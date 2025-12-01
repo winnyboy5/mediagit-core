@@ -1,0 +1,26 @@
+[package]
+name = "mediagit-compression"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+tokio.workspace = true
+zstd.workspace = true
+brotli.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+xdelta3 = "0.1"
+serde = { workspace = true }
+blake3 = { workspace = true }
+
+[dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
+
+[[bench]]
+name = "compression_bench"
+harness = false

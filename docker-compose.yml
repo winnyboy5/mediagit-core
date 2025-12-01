@@ -1,0 +1,100 @@
+version: '3.8'
+
+services:
+  # AWS S3 emulator using LocalStack
+  localstack:
+    image: localstack/localstack:latest
+    container_name: mediagit-localstack
+    ports:
+      - "4566:4566"           # LocalStack edge port
+      - "4510-4559:4510-4559" # External services port range
+    environment:
+      - SERVICES=s3
+      - AWS_DEFAULT_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - DEBUG=1
+      - DATA_DIR=/tmp/localstack/data
+    volumes:
+      - ./scripts/init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh
+      - localstack-data:/tmp/localstack
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Azure Blob Storage emulator
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    container_name: mediagit-azurite
+    ports:
+      - "10000:10000"  # Blob service
+      - "10001:10001"  # Queue service
+      - "10002:10002"  # Table service
+    command: azurite-blob --blobHost 0.0.0.0 --blobPort 10000 --loose
+    volumes:
+      - azurite-data:/data
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "10000"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Google Cloud Storage emulator
+  fake-gcs-server:
+    image: fsouza/fake-gcs-server:latest
+    container_name: mediagit-gcs
+    ports:
+      - "4443:4443"
+    command:
+      - -scheme
+      - http
+      - -host
+      - 0.0.0.0
+      - -port
+      - "4443"
+      - -external-url
+      - http://localhost:4443
+    volumes:
+      - gcs-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:4443/storage/v1/b"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MinIO (S3-compatible storage) - useful for testing S3 compatibility
+  minio:
+    image: minio/minio:latest
+    container_name: mediagit-minio
+    ports:
+      - "9000:9000"      # API port
+      - "9001:9001"      # Console port
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+      - MINIO_REGION=us-east-1
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  localstack-data:
+    driver: local
+  azurite-data:
+    driver: local
+  gcs-data:
+    driver: local
+  minio-data:
+    driver: local
+
+networks:
+  default:
+    name: mediagit-test-network

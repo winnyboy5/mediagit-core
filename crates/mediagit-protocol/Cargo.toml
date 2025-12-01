@@ -1,0 +1,32 @@
+[package]
+name = "mediagit-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+
+[dependencies]
+# Workspace dependencies
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# Protocol-specific dependencies
+reqwest = { version = "0.12", features = ["json", "stream"] }
+bytes = "1.9"
+
+# Internal dependencies
+mediagit-versioning = { path = "../mediagit-versioning" }
+mediagit-storage = { path = "../mediagit-storage" }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+tempfile = { workspace = true }

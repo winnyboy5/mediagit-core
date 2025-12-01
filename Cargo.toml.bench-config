@@ -1,0 +1,13 @@
+# Benchmark Configuration
+# Note: Workspace-level benchmarks should be run individually
+#
+# To run benchmarks:
+# cargo bench --bench odb_benchmarks
+# cargo bench --bench compression_benchmarks
+# cargo bench --bench merge_benchmarks
+# cargo bench --bench storage_benchmarks
+#
+# Or run all:
+# for bench in odb_benchmarks compression_benchmarks merge_benchmarks storage_benchmarks; do
+#   cargo bench --bench $bench
+# done

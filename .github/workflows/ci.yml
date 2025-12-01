@@ -1,0 +1,145 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.91.0"
+
+jobs:
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          # Linux
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            rust: stable
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            rust: stable
+            cross: true
+
+          # macOS
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            rust: stable
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            rust: stable
+
+          # Windows
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            rust: stable
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            rust: stable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cross (for ARM cross-compilation)
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --target ${{ matrix.target }} --verbose
+          else
+            cargo build --target ${{ matrix.target }} --verbose
+          fi
+        shell: bash
+
+      - name: Run tests
+        if: ${{ !matrix.cross }}
+        run: cargo test --verbose --all-features
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  license-check:
+    name: License Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check AGPL-3.0 headers
+        run: |
+          echo "Checking for AGPL-3.0 license headers..."
+
+          missing_headers=0
+
+          for file in $(find crates -name "*.rs" -type f); do
+            if ! grep -q "GNU Affero General Public License" "$file"; then
+              echo "❌ Missing license header: $file"
+              missing_headers=$((missing_headers + 1))
+            fi
+          done
+
+          if [ $missing_headers -gt 0 ]; then
+            echo "❌ $missing_headers file(s) missing AGPL-3.0 license headers"
+            exit 1
+          else
+            echo "✅ All files have proper license headers"
+          fi
+
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Run cargo audit
+        uses: actions-rust-lang/audit@v1

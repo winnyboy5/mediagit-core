@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>mediagit</id>
+    <version>0.1.0</version>
+    <packageSourceUrl>https://github.com/yourusername/mediagit-core</packageSourceUrl>
+    <owners>MediaGit Contributors</owners>
+
+    <title>MediaGit</title>
+    <authors>MediaGit Contributors</authors>
+    <projectUrl>https://mediagit.dev</projectUrl>
+    <iconUrl>https://mediagit.dev/icon.png</iconUrl>
+    <copyright>2025 MediaGit Contributors</copyright>
+    <licenseUrl>https://github.com/yourusername/mediagit-core/blob/main/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <projectSourceUrl>https://github.com/yourusername/mediagit-core</projectSourceUrl>
+    <docsUrl>https://docs.mediagit.dev</docsUrl>
+    <bugTrackerUrl>https://github.com/yourusername/mediagit-core/issues</bugTrackerUrl>
+    <tags>git version-control media binary-files large-files</tags>
+
+    <summary>Git-based version control system optimized for large media files</summary>
+    <description>
+MediaGit is a modern version control system designed specifically for managing large binary files such as images, videos, 3D models, and machine learning datasets. It provides:
+
+* Fast branch switching (under 100ms)
+* Intelligent compression and deduplication
+* Media-aware merge capabilities
+* Support for multiple cloud storage backends (S3, Azure, GCS, MinIO)
+* Git-compatible workflow
+
+Perfect for game development, VFX, machine learning, and any project dealing with large binary assets.
+    </description>
+    <releaseNotes>https://github.com/yourusername/mediagit-core/releases/tag/v0.1.0</releaseNotes>
+  </metadata>
+
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

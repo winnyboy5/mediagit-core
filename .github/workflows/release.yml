@@ -1,0 +1,437 @@
+name: Release
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Dry run (skip publish)'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.91.0"
+
+jobs:
+  # Plan the release - determines what needs to be built
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.get-tag.outputs.tag }}
+      version: ${{ steps.get-tag.outputs.version }}
+      is-prerelease: ${{ steps.get-tag.outputs.is-prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get tag information
+        id: get-tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="dry-run"
+            VERSION="0.0.0-dry-run"
+            IS_PRERELEASE="true"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+            VERSION="${TAG#v}"
+            if [[ "$VERSION" =~ (alpha|beta|rc) ]]; then
+              IS_PRERELEASE="true"
+            else
+              IS_PRERELEASE="false"
+            fi
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "is-prerelease=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "Building version: $VERSION (prerelease: $IS_PRERELEASE)"
+
+  # Build binaries for all platforms
+  build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            archive-name: mediagit-${{ needs.plan.outputs.version }}-x86_64-linux.tar.gz
+
+          # Linux ARM64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
+            cross: true
+            archive-name: mediagit-${{ needs.plan.outputs.version }}-aarch64-linux.tar.gz
+
+          # macOS Intel
+          - target: x86_64-apple-darwin
+            os: macos-13
+            archive-name: mediagit-${{ needs.plan.outputs.version }}-x86_64-macos.tar.gz
+
+          # macOS Apple Silicon
+          - target: aarch64-apple-darwin
+            os: macos-14
+            archive-name: mediagit-${{ needs.plan.outputs.version }}-aarch64-macos.tar.gz
+
+          # Windows x86_64
+          - target: x86_64-pc-windows-msvc
+            os: windows-2022
+            archive-name: mediagit-${{ needs.plan.outputs.version }}-x86_64-windows.zip
+
+          # Windows ARM64
+          - target: aarch64-pc-windows-msvc
+            os: windows-2022
+            cross: true
+            archive-name: mediagit-${{ needs.plan.outputs.version }}-aarch64-windows.zip
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cross (for ARM cross-compilation)
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build release binary
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} --bin mediagit
+          else
+            cargo build --release --target ${{ matrix.target }} --bin mediagit
+          fi
+        shell: bash
+
+      - name: Create archive (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../${{ matrix.archive-name }} mediagit
+          cd ../../../
+          shasum -a 256 ${{ matrix.archive-name }} > ${{ matrix.archive-name }}.sha256
+
+      - name: Create archive (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a ../../../${{ matrix.archive-name }} mediagit.exe
+          cd ../../../
+          certUtil -hashfile ${{ matrix.archive-name }} SHA256 > ${{ matrix.archive-name }}.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.target }}
+          path: |
+            mediagit-*
+            *.sha256
+          retention-days: 1
+
+  # Build installers
+  installers:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate install scripts
+        run: |
+          mkdir -p installers
+
+          # Shell installer for Unix systems
+          cat > installers/install.sh << 'EOF'
+          #!/bin/sh
+          set -e
+
+          # MediaGit Installation Script
+          VERSION="${VERSION:-${{ needs.plan.outputs.version }}}"
+          INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+
+          # Detect platform
+          OS="$(uname -s)"
+          ARCH="$(uname -m)"
+
+          case "$OS" in
+            Linux)
+              case "$ARCH" in
+                x86_64) PLATFORM="x86_64-linux" ;;
+                aarch64|arm64) PLATFORM="aarch64-linux" ;;
+                *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+              esac
+              ;;
+            Darwin)
+              case "$ARCH" in
+                x86_64) PLATFORM="x86_64-macos" ;;
+                arm64) PLATFORM="aarch64-macos" ;;
+                *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+              esac
+              ;;
+            *) echo "Unsupported OS: $OS"; exit 1 ;;
+          esac
+
+          ARCHIVE="mediagit-${VERSION}-${PLATFORM}.tar.gz"
+          URL="https://github.com/${{ github.repository }}/releases/download/v${VERSION}/${ARCHIVE}"
+
+          echo "Installing MediaGit ${VERSION} for ${PLATFORM}..."
+          echo "Downloading from: ${URL}"
+
+          # Download and extract
+          curl -fsSL "${URL}" | tar xz -C /tmp
+
+          # Install binary
+          if [ -w "${INSTALL_DIR}" ]; then
+            mv /tmp/mediagit "${INSTALL_DIR}/"
+          else
+            sudo mv /tmp/mediagit "${INSTALL_DIR}/"
+          fi
+
+          chmod +x "${INSTALL_DIR}/mediagit"
+
+          echo "MediaGit installed successfully!"
+          echo "Run 'mediagit --version' to verify installation"
+          EOF
+
+          chmod +x installers/install.sh
+
+          # PowerShell installer for Windows
+          cat > installers/install.ps1 << 'EOF'
+          # MediaGit Windows Installation Script
+          param(
+              [string]$Version = "${{ needs.plan.outputs.version }}",
+              [string]$InstallDir = "$env:LOCALAPPDATA\MediaGit\bin"
+          )
+
+          $ErrorActionPreference = "Stop"
+
+          # Detect architecture
+          $Arch = if ([Environment]::Is64BitOperatingSystem) {
+              if ([Environment]::GetEnvironmentVariable("PROCESSOR_ARCHITECTURE") -eq "ARM64") {
+                  "aarch64"
+              } else {
+                  "x86_64"
+              }
+          } else {
+              throw "32-bit Windows is not supported"
+          }
+
+          $Archive = "mediagit-${Version}-${Arch}-windows.zip"
+          $Url = "https://github.com/${{ github.repository }}/releases/download/v${Version}/${Archive}"
+
+          Write-Host "Installing MediaGit ${Version} for ${Arch}-windows..." -ForegroundColor Green
+
+          # Create install directory
+          New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+
+          # Download archive
+          $TempZip = Join-Path $env:TEMP $Archive
+          Write-Host "Downloading from: ${Url}"
+          Invoke-WebRequest -Uri $Url -OutFile $TempZip
+
+          # Extract
+          Expand-Archive -Path $TempZip -DestinationPath $InstallDir -Force
+          Remove-Item $TempZip
+
+          # Add to PATH
+          $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+          if ($UserPath -notlike "*$InstallDir*") {
+              [Environment]::SetEnvironmentVariable("Path", "$UserPath;$InstallDir", "User")
+              Write-Host "Added to PATH: $InstallDir" -ForegroundColor Yellow
+              Write-Host "Please restart your terminal for PATH changes to take effect" -ForegroundColor Yellow
+          }
+
+          Write-Host "MediaGit installed successfully!" -ForegroundColor Green
+          Write-Host "Run 'mediagit --version' to verify installation"
+          EOF
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers
+          path: installers/
+          retention-days: 1
+
+  # Create GitHub Release
+  release:
+    needs: [plan, build, installers]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          # Move all binaries and installers to release-assets
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.sha256" -o -name "*.sh" -o -name "*.ps1" \) -exec cp {} release-assets/ \;
+          ls -lh release-assets/
+
+      - name: Generate release notes
+        id: release-notes
+        run: |
+          cat > release-notes.md << 'EOF'
+          ## MediaGit ${{ needs.plan.outputs.version }}
+
+          ### Installation
+
+          #### Quick Install (Unix/macOS)
+          ```bash
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh
+          ```
+
+          #### Quick Install (Windows PowerShell)
+          ```powershell
+          iwr https://raw.githubusercontent.com/${{ github.repository }}/main/install.ps1 | iex
+          ```
+
+          #### Manual Installation
+          Download the appropriate archive for your platform below, extract it, and place the `mediagit` binary in your PATH.
+
+          ### Supported Platforms
+          - Linux (x86_64, ARM64)
+          - macOS (Intel, Apple Silicon)
+          - Windows (x86_64, ARM64)
+
+          ### Checksums
+          SHA-256 checksums are provided for all archives (`.sha256` files).
+
+          ### Documentation
+          - [User Guide](https://docs.mediagit.dev)
+          - [CLI Reference](https://docs.mediagit.dev/cli)
+          - [Quick Start](https://docs.mediagit.dev/quickstart)
+          EOF
+
+          echo "notes-file=release-notes.md" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: MediaGit ${{ needs.plan.outputs.version }}
+          body_path: release-notes.md
+          files: release-assets/*
+          draft: false
+          prerelease: ${{ needs.plan.outputs.is-prerelease }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Publish to crates.io
+  publish-crates:
+    needs: [plan, release]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && needs.plan.outputs.is-prerelease == 'false'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Publish to crates.io
+        run: |
+          # Publish workspace crates in dependency order
+          cargo publish -p mediagit-config --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
+          cargo publish -p mediagit-security --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
+          cargo publish -p mediagit-observability --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
+          cargo publish -p mediagit-compression --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
+          cargo publish -p mediagit-storage --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
+          cargo publish -p mediagit-versioning --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
+          cargo publish -p mediagit-media --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
+          cargo publish -p mediagit-git --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
+          cargo publish -p mediagit-metrics --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
+          cargo publish -p mediagit-migration --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
+          cargo publish -p mediagit-cli --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
+        continue-on-error: true
+
+  # Build and publish Docker images
+  docker:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable=${{ needs.plan.outputs.is-prerelease == 'false' }}
+
+      - name: Download Linux binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binaries-*-linux-gnu
+          path: docker-binaries
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

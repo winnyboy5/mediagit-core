@@ -1,0 +1,81 @@
+{
+  "app": {
+    "name": "mediagit",
+    "version": "0.1.0",
+    "environment": "development",
+    "port": 8080,
+    "host": "127.0.0.1",
+    "debug": false
+  },
+  "storage": {
+    "backend": "filesystem",
+    "base_path": "./data",
+    "create_dirs": true,
+    "sync": false,
+    "file_permissions": "0644"
+  },
+  "compression": {
+    "enabled": true,
+    "algorithm": "zstd",
+    "level": 3,
+    "min_size": 1024,
+    "algorithms": {
+      "zstd": {
+        "level": 3
+      },
+      "brotli": {
+        "level": 4
+      }
+    }
+  },
+  "performance": {
+    "max_concurrency": 4,
+    "buffer_size": 65536,
+    "cache": {
+      "enabled": true,
+      "cache_type": "memory",
+      "max_size": 536870912,
+      "ttl": 3600,
+      "compression": false
+    },
+    "connection_pool": {
+      "min_connections": 1,
+      "max_connections": 10,
+      "timeout": 30,
+      "idle_timeout": 600
+    },
+    "timeouts": {
+      "request": 60,
+      "read": 30,
+      "write": 30,
+      "connection": 30
+    }
+  },
+  "observability": {
+    "log_level": "info",
+    "log_format": "json",
+    "tracing_enabled": true,
+    "sample_rate": 0.1,
+    "metrics": {
+      "enabled": true,
+      "port": 9090,
+      "endpoint": "/metrics",
+      "interval": 60
+    }
+  },
+  "security": {
+    "https_enabled": false,
+    "auth_enabled": false,
+    "cors_origins": [
+      "http://localhost:3000",
+      "http://localhost:8080"
+    ],
+    "encryption_at_rest": false,
+    "rate_limiting": {
+      "enabled": false,
+      "requests_per_second": 100,
+      "burst_size": 200
+    }
+  },
+  "custom": {}
+}

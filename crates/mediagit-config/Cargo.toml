@@ -1,0 +1,36 @@
+[package]
+name = "mediagit-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Configuration management system for MediaGit Core"
+
+[dependencies]
+# Serialization and Config
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+toml = { version = "0.8", features = ["preserve_order"] }
+serde_yaml = "0.9"
+
+# Error Handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Async Runtime
+tokio = { workspace = true, features = ["fs", "io-util"] }
+
+# Observability
+tracing.workspace = true
+
+# Time
+chrono = { workspace = true }
+
+# Utilities
+num_cpus = "1.16"
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile.workspace = true
+proptest.workspace = true

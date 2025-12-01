@@ -1,0 +1,271 @@
+use anyhow::{Context, Result};
+use clap::Parser;
+use console::style;
+use mediagit_storage::LocalBackend;
+use mediagit_versioning::{Commit, MergeEngine, MergeStrategy, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Signature};
+use std::sync::Arc;
+
+/// Merge branches
+#[derive(Parser, Debug)]
+pub struct MergeCmd {
+    /// Branch to merge
+    #[arg(value_name = "BRANCH", required = true)]
+    pub branch: String,
+
+    /// Merge message
+    #[arg(short, long, value_name = "MESSAGE")]
+    pub message: Option<String>,
+
+    /// Create a merge commit even if fast-forward is possible
+    #[arg(long)]
+    pub no_ff: bool,
+
+    /// Perform fast-forward only merge
+    #[arg(long)]
+    pub ff_only: bool,
+
+    /// Squash commits before merging
+    #[arg(long)]
+    pub squash: bool,
+
+    /// Merge strategy
+    #[arg(short = 's', long, value_name = "STRATEGY")]
+    pub strategy: Option<String>,
+
+    /// Merge strategy option
+    #[arg(short = 'X', long, value_name = "OPTION")]
+    pub strategy_option: Option<String>,
+
+    /// Don't commit merge result
+    #[arg(long)]
+    pub no_commit: bool,
+
+    /// Abort merge
+    #[arg(long)]
+    pub abort: bool,
+
+    /// Continue after resolving conflicts
+    #[arg(long)]
+    pub continue_merge: bool,
+
+    /// Quiet mode
+    #[arg(short, long)]
+    pub quiet: bool,
+
+    /// Verbose mode
+    #[arg(short, long)]
+    pub verbose: bool,
+}
+
+impl MergeCmd {
+    pub async fn execute(&self) -> Result<()> {
+        // Handle abort/continue first
+        if self.abort {
+            return self.abort_merge().await;
+        }
+        if self.continue_merge {
+            return self.continue_merge_process().await;
+        }
+
+        // Find repository root
+        let repo_root = self.find_repo_root()?;
+        let storage_path = repo_root.join(".mediagit/objects");
+        let storage: Arc<dyn mediagit_storage::StorageBackend> =
+            Arc::new(LocalBackend::new(&storage_path).await?);
+        let refdb = RefDatabase::new(storage.clone());
+        let odb = Arc::new(ObjectDatabase::new(storage, 1000));
+
+        // Resolve branch to OID
+        let their_oid = self.resolve_branch(&refdb).await?;
+
+        // Get current HEAD commit
+        let head = refdb.read("HEAD").await?;
+        let head_target = head.target.clone();
+        let our_oid = match head.oid {
+            Some(oid) => oid,
+            None => {
+                if let Some(ref target) = head_target {
+                    let target_ref = refdb.read(target).await?;
+                    target_ref.oid.context("HEAD has no commit yet")?
+                } else {
+                    anyhow::bail!("HEAD has no commit yet");
+                }
+            }
+        };
+
+        // Parse merge strategy
+        let strategy = match self.strategy.as_deref() {
+            Some("ours") => MergeStrategy::Ours,
+            Some("theirs") => MergeStrategy::Theirs,
+            Some("recursive") | None => MergeStrategy::Recursive,
+            Some(s) => anyhow::bail!("Unknown merge strategy: {}", s),
+        };
+
+        if !self.quiet {
+            println!(
+                "{} Merging {} into {}...",
+                style("🔀").cyan().bold(),
+                style(&self.branch).yellow(),
+                style("HEAD").cyan()
+            );
+        }
+
+        // Create merge engine and perform merge
+        let engine = MergeEngine::new(odb.clone());
+        let result = engine.merge(&our_oid, &their_oid, strategy).await?;
+
+        // Handle merge result
+        if let Some(ff_info) = &result.fast_forward {
+            if ff_info.is_fast_forward {
+                if self.ff_only || !self.no_ff {
+                    // Fast-forward merge
+                    if !self.quiet {
+                        println!(
+                            "{} Fast-forwarding {} -> {}",
+                            style("✓").green(),
+                            &ff_info.from.to_string()[..7],
+                            &ff_info.to.to_string()[..7]
+                        );
+                    }
+
+                    // Update HEAD to point to their commit
+                    if let Some(ref target) = head_target {
+                        let new_ref = Ref::new_direct(target.clone(), their_oid);
+                        refdb.write(&new_ref).await?;
+                    } else {
+                        let new_ref = Ref::new_direct("HEAD".to_string(), their_oid);
+                        refdb.write(&new_ref).await?;
+                    }
+
+                    return Ok(());
+                } else if self.ff_only {
+                    anyhow::bail!("Fast-forward only requested but not possible");
+                }
+            }
+        }
+
+        // Check for conflicts
+        if !result.conflicts.is_empty() {
+            println!(
+                "{} Merge conflicts detected in {} file(s):",
+                style("⚠").yellow().bold(),
+                result.conflicts.len()
+            );
+            for conflict in &result.conflicts {
+                println!("  {} {}", style("conflict:").red(), conflict.path);
+                if self.verbose {
+                    println!("    Type: {:?}", conflict.conflict_type);
+                }
+            }
+            anyhow::bail!(
+                "Automatic merge failed. Fix conflicts and run 'mediagit merge --continue'"
+            );
+        }
+
+        // No conflicts - create merge commit
+        if !self.no_commit {
+            let tree_oid = result.tree_oid.context("No merged tree created")?;
+
+            // Create commit signature
+            let author_name = std::env::var("GIT_AUTHOR_NAME")
+                .or_else(|_| std::env::var("USER"))
+                .unwrap_or_else(|_| "Unknown".to_string());
+            let author_email = std::env::var("GIT_AUTHOR_EMAIL")
+                .unwrap_or_else(|_| "unknown@localhost".to_string());
+
+            let signature = Signature::now(author_name, author_email);
+
+            let message = self.message.clone().unwrap_or_else(|| {
+                format!("Merge branch '{}' into HEAD", self.branch)
+            });
+
+            let merge_commit = Commit {
+                tree: tree_oid,
+                parents: vec![our_oid, their_oid],
+                author: signature.clone(),
+                committer: signature,
+                message,
+            };
+
+            let commit_data = merge_commit.serialize()?;
+            let commit_oid = odb.write(ObjectType::Commit, &commit_data).await?;
+
+            // Update HEAD
+            if let Some(ref target) = head_target {
+                let new_ref = Ref::new_direct(target.clone(), commit_oid);
+                refdb.write(&new_ref).await?;
+            } else {
+                let new_ref = Ref::new_direct("HEAD".to_string(), commit_oid);
+                refdb.write(&new_ref).await?;
+            }
+
+            if !self.quiet {
+                println!(
+                    "{} Merge committed: {}",
+                    style("✓").green().bold(),
+                    &commit_oid.to_string()[..7]
+                );
+            }
+        } else if !self.quiet {
+            println!("{} Merge successful (not committed)", style("✓").green());
+        }
+
+        Ok(())
+    }
+
+    async fn resolve_branch(&self, refdb: &RefDatabase) -> Result<Oid> {
+        // Try as direct OID
+        if let Ok(oid) = Oid::from_hex(&self.branch) {
+            return Ok(oid);
+        }
+
+        // Try as reference
+        let ref_result = refdb.read(&self.branch).await;
+        match ref_result {
+            Ok(r) => r
+                .oid
+                .context(format!("Branch {} has no commit", self.branch)),
+            Err(_) => {
+                // Try with refs/heads prefix
+                let with_prefix = format!("refs/heads/{}", self.branch);
+                let ref_result = refdb.read(&with_prefix).await;
+                match ref_result {
+                    Ok(r) => r
+                        .oid
+                        .context(format!("Branch {} has no commit", self.branch)),
+                    Err(_) => anyhow::bail!("Cannot resolve branch: {}", self.branch),
+                }
+            }
+        }
+    }
+
+    async fn abort_merge(&self) -> Result<()> {
+        if !self.quiet {
+            println!("{} Aborting merge...", style("✗").red());
+        }
+        // TODO: Implement merge state cleanup
+        anyhow::bail!("Merge abort not yet implemented")
+    }
+
+    async fn continue_merge_process(&self) -> Result<()> {
+        if !self.quiet {
+            println!("{} Continuing merge...", style("→").cyan());
+        }
+        // TODO: Implement merge continuation after conflict resolution
+        anyhow::bail!("Merge continue not yet implemented")
+    }
+
+    fn find_repo_root(&self) -> Result<std::path::PathBuf> {
+        let mut current = std::env::current_dir()?;
+
+        loop {
+            if current.join(".mediagit").exists() {
+                return Ok(current);
+            }
+
+            if !current.pop() {
+                anyhow::bail!("Not a mediagit repository");
+            }
+        }
+    }
+}

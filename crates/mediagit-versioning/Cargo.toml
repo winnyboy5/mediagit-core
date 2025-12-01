@@ -1,0 +1,45 @@
+[package]
+name = "mediagit-versioning"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+mediagit-storage = { path = "../mediagit-storage" }
+
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+sha2.workspace = true
+hex.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+moka = { version = "0.12", features = ["future"] }
+
+[dev-dependencies]
+tokio-test.workspace = true
+proptest.workspace = true
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+tempfile = "3.13"
+uuid = { version = "1.11", features = ["v4"] }
+
+[[bench]]
+name = "pack_benchmark"
+harness = false
+
+[[bench]]
+name = "odb_bench"
+harness = false
+
+[[bench]]
+name = "branch_bench"
+harness = false
+
+[[bench]]
+name = "merge_bench"
+harness = false

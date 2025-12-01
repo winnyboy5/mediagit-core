@@ -1,0 +1,209 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# Cargo
+# Uncomment the line below if this is an application (not a library)
+/# Cargo.lock
+
+# Build artifacts
+**/debug/
+**/release/
+*.exe
+*.dll
+*.so
+*.dylib
+*.out
+*.app
+*.ipa
+*.dSYM/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.atom/
+.eclipse/
+*.sublime-project
+*.sublime-workspace
+
+# Testing
+*.profraw
+*.profdata
+coverage/
+**/coverage/
+*.lcov
+.nyc_output
+*.tar.gz
+*.zip
+
+# Documentation
+/book/
+docs/_build/
+site/
+
+# Benchmark results
+/benches/results/
+
+# Environment
+.env
+.env.local
+.env.*.local
+.envrc
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+PIPFILE.lock
+
+# Node.js (if used for any tooling)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.eslintcache
+.stylelintcache
+
+# Coverage directory used by tools like istanbul
+coverage/
+*.lcov
+
+# Rust analyzer and clippy
+.rust-analyzer/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+*.orig
+*.rej
+*.diff
+
+# Local configuration
+config.local.toml
+settings.local.json
+.secrets/
+
+# Database files (if any)
+*.db
+*.sqlite
+*.sqlite3
+
+# Cache directories
+.cache/
+.parcel-cache/
+.temp/
+tmp/
+
+# Build outputs
+build/
+dist/
+out/
+target/release/
+target/debug/
+
+# Media test files that might be generated
+**/test-output/
+**/test-results/
+test-files/
+
+# Session files
+*.session
+
+# Operating System
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Archive files
+*.7z
+*.dmg
+*.gz
+*.iso
+*.jar
+*.rar
+*.tar
+*.zip
+
+# Media files (large test files)
+*.mov
+*.mp4
+*.avi
+*.mkv
+*.wmv
+*.flv
+*.webm
+*.m4v
+
+# Large binary files
+*.bin
+*.dat
+*.pak
+
+# Unity and game engine files (since I see Unity packages in test-files)
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+
+# Blender files
+*.blend1
+*.blend2
+*.blend@
+*.blend#
+
+# Temporary work files
+*.working
+*.wip
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+claudedocs/
+.taskmaster/
+.serena/
+.claude/
+test-files/
+.env
+docs/

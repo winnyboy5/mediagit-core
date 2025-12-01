@@ -1,0 +1,52 @@
+[package]
+name = "mediagit-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+
+[lib]
+name = "mediagit_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mediagit-server"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace dependencies
+tokio = { workspace = true, features = ["full"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# HTTP server
+axum = "0.7"
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["trace", "cors"] }
+bytes = "1.9"
+toml = "0.8"
+
+# HTTPS/TLS
+axum-server = { version = "0.6", features = ["tls-rustls"] }
+rustls = "0.23"
+tokio-rustls = "0.26"
+rustls-pemfile = "2.0"
+rcgen = { version = "0.13", features = ["pem"] }
+
+# Internal dependencies
+mediagit-protocol = { path = "../mediagit-protocol" }
+mediagit-versioning = { path = "../mediagit-versioning" }
+mediagit-storage = { path = "../mediagit-storage" }
+mediagit-config = { path = "../mediagit-config" }
+mediagit-security = { path = "../mediagit-security", features = ["all"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

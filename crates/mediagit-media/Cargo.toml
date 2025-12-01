@@ -1,0 +1,40 @@
+[package]
+name = "mediagit-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# Image processing and metadata
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff", "webp"] }
+kamadak-exif = "0.6"
+img_hash = "3.2"
+
+# Video processing
+mp4parse = "0.17"
+
+# Audio processing
+symphonia = { version = "0.5", features = ["all"] }
+
+# PSD parsing
+psd = "0.3.5"
+
+# Hashing
+sha2.workspace = true
+blake3.workspace = true
+
+# Serialization for metadata
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio-test.workspace = true
+tempfile.workspace = true
+criterion.workspace = true

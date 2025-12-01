@@ -1,0 +1,127 @@
+# MediaGit Configuration File (YAML Format)
+# This file demonstrates all available configuration options
+
+app:
+  name: mediagit
+  version: "0.1.0"
+  environment: development  # development, staging, production
+  port: 8080
+  host: 127.0.0.1
+  debug: false
+
+# Storage Backend Configuration
+# Choose one of: filesystem, s3, azure, gcs, or multi
+
+storage:
+  backend: filesystem
+  base_path: ./data
+  create_dirs: true
+  sync: false
+  file_permissions: "0644"
+
+# AWS S3 Storage Configuration (Uncomment to use)
+# storage:
+#   backend: s3
+#   bucket: mediagit-bucket
+#   region: us-east-1
+#   access_key_id: YOUR_ACCESS_KEY        # Or use MEDIAGIT_S3_ACCESS_KEY_ID env var
+#   secret_access_key: YOUR_SECRET_KEY    # Or use MEDIAGIT_S3_SECRET_ACCESS_KEY env var
+#   endpoint: https://s3.amazonaws.com    # For S3-compatible services
+#   prefix: media/
+#   encryption: true
+#   encryption_algorithm: AES256          # Options: AES256, aws:kms, aws:kms:key-id
+
+# Azure Blob Storage Configuration (Uncomment to use)
+# storage:
+#   backend: azure
+#   account_name: mediagitaccount
+#   account_key: YOUR_ACCOUNT_KEY         # Or use MEDIAGIT_AZURE_ACCOUNT_KEY env var
+#   container: media
+#   prefix: files/
+#   connection_string: ...                # Alternative to account_key
+
+# Google Cloud Storage Configuration (Uncomment to use)
+# storage:
+#   backend: gcs
+#   bucket: mediagit-bucket
+#   project_id: your-project-id
+#   credentials_path: /path/to/credentials.json  # Or use MEDIAGIT_GCS_CREDENTIALS_PATH
+#   prefix: media/
+
+# Compression Configuration
+compression:
+  enabled: true
+  algorithm: zstd          # Options: zstd, brotli, none
+  level: 3                 # zstd: 1-22, brotli: 0-11
+  min_size: 1024           # Minimum file size to compress (bytes)
+  algorithms:
+    zstd:
+      level: 3
+    brotli:
+      level: 4
+
+# Performance Tuning
+performance:
+  max_concurrency: 4       # CPU cores or explicit number
+  buffer_size: 65536       # 64KB buffer
+
+  # Cache Configuration
+  cache:
+    enabled: true
+    cache_type: memory     # Options: memory, disk, redis
+    max_size: 536870912    # 512MB
+    ttl: 3600              # 1 hour (seconds)
+    compression: false
+
+  # Connection Pool Configuration
+  connection_pool:
+    min_connections: 1
+    max_connections: 10
+    timeout: 30            # seconds
+    idle_timeout: 600      # seconds
+
+  # Timeout Configuration
+  timeouts:
+    request: 60            # seconds
+    read: 30               # seconds
+    write: 30              # seconds
+    connection: 30         # seconds
+
+# Observability Configuration
+observability:
+  log_level: info          # debug, info, warn, error, trace
+  log_format: json         # json, text
+  tracing_enabled: true
+  sample_rate: 0.1         # 10% of traces
+
+  # Metrics Configuration
+  metrics:
+    enabled: true
+    port: 9090
+    endpoint: /metrics
+    interval: 60           # seconds
+
+# Security Configuration
+security:
+  https_enabled: false
+  # tls_cert_path: /path/to/cert.pem
+  # tls_key_path: /path/to/key.pem
+  # api_key: your-api-key           # Or use MEDIAGIT_API_KEY env var
+  auth_enabled: false
+  cors_origins:
+    - http://localhost:3000
+    - http://localhost:8080
+  encryption_at_rest: false
+  # encryption_key_path: /path/to/encryption.key
+
+  # Rate Limiting Configuration
+  rate_limiting:
+    enabled: false
+    requests_per_second: 100
+    burst_size: 200
+
+# Custom Settings (application-specific)
+custom:
+  # Add custom configuration here as needed
+  # feature_flag: enabled
+  # custom_timeout: 120

@@ -1,0 +1,37 @@
+[package]
+name = "mediagit-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+tokio.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+aws-config.workspace = true
+aws-sdk-s3.workspace = true
+bytes = "1.7"
+futures = "0.3"
+
+azure_storage_blobs = "0.21"
+azure_storage = "0.21"
+azure_identity = "0.19"
+azure_core = "0.19"
+google-cloud-storage = "0.24"
+google-cloud-auth = "0.17"
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio-test.workspace = true
+tempfile.workspace = true
+criterion = { version = "0.5", features = ["async_tokio"] }
+# azure_storage = "0.21"
+
+[[bench]]
+name = "cache_bench"
+harness = false
