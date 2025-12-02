@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_storage::LocalBackend;
-use mediagit_versioning::{Commit, ObjectDatabase, ObjectType, Oid, RefDatabase};
+use mediagit_versioning::{Commit, ObjectDatabase, Oid, RefDatabase};
 use std::collections::HashSet;
 use std::sync::Arc;
 

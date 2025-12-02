@@ -65,13 +65,14 @@ http = { version = "1.0", optional = true }
 rcgen = { version = "0.13", features = ["pem"], optional = true }
 rustls-pemfile = { version = "2.0", optional = true }
 x509-parser = { version = "0.16", optional = true }
+time = { version = "0.3", features = ["macros"], optional = true }
 
 [features]
 default = []
 auth = ["jsonwebtoken", "bcrypt", "sha2"]
 database = ["sqlx"]
 middleware = ["axum", "tower", "http"]
-tls = ["rcgen", "rustls-pemfile", "x509-parser"]
+tls = ["rcgen", "rustls-pemfile", "x509-parser", "time"]
 all = ["auth", "database", "middleware", "tls"]
 
 [dev-dependencies]

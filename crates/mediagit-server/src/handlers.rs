@@ -52,6 +52,12 @@ pub async fn get_refs(
 ) -> Result<Json<RefsResponse>, StatusCode> {
     tracing::info!("GET /{}/info/refs", repo);
 
+    // Validate repository name to prevent path traversal
+    crate::security::validate_repo_name(&repo).map_err(|e| {
+        tracing::warn!("Invalid repository name '{}': {}", repo, e);
+        StatusCode::BAD_REQUEST
+    })?;
+
     // Check permission: repo:read required
     check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
 

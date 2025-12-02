@@ -6,11 +6,11 @@ use axum::{
     extract::Request,
     http::{HeaderMap, StatusCode},
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use std::sync::Arc;
 
-use super::{ApiKeyAuth, AuthError, Claims, JwtAuth};
+use super::{ApiKeyAuth, AuthError, JwtAuth};
 
 /// Authenticated user information extracted from request
 #[derive(Debug, Clone)]

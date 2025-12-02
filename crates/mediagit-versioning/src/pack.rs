@@ -392,7 +392,7 @@ impl Default for PackWriter {
 pub struct PackReader {
     data: Vec<u8>,
     index: PackIndex,
-    object_data_end: usize,
+    _object_data_end: usize,
 }
 
 impl PackReader {

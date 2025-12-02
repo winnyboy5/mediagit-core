@@ -246,11 +246,16 @@ impl AzureBackend {
             container_name
         );
 
-        Ok(AzureBackend {
-            account_name,
-            container_name,
+        let backend = AzureBackend {
+            account_name: account_name.clone(),
+            container_name: container_name.clone(),
             client: Arc::new(container_client),
-        })
+        };
+
+        // Ensure container exists
+        backend.ensure_container_exists().await?;
+
+        Ok(backend)
     }
 
     /// Create a new Azure Blob Storage backend using account key authentication
@@ -316,11 +321,16 @@ impl AzureBackend {
             container_name
         );
 
-        Ok(AzureBackend {
-            account_name,
-            container_name,
+        let backend = AzureBackend {
+            account_name: account_name.clone(),
+            container_name: container_name.clone(),
             client: Arc::new(container_client),
-        })
+        };
+
+        // Ensure container exists
+        backend.ensure_container_exists().await?;
+
+        Ok(backend)
     }
 
     /// Create a new Azure Blob Storage backend using a connection string
@@ -427,11 +437,16 @@ impl AzureBackend {
             container_name
         );
 
-        Ok(AzureBackend {
-            account_name,
-            container_name,
+        let backend = AzureBackend {
+            account_name: account_name.clone(),
+            container_name: container_name.clone(),
             client: Arc::new(container_client),
-        })
+        };
+
+        // Ensure container exists
+        backend.ensure_container_exists().await?;
+
+        Ok(backend)
     }
 
     /// Check if a key is valid (non-empty)
@@ -455,6 +470,54 @@ impl AzureBackend {
             anyhow::anyhow!("container not found: {}", context)
         } else {
             err
+        }
+    }
+
+    /// Ensure container exists, create if needed
+    async fn ensure_container_exists(&self) -> anyhow::Result<()> {
+        match self.client.exists().await {
+            Ok(exists) if !exists => {
+                tracing::info!("Creating container: {}", self.container_name);
+                match self.client.create().await {
+                    Ok(_) => {
+                        tracing::info!("Successfully created container: {}", self.container_name);
+                        Ok(())
+                    }
+                    Err(e) => Err(anyhow::anyhow!(
+                        "Failed to create container {}: {}",
+                        self.container_name,
+                        e
+                    ))
+                }
+            }
+            Ok(_) => {
+                tracing::debug!("Container {} already exists", self.container_name);
+                Ok(())
+            }
+            Err(e) => {
+                // If we can't check existence, try to create anyway
+                tracing::warn!("Could not check container existence: {}, attempting to create", e);
+                match self.client.create().await {
+                    Ok(_) => {
+                        tracing::info!("Successfully created container: {}", self.container_name);
+                        Ok(())
+                    }
+                    Err(create_err) => {
+                        let err_msg = create_err.to_string();
+                        // Ignore "already exists" errors
+                        if err_msg.contains("ContainerAlreadyExists") || err_msg.contains("409") {
+                            tracing::debug!("Container {} already exists", self.container_name);
+                            Ok(())
+                        } else {
+                            Err(anyhow::anyhow!(
+                                "Failed to create container {}: {}",
+                                self.container_name,
+                                create_err
+                            ))
+                        }
+                    }
+                }
+            }
         }
     }
 }

@@ -2,10 +2,13 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[cfg(feature = "tls")]
+use mediagit_security::TlsConfig;
+
 /// Server configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
-    /// Port to listen on
+    /// Port to listen on (HTTP)
     #[serde(default = "default_port")]
     pub port: u16,
 
@@ -16,10 +19,32 @@ pub struct ServerConfig {
     /// Host to bind to
     #[serde(default = "default_host")]
     pub host: String,
+
+    /// Enable HTTPS/TLS
+    #[serde(default)]
+    pub enable_tls: bool,
+
+    /// HTTPS port (when TLS is enabled)
+    #[serde(default = "default_tls_port")]
+    pub tls_port: u16,
+
+    /// TLS certificate file path (PEM format)
+    pub tls_cert_path: Option<PathBuf>,
+
+    /// TLS private key file path (PEM format)
+    pub tls_key_path: Option<PathBuf>,
+
+    /// Use self-signed certificate for development
+    #[serde(default)]
+    pub tls_self_signed: bool,
 }
 
 fn default_port() -> u16 {
     3000
+}
+
+fn default_tls_port() -> u16 {
+    3443
 }
 
 fn default_host() -> String {
@@ -36,6 +61,11 @@ impl Default for ServerConfig {
             port: default_port(),
             repos_dir: default_repos_dir(),
             host: default_host(),
+            enable_tls: false,
+            tls_port: default_tls_port(),
+            tls_cert_path: None,
+            tls_key_path: None,
+            tls_self_signed: false,
         }
     }
 }
@@ -61,5 +91,46 @@ impl ServerConfig {
     /// Get the full bind address
     pub fn bind_addr(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+
+    /// Get the full TLS bind address
+    pub fn tls_bind_addr(&self) -> String {
+        format!("{}:{}", self.host, self.tls_port)
+    }
+
+    /// Build TlsConfig from server configuration
+    #[cfg(feature = "tls")]
+    pub fn build_tls_config(&self) -> Result<TlsConfig> {
+        use mediagit_security::TlsConfigBuilder;
+
+        if !self.enable_tls {
+            return Ok(TlsConfig::default());
+        }
+
+        let mut builder = TlsConfigBuilder::new().enable();
+
+        if self.tls_self_signed {
+            // Use self-signed certificate for development
+            builder = builder.self_signed("localhost");
+        } else {
+            // Use provided certificate paths
+            let cert_path = self.tls_cert_path.as_ref()
+                .context("TLS certificate path is required when not using self-signed")?;
+            let key_path = self.tls_key_path.as_ref()
+                .context("TLS key path is required when not using self-signed")?;
+
+            builder = builder.certificate_paths(cert_path, key_path);
+        }
+
+        builder.build().context("Failed to build TLS configuration")
+    }
+
+    /// Build TlsConfig (stub for non-TLS builds)
+    #[cfg(not(feature = "tls"))]
+    pub fn build_tls_config(&self) -> Result<()> {
+        if self.enable_tls {
+            anyhow::bail!("TLS is enabled in configuration but not compiled in. Rebuild with --features tls");
+        }
+        Ok(())
     }
 }

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use mediagit_storage::LocalBackend;
-use mediagit_versioning::{BranchManager, ObjectDatabase, Ref, RefDatabase};
+use mediagit_versioning::{Ref, RefDatabase};
 use std::sync::Arc;
 
 /// Manage branches

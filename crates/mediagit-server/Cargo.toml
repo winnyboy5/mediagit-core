@@ -17,6 +17,10 @@ path = "src/lib.rs"
 name = "mediagit-server"
 path = "src/main.rs"
 
+[features]
+default = ["tls"]
+tls = ["mediagit-security/tls"]
+
 [dependencies]
 # Workspace dependencies
 tokio = { workspace = true, features = ["full"] }
@@ -29,14 +33,18 @@ tracing-subscriber = { workspace = true }
 
 # HTTP server
 axum = "0.7"
-tower = { version = "0.4", features = ["util"] }
-tower-http = { version = "0.5", features = ["trace", "cors"] }
+tower = { version = "0.4", features = ["util", "limit"] }
+tower-http = { version = "0.5", features = ["trace", "cors", "request-id", "sensitive-headers"] }
 bytes = "1.9"
 toml = "0.8"
 
+# Security
+tower_governor = "0.4"
+governor = "0.6"
+
 # HTTPS/TLS
 axum-server = { version = "0.7", features = ["tls-rustls"] }
-rustls = "0.23"
+rustls = { version = "0.23", features = ["ring"] }
 tokio-rustls = "0.26"
 rustls-pemfile = "2.0"
 rcgen = { version = "0.13", features = ["pem"] }
@@ -50,3 +58,6 @@ mediagit-security = { path = "../mediagit-security", features = ["all"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+reqwest = { version = "0.12", features = ["rustls-tls"] }
+rustls-pemfile = "2.0"
+futures = "0.3"

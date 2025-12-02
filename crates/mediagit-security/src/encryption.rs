@@ -39,14 +39,13 @@
 //! ```
 
 use aes_gcm::{
-    aead::{Aead, KeyInit, Payload},
+    aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
 use rand::{thread_rng, RngCore};
 use secrecy::{ExposeSecret, SecretVec};
 use thiserror::Error;
-use tracing::{debug, warn};
-use zeroize::Zeroizing;
+use tracing::debug;
 
 /// Encryption version for format evolution
 const ENCRYPTION_VERSION: u8 = 1;
@@ -326,9 +325,10 @@ fn encrypt_stream(key: &EncryptionKey, plaintext: &[u8]) -> Result<Vec<u8>, Encr
 /// Decrypt stream-encrypted data
 ///
 /// This is automatically handled by the decrypt() function based on data size.
-fn decrypt_stream(
+#[allow(dead_code)]
+fn _decrypt_stream(
     key: &EncryptionKey,
-    version: u8,
+    _version: u8,
     nonce_bytes: &[u8],
     encrypted_data: &[u8],
 ) -> Result<Vec<u8>, EncryptionError> {

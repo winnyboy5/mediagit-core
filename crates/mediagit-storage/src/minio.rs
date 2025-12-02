@@ -169,8 +169,8 @@ pub struct MinIOBackend {
     // Keep these for backward compatibility
     endpoint: String,
     bucket: String,
-    access_key: String,
-    secret_key: String,
+    _access_key: String,
+    _secret_key: String,
 }
 
 impl MinIOBackend {
@@ -326,8 +326,8 @@ impl MinIOBackend {
             stats: Arc::new(MinIOStats::new()),
             endpoint: config.endpoint,
             bucket: config.bucket,
-            access_key: config.access_key,
-            secret_key: config.secret_key,
+            _access_key: config.access_key,
+            _secret_key: config.secret_key,
         })
     }
 

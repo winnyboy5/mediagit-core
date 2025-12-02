@@ -94,7 +94,7 @@ impl MergeResult {
 pub struct MergeEngine {
     odb: Arc<ObjectDatabase>,
     lca_finder: LcaFinder,
-    differ: TreeDiffer,
+    __differ: TreeDiffer,
     conflict_detector: ConflictDetector,
 }
 
@@ -103,7 +103,7 @@ impl MergeEngine {
     pub fn new(odb: Arc<ObjectDatabase>) -> Self {
         Self {
             lca_finder: LcaFinder::new(Arc::clone(&odb)),
-            differ: TreeDiffer::new(Arc::clone(&odb)),
+            _differ: TreeDiffer::new(Arc::clone(&odb)),
             conflict_detector: ConflictDetector::new(Arc::clone(&odb)),
             odb,
         }

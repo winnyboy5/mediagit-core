@@ -8,13 +8,7 @@ use std::path::Path;
 use thiserror::Error;
 
 #[cfg(feature = "tls")]
-use rcgen::{Certificate as RcgenCertificate, CertificateParams, DistinguishedName, DnType};
-
-#[cfg(feature = "tls")]
-use rustls_pemfile::{certs, pkcs8_private_keys};
-
-#[cfg(feature = "tls")]
-use std::io::BufReader;
+use rcgen::{CertificateParams, DistinguishedName, DnType};
 
 /// Certificate error types
 #[derive(Debug, Error)]
@@ -188,7 +182,12 @@ impl CertificateBuilder {
     #[cfg(feature = "tls")]
     pub fn generate_self_signed(self) -> TlsResult<Certificate> {
         // Create certificate parameters
-        let mut params = CertificateParams::new(self.san_dns_names.clone());
+        let mut params = CertificateParams::default();
+
+        // Set subject alt names
+        params.subject_alt_names = self.san_dns_names.iter()
+            .map(|name| rcgen::SanType::DnsName(name.clone().try_into().unwrap()))
+            .collect();
 
         // Set distinguished name
         let mut dn = DistinguishedName::new();
@@ -204,18 +203,24 @@ impl CertificateBuilder {
 
         params.distinguished_name = dn;
 
-        // Set validity period
-        params.not_before = chrono::Utc::now() - chrono::Duration::days(1);
-        params.not_after = chrono::Utc::now() + chrono::Duration::days(self.validity_days as i64);
+        // Set validity period using time crate (not chrono)
+        use time::OffsetDateTime;
+        let now = OffsetDateTime::now_utc();
+        params.not_before = now - time::Duration::days(1);
+        params.not_after = now + time::Duration::days(self.validity_days as i64);
+
+        // Generate key pair first
+        let key_pair = rcgen::KeyPair::generate()
+            .map_err(|e| TlsError::CertificateGeneration(e.to_string()))?;
+
+        // Store key PEM before consuming key_pair
+        let key_pem = key_pair.serialize_pem();
 
         // Generate certificate
-        let cert = RcgenCertificate::from_params(params)
+        let cert = params.self_signed(&key_pair)
             .map_err(|e| TlsError::CertificateGeneration(e.to_string()))?;
 
-        let cert_pem = cert.serialize_pem()
-            .map_err(|e| TlsError::CertificateGeneration(e.to_string()))?;
-
-        let key_pem = cert.serialize_private_key_pem();
+        let cert_pem = cert.pem();
 
         Ok(Certificate {
             cert_pem,

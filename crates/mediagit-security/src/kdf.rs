@@ -34,7 +34,7 @@
 
 use crate::encryption::{EncryptionKey, KEY_SIZE};
 use argon2::{
-    password_hash::{PasswordHasher, SaltString},
+    password_hash::SaltString,
     Algorithm, Argon2, ParamsBuilder, Version,
 };
 use rand::thread_rng;

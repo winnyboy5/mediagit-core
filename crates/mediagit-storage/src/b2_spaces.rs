@@ -279,8 +279,8 @@ impl Provider {
 pub struct B2SpacesBackend {
     provider: Provider,
     bucket: String,
-    access_key: String,
-    secret_key: String,
+    _access_key: String,
+    _secret_key: String,
 }
 
 impl B2SpacesBackend {

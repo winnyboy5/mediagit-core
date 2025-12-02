@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use mediagit_storage::LocalBackend;
 use mediagit_versioning::{Ref, RefDatabase};
-use std::path::Path;
 use std::sync::Arc;
 
 /// Show the working tree status
