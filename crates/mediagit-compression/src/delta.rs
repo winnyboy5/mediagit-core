@@ -329,7 +329,41 @@ impl DeltaEncoder {
     /// Tuple of (delta_data, should_use_delta). If should_use_delta is false,
     /// delta_data contains the full target data instead.
     pub fn encode(&self, base: &[u8], target: &[u8]) -> CompressionResult<(Vec<u8>, bool)> {
+        self.encode_with_depth(base, target, 0)
+    }
+
+    /// Encode a delta between base and target with chain depth tracking
+    ///
+    /// Returns (delta_data, should_use_delta)
+    ///
+    /// # Arguments
+    ///
+    /// * `base` - Base version data
+    /// * `target` - Target version data
+    /// * `current_chain_depth` - Current depth in the delta chain
+    ///
+    /// # Returns
+    ///
+    /// Tuple of (delta_data, should_use_delta). If should_use_delta is false,
+    /// delta_data contains the full target data instead.
+    ///
+    /// # Delta Chain Depth
+    ///
+    /// When the chain depth exceeds `max_chain_depth`, the encoder will return
+    /// the full object instead of creating another delta. This prevents
+    /// excessively long delta chains that can hurt decompression performance.
+    pub fn encode_with_depth(&self, base: &[u8], target: &[u8], current_chain_depth: u32) -> CompressionResult<(Vec<u8>, bool)> {
         let start = Instant::now();
+
+        // Check chain depth limit
+        if current_chain_depth >= self.max_chain_depth {
+            debug!(
+                "Chain depth {} reached max depth {}, using full compression",
+                current_chain_depth,
+                self.max_chain_depth
+            );
+            return Ok((target.to_vec(), false));
+        }
 
         // Calculate similarity
         let similarity = self.calculate_similarity(base, target);
@@ -516,6 +550,55 @@ impl DeltaEncoder {
     pub fn hash_data(data: &[u8]) -> String {
         let hash = blake3::hash(data);
         hash.to_hex().to_string()
+    }
+
+    /// Get the maximum chain depth setting
+    pub fn max_chain_depth(&self) -> u32 {
+        self.max_chain_depth
+    }
+
+    /// Set the maximum chain depth
+    ///
+    /// When encoding deltas, if the current chain depth reaches this value,
+    /// the encoder will store the full object instead of creating another delta.
+    ///
+    /// # Arguments
+    ///
+    /// * `depth` - Maximum allowed chain depth (typically 50-100)
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use mediagit_compression::delta::DeltaEncoder;
+    ///
+    /// let mut encoder = DeltaEncoder::new();
+    /// encoder.set_max_chain_depth(75);
+    /// assert_eq!(encoder.max_chain_depth(), 75);
+    /// ```
+    pub fn set_max_chain_depth(&mut self, depth: u32) {
+        self.max_chain_depth = depth;
+    }
+
+    /// Create a delta encoder with custom chain depth
+    ///
+    /// # Arguments
+    ///
+    /// * `max_chain_depth` - Maximum allowed chain depth
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use mediagit_compression::delta::DeltaEncoder;
+    ///
+    /// let encoder = DeltaEncoder::with_max_chain_depth(100);
+    /// assert_eq!(encoder.max_chain_depth(), 100);
+    /// ```
+    pub fn with_max_chain_depth(max_chain_depth: u32) -> Self {
+        DeltaEncoder {
+            similarity_threshold: SIMILARITY_THRESHOLD,
+            min_space_savings: MIN_SPACE_SAVINGS,
+            max_chain_depth,
+        }
     }
 }
 
@@ -792,5 +875,88 @@ mod tests {
             // If delta wasn't beneficial, should return full data
             assert_eq!(data, target);
         }
+    }
+
+    #[test]
+    fn test_chain_depth_enforcement() {
+        let encoder = DeltaEncoder::with_max_chain_depth(3);
+        assert_eq!(encoder.max_chain_depth(), 3);
+
+        // Use larger data that will definitely benefit from delta encoding
+        let base = vec![0x42u8; 1000];
+        let mut target = base.clone();
+        target[500] = 0x43; // Small change to make delta beneficial
+
+        // Depth 0 - should create delta
+        let (data0, should_use0) = encoder.encode_with_depth(&base, &target, 0).unwrap();
+        if should_use0 {
+            assert!(data0.len() < target.len(), "Delta should be smaller than full data");
+        }
+
+        // Depth 2 - should still create delta
+        let (_data2, should_use2) = encoder.encode_with_depth(&base, &target, 2).unwrap();
+        // Should use delta as long as we're below max depth
+        assert_eq!(should_use2, should_use0, "Should make same decision at depth 2");
+
+        // Depth 3 - should NOT create delta (at max depth)
+        let (data3, should_use3) = encoder.encode_with_depth(&base, &target, 3).unwrap();
+        assert!(!should_use3, "Should NOT use delta at max depth");
+        assert_eq!(data3, target, "Should return full data at max depth");
+
+        // Depth 4 - should NOT create delta (exceeds max depth)
+        let (data4, should_use4) = encoder.encode_with_depth(&base, &target, 4).unwrap();
+        assert!(!should_use4, "Should NOT use delta beyond max depth");
+        assert_eq!(data4, target, "Should return full data beyond max depth");
+    }
+
+    #[test]
+    fn test_max_chain_depth_setter() {
+        let mut encoder = DeltaEncoder::new();
+
+        // Default should be MAX_CHAIN_DEPTH (10)
+        assert_eq!(encoder.max_chain_depth(), MAX_CHAIN_DEPTH);
+        assert_eq!(encoder.max_chain_depth(), 10);
+
+        // Set to custom value
+        encoder.set_max_chain_depth(75);
+        assert_eq!(encoder.max_chain_depth(), 75);
+
+        // Set to another value
+        encoder.set_max_chain_depth(25);
+        assert_eq!(encoder.max_chain_depth(), 25);
+    }
+
+    #[test]
+    fn test_chain_depth_with_constructor() {
+        let encoder = DeltaEncoder::with_max_chain_depth(100);
+        assert_eq!(encoder.max_chain_depth(), 100);
+
+        // Verify it actually enforces the limit
+        let base = vec![0x42u8; 1000];
+        let mut target = base.clone();
+        target[500] = 0x43; // Small change
+
+        // At depth 99, should create delta
+        let (_, should_use99) = encoder.encode_with_depth(&base, &target, 99).unwrap();
+        assert!(should_use99, "Should use delta just below max depth");
+
+        // At depth 100, should NOT create delta
+        let (_, should_use100) = encoder.encode_with_depth(&base, &target, 100).unwrap();
+        assert!(!should_use100, "Should NOT use delta at max depth");
+    }
+
+    #[test]
+    fn test_encode_delegates_to_encode_with_depth() {
+        let encoder = DeltaEncoder::new();
+
+        let base = b"Test data for delta encoding";
+        let target = b"Test data for delta encoding with changes";
+
+        // encode() should delegate to encode_with_depth(0)
+        let (data1, should1) = encoder.encode(base, target).unwrap();
+        let (data2, should2) = encoder.encode_with_depth(base, target, 0).unwrap();
+
+        assert_eq!(should1, should2, "Both methods should return same decision");
+        assert_eq!(data1, data2, "Both methods should return same data");
     }
 }
