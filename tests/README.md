@@ -12,7 +12,13 @@ tests/
 │   ├── backend_tests.rs    # Cloud backend tests with emulators
 │   ├── concurrent_tests.rs # Concurrent operation tests
 │   └── multiuser_tests.rs  # Multi-user collaboration tests
-└── README.md              # This file
+├── results/               # Test execution results (2025-12-12)
+│   ├── test_advanced_results.txt
+│   ├── test_remaining_p0_output.txt
+│   └── mediagit_cli_test_plan.json
+├── repositories/          # Test repository fixtures (2025-12-12)
+│   └── [test repos for integration testing]
+└── README.md             # This file
 ```
 
 ## Running Tests

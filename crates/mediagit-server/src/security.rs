@@ -187,8 +187,8 @@ pub async fn request_validation_middleware(
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    // Validate content length (max 100MB for media files)
-    const MAX_CONTENT_LENGTH: u64 = 100 * 1024 * 1024; // 100MB
+    // Validate content length (max 2GB for large media files)
+    const MAX_CONTENT_LENGTH: u64 = 2 * 1024 * 1024 * 1024; // 2GB
 
     if let Some(content_length) = request.headers().get("content-length") {
         if let Ok(length_str) = content_length.to_str() {

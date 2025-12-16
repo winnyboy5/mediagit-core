@@ -60,11 +60,13 @@
 //! ```
 
 mod branch;
+mod checkout;
 mod commit;
 mod conflict;
 mod delta;
 mod diff;
 mod fsck;
+mod index;
 mod lca;
 mod merge;
 mod metrics;
@@ -73,13 +75,16 @@ mod odb;
 mod oid;
 mod pack;
 mod refs;
+mod revision;
 mod tree;
 
 pub use branch::{BranchInfo, BranchManager, DetachedHead};
+pub use checkout::CheckoutManager;
 pub use commit::{Commit, Signature};
 pub use conflict::{Conflict, ConflictDetector, ConflictSide, ConflictStats, ConflictType};
 pub use delta::{Delta, DeltaDecoder, DeltaEncoder, DeltaInstruction};
 pub use diff::{ModifiedEntry, ThreeWayDiff, TreeDiff, TreeDiffer};
+pub use index::{Index, IndexEntry};
 pub use lca::{LcaFinder, LcaResult};
 pub use merge::{FastForwardInfo, MergeEngine, MergeResult, MergeStrategy};
 pub use metrics::OdbMetrics;
@@ -88,6 +93,7 @@ pub use odb::ObjectDatabase;
 pub use oid::Oid;
 pub use pack::{PackHeader, PackIndex, PackMetadata, PackObjectEntry, PackReader, PackWriter};
 pub use refs::{Ref, RefDatabase, RefType};
+pub use revision::resolve_revision;
 pub use tree::{FileMode, Tree, TreeEntry};
 
 // Re-export fsck module

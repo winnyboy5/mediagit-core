@@ -5,7 +5,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use mediagit_storage::LocalBackend;
-use mediagit_versioning::{ObjectDatabase, ObjectType};
+use mediagit_versioning::{Index, IndexEntry, ObjectDatabase, ObjectType};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -65,10 +65,13 @@ impl AddCmd {
         }
 
         // Initialize storage and ODB
-        let storage_path = repo_root.join(".mediagit/objects");
+        let storage_path = repo_root.join(".mediagit");
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
         let odb = ObjectDatabase::new(storage, 1000);
+
+        // Load the index
+        let mut index = Index::load(&repo_root)?;
 
         let mut added_count = 0;
 
@@ -89,11 +92,41 @@ impl AddCmd {
                         .await
                         .context(format!("Failed to read file: {}", path_str))?;
 
+                    // Get file metadata
+                    let metadata = tokio::fs::metadata(path)
+                        .await
+                        .context(format!("Failed to read file metadata: {}", path_str))?;
+
                     // Write to object database
                     let oid = odb
                         .write(ObjectType::Blob, &content)
                         .await
                         .context("Failed to write object")?;
+
+                    // Add to index
+                    let relative_path = path.strip_prefix(&repo_root)
+                        .unwrap_or(path)
+                        .to_path_buf();
+
+                    let mode = if cfg!(unix) {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            metadata.permissions().mode()
+                        }
+                        #[cfg(not(unix))]
+                        0o100644
+                    } else {
+                        0o100644
+                    };
+
+                    let entry = IndexEntry::new(
+                        relative_path.clone(),
+                        oid,
+                        mode,
+                        metadata.len()
+                    );
+                    index.add_entry(entry);
 
                     if self.verbose {
                         output::detail("added", &format!("{} ({})", path_str, oid));
@@ -102,6 +135,12 @@ impl AddCmd {
 
                 added_count += 1;
             }
+        }
+
+        // Save the index
+        if !self.dry_run {
+            index.save(&repo_root)
+                .context("Failed to save index")?;
         }
 
         if !self.quiet {

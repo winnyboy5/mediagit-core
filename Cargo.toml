@@ -52,6 +52,7 @@ hex = "0.4"
 # Compression
 zstd = "0.13"
 brotli = "7.0"
+flate2 = "1.0"
 
 # Observability
 tracing = "0.1.41"

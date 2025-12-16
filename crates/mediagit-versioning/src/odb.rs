@@ -20,6 +20,7 @@
 //! - **Observable metrics**: Track cache performance and deduplication efficiency
 
 use crate::{ObjectType, Oid, OdbMetrics};
+use mediagit_compression::{Compressor, ZlibCompressor};
 use mediagit_storage::StorageBackend;
 use moka::future::Cache;
 use std::sync::Arc;
@@ -74,10 +75,18 @@ pub struct ObjectDatabase {
 
     /// Metrics tracking
     metrics: Arc<RwLock<OdbMetrics>>,
+
+    /// Compression engine (Git-compatible zlib by default)
+    compressor: Arc<dyn Compressor>,
+
+    /// Enable/disable compression (default: true)
+    compression_enabled: bool,
 }
 
 impl ObjectDatabase {
     /// Create a new ObjectDatabase with the given storage backend and cache size
+    ///
+    /// Uses Git-compatible zlib compression by default.
     ///
     /// # Arguments
     ///
@@ -97,6 +106,7 @@ impl ObjectDatabase {
     pub fn new(storage: Arc<dyn StorageBackend>, cache_capacity: u64) -> Self {
         info!(
             capacity = cache_capacity,
+            compression = "zlib (Git-compatible)",
             "Creating ObjectDatabase with LRU cache"
         );
 
@@ -104,6 +114,55 @@ impl ObjectDatabase {
             storage,
             cache: Cache::new(cache_capacity),
             metrics: Arc::new(RwLock::new(OdbMetrics::new())),
+            compressor: Arc::new(ZlibCompressor::default_level()),
+            compression_enabled: true,
+        }
+    }
+
+    /// Create a new ObjectDatabase with custom compression settings
+    ///
+    /// # Arguments
+    ///
+    /// * `storage` - Storage backend implementation
+    /// * `cache_capacity` - Maximum number of objects to cache in memory
+    /// * `compressor` - Custom compression implementation
+    /// * `compression_enabled` - Enable/disable compression
+    pub fn with_compression(
+        storage: Arc<dyn StorageBackend>,
+        cache_capacity: u64,
+        compressor: Arc<dyn Compressor>,
+        compression_enabled: bool,
+    ) -> Self {
+        info!(
+            capacity = cache_capacity,
+            compression_enabled = compression_enabled,
+            "Creating ObjectDatabase with custom compression"
+        );
+
+        Self {
+            storage,
+            cache: Cache::new(cache_capacity),
+            metrics: Arc::new(RwLock::new(OdbMetrics::new())),
+            compressor,
+            compression_enabled,
+        }
+    }
+
+    /// Create a new ObjectDatabase without compression
+    ///
+    /// Useful for testing or when compression is handled externally.
+    pub fn without_compression(storage: Arc<dyn StorageBackend>, cache_capacity: u64) -> Self {
+        info!(
+            capacity = cache_capacity,
+            "Creating ObjectDatabase without compression"
+        );
+
+        Self {
+            storage,
+            cache: Cache::new(cache_capacity),
+            metrics: Arc::new(RwLock::new(OdbMetrics::new())),
+            compressor: Arc::new(ZlibCompressor::default_level()),
+            compression_enabled: false,
         }
     }
 
@@ -139,18 +198,19 @@ impl ObjectDatabase {
     /// # }
     /// ```
     pub async fn write(&self, obj_type: ObjectType, data: &[u8]) -> anyhow::Result<Oid> {
-        // Compute OID from content
+        // Compute OID from UNCOMPRESSED content (Git compatibility)
         let oid = Oid::hash(data);
 
         debug!(
             oid = %oid,
             obj_type = %obj_type,
             size = data.len(),
+            compressed = self.compression_enabled,
             "Writing object"
         );
 
-        // Build storage key
-        let key = format!("objects/{}", oid.to_path());
+        // Build storage key (LocalBackend will handle sharding)
+        let key = oid.to_hex();
 
         // Check if object already exists (deduplication)
         let exists = self.storage.exists(&key).await?;
@@ -161,16 +221,41 @@ impl ObjectDatabase {
             let mut metrics = self.metrics.write().await;
             metrics.record_write(data.len() as u64, false);
         } else {
-            // Store new object
-            self.storage.put(&key, data).await?;
-            info!(oid = %oid, size = data.len(), "Stored new object");
+            // Compress data if enabled
+            let storage_data = if self.compression_enabled {
+                let compressed = self.compressor.compress(data)
+                    .map_err(|e| anyhow::anyhow!("Compression failed: {}", e))?;
+
+                debug!(
+                    oid = %oid,
+                    original_size = data.len(),
+                    compressed_size = compressed.len(),
+                    ratio = compressed.len() as f64 / data.len() as f64,
+                    "Compressed object"
+                );
+
+                compressed
+            } else {
+                data.to_vec()
+            };
+
+            // Store object (compressed or raw)
+            self.storage.put(&key, &storage_data).await?;
+
+            info!(
+                oid = %oid,
+                original_size = data.len(),
+                storage_size = storage_data.len(),
+                compressed = self.compression_enabled,
+                "Stored new object"
+            );
 
             // Update metrics for new write
             let mut metrics = self.metrics.write().await;
             metrics.record_write(data.len() as u64, true);
         }
 
-        // Cache the object for future reads
+        // Cache the UNCOMPRESSED object for future reads
         self.cache.insert(oid, Arc::new(data.to_vec())).await;
 
         Ok(oid)
@@ -226,10 +311,42 @@ impl ObjectDatabase {
         metrics.record_cache_miss();
         drop(metrics); // Release lock before I/O
 
-        let key = format!("objects/{}", oid.to_path());
-        let data = self.storage.get(&key).await?;
+        let key = oid.to_hex();
+        let storage_data = self.storage.get(&key).await?;
 
-        // Verify integrity
+        // Decompress data if needed (auto-detect compression)
+        let data = if self.compression_enabled || storage_data.len() >= 2 && storage_data[0] == 0x78 {
+            // Try to decompress - the compressor will handle uncompressed data gracefully
+            match self.compressor.decompress(&storage_data) {
+                Ok(decompressed) => {
+                    debug!(
+                        oid = %oid,
+                        storage_size = storage_data.len(),
+                        decompressed_size = decompressed.len(),
+                        "Decompressed object"
+                    );
+                    decompressed
+                }
+                Err(e) => {
+                    // If decompression fails and data looks uncompressed, use as-is
+                    // This provides backward compatibility
+                    if !self.compression_enabled {
+                        warn!(
+                            oid = %oid,
+                            error = %e,
+                            "Decompression failed, using raw data"
+                        );
+                        storage_data
+                    } else {
+                        return Err(anyhow::anyhow!("Decompression failed: {}", e));
+                    }
+                }
+            }
+        } else {
+            storage_data
+        };
+
+        // Verify integrity on UNCOMPRESSED data
         let computed_oid = Oid::hash(&data);
         if computed_oid != *oid {
             warn!(
@@ -244,7 +361,7 @@ impl ObjectDatabase {
             );
         }
 
-        // Cache for future reads
+        // Cache UNCOMPRESSED data for future reads
         let arc_data = Arc::new(data.clone());
         self.cache.insert(*oid, arc_data).await;
 
@@ -479,5 +596,131 @@ mod tests {
 
         // Clear all
         odb.clear_cache().await;
+    }
+
+    #[tokio::test]
+    async fn test_compression_enabled() {
+        let storage = Arc::new(MockBackend::new());
+        let odb = ObjectDatabase::new(storage.clone(), 100);
+
+        // Write large compressible data
+        let data = b"This is test data that compresses well. ".repeat(100);
+        let oid = odb.write(ObjectType::Blob, &data).await.unwrap();
+
+        // Read it back
+        let retrieved = odb.read(&oid).await.unwrap();
+        assert_eq!(retrieved, data);
+
+        // Verify data is compressed in storage
+        let key = oid.to_hex();
+        let stored_data = storage.get(&key).await.unwrap();
+
+        // Stored data should be smaller than original (compressed)
+        assert!(stored_data.len() < data.len());
+
+        // Stored data should have zlib header (0x78)
+        assert_eq!(stored_data[0], 0x78);
+    }
+
+    #[tokio::test]
+    async fn test_compression_disabled() {
+        let storage = Arc::new(MockBackend::new());
+        let odb = ObjectDatabase::without_compression(storage.clone(), 100);
+
+        let data = b"test data without compression";
+        let oid = odb.write(ObjectType::Blob, data).await.unwrap();
+
+        // Read it back
+        let retrieved = odb.read(&oid).await.unwrap();
+        assert_eq!(retrieved, data);
+
+        // Verify data is NOT compressed in storage
+        let key = oid.to_hex();
+        let stored_data = storage.get(&key).await.unwrap();
+
+        // Stored data should be same as original (uncompressed)
+        assert_eq!(stored_data, data);
+    }
+
+    #[tokio::test]
+    async fn test_backward_compatibility() {
+        let storage = Arc::new(MockBackend::new());
+
+        // First, write uncompressed data (simulating old version)
+        let odb_old = ObjectDatabase::without_compression(storage.clone(), 100);
+        let data = b"old uncompressed data";
+        let oid = odb_old.write(ObjectType::Blob, data).await.unwrap();
+
+        // Now read with compression-enabled ODB (simulating new version)
+        let odb_new = ObjectDatabase::new(storage, 100);
+        let retrieved = odb_new.read(&oid).await.unwrap();
+
+        // Should read successfully
+        assert_eq!(retrieved, data);
+    }
+
+    #[tokio::test]
+    async fn test_compression_ratio() {
+        let storage = Arc::new(MockBackend::new());
+        let odb = ObjectDatabase::new(storage.clone(), 100);
+
+        // Highly compressible data (repeated pattern)
+        let data = vec![0x42u8; 10000];
+        let oid = odb.write(ObjectType::Blob, &data).await.unwrap();
+
+        // Get stored data
+        let key = oid.to_hex();
+        let stored_data = storage.get(&key).await.unwrap();
+
+        // Compression ratio should be significant (>90% reduction for repeated data)
+        let ratio = stored_data.len() as f64 / data.len() as f64;
+        assert!(ratio < 0.1, "Expected high compression ratio, got {}", ratio);
+
+        // Verify integrity
+        let retrieved = odb.read(&oid).await.unwrap();
+        assert_eq!(retrieved, data);
+    }
+
+    #[tokio::test]
+    async fn test_custom_compressor() {
+        use mediagit_compression::{ZstdCompressor, CompressionLevel};
+
+        let storage = Arc::new(MockBackend::new());
+        let compressor = Arc::new(ZstdCompressor::new(CompressionLevel::Best));
+        let odb = ObjectDatabase::with_compression(storage, 100, compressor, true);
+
+        let data = b"test data with zstd compression";
+        let oid = odb.write(ObjectType::Blob, data).await.unwrap();
+
+        let retrieved = odb.read(&oid).await.unwrap();
+        assert_eq!(retrieved, data);
+    }
+
+    #[tokio::test]
+    async fn test_empty_data_compression() {
+        let storage = Arc::new(MockBackend::new());
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let data = b"";
+        let oid = odb.write(ObjectType::Blob, data).await.unwrap();
+
+        let retrieved = odb.read(&oid).await.unwrap();
+        assert_eq!(retrieved, data);
+    }
+
+    #[tokio::test]
+    async fn test_large_file_compression() {
+        let storage = Arc::new(MockBackend::new());
+        let odb = ObjectDatabase::new(storage, 100);
+
+        // Simulate a 1MB file with some compressibility
+        let data = (0..10000)
+            .flat_map(|i| format!("Line {} content\n", i).into_bytes())
+            .collect::<Vec<u8>>();
+
+        let oid = odb.write(ObjectType::Blob, &data).await.unwrap();
+        let retrieved = odb.read(&oid).await.unwrap();
+
+        assert_eq!(retrieved, data);
     }
 }

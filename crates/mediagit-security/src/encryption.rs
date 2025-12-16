@@ -38,6 +38,11 @@
 //! [version:1][nonce:12][chunk1_cipher][chunk1_tag][chunk2_cipher][chunk2_tag]...
 //! ```
 
+// Suppress deprecation warning for GenericArray::from_slice
+// This is a dependency warning from aes-gcm 0.10 using generic-array 0.14
+// Will be resolved when upgrading to aes-gcm with generic-array 1.x support
+#![allow(deprecated)]
+
 use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,

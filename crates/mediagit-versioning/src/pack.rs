@@ -447,7 +447,7 @@ impl PackReader {
         Ok(Self {
             data,
             index,
-            object_data_end: index_offset,
+            _object_data_end: index_offset,
         })
     }
 
@@ -457,6 +457,16 @@ impl PackReader {
     ///
     /// Returns error if object not found or data is corrupted
     pub fn get_object(&self, oid: &Oid) -> io::Result<Vec<u8>> {
+        let (_, data) = self.get_object_with_type(oid)?;
+        Ok(data)
+    }
+
+    /// Get object data and type by OID
+    ///
+    /// # Errors
+    ///
+    /// Returns error if object not found or data is corrupted
+    pub fn get_object_with_type(&self, oid: &Oid) -> io::Result<(ObjectType, Vec<u8>)> {
         let (offset, total_size) = self
             .index
             .lookup(oid)
@@ -472,6 +482,11 @@ impl PackReader {
             ));
         }
 
+        // Read the type from the 1-byte header
+        let type_byte = self.data[offset];
+        let object_type = ObjectType::from_u8(type_byte)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid object type"))?;
+
         // Skip the 5-byte header (1 byte type + 4 bytes size)
         let header_size = 5;
         if total_size < header_size {
@@ -482,7 +497,9 @@ impl PackReader {
         }
 
         let data_size = total_size - header_size;
-        Ok(self.data[offset + header_size..offset + header_size + data_size].to_vec())
+        let data = self.data[offset + header_size..offset + header_size + data_size].to_vec();
+
+        Ok((object_type, data))
     }
 
     /// Get the index reference

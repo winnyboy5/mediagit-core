@@ -394,7 +394,8 @@ impl FsckChecker {
 
     /// Verify a single object's integrity
     async fn verify_object(&self, oid: &Oid, report: &mut FsckReport) -> anyhow::Result<()> {
-        let key = format!("objects/{}", oid.to_path());
+        // Use hex OID directly - LocalBackend adds "objects/" and sharding
+        let key = oid.to_hex();
 
         // Check if object exists
         if !self.storage.exists(&key).await? {
@@ -689,17 +690,15 @@ impl FsckChecker {
         // List all objects from storage
         // This assumes the storage backend provides a way to list objects
         // For now, we'll scan the objects directory structure
-        let object_keys = self.storage.list_objects("objects/").await?;
+        // List all objects (LocalBackend already operates within objects/ directory)
+        let object_keys = self.storage.list_objects("").await?;
 
         for key in object_keys {
-            // Extract OID from key like "objects/ab/cd123..."
-            if let Some(path_part) = key.strip_prefix("objects/") {
-                // Reconstruct hex from "{ab}/{cd123...}" format
-                let hex = path_part.replace('/', "");
-                if hex.len() == 64 {
-                    if let Ok(oid) = Oid::from_hex(&hex) {
-                        objects.push(oid);
-                    }
+            // LocalBackend returns hex OIDs directly (no "objects/" prefix)
+            // The key is already the hex string
+            if key.len() == 64 {
+                if let Ok(oid) = Oid::from_hex(&key) {
+                    objects.push(oid);
                 }
             }
         }

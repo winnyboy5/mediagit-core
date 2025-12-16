@@ -46,20 +46,11 @@
 //! # }
 //! ```
 
-// NOTE: Parsers currently unused but prepared for future implementation
-// These imports will be enabled when Info types and metadata parsers are fully implemented:
-// - AudioParser: For audio metadata extraction and intelligent merging
-// - ImageMetadataParser: For EXIF and image metadata-aware merging
-// - PsdParser: For PSD layer-aware merging (partially implemented)
-// - VideoParser: For video metadata extraction and timeline-based merging
-#[allow(unused_imports)]
 use crate::audio::AudioParser;
-#[allow(unused_imports)]
 use crate::error::Result;
-// use crate::image::{ImageInfo, ImageMetadata, ImageMetadataParser};
-#[allow(unused_imports)]
+use crate::model3d::Model3DParser;
 use crate::psd::PsdParser;
-#[allow(unused_imports)]
+use crate::vfx::VfxParser;
 use crate::video::VideoParser;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, instrument, warn};
@@ -72,6 +63,7 @@ pub enum MediaType {
     Video,
     Audio,
     Model3D,
+    Vfx,
     Unknown,
 }
 
@@ -84,6 +76,7 @@ impl MediaType {
             "mp4" | "mov" | "avi" | "mkv" => MediaType::Video,
             "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" => MediaType::Audio,
             "obj" | "fbx" | "gltf" | "glb" | "blend" => MediaType::Model3D,
+            "indd" | "indt" | "ai" | "ait" | "aep" | "aet" | "prproj" => MediaType::Vfx,
             _ => MediaType::Unknown,
         }
     }
@@ -117,8 +110,11 @@ pub enum MergeStrategy {
     /// Audio merge strategy
     Audio(AudioStrategy),
 
-    /// 3D model merge strategy (placeholder)
+    /// 3D model merge strategy
     Model3D(Model3DStrategy),
+
+    /// VFX file merge strategy
+    Vfx(VfxStrategy),
 
     /// Generic binary merge (no intelligence)
     Generic,
@@ -133,6 +129,7 @@ impl MergeStrategy {
             MediaType::Video => MergeStrategy::Video(VideoStrategy::default()),
             MediaType::Audio => MergeStrategy::Audio(AudioStrategy::default()),
             MediaType::Model3D => MergeStrategy::Model3D(Model3DStrategy::default()),
+            MediaType::Vfx => MergeStrategy::Vfx(VfxStrategy::default()),
             MediaType::Unknown => MergeStrategy::Generic,
         }
     }
@@ -154,6 +151,7 @@ impl MergeStrategy {
             MergeStrategy::Video(strategy) => strategy.merge(base, ours, theirs, filename).await,
             MergeStrategy::Audio(strategy) => strategy.merge(base, ours, theirs, filename).await,
             MergeStrategy::Model3D(strategy) => strategy.merge(base, ours, theirs, filename).await,
+            MergeStrategy::Vfx(strategy) => strategy.merge(base, ours, theirs, filename).await,
             MergeStrategy::Generic => {
                 warn!("Using generic strategy - no media intelligence");
                 Ok(MergeResult::Conflict(
@@ -321,23 +319,85 @@ impl AudioStrategy {
     }
 }
 
-/// 3D model merge strategy (placeholder for future implementation)
+/// 3D model merge strategy
 #[derive(Debug, Clone, Default)]
 pub struct Model3DStrategy;
 
 impl Model3DStrategy {
     async fn merge(
         &self,
-        _base: &[u8],
-        _ours: &[u8],
-        _theirs: &[u8],
-        _filename: &str,
+        base: &[u8],
+        ours: &[u8],
+        theirs: &[u8],
+        filename: &str,
     ) -> Result<MergeResult> {
-        debug!("Using 3D model merge strategy (not yet implemented)");
+        debug!("Using 3D model merge strategy");
 
-        Ok(MergeResult::Conflict(
-            "3D model merging not yet implemented".to_string(),
-        ))
+        let parser = Model3DParser::new();
+        let base_model = parser.parse(base, &format!("base_{}", filename)).await?;
+        let ours_model = parser.parse(ours, &format!("ours_{}", filename)).await?;
+        let theirs_model = parser.parse(theirs, &format!("theirs_{}", filename)).await?;
+
+        let decision = Model3DParser::can_auto_merge(&base_model, &ours_model, &theirs_model);
+
+        match decision {
+            crate::model3d::MergeDecision::AutoMerge => {
+                info!("Non-overlapping 3D model changes - can auto-merge");
+                // For 3D models, actual binary merging is complex
+                // For now, return conflict to trigger manual review
+                Ok(MergeResult::Conflict(
+                    "3D model merging requires manual review in 3D software".to_string(),
+                ))
+            }
+            crate::model3d::MergeDecision::ManualReview(conflicts) => {
+                warn!("3D model conflicts: {:?}", conflicts);
+                Ok(MergeResult::Conflict(format!(
+                    "3D model conflicts detected: {}",
+                    conflicts.join(", ")
+                )))
+            }
+        }
+    }
+}
+
+/// VFX file merge strategy
+#[derive(Debug, Clone, Default)]
+pub struct VfxStrategy;
+
+impl VfxStrategy {
+    async fn merge(
+        &self,
+        base: &[u8],
+        ours: &[u8],
+        theirs: &[u8],
+        filename: &str,
+    ) -> Result<MergeResult> {
+        debug!("Using VFX file merge strategy");
+
+        let parser = VfxParser::new();
+        let base_vfx = parser.parse(base, &format!("base_{}", filename)).await?;
+        let ours_vfx = parser.parse(ours, &format!("ours_{}", filename)).await?;
+        let theirs_vfx = parser.parse(theirs, &format!("theirs_{}", filename)).await?;
+
+        let decision = VfxParser::can_auto_merge(&base_vfx, &ours_vfx, &theirs_vfx);
+
+        match decision {
+            crate::vfx::MergeDecision::AutoMerge => {
+                info!("Non-overlapping VFX changes - can auto-merge");
+                // For VFX files, actual binary merging is complex
+                // For now, return conflict to trigger manual review
+                Ok(MergeResult::Conflict(
+                    "VFX file merging requires manual review in creative software".to_string(),
+                ))
+            }
+            crate::vfx::MergeDecision::ManualReview(conflicts) => {
+                warn!("VFX file conflicts: {:?}", conflicts);
+                Ok(MergeResult::Conflict(format!(
+                    "VFX file conflicts detected: {}",
+                    conflicts.join(", ")
+                )))
+            }
+        }
     }
 }
 
@@ -352,6 +412,9 @@ mod tests {
         assert_eq!(MediaType::from_extension("mp4"), MediaType::Video);
         assert_eq!(MediaType::from_extension("mp3"), MediaType::Audio);
         assert_eq!(MediaType::from_extension("obj"), MediaType::Model3D);
+        assert_eq!(MediaType::from_extension("indd"), MediaType::Vfx);
+        assert_eq!(MediaType::from_extension("ai"), MediaType::Vfx);
+        assert_eq!(MediaType::from_extension("aep"), MediaType::Vfx);
         assert_eq!(MediaType::from_extension("unknown"), MediaType::Unknown);
     }
 
@@ -362,6 +425,9 @@ mod tests {
 
         let psd_strategy = MergeStrategy::for_media_type(MediaType::Psd);
         assert!(matches!(psd_strategy, MergeStrategy::Psd(_)));
+
+        let vfx_strategy = MergeStrategy::for_media_type(MediaType::Vfx);
+        assert!(matches!(vfx_strategy, MergeStrategy::Vfx(_)));
 
         let generic_strategy = MergeStrategy::for_media_type(MediaType::Unknown);
         assert!(matches!(generic_strategy, MergeStrategy::Generic));

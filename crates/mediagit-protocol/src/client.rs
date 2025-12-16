@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use mediagit_versioning::{ObjectDatabase, ObjectType, Oid, PackWriter};
+use mediagit_versioning::{Commit, FileMode, ObjectDatabase, ObjectType, Oid, PackWriter, Tree};
+use std::collections::{HashSet, VecDeque};
 
 use crate::types::{RefUpdate, RefUpdateRequest, RefUpdateResponse, RefsResponse, WantRequest};
 
@@ -23,7 +24,9 @@ impl ProtocolClient {
 
     /// Get all refs from the remote repository
     pub async fn get_refs(&self) -> Result<RefsResponse> {
+        println!("Fetching refs from {}", self.base_url);
         let url = format!("{}/info/refs", self.base_url);
+        println!("Fetching url from {}", url);
         tracing::debug!("GET {}", url);
 
         let response = self
@@ -58,15 +61,37 @@ impl ProtocolClient {
         updates: Vec<RefUpdate>,
         force: bool,
     ) -> Result<RefUpdateResponse> {
-        // Collect OIDs we need to send (simplified - send all objects for new refs)
-        let mut oids_to_send = Vec::new();
+        // Collect commit OIDs from ref updates
+        let mut commit_oids = Vec::new();
         for update in &updates {
-            oids_to_send.push(update.new_oid.clone());
+            let oid = Oid::from_hex(&update.new_oid)
+                .context(format!("Invalid OID in update: {}", update.new_oid))?;
+            commit_oids.push(oid);
         }
 
-        // Generate pack file with objects
-        if !oids_to_send.is_empty() {
-            let pack_data = self.generate_pack(odb, oids_to_send).await?;
+        // Collect all reachable objects (commits, trees, blobs)
+        if !commit_oids.is_empty() {
+            let objects = self.collect_reachable_objects(odb, commit_oids).await?;
+
+            tracing::info!(
+                "Collected {} objects for push ({} commits, {} trees, {} blobs)",
+                objects.len(),
+                objects
+                    .iter()
+                    .filter(|(_, t)| matches!(t, ObjectType::Commit))
+                    .count(),
+                objects
+                    .iter()
+                    .filter(|(_, t)| matches!(t, ObjectType::Tree))
+                    .count(),
+                objects
+                    .iter()
+                    .filter(|(_, t)| matches!(t, ObjectType::Blob))
+                    .count()
+            );
+
+            // Generate and upload pack file with complete object graph
+            let pack_data = self.generate_pack(odb, objects).await?;
             self.upload_pack(&pack_data).await?;
         }
 
@@ -198,34 +223,99 @@ impl ProtocolClient {
             .context("Failed to parse ref update response")
     }
 
-    /// Generate a pack file containing specified objects
-    async fn generate_pack(&self, odb: &ObjectDatabase, oids: Vec<String>) -> Result<Vec<u8>> {
+    /// Collect all objects reachable from given commit OIDs
+    ///
+    /// Performs depth-first graph traversal to collect commits, trees, and blobs.
+    /// Returns vec of (OID, ObjectType) tuples for all reachable objects.
+    async fn collect_reachable_objects(
+        &self,
+        odb: &ObjectDatabase,
+        commit_oids: Vec<Oid>,
+    ) -> Result<Vec<(Oid, ObjectType)>> {
+        let mut visited = HashSet::new();
+        let mut result = Vec::new();
+        let mut queue = VecDeque::new();
+
+        // Start with commit OIDs
+        for oid in commit_oids {
+            if visited.insert(oid) {
+                queue.push_back((oid, ObjectType::Commit));
+            }
+        }
+
+        while let Some((oid, obj_type)) = queue.pop_front() {
+            // Add to result
+            result.push((oid, obj_type));
+
+            // Read object data
+            let obj_data = odb
+                .read(&oid)
+                .await
+                .context(format!("Failed to read object {}", oid))?;
+
+            match obj_type {
+                ObjectType::Commit => {
+                    // Deserialize commit to extract tree and parent refs
+                    let commit: Commit = bincode::deserialize(&obj_data)
+                        .context(format!("Failed to deserialize commit {}", oid))?;
+
+                    // Add tree OID
+                    if visited.insert(commit.tree) {
+                        queue.push_back((commit.tree, ObjectType::Tree));
+                    }
+
+                    // Add parent commit OIDs
+                    for parent_oid in commit.parents {
+                        if visited.insert(parent_oid) {
+                            queue.push_back((parent_oid, ObjectType::Commit));
+                        }
+                    }
+                }
+                ObjectType::Tree => {
+                    // Deserialize tree to extract blob/subtree refs
+                    let tree: Tree = bincode::deserialize(&obj_data)
+                        .context(format!("Failed to deserialize tree {}", oid))?;
+
+                    for entry in tree.entries.values() {
+                        if visited.insert(entry.oid) {
+                            // Determine type based on FileMode
+                            let entry_type = match entry.mode {
+                                FileMode::Directory => ObjectType::Tree,
+                                _ => ObjectType::Blob, // Regular, Executable, Symlink
+                            };
+                            queue.push_back((entry.oid, entry_type));
+                        }
+                    }
+                }
+                ObjectType::Blob => {
+                    // Blobs are leaf nodes - no references to follow
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Generate a pack file containing specified objects with their types
+    async fn generate_pack(
+        &self,
+        odb: &ObjectDatabase,
+        objects: Vec<(Oid, ObjectType)>,
+    ) -> Result<Vec<u8>> {
         let mut pack_writer = PackWriter::new();
 
-        for oid_str in oids {
-            // Parse OID from hex string
-            let oid = Oid::from_hex(&oid_str)
-                .map_err(|e| anyhow::anyhow!("Invalid OID {}: {}", oid_str, e))?;
-
+        for (oid, object_type) in objects {
             // Read object data from ODB
             let obj_data = odb
                 .read(&oid)
                 .await
-                .context(format!("Failed to read object {}", oid_str))?;
+                .context(format!("Failed to read object {}", oid))?;
 
-            // TODO: Need to determine object type properly
-            // For now, assume Blob type (suitable for media files)
-            // In the future, we should either:
-            // 1. Add metadata storage to track object types
-            // 2. Add read_with_type() method to ObjectDatabase
-            // 3. Parse object data to determine type
-            let object_type = ObjectType::Blob;
-
-            // Add to pack (returns offset as u64, not Result)
+            // Add to pack with correct type
             let _offset = pack_writer.add_object(oid, object_type, &obj_data);
         }
 
-        // Finalize pack (returns Vec<u8> directly, not Result)
+        // Finalize pack
         let pack_data = pack_writer.finalize();
         Ok(pack_data)
     }

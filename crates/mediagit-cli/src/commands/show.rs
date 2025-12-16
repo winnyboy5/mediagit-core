@@ -2,15 +2,15 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_storage::LocalBackend;
-use mediagit_versioning::{Commit, ObjectDatabase, Oid, RefDatabase};
+use mediagit_versioning::{resolve_revision, Commit, ObjectDatabase, RefDatabase};
 use std::sync::Arc;
 
 /// Show object information
 #[derive(Parser, Debug)]
 pub struct ShowCmd {
-    /// Object to show (commit, tag, tree, blob)
+    /// Object to show (commit, tag, tree, blob) - defaults to HEAD
     #[arg(value_name = "OBJECT")]
-    pub object: String,
+    pub object: Option<String>,
 
     /// Show patch
     #[arg(short = 'p', long)]
@@ -44,14 +44,16 @@ impl ShowCmd {
         }
 
         let repo_root = self.find_repo_root()?;
-        let storage_path = repo_root.join(".mediagit/objects");
+        let storage_path = repo_root.join(".mediagit");
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
-        let refdb = RefDatabase::new(storage.clone());
+        let refdb = RefDatabase::new(&storage_path);
         let odb = ObjectDatabase::new(storage, 1000);
 
-        // Resolve object ID
-        let oid = self.resolve_object(&refdb).await?;
+        // Resolve object ID using revision parser (supports HEAD~N)
+        let object_str = self.object.as_deref().unwrap_or("HEAD");
+        let oid = resolve_revision(object_str, &refdb, &odb).await
+            .context(format!("Cannot resolve object: {}", object_str))?;
 
         // Read object
         let data = odb.read(&oid).await
@@ -105,27 +107,6 @@ impl ShowCmd {
         Ok(())
     }
 
-    async fn resolve_object(&self, refdb: &RefDatabase) -> Result<Oid> {
-        // Try as direct OID
-        if let Ok(oid) = Oid::from_hex(&self.object) {
-            return Ok(oid);
-        }
-
-        // Try as reference
-        let ref_result = refdb.read(&self.object).await;
-        match ref_result {
-            Ok(r) => r.oid.ok_or_else(|| anyhow::anyhow!("Reference {} has no commit", self.object)),
-            Err(_) => {
-                // Try with refs/heads prefix
-                let with_prefix = format!("refs/heads/{}", self.object);
-                let ref_result = refdb.read(&with_prefix).await;
-                match ref_result {
-                    Ok(r) => r.oid.ok_or_else(|| anyhow::anyhow!("Reference {} has no commit", self.object)),
-                    Err(_) => anyhow::bail!("Cannot resolve object: {}", self.object),
-                }
-            }
-        }
-    }
 
     fn find_repo_root(&self) -> Result<std::path::PathBuf> {
         let mut current = std::env::current_dir()?;

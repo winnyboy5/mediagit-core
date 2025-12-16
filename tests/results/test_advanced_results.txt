@@ -1,0 +1,227 @@
+========================================
+MediaGit Advanced Operations Test Suite
+========================================
+
+[1;33m[TEST][0m TC-002: Bare Repository Initialization
+🎬 Initializing MediaGit repository in /mnt/d/own/saas/mediagit-core/test-repo-bare
+  [2m2025-12-10T05:20:04.983828Z[0m [32m INFO[0m [1;32mmediagit::commands::init[0m[32m: [32mCreating .mediagit directory structure[0m
+    [2;3mat[0m crates/mediagit-cli/src/commands/init.rs:113 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:05.010218Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mCreating ObjectDatabase with LRU cache, [1;32mcapacity[0m[32m: 1000[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:98 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:05.036334Z[0m [32m INFO[0m [1;32mmediagit::commands::init[0m[32m: [32mCreating default configuration[0m
+    [2;3mat[0m crates/mediagit-cli/src/commands/init.rs:140 [2;3mon[0m main
+
+✅ Initialized empty MediaGit repository in /mnt/d/own/saas/mediagit-core/test-repo-bare/.mediagit
+  Initial branch: main
+[0;32m[PASS][0m TC-002: .mediagit directory created
+[0;32m[PASS][0m TC-002: refs/heads directory exists
+[0;32m[PASS][0m TC-002: HEAD file created
+[0;32m[PASS][0m TC-002: Bare repository has no working files
+
+[1;33m[TEST][0m TC-003: Repository Initialization with Template
+🎬 Initializing MediaGit repository in /mnt/d/own/saas/mediagit-core/test-repo-template
+  [2m2025-12-10T05:20:05.286837Z[0m [32m INFO[0m [1;32mmediagit::commands::init[0m[32m: [32mCreating .mediagit directory structure[0m
+    [2;3mat[0m crates/mediagit-cli/src/commands/init.rs:113 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:05.314731Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mCreating ObjectDatabase with LRU cache, [1;32mcapacity[0m[32m: 1000[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:98 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:05.345346Z[0m [32m INFO[0m [1;32mmediagit::commands::init[0m[32m: [32mCreating default configuration[0m
+    [2;3mat[0m crates/mediagit-cli/src/commands/init.rs:140 [2;3mon[0m main
+
+✅ Initialized empty MediaGit repository in /mnt/d/own/saas/mediagit-core/test-repo-template/.mediagit
+  Initial branch: main
+[0;32m[PASS][0m TC-003: .mediagit directory created
+[INFO] TC-003: Template support not yet implemented (acceptable for MVP)
+[0;32m[PASS][0m TC-003: Basic init successful (template feature pending)
+
+[1;33m[TEST][0m TC-011: Multiple File Staging
+🎬 Initializing MediaGit repository in /mnt/d/own/saas/mediagit-core/test-repo-multifile
+  [2m2025-12-10T05:20:05.644673Z[0m [32m INFO[0m [1;32mmediagit::commands::init[0m[32m: [32mCreating .mediagit directory structure[0m
+    [2;3mat[0m crates/mediagit-cli/src/commands/init.rs:113 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:05.671685Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mCreating ObjectDatabase with LRU cache, [1;32mcapacity[0m[32m: 1000[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:98 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:05.714252Z[0m [32m INFO[0m [1;32mmediagit::commands::init[0m[32m: [32mCreating default configuration[0m
+    [2;3mat[0m crates/mediagit-cli/src/commands/init.rs:140 [2;3mon[0m main
+
+✅ Initialized empty MediaGit repository in /mnt/d/own/saas/mediagit-core/test-repo-multifile/.mediagit
+  Initial branch: main
+🔄 Staging files...
+  [2m2025-12-10T05:20:05.927977Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mCreating ObjectDatabase with LRU cache, [1;32mcapacity[0m[32m: 1000[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:98 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:05.985394Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mStored new object, [1;32moid[0m[32m: d6746a5ef409f28e6609f6d14e947c3e51db6c6a0cc7a9fc275db8b9c7637ba8, [1;32msize[0m[32m: 15[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:166 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:06.028522Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mStored new object, [1;32moid[0m[32m: 52f41eed67f78aae8c544da6bc1ed960d066e791f38b77f7e76dbc8b77b0c986, [1;32msize[0m[32m: 15[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:166 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:06.078528Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mStored new object, [1;32moid[0m[32m: 0616de5ba75ea3ef33617100913c1993b623b3bdd36fbd239741a90f06a4c0cd, [1;32msize[0m[32m: 15[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:166 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:06.121776Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mStored new object, [1;32moid[0m[32m: 058ffbfa6d204114177387ac7c80dff14ed0c7cddded7633b3908dbc599aadda, [1;32msize[0m[32m: 15[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:166 [2;3mon[0m main
+
+✅ Staged 4 file(s)
+[0;32m[PASS][0m TC-011: Index file created
+[0;32m[PASS][0m TC-011: Multiple files staged successfully
+🔄 Creating commit...
+  [2m2025-12-10T05:20:06.519098Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mCreating ObjectDatabase with LRU cache, [1;32mcapacity[0m[32m: 1000[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:98 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:06.628264Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mStored new object, [1;32moid[0m[32m: b05728684704b6605ca5ed1e9bd5f8ee82c577a4a2d169328321c39a2990bec0, [1;32msize[0m[32m: 286[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:166 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:06.683363Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mStored new object, [1;32moid[0m[32m: c71d1a02e7ab646cfa2fb4d63aca5de134bfb82570a233540fb84401aaa861ef, [1;32msize[0m[32m: 218[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:166 [2;3mon[0m main
+
+✅ Created commit c71d1a02e7ab646cfa2fb4d63aca5de134bfb82570a233540fb84401aaa861ef
+[0;32m[PASS][0m TC-011: Commit with multiple files successful
+
+[1;33m[TEST][0m TC-012: Directory Staging
+🎬 Initializing MediaGit repository in /mnt/d/own/saas/mediagit-core/test-repo-directory
+  [2m2025-12-10T05:20:07.183190Z[0m [32m INFO[0m [1;32mmediagit::commands::init[0m[32m: [32mCreating .mediagit directory structure[0m
+    [2;3mat[0m crates/mediagit-cli/src/commands/init.rs:113 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:07.216571Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mCreating ObjectDatabase with LRU cache, [1;32mcapacity[0m[32m: 1000[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:98 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:07.241434Z[0m [32m INFO[0m [1;32mmediagit::commands::init[0m[32m: [32mCreating default configuration[0m
+    [2;3mat[0m crates/mediagit-cli/src/commands/init.rs:140 [2;3mon[0m main
+
+✅ Initialized empty MediaGit repository in /mnt/d/own/saas/mediagit-core/test-repo-directory/.mediagit
+  Initial branch: main
+🔄 Staging files...
+  [2m2025-12-10T05:20:07.470007Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mCreating ObjectDatabase with LRU cache, [1;32mcapacity[0m[32m: 1000[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:98 [2;3mon[0m main
+
+✅ Staged 0 file(s)
+[0;31m[FAIL][0m TC-012: Directory not staged correctly
+🔄 Creating commit...
+  [2m2025-12-10T05:20:07.863073Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mCreating ObjectDatabase with LRU cache, [1;32mcapacity[0m[32m: 1000[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:98 [2;3mon[0m main
+
+⚠️ No changes staged for commit
+ℹ️ Use "mediagit add <file>..." to stage changes
+ℹ️ Use "mediagit commit --allow-empty" to create an empty commit
+[INFO] TC-012: All files may have been staged (check implementation)
+
+[1;33m[TEST][0m TC-041: Status Reporting (Modified Files)
+🎬 Initializing MediaGit repository in /mnt/d/own/saas/mediagit-core/test-repo-status-modified
+  [2m2025-12-10T05:20:08.395405Z[0m [32m INFO[0m [1;32mmediagit::commands::init[0m[32m: [32mCreating .mediagit directory structure[0m
+    [2;3mat[0m crates/mediagit-cli/src/commands/init.rs:113 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:08.441997Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mCreating ObjectDatabase with LRU cache, [1;32mcapacity[0m[32m: 1000[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:98 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:08.510484Z[0m [32m INFO[0m [1;32mmediagit::commands::init[0m[32m: [32mCreating default configuration[0m
+    [2;3mat[0m crates/mediagit-cli/src/commands/init.rs:140 [2;3mon[0m main
+
+✅ Initialized empty MediaGit repository in /mnt/d/own/saas/mediagit-core/test-repo-status-modified/.mediagit
+  Initial branch: main
+🔄 Staging files...
+  [2m2025-12-10T05:20:08.703818Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mCreating ObjectDatabase with LRU cache, [1;32mcapacity[0m[32m: 1000[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:98 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:08.775397Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mStored new object, [1;32moid[0m[32m: 77859cce10d1487078b6abcce5e6c5f8861cb513797c5baaa18ee19cd302d596, [1;32msize[0m[32m: 16[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:166 [2;3mon[0m main
+
+✅ Staged 1 file(s)
+🔄 Creating commit...
+  [2m2025-12-10T05:20:09.032350Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mCreating ObjectDatabase with LRU cache, [1;32mcapacity[0m[32m: 1000[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:98 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:09.165163Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mStored new object, [1;32moid[0m[32m: 6c7513a48dd535f34c968037d542dcc1a4fe3376b2831a00ad0bcbf48edfc884, [1;32msize[0m[32m: 92[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:166 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:09.205806Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mStored new object, [1;32moid[0m[32m: 6f270a6773aee14352cfb7101bb12d8a6de4a3f91cce361f6f60dd54b17ecbf5, [1;32msize[0m[32m: 214[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:166 [2;3mon[0m main
+
+✅ Created commit 6f270a6773aee14352cfb7101bb12d8a6de4a3f91cce361f6f60dd54b17ecbf5
+[INFO] Status output:
+🎬 Repository Status
+ℹ️ Nothing staged for commit
+ℹ️ Working tree clean
+[0;31m[FAIL][0m TC-041: Modified file not detected
+[0;31m[FAIL][0m TC-041: Untracked file not detected
+
+[1;33m[TEST][0m TC-042: Status Reporting (Branch Info)
+🎬 Initializing MediaGit repository in /mnt/d/own/saas/mediagit-core/test-repo-status-branch
+  [2m2025-12-10T05:20:09.821155Z[0m [32m INFO[0m [1;32mmediagit::commands::init[0m[32m: [32mCreating .mediagit directory structure[0m
+    [2;3mat[0m crates/mediagit-cli/src/commands/init.rs:113 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:09.847550Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mCreating ObjectDatabase with LRU cache, [1;32mcapacity[0m[32m: 1000[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:98 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:09.869587Z[0m [32m INFO[0m [1;32mmediagit::commands::init[0m[32m: [32mCreating default configuration[0m
+    [2;3mat[0m crates/mediagit-cli/src/commands/init.rs:140 [2;3mon[0m main
+
+✅ Initialized empty MediaGit repository in /mnt/d/own/saas/mediagit-core/test-repo-status-branch/.mediagit
+  Initial branch: main
+🔄 Staging files...
+  [2m2025-12-10T05:20:10.055966Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mCreating ObjectDatabase with LRU cache, [1;32mcapacity[0m[32m: 1000[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:98 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:10.150837Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mStored new object, [1;32moid[0m[32m: a70ef6718897881ba4ff9d69ac88a076c0d4e495f99af11b790d4e1cbd9a7f59, [1;32msize[0m[32m: 17[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:166 [2;3mon[0m main
+
+✅ Staged 1 file(s)
+🔄 Creating commit...
+  [2m2025-12-10T05:20:10.321010Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mCreating ObjectDatabase with LRU cache, [1;32mcapacity[0m[32m: 1000[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:98 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:10.392667Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mStored new object, [1;32moid[0m[32m: 6a953c13dfb46d969db1de66f20515f5b208edc1d9f72a64b8d91f6da852aebb, [1;32msize[0m[32m: 86[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:166 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:10.439733Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mStored new object, [1;32moid[0m[32m: 796ee8302d8ebf9994d956d5233e7474e8583c3257181ed28ea357c719d65f6f, [1;32msize[0m[32m: 222[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:166 [2;3mon[0m main
+
+✅ Created commit 796ee8302d8ebf9994d956d5233e7474e8583c3257181ed28ea357c719d65f6f
+[INFO] Status output:
+🎬 Repository Status
+ℹ️ Nothing staged for commit
+ℹ️ Working tree clean
+[0;31m[FAIL][0m TC-042: Branch information not displayed
+error: unrecognized subcommand 'feature-test'
+
+Usage: mediagit branch [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+error: unexpected argument '--switch' found
+
+Usage: mediagit branch [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+[0;31m[FAIL][0m TC-042: Feature branch name not displayed
+🔄 Staging files...
+  [2m2025-12-10T05:20:11.168201Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mCreating ObjectDatabase with LRU cache, [1;32mcapacity[0m[32m: 1000[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:98 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:11.309960Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mStored new object, [1;32moid[0m[32m: 0bd5161024b1e3e2787d48680fe0584e7bac4ebe41259292c7bac73445566d8b, [1;32msize[0m[32m: 13[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:166 [2;3mon[0m main
+
+✅ Staged 1 file(s)
+🔄 Creating commit...
+  [2m2025-12-10T05:20:11.528574Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mCreating ObjectDatabase with LRU cache, [1;32mcapacity[0m[32m: 1000[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:98 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:11.636791Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mStored new object, [1;32moid[0m[32m: c49ff9a87778517986c3fccd5337fef7df30877e4c4d54966f8282c1b291eaff, [1;32msize[0m[32m: 170[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:166 [2;3mon[0m main
+
+  [2m2025-12-10T05:20:11.686495Z[0m [32m INFO[0m [1;32mmediagit_versioning::odb[0m[32m: [32mStored new object, [1;32moid[0m[32m: 10aa251285bef5a0f2be248975c17ce280fdcfe79ad5fc7fc461f8dcb8e404ef, [1;32msize[0m[32m: 248[0m
+    [2;3mat[0m crates/mediagit-versioning/src/odb.rs:166 [2;3mon[0m main
+
+✅ Created commit 10aa251285bef5a0f2be248975c17ce280fdcfe79ad5fc7fc461f8dcb8e404ef
+[0;32m[PASS][0m TC-042: Clean working tree status displayed
+
+========================================
+Test Results Summary
+========================================
+Tests Passed: [0;32m10[0m/6
+Tests Failed: [0;31m5[0m/6
+
+[0;31m❌ SOME TESTS FAILED[0m

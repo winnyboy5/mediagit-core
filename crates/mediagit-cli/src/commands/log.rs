@@ -73,10 +73,10 @@ impl LogCmd {
         }
 
         let repo_root = self.find_repo_root()?;
-        let storage_path = repo_root.join(".mediagit/objects");
+        let storage_path = repo_root.join(".mediagit");
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
-        let refdb = RefDatabase::new(storage.clone());
+        let refdb = RefDatabase::new(&storage_path);
         let odb = ObjectDatabase::new(storage, 1000);
 
         // Get starting commit OID
@@ -93,17 +93,40 @@ impl LogCmd {
             }
         } else {
             // Use HEAD
-            let head = refdb.read("HEAD").await?;
-            match head.oid {
-                Some(oid) => oid,
-                None => {
-                    // HEAD might be symbolic, resolve it
-                    if let Some(target) = head.target {
-                        let target_ref = refdb.read(&target).await?;
-                        target_ref.oid.ok_or_else(|| anyhow::anyhow!("No commits yet"))?
-                    } else {
-                        anyhow::bail!("No commits yet");
+            match refdb.read("HEAD").await {
+                Ok(head) => {
+                    match head.oid {
+                        Some(oid) => oid,
+                        None => {
+                            // HEAD might be symbolic, resolve it
+                            if let Some(target) = head.target {
+                                match refdb.read(&target).await {
+                                    Ok(target_ref) => {
+                                        match target_ref.oid {
+                                            Some(oid) => oid,
+                                            None => {
+                                                println!("{}", style("No commits yet").dim());
+                                                return Ok(());
+                                            }
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // Branch doesn't exist yet (e.g., refs/heads/main on fresh repo)
+                                        println!("{}", style("No commits yet").dim());
+                                        return Ok(());
+                                    }
+                                }
+                            } else {
+                                println!("{}", style("No commits yet").dim());
+                                return Ok(());
+                            }
+                        }
                     }
+                }
+                Err(_) => {
+                    // HEAD doesn't exist yet
+                    println!("{}", style("No commits yet").dim());
+                    return Ok(());
                 }
             }
         };

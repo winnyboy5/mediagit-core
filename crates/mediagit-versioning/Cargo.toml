@@ -8,6 +8,7 @@ authors.workspace = true
 
 [dependencies]
 mediagit-storage = { path = "../mediagit-storage" }
+mediagit-compression = { path = "../mediagit-compression" }
 
 tokio.workspace = true
 serde.workspace = true

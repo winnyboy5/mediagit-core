@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_storage::LocalBackend;
-use mediagit_versioning::{Commit, MergeEngine, MergeStrategy, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Signature};
+use mediagit_versioning::{CheckoutManager, Commit, MergeEngine, MergeStrategy, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Signature};
 use std::sync::Arc;
 
 /// Merge branches
@@ -69,10 +69,10 @@ impl MergeCmd {
 
         // Find repository root
         let repo_root = self.find_repo_root()?;
-        let storage_path = repo_root.join(".mediagit/objects");
+        let storage_path = repo_root.join(".mediagit");
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
-        let refdb = RefDatabase::new(storage.clone());
+        let refdb = RefDatabase::new(&storage_path);
         let odb = Arc::new(ObjectDatabase::new(storage, 1000));
 
         // Resolve branch to OID
@@ -108,10 +108,16 @@ impl MergeCmd {
                 style(&self.branch).yellow(),
                 style("HEAD").cyan()
             );
+            println!("{} Analyzing commit history...", style("🔍").cyan());
         }
 
         // Create merge engine and perform merge
         let engine = MergeEngine::new(odb.clone());
+
+        if !self.quiet {
+            println!("{} Computing merge...", style("⚙️ ").cyan());
+        }
+
         let result = engine.merge(&our_oid, &their_oid, strategy).await?;
 
         // Handle merge result
@@ -136,6 +142,11 @@ impl MergeCmd {
                         let new_ref = Ref::new_direct("HEAD".to_string(), their_oid);
                         refdb.write(&new_ref).await?;
                     }
+
+                    // Update working directory to match the merged commit (ISS-008 fix)
+                    let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
+                    checkout_mgr.checkout_commit(&their_oid).await
+                        .context("Failed to update working directory after fast-forward merge")?;
 
                     return Ok(());
                 } else if self.ff_only {
@@ -198,6 +209,11 @@ impl MergeCmd {
                 let new_ref = Ref::new_direct("HEAD".to_string(), commit_oid);
                 refdb.write(&new_ref).await?;
             }
+
+            // Update working directory to match the merged commit (ISS-008 fix)
+            let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
+            checkout_mgr.checkout_commit(&commit_oid).await
+                .context("Failed to update working directory after merge commit")?;
 
             if !self.quiet {
                 println!(

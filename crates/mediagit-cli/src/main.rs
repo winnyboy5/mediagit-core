@@ -69,14 +69,30 @@ enum Commands {
     /// Fetch and integrate remote changes
     Pull(PullCmd),
 
+    /// Manage remote repositories
+    Remote(RemoteCmd),
+
     /// Manage branches
     Branch(BranchCmd),
+
+    /// Manage tags
+    Tag(TagCmd),
 
     /// Merge branches
     Merge(MergeCmd),
 
     /// Rebase commits
     Rebase(RebaseCmd),
+
+    /// Apply changes from existing commits
+    #[command(name = "cherry-pick")]
+    CherryPick(CherryPickCmd),
+
+    /// Stash changes in working directory
+    Stash(StashCmd),
+
+    /// Find commit that introduced a bug using binary search
+    Bisect(BisectCmd),
 
     /// Show commit history
     Log(LogCmd),
@@ -164,9 +180,17 @@ async fn main() -> Result<()> {
         Some(Commands::Commit(cmd)) => cmd.execute().await,
         Some(Commands::Push(cmd)) => cmd.execute().await,
         Some(Commands::Pull(cmd)) => cmd.execute().await,
+        Some(Commands::Remote(cmd)) => cmd.execute().await,
         Some(Commands::Branch(cmd)) => cmd.execute().await,
+        Some(Commands::Tag(cmd)) => {
+            let repo_path = std::env::current_dir()?;
+            cmd.execute(repo_path).await
+        }
         Some(Commands::Merge(cmd)) => cmd.execute().await,
         Some(Commands::Rebase(cmd)) => cmd.execute().await,
+        Some(Commands::CherryPick(cmd)) => cmd.execute().await,
+        Some(Commands::Stash(cmd)) => cmd.execute().await,
+        Some(Commands::Bisect(cmd)) => cmd.execute().await,
         Some(Commands::Log(cmd)) => cmd.execute().await,
         Some(Commands::Diff(cmd)) => cmd.execute().await,
         Some(Commands::Show(cmd)) => cmd.execute().await,
@@ -193,28 +217,33 @@ async fn main() -> Result<()> {
             println!("Usage: mediagit [OPTIONS] <COMMAND>");
             println!();
             println!("Available commands:");
-            println!("  init       Initialize a new MediaGit repository");
-            println!("  add        Stage file contents for commit");
-            println!("  commit     Record changes to the repository");
-            println!("  push       Update remote references");
-            println!("  pull       Fetch and integrate remote changes");
-            println!("  branch     Manage branches");
-            println!("  merge      Merge branches");
-            println!("  rebase     Rebase commits");
-            println!("  log        Show commit history");
-            println!("  diff       Show changes between commits");
-            println!("  show       Show object information");
-            println!("  status     Show working tree status");
-            println!("  gc         Clean up repository");
-            println!("  fsck       Check repository integrity");
-            println!("  verify     Verify commits and signatures");
-            println!("  stats      Show repository statistics");
+            println!("  init         Initialize a new MediaGit repository");
+            println!("  add          Stage file contents for commit");
+            println!("  commit       Record changes to the repository");
+            println!("  push         Update remote references");
+            println!("  pull         Fetch and integrate remote changes");
+            println!("  remote       Manage remote repositories");
+            println!("  branch       Manage branches");
+            println!("  tag          Manage tags");
+            println!("  merge        Merge branches");
+            println!("  rebase       Rebase commits");
+            println!("  cherry-pick  Apply changes from existing commits");
+            println!("  stash        Stash changes in working directory");
+            println!("  bisect       Find commit that introduced a bug using binary search");
+            println!("  log          Show commit history");
+            println!("  diff         Show changes between commits");
+            println!("  show         Show object information");
+            println!("  status       Show working tree status");
+            println!("  gc           Clean up repository");
+            println!("  fsck         Check repository integrity");
+            println!("  verify       Verify commits and signatures");
+            println!("  stats        Show repository statistics");
             println!();
             println!("Git Integration:");
-            println!("  filter     Git filter driver operations (clean/smudge)");
-            println!("  install    Install MediaGit filter driver");
-            println!("  track      Track file patterns with MediaGit");
-            println!("  untrack    Untrack file patterns");
+            println!("  filter       Git filter driver operations (clean/smudge)");
+            println!("  install      Install MediaGit filter driver");
+            println!("  track        Track file patterns with MediaGit");
+            println!("  untrack      Untrack file patterns");
             println!();
             println!("Run 'mediagit <COMMAND> --help' for command-specific help");
             Ok(())

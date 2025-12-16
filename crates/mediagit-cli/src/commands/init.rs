@@ -61,14 +61,15 @@ impl InitCmd {
             .context("Failed to create repository structure")?;
 
         // Initialize storage backend (local for now)
-        let storage_path = repo_path.join(".mediagit/objects");
+        // LocalBackend will create the "objects" directory automatically
+        let storage_path = repo_path.join(".mediagit");
         let storage: Arc<dyn mediagit_storage::StorageBackend> = Arc::new(LocalBackend::new(&storage_path).await?);
 
         // Initialize object database
         let _odb = ObjectDatabase::new(storage.clone(), 1000);
 
-        // Initialize reference database
-        let refdb = RefDatabase::new(storage);
+        // Initialize reference database (uses direct filesystem, not StorageBackend)
+        let refdb = RefDatabase::new(&storage_path);
 
         // Create initial branch
         let initial_branch = self.initial_branch.as_deref().unwrap_or("main");

@@ -48,6 +48,7 @@
 //! ```
 
 use crate::error::{CompressionError, CompressionResult};
+use crate::smart_compressor::{ObjectType, ObjectCategory};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -64,6 +65,70 @@ pub const MIN_SPACE_SAVINGS: f64 = 0.10;
 
 /// Maximum reconstruction time target (100ms)
 pub const MAX_RECONSTRUCTION_TIME_MS: u64 = 100;
+
+/// Media-aware delta configuration
+#[derive(Debug, Clone, Copy)]
+pub struct DeltaConfig {
+    /// Similarity threshold (0.0-1.0)
+    pub similarity_threshold: f64,
+    /// Minimum space savings (0.0-1.0)
+    pub min_space_savings: f64,
+    /// Maximum chain depth
+    pub max_chain_depth: u32,
+}
+
+impl DeltaConfig {
+    /// Get configuration for object type
+    pub fn for_object_type(obj_type: ObjectType) -> Self {
+        match obj_type.category() {
+            // Images: higher similarity threshold, more aggressive savings
+            ObjectCategory::Image => DeltaConfig {
+                similarity_threshold: 0.85,
+                min_space_savings: 0.15,
+                max_chain_depth: 5,
+            },
+            // Video: very high similarity needed (metadata changes only)
+            ObjectCategory::Video => DeltaConfig {
+                similarity_threshold: 0.95,
+                min_space_savings: 0.05,
+                max_chain_depth: 3,
+            },
+            // Audio: moderate similarity
+            ObjectCategory::Audio => DeltaConfig {
+                similarity_threshold: 0.90,
+                min_space_savings: 0.10,
+                max_chain_depth: 5,
+            },
+            // Text/Code: very effective delta compression
+            ObjectCategory::Text | ObjectCategory::Document => DeltaConfig {
+                similarity_threshold: 0.70,
+                min_space_savings: 0.10,
+                max_chain_depth: MAX_CHAIN_DEPTH,
+            },
+            // Git objects: optimized for source code
+            ObjectCategory::GitObject => DeltaConfig {
+                similarity_threshold: 0.75,
+                min_space_savings: 0.10,
+                max_chain_depth: MAX_CHAIN_DEPTH,
+            },
+            // Archives/Unknown: conservative
+            _ => DeltaConfig {
+                similarity_threshold: SIMILARITY_THRESHOLD,
+                min_space_savings: MIN_SPACE_SAVINGS,
+                max_chain_depth: MAX_CHAIN_DEPTH,
+            },
+        }
+    }
+
+    /// Default configuration
+    pub fn default_config() -> Self {
+        DeltaConfig {
+            similarity_threshold: SIMILARITY_THRESHOLD,
+            min_space_savings: MIN_SPACE_SAVINGS,
+            max_chain_depth: MAX_CHAIN_DEPTH,
+        }
+    }
+}
 
 /// Delta encoding metadata
 ///
@@ -219,13 +284,16 @@ impl Default for DeltaChainTracker {
 
 /// Delta encoder using XDelta3
 ///
-/// Provides delta compression and decompression with intelligent decision logic
+/// Provides delta compression and decompression with intelligent decision logic,
+/// with optional media-aware configuration.
 #[derive(Debug, Clone)]
 pub struct DeltaEncoder {
     /// Minimum similarity threshold for using delta encoding
     similarity_threshold: f64,
     /// Minimum space savings for using delta encoding
     min_space_savings: f64,
+    /// Maximum chain depth
+    max_chain_depth: u32,
 }
 
 impl DeltaEncoder {
@@ -234,6 +302,7 @@ impl DeltaEncoder {
         DeltaEncoder {
             similarity_threshold: SIMILARITY_THRESHOLD,
             min_space_savings: MIN_SPACE_SAVINGS,
+            max_chain_depth: MAX_CHAIN_DEPTH,
         }
     }
 
@@ -242,6 +311,7 @@ impl DeltaEncoder {
         DeltaEncoder {
             similarity_threshold,
             min_space_savings,
+            max_chain_depth: MAX_CHAIN_DEPTH,
         }
     }
 

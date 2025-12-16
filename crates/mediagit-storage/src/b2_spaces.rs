@@ -370,8 +370,8 @@ impl B2SpacesBackend {
         Ok(B2SpacesBackend {
             provider,
             bucket: bucket.to_string(),
-            access_key: access_key.to_string(),
-            secret_key: secret_key.to_string(),
+            _access_key: access_key.to_string(),
+            _secret_key: secret_key.to_string(),
         })
     }
 

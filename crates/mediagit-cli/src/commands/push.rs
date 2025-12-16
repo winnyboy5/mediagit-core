@@ -63,10 +63,10 @@ impl PushCmd {
 
         // Validate repository
         let repo_root = self.find_repo_root()?;
-        let storage_path = repo_root.join(".mediagit/objects");
+        let storage_path = repo_root.join(".mediagit");
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
-        let refdb = RefDatabase::new(Arc::clone(&storage));
+        let refdb = RefDatabase::new(&storage_path);
 
         if self.dry_run {
             if !self.quiet {

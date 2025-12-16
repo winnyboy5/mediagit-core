@@ -193,16 +193,30 @@ fn test_large_file_simulation() {
 
 #[test]
 fn test_compression_metrics() {
+    use mediagit_compression::{CompressionAlgorithm, CompressionLevel, CompressionMetrics};
+
     let zstd = ZstdCompressor::new(CompressionLevel::Default);
     let data = b"Test data for metrics calculation. ".repeat(100);
 
+    let start = std::time::Instant::now();
     let compressed = zstd.compress(&data).unwrap();
-    let metrics = zstd.metrics(&data, &compressed);
+    let duration = start.elapsed();
+
+    let mut metrics = CompressionMetrics::new();
+    metrics.record_compression(
+        &data,
+        &compressed,
+        duration,
+        CompressionAlgorithm::Zstd,
+        CompressionLevel::Default,
+    );
 
     assert_eq!(metrics.original_size, data.len());
     assert_eq!(metrics.compressed_size, compressed.len());
-    assert!(metrics.compression_ratio() > 0.0);
-    assert!(metrics.savings_percentage() >= 0.0);
+    assert!(metrics.compression_ratio > 1.0); // Should be > 1 for compression
+    assert!(metrics.space_saved_percent >= 0.0);
 
-    println!("{}", metrics.format_summary());
+    println!("{}", metrics.summary());
+    println!("Prometheus:\n{}", metrics.to_prometheus_metrics());
+    println!("JSON: {}", metrics.to_json());
 }

@@ -12,6 +12,7 @@ pub use security::RateLimitConfig;
 pub use state::AppState;
 
 use axum::{
+    extract::DefaultBodyLimit,
     middleware,
     routing::{get, post},
     Router,
@@ -34,6 +35,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 
     // Apply security middleware to routes
     router = router
+        // Body size limit (2GB for large media files)
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024))
         .layer(middleware::from_fn(security::audit_middleware))
         .layer(middleware::from_fn(security::security_headers_middleware))
         .layer(middleware::from_fn(security::request_validation_middleware))
@@ -129,6 +132,8 @@ pub fn create_router_with_rate_limit(
 
     // Apply middleware layers
     router = router
+        // Body size limit (2GB for large media files)
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024))
         // Rate limiting (applied first, before other middleware)
         .layer(GovernorLayer {
             config: governor_config,

@@ -11,8 +11,9 @@ use mediagit_protocol::{
     WantRequest,
 };
 use mediagit_security::auth::AuthUser;
-use mediagit_storage::LocalBackend;
+use mediagit_storage::{LocalBackend, StorageBackend, S3Backend, MinIOBackend, AzureBackend};
 use mediagit_versioning::{ObjectDatabase, Oid, ObjectType, PackReader, PackWriter, Ref, RefDatabase};
+use std::path::Path as StdPath;
 use std::sync::Arc;
 
 use crate::state::AppState;
@@ -44,6 +45,113 @@ fn check_permission(
     }
 }
 
+/// Helper function to create storage backend based on repository configuration
+async fn create_storage_backend(
+    repo_path: &StdPath,
+) -> Result<Arc<dyn StorageBackend>, StatusCode> {
+    // Load repository configuration
+    let config = mediagit_config::Config::load(repo_path)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to load repository config: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Create storage backend based on configuration
+    let storage: Arc<dyn StorageBackend> = match &config.storage {
+        mediagit_config::StorageConfig::FileSystem(fs_config) => {
+            tracing::debug!("Using filesystem storage backend: {}", fs_config.base_path);
+            let storage = LocalBackend::new(repo_path)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to initialize filesystem backend: {}", e);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+            Arc::new(storage)
+        }
+        mediagit_config::StorageConfig::S3(s3_config) => {
+            // Use MinIOBackend for custom endpoints (MinIO, DigitalOcean Spaces, etc.)
+            // Use S3Backend for AWS S3
+            if let Some(endpoint) = &s3_config.endpoint {
+                tracing::info!(
+                    "Using MinIO/S3-compatible backend: bucket={}, endpoint={}",
+                    s3_config.bucket,
+                    endpoint
+                );
+
+                let storage = MinIOBackend::new(
+                    endpoint,
+                    &s3_config.bucket,
+                    s3_config.access_key_id.as_deref().unwrap_or(""),
+                    s3_config.secret_access_key.as_deref().unwrap_or(""),
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to initialize MinIO backend: {}", e);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+                Arc::new(storage)
+            } else {
+                tracing::info!("Using AWS S3 storage backend: bucket={}", s3_config.bucket);
+
+                // Set AWS credentials from config if provided
+                if let Some(key_id) = &s3_config.access_key_id {
+                    std::env::set_var("AWS_ACCESS_KEY_ID", key_id);
+                }
+                if let Some(secret) = &s3_config.secret_access_key {
+                    std::env::set_var("AWS_SECRET_ACCESS_KEY", secret);
+                }
+                std::env::set_var("AWS_REGION", &s3_config.region);
+
+                let mut backend_config = mediagit_storage::s3::S3Config::default();
+                backend_config.bucket = s3_config.bucket.clone();
+
+                let storage = S3Backend::with_config(backend_config)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Failed to initialize S3 backend: {}", e);
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?;
+                Arc::new(storage)
+            }
+        }
+        mediagit_config::StorageConfig::Azure(azure_config) => {
+            tracing::info!("Using Azure storage backend: container={}", azure_config.container);
+
+            // Use connection string if provided, otherwise use account key
+            let storage = if let Some(conn_str) = &azure_config.connection_string {
+                AzureBackend::with_connection_string(&azure_config.container, conn_str)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Failed to initialize Azure backend with connection string: {}", e);
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?
+            } else if let Some(account_key) = &azure_config.account_key {
+                AzureBackend::with_account_key(
+                    &azure_config.account_name,
+                    &azure_config.container,
+                    account_key,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to initialize Azure backend with account key: {}", e);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?
+            } else {
+                tracing::error!("Azure backend requires either connection_string or account_key");
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            };
+            Arc::new(storage)
+        }
+        mediagit_config::StorageConfig::GCS(_) | mediagit_config::StorageConfig::Multi(_) => {
+            tracing::error!("GCS and Multi-backend storage are not yet implemented");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    Ok(storage)
+}
+
 /// GET /:repo/info/refs - List all refs in the repository
 pub async fn get_refs(
     Path(repo): Path<String>,
@@ -68,28 +176,54 @@ pub async fn get_refs(
     }
 
     // Initialize storage and refdb
-    let storage = LocalBackend::new(&repo_path)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to initialize storage: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let _storage = create_storage_backend(&repo_path).await?;
+    let refdb = RefDatabase::new(&repo_path.join(".mediagit"));
 
-    let storage_arc: Arc<dyn mediagit_storage::StorageBackend> = Arc::new(storage);
-    let refdb = RefDatabase::new(Arc::clone(&storage_arc));
-
-    // List all refs - read specific known refs (simplified)
-    // TODO: implement proper ref listing
-    let known_refs = vec!["HEAD", "refs/heads/main"];
+    // List all refs by scanning refs directory
+    let refs_dir = repo_path.join(".mediagit/refs");
     let mut ref_infos = Vec::new();
 
-    for ref_name in known_refs {
-        if let Ok(r) = refdb.read(ref_name).await {
-            ref_infos.push(RefInfo {
-                name: r.name,
-                oid: r.oid.map(|o| o.to_hex()).unwrap_or_default(),
-                target: r.target,
-            });
+    // Read HEAD
+    if let Ok(head) = refdb.read("HEAD").await {
+        ref_infos.push(RefInfo {
+            name: "HEAD".to_string(),
+            oid: head.oid.map(|o| o.to_hex()).unwrap_or_default(),
+            target: head.target,
+        });
+    }
+
+    // Recursively read all refs in refs/heads, refs/tags, etc.
+    if refs_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&refs_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    // Read refs/heads/, refs/tags/, etc.
+                    let ref_type = path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("");
+
+                    if let Ok(ref_entries) = std::fs::read_dir(&path) {
+                        for ref_entry in ref_entries.flatten() {
+                            if ref_entry.path().is_file() {
+                                let ref_name = format!(
+                                    "refs/{}/{}",
+                                    ref_type,
+                                    ref_entry.file_name().to_string_lossy()
+                                );
+
+                                if let Ok(r) = refdb.read(&ref_name).await {
+                                    ref_infos.push(RefInfo {
+                                        name: ref_name,
+                                        oid: r.oid.map(|o| o.to_hex()).unwrap_or_default(),
+                                        target: r.target,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -118,14 +252,8 @@ pub async fn upload_pack(
     }
 
     // Initialize storage and odb
-    let storage = LocalBackend::new(&repo_path)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to initialize storage: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    let odb = ObjectDatabase::new(Arc::new(storage), 1000);
+    let storage = create_storage_backend(&repo_path).await?;
+    let odb = ObjectDatabase::new(storage, 1000);
 
     // Unpack the pack file
     let pack_reader = PackReader::new(body.to_vec()).map_err(|e| {
@@ -134,12 +262,12 @@ pub async fn upload_pack(
     })?;
 
     for oid in pack_reader.list_objects() {
-        let obj_data = pack_reader.get_object(&oid).map_err(|e| {
+        let (object_type, obj_data) = pack_reader.get_object_with_type(&oid).map_err(|e| {
             tracing::error!("Failed to get object {}: {}", oid, e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-        // Write object to ODB (assuming Blob type for now)
-        odb.write(ObjectType::Blob, &obj_data)
+        // Write object to ODB with correct type
+        odb.write(object_type, &obj_data)
             .await
             .map_err(|e| {
                 tracing::error!("Failed to write object {}: {}", oid, e);
@@ -177,11 +305,8 @@ pub async fn download_pack(
     }
 
     // Initialize storage and odb
-    let storage = LocalBackend::new(&repo_path)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let odb = ObjectDatabase::new(Arc::new(storage), 1000);
+    let storage = create_storage_backend(&repo_path).await?;
+    let odb = ObjectDatabase::new(storage, 1000);
 
     // Generate pack file with wanted objects
     let mut pack_writer = PackWriter::new();
@@ -259,11 +384,8 @@ pub async fn update_refs(
     }
 
     // Initialize storage and refdb
-    let storage = LocalBackend::new(&repo_path)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let refdb = RefDatabase::new(Arc::new(storage));
+    let _storage = create_storage_backend(&repo_path).await?;
+    let refdb = RefDatabase::new(&repo_path.join(".mediagit"));
 
     let mut results = Vec::new();
     let mut all_success = true;

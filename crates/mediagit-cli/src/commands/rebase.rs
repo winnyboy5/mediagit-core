@@ -77,10 +77,10 @@ impl RebaseCmd {
 
         // Find repository root
         let repo_root = self.find_repo_root()?;
-        let storage_path = repo_root.join(".mediagit/objects");
+        let storage_path = repo_root.join(".mediagit");
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
-        let refdb = RefDatabase::new(storage.clone());
+        let refdb = RefDatabase::new(&storage_path);
         let odb = Arc::new(ObjectDatabase::new(storage, 1000));
 
         // Resolve upstream branch
