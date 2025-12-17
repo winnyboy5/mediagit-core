@@ -6,7 +6,31 @@ use mediagit_versioning::{resolve_revision, Commit, ObjectDatabase, Oid, RefData
 use std::sync::Arc;
 
 /// Show changes between commits
+///
+/// Display differences between commits, commit and working tree, or between
+/// the index and working tree.
 #[derive(Parser, Debug)]
+#[command(after_help = "EXAMPLES:
+    # Show changes between two commits
+    mediagit diff abc123 def456
+
+    # Show changes from HEAD to working directory
+    mediagit diff HEAD
+
+    # Show staged changes
+    mediagit diff --cached
+
+    # Show changes with statistics
+    mediagit diff --stat abc123 def456
+
+    # Show changes for specific files
+    mediagit diff -- path/to/file.psd
+
+    # Compare with previous commit
+    mediagit diff HEAD~1 HEAD
+
+SEE ALSO:
+    mediagit-status(1), mediagit-log(1), mediagit-show(1)")]
 pub struct DiffCmd {
     /// First revision to compare
     #[arg(value_name = "REVISION1")]

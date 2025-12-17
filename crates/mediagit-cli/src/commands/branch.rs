@@ -5,7 +5,43 @@ use mediagit_versioning::{Ref, RefDatabase};
 use std::sync::Arc;
 
 /// Manage branches
+///
+/// Create, list, rename, and delete branches. Branches are lightweight references
+/// to commits that allow parallel development workflows.
 #[derive(Parser, Debug)]
+#[command(after_help = "EXAMPLES:
+    # List all local branches
+    mediagit branch list
+
+    # List all branches with verbose output
+    mediagit branch list -v
+
+    # Create a new branch
+    mediagit branch create feature-branch
+
+    # Create branch from specific commit
+    mediagit branch create hotfix abc123
+
+    # Switch to a branch
+    mediagit branch switch main
+
+    # Create and switch to new branch
+    mediagit branch switch -c feature-branch
+
+    # Rename current branch
+    mediagit branch rename new-name
+
+    # Rename specific branch
+    mediagit branch rename old-name new-name
+
+    # Delete a branch
+    mediagit branch delete feature-branch
+
+    # Show branch information
+    mediagit branch show
+
+SEE ALSO:
+    mediagit-checkout(1), mediagit-merge(1), mediagit-tag(1)")]
 pub struct BranchCmd {
     #[command(subcommand)]
     pub subcommand: BranchSubcommand,

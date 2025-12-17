@@ -491,6 +491,73 @@ impl PsdParser {
         conflicts
     }
 
+    /// Perform actual merge of PSD layers (metadata-level merge)
+    ///
+    /// This merges non-conflicting layer changes by combining:
+    /// - Layers added in 'ours' branch
+    /// - Layers added in 'theirs' branch
+    /// - Layers from base that weren't modified
+    ///
+    /// Returns merged PsdInfo structure (not actual PSD binary - that requires rebuild)
+    pub fn merge_layers(
+        base: &PsdInfo,
+        ours: &PsdInfo,
+        theirs: &PsdInfo,
+    ) -> Result<PsdInfo> {
+        info!("Executing PSD layer merge");
+
+        // Start with base document properties
+        let mut merged_psd = PsdInfo {
+            width: ours.width,
+            height: ours.height,
+            depth: ours.depth,
+            color_mode: ours.color_mode.clone(),
+            channels: ours.channels,
+            layers: Vec::new(),
+            groups: Vec::new(),
+        };
+
+        // Collect layers from both branches
+        let mut merged_layers = Vec::new();
+
+        // Add all layers from 'ours' that were added or modified
+        for layer in &ours.layers {
+            if !base.layers.iter().any(|b| b.name == layer.name) {
+                // New layer in 'ours'
+                debug!("Adding new layer from 'ours': {}", layer.name);
+                merged_layers.push(layer.clone());
+            } else {
+                // Modified or unchanged layer from 'ours'
+                merged_layers.push(layer.clone());
+            }
+        }
+
+        // Add new layers from 'theirs' that don't exist in 'ours'
+        for layer in &theirs.layers {
+            if !ours.layers.iter().any(|o| o.name == layer.name)
+                && !base.layers.iter().any(|b| b.name == layer.name) {
+                // New layer in 'theirs' only
+                debug!("Adding new layer from 'theirs': {}", layer.name);
+                merged_layers.push(layer.clone());
+            }
+        }
+
+        merged_psd.layers = merged_layers;
+
+        // Merge groups - combine all unique groups
+        let mut merged_groups = ours.groups.clone();
+        for group in &theirs.groups {
+            if !merged_groups.iter().any(|g| g.name == group.name) {
+                merged_groups.push(group.clone());
+            }
+        }
+        merged_psd.groups = merged_groups;
+
+        info!("PSD merge complete: {} layers", merged_psd.layers.len());
+
+        Ok(merged_psd)
+    }
+
     /// Find overlapping modifications between two sets of layers
     fn find_overlapping_modifications(
         ours: &[&LayerInfo],

@@ -10,7 +10,25 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// Add file contents to the staging area
+///
+/// Stages changes to files for inclusion in the next commit. This command
+/// updates the index with the current content found in the working tree.
 #[derive(Parser, Debug)]
+#[command(after_help = "EXAMPLES:
+    # Stage a single file
+    mediagit add photo.psd
+
+    # Stage multiple files
+    mediagit add image1.jpg image2.png video.mp4
+
+    # Stage all modified and new files
+    mediagit add --all
+
+    # Preview what would be staged
+    mediagit add --dry-run *.psd
+
+SEE ALSO:
+    mediagit-status(1), mediagit-commit(1), mediagit-reset(1)")]
 pub struct AddCmd {
     /// Files or patterns to add
     #[arg(value_name = "PATHS", required = true)]

@@ -9,7 +9,26 @@ use mediagit_versioning::{Commit, Index, ObjectDatabase, Ref, RefDatabase, Signa
 use std::sync::Arc;
 
 /// Record changes to the repository
+///
+/// Creates a new commit containing the currently staged changes. The commit
+/// captures a snapshot of the project's currently staged changes along with
+/// a descriptive message from the user.
 #[derive(Parser, Debug)]
+#[command(after_help = "EXAMPLES:
+    # Commit staged changes with inline message
+    mediagit commit -m \"Add new character model\"
+
+    # Commit all modified tracked files
+    mediagit commit -am \"Update texture maps\"
+
+    # Commit with detailed message from file
+    mediagit commit -F commit-message.txt
+
+    # Preview what would be committed
+    mediagit commit --dry-run
+
+SEE ALSO:
+    mediagit-add(1), mediagit-status(1), mediagit-log(1), mediagit-amend(1)")]
 pub struct CommitCmd {
     /// Commit message
     #[arg(short, long, value_name = "MESSAGE")]

@@ -7,7 +7,31 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Show the working tree status
+///
+/// Displays the state of the working directory and staging area, showing which
+/// changes have been staged, which haven't, and which files aren't being tracked.
 #[derive(Parser, Debug)]
+#[command(after_help = "EXAMPLES:
+    # Show repository status
+    mediagit status
+
+    # Show status with branch information
+    mediagit status -b
+
+    # Show status in short format
+    mediagit status -s
+
+    # Show status in porcelain format (for scripts)
+    mediagit status --porcelain
+
+    # Show tracked files only
+    mediagit status --tracked
+
+    # Show untracked files only
+    mediagit status --untracked
+
+SEE ALSO:
+    mediagit-add(1), mediagit-commit(1), mediagit-diff(1)")]
 pub struct StatusCmd {
     /// Show tracked files
     #[arg(long)]

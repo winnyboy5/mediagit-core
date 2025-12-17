@@ -12,6 +12,7 @@ use mediagit_versioning::{
     BranchManager, Commit, ObjectDatabase, ObjectType, Signature, Tree, TreeEntry, FileMode,
 };
 use std::sync::Arc;
+use tempfile::tempdir;
 
 #[tokio::test]
 async fn test_week2_milestone_end_to_end() {
@@ -19,9 +20,12 @@ async fn test_week2_milestone_end_to_end() {
     // SETUP: Initialize version control system
     // ========================================
 
+    let temp_dir = tempdir().unwrap();
+    let storage_path = temp_dir.path().to_path_buf();
+
     let storage: Arc<dyn mediagit_storage::StorageBackend> = Arc::new(MockBackend::new());
     let odb = ObjectDatabase::new(Arc::clone(&storage), 1000);
-    let branch_mgr = BranchManager::new(Arc::clone(&storage));
+    let branch_mgr = BranchManager::new(&storage_path);
 
     // ========================================
     // STEP 1: Create initial commit with files
@@ -283,9 +287,12 @@ async fn test_week2_milestone_end_to_end() {
 
 #[tokio::test]
 async fn test_detached_head_workflow() {
+    let temp_dir = tempdir().unwrap();
+    let storage_path = temp_dir.path().to_path_buf();
+
     let storage: Arc<dyn mediagit_storage::StorageBackend> = Arc::new(MockBackend::new());
     let odb = ObjectDatabase::new(Arc::clone(&storage), 100);
-    let branch_mgr = BranchManager::new(Arc::clone(&storage));
+    let branch_mgr = BranchManager::new(&storage_path);
 
     // Create initial commit
     let author = Signature::now("Test".to_string(), "test@example.com".to_string());

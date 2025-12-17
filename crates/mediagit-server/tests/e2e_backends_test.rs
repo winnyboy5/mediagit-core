@@ -150,7 +150,7 @@ async fn test_local_backend_complete_flow() {
     let storage = LocalBackend::new(&repo_path).await.unwrap();
     let storage_arc: Arc<dyn StorageBackend> = Arc::new(storage);
     let odb = ObjectDatabase::new(Arc::clone(&storage_arc), 1000);
-    let refdb = RefDatabase::new(Arc::clone(&storage_arc));
+    let refdb = RefDatabase::new(&repo_path);
 
     // 2. Upload a small test image
     let test_data = read_test_file("freepik__talk__71826.jpeg").await;
@@ -301,6 +301,11 @@ async fn test_local_backend_multiple_media_types() {
 #[tokio::test]
 #[ignore] // Requires MinIO Docker container
 async fn test_minio_backend_complete_flow() {
+    // Create temporary directory for RefDatabase
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let refs_path = temp_dir.path().join("refs");
+    fs::create_dir_all(&refs_path).await.unwrap();
+
     // Create MinIO backend
     let backend = MinIOBackend::new(
         "http://localhost:9000",
@@ -313,7 +318,7 @@ async fn test_minio_backend_complete_flow() {
 
     let storage_arc: Arc<dyn StorageBackend> = Arc::new(backend);
     let odb = ObjectDatabase::new(Arc::clone(&storage_arc), 1000);
-    let refdb = RefDatabase::new(Arc::clone(&storage_arc));
+    let refdb = RefDatabase::new(&refs_path);
 
     // Test with image file
     let test_data = read_test_file("freepik__talk__71826.jpeg").await;
@@ -422,6 +427,11 @@ async fn test_azurite_backend_complete_flow() {
         AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;\
         BlobEndpoint=http://localhost:10000/devstoreaccount1;";
 
+    // Create temporary directory for RefDatabase
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let refs_path = temp_dir.path().join("refs");
+    fs::create_dir_all(&refs_path).await.unwrap();
+
     // Create Azure backend
     let backend = AzureBackend::with_connection_string("mediagit-test", AZURITE_CONNECTION_STRING)
         .await
@@ -429,7 +439,7 @@ async fn test_azurite_backend_complete_flow() {
 
     let storage_arc: Arc<dyn StorageBackend> = Arc::new(backend);
     let odb = ObjectDatabase::new(Arc::clone(&storage_arc), 1000);
-    let refdb = RefDatabase::new(Arc::clone(&storage_arc));
+    let refdb = RefDatabase::new(&refs_path);
 
     // Test with image file
     let test_data = read_test_file("Workstation_cube_lid_off.webp").await;

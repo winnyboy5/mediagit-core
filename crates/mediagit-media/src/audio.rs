@@ -344,6 +344,59 @@ impl AudioParser {
 
         conflicts
     }
+
+    /// Perform actual merge of audio tracks (metadata-level merge)
+    ///
+    /// This merges non-conflicting audio track changes by combining:
+    /// - Tracks added in 'ours' branch
+    /// - Tracks added in 'theirs' branch
+    /// - Tracks that don't conflict
+    ///
+    /// Returns merged AudioInfo structure (not actual audio binary - that requires mixing)
+    pub fn merge_tracks(
+        _base: &AudioInfo,
+        ours: &AudioInfo,
+        theirs: &AudioInfo,
+    ) -> Result<AudioInfo> {
+        info!("Executing audio track merge");
+
+        // Start with ours as the base merged audio
+        let mut merged_audio = AudioInfo {
+            duration_seconds: ours.duration_seconds.max(theirs.duration_seconds),
+            sample_rate: ours.sample_rate,
+            channels: ours.channels.max(theirs.channels),
+            bit_depth: ours.bit_depth,
+            codec: ours.codec.clone(),
+            bitrate: ours.bitrate,
+            tracks: Vec::new(),
+            format: ours.format,
+        };
+
+        // Merge tracks - combine all unique tracks by ID
+        let mut merged_tracks = Vec::new();
+        let mut track_ids = std::collections::HashSet::new();
+
+        // Add all tracks from 'ours'
+        for track in &ours.tracks {
+            if track_ids.insert(track.id) {
+                merged_tracks.push(track.clone());
+            }
+        }
+
+        // Add new tracks from 'theirs' not in 'ours'
+        for track in &theirs.tracks {
+            if track_ids.insert(track.id) {
+                debug!("Adding new track from 'theirs': {} ({:?})", track.id, track.track_type);
+                merged_tracks.push(track.clone());
+            }
+        }
+
+        merged_audio.tracks = merged_tracks;
+
+        info!("Audio track merge complete: {} tracks", merged_audio.tracks.len());
+
+        Ok(merged_audio)
+    }
 }
 
 impl Default for AudioParser {

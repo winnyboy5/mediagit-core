@@ -7,7 +7,28 @@ use mediagit_versioning::{Commit, MergeStrategy, RefDatabase, Signature};
 use std::sync::Arc;
 
 /// Fetch and integrate remote changes
+///
+/// Fetches changes from a remote repository and integrates them into the
+/// current branch. By default, this performs a fetch followed by a merge.
 #[derive(Parser, Debug)]
+#[command(after_help = "EXAMPLES:
+    # Pull changes from origin into current branch
+    mediagit pull
+
+    # Pull specific branch from origin
+    mediagit pull origin main
+
+    # Pull and rebase instead of merge
+    mediagit pull --rebase
+
+    # Preview what would be pulled
+    mediagit pull --dry-run
+
+    # Continue pull after resolving conflicts
+    mediagit pull --continue
+
+SEE ALSO:
+    mediagit-push(1), mediagit-fetch(1), mediagit-merge(1), mediagit-rebase(1)")]
 pub struct PullCmd {
     /// Remote name (defaults to origin)
     #[arg(value_name = "REMOTE")]

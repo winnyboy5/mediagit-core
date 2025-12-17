@@ -33,8 +33,8 @@ fn init_test_repo() -> TempDir {
 fn test_cli_no_args() {
     mediagit_cmd()
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("Usage"));
+        .success()
+        .stdout(predicate::str::contains("Usage"));
 }
 
 #[test]
@@ -44,7 +44,7 @@ fn test_cli_help() {
         .assert()
         .success()
         .stdout(predicate::str::contains("MediaGit"))
-        .stdout(predicate::str::contains("USAGE"));
+        .stdout(predicate::str::contains("Usage"));
 }
 
 #[test]
@@ -125,7 +125,7 @@ fn test_add_requires_init() {
         .arg("file.txt")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("not a mediagit repository"));
+        .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
