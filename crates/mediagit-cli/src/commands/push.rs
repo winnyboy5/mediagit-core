@@ -6,7 +6,29 @@ use mediagit_versioning::{RefDatabase};
 use std::sync::Arc;
 
 /// Update remote references and send objects
+///
+/// Pushes local commits to a remote repository, updating the remote
+/// references to point to the new commits. This makes your local changes
+/// available to others.
 #[derive(Parser, Debug)]
+#[command(after_help = "EXAMPLES:
+    # Push current branch to origin
+    mediagit push
+
+    # Push specific branch to origin
+    mediagit push origin main
+
+    # Push and set upstream tracking
+    mediagit push -u origin feature-branch
+
+    # Preview what would be pushed
+    mediagit push --dry-run
+
+    # Force push (use with caution!)
+    mediagit push --force-with-lease
+
+SEE ALSO:
+    mediagit-pull(1), mediagit-fetch(1), mediagit-remote(1)")]
 pub struct PushCmd {
     /// Remote name or URL
     #[arg(value_name = "REMOTE")]

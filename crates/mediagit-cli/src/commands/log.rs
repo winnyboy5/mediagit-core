@@ -7,7 +7,37 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Show commit history
+///
+/// Display commits in reverse chronological order. The output can be filtered
+/// by author, date range, or commit message pattern.
 #[derive(Parser, Debug)]
+#[command(after_help = "EXAMPLES:
+    # Show commit history
+    mediagit log
+
+    # Show last 10 commits
+    mediagit log -n 10
+
+    # Show commits in one-line format
+    mediagit log --oneline
+
+    # Show commits with statistics
+    mediagit log --stat
+
+    # Show commits by specific author
+    mediagit log --author \"John Doe\"
+
+    # Show commits matching pattern
+    mediagit log --grep \"fix bug\"
+
+    # Show commits for specific files
+    mediagit log -- path/to/file.psd
+
+    # Show commits in date range
+    mediagit log --since \"2024-01-01\" --until \"2024-12-31\"
+
+SEE ALSO:
+    mediagit-show(1), mediagit-diff(1), mediagit-reflog(1)")]
 pub struct LogCmd {
     /// Revision range (e.g., main..feature, v1.0..v2.0)
     #[arg(value_name = "REVISION")]

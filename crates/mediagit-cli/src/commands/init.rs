@@ -14,7 +14,22 @@ use std::sync::Arc;
 use tracing::info;
 
 /// Initialize a new MediaGit repository
+///
+/// Creates a new MediaGit repository with the required directory structure,
+/// configuration files, and initial branch setup.
 #[derive(Parser, Debug)]
+#[command(after_help = "EXAMPLES:
+    # Initialize repository in current directory
+    mediagit init
+
+    # Initialize repository in a specific path
+    mediagit init my-project
+
+    # Initialize with custom initial branch name
+    mediagit init --initial-branch develop
+
+SEE ALSO:
+    mediagit-config(1), mediagit-clone(1)")]
 pub struct InitCmd {
     /// Path to initialize (defaults to current directory)
     #[arg(value_name = "PATH")]

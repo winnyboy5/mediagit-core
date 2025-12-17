@@ -6,7 +6,34 @@ use mediagit_versioning::{CheckoutManager, Commit, MergeEngine, MergeStrategy, O
 use std::sync::Arc;
 
 /// Merge branches
+///
+/// Join two or more development histories together. By default, creates a
+/// merge commit combining the changes from both branches.
 #[derive(Parser, Debug)]
+#[command(after_help = "EXAMPLES:
+    # Merge feature branch into current branch
+    mediagit merge feature-branch
+
+    # Merge with custom message
+    mediagit merge feature-branch -m \"Merge feature X\"
+
+    # Force merge commit (no fast-forward)
+    mediagit merge --no-ff feature-branch
+
+    # Fast-forward only merge
+    mediagit merge --ff-only feature-branch
+
+    # Merge with specific strategy
+    mediagit merge -s recursive feature-branch
+
+    # Abort merge after conflicts
+    mediagit merge --abort
+
+    # Continue merge after resolving conflicts
+    mediagit merge --continue
+
+SEE ALSO:
+    mediagit-branch(1), mediagit-rebase(1), mediagit-cherry-pick(1)")]
 pub struct MergeCmd {
     /// Branch to merge
     #[arg(value_name = "BRANCH", required = true)]
