@@ -100,7 +100,7 @@ impl MergeCmd {
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
         let refdb = RefDatabase::new(&storage_path);
-        let odb = Arc::new(ObjectDatabase::new(storage, 1000));
+        let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
 
         // Resolve branch to OID
         let their_oid = self.resolve_branch(&refdb).await?;

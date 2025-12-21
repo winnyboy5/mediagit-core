@@ -81,7 +81,7 @@ impl InitCmd {
         let storage: Arc<dyn mediagit_storage::StorageBackend> = Arc::new(LocalBackend::new(&storage_path).await?);
 
         // Initialize object database
-        let _odb = ObjectDatabase::new(storage.clone(), 1000);
+        let _odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
 
         // Initialize reference database (uses direct filesystem, not StorageBackend)
         let refdb = RefDatabase::new(&storage_path);

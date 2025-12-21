@@ -5,6 +5,8 @@ use console::style;
 use mediagit_storage::LocalBackend;
 use mediagit_versioning::{Commit, MergeStrategy, RefDatabase, Signature};
 use std::sync::Arc;
+use std::time::Instant;
+use crate::progress::{ProgressTracker, OperationStats};
 
 /// Fetch and integrate remote changes
 ///
@@ -77,6 +79,10 @@ pub struct PullCmd {
 
 impl PullCmd {
     pub async fn execute(&self) -> Result<()> {
+        let start_time = Instant::now();
+        let mut stats = OperationStats::new();
+        let progress = ProgressTracker::new(self.quiet);
+
         let remote = self.remote.as_deref().unwrap_or("origin");
 
         // Validate repository
@@ -128,9 +134,9 @@ impl PullCmd {
         // Initialize protocol client
         let client = mediagit_protocol::ProtocolClient::new(remote_url);
 
-        // Initialize ODB with 1000 object cache capacity
+        // Initialize ODB with smart compression for consistent read/write
         let odb = Arc::new(
-            mediagit_versioning::ObjectDatabase::new(Arc::clone(&storage), 1000)
+            mediagit_versioning::ObjectDatabase::with_smart_compression(Arc::clone(&storage), 1000)
         );
 
         // Determine remote ref to pull
@@ -150,27 +156,41 @@ impl PullCmd {
 
         if !self.dry_run {
             // Pull using protocol client (downloads pack file)
+            let download_pb = progress.download_bar("Receiving objects");
             let pack_data = client.pull(&odb, &remote_ref).await?;
+            let pack_size = pack_data.len() as u64;
+
+            download_pb.set_length(pack_size);
+            download_pb.set_position(pack_size);
+            stats.bytes_downloaded = pack_size;
 
             if !self.quiet {
                 println!(
                     "{} Received {} bytes",
                     style("↓").cyan(),
-                    pack_data.len()
+                    pack_size
                 );
             }
+            download_pb.finish_with_message("Download complete");
 
             // Unpack received objects
             let pack_reader = mediagit_versioning::PackReader::new(pack_data)?;
-            for oid in pack_reader.list_objects() {
-                let obj_data = pack_reader.get_object(&oid)?;
+            let objects = pack_reader.list_objects();
+            let object_count = objects.len() as u64;
+
+            let unpack_pb = progress.object_bar("Unpacking objects", object_count);
+            for (idx, oid) in objects.iter().enumerate() {
+                let obj_data = pack_reader.get_object(oid)?;
                 // Write object to ODB (assuming Blob type for now)
                 odb.write(mediagit_versioning::ObjectType::Blob, &obj_data).await?;
+                unpack_pb.set_position((idx + 1) as u64);
             }
+            stats.objects_received = object_count;
 
             if !self.quiet {
                 println!("{} Unpacked objects", style("✓").green());
             }
+            unpack_pb.finish_with_message("Unpack complete");
 
             // Get remote ref OID
             let remote_refs = client.get_refs().await?;
@@ -295,6 +315,12 @@ impl PullCmd {
                     style("ℹ").blue()
                 );
             }
+        }
+
+        // Print operation summary
+        stats.duration_ms = start_time.elapsed().as_millis() as u64;
+        if !self.quiet && !self.dry_run {
+            println!("\n{} {}", style("📊").cyan(), stats.summary());
         }
 
         Ok(())

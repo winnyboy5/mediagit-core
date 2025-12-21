@@ -122,7 +122,7 @@ impl StatusCmd {
 
         // Load index and initialize ODB for file comparison (ISS-005 fix)
         let index = Index::load(&repo_root)?;
-        let odb = ObjectDatabase::new(storage.clone(), 1000);
+        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
 
         // Scan working directory
         let working_files = self.scan_working_directory(&repo_root)?;
