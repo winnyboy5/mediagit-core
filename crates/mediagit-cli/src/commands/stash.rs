@@ -138,7 +138,7 @@ impl StashCmd {
         let repo_root = self.find_repo_root()?;
         let mediagit_dir = repo_root.join(".mediagit");
         let storage = Arc::new(mediagit_storage::LocalBackend::new(&mediagit_dir).await?);
-        let odb = ObjectDatabase::new(storage.clone(), 1000);
+        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
         let refdb = RefDatabase::new(&mediagit_dir);
 
         // Check if there are changes to stash
@@ -220,7 +220,7 @@ impl StashCmd {
         let repo_root = self.find_repo_root()?;
         let mediagit_dir = repo_root.join(".mediagit");
         let storage = Arc::new(mediagit_storage::LocalBackend::new(&mediagit_dir).await?);
-        let odb = ObjectDatabase::new(storage.clone(), 1000);
+        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
 
         // Load stash entry
         let stash_index = opts.stash.unwrap_or(0);

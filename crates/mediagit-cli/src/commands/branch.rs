@@ -3,6 +3,8 @@ use clap::{Parser, Subcommand};
 use mediagit_storage::LocalBackend;
 use mediagit_versioning::{Ref, RefDatabase};
 use std::sync::Arc;
+use std::time::Instant;
+use crate::progress::{ProgressTracker, OperationStats};
 
 /// Manage branches
 ///
@@ -377,13 +379,19 @@ impl BranchCmd {
         use crate::output;
         use mediagit_versioning::{CheckoutManager, Index, ObjectDatabase};
 
+        let start_time = Instant::now();
+        let mut stats = OperationStats::new();
+        let progress = ProgressTracker::new(opts.quiet);
+
         let repo_root = self.find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
         let refdb = RefDatabase::new(&storage_path);
 
-        let branch_ref_name = format!("refs/heads/{}", opts.branch);
+        // Strip refs/heads/ prefix if already present
+        let branch_name = opts.branch.strip_prefix("refs/heads/").unwrap_or(&opts.branch);
+        let branch_ref_name = format!("refs/heads/{}", branch_name);
 
         // If create flag is set, create the branch first
         if opts.create {
@@ -419,10 +427,15 @@ impl BranchCmd {
         refdb.write(&head).await?;
 
         // Update working directory to match the target branch's commit
-        let odb = ObjectDatabase::new(storage.clone(), 1000);
+        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
         let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
+
+        let checkout_pb = progress.spinner("Updating working directory");
         let files_updated = checkout_mgr.checkout_commit(&target_commit_oid).await
             .context("Failed to update working directory")?;
+        checkout_pb.finish_with_message("Working directory updated");
+
+        stats.files_updated = files_updated as u64;
 
         // Clear the index (staging area) when switching branches
         // This ensures a clean state on the new branch
@@ -435,6 +448,12 @@ impl BranchCmd {
             if files_updated > 0 {
                 output::info(&format!("Updated {} file(s) in working directory", files_updated));
             }
+        }
+
+        // Print operation summary
+        stats.duration_ms = start_time.elapsed().as_millis() as u64;
+        if !opts.quiet && stats.files_updated > 0 {
+            println!("\n📊 {}", stats.summary());
         }
 
         Ok(())

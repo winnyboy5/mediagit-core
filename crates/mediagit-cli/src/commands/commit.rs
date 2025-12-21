@@ -115,7 +115,7 @@ impl CommitCmd {
         let storage_path = repo_root.join(".mediagit");
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
-        let odb = ObjectDatabase::new(storage.clone(), 1000);
+        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
         let refdb = RefDatabase::new(&storage_path);
 
         // Load the index
@@ -126,7 +126,7 @@ impl CommitCmd {
             output::warning("No changes staged for commit");
             output::info("Use \"mediagit add <file>...\" to stage changes");
             output::info("Use \"mediagit commit --allow-empty\" to create an empty commit");
-            return Ok(());
+            anyhow::bail!("nothing to commit");
         }
 
         // Get current HEAD to find parent (resolve symbolic refs) - do this before building tree

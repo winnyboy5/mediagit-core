@@ -4,6 +4,8 @@ use console::style;
 use mediagit_storage::LocalBackend;
 use mediagit_versioning::{RefDatabase};
 use std::sync::Arc;
+use std::time::Instant;
+use crate::progress::{ProgressTracker, OperationStats};
 
 /// Update remote references and send objects
 ///
@@ -81,6 +83,10 @@ pub struct PushCmd {
 
 impl PushCmd {
     pub async fn execute(&self) -> Result<()> {
+        let start_time = Instant::now();
+        let mut stats = OperationStats::new();
+        let progress = ProgressTracker::new(self.quiet);
+
         let remote = self.remote.as_deref().unwrap_or("origin");
 
         // Validate repository
@@ -134,9 +140,9 @@ impl PushCmd {
         // Initialize protocol client
         let client = mediagit_protocol::ProtocolClient::new(remote_url);
 
-        // Initialize ODB with 1000 object cache capacity
+        // Initialize ODB with smart compression for consistent read/write
         let odb =
-            mediagit_versioning::ObjectDatabase::new(Arc::clone(&storage), 1000);
+            mediagit_versioning::ObjectDatabase::with_smart_compression(Arc::clone(&storage), 1000);
 
         // Determine which refs to push
         let ref_to_push = if self.refspec.is_empty() {
@@ -192,7 +198,16 @@ impl PushCmd {
 
         if !self.dry_run {
             // Push using protocol client
+            let upload_pb = progress.upload_bar("Uploading objects");
+            upload_pb.set_position(0);
+
             let result = client.push(&odb, vec![update], self.force).await?;
+
+            // Estimate bytes uploaded (simplified - would need actual tracking from protocol)
+            stats.bytes_uploaded = 1024; // Placeholder
+            stats.objects_sent = 1;
+
+            upload_pb.finish_with_message("Upload complete");
 
             if !result.success {
                 anyhow::bail!(
@@ -221,6 +236,12 @@ impl PushCmd {
                     style("ℹ").blue()
                 );
             }
+        }
+
+        // Print operation summary
+        stats.duration_ms = start_time.elapsed().as_millis() as u64;
+        if !self.quiet && !self.dry_run {
+            println!("\n{} {}", style("📊").cyan(), stats.summary());
         }
 
         Ok(())

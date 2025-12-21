@@ -65,7 +65,7 @@ impl CherryPickCmd {
     async fn start_cherrypick(&self, repo_root: &PathBuf) -> Result<()> {
         let mediagit_dir = repo_root.join(".mediagit");
         let storage = Arc::new(mediagit_storage::LocalBackend::new(&mediagit_dir).await?);
-        let odb = ObjectDatabase::new(storage.clone(), 1000);
+        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
         let refdb = RefDatabase::new(&mediagit_dir);
 
         // Get current HEAD
@@ -161,7 +161,7 @@ impl CherryPickCmd {
         // Create Arc for MergeEngine (it requires Arc<ObjectDatabase>)
         let mediagit_dir = repo_root.join(".mediagit");
         let storage = Arc::new(mediagit_storage::LocalBackend::new(&mediagit_dir).await?);
-        let odb_arc = Arc::new(ObjectDatabase::new(storage.clone(), 1000));
+        let odb_arc = Arc::new(ObjectDatabase::with_smart_compression(storage.clone(), 1000));
 
         // Perform three-way merge: current HEAD vs commit being cherry-picked
         let merger = MergeEngine::new(odb_arc.clone());
@@ -273,7 +273,7 @@ impl CherryPickCmd {
         // Create commit for current pick
         let mediagit_dir = repo_root.join(".mediagit");
         let storage = Arc::new(mediagit_storage::LocalBackend::new(&mediagit_dir).await?);
-        let odb = ObjectDatabase::new(storage.clone(), 1000);
+        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
         let refdb = RefDatabase::new(&mediagit_dir);
 
         if let Some(current) = &state.current_commit {
@@ -369,7 +369,7 @@ impl CherryPickCmd {
             // Reset to original HEAD
             let mediagit_dir = repo_root.join(".mediagit");
             let storage = Arc::new(mediagit_storage::LocalBackend::new(&mediagit_dir).await?);
-            let odb = ObjectDatabase::new(storage.clone(), 1000);
+            let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
             let refdb = RefDatabase::new(&mediagit_dir);
 
             let original_oid = Oid::from_hex(original_head)?;

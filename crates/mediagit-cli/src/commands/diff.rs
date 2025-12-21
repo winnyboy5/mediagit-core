@@ -80,7 +80,7 @@ impl DiffCmd {
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
         let refdb = RefDatabase::new(&storage_path);
-        let odb = ObjectDatabase::new(storage, 1000);
+        let odb = ObjectDatabase::with_smart_compression(storage, 1000);
 
         // Resolve commits using revision parser (supports HEAD~N)
         let (from_oid, to_oid) = self.resolve_commits(&refdb, &odb).await?;

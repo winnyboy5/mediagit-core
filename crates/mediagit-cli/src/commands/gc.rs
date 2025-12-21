@@ -41,6 +41,14 @@ pub struct GcCmd {
     /// Verbose mode (detailed output)
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Repack loose objects into pack files
+    #[arg(long)]
+    pub repack: bool,
+
+    /// Maximum objects per pack file (0 = unlimited)
+    #[arg(long, default_value = "0")]
+    pub max_pack_size: usize,
 }
 
 /// Statistics collected during GC operation
@@ -382,7 +390,7 @@ impl GcCmd {
         let storage_path = repo_root.join(".mediagit");
         let storage: Arc<dyn StorageBackend> = Arc::new(mediagit_storage::LocalBackend::new(&storage_path).await?);
 
-        let gc = GarbageCollector::new(storage, &storage_path);
+        let gc = GarbageCollector::new(storage.clone(), &storage_path);
         let mut stats = GcStats::default();
 
         // Step 1: Build reachability graph
@@ -465,6 +473,47 @@ impl GcCmd {
                     stats.objects_deleted,
                     GcStats::format_bytes(stats.bytes_reclaimed)
                 );
+            }
+        }
+
+        // Step 5: Repack loose objects if requested
+        if self.repack {
+            if !self.quiet {
+                println!("\n{} Repacking loose objects...", style("→").cyan());
+            }
+
+            // Create ODB for repack operation
+            use mediagit_versioning::ObjectDatabase;
+            let odb = ObjectDatabase::new(storage.clone(), 1000);
+
+            match odb.repack(self.max_pack_size, !self.dry_run).await {
+                Ok(repack_stats) => {
+                    if !self.quiet {
+                        println!(
+                            "{} Packed {} objects into pack file ({} deltas)",
+                            style("✓").green(),
+                            repack_stats.objects_packed,
+                            repack_stats.delta_objects
+                        );
+                        println!(
+                            "   Pack size: {}, Saved: {}",
+                            GcStats::format_bytes(repack_stats.pack_size),
+                            GcStats::format_bytes(repack_stats.bytes_saved)
+                        );
+                        if repack_stats.loose_objects_removed > 0 {
+                            println!(
+                                "   Removed {} loose objects",
+                                repack_stats.loose_objects_removed
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    if !self.quiet {
+                        println!("{} Repack failed: {}", style("✗").red(), e);
+                    }
+                    stats.errors.push(format!("Repack error: {}", e));
+                }
             }
         }
 

@@ -13,6 +13,7 @@
 
 mod commands;
 mod output;
+mod progress;
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};

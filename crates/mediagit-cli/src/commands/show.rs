@@ -48,7 +48,7 @@ impl ShowCmd {
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
         let refdb = RefDatabase::new(&storage_path);
-        let odb = ObjectDatabase::new(storage, 1000);
+        let odb = ObjectDatabase::with_smart_compression(storage, 1000);
 
         // Resolve object ID using revision parser (supports HEAD~N)
         let object_str = self.object.as_deref().unwrap_or("HEAD");

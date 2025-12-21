@@ -64,7 +64,7 @@ impl StatsCmd {
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
         let refdb = RefDatabase::new(&storage_path);
-        let odb = ObjectDatabase::new(storage.clone(), 1000);
+        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
 
         // Handle Prometheus format output
         if self.prometheus {
@@ -79,6 +79,11 @@ impl StatsCmd {
         println!("{} Repository Statistics\n", style("📊").cyan().bold());
 
         let show_all = self.all || (!self.storage && !self.files && !self.commits && !self.branches && !self.authors && !self.compression);
+
+        // Operation Statistics (example data - would be persisted in production)
+        if show_all {
+            self.show_operation_stats();
+        }
 
         // Storage statistics
         if self.storage || show_all {
@@ -176,6 +181,14 @@ impl StatsCmd {
         }
 
         Ok(())
+    }
+
+    fn show_operation_stats(&self) {
+        println!("{}", style("Recent Operations:").bold());
+        println!("  Last pull: Demo data (↓ 1.50 MB, 42 objects, 1500ms)");
+        println!("  Last push: Demo data (↑ 500.00 KB, 15 objects, 800ms)");
+        println!("  Last branch switch: Demo data (10 files updated, 250ms)");
+        println!();
     }
 
     async fn show_compression_stats(&self) -> Result<()> {

@@ -289,7 +289,7 @@ impl BisectCmd {
 
         // Checkout original HEAD
         let storage = Arc::new(mediagit_storage::LocalBackend::new(&mediagit_dir).await?);
-        let odb = ObjectDatabase::new(storage.clone(), 1000);
+        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
         let refdb = RefDatabase::new(&mediagit_dir);
 
         let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
@@ -354,7 +354,7 @@ impl BisectCmd {
     async fn find_next_commit(&self, repo_root: &PathBuf, state: &mut BisectState) -> Result<()> {
         let mediagit_dir = repo_root.join(".mediagit");
         let storage = Arc::new(mediagit_storage::LocalBackend::new(&mediagit_dir).await?);
-        let odb = ObjectDatabase::new(storage.clone(), 1000);
+        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
 
         // Get all commits between good and bad
         let candidates = self.find_candidate_commits(&odb, state).await?;
