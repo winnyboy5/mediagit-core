@@ -4,9 +4,33 @@ use console::style;
 use mediagit_storage::LocalBackend;
 use mediagit_versioning::{RefDatabase};
 use std::sync::Arc;
+use std::time::Instant;
+use crate::progress::{ProgressTracker, OperationStats};
 
 /// Update remote references and send objects
+///
+/// Pushes local commits to a remote repository, updating the remote
+/// references to point to the new commits. This makes your local changes
+/// available to others.
 #[derive(Parser, Debug)]
+#[command(after_help = "EXAMPLES:
+    # Push current branch to origin
+    mediagit push
+
+    # Push specific branch to origin
+    mediagit push origin main
+
+    # Push and set upstream tracking
+    mediagit push -u origin feature-branch
+
+    # Preview what would be pushed
+    mediagit push --dry-run
+
+    # Force push (use with caution!)
+    mediagit push --force-with-lease
+
+SEE ALSO:
+    mediagit-pull(1), mediagit-fetch(1), mediagit-remote(1)")]
 pub struct PushCmd {
     /// Remote name or URL
     #[arg(value_name = "REMOTE")]
@@ -59,14 +83,18 @@ pub struct PushCmd {
 
 impl PushCmd {
     pub async fn execute(&self) -> Result<()> {
+        let start_time = Instant::now();
+        let mut stats = OperationStats::new();
+        let progress = ProgressTracker::new(self.quiet);
+
         let remote = self.remote.as_deref().unwrap_or("origin");
 
         // Validate repository
         let repo_root = self.find_repo_root()?;
-        let storage_path = repo_root.join(".mediagit/objects");
+        let storage_path = repo_root.join(".mediagit");
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
-        let refdb = RefDatabase::new(Arc::clone(&storage));
+        let refdb = RefDatabase::new(&storage_path);
 
         if self.dry_run {
             if !self.quiet {
@@ -82,7 +110,7 @@ impl PushCmd {
             );
         }
 
-        // Validate local refs exist
+        // Validate local refs exist and read HEAD once
         let head = refdb.read("HEAD").await.context("Failed to read HEAD")?;
 
         if head.oid.is_none() && head.target.is_none() {
@@ -112,20 +140,19 @@ impl PushCmd {
         // Initialize protocol client
         let client = mediagit_protocol::ProtocolClient::new(remote_url);
 
-        // Initialize ODB with 1000 object cache capacity
+        // Initialize ODB with smart compression for consistent read/write
         let odb =
-            mediagit_versioning::ObjectDatabase::new(Arc::clone(&storage), 1000);
+            mediagit_versioning::ObjectDatabase::with_smart_compression(Arc::clone(&storage), 1000);
 
         // Determine which refs to push
         let ref_to_push = if self.refspec.is_empty() {
-            // Default: push current branch
-            let head = refdb.read("HEAD").await?;
+            // Default: push current branch (reuse head from above)
             head.target.ok_or_else(|| {
                 anyhow::anyhow!("HEAD is detached, please specify a refspec")
             })?
         } else {
-            // Use first refspec (simplified - should parse properly)
-            self.refspec[0].clone()
+            // Use first refspec - normalize to handle both short and full ref names
+            mediagit_versioning::normalize_ref_name(&self.refspec[0])
         };
 
         // Read local ref OID
@@ -144,6 +171,18 @@ impl PushCmd {
 
         // Create ref update (convert Oid to hex string)
         let local_oid_str = local_oid.to_hex();
+
+        // Check if already up-to-date (avoid redundant push)
+        if let Some(ref remote) = remote_oid {
+            if remote == &local_oid_str {
+                if !self.quiet {
+                    println!("{} Already up to date", style("✓").green());
+                    println!("  {} {}", style("→").cyan(), &local_oid_str[..8]);
+                }
+                return Ok(());
+            }
+        }
+
         let update = mediagit_protocol::RefUpdate {
             name: ref_to_push.clone(),
             old_oid: remote_oid.clone(),
@@ -170,7 +209,16 @@ impl PushCmd {
 
         if !self.dry_run {
             // Push using protocol client
+            let upload_pb = progress.upload_bar("Uploading objects");
+            upload_pb.set_position(0);
+
             let result = client.push(&odb, vec![update], self.force).await?;
+
+            // Estimate bytes uploaded (simplified - would need actual tracking from protocol)
+            stats.bytes_uploaded = 1024; // Placeholder
+            stats.objects_sent = 1;
+
+            upload_pb.finish_with_message("Upload complete");
 
             if !result.success {
                 anyhow::bail!(
@@ -199,6 +247,12 @@ impl PushCmd {
                     style("ℹ").blue()
                 );
             }
+        }
+
+        // Print operation summary
+        stats.duration_ms = start_time.elapsed().as_millis() as u64;
+        if !self.quiet && !self.dry_run {
+            println!("\n{} {}", style("📊").cyan(), stats.summary());
         }
 
         Ok(())

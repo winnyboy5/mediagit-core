@@ -235,6 +235,55 @@ pub struct PackMetadata {
     pub compression_ratio: f64,
 }
 
+/// Determine if an object should be included in pack based on size and type
+///
+/// This provides intelligent pack selection to avoid packing objects that:
+/// - Are too small (metadata overhead outweighs benefit)
+/// - Are already heavily compressed (no delta opportunity)
+/// - Have poor delta compression potential
+fn should_pack_object(size: usize, object_type: ObjectType, filename: Option<&str>) -> bool {
+    const MIN_PACK_SIZE: usize = 1024; // 1KB minimum
+
+    match object_type {
+        ObjectType::Blob => {
+            // Skip tiny blobs (metadata, small configs) - packing overhead too high
+            if size < MIN_PACK_SIZE {
+                return false;
+            }
+
+            // Type-based packing decision for blobs
+            if let Some(name) = filename {
+                // Extract file extension for intelligent decision
+                let ext = std::path::Path::new(name)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
+
+                match ext.to_lowercase().as_str() {
+                    // Large uncompressed media: Always pack (good delta opportunity)
+                    "psd" | "tif" | "tiff" | "bmp" | "wav" | "aiff" | "avi" | "mov" => true,
+                    // Compressed images: Pack only if large (limited delta benefit)
+                    "jpg" | "jpeg" | "png" | "webp" => size > 100 * 1024, // 100KB
+                    // Compressed video: Pack only if very large
+                    "mp4" | "mkv" | "flv" | "wmv" => size > 100 * 1024, // 100KB
+                    // Text/code: Always pack (excellent delta opportunity)
+                    "txt" | "md" | "json" | "xml" | "html" | "css" | "js" | "ts" |
+                    "py" | "rs" | "go" | "java" | "c" | "cpp" | "h" | "hpp" => true,
+                    // Archives: Don't pack (already compressed, no delta benefit)
+                    "zip" | "gz" | "bz2" | "7z" | "rar" => false,
+                    // Unknown: Pack if above minimum size
+                    _ => size > MIN_PACK_SIZE,
+                }
+            } else {
+                // No filename: pack if above minimum
+                size > MIN_PACK_SIZE
+            }
+        }
+        // Always pack commits and trees (small, critical metadata)
+        ObjectType::Commit | ObjectType::Tree => true,
+    }
+}
+
 /// Pack file writer for creating pack files
 pub struct PackWriter {
     /// Current data buffer
@@ -298,6 +347,42 @@ impl PackWriter {
         });
 
         offset
+    }
+
+    /// Add an object to the pack with intelligent selection
+    ///
+    /// Uses type-aware logic to determine if object should be packed.
+    /// Returns Ok(Some(offset)) if packed, Ok(None) if skipped.
+    ///
+    /// # Arguments
+    ///
+    /// * `oid` - Object identifier
+    /// * `object_type` - Type of object
+    /// * `object_data` - Object data
+    /// * `filename` - Optional filename for type inference
+    ///
+    /// # Returns
+    ///
+    /// Option with offset if packed, None if skipped
+    pub fn smart_add_object(
+        &mut self,
+        oid: Oid,
+        object_type: ObjectType,
+        object_data: &[u8],
+        filename: Option<&str>,
+    ) -> Option<u64> {
+        // Check if object should be packed
+        if should_pack_object(object_data.len(), object_type, filename) {
+            Some(self.add_object(oid, object_type, object_data))
+        } else {
+            debug!(
+                oid = %oid,
+                size = object_data.len(),
+                filename = ?filename,
+                "Skipping object from pack (too small or poor compression candidate)"
+            );
+            None
+        }
     }
 
     /// Add a delta-encoded object to the pack
@@ -447,7 +532,7 @@ impl PackReader {
         Ok(Self {
             data,
             index,
-            object_data_end: index_offset,
+            _object_data_end: index_offset,
         })
     }
 
@@ -457,6 +542,16 @@ impl PackReader {
     ///
     /// Returns error if object not found or data is corrupted
     pub fn get_object(&self, oid: &Oid) -> io::Result<Vec<u8>> {
+        let (_, data) = self.get_object_with_type(oid)?;
+        Ok(data)
+    }
+
+    /// Get object data and type by OID
+    ///
+    /// # Errors
+    ///
+    /// Returns error if object not found or data is corrupted
+    pub fn get_object_with_type(&self, oid: &Oid) -> io::Result<(ObjectType, Vec<u8>)> {
         let (offset, total_size) = self
             .index
             .lookup(oid)
@@ -472,6 +567,11 @@ impl PackReader {
             ));
         }
 
+        // Read the type from the 1-byte header
+        let type_byte = self.data[offset];
+        let object_type = ObjectType::from_u8(type_byte)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid object type"))?;
+
         // Skip the 5-byte header (1 byte type + 4 bytes size)
         let header_size = 5;
         if total_size < header_size {
@@ -482,7 +582,9 @@ impl PackReader {
         }
 
         let data_size = total_size - header_size;
-        Ok(self.data[offset + header_size..offset + header_size + data_size].to_vec())
+        let data = self.data[offset + header_size..offset + header_size + data_size].to_vec();
+
+        Ok((object_type, data))
     }
 
     /// Get the index reference

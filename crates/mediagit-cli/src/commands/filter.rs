@@ -29,7 +29,7 @@ impl FilterCmd {
     pub fn execute(self) -> Result<()> {
         // Find repository root to get storage path
         let repo_root = Self::find_repo_root()?;
-        let storage_path = repo_root.join(".mediagit/objects");
+        let storage_path = repo_root.join(".mediagit");
 
         // Create filter configuration
         let config = FilterConfig {

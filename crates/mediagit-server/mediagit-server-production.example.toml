@@ -1,0 +1,64 @@
+# MediaGit Server - PRODUCTION Configuration Template
+#
+# This is a production-ready configuration with all security features enabled.
+# Copy to mediagit-server.toml and update with your specific values.
+
+# ========================================
+# Basic Server Settings
+# ========================================
+
+port = 3000
+host = "0.0.0.0"  # Listen on all interfaces
+repos_dir = "/var/lib/mediagit/repos"
+
+# ========================================
+# Authentication (REQUIRED for Production)
+# ========================================
+
+enable_auth = true
+
+# Generate a secure secret:
+# openssl rand -base64 32
+# Store this securely (environment variable or secret manager)
+jwt_secret = "CHANGE-THIS-TO-A-SECURE-RANDOM-STRING-32-BYTES-OR-MORE"
+
+# ========================================
+# Rate Limiting (REQUIRED for Production)
+# ========================================
+
+enable_rate_limiting = true
+
+# Adjust based on expected legitimate traffic
+# 100 requests/second = 6,000 requests/minute per IP
+rate_limit_rps = 100
+rate_limit_burst = 200
+
+# ========================================
+# TLS/HTTPS (REQUIRED for Production)
+# ========================================
+
+enable_tls = true
+tls_port = 443
+
+# Use Let's Encrypt or your certificate authority
+tls_cert_path = "/etc/letsencrypt/live/yourdomain.com/fullchain.pem"
+tls_key_path = "/etc/letsencrypt/live/yourdomain.com/privkey.pem"
+
+# Never use self-signed certificates in production
+tls_self_signed = false
+
+# ========================================
+# Production Checklist
+# ========================================
+#
+# [ ] JWT secret is at least 32 bytes of random data
+# [ ] JWT secret is stored securely (not in this file in production)
+# [ ] TLS certificate is from a trusted CA (not self-signed)
+# [ ] TLS certificate auto-renewal is configured
+# [ ] Rate limiting values tested with expected load
+# [ ] Server runs behind reverse proxy (nginx/Traefik) for additional security
+# [ ] Firewall rules restrict access to necessary ports only
+# [ ] Monitoring and alerting configured
+# [ ] Backup strategy in place for repositories
+# [ ] Log rotation configured
+#

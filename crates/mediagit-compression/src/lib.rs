@@ -14,12 +14,15 @@
 //! Intelligent compression for MediaGit
 //!
 //! This crate provides compression abstractions and implementations:
+//! - **Smart compression**: Automatic per-object-type strategy selection
 //! - **Zstd compression**: Fast, good compression ratios (default)
 //! - **Brotli compression**: Higher compression, slower (for archival)
 //! - **Auto-detection**: Transparently handle compressed vs uncompressed data
 //! - **Compression levels**: Configurable speed vs compression trade-offs
 //!
 //! # Quick Start
+//!
+//! ## Basic Compression
 //!
 //! ```rust
 //! use mediagit_compression::{Compressor, CompressionLevel, ZstdCompressor};
@@ -40,6 +43,28 @@
 //! }
 //! ```
 //!
+//! ## Smart Type-Aware Compression
+//!
+//! ```rust
+//! use mediagit_compression::{SmartCompressor, TypeAwareCompressor, ObjectType};
+//!
+//! #[tokio::main]
+//! async fn main() -> anyhow::Result<()> {
+//!     let compressor = SmartCompressor::new();
+//!
+//!     // Automatically selects best strategy based on file type
+//!     let text_data = b"Some text content...";
+//!     let compressed = compressor.compress_typed(text_data, ObjectType::Text)?;
+//!
+//!     // Already compressed formats stored without recompression
+//!     let jpeg_data = vec![0xFF, 0xD8, 0xFF, 0xE0];
+//!     let stored = compressor.compress_typed(&jpeg_data, ObjectType::Jpeg)?;
+//!     assert_eq!(stored, jpeg_data); // No recompression overhead
+//!
+//!     Ok(())
+//! }
+//! ```
+//!
 //! # Compression Algorithms
 //!
 //! ## Zstd (Default)
@@ -53,18 +78,44 @@
 //! - Slower compression but faster decompression than gzip
 //! - Good for archival and infrequently accessed data
 //! - Higher memory usage during compression
+//!
+//! # Per-Object Type Strategies
+//!
+//! `SmartCompressor` automatically selects optimal compression:
+//!
+//! - **Already compressed** (JPEG, PNG, MP4, ZIP): Store without recompression
+//! - **Uncompressed images** (TIFF, BMP, PSD, RAW): Zstd Best compression
+//! - **Text/Code** (TXT, JSON, XML, YAML): Brotli Best for maximum text compression
+//! - **Documents** (PDF, SVG): Zstd Default for balanced performance
+//! - **Unknown/Binary**: Zstd Default as safe fallback
 
+pub mod adaptive;
 pub mod brotli_compressor;
 pub mod delta;
 pub mod error;
 pub mod metrics;
+pub mod per_type_compressor;
+pub mod smart_compressor;
+pub mod zlib_compressor;
 pub mod zstd_compressor;
 
 use std::fmt::Debug;
 
+pub use adaptive::{
+    AdaptiveCompressor, CompressionStrategy as AdaptiveStrategy,
+    EntropyClass, FileProfile, PatternClass, PerformanceStats,
+    SizeClass, calculate_entropy,
+};
 pub use brotli_compressor::BrotliCompressor;
 pub use error::{CompressionError, CompressionResult};
-pub use metrics::CompressionMetrics;
+pub use metrics::{AggregatedStats, CompressionMetrics, MetricsAggregator};
+pub use per_type_compressor::{
+    CompressionProfile, PerObjectTypeCompressor, PerTypeStats,
+};
+pub use smart_compressor::{
+    CompressionStrategy, ObjectCategory, ObjectType, SmartCompressor, TypeAwareCompressor,
+};
+pub use zlib_compressor::ZlibCompressor;
 pub use zstd_compressor::ZstdCompressor;
 
 /// Compression level configuration
@@ -106,10 +157,12 @@ impl CompressionLevel {
 pub enum CompressionAlgorithm {
     /// No compression (raw data)
     None = 0,
+    /// Zlib compression (Git-compatible)
+    Zlib = 1,
     /// Zstd compression
-    Zstd = 1,
+    Zstd = 2,
     /// Brotli compression
-    Brotli = 2,
+    Brotli = 3,
 }
 
 impl CompressionAlgorithm {
@@ -117,6 +170,7 @@ impl CompressionAlgorithm {
     pub fn magic_bytes(self) -> &'static [u8] {
         match self {
             CompressionAlgorithm::None => b"",
+            CompressionAlgorithm::Zlib => b"\x78",              // Zlib header
             CompressionAlgorithm::Zstd => b"\x28\xb5\x2f\xfd", // Zstd frame magic
             CompressionAlgorithm::Brotli => b"BRT\x01",         // Custom marker for brotli
         }
@@ -124,6 +178,16 @@ impl CompressionAlgorithm {
 
     /// Detect compression algorithm from data
     pub fn detect(data: &[u8]) -> Self {
+        if data.is_empty() {
+            return CompressionAlgorithm::None;
+        }
+
+        // Check zlib first (Git compatibility)
+        if data.len() >= 2 && data[0] == 0x78 {
+            return CompressionAlgorithm::Zlib;
+        }
+
+        // Check other formats
         if data.len() >= 4 {
             if data.starts_with(b"\x28\xb5\x2f\xfd") {
                 return CompressionAlgorithm::Zstd;
@@ -132,6 +196,7 @@ impl CompressionAlgorithm {
                 return CompressionAlgorithm::Brotli;
             }
         }
+
         CompressionAlgorithm::None
     }
 }
@@ -172,11 +237,6 @@ pub trait Compressor: Send + Sync + Debug {
     ///
     /// Returns `CompressionError` if decompression fails
     fn decompress(&self, data: &[u8]) -> CompressionResult<Vec<u8>>;
-
-    /// Get compression metrics for data
-    fn metrics(&self, original: &[u8], compressed: &[u8]) -> CompressionMetrics {
-        CompressionMetrics::from_sizes(original.len(), compressed.len())
-    }
 }
 
 #[cfg(test)]
@@ -196,6 +256,13 @@ mod tests {
 
     #[test]
     fn algorithm_detection() {
+        // Zlib magic bytes
+        let zlib_data = b"\x78\x9c\x00\x00\x00\x00";
+        assert_eq!(
+            CompressionAlgorithm::detect(zlib_data),
+            CompressionAlgorithm::Zlib
+        );
+
         // Zstd magic bytes
         let zstd_data = b"\x28\xb5\x2f\xfd\x00\x00\x00\x00";
         assert_eq!(
@@ -214,6 +281,13 @@ mod tests {
         let raw_data = b"Hello, World!";
         assert_eq!(
             CompressionAlgorithm::detect(raw_data),
+            CompressionAlgorithm::None
+        );
+
+        // Empty data
+        let empty_data = b"";
+        assert_eq!(
+            CompressionAlgorithm::detect(empty_data),
             CompressionAlgorithm::None
         );
     }

@@ -2,11 +2,35 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_storage::LocalBackend;
-use mediagit_versioning::{Commit, ObjectDatabase, Oid, RefDatabase};
+use mediagit_versioning::{resolve_revision, Commit, ObjectDatabase, Oid, RefDatabase};
 use std::sync::Arc;
 
 /// Show changes between commits
+///
+/// Display differences between commits, commit and working tree, or between
+/// the index and working tree.
 #[derive(Parser, Debug)]
+#[command(after_help = "EXAMPLES:
+    # Show changes between two commits
+    mediagit diff abc123 def456
+
+    # Show changes from HEAD to working directory
+    mediagit diff HEAD
+
+    # Show staged changes
+    mediagit diff --cached
+
+    # Show changes with statistics
+    mediagit diff --stat abc123 def456
+
+    # Show changes for specific files
+    mediagit diff -- path/to/file.psd
+
+    # Compare with previous commit
+    mediagit diff HEAD~1 HEAD
+
+SEE ALSO:
+    mediagit-status(1), mediagit-log(1), mediagit-show(1)")]
 pub struct DiffCmd {
     /// First revision to compare
     #[arg(value_name = "REVISION1")]
@@ -52,14 +76,14 @@ impl DiffCmd {
         }
 
         let repo_root = self.find_repo_root()?;
-        let storage_path = repo_root.join(".mediagit/objects");
+        let storage_path = repo_root.join(".mediagit");
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
-        let refdb = RefDatabase::new(storage.clone());
-        let odb = ObjectDatabase::new(storage, 1000);
+        let refdb = RefDatabase::new(&storage_path);
+        let odb = ObjectDatabase::with_smart_compression(storage, 1000);
 
-        // Resolve commits
-        let (from_oid, to_oid) = self.resolve_commits(&refdb).await?;
+        // Resolve commits using revision parser (supports HEAD~N)
+        let (from_oid, to_oid) = self.resolve_commits(&refdb, &odb).await?;
 
         // Read commits
         let from_data = odb.read(&from_oid).await?;
@@ -91,67 +115,26 @@ impl DiffCmd {
         Ok(())
     }
 
-    async fn resolve_commits(&self, refdb: &RefDatabase) -> Result<(Oid, Oid)> {
+    async fn resolve_commits(&self, refdb: &RefDatabase, odb: &ObjectDatabase) -> Result<(Oid, Oid)> {
         let from_oid = if let Some(from) = &self.from {
-            self.resolve_revision(refdb, from).await?
+            resolve_revision(from, refdb, odb).await
+                .context(format!("Cannot resolve from revision: {}", from))?
         } else {
-            // Use HEAD~1 (parent of HEAD)
-            let head = refdb.read("HEAD").await?;
-            let head_oid = match head.oid {
-                Some(oid) => oid,
-                None => {
-                    if let Some(target) = head.target {
-                        let target_ref = refdb.read(&target).await?;
-                        target_ref.oid.ok_or_else(|| anyhow::anyhow!("No commits yet"))?
-                    } else {
-                        anyhow::bail!("No commits yet");
-                    }
-                }
-            };
-            head_oid
+            // Default: Use HEAD
+            resolve_revision("HEAD", refdb, odb).await
+                .context("No commits yet")?
         };
 
         let to_oid = if let Some(to) = &self.to {
-            self.resolve_revision(refdb, to).await?
+            resolve_revision(to, refdb, odb).await
+                .context(format!("Cannot resolve to revision: {}", to))?
         } else {
-            // Use HEAD
-            let head = refdb.read("HEAD").await?;
-            match head.oid {
-                Some(oid) => oid,
-                None => {
-                    if let Some(target) = head.target {
-                        let target_ref = refdb.read(&target).await?;
-                        target_ref.oid.ok_or_else(|| anyhow::anyhow!("No commits yet"))?
-                    } else {
-                        anyhow::bail!("No commits yet");
-                    }
-                }
-            }
+            // Default: Use HEAD
+            resolve_revision("HEAD", refdb, odb).await
+                .context("No commits yet")?
         };
 
         Ok((from_oid, to_oid))
-    }
-
-    async fn resolve_revision(&self, refdb: &RefDatabase, revision: &str) -> Result<Oid> {
-        // Try as direct OID
-        if let Ok(oid) = Oid::from_hex(revision) {
-            return Ok(oid);
-        }
-
-        // Try as reference
-        let ref_result = refdb.read(revision).await;
-        match ref_result {
-            Ok(r) => r.oid.ok_or_else(|| anyhow::anyhow!("Reference {} has no commit", revision)),
-            Err(_) => {
-                // Try with refs/heads prefix
-                let with_prefix = format!("refs/heads/{}", revision);
-                let ref_result = refdb.read(&with_prefix).await;
-                match ref_result {
-                    Ok(r) => r.oid.ok_or_else(|| anyhow::anyhow!("Reference {} has no commit", revision)),
-                    Err(_) => anyhow::bail!("Cannot resolve revision: {}", revision),
-                }
-            }
-        }
     }
 
     fn find_repo_root(&self) -> Result<std::path::PathBuf> {

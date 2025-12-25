@@ -207,4 +207,4 @@ claudedocs/
 test-files/
 .env
 docs/
-dev-test/
+tests/

@@ -24,18 +24,22 @@
 pub mod audio;
 pub mod error;
 pub mod image;
+pub mod model3d;
 pub mod phash;
 pub mod psd;
 pub mod strategy;
+pub mod vfx;
 pub mod video;
 
 // Re-export commonly used types
 pub use audio::{AudioInfo, AudioParser, AudioTrack};
 pub use error::{MediaError, Result};
 pub use image::{ImageMetadata, ImageMetadataParser};
+pub use model3d::{BoundingBox, MaterialInfo, Model3DFormat, Model3DInfo, Model3DParser};
 pub use phash::{PerceptualHash, PerceptualHasher};
 pub use psd::{LayerInfo, PsdInfo, PsdParser};
 pub use strategy::{MediaType, MergeResult, MergeStrategy};
+pub use vfx::{VfxFormat, VfxInfo, VfxParser};
 pub use video::{TimelineSegment, TrackInfo, VideoInfo, VideoParser};
 
 #[cfg(test)]

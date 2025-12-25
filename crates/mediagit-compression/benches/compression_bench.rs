@@ -11,10 +11,13 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
 
-//! Compression benchmarks comparing Zstd vs Brotli
+//! Compression benchmarks comparing Zstd vs Brotli vs Adaptive
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use mediagit_compression::{BrotliCompressor, Compressor, CompressionLevel, ZstdCompressor};
+use mediagit_compression::{
+    adaptive::AdaptiveCompressor, BrotliCompressor, Compressor, CompressionLevel, ZstdCompressor,
+    PerObjectTypeCompressor, CompressionProfile, ObjectType, TypeAwareCompressor,
+};
 
 /// Generate test data with specified pattern
 fn generate_test_data(size: usize, pattern: &str) -> Vec<u8> {
@@ -192,11 +195,150 @@ fn benchmark_data_types(c: &mut Criterion) {
     group.finish();
 }
 
+fn benchmark_adaptive(c: &mut Criterion) {
+    let mut group = c.benchmark_group("adaptive_vs_static");
+
+    // Adaptive compressor
+    let adaptive = AdaptiveCompressor::new();
+
+    // Static compressors at default level
+    let zstd = ZstdCompressor::new(CompressionLevel::Default);
+    let brotli = BrotliCompressor::new(CompressionLevel::Default);
+
+    // Test 1: Tiny text (optimal: Brotli Best)
+    let tiny_text = black_box(generate_test_data(512, "text"));
+    group.bench_function("adaptive_tiny_text", |b| {
+        b.iter(|| adaptive.compress(&tiny_text))
+    });
+    group.bench_function("static_zstd_tiny_text", |b| {
+        b.iter(|| zstd.compress(&tiny_text))
+    });
+    group.bench_function("static_brotli_tiny_text", |b| {
+        b.iter(|| brotli.compress(&tiny_text))
+    });
+
+    // Test 2: Small JSON (optimal: Brotli Best)
+    let small_json = black_box(generate_test_data(50 * 1024, "json"));
+    group.bench_function("adaptive_small_json", |b| {
+        b.iter(|| adaptive.compress(&small_json))
+    });
+    group.bench_function("static_zstd_small_json", |b| {
+        b.iter(|| zstd.compress(&small_json))
+    });
+    group.bench_function("static_brotli_small_json", |b| {
+        b.iter(|| brotli.compress(&small_json))
+    });
+
+    // Test 3: Large text (optimal: Zstd Fast)
+    let large_text = black_box(generate_test_data(50 * 1024 * 1024, "text"));
+    group.bench_function("adaptive_large_text", |b| {
+        b.iter(|| adaptive.compress(&large_text))
+    });
+    group.bench_function("static_zstd_large_text", |b| {
+        b.iter(|| zstd.compress(&large_text))
+    });
+
+    // Test 4: Random data (optimal: Store)
+    let random = black_box(generate_test_data(10 * 1024, "random"));
+    group.bench_function("adaptive_random", |b| {
+        b.iter(|| adaptive.compress(&random))
+    });
+    group.bench_function("static_zstd_random", |b| {
+        b.iter(|| zstd.compress(&random))
+    });
+
+    // Test 5: Mixed workload (show overall benefit)
+    group.bench_function("adaptive_mixed_workload", |b| {
+        let tiny = generate_test_data(512, "text");
+        let small = generate_test_data(50 * 1024, "json");
+        let medium = generate_test_data(1024 * 1024, "text");
+        let random = generate_test_data(10 * 1024, "random");
+
+        b.iter(|| {
+            adaptive.compress(&tiny).unwrap();
+            adaptive.compress(&small).unwrap();
+            adaptive.compress(&medium).unwrap();
+            adaptive.compress(&random).unwrap();
+        })
+    });
+
+    group.bench_function("static_zstd_mixed_workload", |b| {
+        let tiny = generate_test_data(512, "text");
+        let small = generate_test_data(50 * 1024, "json");
+        let medium = generate_test_data(1024 * 1024, "text");
+        let random = generate_test_data(10 * 1024, "random");
+
+        b.iter(|| {
+            zstd.compress(&tiny).unwrap();
+            zstd.compress(&small).unwrap();
+            zstd.compress(&medium).unwrap();
+            zstd.compress(&random).unwrap();
+        })
+    });
+
+    group.finish();
+}
+
+fn benchmark_per_type_compressor(c: &mut Criterion) {
+    let mut group = c.benchmark_group("per_type_compressor");
+
+    // Compressors with different profiles
+    let balanced = PerObjectTypeCompressor::new();
+    let speed = PerObjectTypeCompressor::with_profile(CompressionProfile::Speed);
+    let max_compression = PerObjectTypeCompressor::with_profile(CompressionProfile::MaxCompression);
+
+    // Test data for different object types
+    let text_data = black_box(generate_test_data(10 * 1024, "text"));
+    let json_data = black_box(generate_test_data(10 * 1024, "json"));
+    let random_data = black_box(generate_test_data(10 * 1024, "random"));
+
+    // Balanced profile
+    group.bench_function("balanced_text", |b| {
+        b.iter(|| balanced.compress_typed(&text_data, ObjectType::Text))
+    });
+
+    group.bench_function("balanced_json", |b| {
+        b.iter(|| balanced.compress_typed(&json_data, ObjectType::Json))
+    });
+
+    // Speed profile
+    group.bench_function("speed_text", |b| {
+        b.iter(|| speed.compress_typed(&text_data, ObjectType::Text))
+    });
+
+    group.bench_function("speed_json", |b| {
+        b.iter(|| speed.compress_typed(&json_data, ObjectType::Json))
+    });
+
+    // Max compression profile
+    group.bench_function("max_compression_text", |b| {
+        b.iter(|| max_compression.compress_typed(&text_data, ObjectType::Text))
+    });
+
+    group.bench_function("max_compression_json", |b| {
+        b.iter(|| max_compression.compress_typed(&json_data, ObjectType::Json))
+    });
+
+    // Already compressed types (should store)
+    group.bench_function("balanced_jpeg_store", |b| {
+        b.iter(|| balanced.compress_typed(&random_data, ObjectType::Jpeg))
+    });
+
+    // Git objects (should use Zlib)
+    group.bench_function("balanced_git_blob", |b| {
+        b.iter(|| balanced.compress_typed(&text_data, ObjectType::GitBlob))
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     benchmark_compression,
     benchmark_decompression,
     benchmark_levels,
-    benchmark_data_types
+    benchmark_data_types,
+    benchmark_adaptive,
+    benchmark_per_type_compressor
 );
 criterion_main!(benches);

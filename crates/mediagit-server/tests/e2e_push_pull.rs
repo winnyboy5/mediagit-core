@@ -49,7 +49,7 @@ async fn init_test_repo(repo_path: &std::path::Path) -> anyhow::Result<()> {
     let oid = odb.write(ObjectType::Blob, content).await?;
 
     // Create initial ref
-    let refdb = RefDatabase::new(Arc::clone(&storage));
+    let refdb = RefDatabase::new(repo_path);
     let main_ref = Ref::new_direct("refs/heads/main".to_string(), oid);
     refdb.write(&main_ref).await?;
 
@@ -87,7 +87,7 @@ async fn test_e2e_push_workflow() {
     let new_oid = odb.write(ObjectType::Blob, new_content).await.unwrap();
 
     // Update client's main ref
-    let refdb = RefDatabase::new(Arc::clone(&storage));
+    let refdb = RefDatabase::new(&client_repo);
     let updated_ref = Ref::new_direct("refs/heads/main".to_string(), new_oid);
     refdb.write(&updated_ref).await.unwrap();
 
@@ -119,7 +119,7 @@ async fn test_e2e_push_workflow() {
 
     // Verify server repository was updated
     let server_storage: Arc<dyn StorageBackend> = Arc::new(LocalBackend::new(server_repo.clone()).await.unwrap());
-    let server_refdb = RefDatabase::new(Arc::clone(&server_storage));
+    let server_refdb = RefDatabase::new(&server_repo);
     let server_main = server_refdb.read("refs/heads/main").await.unwrap();
 
     if let Some(target_oid) = &server_main.oid {
@@ -149,7 +149,7 @@ async fn test_e2e_pull_workflow() {
     let server_oid = server_odb.write(ObjectType::Blob, server_content).await.unwrap();
 
     // Update server's main ref
-    let server_refdb = RefDatabase::new(Arc::clone(&server_storage));
+    let server_refdb = RefDatabase::new(&server_repo);
     let server_ref = Ref::new_direct("refs/heads/main".to_string(), server_oid);
     server_refdb.write(&server_ref).await.unwrap();
 
@@ -217,7 +217,7 @@ async fn test_e2e_push_then_pull_roundtrip() {
     let unique_oid = client1_odb.write(ObjectType::Blob, unique_content).await.unwrap();
 
     // Update client1's main ref
-    let client1_refdb = RefDatabase::new(Arc::clone(&client1_storage));
+    let client1_refdb = RefDatabase::new(&client1_repo);
     let client1_ref = Ref::new_direct("refs/heads/main".to_string(), unique_oid);
     client1_refdb.write(&client1_ref).await.unwrap();
 
@@ -285,7 +285,7 @@ async fn test_force_push() {
     let server_content = b"server divergent content";
     let server_oid = server_odb.write(ObjectType::Blob, server_content).await.unwrap();
 
-    let server_refdb = RefDatabase::new(Arc::clone(&server_storage));
+    let server_refdb = RefDatabase::new(&server_repo);
     let server_ref = Ref::new_direct("refs/heads/main".to_string(), server_oid);
     server_refdb.write(&server_ref).await.unwrap();
 
@@ -301,7 +301,7 @@ async fn test_force_push() {
     let client_content = b"client different content";
     let client_oid = client_odb.write(ObjectType::Blob, client_content).await.unwrap();
 
-    let client_refdb = RefDatabase::new(Arc::clone(&client_storage));
+    let client_refdb = RefDatabase::new(&client_repo);
     let client_ref = Ref::new_direct("refs/heads/main".to_string(), client_oid);
     client_refdb.write(&client_ref).await.unwrap();
 
@@ -327,7 +327,7 @@ async fn test_force_push() {
     assert!(response.success, "Force push should succeed");
 
     // Verify server was updated to client's version
-    let server_refdb = RefDatabase::new(Arc::clone(&server_storage));
+    let server_refdb = RefDatabase::new(&server_repo);
     let updated_ref = server_refdb.read("refs/heads/main").await.unwrap();
 
     if let Some(oid) = &updated_ref.oid {

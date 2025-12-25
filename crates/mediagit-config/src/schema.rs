@@ -464,13 +464,17 @@ pub struct RemoteConfig {
     /// Remote URL (e.g., "http://localhost:3000/repo-name")
     pub url: String,
 
-    /// Fetch refspec (optional)
+    /// Fetch URL (if different from url)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fetch: Option<String>,
 
-    /// Push refspec (optional)
+    /// Push URL (if different from url)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub push: Option<String>,
+
+    /// Default fetch flag
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_fetch: Option<bool>,
 }
 
 impl RemoteConfig {
@@ -480,7 +484,18 @@ impl RemoteConfig {
             url: url.into(),
             fetch: None,
             push: None,
+            default_fetch: Some(true),
         }
+    }
+
+    /// Get the effective fetch URL
+    pub fn fetch_url(&self) -> &str {
+        self.fetch.as_deref().unwrap_or(&self.url)
+    }
+
+    /// Get the effective push URL
+    pub fn push_url(&self) -> &str {
+        self.push.as_deref().unwrap_or(&self.url)
     }
 }
 

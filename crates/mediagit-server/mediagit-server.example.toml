@@ -1,0 +1,99 @@
+# MediaGit Server Configuration Example
+#
+# Copy this file to mediagit-server.toml and customize for your environment
+#
+# Security Levels:
+# - Development: All security features disabled (default)
+# - Staging: Auth + Rate limiting enabled, TLS optional
+# - Production: All security features enabled (auth + rate limiting + TLS)
+
+# ========================================
+# Basic Server Settings
+# ========================================
+
+# HTTP port (default: 3000)
+port = 3000
+
+# Host to bind to (default: "127.0.0.1")
+# Use "0.0.0.0" to listen on all interfaces
+host = "127.0.0.1"
+
+# Directory for storing repositories (default: "./repos")
+repos_dir = "./repos"
+
+# ========================================
+# Authentication Settings
+# ========================================
+
+# Enable JWT-based authentication (default: false)
+# IMPORTANT: Set to true for staging and production environments
+enable_auth = false
+
+# JWT secret key (REQUIRED when enable_auth = true)
+# Generate a strong random secret: openssl rand -base64 32
+# jwt_secret = "your-secret-key-here-change-this-in-production"
+
+# ========================================
+# Rate Limiting Settings
+# ========================================
+
+# Enable rate limiting to prevent DoS attacks (default: false)
+# IMPORTANT: Set to true for production environments
+enable_rate_limiting = false
+
+# Requests per second per IP address (default: 10)
+rate_limit_rps = 10
+
+# Burst size - allows temporary spikes (default: 20)
+# This allows up to 20 requests in a short burst
+rate_limit_burst = 20
+
+# ========================================
+# TLS/HTTPS Settings
+# ========================================
+
+# Enable HTTPS/TLS (default: false)
+# IMPORTANT: Set to true for production environments
+enable_tls = false
+
+# HTTPS port (default: 3443)
+tls_port = 3443
+
+# Use self-signed certificate for development (default: false)
+# WARNING: Never use self-signed certificates in production
+tls_self_signed = false
+
+# TLS certificate file path (PEM format)
+# Required when enable_tls = true and tls_self_signed = false
+# tls_cert_path = "/path/to/certificate.pem"
+
+# TLS private key file path (PEM format)
+# Required when enable_tls = true and tls_self_signed = false
+# tls_key_path = "/path/to/private-key.pem"
+
+# ========================================
+# Configuration Examples
+# ========================================
+
+# --- Development Configuration (INSECURE - for local testing only) ---
+# enable_auth = false
+# enable_rate_limiting = false
+# enable_tls = false
+
+# --- Staging Configuration (Moderate Security) ---
+# enable_auth = true
+# jwt_secret = "staging-secret-key-change-this"
+# enable_rate_limiting = true
+# rate_limit_rps = 10
+# rate_limit_burst = 20
+# enable_tls = false  # or true with self-signed cert
+
+# --- Production Configuration (Full Security) ---
+# enable_auth = true
+# jwt_secret = "production-secret-key-from-secure-storage"
+# enable_rate_limiting = true
+# rate_limit_rps = 100  # Adjust based on expected traffic
+# rate_limit_burst = 200
+# enable_tls = true
+# tls_cert_path = "/etc/mediagit/tls/cert.pem"
+# tls_key_path = "/etc/mediagit/tls/key.pem"

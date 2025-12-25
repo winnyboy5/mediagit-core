@@ -4,8 +4,9 @@ use console::style;
 use dialoguer::Confirm;
 use indicatif::{ProgressBar, ProgressStyle};
 use mediagit_storage::StorageBackend;
-use mediagit_versioning::{BranchManager, Commit, Oid, RefDatabase, RefType};
+use mediagit_versioning::{BranchManager, Commit, Oid, RefDatabase, RefType, Tree, FileMode};
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info, warn};
@@ -40,6 +41,14 @@ pub struct GcCmd {
     /// Verbose mode (detailed output)
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Repack loose objects into pack files
+    #[arg(long)]
+    pub repack: bool,
+
+    /// Maximum objects per pack file (0 = unlimited)
+    #[arg(long, default_value = "0")]
+    pub max_pack_size: usize,
 }
 
 /// Statistics collected during GC operation
@@ -113,11 +122,11 @@ struct GarbageCollector {
 }
 
 impl GarbageCollector {
-    fn new(storage: Arc<dyn StorageBackend>) -> Self {
+    fn new(storage: Arc<dyn StorageBackend>, root_path: &Path) -> Self {
         Self {
             storage: storage.clone(),
-            refdb: RefDatabase::new(storage.clone()),
-            branch_mgr: BranchManager::new(storage),
+            refdb: RefDatabase::new(root_path),
+            branch_mgr: BranchManager::new(root_path),
         }
     }
 
@@ -178,7 +187,8 @@ impl GarbageCollector {
             reachable.insert(*start_oid);
 
             // Try to read commit
-            let key = format!("objects/{}", start_oid.to_path());
+            // Use hex OID directly - LocalBackend adds "objects/" and sharding
+            let key = start_oid.to_hex();
             let data = match self.storage.get(&key).await {
                 Ok(d) => d,
                 Err(_) => {
@@ -189,12 +199,61 @@ impl GarbageCollector {
 
             // Try to deserialize as commit
             if let Ok(commit) = bincode::deserialize::<Commit>(&data) {
-                // Mark tree as reachable
-                reachable.insert(commit.tree);
+                // Traverse tree to mark tree + all blobs as reachable
+                self.traverse_tree(&commit.tree, reachable).await?;
 
                 // Traverse parent commits
                 for parent in &commit.parents {
                     self.traverse_commit_chain(parent, reachable).await?;
+                }
+            }
+
+            Ok(())
+        })
+    }
+
+    /// Traverse tree to mark all blobs and subtrees as reachable
+    fn traverse_tree<'a>(
+        &'a self,
+        tree_oid: &'a Oid,
+        reachable: &'a mut HashSet<Oid>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>> {
+        Box::pin(async move {
+            // Avoid re-traversing
+            if reachable.contains(tree_oid) {
+                return Ok(());
+            }
+
+            // Mark this tree as reachable
+            reachable.insert(*tree_oid);
+
+            // Read tree object
+            let key = tree_oid.to_hex();
+            let data = match self.storage.get(&key).await {
+                Ok(d) => d,
+                Err(_) => {
+                    debug!("Tree object {} not found", tree_oid);
+                    return Ok(());
+                }
+            };
+
+            // Deserialize tree
+            let tree = match bincode::deserialize::<Tree>(&data) {
+                Ok(t) => t,
+                Err(e) => {
+                    debug!("Failed to deserialize tree {}: {}", tree_oid, e);
+                    return Ok(());
+                }
+            };
+
+            // Mark all entries as reachable and traverse subtrees
+            for (_name, entry) in &tree.entries {
+                if entry.mode == FileMode::Directory {
+                    // Recursively traverse subtrees
+                    self.traverse_tree(&entry.oid, reachable).await?;
+                } else {
+                    // Mark blob as reachable
+                    reachable.insert(entry.oid);
                 }
             }
 
@@ -207,11 +266,14 @@ impl GarbageCollector {
         debug!("Enumerating all objects in storage");
         let mut objects = Vec::new();
 
-        let object_keys = self.storage.list_objects("objects/").await?;
+        // List all objects (LocalBackend already operates within objects/ directory)
+        let object_keys = self.storage.list_objects("").await?;
 
         for key in object_keys {
-            // Extract OID from key like "objects/ab/cd123..."
-            if let Some(path_part) = key.strip_prefix("objects/") {
+            // LocalBackend returns hex OIDs directly (no "objects/" prefix)
+            // The key is already the hex string
+            if true {
+                let path_part = &key;
                 let hex = path_part.replace('/', "");
                 if hex.len() == 64 {
                     if let Ok(oid) = Oid::from_hex(&hex) {
@@ -270,7 +332,8 @@ impl GarbageCollector {
         };
 
         for (oid, size) in objects {
-            let key = format!("objects/{}", oid.to_path());
+            // Use hex OID directly - LocalBackend adds "objects/" and sharding
+            let key = oid.to_hex();
 
             if dry_run {
                 if verbose {
@@ -325,9 +388,9 @@ impl GcCmd {
 
         // Load storage backend (assume local for now)
         let storage_path = repo_root.join(".mediagit");
-        let storage: Arc<dyn StorageBackend> = Arc::new(mediagit_storage::LocalBackend::new(storage_path).await?);
+        let storage: Arc<dyn StorageBackend> = Arc::new(mediagit_storage::LocalBackend::new(&storage_path).await?);
 
-        let gc = GarbageCollector::new(storage);
+        let gc = GarbageCollector::new(storage.clone(), &storage_path);
         let mut stats = GcStats::default();
 
         // Step 1: Build reachability graph
@@ -410,6 +473,47 @@ impl GcCmd {
                     stats.objects_deleted,
                     GcStats::format_bytes(stats.bytes_reclaimed)
                 );
+            }
+        }
+
+        // Step 5: Repack loose objects if requested
+        if self.repack {
+            if !self.quiet {
+                println!("\n{} Repacking loose objects...", style("→").cyan());
+            }
+
+            // Create ODB for repack operation
+            use mediagit_versioning::ObjectDatabase;
+            let odb = ObjectDatabase::new(storage.clone(), 1000);
+
+            match odb.repack(self.max_pack_size, !self.dry_run).await {
+                Ok(repack_stats) => {
+                    if !self.quiet {
+                        println!(
+                            "{} Packed {} objects into pack file ({} deltas)",
+                            style("✓").green(),
+                            repack_stats.objects_packed,
+                            repack_stats.delta_objects
+                        );
+                        println!(
+                            "   Pack size: {}, Saved: {}",
+                            GcStats::format_bytes(repack_stats.pack_size),
+                            GcStats::format_bytes(repack_stats.bytes_saved)
+                        );
+                        if repack_stats.loose_objects_removed > 0 {
+                            println!(
+                                "   Removed {} loose objects",
+                                repack_stats.loose_objects_removed
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    if !self.quiet {
+                        println!("{} Repack failed: {}", style("✗").red(), e);
+                    }
+                    stats.errors.push(format!("Repack error: {}", e));
+                }
             }
         }
 
