@@ -14,7 +14,10 @@ thiserror.workspace = true
 tracing.workspace = true
 
 # Image processing and metadata
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff", "webp"] }
+# Note: img_hash 3.2 has transpose 0.1.0 vulnerability (RUSTSEC-2023-0080)
+# Latest img_hash is 3.2.0 - no fix available yet
+# Using img_hash with image 0.23 for compatibility
+image = { version = "0.23", default-features = false, features = ["png", "jpeg", "tiff", "webp"] }
 kamadak-exif = "0.6"
 img_hash = "3.2"
 

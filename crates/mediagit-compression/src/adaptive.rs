@@ -155,7 +155,7 @@ impl PatternClass {
     }
 
     fn is_media_format(data: &[u8]) -> bool {
-        if data.len() < 12 {
+        if data.len() < 4 {
             return false;
         }
 
@@ -167,9 +167,9 @@ impl PatternClass {
             | [0x47, 0x49, 0x46, 0x38] // GIF
             | [0x42, 0x4d, _, _]       // BMP
             | [0x66, 0x74, 0x79, 0x70] // MP4/MOV (ftyp)
+            | [0x52, 0x49, 0x46, 0x46] // RIFF (WAV/AVI/WebP)
         ) || (data.len() >= 12 && &data[4..12] == b"ftypMSNV") // MP4
             || (data.len() >= 12 && &data[4..12] == b"ftypisom") // MP4
-            || (data.len() >= 4 && &data[0..4] == b"RIFF") // WAV/AVI/WebP
     }
 }
 

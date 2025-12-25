@@ -54,10 +54,14 @@ zstd = "0.13"
 brotli = "7.0"
 flate2 = "1.0"
 
+# Parallelization
+rayon = "1.10"
+
 # Observability
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json", "fmt", "ansi", "time"] }
-prometheus = "0.13"
+# Updated to 0.14+ to fix RUSTSEC-2024-0437 (protobuf recursion)
+prometheus = "0.14"
 
 # Testing
 tokio-test = "0.4"

@@ -24,7 +24,9 @@ pub use audit::{
 #[cfg(feature = "auth")]
 pub use auth::{
     ApiKey, ApiKeyAuth, AuthError, AuthLayer, AuthResult, AuthUser, Claims, JwtAuth,
-    TokenPair, User, UserId,
+    TokenPair, User, UserId, UserCredentials, CredentialsStore,
+    AuthService, RegisterRequest, LoginRequest, RefreshRequest, AuthResponse, UserInfo, ErrorResponse,
+    register_handler, login_handler, refresh_handler, me_handler, logout_handler,
     user::Role,
 };
 

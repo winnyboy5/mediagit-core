@@ -110,7 +110,7 @@ impl PushCmd {
             );
         }
 
-        // Validate local refs exist
+        // Validate local refs exist and read HEAD once
         let head = refdb.read("HEAD").await.context("Failed to read HEAD")?;
 
         if head.oid.is_none() && head.target.is_none() {
@@ -146,14 +146,13 @@ impl PushCmd {
 
         // Determine which refs to push
         let ref_to_push = if self.refspec.is_empty() {
-            // Default: push current branch
-            let head = refdb.read("HEAD").await?;
+            // Default: push current branch (reuse head from above)
             head.target.ok_or_else(|| {
                 anyhow::anyhow!("HEAD is detached, please specify a refspec")
             })?
         } else {
-            // Use first refspec (simplified - should parse properly)
-            self.refspec[0].clone()
+            // Use first refspec - normalize to handle both short and full ref names
+            mediagit_versioning::normalize_ref_name(&self.refspec[0])
         };
 
         // Read local ref OID
@@ -172,6 +171,18 @@ impl PushCmd {
 
         // Create ref update (convert Oid to hex string)
         let local_oid_str = local_oid.to_hex();
+
+        // Check if already up-to-date (avoid redundant push)
+        if let Some(ref remote) = remote_oid {
+            if remote == &local_oid_str {
+                if !self.quiet {
+                    println!("{} Already up to date", style("✓").green());
+                    println!("  {} {}", style("→").cyan(), &local_oid_str[..8]);
+                }
+                return Ok(());
+            }
+        }
+
         let update = mediagit_protocol::RefUpdate {
             name: ref_to_push.clone(),
             old_oid: remote_oid.clone(),

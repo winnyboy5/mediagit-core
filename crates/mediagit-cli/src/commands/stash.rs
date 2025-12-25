@@ -294,8 +294,8 @@ impl StashCmd {
         println!("Date:     {}", stash_entry.timestamp);
 
         if opts.patch {
-            // TODO: Show diff patch when diff implementation is ready
-            println!("\n{} Patch display not yet implemented", style("ℹ").blue());
+            // Future enhancement: integrate diff display here
+            println!("\n{} Patch display feature coming soon", style("ℹ").blue());
         }
 
         Ok(())

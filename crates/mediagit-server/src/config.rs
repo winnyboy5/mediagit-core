@@ -37,6 +37,25 @@ pub struct ServerConfig {
     /// Use self-signed certificate for development
     #[serde(default)]
     pub tls_self_signed: bool,
+
+    /// Enable authentication
+    #[serde(default)]
+    pub enable_auth: bool,
+
+    /// JWT secret key (required when enable_auth = true)
+    pub jwt_secret: Option<String>,
+
+    /// Enable rate limiting
+    #[serde(default)]
+    pub enable_rate_limiting: bool,
+
+    /// Rate limiting: requests per second
+    #[serde(default = "default_rate_limit_rps")]
+    pub rate_limit_rps: u64,
+
+    /// Rate limiting: burst size
+    #[serde(default = "default_rate_limit_burst")]
+    pub rate_limit_burst: u32,
 }
 
 fn default_port() -> u16 {
@@ -55,6 +74,14 @@ fn default_repos_dir() -> PathBuf {
     PathBuf::from("./repos")
 }
 
+fn default_rate_limit_rps() -> u64 {
+    10 // 10 requests per second
+}
+
+fn default_rate_limit_burst() -> u32 {
+    20 // Allow bursts up to 20 requests
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -66,6 +93,11 @@ impl Default for ServerConfig {
             tls_cert_path: None,
             tls_key_path: None,
             tls_self_signed: false,
+            enable_auth: false,
+            jwt_secret: None,
+            enable_rate_limiting: false,
+            rate_limit_rps: default_rate_limit_rps(),
+            rate_limit_burst: default_rate_limit_burst(),
         }
     }
 }

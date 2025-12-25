@@ -286,16 +286,140 @@ impl MergeCmd {
         if !self.quiet {
             println!("{} Aborting merge...", style("✗").red());
         }
-        // TODO: Implement merge state cleanup
-        anyhow::bail!("Merge abort not yet implemented")
+
+        let repo_root = self.find_repo_root()?;
+        let mediagit_dir = repo_root.join(".mediagit");
+
+        // Clean up merge state files
+        let merge_head = mediagit_dir.join("MERGE_HEAD");
+        let merge_msg = mediagit_dir.join("MERGE_MSG");
+        let merge_mode = mediagit_dir.join("MERGE_MODE");
+
+        let mut cleaned = 0;
+
+        if merge_head.exists() {
+            std::fs::remove_file(&merge_head)
+                .context("Failed to remove MERGE_HEAD")?;
+            cleaned += 1;
+        }
+
+        if merge_msg.exists() {
+            std::fs::remove_file(&merge_msg)
+                .context("Failed to remove MERGE_MSG")?;
+            cleaned += 1;
+        }
+
+        if merge_mode.exists() {
+            std::fs::remove_file(&merge_mode)
+                .context("Failed to remove MERGE_MODE")?;
+            cleaned += 1;
+        }
+
+        if !self.quiet {
+            println!(
+                "{} Merge aborted. Cleaned up {} state file(s).",
+                style("✓").green(),
+                cleaned
+            );
+        }
+
+        Ok(())
     }
 
     async fn continue_merge_process(&self) -> Result<()> {
         if !self.quiet {
             println!("{} Continuing merge...", style("→").cyan());
         }
-        // TODO: Implement merge continuation after conflict resolution
-        anyhow::bail!("Merge continue not yet implemented")
+
+        let repo_root = self.find_repo_root()?;
+        let mediagit_dir = repo_root.join(".mediagit");
+
+        // Check if merge is in progress
+        let merge_head_path = mediagit_dir.join("MERGE_HEAD");
+        if !merge_head_path.exists() {
+            anyhow::bail!("No merge in progress");
+        }
+
+        // Read MERGE_HEAD to get the OID being merged
+        let merge_head_content = std::fs::read_to_string(&merge_head_path)
+            .context("Failed to read MERGE_HEAD")?;
+        let merge_oid = mediagit_versioning::Oid::from_hex(merge_head_content.trim())?;
+
+        // Read MERGE_MSG if it exists
+        let merge_msg_path = mediagit_dir.join("MERGE_MSG");
+        let message = if merge_msg_path.exists() {
+            std::fs::read_to_string(&merge_msg_path)
+                .context("Failed to read MERGE_MSG")?
+        } else {
+            format!("Merge commit {}", merge_oid.to_hex())
+        };
+
+        // Create commit with resolved changes
+        if !self.quiet {
+            println!("{} Creating merge commit...", style("→").cyan());
+        }
+
+        // Load index and create tree
+        let index = mediagit_versioning::Index::load(&repo_root)?;
+        if index.is_empty() {
+            anyhow::bail!("No changes staged. Use 'add' to stage resolved files.");
+        }
+
+        let storage = Arc::new(mediagit_storage::LocalBackend::new(&mediagit_dir).await?);
+        let odb = mediagit_versioning::ObjectDatabase::with_smart_compression(storage, 1000);
+
+        let mut tree = mediagit_versioning::Tree::new();
+        for entry in index.entries() {
+            tree.add_entry(mediagit_versioning::TreeEntry::new(
+                entry.path.to_string_lossy().to_string(),
+                mediagit_versioning::FileMode::Regular,
+                entry.oid,
+            ));
+        }
+        let tree_oid = tree.write(&odb).await?;
+
+        // Get current HEAD
+        let refdb = mediagit_versioning::RefDatabase::new(&mediagit_dir);
+        let current_oid = refdb.resolve("HEAD").await?;
+
+        // Create merge commit with two parents
+        let signature = mediagit_versioning::Signature {
+            name: "MediaGit User".to_string(),
+            email: "user@mediagit.local".to_string(),
+            timestamp: chrono::Utc::now(),
+        };
+
+        let commit = mediagit_versioning::Commit {
+            tree: tree_oid,
+            parents: vec![current_oid, merge_oid],
+            author: signature.clone(),
+            committer: signature,
+            message,
+        };
+
+        let commit_oid = commit.write(&odb).await?;
+
+        // Update HEAD (force=false, safe update)
+        refdb.update("HEAD", commit_oid, false).await?;
+
+        // Clean up merge state after successful commit
+        if merge_head_path.exists() {
+            std::fs::remove_file(&merge_head_path).ok();
+        }
+        if merge_msg_path.exists() {
+            std::fs::remove_file(&merge_msg_path).ok();
+        }
+        let merge_mode = mediagit_dir.join("MERGE_MODE");
+        if merge_mode.exists() {
+            std::fs::remove_file(&merge_mode).ok();
+        }
+
+        if !self.quiet {
+            println!("{} Merge continued successfully", style("✓").green());
+            println!("  Created merge commit: {}", commit_oid.to_hex());
+        }
+
+        Ok(())
     }
 
     fn find_repo_root(&self) -> Result<std::path::PathBuf> {

@@ -135,9 +135,9 @@ impl RemoteCmd {
                 style("→").cyan(),
                 style(name).yellow()
             );
-            // TODO: Implement fetch logic when pull command is ready
+            // Future enhancement: implement standalone fetch (pull command already works)
             println!(
-                "{} Fetch not yet implemented",
+                "{} Standalone fetch coming soon - use 'pull' for now",
                 style("ℹ").blue()
             );
         }

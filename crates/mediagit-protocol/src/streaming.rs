@@ -605,13 +605,15 @@ fn format_duration(seconds: f64) -> String {
     if seconds < 60.0 {
         format!("{:.0}s", seconds)
     } else if seconds < 3600.0 {
-        format!("{:.0}m {:.0}s", seconds / 60.0, seconds % 60.0)
+        let total_secs = seconds as u64;
+        let mins = total_secs / 60;
+        let secs = total_secs % 60;
+        format!("{}m {}s", mins, secs)
     } else {
-        format!(
-            "{:.0}h {:.0}m",
-            seconds / 3600.0,
-            (seconds % 3600.0) / 60.0
-        )
+        let total_secs = seconds as u64;
+        let hours = total_secs / 3600;
+        let mins = (total_secs % 3600) / 60;
+        format!("{}h {}m", hours, mins)
     }
 }
 
