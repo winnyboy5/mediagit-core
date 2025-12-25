@@ -772,6 +772,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // Requires live Azure credentials to create container
     async fn test_sas_token_backend_creation() {
         let result = AzureBackend::with_sas_token(
             "testaccount",
@@ -787,6 +788,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // Requires live Azure credentials to create container
     async fn test_account_key_backend_creation() {
         let result = AzureBackend::with_account_key(
             "testaccount",
@@ -802,6 +804,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // Requires live Azure credentials to create container
     async fn test_connection_string_backend_creation() {
         let conn_str = "DefaultEndpointsProtocol=https;AccountName=testaccount;AccountKey=test==;EndpointSuffix=core.windows.net";
         let result = AzureBackend::with_connection_string("testcontainer", conn_str).await;

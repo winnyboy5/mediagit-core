@@ -5,8 +5,9 @@
 //! # Features
 //! - JWT token generation and validation
 //! - API key authentication
-//! - User management
+//! - User management with password hashing
 //! - Permission-based access control
+//! - HTTP handlers for auth endpoints
 //!
 //! # Example
 //! ```no_run
@@ -24,11 +25,19 @@ pub mod jwt;
 pub mod apikey;
 pub mod user;
 pub mod middleware;
+pub mod credentials;
+pub mod handlers;
 
 pub use jwt::{JwtAuth, Claims, TokenPair};
 pub use apikey::{ApiKeyAuth, ApiKey};
 pub use user::{User, UserId};
 pub use middleware::{AuthLayer, AuthUser, auth_middleware};
+pub use credentials::{UserCredentials, CredentialsStore};
+pub use handlers::{
+    AuthService, RegisterRequest, LoginRequest, RefreshRequest,
+    AuthResponse, UserInfo, ErrorResponse,
+    register_handler, login_handler, refresh_handler, me_handler, logout_handler,
+};
 
 use thiserror::Error;
 

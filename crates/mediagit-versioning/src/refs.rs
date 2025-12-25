@@ -22,7 +22,7 @@
 
 use crate::Oid;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use tracing::debug;
 
 /// Ref types in the reference database
@@ -238,17 +238,86 @@ impl Ref {
         Ok(())
     }
 
-    /// Serialize reference to bytes
+    /// Serialize reference to bytes (plain text format)
+    ///
+    /// Format:
+    /// - Direct ref: <hex-oid>\n
+    /// - Symbolic ref: ref: <target>\n
     pub fn serialize(&self) -> anyhow::Result<Vec<u8>> {
-        bincode::serialize(self)
-            .map_err(|e| anyhow::anyhow!("Ref serialization failed: {}", e))
+        let content = match self.ref_type {
+            RefType::Direct => {
+                let oid = self.oid.ok_or_else(|| anyhow::anyhow!("Direct ref missing OID"))?;
+                format!("{}\n", oid.to_hex())
+            }
+            RefType::Symbolic => {
+                let target = self.target.as_ref().ok_or_else(|| anyhow::anyhow!("Symbolic ref missing target"))?;
+                format!("ref: {}\n", target)
+            }
+        };
+        Ok(content.into_bytes())
     }
 
-    /// Deserialize reference from bytes
+    /// Deserialize reference from bytes (plain text format)
+    ///
+    /// Supports both:
+    /// - Direct ref: <hex-oid>\n
+    /// - Symbolic ref: ref: <target>\n
     pub fn deserialize(data: &[u8]) -> anyhow::Result<Self> {
-        bincode::deserialize(data)
-            .map_err(|e| anyhow::anyhow!("Ref deserialization failed: {}", e))
+        use crate::Oid;
+
+        let content = std::str::from_utf8(data)
+            .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in ref file: {}", e))?
+            .trim();
+
+        if let Some(target) = content.strip_prefix("ref: ") {
+            // Symbolic reference
+            Ok(Self {
+                name: String::new(), // Name will be set by caller
+                ref_type: RefType::Symbolic,
+                oid: None,
+                target: Some(target.to_string()),
+            })
+        } else {
+            // Direct reference - parse as hex OID
+            let oid = Oid::from_hex(content)
+                .map_err(|e| anyhow::anyhow!("Invalid OID in ref file: {}", e))?;
+            Ok(Self {
+                name: String::new(), // Name will be set by caller
+                ref_type: RefType::Direct,
+                oid: Some(oid),
+                target: None,
+            })
+        }
     }
+}
+
+/// Recursively collect all reference files in a directory
+async fn collect_refs_recursive(
+    dir_path: &std::path::Path,
+    refs_root: &std::path::Path,
+    refs: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    use tokio::fs;
+
+    let mut entries = fs::read_dir(dir_path).await?;
+
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        let file_type = entry.file_type().await?;
+
+        if file_type.is_file() {
+            // Convert absolute path to ref name: refs/heads/feat/bunny-audio
+            if let Ok(rel) = path.strip_prefix(refs_root) {
+                let ref_name = format!("refs/{}", rel.display());
+                refs.push(ref_name);
+            }
+        } else if file_type.is_dir() {
+            // Recursively scan subdirectories
+            Box::pin(collect_refs_recursive(&path, refs_root, refs)).await?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Reference database providing ref management
@@ -263,13 +332,11 @@ impl Ref {
 ///
 /// ```no_run
 /// use mediagit_versioning::{RefDatabase, Ref, Oid};
-/// use mediagit_storage::LocalBackend;
-/// use std::sync::Arc;
+/// use std::path::PathBuf;
 ///
 /// #[tokio::main]
 /// async fn main() -> anyhow::Result<()> {
-///     let storage = Arc::new(LocalBackend::new("/tmp/mediagit")?);
-///     let refdb = RefDatabase::new(storage);
+///     let refdb = RefDatabase::new(PathBuf::from("/tmp/mediagit"));
 ///
 ///     // Create a branch reference
 ///     let oid = Oid::hash(b"commit");
@@ -288,7 +355,8 @@ impl Ref {
 /// }
 /// ```
 pub struct RefDatabase {
-    storage: Arc<dyn mediagit_storage::StorageBackend>,
+    /// Root path (e.g., .mediagit directory)
+    root: PathBuf,
 }
 
 impl RefDatabase {
@@ -296,15 +364,17 @@ impl RefDatabase {
     ///
     /// # Arguments
     ///
-    /// * `storage` - Storage backend for persisting refs
-    pub fn new(storage: Arc<dyn mediagit_storage::StorageBackend>) -> Self {
-        Self { storage }
+    /// * `root` - Root directory path (e.g., .mediagit)
+    pub fn new<P: AsRef<Path>>(root: P) -> Self {
+        Self {
+            root: root.as_ref().to_path_buf(),
+        }
     }
 
-    /// Get the ref file path for a reference name
-    fn ref_path(&self, ref_name: &str) -> String {
-        // Ref names are already in full form like "refs/heads/main" or "HEAD"
-        ref_name.to_string()
+    /// Get the absolute file path for a reference name
+    fn ref_path(&self, ref_name: &str) -> PathBuf {
+        // Refs are stored at: .mediagit/HEAD or .mediagit/refs/heads/main
+        self.root.join(ref_name)
     }
 
     /// Write a reference to the database
@@ -312,6 +382,9 @@ impl RefDatabase {
     /// Performs validation and atomically stores the reference.
     /// For symbolic refs, also validates that the target is valid.
     pub async fn write(&self, r: &Ref) -> anyhow::Result<()> {
+        use tokio::fs;
+        use tokio::io::AsyncWriteExt;
+
         r.validate()?;
 
         debug!(
@@ -323,7 +396,19 @@ impl RefDatabase {
         let data = r.serialize()?;
         let path = self.ref_path(&r.name);
 
-        self.storage.put(&path, &data).await?;
+        // Create parent directory if needed
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        // Write atomically using temp file + rename
+        let temp_path = path.with_extension("tmp");
+        let mut file = fs::File::create(&temp_path).await?;
+        file.write_all(&data).await?;
+        file.sync_all().await?;
+        drop(file);
+
+        fs::rename(&temp_path, &path).await?;
 
         debug!(ref_name = %r.name, "Reference written successfully");
         Ok(())
@@ -339,12 +424,16 @@ impl RefDatabase {
     ///
     /// The reference if it exists
     pub async fn read(&self, ref_name: &str) -> anyhow::Result<Ref> {
+        use tokio::fs;
+
         let path = self.ref_path(ref_name);
 
-        match self.storage.get(&path).await {
+        match fs::read(&path).await {
             Ok(data) => {
                 debug!(ref_name = %ref_name, "Read reference");
-                Ref::deserialize(&data)
+                let mut r = Ref::deserialize(&data)?;
+                r.name = ref_name.to_string(); // Set name from the file path
+                Ok(r)
             }
             Err(_) => {
                 anyhow::bail!("Reference not found: {}", ref_name)
@@ -354,8 +443,10 @@ impl RefDatabase {
 
     /// Check if a reference exists
     pub async fn exists(&self, ref_name: &str) -> anyhow::Result<bool> {
+        use tokio::fs;
+
         let path = self.ref_path(ref_name);
-        Ok(self.storage.exists(&path).await?)
+        Ok(fs::metadata(&path).await.is_ok())
     }
 
     /// Delete a reference
@@ -364,10 +455,12 @@ impl RefDatabase {
     ///
     /// * `ref_name` - Name of the reference to delete
     pub async fn delete(&self, ref_name: &str) -> anyhow::Result<()> {
+        use tokio::fs;
+
         debug!(ref_name = %ref_name, "Deleting reference");
 
         let path = self.ref_path(ref_name);
-        self.storage.delete(&path).await?;
+        fs::remove_file(&path).await?;
 
         debug!(ref_name = %ref_name, "Reference deleted");
         Ok(())
@@ -383,23 +476,28 @@ impl RefDatabase {
     ///
     /// Vector of reference names in the namespace
     pub async fn list(&self, namespace: &str) -> anyhow::Result<Vec<String>> {
-        let prefix = format!("refs/{}/", namespace);
+        use tokio::fs;
+
+        let prefix = format!("refs/{}", namespace);
+        let dir_path = self.root.join(&prefix);
+
         debug!(namespace = %namespace, "Listing references");
 
-        match self.storage.list_objects(&prefix).await {
-            Ok(names) => {
-                debug!(
-                    namespace = %namespace,
-                    count = names.len(),
-                    "Listed references"
-                );
-                Ok(names)
-            }
-            Err(_) => {
-                // Namespace doesn't exist yet
-                Ok(Vec::new())
-            }
+        if !fs::metadata(&dir_path).await.is_ok() {
+            return Ok(Vec::new());
         }
+
+        let mut refs = Vec::new();
+        let refs_root = self.root.join("refs");
+        collect_refs_recursive(&dir_path, &refs_root, &mut refs).await?;
+
+        debug!(
+            namespace = %namespace,
+            count = refs.len(),
+            "Listed references"
+        );
+
+        Ok(refs)
     }
 
     /// List all branches
@@ -516,6 +614,42 @@ impl RefDatabase {
         Ok(())
     }
 }
+
+/// Normalize a ref name to its full path
+///
+/// Handles both short branch names (e.g., "main") and full ref paths (e.g., "refs/heads/main").
+/// This ensures consistent ref handling across push, pull, and other operations.
+///
+/// # Arguments
+///
+/// * `input` - The ref name to normalize (short or full path)
+///
+/// # Returns
+///
+/// The full ref path (e.g., "refs/heads/main")
+///
+/// # Examples
+///
+/// ```
+/// use mediagit_versioning::normalize_ref_name;
+///
+/// assert_eq!(normalize_ref_name("main"), "refs/heads/main");
+/// assert_eq!(normalize_ref_name("refs/heads/main"), "refs/heads/main");
+/// assert_eq!(normalize_ref_name("feature/auth"), "refs/heads/feature/auth");
+/// ```
+pub fn normalize_ref_name(input: &str) -> String {
+    if input.starts_with("refs/") {
+        // Already a full ref path
+        input.to_string()
+    } else if input == "HEAD" {
+        // HEAD is special - don't prefix it
+        input.to_string()
+    } else {
+        // Assume it's a branch name - prefix with refs/heads/
+        format!("refs/heads/{}", input)
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -636,7 +770,8 @@ mod tests {
         let r = Ref::new_direct("refs/heads/main".to_string(), oid);
 
         let serialized = r.serialize().unwrap();
-        let deserialized = Ref::deserialize(&serialized).unwrap();
+        let mut deserialized = Ref::deserialize(&serialized).unwrap();
+        deserialized.name = r.name.clone(); // Restore name as done in RefDatabase::read
 
         assert_eq!(r, deserialized);
     }
@@ -646,18 +781,17 @@ mod tests {
         let r = Ref::new_symbolic("HEAD".to_string(), "refs/heads/main".to_string());
 
         let serialized = r.serialize().unwrap();
-        let deserialized = Ref::deserialize(&serialized).unwrap();
+        let mut deserialized = Ref::deserialize(&serialized).unwrap();
+        deserialized.name = r.name.clone(); // Restore name as done in RefDatabase::read
 
         assert_eq!(r, deserialized);
     }
 
     #[tokio::test]
     async fn test_refdb_write_and_read() {
-        use mediagit_storage::mock::MockBackend;
-        use std::sync::Arc;
 
-        let storage = Arc::new(MockBackend::new());
-        let refdb = RefDatabase::new(storage);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let refdb = RefDatabase::new(temp_dir.path());
 
         let oid = Oid::hash(b"commit");
         let r = Ref::new_direct("refs/heads/main".to_string(), oid);
@@ -670,11 +804,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_refdb_symbolic_ref() {
-        use mediagit_storage::mock::MockBackend;
-        use std::sync::Arc;
 
-        let storage = Arc::new(MockBackend::new());
-        let refdb = RefDatabase::new(storage);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let refdb = RefDatabase::new(temp_dir.path());
 
         let oid = Oid::hash(b"commit");
         let branch = Ref::new_direct("refs/heads/main".to_string(), oid);
@@ -690,11 +822,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_refdb_resolve() {
-        use mediagit_storage::mock::MockBackend;
-        use std::sync::Arc;
 
-        let storage = Arc::new(MockBackend::new());
-        let refdb = RefDatabase::new(storage);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let refdb = RefDatabase::new(temp_dir.path());
 
         let oid = Oid::hash(b"commit");
         let branch = Ref::new_direct("refs/heads/main".to_string(), oid);
@@ -709,11 +839,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_refdb_delete() {
-        use mediagit_storage::mock::MockBackend;
-        use std::sync::Arc;
 
-        let storage = Arc::new(MockBackend::new());
-        let refdb = RefDatabase::new(storage);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let refdb = RefDatabase::new(temp_dir.path());
 
         let oid = Oid::hash(b"commit");
         let r = Ref::new_direct("refs/heads/main".to_string(), oid);
@@ -728,11 +856,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_refdb_exists() {
-        use mediagit_storage::mock::MockBackend;
-        use std::sync::Arc;
 
-        let storage = Arc::new(MockBackend::new());
-        let refdb = RefDatabase::new(storage);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let refdb = RefDatabase::new(temp_dir.path());
 
         assert!(!refdb.exists("refs/heads/main").await.unwrap());
 
@@ -745,11 +871,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_refdb_update() {
-        use mediagit_storage::mock::MockBackend;
-        use std::sync::Arc;
 
-        let storage = Arc::new(MockBackend::new());
-        let refdb = RefDatabase::new(storage);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let refdb = RefDatabase::new(temp_dir.path());
 
         let oid1 = Oid::hash(b"commit1");
         let r = Ref::new_direct("refs/heads/main".to_string(), oid1);
@@ -765,11 +889,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_refdb_update_symbolic() {
-        use mediagit_storage::mock::MockBackend;
-        use std::sync::Arc;
 
-        let storage = Arc::new(MockBackend::new());
-        let refdb = RefDatabase::new(storage);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let refdb = RefDatabase::new(temp_dir.path());
 
         let oid = Oid::hash(b"commit");
         let branch = Ref::new_direct("refs/heads/main".to_string(), oid);
@@ -790,11 +912,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_refdb_list_branches() {
-        use mediagit_storage::mock::MockBackend;
-        use std::sync::Arc;
 
-        let storage = Arc::new(MockBackend::new());
-        let refdb = RefDatabase::new(storage);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let refdb = RefDatabase::new(temp_dir.path());
 
         let oid = Oid::hash(b"commit");
 
@@ -812,11 +932,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_refdb_list_tags() {
-        use mediagit_storage::mock::MockBackend;
-        use std::sync::Arc;
 
-        let storage = Arc::new(MockBackend::new());
-        let refdb = RefDatabase::new(storage);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let refdb = RefDatabase::new(temp_dir.path());
 
         let oid = Oid::hash(b"commit");
 
@@ -834,11 +952,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_refdb_circular_reference_detection() {
-        use mediagit_storage::mock::MockBackend;
-        use std::sync::Arc;
 
-        let storage = Arc::new(MockBackend::new());
-        let refdb = RefDatabase::new(storage);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let refdb = RefDatabase::new(temp_dir.path());
 
         // Create circular reference: HEAD -> main, main -> develop, develop -> HEAD
         let head = Ref::new_symbolic("HEAD".to_string(), "refs/heads/main".to_string());

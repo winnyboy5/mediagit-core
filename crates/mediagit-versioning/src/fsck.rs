@@ -46,6 +46,7 @@
 //! ```
 
 use crate::{Commit, Oid, Ref, RefType};
+use crate::odb::ObjectDatabase;
 use mediagit_storage::StorageBackend;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -289,14 +290,21 @@ impl FsckOptions {
 
 /// FSCK integrity checker
 pub struct FsckChecker {
-    /// Storage backend
+    /// Storage backend for file operations
     storage: Arc<dyn StorageBackend>,
+    /// Object database for reading and verifying objects
+    odb: Arc<ObjectDatabase>,
 }
 
 impl FsckChecker {
     /// Create a new FSCK checker
     pub fn new(storage: Arc<dyn StorageBackend>) -> Self {
-        Self { storage }
+        // Create ODB with smart compression to handle all compression types
+        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 10_000_000); // 10MB cache
+        Self {
+            storage,
+            odb: Arc::new(odb),
+        }
     }
 
     /// Run comprehensive integrity check
@@ -394,55 +402,55 @@ impl FsckChecker {
 
     /// Verify a single object's integrity
     async fn verify_object(&self, oid: &Oid, report: &mut FsckReport) -> anyhow::Result<()> {
-        let key = format!("objects/{}", oid.to_path());
-
-        // Check if object exists
-        if !self.storage.exists(&key).await? {
-            report.add_issue(
-                FsckIssue::new(
-                    IssueSeverity::Error,
-                    IssueCategory::MissingObject,
-                    format!("Object file missing: {}", oid),
-                )
-                .with_oid(*oid),
-            );
-            return Ok(());
-        }
-
-        // Read object data
-        let data = match self.storage.get(&key).await {
-            Ok(d) => d,
-            Err(e) => {
-                report.add_issue(
-                    FsckIssue::new(
-                        IssueSeverity::Error,
-                        IssueCategory::InvalidFormat,
-                        format!("Failed to read object {}: {}", oid, e),
-                    )
-                    .with_oid(*oid),
-                );
-                return Ok(());
+        // Use ObjectDatabase's read method, which handles:
+        // - Decompression (smart, zlib, or uncompressed)
+        // - Checksum verification (returns error if checksum doesn't match)
+        // - Chunk reconstruction if needed
+        match self.odb.read(oid).await {
+            Ok(_data) => {
+                // Object read successfully, checksum verified by ODB
+                debug!(oid = %oid, "Object verified successfully");
+                Ok(())
             }
-        };
+            Err(e) => {
+                let error_msg = e.to_string();
 
-        // Verify checksum
-        let computed_oid = Oid::hash(&data);
-        if computed_oid != *oid {
-            report.add_issue(
-                FsckIssue::new(
-                    IssueSeverity::Error,
-                    IssueCategory::ChecksumMismatch,
-                    format!(
-                        "Checksum mismatch: expected {}, computed {}",
-                        oid, computed_oid
-                    ),
-                )
-                .with_oid(*oid)
-                .repairable(),
-            );
+                // Classify the error based on error message
+                if error_msg.contains("integrity check failed") {
+                    // Checksum mismatch - object is corrupt
+                    report.add_issue(
+                        FsckIssue::new(
+                            IssueSeverity::Error,
+                            IssueCategory::ChecksumMismatch,
+                            format!("Checksum mismatch: {}", e),
+                        )
+                        .with_oid(*oid)
+                        .repairable(),
+                    );
+                } else if error_msg.contains("not found") || error_msg.contains("No such file") {
+                    // Object file is missing
+                    report.add_issue(
+                        FsckIssue::new(
+                            IssueSeverity::Error,
+                            IssueCategory::MissingObject,
+                            format!("Object file missing: {}", oid),
+                        )
+                        .with_oid(*oid),
+                    );
+                } else {
+                    // Other error (decompression failure, invalid format, etc.)
+                    report.add_issue(
+                        FsckIssue::new(
+                            IssueSeverity::Error,
+                            IssueCategory::InvalidFormat,
+                            format!("Failed to read object {}: {}", oid, e),
+                        )
+                        .with_oid(*oid),
+                    );
+                }
+                Ok(())
+            }
         }
-
-        Ok(())
     }
 
     /// Validate all references
@@ -689,17 +697,15 @@ impl FsckChecker {
         // List all objects from storage
         // This assumes the storage backend provides a way to list objects
         // For now, we'll scan the objects directory structure
-        let object_keys = self.storage.list_objects("objects/").await?;
+        // List all objects (LocalBackend already operates within objects/ directory)
+        let object_keys = self.storage.list_objects("").await?;
 
         for key in object_keys {
-            // Extract OID from key like "objects/ab/cd123..."
-            if let Some(path_part) = key.strip_prefix("objects/") {
-                // Reconstruct hex from "{ab}/{cd123...}" format
-                let hex = path_part.replace('/', "");
-                if hex.len() == 64 {
-                    if let Ok(oid) = Oid::from_hex(&hex) {
-                        objects.push(oid);
-                    }
+            // LocalBackend returns hex OIDs directly (no "objects/" prefix)
+            // The key is already the hex string
+            if key.len() == 64 {
+                if let Ok(oid) = Oid::from_hex(&key) {
+                    objects.push(oid);
                 }
             }
         }

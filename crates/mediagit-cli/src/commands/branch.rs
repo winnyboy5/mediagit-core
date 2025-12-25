@@ -3,9 +3,47 @@ use clap::{Parser, Subcommand};
 use mediagit_storage::LocalBackend;
 use mediagit_versioning::{Ref, RefDatabase};
 use std::sync::Arc;
+use std::time::Instant;
+use crate::progress::{ProgressTracker, OperationStats};
 
 /// Manage branches
+///
+/// Create, list, rename, and delete branches. Branches are lightweight references
+/// to commits that allow parallel development workflows.
 #[derive(Parser, Debug)]
+#[command(after_help = "EXAMPLES:
+    # List all local branches
+    mediagit branch list
+
+    # List all branches with verbose output
+    mediagit branch list -v
+
+    # Create a new branch
+    mediagit branch create feature-branch
+
+    # Create branch from specific commit
+    mediagit branch create hotfix abc123
+
+    # Switch to a branch
+    mediagit branch switch main
+
+    # Create and switch to new branch
+    mediagit branch switch -c feature-branch
+
+    # Rename current branch
+    mediagit branch rename new-name
+
+    # Rename specific branch
+    mediagit branch rename old-name new-name
+
+    # Delete a branch
+    mediagit branch delete feature-branch
+
+    # Show branch information
+    mediagit branch show
+
+SEE ALSO:
+    mediagit-checkout(1), mediagit-merge(1), mediagit-tag(1)")]
 pub struct BranchCmd {
     #[command(subcommand)]
     pub subcommand: BranchSubcommand,
@@ -240,13 +278,13 @@ impl BranchCmd {
         use crate::output;
 
         let repo_root = self.find_repo_root()?;
-        let storage_path = repo_root.join(".mediagit/objects");
-        let storage: Arc<dyn mediagit_storage::StorageBackend> =
+        let storage_path = repo_root.join(".mediagit");
+        let _storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
-        let refdb = RefDatabase::new(storage);
+        let refdb = RefDatabase::new(&storage_path);
 
-        // List local branches from refs/heads
-        let branches = refdb.list("refs/heads").await?;
+        // List local branches from refs/heads (pass namespace only, not full path)
+        let branches = refdb.list("heads").await?;
 
         if branches.is_empty() {
             if !opts.quiet {
@@ -298,10 +336,10 @@ impl BranchCmd {
         use crate::output;
 
         let repo_root = self.find_repo_root()?;
-        let storage_path = repo_root.join(".mediagit/objects");
-        let storage: Arc<dyn mediagit_storage::StorageBackend> =
+        let storage_path = repo_root.join(".mediagit");
+        let _storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
-        let refdb = RefDatabase::new(storage);
+        let refdb = RefDatabase::new(&storage_path);
 
         // Validate branch name
         if opts.name.contains("..") || opts.name.starts_with('/') || opts.name.ends_with('/') {
@@ -315,18 +353,15 @@ impl BranchCmd {
             anyhow::bail!("Branch '{}' already exists", opts.name);
         }
 
-        // Get start point (defaults to HEAD)
+        // Get start point (defaults to HEAD) - resolve symbolic refs
         let start_oid = if let Some(start_point) = &opts.start_point {
             // Try to resolve the start point as a reference or commit
-            refdb.read(start_point)
-                .await
-                .ok()
-                .and_then(|r| r.oid)
-                .ok_or_else(|| anyhow::anyhow!("Invalid start point: {}", start_point))?
+            refdb.resolve(start_point).await
+                .context(format!("Invalid start point: {}", start_point))?
         } else {
-            // Use HEAD as start point
-            let head = refdb.read("HEAD").await?;
-            head.oid.ok_or_else(|| anyhow::anyhow!("HEAD has no commit yet"))?
+            // Use HEAD as start point (resolve symbolic ref)
+            refdb.resolve("HEAD").await
+                .context("HEAD has no commit yet")?
         };
 
         // Create the branch reference
@@ -342,14 +377,21 @@ impl BranchCmd {
 
     async fn switch(&self, opts: &SwitchOpts) -> Result<()> {
         use crate::output;
+        use mediagit_versioning::{CheckoutManager, Index, ObjectDatabase};
+
+        let start_time = Instant::now();
+        let mut stats = OperationStats::new();
+        let progress = ProgressTracker::new(opts.quiet);
 
         let repo_root = self.find_repo_root()?;
-        let storage_path = repo_root.join(".mediagit/objects");
+        let storage_path = repo_root.join(".mediagit");
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
-        let refdb = RefDatabase::new(storage);
+        let refdb = RefDatabase::new(&storage_path);
 
-        let branch_ref_name = format!("refs/heads/{}", opts.branch);
+        // Strip refs/heads/ prefix if already present
+        let branch_name = opts.branch.strip_prefix("refs/heads/").unwrap_or(&opts.branch);
+        let branch_ref_name = format!("refs/heads/{}", branch_name);
 
         // If create flag is set, create the branch first
         if opts.create {
@@ -358,9 +400,9 @@ impl BranchCmd {
                 anyhow::bail!("Branch '{}' already exists", opts.branch);
             }
 
-            // Get current HEAD for start point
-            let head = refdb.read("HEAD").await?;
-            let start_oid = head.oid.ok_or_else(|| anyhow::anyhow!("HEAD has no commit yet"))?;
+            // Get current HEAD for start point (resolve symbolic ref)
+            let start_oid = refdb.resolve("HEAD").await
+                .context("HEAD has no commit yet")?;
 
             // Create the branch reference
             let branch_ref = Ref::new_direct(branch_ref_name.clone(), start_oid);
@@ -376,12 +418,42 @@ impl BranchCmd {
                 .context(format!("Branch '{}' not found", opts.branch))?;
         }
 
+        // Get the commit that the target branch points to
+        let target_commit_oid = refdb.resolve(&branch_ref_name).await
+            .context(format!("Failed to resolve branch '{}' to a commit", opts.branch))?;
+
         // Update HEAD to point to the branch
         let head = Ref::new_symbolic("HEAD".to_string(), branch_ref_name.clone());
         refdb.write(&head).await?;
 
+        // Update working directory to match the target branch's commit
+        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
+        let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
+
+        let checkout_pb = progress.spinner("Updating working directory");
+        let files_updated = checkout_mgr.checkout_commit(&target_commit_oid).await
+            .context("Failed to update working directory")?;
+        checkout_pb.finish_with_message("Working directory updated");
+
+        stats.files_updated = files_updated as u64;
+
+        // Clear the index (staging area) when switching branches
+        // This ensures a clean state on the new branch
+        let mut index = Index::load(&repo_root)?;
+        index.clear();
+        index.save(&repo_root)?;
+
         if !opts.quiet {
             output::success(&format!("Switched to branch '{}'", opts.branch));
+            if files_updated > 0 {
+                output::info(&format!("Updated {} file(s) in working directory", files_updated));
+            }
+        }
+
+        // Print operation summary
+        stats.duration_ms = start_time.elapsed().as_millis() as u64;
+        if !opts.quiet && stats.files_updated > 0 {
+            println!("\n📊 {}", stats.summary());
         }
 
         Ok(())
@@ -391,10 +463,10 @@ impl BranchCmd {
         use crate::output;
 
         let repo_root = self.find_repo_root()?;
-        let storage_path = repo_root.join(".mediagit/objects");
-        let storage: Arc<dyn mediagit_storage::StorageBackend> =
+        let storage_path = repo_root.join(".mediagit");
+        let _storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
-        let refdb = RefDatabase::new(storage);
+        let refdb = RefDatabase::new(&storage_path);
 
         // Get current branch to prevent deletion
         let head = refdb.read("HEAD").await?;
@@ -449,10 +521,10 @@ impl BranchCmd {
         use crate::output;
 
         let repo_root = self.find_repo_root()?;
-        let storage_path = repo_root.join(".mediagit/objects");
-        let storage: Arc<dyn mediagit_storage::StorageBackend> =
+        let storage_path = repo_root.join(".mediagit");
+        let _storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
-        let refdb = RefDatabase::new(storage);
+        let refdb = RefDatabase::new(&storage_path);
 
         // Determine old branch name (current branch if not specified)
         let old_branch = if let Some(old_name) = &opts.old_name {
@@ -516,10 +588,10 @@ impl BranchCmd {
         use crate::output;
 
         let repo_root = self.find_repo_root()?;
-        let storage_path = repo_root.join(".mediagit/objects");
-        let storage: Arc<dyn mediagit_storage::StorageBackend> =
+        let storage_path = repo_root.join(".mediagit");
+        let _storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
-        let refdb = RefDatabase::new(storage);
+        let refdb = RefDatabase::new(&storage_path);
 
         // Determine which branch to show
         let branch_name = if let Some(name) = &opts.branch {

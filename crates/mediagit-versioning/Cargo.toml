@@ -8,6 +8,7 @@ authors.workspace = true
 
 [dependencies]
 mediagit-storage = { path = "../mediagit-storage" }
+mediagit-compression = { path = "../mediagit-compression" }
 
 tokio.workspace = true
 serde.workspace = true
@@ -19,6 +20,7 @@ anyhow.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
 tracing.workspace = true
+toml.workspace = true
 moka = { version = "0.12", features = ["future"] }
 
 [dev-dependencies]

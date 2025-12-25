@@ -14,7 +14,22 @@ use std::sync::Arc;
 use tracing::info;
 
 /// Initialize a new MediaGit repository
+///
+/// Creates a new MediaGit repository with the required directory structure,
+/// configuration files, and initial branch setup.
 #[derive(Parser, Debug)]
+#[command(after_help = "EXAMPLES:
+    # Initialize repository in current directory
+    mediagit init
+
+    # Initialize repository in a specific path
+    mediagit init my-project
+
+    # Initialize with custom initial branch name
+    mediagit init --initial-branch develop
+
+SEE ALSO:
+    mediagit-config(1), mediagit-clone(1)")]
 pub struct InitCmd {
     /// Path to initialize (defaults to current directory)
     #[arg(value_name = "PATH")]
@@ -61,14 +76,15 @@ impl InitCmd {
             .context("Failed to create repository structure")?;
 
         // Initialize storage backend (local for now)
-        let storage_path = repo_path.join(".mediagit/objects");
+        // LocalBackend will create the "objects" directory automatically
+        let storage_path = repo_path.join(".mediagit");
         let storage: Arc<dyn mediagit_storage::StorageBackend> = Arc::new(LocalBackend::new(&storage_path).await?);
 
         // Initialize object database
-        let _odb = ObjectDatabase::new(storage.clone(), 1000);
+        let _odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
 
-        // Initialize reference database
-        let refdb = RefDatabase::new(storage);
+        // Initialize reference database (uses direct filesystem, not StorageBackend)
+        let refdb = RefDatabase::new(&storage_path);
 
         // Create initial branch
         let initial_branch = self.initial_branch.as_deref().unwrap_or("main");

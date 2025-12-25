@@ -57,6 +57,10 @@ pub enum MediaError {
     /// Metadata extraction error
     #[error("Metadata extraction error: {0}")]
     MetadataError(String),
+
+    /// Serialization error
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
 }
 
 /// Result type for media operations

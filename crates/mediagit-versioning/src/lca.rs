@@ -51,7 +51,7 @@
 use crate::{Commit, ObjectDatabase, Oid};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use tracing::{debug, trace};
+use tracing::debug;
 
 /// Lowest Common Ancestor finder for merge operations
 ///
@@ -165,7 +165,7 @@ impl LcaFinder {
     ///
     /// true if ancestor is in the history of descendant
     pub async fn is_ancestor(&self, ancestor: &Oid, descendant: &Oid) -> anyhow::Result<bool> {
-        trace!(ancestor = %ancestor, descendant = %descendant, "Checking ancestry");
+        // Removed trace logging from hot path for performance
 
         if ancestor == descendant {
             return Ok(true);
@@ -177,7 +177,6 @@ impl LcaFinder {
 
         while let Some(current) = queue.pop_front() {
             if current == *ancestor {
-                trace!("Found ancestor");
                 return Ok(true);
             }
 
@@ -195,7 +194,6 @@ impl LcaFinder {
             }
         }
 
-        trace!("Not an ancestor");
         Ok(false)
     }
 
@@ -230,7 +228,7 @@ impl LcaFinder {
             }
         }
 
-        trace!(count = common.len(), "Found common ancestors");
+        debug!(count = common.len(), "Found common ancestors");
         Ok(common)
     }
 

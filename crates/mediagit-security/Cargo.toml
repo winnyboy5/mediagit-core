@@ -46,15 +46,17 @@ tracing.workspace = true
 
 # Utilities
 hex = { workspace = true, features = ["serde"] }
-sha2 = { workspace = true, optional = true }
+sha2.workspace = true
 chrono.workspace = true
 
 # Authentication (optional)
 jsonwebtoken = { version = "9.2", optional = true }
 bcrypt = { version = "0.15", optional = true }
+uuid = { version = "1.10", features = ["v4", "serde"], optional = true }
 
 # Database (optional features)
-sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-rustls", "chrono"], optional = true }
+# Updated to 0.8+ to fix RUSTSEC-2024-0363 (binary protocol issue)
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls", "chrono"], optional = true }
 
 # HTTP/Web framework (for middleware)
 axum = { version = "0.7", optional = true }
@@ -69,7 +71,7 @@ time = { version = "0.3", features = ["macros"], optional = true }
 
 [features]
 default = []
-auth = ["jsonwebtoken", "bcrypt", "sha2"]
+auth = ["jsonwebtoken", "bcrypt", "uuid"]
 database = ["sqlx"]
 middleware = ["axum", "tower", "http"]
 tls = ["rcgen", "rustls-pemfile", "x509-parser", "time"]

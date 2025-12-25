@@ -60,11 +60,16 @@
 //! ```
 
 mod branch;
+mod checkout;
+mod chunking;
 mod commit;
+mod config;
 mod conflict;
 mod delta;
 mod diff;
 mod fsck;
+mod similarity;
+mod index;
 mod lca;
 mod merge;
 mod metrics;
@@ -73,21 +78,31 @@ mod odb;
 mod oid;
 mod pack;
 mod refs;
+mod revision;
 mod tree;
 
 pub use branch::{BranchInfo, BranchManager, DetachedHead};
+pub use checkout::{CheckoutManager, CheckoutStats};
+pub use chunking::{
+    ChunkId, ChunkManifest, ChunkRef, ChunkStore, ChunkStoreStats, ChunkStrategy, ChunkType,
+    ContentChunk, ContentChunker,
+};
 pub use commit::{Commit, Signature};
+pub use config::{ChunkingStrategyConfig, StorageConfig};
 pub use conflict::{Conflict, ConflictDetector, ConflictSide, ConflictStats, ConflictType};
 pub use delta::{Delta, DeltaDecoder, DeltaEncoder, DeltaInstruction};
 pub use diff::{ModifiedEntry, ThreeWayDiff, TreeDiff, TreeDiffer};
+pub use index::{Index, IndexEntry};
+pub use similarity::{ObjectMetadata, SimilarityDetector, SimilarityScore};
 pub use lca::{LcaFinder, LcaResult};
 pub use merge::{FastForwardInfo, MergeEngine, MergeResult, MergeStrategy};
 pub use metrics::OdbMetrics;
 pub use object::ObjectType;
-pub use odb::ObjectDatabase;
+pub use odb::{ObjectDatabase, RepackStats};
 pub use oid::Oid;
 pub use pack::{PackHeader, PackIndex, PackMetadata, PackObjectEntry, PackReader, PackWriter};
-pub use refs::{Ref, RefDatabase, RefType};
+pub use refs::{normalize_ref_name, Ref, RefDatabase, RefType};
+pub use revision::resolve_revision;
 pub use tree::{FileMode, Tree, TreeEntry};
 
 // Re-export fsck module

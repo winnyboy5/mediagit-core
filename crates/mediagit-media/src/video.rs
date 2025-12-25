@@ -373,6 +373,77 @@ impl VideoParser {
 
         conflicts
     }
+
+    /// Perform actual merge of video timelines (metadata-level merge)
+    ///
+    /// This merges non-conflicting timeline changes by combining:
+    /// - Tracks added in 'ours' branch
+    /// - Tracks added in 'theirs' branch
+    /// - Timeline segments that don't overlap
+    ///
+    /// Returns merged VideoInfo structure (not actual video binary - that requires re-encoding)
+    pub fn merge_timelines(
+        _base: &VideoInfo,
+        ours: &VideoInfo,
+        theirs: &VideoInfo,
+    ) -> Result<VideoInfo> {
+        info!("Executing video timeline merge");
+
+        // Start with ours as the base merged video
+        let mut merged_video = VideoInfo {
+            duration_seconds: ours.duration_seconds.max(theirs.duration_seconds),
+            tracks: Vec::new(),
+            video_codec: ours.video_codec.clone(),
+            audio_codec: ours.audio_codec.clone(),
+            brand: ours.brand.clone(),
+            segments: Vec::new(),
+        };
+
+        // Merge tracks - combine all unique tracks by ID
+        let mut merged_tracks = Vec::new();
+        let mut track_ids = std::collections::HashSet::new();
+
+        // Add all tracks from 'ours'
+        for track in &ours.tracks {
+            if track_ids.insert(track.id) {
+                merged_tracks.push(track.clone());
+            }
+        }
+
+        // Add new tracks from 'theirs' not in 'ours'
+        for track in &theirs.tracks {
+            if track_ids.insert(track.id) {
+                debug!("Adding new track from 'theirs': {}", track.id);
+                merged_tracks.push(track.clone());
+            }
+        }
+
+        merged_video.tracks = merged_tracks;
+
+        // Merge segments - combine non-overlapping segments
+        let mut merged_segments = Vec::new();
+
+        // Add all segments from 'ours'
+        for segment in &ours.segments {
+            merged_segments.push(segment.clone());
+        }
+
+        // Add segments from 'theirs' that don't overlap with 'ours'
+        for their_seg in &theirs.segments {
+            let overlaps = merged_segments.iter().any(|our_seg| their_seg.overlaps(our_seg));
+            if !overlaps {
+                debug!("Adding non-overlapping segment from 'theirs': track {}", their_seg.track_id);
+                merged_segments.push(their_seg.clone());
+            }
+        }
+
+        merged_video.segments = merged_segments;
+
+        info!("Video timeline merge complete: {} tracks, {} segments",
+              merged_video.tracks.len(), merged_video.segments.len());
+
+        Ok(merged_video)
+    }
 }
 
 impl Default for VideoParser {

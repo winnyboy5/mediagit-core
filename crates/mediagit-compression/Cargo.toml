@@ -10,11 +10,13 @@ authors.workspace = true
 tokio.workspace = true
 zstd.workspace = true
 brotli.workspace = true
+flate2.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 xdelta3 = "0.1"
 serde = { workspace = true }
+serde_json = { workspace = true }
 blake3 = { workspace = true }
 
 [dev-dependencies]

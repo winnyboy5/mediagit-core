@@ -5,12 +5,30 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use mediagit_storage::LocalBackend;
-use mediagit_versioning::{ObjectDatabase, ObjectType};
-use std::path::Path;
+use mediagit_versioning::{ChunkStrategy, Index, IndexEntry, ObjectDatabase, ObjectType, StorageConfig};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Add file contents to the staging area
+///
+/// Stages changes to files for inclusion in the next commit. This command
+/// updates the index with the current content found in the working tree.
 #[derive(Parser, Debug)]
+#[command(after_help = "EXAMPLES:
+    # Stage a single file
+    mediagit add photo.psd
+
+    # Stage multiple files
+    mediagit add image1.jpg image2.png video.mp4
+
+    # Stage all modified and new files
+    mediagit add --all
+
+    # Preview what would be staged
+    mediagit add --dry-run *.psd
+
+SEE ALSO:
+    mediagit-status(1), mediagit-commit(1), mediagit-reset(1)")]
 pub struct AddCmd {
     /// Files or patterns to add
     #[arg(value_name = "PATHS", required = true)]
@@ -47,6 +65,14 @@ pub struct AddCmd {
     /// Verbose mode
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Enable chunking for large media files (experimental)
+    #[arg(long)]
+    pub chunking: bool,
+
+    /// Enable delta compression for similar files (experimental)
+    #[arg(long)]
+    pub delta: bool,
 }
 
 impl AddCmd {
@@ -64,44 +90,139 @@ impl AddCmd {
             output::progress("Staging files...");
         }
 
-        // Initialize storage and ODB
-        let storage_path = repo_root.join(".mediagit/objects");
+        // Initialize storage and ODB with smart compression
+        let storage_path = repo_root.join(".mediagit");
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
-        let odb = ObjectDatabase::new(storage, 1000);
+
+        // Check if optimizations are enabled (via flags or environment)
+        let config = StorageConfig::from_env();
+        let chunking_enabled = self.chunking || config.chunking_enabled;
+        let delta_enabled = self.delta || config.delta_enabled;
+
+        // Create ODB with appropriate optimizations
+        let odb = if chunking_enabled || delta_enabled {
+            if !self.quiet {
+                if chunking_enabled {
+                    output::info("Chunking enabled for large media files");
+                }
+                if delta_enabled {
+                    output::info("Delta compression enabled for similar files");
+                }
+            }
+            ObjectDatabase::with_optimizations(
+                storage,
+                1000,
+                if chunking_enabled {
+                    Some(ChunkStrategy::MediaAware)
+                } else {
+                    None
+                },
+                delta_enabled
+            )
+        } else {
+            ObjectDatabase::with_smart_compression(storage, 1000)
+        };
+
+        // Load the index
+        let mut index = Index::load(&repo_root)?;
+
+        // Expand paths (globs, directories) into file list
+        let files_to_add = self.expand_paths(&repo_root)?;
+
+        if files_to_add.is_empty() {
+            if !self.quiet {
+                output::warning("No files to stage");
+            }
+            anyhow::bail!("No files were staged");
+        }
 
         let mut added_count = 0;
 
-        for path_str in &self.paths {
-            let path = Path::new(path_str);
+        for file_path in &files_to_add {
+            if !self.dry_run {
+                // Read file content
+                let content = tokio::fs::read(file_path)
+                    .await
+                    .context(format!("Failed to read file: {}", file_path.display()))?;
 
-            if !path.exists() {
-                if !self.force {
-                    output::warning(&format!("Path does not exist: {}", path_str));
-                    continue;
-                }
-            }
+                // Get file metadata
+                let metadata = tokio::fs::metadata(file_path)
+                    .await
+                    .context(format!("Failed to read file metadata: {}", file_path.display()))?;
 
-            if path.is_file() {
-                if !self.dry_run {
-                    // Read file content
-                    let content = tokio::fs::read(path)
-                        .await
-                        .context(format!("Failed to read file: {}", path_str))?;
+                // Write to object database with intelligent feature selection
+                let filename = file_path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
 
-                    // Write to object database
-                    let oid = odb
-                        .write(ObjectType::Blob, &content)
-                        .await
-                        .context("Failed to write object")?;
-
+                // Intelligent feature selection based on file type and size
+                let oid = if chunking_enabled && Self::should_use_chunking(content.len(), filename) {
+                    // Chunking recommended for this file type/size
                     if self.verbose {
-                        output::detail("added", &format!("{} ({})", path_str, oid));
+                        output::detail(
+                            "chunking",
+                            &format!("{} ({:.2} MB)", file_path.display(), content.len() as f64 / 1_048_576.0)
+                        );
                     }
-                }
+                    odb.write_chunked(ObjectType::Blob, &content, filename)
+                        .await
+                        .context("Failed to write chunked object")?
+                } else if delta_enabled && Self::should_use_delta(filename, &content) {
+                    // Delta compression recommended for this file type
+                    if self.verbose {
+                        output::detail(
+                            "delta",
+                            &format!("{} ({:.2} MB)", file_path.display(), content.len() as f64 / 1_048_576.0)
+                        );
+                    }
+                    odb.write_with_delta(ObjectType::Blob, &content, filename)
+                        .await
+                        .context("Failed to write object with delta")?
+                } else {
+                    // Standard write with smart compression
+                    odb.write_with_path(ObjectType::Blob, &content, filename)
+                        .await
+                        .context("Failed to write object")?
+                };
 
-                added_count += 1;
+                // Add to index
+                let relative_path = file_path.strip_prefix(&repo_root)
+                    .unwrap_or(file_path)
+                    .to_path_buf();
+
+                let mode = if cfg!(unix) {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        metadata.permissions().mode()
+                    }
+                    #[cfg(not(unix))]
+                    0o100644
+                } else {
+                    0o100644
+                };
+
+                let entry = IndexEntry::new(
+                    relative_path.clone(),
+                    oid,
+                    mode,
+                    metadata.len()
+                );
+                index.add_entry(entry);
+
+                if self.verbose {
+                    output::detail("added", &format!("{} ({})", file_path.display(), oid));
+                }
             }
+
+            added_count += 1;
+        }
+
+        // Save the index
+        if !self.dry_run {
+            index.save(&repo_root)
+                .context("Failed to save index")?;
         }
 
         if !self.quiet {
@@ -122,6 +243,170 @@ impl AddCmd {
             if !current.pop() {
                 anyhow::bail!("Not a mediagit repository");
             }
+        }
+    }
+
+    /// Check if path is outside .mediagit directory
+    ///
+    /// Returns true if the path is valid and not inside .mediagit
+    fn is_outside_mediagit(path: &Path, mediagit_dir: &Path) -> bool {
+        if let Ok(abs_path) = path.canonicalize() {
+            !abs_path.starts_with(mediagit_dir)
+        } else {
+            false
+        }
+    }
+
+    /// Expand paths (globs, directories) into a list of files to add
+    fn expand_paths(&self, repo_root: &Path) -> Result<Vec<PathBuf>> {
+        use crate::output;
+
+        let mut files = Vec::new();
+        let mediagit_dir = repo_root.join(".mediagit");
+
+        for path_str in &self.paths {
+            let path = Path::new(path_str);
+
+            // Handle glob patterns
+            if path_str.contains('*') || path_str.contains('?') {
+                match glob::glob(path_str) {
+                    Ok(entries) => {
+                        for entry in entries {
+                            match entry {
+                                Ok(p) => {
+                                    if p.is_file() && Self::is_outside_mediagit(&p, &mediagit_dir) {
+                                        files.push(p);
+                                    }
+                                }
+                                Err(e) => {
+                                    if !self.force {
+                                        output::warning(&format!("Glob error: {}", e));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if !self.force {
+                            output::warning(&format!("Invalid glob pattern '{}': {}", path_str, e));
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Check if path exists
+            if !path.exists() {
+                if !self.force {
+                    output::warning(&format!("Path does not exist: {}", path_str));
+                }
+                continue;
+            }
+
+            // Handle files
+            if path.is_file() && Self::is_outside_mediagit(path, &mediagit_dir) {
+                files.push(path.to_path_buf());
+            }
+            // Handle directories - recurse
+            else if path.is_dir() {
+                self.collect_files_recursive(path, &mediagit_dir, &mut files)?;
+            }
+        }
+
+        Ok(files)
+    }
+
+    /// Recursively collect all files from a directory
+    fn collect_files_recursive(
+        &self,
+        dir: &Path,
+        mediagit_dir: &Path,
+        files: &mut Vec<PathBuf>,
+    ) -> Result<()> {
+        // Skip .mediagit directory using helper
+        if !Self::is_outside_mediagit(dir, mediagit_dir) {
+            return Ok(());
+        }
+
+        let entries = std::fs::read_dir(dir)
+            .context(format!("Failed to read directory: {}", dir.display()))?;
+
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+
+            // Skip .mediagit directory and its contents
+            if !Self::is_outside_mediagit(&path, mediagit_dir) {
+                continue;
+            }
+
+            if path.is_file() {
+                // Normalize path to avoid ./ prefix issues
+                if let Ok(abs_path) = path.canonicalize() {
+                    files.push(abs_path);
+                } else {
+                    files.push(path);
+                }
+            } else if path.is_dir() {
+                self.collect_files_recursive(&path, mediagit_dir, files)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Determine if file should use chunking based on size AND type
+    fn should_use_chunking(size: usize, filename: &str) -> bool {
+        const MIN_CHUNK_SIZE: usize = 5 * 1024 * 1024; // 5 MB
+
+        if size < MIN_CHUNK_SIZE {
+            return false;
+        }
+
+        let ext = std::path::Path::new(filename)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+
+        match ext.to_lowercase().as_str() {
+            // Video formats: Chunk at lower threshold (benefits most)
+            "mp4" | "mov" | "avi" | "mkv" | "flv" | "wmv" => size > MIN_CHUNK_SIZE,
+            // Large uncompressed formats: Chunk at moderate threshold
+            "psd" | "tif" | "tiff" | "bmp" | "wav" | "aiff" => size > 10 * 1024 * 1024,
+            // Compressed images: Higher threshold (already compressed)
+            "jpg" | "jpeg" | "png" | "webp" => size > 50 * 1024 * 1024,
+            // 3D models: Chunk at moderate threshold
+            "obj" | "fbx" | "blend" | "gltf" | "glb" => size > 20 * 1024 * 1024,
+            // Archives: Don't chunk (already compressed)
+            "zip" | "gz" | "bz2" | "7z" | "rar" => false,
+            // Unknown: Use generic large file threshold
+            _ => size > 50 * 1024 * 1024,
+        }
+    }
+
+    /// Determine if file is suitable for delta compression
+    fn should_use_delta(filename: &str, data: &[u8]) -> bool {
+        let ext = std::path::Path::new(filename)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+
+        match ext.to_lowercase().as_str() {
+            // Text-based formats: Excellent delta candidates
+            "txt" | "md" | "json" | "xml" | "html" | "css" | "js" | "ts" |
+            "py" | "rs" | "go" | "java" | "c" | "cpp" | "h" | "hpp" => true,
+            // Uncompressed formats: Good delta candidates
+            "psd" | "tif" | "tiff" | "bmp" | "wav" | "aiff" => true,
+            // Video (raw/uncompressed): Good delta candidates
+            "avi" | "mov" => true,
+            // Compressed video: Moderate benefit (only for very large files)
+            "mp4" | "mkv" | "flv" | "wmv" => data.len() > 100 * 1024 * 1024,
+            // Compressed images: Poor delta candidates (skip)
+            "jpg" | "jpeg" | "png" | "webp" | "gif" => false,
+            // Archives: No delta benefit (skip)
+            "zip" | "gz" | "bz2" | "7z" | "rar" => false,
+            // Unknown: Conservative approach (allow if large)
+            _ => data.len() > 50 * 1024 * 1024,
         }
     }
 }

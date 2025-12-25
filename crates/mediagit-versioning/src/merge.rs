@@ -21,7 +21,7 @@ use crate::{
 };
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
-use tracing::{debug, info, instrument, trace};
+use tracing::{debug, instrument, trace};
 
 /// Merge strategy to use when conflicts are detected
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,7 +103,7 @@ impl MergeEngine {
     pub fn new(odb: Arc<ObjectDatabase>) -> Self {
         Self {
             lca_finder: LcaFinder::new(Arc::clone(&odb)),
-            _differ: TreeDiffer::new(Arc::clone(&odb)),
+            __differ: TreeDiffer::new(Arc::clone(&odb)),
             conflict_detector: ConflictDetector::new(Arc::clone(&odb)),
             odb,
         }
@@ -117,14 +117,14 @@ impl MergeEngine {
     /// 3. Performs 3-way merge if needed
     /// 4. Detects and handles conflicts based on strategy
     /// 5. Builds the result tree
-    #[instrument(skip(self))]
+    #[instrument(level = "debug", skip(self, ours, theirs))]
     pub async fn merge(
         &self,
         ours: &Oid,
         theirs: &Oid,
         strategy: MergeStrategy,
     ) -> Result<MergeResult> {
-        info!("Starting merge: ours={}, theirs={}", ours, theirs);
+        debug!("Starting merge: ours={}, theirs={}", ours, theirs);
 
         // Trivial case: same commit
         if ours == theirs {
@@ -213,7 +213,7 @@ impl MergeEngine {
     }
 
     /// Perform 3-way merge between base, ours, and theirs trees
-    #[instrument(skip(self, base, ours, theirs))]
+    #[instrument(level = "debug", skip(self, base, ours, theirs))]
     async fn three_way_merge(
         &self,
         base: &Tree,

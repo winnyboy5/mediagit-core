@@ -21,7 +21,7 @@
 //! - Validation and safety checks
 
 use crate::{Oid, Ref, RefDatabase, RefType};
-use std::sync::Arc;
+use std::path::Path;
 use tracing::{debug, info, warn};
 
 /// Branch operations manager
@@ -38,13 +38,10 @@ use tracing::{debug, info, warn};
 ///
 /// ```no_run
 /// use mediagit_versioning::{BranchManager, Oid};
-/// use mediagit_storage::LocalBackend;
-/// use std::sync::Arc;
 ///
 /// #[tokio::main]
 /// async fn main() -> anyhow::Result<()> {
-///     let storage = Arc::new(LocalBackend::new("/tmp/mediagit")?);
-///     let branch_mgr = BranchManager::new(storage);
+///     let branch_mgr = BranchManager::new("/tmp/mediagit");
 ///
 ///     let commit_oid = Oid::hash(b"commit data");
 ///
@@ -99,10 +96,10 @@ impl BranchManager {
     ///
     /// # Arguments
     ///
-    /// * `storage` - Storage backend for persisting refs
-    pub fn new(storage: Arc<dyn mediagit_storage::StorageBackend>) -> Self {
+    /// * `root` - Root directory path (e.g., .mediagit)
+    pub fn new<P: AsRef<Path>>(root: P) -> Self {
         Self {
-            refdb: RefDatabase::new(storage),
+            refdb: RefDatabase::new(root),
         }
     }
 
@@ -126,7 +123,7 @@ impl BranchManager {
     /// # #[tokio::main]
     /// # async fn main() -> anyhow::Result<()> {
     /// # let storage = Arc::new(LocalBackend::new("/tmp/test")?);
-    /// let branch_mgr = BranchManager::new(storage);
+    /// let branch_mgr = BranchManager::new(&storage_path);
     /// let oid = Oid::hash(b"commit");
     /// branch_mgr.create("develop", oid).await?;
     /// # Ok(())
@@ -531,14 +528,13 @@ impl BranchManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[tokio::test]
     async fn test_branch_create() {
-        use mediagit_storage::mock::MockBackend;
-        use std::sync::Arc;
-
-        let storage = Arc::new(MockBackend::new());
-        let mgr = BranchManager::new(storage);
+        let temp_dir = tempdir().unwrap();
+        let storage_path = temp_dir.path();
+        let mgr = BranchManager::new(storage_path);
 
         let oid = Oid::hash(b"commit");
         mgr.create("main", oid).await.unwrap();
@@ -548,11 +544,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_branch_create_duplicate() {
-        use mediagit_storage::mock::MockBackend;
-        use std::sync::Arc;
-
-        let storage = Arc::new(MockBackend::new());
-        let mgr = BranchManager::new(storage);
+        let temp_dir = tempdir().unwrap();
+        let storage_path = temp_dir.path();
+        let mgr = BranchManager::new(storage_path);
 
         let oid = Oid::hash(b"commit");
         mgr.create("main", oid).await.unwrap();
@@ -561,11 +555,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_branch_delete() {
-        use mediagit_storage::mock::MockBackend;
-        use std::sync::Arc;
-
-        let storage = Arc::new(MockBackend::new());
-        let mgr = BranchManager::new(storage);
+        let temp_dir = tempdir().unwrap();
+        let storage_path = temp_dir.path();
+        let mgr = BranchManager::new(storage_path);
 
         let oid = Oid::hash(b"commit");
         mgr.create("main", oid).await.unwrap();
@@ -576,11 +568,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_branch_switch() {
-        use mediagit_storage::mock::MockBackend;
-        use std::sync::Arc;
-
-        let storage = Arc::new(MockBackend::new());
-        let mgr = BranchManager::new(storage);
+        let temp_dir = tempdir().unwrap();
+        let storage_path = temp_dir.path();
+        let mgr = BranchManager::new(storage_path);
 
         let oid = Oid::hash(b"commit");
         mgr.create("main", oid).await.unwrap();
@@ -597,11 +587,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_branch_list() {
-        use mediagit_storage::mock::MockBackend;
-        use std::sync::Arc;
-
-        let storage = Arc::new(MockBackend::new());
-        let mgr = BranchManager::new(storage);
+        let temp_dir = tempdir().unwrap();
+        let storage_path = temp_dir.path();
+        let mgr = BranchManager::new(storage_path);
 
         let oid = Oid::hash(b"commit");
         mgr.create("main", oid).await.unwrap();
@@ -613,11 +601,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_branch_rename() {
-        use mediagit_storage::mock::MockBackend;
-        use std::sync::Arc;
-
-        let storage = Arc::new(MockBackend::new());
-        let mgr = BranchManager::new(storage);
+        let temp_dir = tempdir().unwrap();
+        let storage_path = temp_dir.path();
+        let mgr = BranchManager::new(storage_path);
 
         let oid = Oid::hash(b"commit");
         mgr.create("main", oid).await.unwrap();
@@ -629,11 +615,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_branch_get_info() {
-        use mediagit_storage::mock::MockBackend;
-        use std::sync::Arc;
-
-        let storage = Arc::new(MockBackend::new());
-        let mgr = BranchManager::new(storage);
+        let temp_dir = tempdir().unwrap();
+        let storage_path = temp_dir.path();
+        let mgr = BranchManager::new(storage_path);
 
         let oid = Oid::hash(b"commit");
         mgr.create("main", oid).await.unwrap();
@@ -645,11 +629,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_detach_head() {
-        use mediagit_storage::mock::MockBackend;
-        use std::sync::Arc;
-
-        let storage = Arc::new(MockBackend::new());
-        let mgr = BranchManager::new(storage);
+        let temp_dir = tempdir().unwrap();
+        let storage_path = temp_dir.path();
+        let mgr = BranchManager::new(storage_path);
 
         let oid = Oid::hash(b"commit");
         mgr.create("main", oid).await.unwrap();
@@ -663,11 +645,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_head_commit() {
-        use mediagit_storage::mock::MockBackend;
-        use std::sync::Arc;
-
-        let storage = Arc::new(MockBackend::new());
-        let mgr = BranchManager::new(storage);
+        let temp_dir = tempdir().unwrap();
+        let storage_path = temp_dir.path();
+        let mgr = BranchManager::new(storage_path);
 
         let oid = Oid::hash(b"commit");
         mgr.create("main", oid).await.unwrap();
@@ -679,11 +659,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_branch() {
-        use mediagit_storage::mock::MockBackend;
-        use std::sync::Arc;
-
-        let storage = Arc::new(MockBackend::new());
-        let mgr = BranchManager::new(storage);
+        let temp_dir = tempdir().unwrap();
+        let storage_path = temp_dir.path();
+        let mgr = BranchManager::new(storage_path);
 
         let oid1 = Oid::hash(b"commit1");
         let oid2 = Oid::hash(b"commit2");
@@ -698,11 +676,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_tag() {
-        use mediagit_storage::mock::MockBackend;
-        use std::sync::Arc;
-
-        let storage = Arc::new(MockBackend::new());
-        let mgr = BranchManager::new(storage);
+        let temp_dir = tempdir().unwrap();
+        let storage_path = temp_dir.path();
+        let mgr = BranchManager::new(storage_path);
 
         let oid = Oid::hash(b"commit");
         mgr.create_tag("v1.0.0", oid).await.unwrap();
@@ -713,11 +689,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_tag() {
-        use mediagit_storage::mock::MockBackend;
-        use std::sync::Arc;
-
-        let storage = Arc::new(MockBackend::new());
-        let mgr = BranchManager::new(storage);
+        let temp_dir = tempdir().unwrap();
+        let storage_path = temp_dir.path();
+        let mgr = BranchManager::new(storage_path);
 
         let oid = Oid::hash(b"commit");
         mgr.create_tag("v1.0.0", oid).await.unwrap();
@@ -729,11 +703,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_initialize() {
-        use mediagit_storage::mock::MockBackend;
-        use std::sync::Arc;
-
-        let storage = Arc::new(MockBackend::new());
-        let mgr = BranchManager::new(storage);
+        let temp_dir = tempdir().unwrap();
+        let storage_path = temp_dir.path();
+        let mgr = BranchManager::new(storage_path);
 
         let oid = Oid::hash(b"commit");
         mgr.initialize(Some(oid)).await.unwrap();
@@ -744,22 +716,25 @@ mod tests {
 
     #[test]
     fn test_validate_branch_name_empty() {
-        let storage = Arc::new(mediagit_storage::mock::MockBackend::new());
-        let mgr = BranchManager::new(storage);
+        let temp_dir = tempdir().unwrap();
+        let storage_path = temp_dir.path();
+        let mgr = BranchManager::new(storage_path);
         assert!(mgr.validate_branch_name("").is_err());
     }
 
     #[test]
     fn test_validate_branch_name_starts_with_dash() {
-        let storage = Arc::new(mediagit_storage::mock::MockBackend::new());
-        let mgr = BranchManager::new(storage);
+        let temp_dir = tempdir().unwrap();
+        let storage_path = temp_dir.path();
+        let mgr = BranchManager::new(storage_path);
         assert!(mgr.validate_branch_name("-invalid").is_err());
     }
 
     #[test]
     fn test_validate_branch_name_valid() {
-        let storage = Arc::new(mediagit_storage::mock::MockBackend::new());
-        let mgr = BranchManager::new(storage);
+        let temp_dir = tempdir().unwrap();
+        let storage_path = temp_dir.path();
+        let mgr = BranchManager::new(storage_path);
         assert!(mgr.validate_branch_name("feature/auth").is_ok());
         assert!(mgr.validate_branch_name("main").is_ok());
         assert!(mgr.validate_branch_name("develop").is_ok());

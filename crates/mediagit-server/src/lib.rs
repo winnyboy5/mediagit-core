@@ -5,13 +5,16 @@ pub mod config;
 pub mod handlers;
 pub mod security;
 pub mod state;
+pub mod auth_routes;
 
 pub use config::ServerConfig;
 pub use security::validate_repo_name;
 pub use security::RateLimitConfig;
 pub use state::AppState;
+pub use auth_routes::create_auth_router;
 
 use axum::{
+    extract::DefaultBodyLimit,
     middleware,
     routing::{get, post},
     Router,
@@ -23,8 +26,8 @@ use mediagit_security::auth::auth_middleware;
 
 /// Create the axum router with all endpoints
 pub fn create_router(state: Arc<AppState>) -> Router {
-    // Create inner router with routes
-    let mut router = Router::new()
+    // Create Git protocol routes
+    let mut git_router = Router::new()
         .route("/:repo/info/refs", get(handlers::get_refs))
         .route("/:repo/refs/update", post(handlers::update_refs))
         .route("/:repo/objects/want", post(handlers::request_objects))
@@ -32,20 +35,30 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/:repo/objects/pack", post(handlers::upload_pack))
         .with_state(Arc::clone(&state));
 
-    // Apply security middleware to routes
+    // Apply authentication middleware to Git routes if enabled
+    if let Some(auth_layer) = &state.auth_layer {
+        let auth_layer = Arc::clone(auth_layer);
+        git_router = git_router.layer(middleware::from_fn(move |req, next| {
+            auth_middleware(Arc::clone(&auth_layer), req, next)
+        }));
+    }
+
+    // Merge with auth routes if auth is enabled
+    let mut router = if let Some(auth_service) = &state.auth_service {
+        let auth_router = create_auth_router(Arc::clone(auth_service));
+        git_router.merge(auth_router)
+    } else {
+        git_router
+    };
+
+    // Apply security middleware to all routes
     router = router
+        // Body size limit (2GB for large media files)
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024))
         .layer(middleware::from_fn(security::audit_middleware))
         .layer(middleware::from_fn(security::security_headers_middleware))
         .layer(middleware::from_fn(security::request_validation_middleware))
         .layer(TraceLayer::new_for_http());
-
-    // Add authentication middleware if enabled
-    if let Some(auth_layer) = &state.auth_layer {
-        let auth_layer = Arc::clone(auth_layer);
-        router = router.layer(middleware::from_fn(move |req, next| {
-            auth_middleware(Arc::clone(&auth_layer), req, next)
-        }));
-    }
 
     // Path validation middleware must be applied as the outermost layer
     // to intercept requests before routing
@@ -129,6 +142,8 @@ pub fn create_router_with_rate_limit(
 
     // Apply middleware layers
     router = router
+        // Body size limit (2GB for large media files)
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024))
         // Rate limiting (applied first, before other middleware)
         .layer(GovernorLayer {
             config: governor_config,

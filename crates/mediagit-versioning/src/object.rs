@@ -69,6 +69,25 @@ impl ObjectType {
             _ => anyhow::bail!("Unknown object type: {}", s),
         }
     }
+
+    /// Convert object type to byte value
+    pub fn to_u8(self) -> u8 {
+        match self {
+            ObjectType::Blob => 1,
+            ObjectType::Tree => 2,
+            ObjectType::Commit => 3,
+        }
+    }
+
+    /// Parse object type from byte value
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(ObjectType::Blob),
+            2 => Some(ObjectType::Tree),
+            3 => Some(ObjectType::Commit),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for ObjectType {

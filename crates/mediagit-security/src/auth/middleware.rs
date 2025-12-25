@@ -3,8 +3,9 @@
 //! Provides HTTP middleware for JWT and API key authentication.
 
 use axum::{
-    extract::Request,
-    http::{HeaderMap, StatusCode},
+    async_trait,
+    extract::{FromRequestParts, Request},
+    http::{request::Parts, HeaderMap, StatusCode},
     middleware::Next,
     response::Response,
 };
@@ -23,6 +24,23 @@ pub struct AuthUser {
 
     /// Authentication method used
     pub auth_method: AuthMethod,
+}
+
+/// Implement FromRequestParts for AuthUser to enable it as an extractor
+#[async_trait]
+impl<S> FromRequestParts<S> for AuthUser
+where
+    S: Send + Sync,
+{
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<AuthUser>()
+            .cloned()
+            .ok_or(StatusCode::UNAUTHORIZED)
+    }
 }
 
 /// Authentication method

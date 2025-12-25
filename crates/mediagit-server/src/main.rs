@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use mediagit_server::{create_router, AppState, ServerConfig};
+use mediagit_server::{create_router, create_router_with_rate_limit, AppState, RateLimitConfig, ServerConfig};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -23,11 +23,35 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&config.repos_dir)?;
     tracing::info!("Repositories directory: {:?}", config.repos_dir);
 
-    // Setup shared state
-    let state = Arc::new(AppState::new(config.repos_dir.clone()));
+    // Setup shared state with optional authentication
+    let state = if config.enable_auth {
+        let jwt_secret = config.jwt_secret.as_deref()
+            .ok_or_else(|| anyhow::anyhow!("JWT secret is required when authentication is enabled"))?;
+        tracing::info!("Authentication is ENABLED");
+        Arc::new(AppState::new_with_full_auth(config.repos_dir.clone(), jwt_secret))
+    } else {
+        tracing::warn!("Authentication is DISABLED - not suitable for production!");
+        Arc::new(AppState::new(config.repos_dir.clone()))
+    };
 
-    // Build router using library function
-    let app = create_router(Arc::clone(&state));
+    // Build router with optional rate limiting
+    let (app, _cleanup_task) = if config.enable_rate_limiting {
+        tracing::info!("Rate limiting ENABLED: {} req/s, burst {}",
+                      config.rate_limit_rps, config.rate_limit_burst);
+        let rate_config = RateLimitConfig {
+            requests_per_second: config.rate_limit_rps,
+            burst_size: config.rate_limit_burst,
+        };
+        let (router, cleanup) = create_router_with_rate_limit(Arc::clone(&state), rate_config);
+
+        // Spawn rate limiter cleanup task
+        std::thread::spawn(cleanup);
+
+        (router, true)
+    } else {
+        tracing::warn!("Rate limiting is DISABLED - not suitable for production!");
+        (create_router(Arc::clone(&state)), false)
+    };
 
     // Start HTTP server (always enabled)
     let http_bind_addr = config.bind_addr();

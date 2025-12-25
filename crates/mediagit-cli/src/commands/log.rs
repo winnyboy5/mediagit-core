@@ -7,7 +7,37 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Show commit history
+///
+/// Display commits in reverse chronological order. The output can be filtered
+/// by author, date range, or commit message pattern.
 #[derive(Parser, Debug)]
+#[command(after_help = "EXAMPLES:
+    # Show commit history
+    mediagit log
+
+    # Show last 10 commits
+    mediagit log -n 10
+
+    # Show commits in one-line format
+    mediagit log --oneline
+
+    # Show commits with statistics
+    mediagit log --stat
+
+    # Show commits by specific author
+    mediagit log --author \"John Doe\"
+
+    # Show commits matching pattern
+    mediagit log --grep \"fix bug\"
+
+    # Show commits for specific files
+    mediagit log -- path/to/file.psd
+
+    # Show commits in date range
+    mediagit log --since \"2024-01-01\" --until \"2024-12-31\"
+
+SEE ALSO:
+    mediagit-show(1), mediagit-diff(1), mediagit-reflog(1)")]
 pub struct LogCmd {
     /// Revision range (e.g., main..feature, v1.0..v2.0)
     #[arg(value_name = "REVISION")]
@@ -73,11 +103,11 @@ impl LogCmd {
         }
 
         let repo_root = self.find_repo_root()?;
-        let storage_path = repo_root.join(".mediagit/objects");
+        let storage_path = repo_root.join(".mediagit");
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
-        let refdb = RefDatabase::new(storage.clone());
-        let odb = ObjectDatabase::new(storage, 1000);
+        let refdb = RefDatabase::new(&storage_path);
+        let odb = ObjectDatabase::with_smart_compression(storage, 1000);
 
         // Get starting commit OID
         let start_oid = if let Some(revision) = &self.revision {
@@ -93,17 +123,40 @@ impl LogCmd {
             }
         } else {
             // Use HEAD
-            let head = refdb.read("HEAD").await?;
-            match head.oid {
-                Some(oid) => oid,
-                None => {
-                    // HEAD might be symbolic, resolve it
-                    if let Some(target) = head.target {
-                        let target_ref = refdb.read(&target).await?;
-                        target_ref.oid.ok_or_else(|| anyhow::anyhow!("No commits yet"))?
-                    } else {
-                        anyhow::bail!("No commits yet");
+            match refdb.read("HEAD").await {
+                Ok(head) => {
+                    match head.oid {
+                        Some(oid) => oid,
+                        None => {
+                            // HEAD might be symbolic, resolve it
+                            if let Some(target) = head.target {
+                                match refdb.read(&target).await {
+                                    Ok(target_ref) => {
+                                        match target_ref.oid {
+                                            Some(oid) => oid,
+                                            None => {
+                                                println!("{}", style("No commits yet").dim());
+                                                return Ok(());
+                                            }
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // Branch doesn't exist yet (e.g., refs/heads/main on fresh repo)
+                                        println!("{}", style("No commits yet").dim());
+                                        return Ok(());
+                                    }
+                                }
+                            } else {
+                                println!("{}", style("No commits yet").dim());
+                                return Ok(());
+                            }
+                        }
                     }
+                }
+                Err(_) => {
+                    // HEAD doesn't exist yet
+                    println!("{}", style("No commits yet").dim());
+                    return Ok(());
                 }
             }
         };

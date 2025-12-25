@@ -5,9 +5,32 @@ use console::style;
 use mediagit_storage::LocalBackend;
 use mediagit_versioning::{Commit, MergeStrategy, RefDatabase, Signature};
 use std::sync::Arc;
+use std::time::Instant;
+use crate::progress::{ProgressTracker, OperationStats};
 
 /// Fetch and integrate remote changes
+///
+/// Fetches changes from a remote repository and integrates them into the
+/// current branch. By default, this performs a fetch followed by a merge.
 #[derive(Parser, Debug)]
+#[command(after_help = "EXAMPLES:
+    # Pull changes from origin into current branch
+    mediagit pull
+
+    # Pull specific branch from origin
+    mediagit pull origin main
+
+    # Pull and rebase instead of merge
+    mediagit pull --rebase
+
+    # Preview what would be pulled
+    mediagit pull --dry-run
+
+    # Continue pull after resolving conflicts
+    mediagit pull --continue
+
+SEE ALSO:
+    mediagit-push(1), mediagit-fetch(1), mediagit-merge(1), mediagit-rebase(1)")]
 pub struct PullCmd {
     /// Remote name (defaults to origin)
     #[arg(value_name = "REMOTE")]
@@ -56,14 +79,18 @@ pub struct PullCmd {
 
 impl PullCmd {
     pub async fn execute(&self) -> Result<()> {
+        let start_time = Instant::now();
+        let mut stats = OperationStats::new();
+        let progress = ProgressTracker::new(self.quiet);
+
         let remote = self.remote.as_deref().unwrap_or("origin");
 
         // Validate repository
         let repo_root = self.find_repo_root()?;
-        let storage_path = repo_root.join(".mediagit/objects");
+        let storage_path = repo_root.join(".mediagit");
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
-        let refdb = RefDatabase::new(Arc::clone(&storage));
+        let refdb = RefDatabase::new(&storage_path);
 
         if self.dry_run {
             if !self.quiet {
@@ -79,8 +106,8 @@ impl PullCmd {
             );
         }
 
-        // Validate local repository state
-        let _head = refdb.read("HEAD").await.context("Failed to read HEAD")?;
+        // Validate local repository state and read HEAD once
+        let head = refdb.read("HEAD").await.context("Failed to read HEAD")?;
 
         if self.verbose {
             println!("  Remote: {}", remote);
@@ -107,17 +134,17 @@ impl PullCmd {
         // Initialize protocol client
         let client = mediagit_protocol::ProtocolClient::new(remote_url);
 
-        // Initialize ODB with 1000 object cache capacity
+        // Initialize ODB with smart compression for consistent read/write
         let odb = Arc::new(
-            mediagit_versioning::ObjectDatabase::new(Arc::clone(&storage), 1000)
+            mediagit_versioning::ObjectDatabase::with_smart_compression(Arc::clone(&storage), 1000)
         );
 
         // Determine remote ref to pull
         let remote_ref = if let Some(branch) = &self.branch {
-            format!("refs/heads/{}", branch)
+            // Normalize branch name to handle both short and full ref paths
+            mediagit_versioning::normalize_ref_name(branch)
         } else {
-            // Default: pull tracking branch for current HEAD
-            let head = refdb.read("HEAD").await?;
+            // Default: pull tracking branch for current HEAD (reuse head from above)
             head.target.ok_or_else(|| {
                 anyhow::anyhow!("HEAD is detached, please specify a branch")
             })?
@@ -127,29 +154,66 @@ impl PullCmd {
             println!("  Pulling ref: {}", remote_ref);
         }
 
+        // Get current local ref state BEFORE downloading
+        let local_ref = refdb.read(&remote_ref).await.ok();
+
+        // Get remote refs to check current state
+        let remote_refs_check = client.get_refs().await?;
+        let remote_oid_check = remote_refs_check
+            .refs
+            .iter()
+            .find(|r| r.name == remote_ref)
+            .map(|r| r.oid.clone());
+
+        // Check if already synchronized (avoid redundant pull)
+        if let (Some(local), Some(remote)) = (local_ref.as_ref().and_then(|r| r.oid.as_ref()), remote_oid_check.as_ref()) {
+            let local_oid_str = local.to_hex();
+            if &local_oid_str == remote {
+                if !self.quiet {
+                    println!("{} Already up to date", style("✓").green());
+                    println!("  {} {}", style("→").cyan(), &remote[..8]);
+                }
+                return Ok(());
+            }
+        }
+
         if !self.dry_run {
             // Pull using protocol client (downloads pack file)
+            let download_pb = progress.download_bar("Receiving objects");
             let pack_data = client.pull(&odb, &remote_ref).await?;
+            let pack_size = pack_data.len() as u64;
+
+            download_pb.set_length(pack_size);
+            download_pb.set_position(pack_size);
+            stats.bytes_downloaded = pack_size;
 
             if !self.quiet {
                 println!(
                     "{} Received {} bytes",
                     style("↓").cyan(),
-                    pack_data.len()
+                    pack_size
                 );
             }
+            download_pb.finish_with_message("Download complete");
 
             // Unpack received objects
             let pack_reader = mediagit_versioning::PackReader::new(pack_data)?;
-            for oid in pack_reader.list_objects() {
-                let obj_data = pack_reader.get_object(&oid)?;
+            let objects = pack_reader.list_objects();
+            let object_count = objects.len() as u64;
+
+            let unpack_pb = progress.object_bar("Unpacking objects", object_count);
+            for (idx, oid) in objects.iter().enumerate() {
+                let obj_data = pack_reader.get_object(oid)?;
                 // Write object to ODB (assuming Blob type for now)
                 odb.write(mediagit_versioning::ObjectType::Blob, &obj_data).await?;
+                unpack_pb.set_position((idx + 1) as u64);
             }
+            stats.objects_received = object_count;
 
             if !self.quiet {
                 println!("{} Unpacked objects", style("✓").green());
             }
+            unpack_pb.finish_with_message("Unpack complete");
 
             // Get remote ref OID
             let remote_refs = client.get_refs().await?;
@@ -274,6 +338,12 @@ impl PullCmd {
                     style("ℹ").blue()
                 );
             }
+        }
+
+        // Print operation summary
+        stats.duration_ms = start_time.elapsed().as_millis() as u64;
+        if !self.quiet && !self.dry_run {
+            println!("\n{} {}", style("📊").cyan(), stats.summary());
         }
 
         Ok(())

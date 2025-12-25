@@ -338,7 +338,7 @@ impl PsdParser {
         groups
     }
 
-    /// Check if two sets of layers have non-overlapping changes
+    /// Check if two sets of layers have non-overlapping changes (enhanced)
     pub fn can_auto_merge(base: &PsdInfo, ours: &PsdInfo, theirs: &PsdInfo) -> MergeDecision {
         let base_layers: Vec<&LayerInfo> = base.layers.iter().collect();
         let ours_layers: Vec<&LayerInfo> = ours.layers.iter().collect();
@@ -356,15 +356,31 @@ impl PsdParser {
         let ours_modified = Self::find_modified_layers(&base_layers, &ours_layers);
         let theirs_modified = Self::find_modified_layers(&base_layers, &theirs_layers);
 
-        // Check for overlapping modifications
-        let conflicts = Self::find_overlapping_modifications(&ours_modified, &theirs_modified);
+        // Collect all conflicts from different detection strategies
+        let mut all_conflicts = Vec::new();
 
-        if conflicts.is_empty() {
+        // Check for overlapping spatial modifications
+        let spatial_conflicts = Self::find_overlapping_modifications(&ours_modified, &theirs_modified);
+        all_conflicts.extend(spatial_conflicts);
+
+        // Check for blend mode conflicts
+        let blend_conflicts = Self::detect_blend_conflicts(&ours_modified, &theirs_modified);
+        all_conflicts.extend(blend_conflicts);
+
+        // Check for layer group hierarchy conflicts
+        let group_conflicts = Self::detect_group_conflicts(base, ours, theirs);
+        all_conflicts.extend(group_conflicts);
+
+        // Check for smart object conflicts
+        let smart_conflicts = Self::detect_smart_object_conflicts(&ours_modified, &theirs_modified);
+        all_conflicts.extend(smart_conflicts);
+
+        if all_conflicts.is_empty() {
             info!("No overlapping layer modifications detected - can auto-merge");
             MergeDecision::AutoMerge
         } else {
-            warn!("Found {} overlapping layer modifications", conflicts.len());
-            MergeDecision::ManualReview(conflicts)
+            warn!("Found {} total conflicts across all detection strategies", all_conflicts.len());
+            MergeDecision::ManualReview(all_conflicts)
         }
     }
 
@@ -389,7 +405,7 @@ impl PsdParser {
         result
     }
 
-    /// Check if two layers differ
+    /// Check if two layers differ (enhanced with blend mode and type checking)
     fn layer_differs(a: &LayerInfo, b: &LayerInfo) -> bool {
         a.x != b.x
             || a.y != b.y
@@ -397,6 +413,149 @@ impl PsdParser {
             || a.height != b.height
             || a.opacity != b.opacity
             || a.visible != b.visible
+            || a.blend_mode != b.blend_mode
+            || a.layer_type != b.layer_type
+    }
+
+    /// Detect blend mode conflicts between layers
+    fn detect_blend_conflicts(
+        ours: &[&LayerInfo],
+        theirs: &[&LayerInfo],
+    ) -> Vec<String> {
+        let mut conflicts = Vec::new();
+
+        for our_layer in ours {
+            for their_layer in theirs {
+                if our_layer.name == their_layer.name
+                    && our_layer.blend_mode != their_layer.blend_mode {
+                    conflicts.push(format!(
+                        "Layer '{}': blend mode changed from '{}' to '{}' in different branches",
+                        our_layer.name, our_layer.blend_mode, their_layer.blend_mode
+                    ));
+                }
+            }
+        }
+
+        conflicts
+    }
+
+    /// Check for layer group hierarchy conflicts
+    fn detect_group_conflicts(
+        base: &PsdInfo,
+        ours: &PsdInfo,
+        theirs: &PsdInfo,
+    ) -> Vec<String> {
+        let mut conflicts = Vec::new();
+
+        // Check if same layer moved to different groups
+        for base_layer in &base.layers {
+            let ours_layer = ours.layers.iter().find(|l| l.name == base_layer.name);
+            let theirs_layer = theirs.layers.iter().find(|l| l.name == base_layer.name);
+
+            if let (Some(ours), Some(theirs)) = (ours_layer, theirs_layer) {
+                if ours.parent_group != theirs.parent_group
+                    && (ours.parent_group != base_layer.parent_group
+                        || theirs.parent_group != base_layer.parent_group) {
+                    conflicts.push(format!(
+                        "Layer '{}' moved to different groups: {:?} vs {:?}",
+                        base_layer.name, ours.parent_group, theirs.parent_group
+                    ));
+                }
+            }
+        }
+
+        conflicts
+    }
+
+    /// Detect smart object conflicts
+    fn detect_smart_object_conflicts(
+        ours: &[&LayerInfo],
+        theirs: &[&LayerInfo],
+    ) -> Vec<String> {
+        let mut conflicts = Vec::new();
+
+        for our_layer in ours {
+            if our_layer.layer_type == LayerType::SmartObject {
+                for their_layer in theirs {
+                    if their_layer.name == our_layer.name
+                        && their_layer.layer_type == LayerType::SmartObject {
+                        conflicts.push(format!(
+                            "Smart Object '{}' modified in both branches (may contain different embedded content)",
+                            our_layer.name
+                        ));
+                    }
+                }
+            }
+        }
+
+        conflicts
+    }
+
+    /// Perform actual merge of PSD layers (metadata-level merge)
+    ///
+    /// This merges non-conflicting layer changes by combining:
+    /// - Layers added in 'ours' branch
+    /// - Layers added in 'theirs' branch
+    /// - Layers from base that weren't modified
+    ///
+    /// Returns merged PsdInfo structure (not actual PSD binary - that requires rebuild)
+    pub fn merge_layers(
+        base: &PsdInfo,
+        ours: &PsdInfo,
+        theirs: &PsdInfo,
+    ) -> Result<PsdInfo> {
+        info!("Executing PSD layer merge");
+
+        // Start with base document properties
+        let mut merged_psd = PsdInfo {
+            width: ours.width,
+            height: ours.height,
+            depth: ours.depth,
+            color_mode: ours.color_mode.clone(),
+            channels: ours.channels,
+            layers: Vec::new(),
+            groups: Vec::new(),
+        };
+
+        // Collect layers from both branches
+        let mut merged_layers = Vec::new();
+
+        // Add all layers from 'ours' that were added or modified
+        for layer in &ours.layers {
+            if !base.layers.iter().any(|b| b.name == layer.name) {
+                // New layer in 'ours'
+                debug!("Adding new layer from 'ours': {}", layer.name);
+                merged_layers.push(layer.clone());
+            } else {
+                // Modified or unchanged layer from 'ours'
+                merged_layers.push(layer.clone());
+            }
+        }
+
+        // Add new layers from 'theirs' that don't exist in 'ours'
+        for layer in &theirs.layers {
+            if !ours.layers.iter().any(|o| o.name == layer.name)
+                && !base.layers.iter().any(|b| b.name == layer.name) {
+                // New layer in 'theirs' only
+                debug!("Adding new layer from 'theirs': {}", layer.name);
+                merged_layers.push(layer.clone());
+            }
+        }
+
+        merged_psd.layers = merged_layers;
+
+        // Merge groups - combine all unique groups
+        let mut merged_groups = ours.groups.clone();
+        for group in &theirs.groups {
+            if !merged_groups.iter().any(|g| g.name == group.name) {
+                merged_groups.push(group.clone());
+            }
+        }
+        merged_psd.groups = merged_groups;
+
+        info!("PSD merge complete: {} layers", merged_psd.layers.len());
+
+        Ok(merged_psd)
     }
 
     /// Find overlapping modifications between two sets of layers
