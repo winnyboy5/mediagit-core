@@ -106,8 +106,8 @@ impl PullCmd {
             );
         }
 
-        // Validate local repository state
-        let _head = refdb.read("HEAD").await.context("Failed to read HEAD")?;
+        // Validate local repository state and read HEAD once
+        let head = refdb.read("HEAD").await.context("Failed to read HEAD")?;
 
         if self.verbose {
             println!("  Remote: {}", remote);
@@ -141,10 +141,10 @@ impl PullCmd {
 
         // Determine remote ref to pull
         let remote_ref = if let Some(branch) = &self.branch {
-            format!("refs/heads/{}", branch)
+            // Normalize branch name to handle both short and full ref paths
+            mediagit_versioning::normalize_ref_name(branch)
         } else {
-            // Default: pull tracking branch for current HEAD
-            let head = refdb.read("HEAD").await?;
+            // Default: pull tracking branch for current HEAD (reuse head from above)
             head.target.ok_or_else(|| {
                 anyhow::anyhow!("HEAD is detached, please specify a branch")
             })?
@@ -152,6 +152,29 @@ impl PullCmd {
 
         if self.verbose {
             println!("  Pulling ref: {}", remote_ref);
+        }
+
+        // Get current local ref state BEFORE downloading
+        let local_ref = refdb.read(&remote_ref).await.ok();
+
+        // Get remote refs to check current state
+        let remote_refs_check = client.get_refs().await?;
+        let remote_oid_check = remote_refs_check
+            .refs
+            .iter()
+            .find(|r| r.name == remote_ref)
+            .map(|r| r.oid.clone());
+
+        // Check if already synchronized (avoid redundant pull)
+        if let (Some(local), Some(remote)) = (local_ref.as_ref().and_then(|r| r.oid.as_ref()), remote_oid_check.as_ref()) {
+            let local_oid_str = local.to_hex();
+            if &local_oid_str == remote {
+                if !self.quiet {
+                    println!("{} Already up to date", style("✓").green());
+                    println!("  {} {}", style("→").cyan(), &remote[..8]);
+                }
+                return Ok(());
+            }
         }
 
         if !self.dry_run {

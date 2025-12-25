@@ -151,15 +151,14 @@ impl AddCmd {
                     .await
                     .context(format!("Failed to read file metadata: {}", file_path.display()))?;
 
-                // Write to object database with appropriate optimization
+                // Write to object database with intelligent feature selection
                 let filename = file_path.file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("");
 
-                // Use chunking for large files (>10MB) when enabled
-                const CHUNKING_THRESHOLD: usize = 10 * 1024 * 1024; // 10 MB
-                let oid = if chunking_enabled && content.len() > CHUNKING_THRESHOLD {
-                    // Large file with chunking enabled
+                // Intelligent feature selection based on file type and size
+                let oid = if chunking_enabled && Self::should_use_chunking(content.len(), filename) {
+                    // Chunking recommended for this file type/size
                     if self.verbose {
                         output::detail(
                             "chunking",
@@ -169,8 +168,8 @@ impl AddCmd {
                     odb.write_chunked(ObjectType::Blob, &content, filename)
                         .await
                         .context("Failed to write chunked object")?
-                } else if delta_enabled {
-                    // Delta compression enabled (for similar files)
+                } else if delta_enabled && Self::should_use_delta(filename, &content) {
+                    // Delta compression recommended for this file type
                     if self.verbose {
                         output::detail(
                             "delta",
@@ -247,6 +246,17 @@ impl AddCmd {
         }
     }
 
+    /// Check if path is outside .mediagit directory
+    ///
+    /// Returns true if the path is valid and not inside .mediagit
+    fn is_outside_mediagit(path: &Path, mediagit_dir: &Path) -> bool {
+        if let Ok(abs_path) = path.canonicalize() {
+            !abs_path.starts_with(mediagit_dir)
+        } else {
+            false
+        }
+    }
+
     /// Expand paths (globs, directories) into a list of files to add
     fn expand_paths(&self, repo_root: &Path) -> Result<Vec<PathBuf>> {
         use crate::output;
@@ -264,13 +274,8 @@ impl AddCmd {
                         for entry in entries {
                             match entry {
                                 Ok(p) => {
-                                    if p.is_file() {
-                                        // Check if file is in .mediagit directory
-                                        if let Ok(abs_path) = p.canonicalize() {
-                                            if !abs_path.starts_with(&mediagit_dir) {
-                                                files.push(p);
-                                            }
-                                        }
+                                    if p.is_file() && Self::is_outside_mediagit(&p, &mediagit_dir) {
+                                        files.push(p);
                                     }
                                 }
                                 Err(e) => {
@@ -299,13 +304,8 @@ impl AddCmd {
             }
 
             // Handle files
-            if path.is_file() {
-                // Skip .mediagit directory files
-                if let Ok(abs_path) = path.canonicalize() {
-                    if !abs_path.starts_with(&mediagit_dir) {
-                        files.push(path.to_path_buf());
-                    }
-                }
+            if path.is_file() && Self::is_outside_mediagit(path, &mediagit_dir) {
+                files.push(path.to_path_buf());
             }
             // Handle directories - recurse
             else if path.is_dir() {
@@ -323,11 +323,9 @@ impl AddCmd {
         mediagit_dir: &Path,
         files: &mut Vec<PathBuf>,
     ) -> Result<()> {
-        // Skip .mediagit directory - use canonicalize for reliable comparison
-        if let Ok(abs_dir) = dir.canonicalize() {
-            if abs_dir.starts_with(mediagit_dir) || abs_dir == *mediagit_dir {
-                return Ok(());
-            }
+        // Skip .mediagit directory using helper
+        if !Self::is_outside_mediagit(dir, mediagit_dir) {
+            return Ok(());
         }
 
         let entries = std::fs::read_dir(dir)
@@ -338,10 +336,8 @@ impl AddCmd {
             let path = entry.path();
 
             // Skip .mediagit directory and its contents
-            if let Ok(abs_path) = path.canonicalize() {
-                if abs_path.starts_with(mediagit_dir) {
-                    continue;
-                }
+            if !Self::is_outside_mediagit(&path, mediagit_dir) {
+                continue;
             }
 
             if path.is_file() {
@@ -357,5 +353,60 @@ impl AddCmd {
         }
 
         Ok(())
+    }
+
+    /// Determine if file should use chunking based on size AND type
+    fn should_use_chunking(size: usize, filename: &str) -> bool {
+        const MIN_CHUNK_SIZE: usize = 5 * 1024 * 1024; // 5 MB
+
+        if size < MIN_CHUNK_SIZE {
+            return false;
+        }
+
+        let ext = std::path::Path::new(filename)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+
+        match ext.to_lowercase().as_str() {
+            // Video formats: Chunk at lower threshold (benefits most)
+            "mp4" | "mov" | "avi" | "mkv" | "flv" | "wmv" => size > MIN_CHUNK_SIZE,
+            // Large uncompressed formats: Chunk at moderate threshold
+            "psd" | "tif" | "tiff" | "bmp" | "wav" | "aiff" => size > 10 * 1024 * 1024,
+            // Compressed images: Higher threshold (already compressed)
+            "jpg" | "jpeg" | "png" | "webp" => size > 50 * 1024 * 1024,
+            // 3D models: Chunk at moderate threshold
+            "obj" | "fbx" | "blend" | "gltf" | "glb" => size > 20 * 1024 * 1024,
+            // Archives: Don't chunk (already compressed)
+            "zip" | "gz" | "bz2" | "7z" | "rar" => false,
+            // Unknown: Use generic large file threshold
+            _ => size > 50 * 1024 * 1024,
+        }
+    }
+
+    /// Determine if file is suitable for delta compression
+    fn should_use_delta(filename: &str, data: &[u8]) -> bool {
+        let ext = std::path::Path::new(filename)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+
+        match ext.to_lowercase().as_str() {
+            // Text-based formats: Excellent delta candidates
+            "txt" | "md" | "json" | "xml" | "html" | "css" | "js" | "ts" |
+            "py" | "rs" | "go" | "java" | "c" | "cpp" | "h" | "hpp" => true,
+            // Uncompressed formats: Good delta candidates
+            "psd" | "tif" | "tiff" | "bmp" | "wav" | "aiff" => true,
+            // Video (raw/uncompressed): Good delta candidates
+            "avi" | "mov" => true,
+            // Compressed video: Moderate benefit (only for very large files)
+            "mp4" | "mkv" | "flv" | "wmv" => data.len() > 100 * 1024 * 1024,
+            // Compressed images: Poor delta candidates (skip)
+            "jpg" | "jpeg" | "png" | "webp" | "gif" => false,
+            // Archives: No delta benefit (skip)
+            "zip" | "gz" | "bz2" | "7z" | "rar" => false,
+            // Unknown: Conservative approach (allow if large)
+            _ => data.len() > 50 * 1024 * 1024,
+        }
     }
 }

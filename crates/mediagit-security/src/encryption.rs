@@ -255,10 +255,40 @@ pub fn decrypt(key: &EncryptionKey, ciphertext: &[u8]) -> Result<Vec<u8>, Encryp
 
     // Extract nonce
     let nonce_bytes = &ciphertext[1..1 + NONCE_SIZE];
-    let nonce = Nonce::from_slice(nonce_bytes);
 
     // Extract ciphertext (includes tag)
     let encrypted_data = &ciphertext[1 + NONCE_SIZE..];
+
+    // Detect if this was stream-encrypted based on size
+    // Stream encryption is used when plaintext > STREAM_THRESHOLD
+    // Encrypted size = plaintext + tags (one per chunk)
+    // If encrypted_data is large or is a multiple of (CHUNK_SIZE + TAG_SIZE), try stream decryption
+    let chunk_ciphertext_size = CHUNK_SIZE + TAG_SIZE;
+    let could_be_stream = encrypted_data.len() > STREAM_THRESHOLD + TAG_SIZE
+        || (encrypted_data.len() >= chunk_ciphertext_size
+            && encrypted_data.len() % chunk_ciphertext_size == 0
+            && encrypted_data.len() > TAG_SIZE);
+
+    if could_be_stream {
+        // Try stream decryption first
+        match decrypt_stream(key, version, nonce_bytes, encrypted_data) {
+            Ok(plaintext) => {
+                debug!(
+                    ciphertext_size = ciphertext.len(),
+                    plaintext_size = plaintext.len(),
+                    "Stream decryption complete"
+                );
+                return Ok(plaintext);
+            }
+            Err(_) => {
+                // Fall through to try regular decryption
+                debug!("Stream decryption failed, trying regular decryption");
+            }
+        }
+    }
+
+    // Regular single-block decryption
+    let nonce = Nonce::from_slice(nonce_bytes);
 
     // Create cipher
     let cipher = Aes256Gcm::new_from_slice(key.expose_key())
@@ -330,8 +360,7 @@ fn encrypt_stream(key: &EncryptionKey, plaintext: &[u8]) -> Result<Vec<u8>, Encr
 /// Decrypt stream-encrypted data
 ///
 /// This is automatically handled by the decrypt() function based on data size.
-#[allow(dead_code)]
-fn _decrypt_stream(
+fn decrypt_stream(
     key: &EncryptionKey,
     _version: u8,
     nonce_bytes: &[u8],

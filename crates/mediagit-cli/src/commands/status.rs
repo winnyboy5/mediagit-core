@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use mediagit_storage::LocalBackend;
 use mediagit_versioning::{Index, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase};
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -149,22 +150,47 @@ impl StatusCmd {
             index_files.insert(entry.path.clone(), entry.oid);
         }
 
-        // Detect modified files (in HEAD but different in working dir)
-        let mut modified_files = Vec::new();
-        for (path, head_oid) in &head_files {
-            if working_files.contains(path) {
-                // File exists in working dir, check if modified
+        // OPTIMIZATION: Parallel modified files detection with Rayon
+        // Convert to vector for parallel iteration
+        let head_files_vec: Vec<_> = head_files.iter().collect();
+
+        let modified_files: Vec<PathBuf> = head_files_vec
+            .par_iter()  // Parallel iterator for multi-core processing
+            .filter_map(|(path, head_oid)| {
+                // Skip files not in working directory
+                if !working_files.contains(*path) {
+                    return None;
+                }
+
+                // Skip files already in index (staged changes)
+                if index_files.contains_key(*path) {
+                    return None;
+                }
+
                 let full_path = repo_root.join(path);
-                if let Ok(content) = std::fs::read(&full_path) {
-                    if let Ok(working_oid) = odb.write(ObjectType::Blob, &content).await {
-                        if working_oid != *head_oid && !index_files.contains_key(path) {
-                            // Modified but not staged
-                            modified_files.push(path.clone());
+
+                // OPTIMIZATION 1: Size-based quick check
+                if let Ok(_metadata) = std::fs::metadata(&full_path) {
+                    // Quick size comparison - avoids reading file if size differs significantly
+                    // This is a heuristic; we still need to read for hash comparison
+                    // For now, we always read to compute hash; future optimization could cache sizes
+
+                    // Read file content
+                    if let Ok(content) = std::fs::read(&full_path) {
+                        // OPTIMIZATION 2: Direct hash computation (no async overhead)
+                        // Compute OID directly instead of using odb.write() for comparison
+                        let working_oid = Oid::hash(&content);
+
+                        if working_oid != **head_oid {
+                            // File is modified
+                            return Some((*path).clone());
                         }
                     }
                 }
-            }
-        }
+
+                None
+            })
+            .collect();
 
         // Detect deleted files (in HEAD, not in working dir, not staged for deletion)
         let mut deleted_files = Vec::new();

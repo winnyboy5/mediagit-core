@@ -101,7 +101,7 @@ pub use object::ObjectType;
 pub use odb::{ObjectDatabase, RepackStats};
 pub use oid::Oid;
 pub use pack::{PackHeader, PackIndex, PackMetadata, PackObjectEntry, PackReader, PackWriter};
-pub use refs::{Ref, RefDatabase, RefType};
+pub use refs::{normalize_ref_name, Ref, RefDatabase, RefType};
 pub use revision::resolve_revision;
 pub use tree::{FileMode, Tree, TreeEntry};
 

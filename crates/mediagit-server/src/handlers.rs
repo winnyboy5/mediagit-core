@@ -320,9 +320,9 @@ pub async fn download_pack(
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        // TODO: Need to determine object type properly
-        // For now, assume Blob type (suitable for media files)
-        let object_type = ObjectType::Blob;
+        // Determine object type from data header
+        // Git objects start with: "type size\0" where type is blob/tree/commit
+        let object_type = detect_object_type(&obj_data).unwrap_or(ObjectType::Blob);
 
         // Add to pack (returns offset as u64, not Result)
         let _offset = pack_writer.add_object(oid, object_type, &obj_data);
@@ -444,4 +444,27 @@ pub async fn update_refs(
         success: all_success,
         results,
     }))
+}
+
+/// Helper function to detect object type from raw object data
+/// Git objects start with "type size\0" header
+fn detect_object_type(data: &[u8]) -> Option<ObjectType> {
+    // Find the null byte that separates header from content
+    let null_pos = data.iter().position(|&b| b == 0)?;
+
+    // Parse the header
+    let header = std::str::from_utf8(&data[..null_pos]).ok()?;
+    let parts: Vec<&str> = header.split(' ').collect();
+
+    if parts.is_empty() {
+        return None;
+    }
+
+    // Determine type from header
+    match parts[0] {
+        "blob" => Some(ObjectType::Blob),
+        "tree" => Some(ObjectType::Tree),
+        "commit" => Some(ObjectType::Commit),
+        _ => None,
+    }
 }

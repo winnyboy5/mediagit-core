@@ -615,6 +615,41 @@ impl RefDatabase {
     }
 }
 
+/// Normalize a ref name to its full path
+///
+/// Handles both short branch names (e.g., "main") and full ref paths (e.g., "refs/heads/main").
+/// This ensures consistent ref handling across push, pull, and other operations.
+///
+/// # Arguments
+///
+/// * `input` - The ref name to normalize (short or full path)
+///
+/// # Returns
+///
+/// The full ref path (e.g., "refs/heads/main")
+///
+/// # Examples
+///
+/// ```
+/// use mediagit_versioning::normalize_ref_name;
+///
+/// assert_eq!(normalize_ref_name("main"), "refs/heads/main");
+/// assert_eq!(normalize_ref_name("refs/heads/main"), "refs/heads/main");
+/// assert_eq!(normalize_ref_name("feature/auth"), "refs/heads/feature/auth");
+/// ```
+pub fn normalize_ref_name(input: &str) -> String {
+    if input.starts_with("refs/") {
+        // Already a full ref path
+        input.to_string()
+    } else if input == "HEAD" {
+        // HEAD is special - don't prefix it
+        input.to_string()
+    } else {
+        // Assume it's a branch name - prefix with refs/heads/
+        format!("refs/heads/{}", input)
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -735,7 +770,8 @@ mod tests {
         let r = Ref::new_direct("refs/heads/main".to_string(), oid);
 
         let serialized = r.serialize().unwrap();
-        let deserialized = Ref::deserialize(&serialized).unwrap();
+        let mut deserialized = Ref::deserialize(&serialized).unwrap();
+        deserialized.name = r.name.clone(); // Restore name as done in RefDatabase::read
 
         assert_eq!(r, deserialized);
     }
@@ -745,7 +781,8 @@ mod tests {
         let r = Ref::new_symbolic("HEAD".to_string(), "refs/heads/main".to_string());
 
         let serialized = r.serialize().unwrap();
-        let deserialized = Ref::deserialize(&serialized).unwrap();
+        let mut deserialized = Ref::deserialize(&serialized).unwrap();
+        deserialized.name = r.name.clone(); // Restore name as done in RefDatabase::read
 
         assert_eq!(r, deserialized);
     }

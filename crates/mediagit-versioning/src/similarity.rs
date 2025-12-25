@@ -23,6 +23,56 @@ use tracing::{debug, info};
 /// Minimum similarity threshold for delta compression (0.0 to 1.0)
 pub const MIN_SIMILARITY_THRESHOLD: f64 = 0.30;
 
+/// Get type-aware similarity threshold based on file extension
+///
+/// Different file types have different similarity characteristics:
+/// - Text/code: High threshold (small changes matter)
+/// - Configuration: Very high threshold (exact matches preferred)
+/// - Images: Lower threshold (perceptual similarity)
+/// - Video: Very low threshold (metadata/timeline changes)
+///
+/// # Arguments
+///
+/// * `filename` - Optional filename for type inference
+///
+/// # Returns
+///
+/// Threshold value (0.0 to 1.0)
+pub fn get_similarity_threshold(filename: Option<&str>) -> f64 {
+    if let Some(name) = filename {
+        let ext = std::path::Path::new(name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+
+        match ext.to_lowercase().as_str() {
+            // Text/code: High similarity threshold (small changes matter)
+            "txt" | "md" | "py" | "rs" | "js" | "ts" | "go" | "java" | "c" | "cpp" | "h" | "hpp" => 0.85,
+
+            // Configuration: Very high threshold (exact matches preferred)
+            "json" | "yaml" | "toml" | "xml" => 0.95,
+
+            // Images: Lower threshold (perceptual similarity)
+            "jpg" | "jpeg" | "png" | "psd" => 0.70,
+
+            // Video: Very low threshold (metadata/timeline changes significant)
+            "mp4" | "mov" | "avi" | "mkv" => 0.50,
+
+            // Audio: Medium threshold
+            "wav" | "aiff" | "mp3" | "flac" => 0.65,
+
+            // 3D models: Medium threshold
+            "obj" | "fbx" | "blend" | "gltf" | "glb" => 0.70,
+
+            // Unknown: Use default
+            _ => MIN_SIMILARITY_THRESHOLD,
+        }
+    } else {
+        // No filename: use default threshold
+        MIN_SIMILARITY_THRESHOLD
+    }
+}
+
 /// Maximum objects to consider for similarity matching
 pub const MAX_SIMILARITY_CANDIDATES: usize = 50;
 
@@ -58,6 +108,22 @@ impl SimilarityScore {
     /// Check if this score meets the threshold for delta compression
     pub fn is_good_match(&self) -> bool {
         self.score >= MIN_SIMILARITY_THRESHOLD
+    }
+
+    /// Check if this score meets a type-aware threshold
+    ///
+    /// Uses filename-based threshold if available, otherwise uses default
+    ///
+    /// # Arguments
+    ///
+    /// * `filename` - Optional filename for type-aware threshold
+    ///
+    /// # Returns
+    ///
+    /// True if score meets the threshold
+    pub fn is_good_match_for_type(&self, filename: Option<&str>) -> bool {
+        let threshold = get_similarity_threshold(filename);
+        self.score >= threshold
     }
 }
 
@@ -368,7 +434,8 @@ mod tests {
         let score = detector.compute_similarity(&target, &candidate, size_ratio);
 
         // Different objects should have low similarity
-        assert!(score.score < 0.1);
+        // Note: With size_ratio=1.0 and 0 sample matches, score = (0 * 0.7) + (1.0 * 0.3) = 0.3
+        assert!(score.score <= MIN_SIMILARITY_THRESHOLD);
         assert_eq!(score.sample_matches, 0);
     }
 

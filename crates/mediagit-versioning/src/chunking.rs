@@ -380,7 +380,9 @@ pub struct ChunkStore {
 #[derive(Debug, Clone)]
 struct ChunkMetadata {
     size: usize,
+    #[allow(dead_code)]
     chunk_type: ChunkType,
+    #[allow(dead_code)]
     first_seen: std::time::SystemTime,
 }
 

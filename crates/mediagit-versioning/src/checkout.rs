@@ -60,21 +60,20 @@ impl<'a> CheckoutManager<'a> {
 
         debug!("Commit tree: {}", commit.tree);
 
-        // Get all files that should exist from the tree
-        let target_files = self.get_tree_files(&commit.tree, Path::new("")).await?;
+        // Optimized: Single-pass checkout that collects files and writes them
+        // This eliminates the redundant tree traversal
+        let (target_files, files_updated) = self.checkout_tree_optimized(&commit.tree, Path::new("")).await?;
         debug!("Target files: {} entries", target_files.len());
 
         // Clean working directory (remove files not in target)
         self.clean_working_directory(&target_files)?;
-
-        // Checkout all files from the tree
-        let files_updated = self.checkout_tree(&commit.tree, Path::new("")).await?;
 
         info!("Checked out {} files", files_updated);
         Ok(files_updated)
     }
 
     /// Get all file paths from a tree recursively
+    #[allow(dead_code)]
     fn get_tree_files<'b>(
         &'b self,
         tree_oid: &'b Oid,
@@ -165,37 +164,70 @@ impl<'a> CheckoutManager<'a> {
     }
 
     /// Remove empty directories in working tree
+    ///
+    /// Recursively removes all empty directories to match Git behavior.
+    /// Directories are only removed if they contain no files and no non-empty subdirectories.
     fn remove_empty_directories(&self) -> Result<()> {
-        // Simple implementation: try to remove all directories
-        // Non-empty ones will fail to remove, which is fine
-        self.try_remove_empty_dirs(&self.repo_root)?;
+        // Improved: Recursively clean until no more empty dirs
+        // Multiple passes handle nested empty directories
+        loop {
+            let mut removed_any = false;
+            self.try_remove_empty_dirs(&self.repo_root, &mut removed_any)?;
+
+            if !removed_any {
+                break; // No more empty dirs to remove
+            }
+        }
         Ok(())
     }
 
     /// Try to remove empty directories recursively
-    fn try_remove_empty_dirs(&self, dir: &Path) -> Result<()> {
+    ///
+    /// Returns true if directory still exists (has contents or couldn't be removed)
+    fn try_remove_empty_dirs(&self, dir: &Path, removed_any: &mut bool) -> Result<bool> {
         if !dir.exists() || !dir.is_dir() || dir == self.repo_root {
-            return Ok(());
+            return Ok(false);
         }
+
+        let mut has_contents = false;
 
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
 
-            // Skip .mediagit
+            // Skip .mediagit directory
             if path.file_name().and_then(|n| n.to_str()) == Some(".mediagit") {
                 continue;
             }
 
             if path.is_dir() {
-                self.try_remove_empty_dirs(&path)?;
+                // Recursively try to remove subdirectories
+                if self.try_remove_empty_dirs(&path, removed_any)? {
+                    has_contents = true;
+                }
+            } else {
+                // Directory contains files
+                has_contents = true;
             }
         }
 
-        // Try to remove this directory (will only succeed if empty)
-        let _ = fs::remove_dir(dir);
-
-        Ok(())
+        // Remove directory if empty
+        if !has_contents {
+            match fs::remove_dir(dir) {
+                Ok(_) => {
+                    debug!("Removed empty directory: {}", dir.display());
+                    *removed_any = true;
+                    Ok(false) // Successfully removed
+                }
+                Err(e) => {
+                    // Log but don't fail (might be permission issue)
+                    debug!("Failed to remove empty directory {}: {}", dir.display(), e);
+                    Ok(true) // Still has directory (couldn't remove)
+                }
+            }
+        } else {
+            Ok(true) // Has contents
+        }
     }
 
     /// Checkout a tree recursively, writing all files to working directory
@@ -278,6 +310,129 @@ impl<'a> CheckoutManager<'a> {
             }
 
             Ok(files_updated)
+        })
+    }
+
+    /// Optimized checkout: Single-pass tree traversal that both collects files and writes them
+    ///
+    /// This eliminates the redundant tree traversal (get_tree_files + checkout_tree).
+    /// Returns (file_paths, files_updated) for cleanup and counting.
+    fn checkout_tree_optimized<'b>(
+        &'b self,
+        tree_oid: &'b Oid,
+        prefix: &'b Path,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(HashSet<PathBuf>, usize)>> + 'b>> {
+        Box::pin(async move {
+            let tree = Tree::read(self.odb, tree_oid).await?;
+
+            let mut file_paths = HashSet::new();
+            let mut files_updated = 0;
+
+            for entry in tree.iter() {
+                let entry_path = prefix.join(&entry.name);
+                let full_path = self.repo_root.join(&entry_path);
+
+                match entry.mode {
+                    FileMode::Regular | FileMode::Executable => {
+                        // Collect path for cleanup
+                        file_paths.insert(entry_path.clone());
+
+                        // OPTIMIZATION: Differential checkout - skip unchanged files
+                        // Check if file exists and matches the expected OID
+                        let mut skip_write = false;
+                        if full_path.exists() {
+                            // Quick check: Compare file size first (cheap operation)
+                            if let Ok(metadata) = fs::metadata(&full_path) {
+                                if let Ok(expected_size) = self.odb.get_object_size(&entry.oid).await {
+                                    if metadata.len() == expected_size as u64 {
+                                        // Size matches - perform full hash comparison
+                                        if let Ok(file_data) = fs::read(&full_path) {
+                                            let file_oid = Oid::hash(&file_data);
+                                            if file_oid == entry.oid {
+                                                // File is unchanged - skip write operation
+                                                skip_write = true;
+                                                debug!("Skipped unchanged file: {}", entry_path.display());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if !skip_write {
+                            // Read blob data
+                            let blob_data = self.odb.read(&entry.oid).await
+                                .with_context(|| format!("Failed to read blob: {}", entry.oid))?;
+
+                            // Ensure parent directory exists
+                            if let Some(parent) = full_path.parent() {
+                                fs::create_dir_all(parent)
+                                    .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+                            }
+
+                            // Write file
+                            fs::write(&full_path, blob_data)
+                                .with_context(|| format!("Failed to write file: {}", full_path.display()))?;
+
+                            // Set executable permission if needed
+                            #[cfg(unix)]
+                            if entry.mode == FileMode::Executable {
+                                use std::os::unix::fs::PermissionsExt;
+                                let mut perms = fs::metadata(&full_path)?.permissions();
+                                perms.set_mode(0o755);
+                                fs::set_permissions(&full_path, perms)?;
+                            }
+
+                            debug!("Checked out file: {}", entry_path.display());
+                            files_updated += 1;
+                        }
+                    }
+                    FileMode::Symlink => {
+                        // Collect path for cleanup
+                        file_paths.insert(entry_path.clone());
+
+                        // Read symlink target
+                        let target_data = self.odb.read(&entry.oid).await?;
+                        let target = String::from_utf8(target_data)
+                            .context("Symlink target is not valid UTF-8")?;
+
+                        // Ensure parent directory exists
+                        if let Some(parent) = full_path.parent() {
+                            fs::create_dir_all(parent)?;
+                        }
+
+                        // Create symlink
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::symlink;
+                            // Remove existing file/link if present
+                            if full_path.exists() || full_path.symlink_metadata().is_ok() {
+                                let _ = fs::remove_file(&full_path);
+                            }
+                            symlink(&target, &full_path)
+                                .with_context(|| format!("Failed to create symlink: {}", full_path.display()))?;
+                        }
+
+                        #[cfg(not(unix))]
+                        {
+                            // On non-Unix, write symlink target as a regular file
+                            fs::write(&full_path, target.as_bytes())
+                                .with_context(|| format!("Failed to write symlink file: {}", full_path.display()))?;
+                        }
+
+                        debug!("Checked out symlink: {}", entry_path.display());
+                        files_updated += 1;
+                    }
+                    FileMode::Directory => {
+                        // Recursively checkout subdirectory
+                        let (subdir_paths, subdir_count) = self.checkout_tree_optimized(&entry.oid, &entry_path).await?;
+                        file_paths.extend(subdir_paths);
+                        files_updated += subdir_count;
+                    }
+                }
+            }
+
+            Ok((file_paths, files_updated))
         })
     }
 
@@ -577,8 +732,7 @@ mod tests {
             blob_oid,
         ));
 
-        let tree_data = serde_json::to_vec(&tree)?;
-        let tree_oid = odb.write(ObjectType::Tree, &tree_data).await?;
+        let tree_oid = tree.write(&odb).await?;
 
         let commit = Commit::new(
             tree_oid,
@@ -587,8 +741,7 @@ mod tests {
             "Initial commit".to_string(),
         );
 
-        let commit_data = serde_json::to_vec(&commit)?;
-        let commit_oid = odb.write(ObjectType::Commit, &commit_data).await?;
+        let commit_oid = commit.write(&odb).await?;
 
         // Checkout the commit
         let checkout_mgr = CheckoutManager::new(&odb, repo_root);
@@ -620,8 +773,7 @@ mod tests {
         let blob_oid = odb.write(ObjectType::Blob, b"content").await?;
         let mut tree = Tree::new();
         tree.add_entry(TreeEntry::new("file.txt".to_string(), FileMode::Regular, blob_oid));
-        let tree_data = serde_json::to_vec(&tree)?;
-        let tree_oid = odb.write(ObjectType::Tree, &tree_data).await?;
+        let tree_oid = tree.write(&odb).await?;
 
         let commit = Commit::new(
             tree_oid,
@@ -629,8 +781,7 @@ mod tests {
             Signature::now("Test".to_string(), "test@example.com".to_string()),
             "commit".to_string(),
         );
-        let commit_data = serde_json::to_vec(&commit)?;
-        let commit_oid = odb.write(ObjectType::Commit, &commit_data).await?;
+        let commit_oid = commit.write(&odb).await?;
 
         let checkout_mgr = CheckoutManager::new(&odb, repo_root);
 
@@ -660,8 +811,7 @@ mod tests {
         let mut tree1 = Tree::new();
         tree1.add_entry(TreeEntry::new("unchanged.txt".to_string(), FileMode::Regular, blob1));
         tree1.add_entry(TreeEntry::new("changed.txt".to_string(), FileMode::Regular, blob2));
-        let tree1_data = serde_json::to_vec(&tree1)?;
-        let tree1_oid = odb.write(ObjectType::Tree, &tree1_data).await?;
+        let tree1_oid = tree1.write(&odb).await?;
 
         let commit1 = Commit::new(
             tree1_oid,
@@ -669,8 +819,7 @@ mod tests {
             Signature::now("Test".to_string(), "test@example.com".to_string()),
             "commit 1".to_string(),
         );
-        let commit1_data = serde_json::to_vec(&commit1)?;
-        let commit1_oid = odb.write(ObjectType::Commit, &commit1_data).await?;
+        let commit1_oid = commit1.write(&odb).await?;
 
         // Create second commit - only one file changes
         let blob3 = odb.write(ObjectType::Blob, b"new content").await?;
@@ -678,8 +827,7 @@ mod tests {
         let mut tree2 = Tree::new();
         tree2.add_entry(TreeEntry::new("unchanged.txt".to_string(), FileMode::Regular, blob1)); // Same OID
         tree2.add_entry(TreeEntry::new("changed.txt".to_string(), FileMode::Regular, blob3)); // Different OID
-        let tree2_data = serde_json::to_vec(&tree2)?;
-        let tree2_oid = odb.write(ObjectType::Tree, &tree2_data).await?;
+        let tree2_oid = tree2.write(&odb).await?;
 
         let mut commit2 = Commit::new(
             tree2_oid,
@@ -688,8 +836,7 @@ mod tests {
             "commit 2".to_string(),
         );
         commit2.add_parent(commit1_oid);
-        let commit2_data = serde_json::to_vec(&commit2)?;
-        let commit2_oid = odb.write(ObjectType::Commit, &commit2_data).await?;
+        let commit2_oid = commit2.write(&odb).await?;
 
         // First checkout commit1
         let checkout_mgr = CheckoutManager::new(&odb, repo_root);
@@ -728,8 +875,7 @@ mod tests {
         let blob_a = odb.write(ObjectType::Blob, b"file A").await?;
         let mut tree1 = Tree::new();
         tree1.add_entry(TreeEntry::new("a.txt".to_string(), FileMode::Regular, blob_a));
-        let tree1_data = serde_json::to_vec(&tree1)?;
-        let tree1_oid = odb.write(ObjectType::Tree, &tree1_data).await?;
+        let tree1_oid = tree1.write(&odb).await?;
 
         let commit1 = Commit::new(
             tree1_oid,
@@ -737,15 +883,13 @@ mod tests {
             Signature::now("Test".to_string(), "test@example.com".to_string()),
             "commit 1".to_string(),
         );
-        let commit1_data = serde_json::to_vec(&commit1)?;
-        let commit1_oid = odb.write(ObjectType::Commit, &commit1_data).await?;
+        let commit1_oid = commit1.write(&odb).await?;
 
         // Create second commit with file B (no file A)
         let blob_b = odb.write(ObjectType::Blob, b"file B").await?;
         let mut tree2 = Tree::new();
         tree2.add_entry(TreeEntry::new("b.txt".to_string(), FileMode::Regular, blob_b));
-        let tree2_data = serde_json::to_vec(&tree2)?;
-        let tree2_oid = odb.write(ObjectType::Tree, &tree2_data).await?;
+        let tree2_oid = tree2.write(&odb).await?;
 
         let commit2 = Commit::new(
             tree2_oid,
@@ -753,8 +897,7 @@ mod tests {
             Signature::now("Test".to_string(), "test@example.com".to_string()),
             "commit 2".to_string(),
         );
-        let commit2_data = serde_json::to_vec(&commit2)?;
-        let commit2_oid = odb.write(ObjectType::Commit, &commit2_data).await?;
+        let commit2_oid = commit2.write(&odb).await?;
 
         // First checkout commit1
         let checkout_mgr = CheckoutManager::new(&odb, repo_root);
