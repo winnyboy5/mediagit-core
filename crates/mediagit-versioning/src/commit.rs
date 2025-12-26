@@ -16,10 +16,12 @@
 //! A Commit object captures a moment in time with metadata about changes,
 //! references to the tree snapshot, and parent commits for history tracking.
 
-use crate::{ObjectType, Oid};
+use crate::{ObjectType, Oid, ObjectDatabase};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fmt;
+use std::sync::Arc;
 
 /// Author or committer information
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,6 +310,207 @@ impl fmt::Display for Commit {
     }
 }
 
+/// Result of a shallow walk operation
+///
+/// Contains the commits within the depth limit and the shallow boundaries
+/// (commits at the depth limit whose parents are not included).
+#[derive(Debug, Clone)]
+pub struct ShallowWalkResult {
+    /// Commits within the depth limit (includes boundary commits)
+    pub commits: Vec<Oid>,
+
+    /// Commits at the depth limit (shallow boundaries)
+    pub shallow_boundaries: HashSet<Oid>,
+}
+
+/// Commit graph walker with depth-limited traversal support
+///
+/// Provides efficient commit graph traversal with optional depth limiting
+/// for shallow clone support. Tracks visited commits to avoid redundant work.
+///
+/// # Examples
+///
+/// ```no_run
+/// use mediagit_versioning::{CommitWalker, ObjectDatabase, Oid};
+/// use mediagit_storage::LocalBackend;
+/// use std::sync::Arc;
+///
+/// #[tokio::main]
+/// async fn main() -> anyhow::Result<()> {
+///     let storage = Arc::new(LocalBackend::new("/tmp/odb")?);
+///     let odb = Arc::new(ObjectDatabase::new(storage, 100));
+///
+///     let mut walker = CommitWalker::new(odb);
+///     let head_oid = Oid::hash(b"head");
+///
+///     // Walk with depth limit of 10
+///     let result = walker.walk_shallow(&head_oid, 10).await?;
+///     println!("Found {} commits, {} boundaries",
+///              result.commits.len(),
+///              result.shallow_boundaries.len());
+///
+///     Ok(())
+/// }
+/// ```
+pub struct CommitWalker {
+    odb: Arc<ObjectDatabase>,
+    visited: HashSet<Oid>,
+}
+
+impl CommitWalker {
+    /// Create a new commit walker
+    ///
+    /// # Arguments
+    ///
+    /// * `odb` - Object database for reading commits
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use mediagit_versioning::{CommitWalker, ObjectDatabase};
+    /// use mediagit_storage::LocalBackend;
+    /// use std::sync::Arc;
+    ///
+    /// # async fn example() -> anyhow::Result<()> {
+    /// let storage = Arc::new(LocalBackend::new("/tmp/odb")?);
+    /// let odb = Arc::new(ObjectDatabase::new(storage, 100));
+    /// let walker = CommitWalker::new(odb);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn new(odb: Arc<ObjectDatabase>) -> Self {
+        Self {
+            odb,
+            visited: HashSet::new(),
+        }
+    }
+
+    /// Walk commit graph with depth limit (for shallow clones)
+    ///
+    /// Traverses the commit graph starting from `start`, limiting traversal
+    /// to `depth` commits. Returns all commits within the depth and marks
+    /// commits at the depth limit as shallow boundaries.
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - Starting commit OID (typically HEAD)
+    /// * `depth` - Maximum depth to traverse (0 = only start commit)
+    ///
+    /// # Returns
+    ///
+    /// `ShallowWalkResult` containing:
+    /// - `commits`: All commits within depth limit
+    /// - `shallow_boundaries`: Commits at depth limit (boundary commits)
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use mediagit_versioning::{CommitWalker, ObjectDatabase, Oid};
+    /// use mediagit_storage::LocalBackend;
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> anyhow::Result<()> {
+    ///     let storage = Arc::new(LocalBackend::new("/tmp/odb")?);
+    ///     let odb = Arc::new(ObjectDatabase::new(storage, 100));
+    ///     let mut walker = CommitWalker::new(odb);
+    ///
+    ///     let head = Oid::hash(b"head");
+    ///
+    ///     // Clone with depth 1 (only HEAD commit)
+    ///     let result = walker.walk_shallow(&head, 0).await?;
+    ///     assert_eq!(result.commits.len(), 1);
+    ///     assert_eq!(result.shallow_boundaries.len(), 1);
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn walk_shallow(
+        &mut self,
+        start: &Oid,
+        depth: usize,
+    ) -> anyhow::Result<ShallowWalkResult> {
+        let mut commits = Vec::new();
+        let mut boundaries = HashSet::new();
+
+        // Reset visited set for new walk
+        self.visited.clear();
+
+        // Perform depth-limited recursive walk
+        self.walk_recursive(start, 0, depth, &mut commits, &mut boundaries)
+            .await?;
+
+        Ok(ShallowWalkResult {
+            commits,
+            shallow_boundaries: boundaries,
+        })
+    }
+
+    /// Recursive helper for depth-limited traversal
+    ///
+    /// # Arguments
+    ///
+    /// * `oid` - Current commit OID
+    /// * `current_depth` - Current depth in traversal (0 = start)
+    /// * `max_depth` - Maximum allowed depth
+    /// * `commits` - Accumulator for all commits within depth
+    /// * `boundaries` - Accumulator for boundary commits at depth limit
+    fn walk_recursive<'a>(
+        &'a mut self,
+        oid: &'a Oid,
+        current_depth: usize,
+        max_depth: usize,
+        commits: &'a mut Vec<Oid>,
+        boundaries: &'a mut HashSet<Oid>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + 'a>> {
+        Box::pin(async move {
+            // Already visited? (handles merge commits and DAG structure)
+            if !self.visited.insert(*oid) {
+                return Ok(());
+            }
+
+            // Add commit to result
+            commits.push(*oid);
+
+            // At depth limit?
+            if current_depth >= max_depth {
+                // This is a boundary commit - its parents won't be included
+                boundaries.insert(*oid);
+                return Ok(());
+            }
+
+            // Read commit to get parents
+            let commit_data = self.odb.read(oid).await?;
+            let commit: Commit = bincode::deserialize(&commit_data)
+                .map_err(|e| anyhow::anyhow!("Failed to deserialize commit: {}", e))?;
+
+            // Recurse to all parents (depth-first traversal)
+            for parent in &commit.parents {
+                self.walk_recursive(
+                    parent,
+                    current_depth + 1,
+                    max_depth,
+                    commits,
+                    boundaries,
+                )
+                .await?;
+            }
+
+            Ok(())
+        })
+    }
+
+    /// Reset the visited set (useful for multiple walks)
+    pub fn reset(&mut self) {
+        self.visited.clear();
+    }
+
+    /// Get the number of visited commits
+    pub fn visited_count(&self) -> usize {
+        self.visited.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,5 +791,258 @@ mod tests {
         assert!(loaded.is_merge());
         assert_eq!(loaded.parent_count(), 2);
         assert_eq!(loaded.first_parent(), Some(&commit1_oid));
+    }
+
+    // CommitWalker tests
+    #[tokio::test]
+    async fn test_walker_depth_zero() {
+        use mediagit_storage::mock::MockBackend;
+        use std::sync::Arc;
+
+        let storage = Arc::new(MockBackend::new());
+        let odb = Arc::new(ObjectDatabase::new(storage, 100));
+
+        let sig = Signature::now("Alice".to_string(), "alice@example.com".to_string());
+
+        // Create a single commit
+        let tree = Oid::hash(b"tree");
+        let commit = Commit::new(tree, sig.clone(), sig, "Initial commit".to_string());
+        let commit_oid = commit.write(&odb).await.unwrap();
+
+        // Walk with depth 0 (only the start commit)
+        let mut walker = CommitWalker::new(odb);
+        let result = walker.walk_shallow(&commit_oid, 0).await.unwrap();
+
+        assert_eq!(result.commits.len(), 1);
+        assert_eq!(result.commits[0], commit_oid);
+        assert_eq!(result.shallow_boundaries.len(), 1);
+        assert!(result.shallow_boundaries.contains(&commit_oid));
+    }
+
+    #[tokio::test]
+    async fn test_walker_linear_chain() {
+        use mediagit_storage::mock::MockBackend;
+        use std::sync::Arc;
+
+        let storage = Arc::new(MockBackend::new());
+        let odb = Arc::new(ObjectDatabase::new(storage, 100));
+
+        let sig = Signature::now("Alice".to_string(), "alice@example.com".to_string());
+
+        // Create a chain: commit1 <- commit2 <- commit3 <- commit4
+        let tree1 = Oid::hash(b"tree1");
+        let commit1 = Commit::new(tree1, sig.clone(), sig.clone(), "Commit 1".to_string());
+        let commit1_oid = commit1.write(&odb).await.unwrap();
+
+        let tree2 = Oid::hash(b"tree2");
+        let commit2 = Commit::with_parents(
+            tree2,
+            vec![commit1_oid],
+            sig.clone(),
+            sig.clone(),
+            "Commit 2".to_string(),
+        );
+        let commit2_oid = commit2.write(&odb).await.unwrap();
+
+        let tree3 = Oid::hash(b"tree3");
+        let commit3 = Commit::with_parents(
+            tree3,
+            vec![commit2_oid],
+            sig.clone(),
+            sig.clone(),
+            "Commit 3".to_string(),
+        );
+        let commit3_oid = commit3.write(&odb).await.unwrap();
+
+        let tree4 = Oid::hash(b"tree4");
+        let commit4 = Commit::with_parents(
+            tree4,
+            vec![commit3_oid],
+            sig.clone(),
+            sig.clone(),
+            "Commit 4".to_string(),
+        );
+        let commit4_oid = commit4.write(&odb).await.unwrap();
+
+        // Walk from commit4 with depth 2
+        let mut walker = CommitWalker::new(odb);
+        let result = walker.walk_shallow(&commit4_oid, 2).await.unwrap();
+
+        // Should get: commit4 (depth 0), commit3 (depth 1), commit2 (depth 2)
+        // commit2 is a boundary (at depth limit)
+        assert_eq!(result.commits.len(), 3);
+        assert!(result.commits.contains(&commit4_oid));
+        assert!(result.commits.contains(&commit3_oid));
+        assert!(result.commits.contains(&commit2_oid));
+
+        // Boundary should be commit2
+        assert_eq!(result.shallow_boundaries.len(), 1);
+        assert!(result.shallow_boundaries.contains(&commit2_oid));
+    }
+
+    #[tokio::test]
+    async fn test_walker_merge_commit() {
+        use mediagit_storage::mock::MockBackend;
+        use std::sync::Arc;
+
+        let storage = Arc::new(MockBackend::new());
+        let odb = Arc::new(ObjectDatabase::new(storage, 100));
+
+        let sig = Signature::now("Alice".to_string(), "alice@example.com".to_string());
+
+        // Create a merge structure:
+        //     base
+        //    /    \
+        //  left  right
+        //    \    /
+        //     merge
+        let tree_base = Oid::hash(b"tree_base");
+        let base = Commit::new(
+            tree_base,
+            sig.clone(),
+            sig.clone(),
+            "Base".to_string(),
+        );
+        let base_oid = base.write(&odb).await.unwrap();
+
+        let tree_left = Oid::hash(b"tree_left");
+        let left = Commit::with_parents(
+            tree_left,
+            vec![base_oid],
+            sig.clone(),
+            sig.clone(),
+            "Left".to_string(),
+        );
+        let left_oid = left.write(&odb).await.unwrap();
+
+        let tree_right = Oid::hash(b"tree_right");
+        let right = Commit::with_parents(
+            tree_right,
+            vec![base_oid],
+            sig.clone(),
+            sig.clone(),
+            "Right".to_string(),
+        );
+        let right_oid = right.write(&odb).await.unwrap();
+
+        let tree_merge = Oid::hash(b"tree_merge");
+        let merge = Commit::with_parents(
+            tree_merge,
+            vec![left_oid, right_oid],
+            sig.clone(),
+            sig,
+            "Merge".to_string(),
+        );
+        let merge_oid = merge.write(&odb).await.unwrap();
+
+        // Walk from merge with depth 1
+        let mut walker = CommitWalker::new(odb);
+        let result = walker.walk_shallow(&merge_oid, 1).await.unwrap();
+
+        // Should get: merge (depth 0), left (depth 1), right (depth 1)
+        assert_eq!(result.commits.len(), 3);
+        assert!(result.commits.contains(&merge_oid));
+        assert!(result.commits.contains(&left_oid));
+        assert!(result.commits.contains(&right_oid));
+
+        // Both left and right are boundaries
+        assert_eq!(result.shallow_boundaries.len(), 2);
+        assert!(result.shallow_boundaries.contains(&left_oid));
+        assert!(result.shallow_boundaries.contains(&right_oid));
+    }
+
+    #[tokio::test]
+    async fn test_walker_reset() {
+        use mediagit_storage::mock::MockBackend;
+        use std::sync::Arc;
+
+        let storage = Arc::new(MockBackend::new());
+        let odb = Arc::new(ObjectDatabase::new(storage, 100));
+
+        let sig = Signature::now("Alice".to_string(), "alice@example.com".to_string());
+
+        let tree = Oid::hash(b"tree");
+        let commit = Commit::new(tree, sig.clone(), sig, "Commit".to_string());
+        let commit_oid = commit.write(&odb).await.unwrap();
+
+        let mut walker = CommitWalker::new(odb);
+
+        // First walk
+        let _ = walker.walk_shallow(&commit_oid, 0).await.unwrap();
+        assert_eq!(walker.visited_count(), 1);
+
+        // Reset and walk again
+        walker.reset();
+        assert_eq!(walker.visited_count(), 0);
+
+        let _ = walker.walk_shallow(&commit_oid, 0).await.unwrap();
+        assert_eq!(walker.visited_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_walker_dag_structure() {
+        use mediagit_storage::mock::MockBackend;
+        use std::sync::Arc;
+
+        let storage = Arc::new(MockBackend::new());
+        let odb = Arc::new(ObjectDatabase::new(storage, 100));
+
+        let sig = Signature::now("Alice".to_string(), "alice@example.com".to_string());
+
+        // Create a DAG where commit is visited via two paths:
+        //     c1
+        //    /  \
+        //   c2  c3
+        //    \  /
+        //     c4
+        let tree1 = Oid::hash(b"tree1");
+        let c1 = Commit::new(tree1, sig.clone(), sig.clone(), "C1".to_string());
+        let c1_oid = c1.write(&odb).await.unwrap();
+
+        let tree2 = Oid::hash(b"tree2");
+        let c2 = Commit::with_parents(
+            tree2,
+            vec![c1_oid],
+            sig.clone(),
+            sig.clone(),
+            "C2".to_string(),
+        );
+        let c2_oid = c2.write(&odb).await.unwrap();
+
+        let tree3 = Oid::hash(b"tree3");
+        let c3 = Commit::with_parents(
+            tree3,
+            vec![c1_oid],
+            sig.clone(),
+            sig.clone(),
+            "C3".to_string(),
+        );
+        let c3_oid = c3.write(&odb).await.unwrap();
+
+        let tree4 = Oid::hash(b"tree4");
+        let c4 = Commit::with_parents(
+            tree4,
+            vec![c2_oid, c3_oid],
+            sig.clone(),
+            sig,
+            "C4".to_string(),
+        );
+        let c4_oid = c4.write(&odb).await.unwrap();
+
+        // Walk with depth 2 from c4
+        let mut walker = CommitWalker::new(odb);
+        let result = walker.walk_shallow(&c4_oid, 2).await.unwrap();
+
+        // Should visit: c4 (depth 0), c2 (depth 1), c3 (depth 1), c1 (depth 2)
+        // c1 should only be counted once even though reachable via two paths
+        assert_eq!(result.commits.len(), 4);
+        assert!(result.commits.contains(&c4_oid));
+        assert!(result.commits.contains(&c2_oid));
+        assert!(result.commits.contains(&c3_oid));
+        assert!(result.commits.contains(&c1_oid));
+
+        // c1 is the boundary
+        assert_eq!(result.shallow_boundaries.len(), 1);
+        assert!(result.shallow_boundaries.contains(&c1_oid));
     }
 }

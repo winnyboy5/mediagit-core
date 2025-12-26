@@ -45,3 +45,7 @@ harness = false
 [[bench]]
 name = "merge_bench"
 harness = false
+
+[[bench]]
+name = "shallow_clone_benchmarks"
+harness = false

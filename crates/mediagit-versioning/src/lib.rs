@@ -79,6 +79,7 @@ mod oid;
 mod pack;
 mod refs;
 mod revision;
+mod shallow;
 mod tree;
 
 pub use branch::{BranchInfo, BranchManager, DetachedHead};
@@ -87,7 +88,7 @@ pub use chunking::{
     ChunkId, ChunkManifest, ChunkRef, ChunkStore, ChunkStoreStats, ChunkStrategy, ChunkType,
     ContentChunk, ContentChunker,
 };
-pub use commit::{Commit, Signature};
+pub use commit::{Commit, CommitWalker, ShallowWalkResult, Signature};
 pub use config::{ChunkingStrategyConfig, StorageConfig};
 pub use conflict::{Conflict, ConflictDetector, ConflictSide, ConflictStats, ConflictType};
 pub use delta::{Delta, DeltaDecoder, DeltaEncoder, DeltaInstruction};
@@ -103,6 +104,7 @@ pub use oid::Oid;
 pub use pack::{PackHeader, PackIndex, PackMetadata, PackObjectEntry, PackReader, PackWriter};
 pub use refs::{normalize_ref_name, Ref, RefDatabase, RefType};
 pub use revision::resolve_revision;
+pub use shallow::ShallowDatabase;
 pub use tree::{FileMode, Tree, TreeEntry};
 
 // Re-export fsck module

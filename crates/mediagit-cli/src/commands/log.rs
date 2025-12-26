@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_storage::LocalBackend;
-use mediagit_versioning::{Commit, ObjectDatabase, Oid, RefDatabase};
+use mediagit_versioning::{Commit, ObjectDatabase, Oid, RefDatabase, ShallowDatabase};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -109,6 +109,14 @@ impl LogCmd {
         let refdb = RefDatabase::new(&storage_path);
         let odb = ObjectDatabase::with_smart_compression(storage, 1000);
 
+        // Load shallow boundaries if this is a shallow clone
+        let shallow_db = ShallowDatabase::new(&repo_root);
+        let shallow_boundaries = if shallow_db.is_shallow() {
+            shallow_db.read_boundaries()?
+        } else {
+            HashSet::new()
+        };
+
         // Get starting commit OID
         let start_oid = if let Some(revision) = &self.revision {
             // Try to resolve revision as a reference
@@ -206,6 +214,12 @@ impl LogCmd {
 
             commits_to_show.push((oid, commit.clone()));
 
+            // Check if this is a shallow boundary - don't traverse parents if it is
+            if shallow_boundaries.contains(&oid) {
+                // This is a boundary commit - don't traverse its parents
+                continue;
+            }
+
             // Add parents to stack
             for parent in &commit.parents {
                 if !visited.contains(parent) {
@@ -236,7 +250,12 @@ impl LogCmd {
             return Ok(());
         }
 
-        for (oid, commit) in commits_to_show {
+        // Check if we hit any shallow boundaries
+        let hit_shallow_boundary = commits_to_show
+            .iter()
+            .any(|(oid, _)| shallow_boundaries.contains(oid));
+
+        for (oid, commit) in &commits_to_show {
             if self.oneline {
                 // One-line format
                 let short_oid = &oid.to_string()[..7];
@@ -253,6 +272,20 @@ impl LogCmd {
                 }
                 println!();
             }
+        }
+
+        // Show shallow clone notice if we hit a boundary
+        if hit_shallow_boundary && !self.quiet {
+            println!();
+            println!(
+                "{}",
+                style("Note: This is a shallow clone - history is truncated at boundary commits.")
+                    .dim()
+            );
+            println!(
+                "{}",
+                style("Run 'mediagit shallow --unshallow' to fetch complete history.").dim()
+            );
         }
 
         Ok(())

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use mediagit_storage::LocalBackend;
-use mediagit_versioning::{Index, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase};
+use mediagit_versioning::{Index, ObjectDatabase, Oid, Ref, RefDatabase, ShallowDatabase};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -114,6 +114,23 @@ impl StatusCmd {
                 }
                 _ => {
                     output::warning("HEAD reference is invalid");
+                }
+            }
+        }
+
+        // Check shallow clone status
+        let shallow_db = ShallowDatabase::new(&repo_root);
+        if shallow_db.is_shallow() && !self.quiet {
+            let boundary_count = shallow_db.boundary_count()?;
+            output::info(&format!("Shallow clone (depth-limited, {} boundary commits)", boundary_count));
+            if self.verbose {
+                let boundaries = shallow_db.read_boundaries()?;
+                println!("  Boundary commits:");
+                for boundary in boundaries.iter().take(5) {
+                    println!("    {}", boundary);
+                }
+                if boundary_count > 5 {
+                    println!("    ... and {} more", boundary_count - 5);
                 }
             }
         }

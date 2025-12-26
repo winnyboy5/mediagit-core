@@ -119,6 +119,9 @@ enum Commands {
     /// Show repository statistics
     Stats(StatsCmd),
 
+    /// Manage shallow clone state
+    Shallow(ShallowCmd),
+
     /// Git filter driver operations (clean/smudge)
     #[command(subcommand)]
     Filter(FilterCmd),
@@ -200,6 +203,7 @@ async fn main() -> Result<()> {
         Some(Commands::Fsck(cmd)) => cmd.execute().await,
         Some(Commands::Verify(cmd)) => cmd.execute().await,
         Some(Commands::Stats(cmd)) => cmd.execute().await,
+        Some(Commands::Shallow(cmd)) => cmd.execute().await,
         Some(Commands::Filter(cmd)) => cmd.execute(),
         Some(Commands::Install(cmd)) => cmd.execute(),
         Some(Commands::Track(cmd)) => cmd.execute(),
@@ -239,6 +243,7 @@ async fn main() -> Result<()> {
             println!("  fsck         Check repository integrity");
             println!("  verify       Verify commits and signatures");
             println!("  stats        Show repository statistics");
+            println!("  shallow      Manage shallow clone state");
             println!();
             println!("Git Integration:");
             println!("  filter       Git filter driver operations (clean/smudge)");
