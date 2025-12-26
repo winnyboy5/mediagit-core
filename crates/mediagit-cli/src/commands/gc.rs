@@ -117,14 +117,19 @@ impl GcStats {
 /// Garbage collector for unreferenced objects
 struct GarbageCollector {
     storage: Arc<dyn StorageBackend>,
+    odb: mediagit_versioning::ObjectDatabase,
     refdb: RefDatabase,
     branch_mgr: BranchManager,
 }
 
 impl GarbageCollector {
     fn new(storage: Arc<dyn StorageBackend>, root_path: &Path) -> Self {
+        // Create ODB for reading objects (including from pack files)
+        let odb = mediagit_versioning::ObjectDatabase::with_smart_compression(storage.clone(), 1000);
+
         Self {
             storage: storage.clone(),
+            odb,
             refdb: RefDatabase::new(root_path),
             branch_mgr: BranchManager::new(root_path),
         }
@@ -186,10 +191,8 @@ impl GarbageCollector {
 
             reachable.insert(*start_oid);
 
-            // Try to read commit
-            // Use hex OID directly - LocalBackend adds "objects/" and sharding
-            let key = start_oid.to_hex();
-            let data = match self.storage.get(&key).await {
+            // Try to read commit (will check both loose objects and pack files)
+            let data = match self.odb.read(start_oid).await {
                 Ok(d) => d,
                 Err(_) => {
                     debug!("Object {} not found or not a commit", start_oid);
@@ -227,9 +230,8 @@ impl GarbageCollector {
             // Mark this tree as reachable
             reachable.insert(*tree_oid);
 
-            // Read tree object
-            let key = tree_oid.to_hex();
-            let data = match self.storage.get(&key).await {
+            // Read tree object (will check both loose objects and pack files)
+            let data = match self.odb.read(tree_oid).await {
                 Ok(d) => d,
                 Err(_) => {
                     debug!("Tree object {} not found", tree_oid);

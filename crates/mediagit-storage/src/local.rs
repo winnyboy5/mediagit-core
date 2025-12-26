@@ -172,10 +172,14 @@ impl LocalBackend {
 
     /// Get the path for a given key with sharding
     ///
-    /// Sharding layout: `root/objects/AB/CD/key` where:
+    /// Sharding layout for objects: `root/objects/AB/CD/key` where:
     /// - AB is the first 2 characters of the key
     /// - CD is the next 2 characters (if key is 4+ chars)
     /// - key is the full key (with "/" encoded as "::")
+    ///
+    /// Special handling for pack files:
+    /// - Keys starting with "packs/" are stored directly without sharding
+    /// - Example: "packs/pack-123.pack" → `root/packs/pack-123.pack`
     ///
     /// This allows keys with "/" in them (like "images/photo1.jpg").
     /// Since "/" cannot appear in filenames, we encode it as "::".
@@ -195,7 +199,16 @@ impl LocalBackend {
     ///
     /// For key "images/photo1.jpg":
     /// - Returns: `root/objects/im/ag/images::photo1.jpg`
+    ///
+    /// For key "packs/pack-123.pack":
+    /// - Returns: `root/packs/pack-123.pack`
     fn object_path(&self, key: &str) -> PathBuf {
+        // Special case: pack files should not be sharded
+        // They are stored directly under root/packs/
+        if key.starts_with("packs/") {
+            return self.root.join(key);
+        }
+
         // Encode "/" as "::" to allow keys with "/" in filenames
         let encoded_key = key.replace('/', "::");
 
@@ -371,7 +384,9 @@ impl StorageBackend for LocalBackend {
     /// List objects with a given prefix
     ///
     /// Returns a sorted list of all keys that start with the given prefix.
-    /// Recursively walks the sharded directory structure.
+    /// Recursively walks the appropriate directory structure:
+    /// - For "packs/" prefix: searches root/packs/ directly
+    /// - For other prefixes: searches root/objects/ with sharding
     ///
     /// # Arguments
     ///
@@ -382,15 +397,30 @@ impl StorageBackend for LocalBackend {
     /// * `Ok(Vec<String>)` - Sorted list of matching keys
     /// * `Err` - If an I/O error occurs or permission is denied
     async fn list_objects(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
-        let objects_dir = self.root.join("objects");
-
-        // If objects directory doesn't exist, return empty list
-        if !objects_dir.exists() {
-            return Ok(Vec::new());
-        }
-
         let mut results = Vec::new();
-        Self::walk_dir_iterative(&objects_dir, &objects_dir, prefix, &mut results).await?;
+
+        // Special case: pack files are stored directly under root/packs/
+        if prefix.starts_with("packs/") {
+            let packs_dir = self.root.join("packs");
+
+            // If packs directory doesn't exist, return empty list
+            if !packs_dir.exists() {
+                return Ok(Vec::new());
+            }
+
+            // List files directly in packs/ directory
+            Self::walk_dir_flat(&packs_dir, prefix, &mut results).await?;
+        } else {
+            // Regular objects: search in sharded objects/ directory
+            let objects_dir = self.root.join("objects");
+
+            // If objects directory doesn't exist, return empty list
+            if !objects_dir.exists() {
+                return Ok(Vec::new());
+            }
+
+            Self::walk_dir_iterative(&objects_dir, &objects_dir, prefix, &mut results).await?;
+        }
 
         results.sort();
         Ok(results)
@@ -399,6 +429,45 @@ impl StorageBackend for LocalBackend {
 
 // Helper function for iterative directory traversal
 impl LocalBackend {
+    /// Walk a flat directory (like packs/) and collect matching keys
+    ///
+    /// For directories that don't use sharding (like packs/), list files directly
+    /// and reconstruct keys by prepending the directory name.
+    ///
+    /// # Arguments
+    ///
+    /// * `dir` - The directory to walk (e.g., root/packs/)
+    /// * `prefix` - The key prefix to filter by (e.g., "packs/")
+    /// * `results` - Vector to collect matching keys
+    async fn walk_dir_flat(
+        dir: &Path,
+        prefix: &str,
+        results: &mut Vec<String>,
+    ) -> anyhow::Result<()> {
+        let mut entries = match fs::read_dir(dir).await {
+            Ok(entries) => entries,
+            Err(_) => return Ok(()), // Directory doesn't exist or can't be read
+        };
+
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+
+            if path.is_file() {
+                // For packs directory: reconstruct key as "packs/filename"
+                if let Some(filename) = path.file_name() {
+                    if let Some(filename_str) = filename.to_str() {
+                        let key = format!("packs/{}", filename_str);
+                        if key.starts_with(prefix) {
+                            results.push(key);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Iteratively walk directory tree and collect matching keys
     /// Uses a work queue to avoid recursive async function issues
     ///
