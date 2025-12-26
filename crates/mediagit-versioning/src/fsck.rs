@@ -568,7 +568,8 @@ impl FsckChecker {
         referenced_objects.insert(*oid);
 
         // Try to read commit
-        let key = format!("objects/{}", oid.to_path());
+        // Use oid.to_hex() - LocalBackend handles "objects/" prefix and sharding
+        let key = oid.to_hex();
         let data = match self.storage.get(&key).await {
             Ok(d) => d,
             Err(_) => {
@@ -675,7 +676,8 @@ impl FsckChecker {
         visited.insert(*oid);
         referenced.insert(*oid);
 
-        let key = format!("objects/{}", oid.to_path());
+        // Use oid.to_hex() - LocalBackend handles "objects/" prefix and sharding
+        let key = oid.to_hex();
         if let Ok(data) = self.storage.get(&key).await {
             if let Ok(commit) = bincode::deserialize::<Commit>(&data) {
                 referenced.insert(commit.tree);
@@ -740,7 +742,8 @@ impl FsckChecker {
 
     /// Check if an object exists
     async fn object_exists(&self, oid: &Oid) -> anyhow::Result<bool> {
-        let key = format!("objects/{}", oid.to_path());
+        // Use oid.to_hex() - LocalBackend handles "objects/" prefix and sharding
+        let key = oid.to_hex();
         self.storage.exists(&key).await
     }
 
@@ -836,7 +839,8 @@ impl FsckRepair {
 
     /// Repair a corrupted object by removing it
     async fn repair_corrupted_object(&self, oid: &Oid, dry_run: bool) -> anyhow::Result<bool> {
-        let key = format!("objects/{}", oid.to_path());
+        // Use oid.to_hex() - LocalBackend handles "objects/" prefix and sharding
+        let key = oid.to_hex();
 
         if dry_run {
             info!("[DRY RUN] Would remove corrupted object: {}", oid);
@@ -862,7 +866,8 @@ impl FsckRepair {
 
     /// Remove a dangling object
     async fn remove_dangling_object(&self, oid: &Oid, dry_run: bool) -> anyhow::Result<bool> {
-        let key = format!("objects/{}", oid.to_path());
+        // Use oid.to_hex() - LocalBackend handles "objects/" prefix and sharding
+        let key = oid.to_hex();
 
         if dry_run {
             info!("[DRY RUN] Would remove dangling object: {}", oid);
