@@ -44,7 +44,10 @@ coverage/
 *.zip
 
 # Documentation
-/book/
+# mdBook build output (generated HTML) - exclude built docs
+book/book/
+
+# Other documentation build artifacts
 docs/_build/
 site/
 
@@ -208,3 +211,4 @@ test-files/
 .env
 docs/
 tests/
+test-archives/
