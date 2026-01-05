@@ -2,6 +2,8 @@
 //!
 //! Tests repository status reporting with various options.
 
+#![allow(deprecated)]
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
@@ -16,7 +18,7 @@ fn test_status_basic() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -29,7 +31,7 @@ fn test_status_short_format() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -42,7 +44,7 @@ fn test_status_porcelain_format() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -55,7 +57,7 @@ fn test_status_show_branch() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -68,7 +70,7 @@ fn test_status_show_tracked() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -81,7 +83,7 @@ fn test_status_show_untracked() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -94,7 +96,7 @@ fn test_status_show_ignored() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -107,7 +109,7 @@ fn test_status_ahead_behind() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -120,7 +122,7 @@ fn test_status_quiet_mode() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -133,7 +135,7 @@ fn test_status_verbose_mode() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -155,7 +157,7 @@ fn test_status_help_output() {
        .arg("--help")
        .assert()
        .success()
-       .stdout(predicate::str::contains("Show the working tree status"));
+       .stdout(predicate::str::contains("Show working tree status"));
 }
 
 #[test]
@@ -170,7 +172,7 @@ fn test_status_combined_options() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -184,7 +186,7 @@ fn test_status_with_files() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]

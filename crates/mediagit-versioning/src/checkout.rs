@@ -107,11 +107,21 @@ impl<'a> CheckoutManager<'a> {
     fn clean_working_directory(&self, target_files: &HashSet<PathBuf>) -> Result<()> {
         debug!("Cleaning working directory");
 
+        // Normalize target paths to use forward slashes for consistent comparison
+        // This handles cross-platform path separator differences
+        let normalized_target: HashSet<String> = target_files
+            .iter()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .collect();
+
         // Get all files in working directory (excluding .mediagit)
         let existing_files = self.list_working_directory_files()?;
 
         for file in existing_files {
-            if !target_files.contains(&file) {
+            // Normalize existing file path for comparison
+            let file_normalized = file.to_string_lossy().replace('\\', "/");
+            
+            if !normalized_target.contains(&file_normalized) {
                 let file_path = self.repo_root.join(&file);
                 debug!("Removing file not in target: {}", file.display());
 

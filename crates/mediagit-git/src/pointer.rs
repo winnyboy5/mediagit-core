@@ -86,7 +86,7 @@ impl PointerFile {
     /// ```rust
     /// use mediagit_git::PointerFile;
     ///
-    /// let content = "version https://mediagit.dev/spec/v1\noid sha256:abc123\nsize 12345\n";
+    /// let content = "version https://mediagit.dev/spec/v1\noid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n";
     /// let pointer = PointerFile::parse(content)?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```

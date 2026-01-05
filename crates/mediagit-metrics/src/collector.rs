@@ -89,7 +89,7 @@ mod tests {
         // Verify we have expected metric names
         let metric_names: Vec<String> = families
             .iter()
-            .map(|f| f.get_name().to_string())
+            .map(|f| f.name().to_string())
             .collect();
 
         // Check for key metrics
@@ -133,7 +133,7 @@ mod tests {
         // Check for operation and backend metrics
         let metric_names: Vec<String> = families
             .iter()
-            .map(|f| f.get_name().to_string())
+            .map(|f| f.name().to_string())
             .collect();
 
         assert!(metric_names.iter().any(|n| n.contains("operation")));

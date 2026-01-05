@@ -530,7 +530,9 @@ impl ObjectDatabase {
 
         // Check if object already exists
         let key = oid.to_hex();
-        if self.storage.exists(&key).await? {
+        let exists = self.storage.exists(&key).await
+            .map_err(|e| anyhow::anyhow!("Failed to check if chunked object {} exists: {}", key, e))?;
+        if exists {
             debug!(oid = %oid, "Chunked object already exists (deduplicated)");
             let mut metrics = self.metrics.write().await;
             metrics.record_write(data.len() as u64, false);
@@ -541,7 +543,8 @@ impl ObjectDatabase {
         let chunker = ContentChunker::new(self.chunk_strategy.unwrap());
 
         // Chunk the data
-        let chunks = chunker.chunk(data, filename).await?;
+        let chunks = chunker.chunk(data, filename).await
+            .map_err(|e| anyhow::anyhow!("Failed to chunk data for {} (size: {} bytes): {}", filename, data.len(), e))?;
 
         info!(
             oid = %oid,
@@ -556,18 +559,24 @@ impl ObjectDatabase {
             let chunk_key = format!("chunks/{}", chunk.id.to_hex());
 
             // Check if chunk exists (deduplication at chunk level)
-            if !self.storage.exists(&chunk_key).await? {
+            let exists = self.storage.exists(&chunk_key).await
+                .map_err(|e| anyhow::anyhow!("Failed to check chunk existence for {}: {}", chunk_key, e))?;
+            
+            if !exists {
                 // Determine compression strategy for chunk
                 let compressed = if let Some(smart_comp) = &self.smart_compressor {
                     // Use generic compression for chunks
                     let chunk_comp_type = CompressionObjectType::Unknown;
-                    smart_comp.compress_typed(&chunk.data, chunk_comp_type)?
+                    smart_comp.compress_typed(&chunk.data, chunk_comp_type)
+                        .map_err(|e| anyhow::anyhow!("Failed to compress chunk {}: {}", chunk_key, e))?
                 } else {
-                    self.compressor.compress(&chunk.data)?
+                    self.compressor.compress(&chunk.data)
+                        .map_err(|e| anyhow::anyhow!("Failed to compress chunk {}: {}", chunk_key, e))?
                 };
 
                 // Store chunk
-                self.storage.put(&chunk_key, &compressed).await?;
+                self.storage.put(&chunk_key, &compressed).await
+                    .map_err(|e| anyhow::anyhow!("Failed to store chunk {} (size: {} bytes): {}", chunk_key, compressed.len(), e))?;
 
                 debug!(
                     chunk_id = %chunk.id,
@@ -589,8 +598,10 @@ impl ObjectDatabase {
 
         // Store manifest
         let manifest_key = format!("manifests/{}", oid.to_hex());
-        let manifest_data = bincode::serialize(&manifest)?;
-        self.storage.put(&manifest_key, &manifest_data).await?;
+        let manifest_data = bincode::serialize(&manifest)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize chunk manifest for {}: {}", oid, e))?;
+        self.storage.put(&manifest_key, &manifest_data).await
+            .map_err(|e| anyhow::anyhow!("Failed to store chunk manifest {} (size: {} bytes): {}", manifest_key, manifest_data.len(), e))?;
 
         info!(
             oid = %oid,
@@ -1520,6 +1531,7 @@ impl ObjectDatabase {
     /// Parse OID from object path (DEPRECATED - kept for compatibility)
     ///
     /// Converts "objects/ab/cdef..." to "abcdef..." OR just returns the key if it's already a hex string
+    #[allow(dead_code)]
     fn parse_oid_from_path(path: &str) -> Option<String> {
         // New behavior: if path doesn't contain "/", it's already a hex OID
         if !path.contains('/') {

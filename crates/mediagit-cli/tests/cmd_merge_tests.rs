@@ -2,6 +2,8 @@
 //!
 //! Tests branch merging operations with various strategies and options.
 
+#![allow(deprecated)]
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
@@ -16,7 +18,7 @@ fn test_merge_branch() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -31,7 +33,7 @@ fn test_merge_with_message() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -45,7 +47,7 @@ fn test_merge_no_fast_forward() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -59,7 +61,7 @@ fn test_merge_fast_forward_only() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -73,7 +75,7 @@ fn test_merge_squash() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -88,7 +90,7 @@ fn test_merge_with_strategy() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -105,7 +107,7 @@ fn test_merge_with_strategy_option() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -119,7 +121,7 @@ fn test_merge_no_commit() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -133,7 +135,7 @@ fn test_merge_abort() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -142,12 +144,12 @@ fn test_merge_continue() {
     let mut cmd = Command::cargo_bin("mediagit").unwrap();
 
     cmd.arg("merge")
-       .arg("--continue")
+       .arg("--continue-merge")
        .arg("feature-branch")
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -161,7 +163,7 @@ fn test_merge_quiet_mode() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -175,7 +177,7 @@ fn test_merge_verbose_mode() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -230,7 +232,7 @@ fn test_merge_combined_options() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -245,7 +247,7 @@ fn test_merge_strategy_ours() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -260,7 +262,7 @@ fn test_merge_strategy_theirs() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -276,5 +278,5 @@ fn test_merge_squash_with_message() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }

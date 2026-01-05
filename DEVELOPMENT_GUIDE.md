@@ -1,26 +1,221 @@
 # MediaGit-Core Development Guide
 **Version**: 0.1.0
-**Last Updated**: December 27, 2025
+**Last Updated**: December 30, 2025
 
-Complete setup guide for MediaGit server and client development across all storage backends.
+Complete setup guide for MediaGit development - from beginner setup to production deployment.
 
 ---
 
 ## 📋 Table of Contents
 
-1. [Prerequisites](#prerequisites)
-2. [Local Development Setup](#local-development-setup)
-3. [Backend Configurations](#backend-configurations)
+1. [Understanding MediaGit Architecture](#understanding-mediagit-architecture)
+2. [Prerequisites](#prerequisites)
+3. [Quick Start Guide](#quick-start-guide)
+4. [Local Development Setup](#local-development-setup)
+5. [Backend Configurations](#backend-configurations)
    - [Local Filesystem](#1-local-filesystem-backend-default)
    - [MinIO (S3-Compatible)](#2-minio-s3-compatible-backend)
    - [AWS S3](#3-aws-s3-backend)
    - [Azure Blob Storage](#4-azure-blob-storage-backend)
    - [Google Cloud Storage](#5-google-cloud-storage-backend)
-4. [Server Setup](#server-setup)
-5. [Client Setup](#client-setup)
-6. [Testing Your Setup](#testing-your-setup)
-7. [Troubleshooting](#troubleshooting)
-8. [Performance Tuning](#performance-tuning)
+6. [Server Setup](#server-setup)
+7. [Client-Server Workflows](#client-server-workflows)
+8. [Testing Your Setup](#testing-your-setup)
+9. [Troubleshooting](#troubleshooting)
+10. [Performance Tuning](#performance-tuning)
+
+---
+
+## Understanding MediaGit Architecture
+
+### Two Usage Modes
+
+MediaGit can be used in **two different modes** depending on your needs:
+
+#### Mode 1: Standalone (Local-Only)
+**Perfect for**: Single developer, local versioning, experimenting
+
+```
+┌─────────────────────────────────┐
+│   Your Computer                 │
+│                                 │
+│  mediagit CLI                   │
+│       ↓                         │
+│  .mediagit/        (metadata)   │
+│  mediagit-data/    (objects)    │
+└─────────────────────────────────┘
+```
+
+**What you need**:
+- ✅ `mediagit` binary only
+- ❌ No server required
+- ❌ No network needed
+
+**What you can do**:
+- `mediagit init` - Initialize repository
+- `mediagit add` - Stage files
+- `mediagit commit` - Save changes
+- `mediagit status` - Check status
+- `mediagit log` - View history
+
+#### Mode 2: Client-Server (Collaborative)
+**Perfect for**: Teams, remote backups, collaboration
+
+```
+┌──────────────────┐         ┌──────────────────┐
+│  Your Computer   │         │   Server         │
+│                  │         │                  │
+│  mediagit CLI    │ ←────→  │ mediagit-server  │
+│       ↓          │  push/  │       ↓          │
+│  .mediagit/      │  pull   │  repos/          │
+└──────────────────┘         │  S3/Azure/etc    │
+                             └──────────────────┘
+```
+
+**What you need**:
+- ✅ `mediagit` binary (client)
+- ✅ `mediagit-server` running (locally or remote)
+- ✅ Network connection
+
+**What you can do**:
+- Everything from Mode 1 **PLUS**:
+- `mediagit push` - Upload to server
+- `mediagit pull` - Download from server
+- `mediagit clone` - Copy remote repository
+- `mediagit fetch` - Get remote changes
+
+### Storage Architecture
+
+MediaGit uses **TWO separate storage locations**:
+
+#### 1. Repository Metadata (`.mediagit/`)
+```
+your-project/
+├── .mediagit/           ← Repository structure (like .git/)
+│   ├── objects/         ← Compressed objects
+│   ├── refs/            ← Branch/tag references
+│   ├── HEAD             ← Current branch
+│   └── config.toml      ← Local config
+├── your-files.psd
+└── config.toml          ← Optional: storage backend config
+```
+
+**Contains**: Commits, branches, refs, Git-compatible metadata
+
+**Always stored**: Locally on your machine
+
+#### 2. Object Storage Backend (Configurable)
+```
+Default filesystem backend:
+mediagit-data/           ← Actual file objects
+├── objects/
+│   ├── ab/
+│   │   └── cd/
+│   │       └── abcd1234...  ← Chunked file data
+```
+
+**Contains**: Actual file content (chunked, compressed, deduplicated)
+
+**Can be stored**:
+- Local filesystem (`./mediagit-data/`)
+- AWS S3 bucket
+- Azure Blob Storage
+- Google Cloud Storage
+- MinIO server
+
+### Key Differences from Git
+
+| Aspect | Git | MediaGit |
+|--------|-----|----------|
+| **Optimized for** | Text/code | Large media files |
+| **Metadata** | `.git/` directory | `.mediagit/` directory |
+| **Object storage** | Inside `.git/objects/` | Separate backend (configurable) |
+| **Deduplication** | File-level | Chunk-level (CDC) |
+| **Compression** | zlib | zstd/brotli (configurable) |
+| **Max file size** | ~100MB practical | Multi-GB supported |
+
+### Choosing Your Mode
+
+**Answer these questions**:
+
+1. Are you working alone? → **Standalone mode**
+2. Do you need remote backups? → **Client-Server mode**
+3. Do you need to collaborate with others? → **Client-Server mode**
+4. Just experimenting with MediaGit? → **Standalone mode**
+
+**Still unsure?** Start with Standalone mode (simpler setup, no server required). You can migrate to Client-Server mode later when you need collaboration or remote backups.
+
+**Decision flowchart**:
+```
+Need collaboration OR remote backups?
+├─ No  → Standalone mode (Quick Start guide)
+└─ Yes → Client-Server mode (Server Setup section)
+```
+
+---
+
+## Quick Start Guide
+
+**New to MediaGit?** Follow these steps to get started in 5 minutes:
+
+### Step 1: Install Rust (if not already installed)
+
+```bash
+curl --proto='=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+rustc --version  # Must show 1.91.0 or higher
+```
+
+### Step 2: Clone and Build
+
+```bash
+git clone https://github.com/yourusername/mediagit-core.git
+cd mediagit-core
+cargo build  # Takes 5-10 minutes on first build
+```
+
+### Step 3: Verify Binaries
+
+```bash
+# Check that both binaries were built successfully
+ls -lh target/debug/mediagit
+ls -lh target/debug/mediagit-server
+
+# Both should show file sizes (not "No such file")
+```
+
+### Step 4: Choose Your Mode
+
+**For local-only use (no server needed)**:
+
+```bash
+cd /path/to/your/project
+../mediagit-core/target/debug/mediagit init
+../mediagit-core/target/debug/mediagit add your-file.psd
+../mediagit-core/target/debug/mediagit commit -m "First commit"
+```
+
+**For team collaboration (requires server)**:
+
+```bash
+# Terminal 1: Start server
+cd mediagit-core
+./target/debug/mediagit-server
+
+# Terminal 2: Use client
+cd /path/to/your/project
+../mediagit-core/target/debug/mediagit init
+../mediagit-core/target/debug/mediagit remote add origin http://localhost:3000/repos/my-project
+../mediagit-core/target/debug/mediagit add your-file.psd
+../mediagit-core/target/debug/mediagit commit -m "First commit"
+../mediagit-core/target/debug/mediagit push origin main
+```
+
+### Next Steps
+
+- **Local development**: Continue to [Local Development Setup](#local-development-setup)
+- **Production deployment**: Skip to [Server Setup](#server-setup)
+- **Cloud storage**: Check [Backend Configurations](#backend-configurations)
 
 ---
 
@@ -28,7 +223,7 @@ Complete setup guide for MediaGit server and client development across all stora
 
 ### System Requirements
 - **OS**: Linux, macOS, or WSL2 (Windows)
-- **Rust**: 1.70+ (latest stable recommended)
+- **Rust**: 1.91.0+ (required - check with `rustc --version`)
 - **CPU**: 2+ cores
 - **RAM**: 4GB minimum, 8GB+ recommended
 - **Disk**: 10GB+ free space
@@ -41,7 +236,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
 
 # Verify installation
-rustc --version  # Should be 1.70+
+rustc --version  # Must be 1.91.0 or higher
 cargo --version
 
 # Install build essentials
@@ -89,17 +284,37 @@ cd mediagit-core
 ### 2. Build Project
 
 ```bash
-# Full release build (production)
-cargo build --release
-
-# Development build (faster compilation)
+# Development build (recommended for testing)
 cargo build
+# Takes 5-10 minutes on first build
+# Creates binaries in target/debug/
 
-# Build with specific features
-cargo build --features tls  # Enable TLS support
+# Full release build (for production)
+cargo build --release
+# Takes 10-20 minutes, creates optimized binaries in target/release/
 ```
 
-### 3. Run Tests
+**Note**: TLS support is **enabled by default** in MediaGit. To disable TLS:
+```bash
+cargo build --no-default-features
+```
+
+### 3. Verify Build
+
+```bash
+# Confirm both binaries exist
+ls -lh target/debug/mediagit
+ls -lh target/debug/mediagit-server
+
+# Test CLI
+./target/debug/mediagit --version
+# Should output: mediagit 0.1.0
+
+# Test server (optional)
+./target/debug/mediagit-server --help
+```
+
+### 4. Run Tests
 
 ```bash
 # Run all tests
@@ -115,7 +330,7 @@ cargo test -- --nocapture
 cargo nextest run
 ```
 
-### 4. Project Structure
+### 5. Project Structure
 
 ```
 mediagit-core/
@@ -139,6 +354,37 @@ mediagit-core/
 ## Backend Configurations
 
 MediaGit supports multiple storage backends. Choose based on your deployment environment.
+
+### Config File Locations
+
+MediaGit looks for configuration files in this order (highest precedence first):
+
+1. **Environment variables** - Highest precedence
+   - Example: `MEDIAGIT_S3_BUCKET=my-bucket`
+   - Overrides all config files
+
+2. **`.mediagit/config.toml`** - Repository-specific config
+   - Located in your project's `.mediagit/` directory
+   - Recommended for project-specific settings
+
+3. **`config.toml`** - Current directory config
+   - Located in the directory where you run mediagit commands
+   - Useful for workspace-level settings
+
+4. **`~/.config/mediagit/config.toml`** - User-level config
+   - Global defaults for all your projects
+   - Lowest precedence
+
+**Recommendation**: Use `.mediagit/config.toml` for repository-specific settings (remote URLs, storage backends) and environment variables for sensitive credentials (API keys, passwords).
+
+**Example precedence**:
+```bash
+# If all three exist, values are merged with this priority:
+# 1. MEDIAGIT_S3_BUCKET env var (wins)
+# 2. .mediagit/config.toml [storage.s3] bucket
+# 3. config.toml [storage.s3] bucket
+# 4. ~/.config/mediagit/config.toml [storage.s3] bucket (lowest)
+```
 
 ### 1. Local Filesystem Backend (Default)
 
@@ -903,16 +1149,39 @@ curl http://localhost:3000/health
 
 ---
 
-## Client Setup
+## Client-Server Workflows
 
-### Client Configuration
+**When do you need this?** Only if you want to collaborate with others or backup to a server.
 
-Create `.mediagit/config.toml` in your project directory:
+**For local-only use**, skip this section - you already have everything you need from the Quick Start.
+
+### Starting the Server
+
+#### Option A: Local Development Server
+
+```bash
+# Terminal 1: Start server
+cd mediagit-core
+./target/debug/mediagit-server
+
+# Server runs on http://localhost:3000 by default
+# Wait for "Server listening on http://127.0.0.1:3000" message
+```
+
+#### Option B: Production Server
+
+See [Server Setup](#server-setup) for full production configuration with TLS, authentication, and systemd service setup.
+
+### Using the Client
+
+#### 1. Configure Remote
+
+Create `.mediagit/config.toml` in your project:
 
 ```toml
 [remote "origin"]
 url = "http://localhost:3000/repos/my-project"
-# Or for remote server
+# Or for remote server:
 # url = "https://mediagit.example.com/repos/my-project"
 
 [user]
@@ -925,42 +1194,44 @@ algorithm = "zstd"
 level = 3
 ```
 
-### Basic Client Workflow
+#### 2. Push to Server
 
 ```bash
-# Initialize new repository
-cd /path/to/your/project
+# Initialize repository (if not already done)
 ./target/debug/mediagit init
 
-# Configure remote
-./target/debug/mediagit remote add origin http://localhost:3000/repos/my-project
-
-# Add files
+# Add and commit files
 ./target/debug/mediagit add *.psd
-./target/debug/mediagit add assets/
+./target/debug/mediagit commit -m "Initial commit"
 
-# Commit changes
-./target/debug/mediagit commit -m "Initial commit with PSD files"
-
-# Push to server
+# Push requires server running (see "Starting the Server" above)
 ./target/debug/mediagit push origin main
+```
 
-# Pull from server
+#### 3. Pull from Server
+
+```bash
+# Fetch and merge changes from server
 ./target/debug/mediagit pull origin main
+```
 
-# Clone existing repository
+#### 4. Clone Existing Repository
+
+```bash
+# Clone from server (server must be running)
 ./target/debug/mediagit clone http://localhost:3000/repos/my-project
+cd my-project
 ```
 
 ### Client Authentication
 
-If server has authentication enabled:
+If server has authentication enabled (`enable_auth = true` in server config):
 
 ```bash
-# Set auth token
+# Set auth token via environment variable
 export MEDIAGIT_AUTH_TOKEN=your-jwt-token
 
-# Or store in config
+# Or store in config file
 echo "auth_token = \"your-jwt-token\"" >> .mediagit/config.toml
 ```
 
@@ -1013,18 +1284,50 @@ cargo bench --bench odb_bench
 
 ## Troubleshooting
 
-### Common Issues
+### Common Setup Issues
 
-#### 1. "Binary not found" Error
+#### "Binary not found" error
 
+**Problem**: `./target/debug/mediagit: No such file or directory`
+
+**Solution**: Build the project first
 ```bash
-# Solution: Build the project first
-cargo build --release
-
-# Verify binary exists
-ls -lh target/release/mediagit
-ls -lh target/release/mediagit-server
+cargo build
+ls -lh target/debug/mediagit  # Verify it exists
 ```
+
+**Why this happens**: You're trying to run binaries before building them.
+
+#### "Rust version too old" error
+
+**Problem**: Build fails with compiler errors or feature compatibility issues
+
+**Solution**: Update Rust to 1.91.0+
+```bash
+rustup update
+rustc --version  # Must show 1.91.0 or higher
+```
+
+**Why this happens**: MediaGit uses features from Rust 1.91.0+ that aren't in older versions.
+
+#### "Server not responding" error
+
+**Problem**: `mediagit push` fails with connection refused or timeout
+
+**Solution**: Start mediagit-server first
+```bash
+# Terminal 1: Start server
+./target/debug/mediagit-server
+
+# Terminal 2: Wait for "Server listening on..." message, then:
+./target/debug/mediagit push origin main
+```
+
+**Why this happens**: Push/pull operations require a running server. Local operations (init, add, commit, status) don't.
+
+**Quick check**: `curl http://localhost:3000/health` should return `{"status":"healthy"}`
+
+### Cloud Backend Issues
 
 #### 2. MinIO Connection Failed
 

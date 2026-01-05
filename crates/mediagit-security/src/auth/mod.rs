@@ -15,7 +15,7 @@
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let jwt_auth = JwtAuth::new("secret-key");
-//! let token = jwt_auth.generate_token("user@example.com", vec!["repo:read"])?;
+//! let token = jwt_auth.generate_token("user@example.com", vec!["repo:read".to_string()])?;
 //! let claims = jwt_auth.validate_token(&token)?;
 //! # Ok(())
 //! # }

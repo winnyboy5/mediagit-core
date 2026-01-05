@@ -10,6 +10,7 @@ mod gcs_tests {
 
     /// Test configuration for GCS backend
     #[tokio::test]
+    #[ignore = "Requires GCS service account file (dummy.json)"]
     async fn test_gcs_backend_configuration() {
         let backend = GcsBackend::new("test-project", "test-bucket", "dummy.json")
             .await
@@ -26,6 +27,7 @@ mod gcs_tests {
 
     /// Test GCS backend with custom configuration
     #[tokio::test]
+    #[ignore = "Requires GCS service account file (dummy.json)"]
     async fn test_gcs_backend_custom_config() {
         use mediagit_storage::gcs::GcsConfig;
 
@@ -67,6 +69,7 @@ mod gcs_tests {
 
     /// Test backend is cloneable
     #[tokio::test]
+    #[ignore = "Requires GCS service account file (dummy.json)"]
     async fn test_gcs_backend_clone() {
         let backend1 = GcsBackend::new("test-project", "test-bucket", "dummy.json")
             .await
@@ -85,6 +88,7 @@ mod gcs_tests {
 
     /// Test backend debug output
     #[tokio::test]
+    #[ignore = "Requires GCS service account file (dummy.json)"]
     async fn test_gcs_backend_debug() {
         let backend = GcsBackend::new("test-project", "test-bucket", "dummy.json")
             .await
@@ -100,6 +104,7 @@ mod gcs_tests {
 
     /// Test that empty keys are rejected in get()
     #[tokio::test]
+    #[ignore = "Requires GCS service account file (dummy.json)"]
     async fn test_gcs_get_empty_key_rejected() {
         let backend = GcsBackend::new("test-project", "test-bucket", "dummy.json")
             .await
@@ -112,6 +117,7 @@ mod gcs_tests {
 
     /// Test that empty keys are rejected in put()
     #[tokio::test]
+    #[ignore = "Requires GCS service account file (dummy.json)"]
     async fn test_gcs_put_empty_key_rejected() {
         let backend = GcsBackend::new("test-project", "test-bucket", "dummy.json")
             .await
@@ -124,6 +130,7 @@ mod gcs_tests {
 
     /// Test that empty keys are rejected in exists()
     #[tokio::test]
+    #[ignore = "Requires GCS service account file (dummy.json)"]
     async fn test_gcs_exists_empty_key_rejected() {
         let backend = GcsBackend::new("test-project", "test-bucket", "dummy.json")
             .await
@@ -136,6 +143,7 @@ mod gcs_tests {
 
     /// Test that empty keys are rejected in delete()
     #[tokio::test]
+    #[ignore = "Requires GCS service account file (dummy.json)"]
     async fn test_gcs_delete_empty_key_rejected() {
         let backend = GcsBackend::new("test-project", "test-bucket", "dummy.json")
             .await
@@ -148,6 +156,7 @@ mod gcs_tests {
 
     /// Test list_objects returns empty vec by default (stub implementation)
     #[tokio::test]
+    #[ignore = "Requires GCS service account file (dummy.json)"]
     async fn test_gcs_list_objects_stub() {
         let backend = GcsBackend::new("test-project", "test-bucket", "dummy.json")
             .await
@@ -195,6 +204,7 @@ mod gcs_tests {
 
     /// Test that configuration can be used multiple times
     #[tokio::test]
+    #[ignore = "Requires GCS service account file (dummy.json)"]
     async fn test_gcs_config_reusable() {
 
         let config = GcsConfig::new("project1", "bucket1");
@@ -211,6 +221,3 @@ mod gcs_tests {
         );
     }
 }
-
-// Re-export for convenience
-use mediagit_storage::gcs::GcsConfig;

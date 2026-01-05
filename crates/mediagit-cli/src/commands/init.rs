@@ -119,8 +119,9 @@ impl InitCmd {
 
         fs::create_dir_all(&path)
             .context(format!("Failed to create directory: {}", path.display()))?;
-
-        path.canonicalize()
+        // Use dunce::canonicalize for cross-platform compatibility
+        // This avoids Windows \\?\ prefix in display paths
+        dunce::canonicalize(&path)
             .context("Failed to canonicalize path")
     }
 

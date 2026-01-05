@@ -172,7 +172,7 @@ mod tests {
         let api_key_auth = ApiKeyAuth::new();
 
         let permissions = vec!["repo:read".to_string()];
-        let (plaintext_key, api_key) = api_key_auth
+        let (plaintext_key, _api_key) = api_key_auth
             .generate_key(
                 "user123".to_string(),
                 "Test Key".to_string(),
