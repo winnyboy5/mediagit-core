@@ -61,17 +61,27 @@ impl ProtocolClient {
         updates: Vec<RefUpdate>,
         force: bool,
     ) -> Result<RefUpdateResponse> {
-        // Collect commit OIDs from ref updates
+        // Collect commit OIDs from ref updates (what we want to push)
         let mut commit_oids = Vec::new();
+        // Collect "have" OIDs - objects remote already has (to exclude from push)
+        let mut have_oids = Vec::new();
+        
         for update in &updates {
             let oid = Oid::from_hex(&update.new_oid)
                 .context(format!("Invalid OID in update: {}", update.new_oid))?;
             commit_oids.push(oid);
+            
+            // If remote has an existing OID, add it to "have" list
+            if let Some(old_oid) = &update.old_oid {
+                if let Ok(oid) = Oid::from_hex(old_oid) {
+                    have_oids.push(oid);
+                }
+            }
         }
 
-        // Collect all reachable objects (commits, trees, blobs)
+        // Collect only NEW objects (not reachable from remote's current state)
         if !commit_oids.is_empty() {
-            let objects = self.collect_reachable_objects(odb, commit_oids).await?;
+            let objects = self.collect_reachable_objects(odb, commit_oids, have_oids).await?;
 
             tracing::info!(
                 "Collected {} objects for push ({} commits, {} trees, {} blobs)",
@@ -90,9 +100,14 @@ impl ProtocolClient {
                     .count()
             );
 
-            // Generate and upload pack file with complete object graph
-            let pack_data = self.generate_pack(odb, objects).await?;
-            self.upload_pack(&pack_data).await?;
+            // Only upload if there are new objects
+            if !objects.is_empty() {
+                // Generate and upload pack file with new objects only
+                let pack_data = self.generate_pack(odb, objects).await?;
+                self.upload_pack(&pack_data).await?;
+            } else {
+                tracing::info!("No new objects to push - remote already has all objects");
+            }
         }
 
         // Update refs
@@ -223,20 +238,70 @@ impl ProtocolClient {
             .context("Failed to parse ref update response")
     }
 
-    /// Collect all objects reachable from given commit OIDs
+    /// Collect all NEW objects reachable from given commit OIDs
     ///
     /// Performs depth-first graph traversal to collect commits, trees, and blobs.
-    /// Returns vec of (OID, ObjectType) tuples for all reachable objects.
+    /// Excludes objects reachable from `have_oids` (objects remote already has).
+    /// Returns vec of (OID, ObjectType) tuples for NEW objects only.
     async fn collect_reachable_objects(
         &self,
         odb: &ObjectDatabase,
         commit_oids: Vec<Oid>,
+        have_oids: Vec<Oid>,
     ) -> Result<Vec<(Oid, ObjectType)>> {
         let mut visited = HashSet::new();
         let mut result = Vec::new();
         let mut queue = VecDeque::new();
 
-        // Start with commit OIDs
+        // OPTIMIZATION: First, mark all objects reachable from "have" commits as already visited
+        // This prevents us from collecting objects the remote already has
+        if !have_oids.is_empty() {
+            let mut have_queue = VecDeque::new();
+            for oid in have_oids {
+                if visited.insert(oid) {
+                    have_queue.push_back((oid, ObjectType::Commit));
+                }
+            }
+
+            // Walk the "have" graph to mark all reachable objects as visited
+            while let Some((oid, obj_type)) = have_queue.pop_front() {
+                // Don't add to result - we're just marking as visited
+                if let Ok(obj_data) = odb.read(&oid).await {
+                    match obj_type {
+                        ObjectType::Commit => {
+                            if let Ok(commit) = bincode::deserialize::<Commit>(&obj_data) {
+                                if visited.insert(commit.tree) {
+                                    have_queue.push_back((commit.tree, ObjectType::Tree));
+                                }
+                                for parent_oid in commit.parents {
+                                    if visited.insert(parent_oid) {
+                                        have_queue.push_back((parent_oid, ObjectType::Commit));
+                                    }
+                                }
+                            }
+                        }
+                        ObjectType::Tree => {
+                            if let Ok(tree) = bincode::deserialize::<Tree>(&obj_data) {
+                                for entry in tree.entries.values() {
+                                    if visited.insert(entry.oid) {
+                                        let entry_type = match entry.mode {
+                                            FileMode::Directory => ObjectType::Tree,
+                                            _ => ObjectType::Blob,
+                                        };
+                                        have_queue.push_back((entry.oid, entry_type));
+                                    }
+                                }
+                            }
+                        }
+                        ObjectType::Blob => {}
+                    }
+                }
+            }
+
+            tracing::debug!("Marked {} objects as already on remote", visited.len());
+        }
+
+        // Now collect only NEW objects (not in visited set)
         for oid in commit_oids {
             if visited.insert(oid) {
                 queue.push_back((oid, ObjectType::Commit));
@@ -244,7 +309,7 @@ impl ProtocolClient {
         }
 
         while let Some((oid, obj_type)) = queue.pop_front() {
-            // Add to result
+            // Add to result (this is a NEW object)
             result.push((oid, obj_type));
 
             // Read object data

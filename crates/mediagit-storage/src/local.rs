@@ -198,7 +198,7 @@ impl LocalBackend {
     /// - Returns: `root/objects/ab/cd/abcd1234567890`
     ///
     /// For key "images/photo1.jpg":
-    /// - Returns: `root/objects/im/ag/images::photo1.jpg`
+    /// - Returns: `root/objects/im/ag/images__photo1.jpg`
     ///
     /// For key "packs/pack-123.pack":
     /// - Returns: `root/packs/pack-123.pack`
@@ -209,8 +209,9 @@ impl LocalBackend {
             return self.root.join(key);
         }
 
-        // Encode "/" as "::" to allow keys with "/" in filenames
-        let encoded_key = key.replace('/', "::");
+        // Encode "/" as "__" to allow keys with "/" in filenames
+        // Note: We use "__" instead of "::" for Windows compatibility (":" is reserved)
+        let encoded_key = key.replace('/', "__");
 
         if key.len() >= 4 {
             // For keys with 4+ chars: use shard1/shard2/key layout
@@ -521,8 +522,8 @@ impl LocalBackend {
                             components.last().unwrap().clone()
                         };
 
-                        // Decode "::" back to "/"
-                        key = key.replace("::", "/");
+                        // Decode "__" back to "/"
+                        key = key.replace("__", "/");
 
                         // Filter by prefix
                         if key.starts_with(prefix) {

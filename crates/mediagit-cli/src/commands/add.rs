@@ -5,9 +5,14 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use mediagit_storage::LocalBackend;
-use mediagit_versioning::{ChunkStrategy, Index, IndexEntry, ObjectDatabase, ObjectType, StorageConfig};
+use mediagit_versioning::{ChunkStrategy, Commit, Index, IndexEntry, ObjectDatabase, ObjectType, Oid, RefDatabase, StorageConfig, Tree};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+// Cross-platform path canonicalization that handles Windows \\?\ prefix
+// On Windows: returns simplified paths without \\?\ prefix when possible
+// On Linux/macOS: compiles to std::fs::canonicalize()
 
 /// Add file contents to the staging area
 ///
@@ -127,17 +132,32 @@ impl AddCmd {
         // Load the index
         let mut index = Index::load(&repo_root)?;
 
+        // Get HEAD commit tree to identify already-tracked files
+        // This allows us to skip files that haven't changed since the last commit
+        let refdb = RefDatabase::new(&storage_path);
+        let mut head_files: HashMap<PathBuf, Oid> = HashMap::new();
+        
+        if let Ok(head_oid) = refdb.resolve("HEAD").await {
+            if let Ok(commit_data) = odb.read(&head_oid).await {
+                if let Ok(commit) = bincode::deserialize::<Commit>(&commit_data) {
+                    if let Ok(tree_data) = odb.read(&commit.tree).await {
+                        if let Ok(tree) = bincode::deserialize::<Tree>(&tree_data) {
+                            for entry in tree.iter() {
+                                head_files.insert(PathBuf::from(&entry.name), entry.oid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Expand paths (globs, directories) into file list
         let files_to_add = self.expand_paths(&repo_root)?;
 
-        if files_to_add.is_empty() {
-            if !self.quiet {
-                output::warning("No files to stage");
-            }
-            anyhow::bail!("No files were staged");
-        }
+        // Note: Don't bail early if files_to_add is empty - we may still have deletions to stage
 
         let mut added_count = 0;
+        let mut skipped_count = 0;
 
         for file_path in &files_to_add {
             if !self.dry_run {
@@ -145,6 +165,26 @@ impl AddCmd {
                 let content = tokio::fs::read(file_path)
                     .await
                     .context(format!("Failed to read file: {}", file_path.display()))?;
+
+                // Get relative path early so we can check against HEAD
+                let relative_path = file_path.strip_prefix(&repo_root)
+                    .unwrap_or(file_path)
+                    .to_path_buf();
+
+                // Compute OID to check if file has changed
+                let content_oid = Oid::hash(&content);
+
+                // Check if file is already in HEAD with the same OID (unchanged)
+                if let Some(head_oid) = head_files.get(&relative_path) {
+                    if *head_oid == content_oid {
+                        // File is unchanged from HEAD, skip it
+                        skipped_count += 1;
+                        if self.verbose {
+                            output::detail("skipped (unchanged)", &relative_path.display().to_string());
+                        }
+                        continue;
+                    }
+                }
 
                 // Get file metadata
                 let metadata = tokio::fs::metadata(file_path)
@@ -186,11 +226,6 @@ impl AddCmd {
                         .context("Failed to write object")?
                 };
 
-                // Add to index
-                let relative_path = file_path.strip_prefix(&repo_root)
-                    .unwrap_or(file_path)
-                    .to_path_buf();
-
                 let mode = if cfg!(unix) {
                     #[cfg(unix)]
                     {
@@ -214,9 +249,48 @@ impl AddCmd {
                 if self.verbose {
                     output::detail("added", &format!("{} ({})", file_path.display(), oid));
                 }
-            }
 
-            added_count += 1;
+                added_count += 1;
+            } else {
+                // Dry run - still count but don't actually add
+                added_count += 1;
+            }
+        }
+
+        // Detect deleted files: files in HEAD but not in working directory
+        let mut deleted_count = 0;
+        
+        // Build a set of existing working directory files for fast lookup
+        let working_files: std::collections::HashSet<PathBuf> = files_to_add
+            .iter()
+            .filter_map(|p| p.strip_prefix(&repo_root).ok())
+            .map(|p| p.to_path_buf())
+            .collect();
+
+        // Check each file in HEAD - if it doesn't exist in working dir, it's deleted
+        for (head_path, _head_oid) in &head_files {
+            // Normalize path separators for cross-platform comparison
+            let head_path_normalized = PathBuf::from(
+                head_path.to_string_lossy().replace('\\', "/")
+            );
+            
+            let exists_in_working_dir = working_files.iter().any(|wp| {
+                wp.to_string_lossy().replace('\\', "/") == head_path_normalized.to_string_lossy()
+            });
+
+            if !exists_in_working_dir {
+                // Check if file actually doesn't exist on disk (not just filtered out)
+                let full_path = repo_root.join(head_path);
+                if !full_path.exists() {
+                    if !self.dry_run {
+                        index.mark_deleted(head_path.clone());
+                        if self.verbose {
+                            output::detail("deleted", &head_path.display().to_string());
+                        }
+                    }
+                    deleted_count += 1;
+                }
+            }
         }
 
         // Save the index
@@ -226,7 +300,22 @@ impl AddCmd {
         }
 
         if !self.quiet {
-            output::success(&format!("Staged {} file(s)", added_count));
+            if added_count > 0 {
+                output::success(&format!("Staged {} file(s)", added_count));
+            }
+            if deleted_count > 0 {
+                output::success(&format!("Staged {} deletion(s)", deleted_count));
+            }
+            if skipped_count > 0 && self.verbose {
+                output::info(&format!("Skipped {} unchanged file(s)", skipped_count));
+            }
+            if added_count == 0 && deleted_count == 0 {
+                if skipped_count > 0 {
+                    output::info("No new or modified files to stage");
+                } else if head_files.is_empty() && files_to_add.is_empty() {
+                    output::warning("No files to stage");
+                }
+            }
         }
 
         Ok(())
@@ -248,9 +337,12 @@ impl AddCmd {
 
     /// Check if path is outside .mediagit directory
     ///
-    /// Returns true if the path is valid and not inside .mediagit
+    /// Returns true if the path is valid and not inside .mediagit.
+    /// Uses dunce::canonicalize for cross-platform compatibility:
+    /// - On Windows: returns paths without \\?\ prefix for reliable comparison
+    /// - On Linux/macOS: equivalent to std::fs::canonicalize
     fn is_outside_mediagit(path: &Path, mediagit_dir: &Path) -> bool {
-        if let Ok(abs_path) = path.canonicalize() {
+        if let Ok(abs_path) = dunce::canonicalize(path) {
             !abs_path.starts_with(mediagit_dir)
         } else {
             false
@@ -262,7 +354,10 @@ impl AddCmd {
         use crate::output;
 
         let mut files = Vec::new();
-        let mediagit_dir = repo_root.join(".mediagit");
+        // Use dunce::canonicalize for cross-platform path comparison
+        // This handles Windows \\?\ prefix and works correctly on all platforms
+        let mediagit_dir = dunce::canonicalize(repo_root.join(".mediagit"))
+            .unwrap_or_else(|_| repo_root.join(".mediagit"));
 
         for path_str in &self.paths {
             let path = Path::new(path_str);
@@ -341,8 +436,9 @@ impl AddCmd {
             }
 
             if path.is_file() {
-                // Normalize path to avoid ./ prefix issues
-                if let Ok(abs_path) = path.canonicalize() {
+                // Use dunce::canonicalize for cross-platform path normalization
+                // This avoids Windows \\?\ prefix issues while working on all platforms
+                if let Ok(abs_path) = dunce::canonicalize(&path) {
                     files.push(abs_path);
                 } else {
                     files.push(path);

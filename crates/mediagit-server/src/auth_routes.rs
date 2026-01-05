@@ -3,13 +3,15 @@
 //! Provides HTTP endpoints for user authentication and management.
 
 use axum::{
+    middleware,
     routing::{get, post},
     Router,
 };
 use std::sync::Arc;
 
 use mediagit_security::auth::{
-    login_handler, logout_handler, me_handler, refresh_handler, register_handler, AuthService,
+    auth_middleware, login_handler, logout_handler, me_handler, refresh_handler,
+    register_handler, ApiKeyAuth, AuthLayer, AuthService,
 };
 
 /// Create authentication router with all auth endpoints
@@ -21,12 +23,28 @@ use mediagit_security::auth::{
 /// - POST /auth/refresh - Refresh access token
 /// - GET /auth/me - Get current user info (requires authentication)
 pub fn create_auth_router(auth_service: Arc<AuthService>) -> Router {
+    // Create authentication layer (with dummy API key auth for completeness)
+    let api_key_auth = Arc::new(ApiKeyAuth::new());
+    let auth_layer = Arc::new(AuthLayer::new(
+        Arc::clone(&auth_service.jwt_auth),
+        api_key_auth,
+    ));
+
+    // Protected routes that require authentication
+    let protected = Router::new()
+        .route("/auth/me", get(me_handler))
+        .layer(middleware::from_fn(move |req, next| {
+            let auth_layer = Arc::clone(&auth_layer);
+            auth_middleware(auth_layer, req, next)
+        }));
+
+    // Public routes
     Router::new()
         .route("/auth/register", post(register_handler))
         .route("/auth/login", post(login_handler))
         .route("/auth/logout", post(logout_handler))
         .route("/auth/refresh", post(refresh_handler))
-        .route("/auth/me", get(me_handler))
+        .merge(protected)
         .with_state(auth_service)
 }
 
@@ -37,7 +55,6 @@ mod tests {
         body::Body,
         http::{Request, StatusCode},
     };
-    use mediagit_security::{auth::{LoginRequest, RegisterRequest}, Role};
     use serde_json::json;
     use tower::ServiceExt;
 

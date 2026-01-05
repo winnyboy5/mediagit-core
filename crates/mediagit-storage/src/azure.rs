@@ -202,6 +202,7 @@ impl AzureBackend {
     ///
     /// ```rust,no_run
     /// use mediagit_storage::azure::AzureBackend;
+    /// use mediagit_storage::StorageBackend;
     ///
     /// #[tokio::main]
     /// async fn main() -> anyhow::Result<()> {
@@ -277,6 +278,7 @@ impl AzureBackend {
     ///
     /// ```rust,no_run
     /// use mediagit_storage::azure::AzureBackend;
+    /// use mediagit_storage::StorageBackend;
     ///
     /// #[tokio::main]
     /// async fn main() -> anyhow::Result<()> {
@@ -351,6 +353,7 @@ impl AzureBackend {
     ///
     /// ```rust,no_run
     /// use mediagit_storage::azure::AzureBackend;
+    /// use mediagit_storage::StorageBackend;
     /// use std::env;
     ///
     /// #[tokio::main]

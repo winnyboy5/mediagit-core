@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use mediagit_storage::LocalBackend;
-use mediagit_versioning::{Index, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase};
+use mediagit_versioning::{Index, ObjectDatabase, Oid, Ref, RefDatabase};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

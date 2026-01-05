@@ -2,6 +2,8 @@
 //!
 //! Tests branch management operations including create, delete, list, switch, etc.
 
+#![allow(deprecated)]
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
@@ -17,7 +19,7 @@ fn test_branch_list() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -31,7 +33,7 @@ fn test_branch_list_remote() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -45,7 +47,7 @@ fn test_branch_list_all() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -59,7 +61,7 @@ fn test_branch_list_verbose() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -74,7 +76,7 @@ fn test_branch_list_with_sort() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 // Branch create tests
@@ -89,7 +91,7 @@ fn test_branch_create() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -104,7 +106,7 @@ fn test_branch_create_with_start_point() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -120,7 +122,7 @@ fn test_branch_create_with_upstream() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -135,7 +137,7 @@ fn test_branch_create_with_track() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -163,7 +165,7 @@ fn test_branch_switch() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -178,7 +180,7 @@ fn test_branch_switch_create() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -193,7 +195,7 @@ fn test_branch_switch_force() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -207,7 +209,7 @@ fn test_branch_switch_alias_checkout() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 // Branch delete tests
@@ -222,7 +224,7 @@ fn test_branch_delete() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -237,7 +239,7 @@ fn test_branch_delete_force() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -253,7 +255,7 @@ fn test_branch_delete_multiple() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -268,7 +270,7 @@ fn test_branch_delete_merged() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -296,7 +298,7 @@ fn test_branch_protect() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Branch protection not yet implemented"));
 }
 
 #[test]
@@ -311,7 +313,7 @@ fn test_branch_protect_require_reviews() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Branch protection not yet implemented"));
 }
 
 #[test]
@@ -326,7 +328,7 @@ fn test_branch_unprotect() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Branch protection not yet implemented"));
 }
 
 // Branch rename tests
@@ -341,7 +343,7 @@ fn test_branch_rename() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -356,7 +358,7 @@ fn test_branch_rename_specific_branch() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -371,7 +373,7 @@ fn test_branch_rename_force() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 // Branch show tests
@@ -385,7 +387,7 @@ fn test_branch_show() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -399,7 +401,7 @@ fn test_branch_show_specific() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -413,7 +415,7 @@ fn test_branch_show_verbose() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 // Branch merge tests (from branch subcommand)
@@ -428,7 +430,7 @@ fn test_branch_merge() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Branch merge not yet implemented"));
 }
 
 #[test]
@@ -443,7 +445,7 @@ fn test_branch_merge_no_ff() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Branch merge not yet implemented"));
 }
 
 #[test]

@@ -29,9 +29,11 @@
 //!
 //! uploader
 //!     .upload_file("large_video.avi", "project/video.avi")
+//!     .await?
 //!     .on_progress(|progress| {
 //!         println!("Progress: {:.1}%", progress.percent());
 //!     })
+//!     .execute()
 //!     .await?;
 //! # Ok(())
 //! # }

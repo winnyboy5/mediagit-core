@@ -253,7 +253,7 @@ async fn main() -> Result<()> {
 
     // Handle errors
     if let Err(e) = result {
-        output::error(&format!("Error: {}", e));
+        output::error(&format!("Error: {:#}", e));
         std::process::exit(1);
     }
 

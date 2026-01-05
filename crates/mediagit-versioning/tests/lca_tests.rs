@@ -127,7 +127,7 @@ async fn test_lca_with_merge_commits() {
     let commit_b = create_test_commit(&odb, "B", vec![commit_a.clone()]).await;
     let commit_c = create_test_commit(&odb, "C", vec![commit_b.clone()]).await;
     let commit_d = create_test_commit(&odb, "D", vec![commit_b.clone()]).await;
-    let commit_e = create_test_commit(&odb, "E", vec![commit_c.clone(), commit_d.clone()]).await;
+    let _commit_e = create_test_commit(&odb, "E", vec![commit_c.clone(), commit_d.clone()]).await;
 
     // LCA of C and D should be B
     let bases = lca_finder

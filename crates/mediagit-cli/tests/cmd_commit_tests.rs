@@ -2,6 +2,8 @@
 //!
 //! Tests commit creation with various options and validation.
 
+#![allow(deprecated)]
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
@@ -18,7 +20,7 @@ fn test_commit_with_message() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -43,7 +45,7 @@ fn test_commit_with_edit_flag() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -59,7 +61,7 @@ fn test_commit_with_message_file() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -74,7 +76,7 @@ fn test_commit_all_flag() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -89,7 +91,7 @@ fn test_commit_include_flag() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -105,7 +107,7 @@ fn test_commit_custom_author() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -121,7 +123,7 @@ fn test_commit_custom_date() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -136,7 +138,7 @@ fn test_commit_allow_empty() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -151,7 +153,7 @@ fn test_commit_signoff() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -166,7 +168,7 @@ fn test_commit_dry_run() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -181,7 +183,7 @@ fn test_commit_quiet_mode() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -196,7 +198,7 @@ fn test_commit_verbose_mode() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -210,7 +212,7 @@ fn test_commit_multiline_message() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -235,7 +237,7 @@ fn test_commit_with_nonexistent_message_file() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -249,7 +251,7 @@ fn test_commit_empty_message() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("aborting commit due to empty commit message"));
 }
 
 #[test]
@@ -266,5 +268,5 @@ fn test_commit_combined_flags() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }

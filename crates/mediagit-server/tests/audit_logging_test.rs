@@ -190,8 +190,8 @@ async fn test_audit_oversized_request() {
     let server = TestServer::new().await;
     let client = Client::new();
 
-    // Create a request with content-length exceeding the limit
-    let oversized_content_length = "200000000"; // 200MB, exceeds 100MB limit
+    // Create a request with content-length exceeding the limit (2GB)
+    let oversized_content_length = "3000000000"; // 3GB, exceeds 2GB limit
 
     let resp = client
         .post(&server.url("/test-repo/objects/pack"))

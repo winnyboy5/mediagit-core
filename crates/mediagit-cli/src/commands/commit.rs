@@ -137,6 +137,7 @@ impl CommitCmd {
         let mut tree = Tree::new();
 
         // First, if we have a parent commit, copy all its tree entries
+        // BUT skip files that are marked for deletion in the index
         if let Some(parent_oid_val) = &parent_oid {
             // Read parent commit and its tree
             let parent_commit_data = odb.read(parent_oid_val).await?;
@@ -148,9 +149,19 @@ impl CommitCmd {
             let parent_tree: Tree = bincode::deserialize(&parent_tree_data)
                 .context("Failed to deserialize parent tree")?;
 
-            // Copy all entries from parent tree
+            // Build a set of deleted paths for fast lookup (normalized for cross-platform)
+            let deleted_paths: std::collections::HashSet<String> = index
+                .deleted_paths()
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .collect();
+
+            // Copy entries from parent tree, but skip deleted ones
             for entry in parent_tree.iter() {
-                tree.add_entry(entry.clone());
+                // Normalize entry name for comparison
+                let entry_name_normalized = entry.name.replace('\\', "/");
+                if !deleted_paths.contains(&entry_name_normalized) {
+                    tree.add_entry(entry.clone());
+                }
             }
         }
 

@@ -789,6 +789,6 @@ mod tests {
             bucket: "test-bucket".to_string(),
             ..Default::default()
         };
-        format!("{:?}", config);
+        let _ = format!("{:?}", config);
     }
 }

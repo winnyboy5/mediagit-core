@@ -2,6 +2,8 @@
 //!
 //! Tests file staging operations with various options and error conditions.
 
+#![allow(deprecated)]
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
@@ -19,7 +21,7 @@ fn test_add_single_file() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -37,7 +39,7 @@ fn test_add_multiple_files() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -53,7 +55,7 @@ fn test_add_all_flag() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -69,7 +71,7 @@ fn test_add_patch_mode() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -85,7 +87,7 @@ fn test_add_dry_run() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -101,7 +103,7 @@ fn test_add_force_flag() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -117,7 +119,7 @@ fn test_add_update_flag() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -133,7 +135,7 @@ fn test_add_quiet_mode() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -149,7 +151,7 @@ fn test_add_verbose_mode() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -189,7 +191,7 @@ fn test_add_directory() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -205,7 +207,7 @@ fn test_add_glob_pattern() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -221,7 +223,7 @@ fn test_add_ignore_removal_flag() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }
 
 #[test]
@@ -232,7 +234,7 @@ fn test_add_help_output() {
        .arg("--help")
        .assert()
        .success()
-       .stdout(predicate::str::contains("Add file contents to the staging area"));
+       .stdout(predicate::str::contains("Stage file contents for commit"));
 }
 
 #[test]
@@ -247,5 +249,5 @@ fn test_add_with_special_characters_in_filename() {
        .current_dir(temp_dir.path())
        .assert()
        .failure()
-       .stderr(predicate::str::contains("not yet implemented"));
+       .stderr(predicate::str::contains("Not a mediagit repository"));
 }

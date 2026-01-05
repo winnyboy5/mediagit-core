@@ -6,7 +6,7 @@
 use crate::Oid;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -43,6 +43,9 @@ impl IndexEntry {
 pub struct Index {
     /// Map of file paths to index entries
     entries: BTreeMap<PathBuf, IndexEntry>,
+    /// Files marked for deletion (to be removed from tree at commit time)
+    #[serde(default)]
+    deleted_entries: HashSet<PathBuf>,
     /// Version of the index format
     version: u32,
 }
@@ -52,6 +55,7 @@ impl Index {
     pub fn new() -> Self {
         Self {
             entries: BTreeMap::new(),
+            deleted_entries: HashSet::new(),
             version: 1,
         }
     }
@@ -117,14 +121,15 @@ impl Index {
         self.entries.len()
     }
 
-    /// Check if the index is empty
+    /// Check if the index is empty (no staged files or deletions)
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.is_empty() && self.deleted_entries.is_empty()
     }
 
-    /// Clear all entries from the index
+    /// Clear all entries from the index (both additions and deletions)
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.deleted_entries.clear();
     }
 
     /// Get all staged file paths
@@ -138,6 +143,36 @@ impl Index {
             .values()
             .map(|entry| (entry.path.clone(), entry.oid))
             .collect()
+    }
+
+    // ===== Deletion tracking methods =====
+
+    /// Mark a file as deleted (to be removed from tree at commit time)
+    pub fn mark_deleted(&mut self, path: PathBuf) {
+        // If file was staged for addition, remove it from entries
+        self.entries.remove(&path);
+        // Add to deleted entries
+        self.deleted_entries.insert(path);
+    }
+
+    /// Check if a file is marked for deletion
+    pub fn is_deleted(&self, path: &Path) -> bool {
+        self.deleted_entries.contains(path)
+    }
+
+    /// Get all files marked for deletion
+    pub fn deleted_paths(&self) -> impl Iterator<Item = &PathBuf> {
+        self.deleted_entries.iter()
+    }
+
+    /// Get the number of files marked for deletion
+    pub fn deleted_count(&self) -> usize {
+        self.deleted_entries.len()
+    }
+
+    /// Check if any files are marked for deletion
+    pub fn has_deletions(&self) -> bool {
+        !self.deleted_entries.is_empty()
     }
 }
 

@@ -74,16 +74,20 @@ impl RateLimitConfig {
     ///
     /// ```no_run
     /// use mediagit_server::RateLimitConfig;
-    /// use tower_governor::GovernorLayer;
     ///
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// let rate_config = RateLimitConfig::default();
     /// let (config, cleanup) = rate_config.build_with_cleanup();
     ///
-    /// // Create the layer
-    /// let layer = GovernorLayer::new(config);
+    /// // Use the config with your rate limiting layer
+    /// // let layer = GovernorLayer { config };
     ///
     /// // Spawn cleanup task in background
-    /// std::thread::spawn(cleanup);
+    /// tokio::spawn(async move {
+    ///     cleanup();
+    /// });
+    /// # }
     /// ```
     pub fn build_with_cleanup(&self) -> (Arc<impl Send + Sync>, impl FnOnce() + Send + 'static) {
         let config = Arc::new(

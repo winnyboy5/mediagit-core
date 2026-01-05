@@ -571,7 +571,7 @@ mod tests {
 
     #[test]
     fn test_magic_bytes_premiere() {
-        let mut data = b"<?xml version=\"1.0\"?>".to_vec();
+        let data = b"<?xml version=\"1.0\"?>".to_vec();
         assert!(VfxParser::validate_magic_bytes(&data, VfxFormat::Premiere));
     }
 
