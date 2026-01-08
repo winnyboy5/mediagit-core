@@ -393,6 +393,10 @@ impl BranchCmd {
         let branch_name = opts.branch.strip_prefix("refs/heads/").unwrap_or(&opts.branch);
         let branch_ref_name = format!("refs/heads/{}", branch_name);
 
+        // OPTIMIZATION: Get current commit BEFORE updating HEAD
+        // This enables differential checkout (only update changed files)
+        let current_commit_oid = refdb.resolve("HEAD").await.ok();
+
         // If create flag is set, create the branch first
         if opts.create {
             // Check if branch already exists
@@ -431,8 +435,20 @@ impl BranchCmd {
         let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
 
         let checkout_pb = progress.spinner("Updating working directory");
-        let files_updated = checkout_mgr.checkout_commit(&target_commit_oid).await
-            .context("Failed to update working directory")?;
+        
+        // OPTIMIZATION: Use differential checkout when we have a current commit
+        // This only updates files that actually changed between commits
+        let files_updated = if let Some(ref current_oid) = current_commit_oid {
+            // Differential checkout: only update changed files
+            let checkout_stats = checkout_mgr.checkout_diff(current_oid, &target_commit_oid).await
+                .context("Failed to update working directory")?;
+            checkout_stats.files_changed()
+        } else {
+            // No current commit (initial checkout) - do full checkout
+            checkout_mgr.checkout_commit(&target_commit_oid).await
+                .context("Failed to update working directory")?
+        };
+        
         checkout_pb.finish_with_message("Working directory updated");
 
         stats.files_updated = files_updated as u64;

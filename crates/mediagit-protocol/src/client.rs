@@ -4,6 +4,45 @@ use std::collections::{HashSet, VecDeque};
 
 use crate::types::{RefUpdate, RefUpdateRequest, RefUpdateResponse, RefsResponse, WantRequest};
 
+/// Statistics from a push operation
+#[derive(Debug, Clone, Default)]
+pub struct PushStats {
+    /// Number of objects collected for push
+    pub objects_count: usize,
+    /// Number of commit objects
+    pub commits_count: usize,
+    /// Number of tree objects
+    pub trees_count: usize,
+    /// Number of blob objects
+    pub blobs_count: usize,
+    /// Bytes uploaded (pack size)
+    pub bytes_uploaded: usize,
+}
+
+/// Phase of the push operation for progress tracking
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushPhase {
+    /// Collecting reachable objects
+    Collecting,
+    /// Generating pack file
+    Packing,
+    /// Uploading pack to server
+    Uploading,
+}
+
+/// Progress update during push operation
+#[derive(Debug, Clone)]
+pub struct PushProgress {
+    /// Current phase of the push
+    pub phase: PushPhase,
+    /// Current progress (objects collected, bytes packed, etc.)
+    pub current: u64,
+    /// Total expected (may be 0 if unknown)
+    pub total: u64,
+    /// Human-readable message
+    pub message: String,
+}
+
 /// HTTP client for the MediaGit protocol
 pub struct ProtocolClient {
     base_url: String,
@@ -55,12 +94,16 @@ impl ProtocolClient {
     /// * `odb` - Local object database
     /// * `updates` - List of ref updates to apply
     /// * `force` - Force update even if not fast-forward
+    ///
+    /// Returns the ref update response and push statistics
     pub async fn push(
         &self,
         odb: &ObjectDatabase,
         updates: Vec<RefUpdate>,
         force: bool,
-    ) -> Result<RefUpdateResponse> {
+    ) -> Result<(RefUpdateResponse, PushStats)> {
+        let mut stats = PushStats::default();
+        
         // Collect commit OIDs from ref updates (what we want to push)
         let mut commit_oids = Vec::new();
         // Collect "have" OIDs - objects remote already has (to exclude from push)
@@ -83,27 +126,24 @@ impl ProtocolClient {
         if !commit_oids.is_empty() {
             let objects = self.collect_reachable_objects(odb, commit_oids, have_oids).await?;
 
+            stats.objects_count = objects.len();
+            stats.commits_count = objects.iter().filter(|(_, t)| matches!(t, ObjectType::Commit)).count();
+            stats.trees_count = objects.iter().filter(|(_, t)| matches!(t, ObjectType::Tree)).count();
+            stats.blobs_count = objects.iter().filter(|(_, t)| matches!(t, ObjectType::Blob)).count();
+
             tracing::info!(
                 "Collected {} objects for push ({} commits, {} trees, {} blobs)",
-                objects.len(),
-                objects
-                    .iter()
-                    .filter(|(_, t)| matches!(t, ObjectType::Commit))
-                    .count(),
-                objects
-                    .iter()
-                    .filter(|(_, t)| matches!(t, ObjectType::Tree))
-                    .count(),
-                objects
-                    .iter()
-                    .filter(|(_, t)| matches!(t, ObjectType::Blob))
-                    .count()
+                stats.objects_count,
+                stats.commits_count,
+                stats.trees_count,
+                stats.blobs_count
             );
 
             // Only upload if there are new objects
             if !objects.is_empty() {
                 // Generate and upload pack file with new objects only
                 let pack_data = self.generate_pack(odb, objects).await?;
+                stats.bytes_uploaded = pack_data.len();
                 self.upload_pack(&pack_data).await?;
             } else {
                 tracing::info!("No new objects to push - remote already has all objects");
@@ -112,7 +152,117 @@ impl ProtocolClient {
 
         // Update refs
         let request = RefUpdateRequest { updates, force };
-        self.update_refs(request).await
+        let response = self.update_refs(request).await?;
+        Ok((response, stats))
+    }
+
+    /// Push local objects and update remote refs with progress tracking
+    ///
+    /// # Arguments
+    /// * `odb` - Local object database
+    /// * `updates` - List of ref updates to apply
+    /// * `force` - Force update even if not fast-forward
+    /// * `on_progress` - Callback function for progress updates
+    ///
+    /// Returns the ref update response and push statistics
+    pub async fn push_with_progress<F>(
+        &self,
+        odb: &ObjectDatabase,
+        updates: Vec<RefUpdate>,
+        force: bool,
+        on_progress: F,
+    ) -> Result<(RefUpdateResponse, PushStats)>
+    where
+        F: Fn(PushProgress),
+    {
+        let mut stats = PushStats::default();
+        
+        // Collect commit OIDs from ref updates (what we want to push)
+        let mut commit_oids = Vec::new();
+        let mut have_oids = Vec::new();
+        
+        for update in &updates {
+            let oid = Oid::from_hex(&update.new_oid)
+                .context(format!("Invalid OID in update: {}", update.new_oid))?;
+            commit_oids.push(oid);
+            
+            if let Some(old_oid) = &update.old_oid {
+                if let Ok(oid) = Oid::from_hex(old_oid) {
+                    have_oids.push(oid);
+                }
+            }
+        }
+
+        // Phase 1: Collect objects with progress
+        on_progress(PushProgress {
+            phase: PushPhase::Collecting,
+            current: 0,
+            total: 0,
+            message: "Collecting objects...".to_string(),
+        });
+
+        let objects = if !commit_oids.is_empty() {
+            self.collect_reachable_objects(odb, commit_oids, have_oids).await?
+        } else {
+            Vec::new()
+        };
+
+        stats.objects_count = objects.len();
+        stats.commits_count = objects.iter().filter(|(_, t)| matches!(t, ObjectType::Commit)).count();
+        stats.trees_count = objects.iter().filter(|(_, t)| matches!(t, ObjectType::Tree)).count();
+        stats.blobs_count = objects.iter().filter(|(_, t)| matches!(t, ObjectType::Blob)).count();
+
+        on_progress(PushProgress {
+            phase: PushPhase::Collecting,
+            current: stats.objects_count as u64,
+            total: stats.objects_count as u64,
+            message: format!("Found {} objects", stats.objects_count),
+        });
+
+        if !objects.is_empty() {
+            // Phase 2: Generate pack with progress
+            let total_objects = objects.len() as u64;
+            on_progress(PushProgress {
+                phase: PushPhase::Packing,
+                current: 0,
+                total: total_objects,
+                message: "Generating pack...".to_string(),
+            });
+
+            let pack_data = self.generate_pack(odb, objects).await?;
+            stats.bytes_uploaded = pack_data.len();
+
+            on_progress(PushProgress {
+                phase: PushPhase::Packing,
+                current: total_objects,
+                total: total_objects,
+                message: format!("Packed {} objects ({} bytes)", total_objects, pack_data.len()),
+            });
+
+            // Phase 3: Upload with progress
+            on_progress(PushProgress {
+                phase: PushPhase::Uploading,
+                current: 0,
+                total: pack_data.len() as u64,
+                message: "Uploading...".to_string(),
+            });
+
+            self.upload_pack(&pack_data).await?;
+
+            on_progress(PushProgress {
+                phase: PushPhase::Uploading,
+                current: pack_data.len() as u64,
+                total: pack_data.len() as u64,
+                message: "Upload complete".to_string(),
+            });
+        } else {
+            tracing::info!("No new objects to push");
+        }
+
+        // Update refs
+        let request = RefUpdateRequest { updates, force };
+        let response = self.update_refs(request).await?;
+        Ok((response, stats))
     }
 
     /// Pull objects from remote and return pack data

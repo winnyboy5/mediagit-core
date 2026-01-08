@@ -58,6 +58,9 @@ enum Commands {
     /// Initialize a new MediaGit repository
     Init(InitCmd),
 
+    /// Clone a repository into a new directory
+    Clone(CloneCmd),
+
     /// Stage file contents for commit
     Add(AddCmd),
 
@@ -177,6 +180,7 @@ async fn main() -> Result<()> {
     // Execute command
     let result = match cli.command {
         Some(Commands::Init(cmd)) => cmd.execute().await,
+        Some(Commands::Clone(cmd)) => cmd.execute().await,
         Some(Commands::Add(cmd)) => cmd.execute().await,
         Some(Commands::Commit(cmd)) => cmd.execute().await,
         Some(Commands::Push(cmd)) => cmd.execute().await,
@@ -219,6 +223,7 @@ async fn main() -> Result<()> {
             println!();
             println!("Available commands:");
             println!("  init         Initialize a new MediaGit repository");
+            println!("  clone        Clone a repository into a new directory");
             println!("  add          Stage file contents for commit");
             println!("  commit       Record changes to the repository");
             println!("  push         Update remote references");

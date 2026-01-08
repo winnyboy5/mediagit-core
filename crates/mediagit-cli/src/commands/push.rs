@@ -1,11 +1,13 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
+use indicatif::{ProgressBar, ProgressStyle};
+use mediagit_protocol::PushPhase;
 use mediagit_storage::LocalBackend;
-use mediagit_versioning::{RefDatabase};
+use mediagit_versioning::RefDatabase;
 use std::sync::Arc;
-use std::time::Instant;
-use crate::progress::{ProgressTracker, OperationStats};
+use std::time::{Duration, Instant};
+use crate::progress::OperationStats;
 
 /// Update remote references and send objects
 ///
@@ -85,7 +87,6 @@ impl PushCmd {
     pub async fn execute(&self) -> Result<()> {
         let start_time = Instant::now();
         let mut stats = OperationStats::new();
-        let progress = ProgressTracker::new(self.quiet);
 
         let remote = self.remote.as_deref().unwrap_or("origin");
 
@@ -189,36 +190,76 @@ impl PushCmd {
             new_oid: local_oid_str.clone(),
         };
 
-        if !self.quiet {
-            if let Some(ref remote) = remote_oid {
-                println!(
-                    "{} Updating {} -> {}",
-                    style("→").cyan(),
-                    &remote[..8],
-                    &local_oid_str[..8]
-                );
-            } else {
-                println!(
-                    "{} Creating {} at {}",
-                    style("*").green(),
-                    ref_to_push,
-                    &local_oid_str[..8]
-                );
-            }
-        }
-
         if !self.dry_run {
-            // Push using protocol client
-            let upload_pb = progress.upload_bar("Uploading objects");
-            upload_pb.set_position(0);
+            // Create progress bar for push
+            let pb = if !self.quiet {
+                let pb = ProgressBar::new(100);
+                pb.set_style(
+                    ProgressStyle::default_bar()
+                        .template("{spinner:.green} [{bar:40.cyan/blue}] {msg}")
+                        .unwrap()
+                        .progress_chars("█▓░"),
+                );
+                pb.enable_steady_tick(Duration::from_millis(100));
+                Some(pb)
+            } else {
+                None
+            };
 
-            let result = client.push(&odb, vec![update], self.force).await?;
+            // Push with progress callback
+            let (result, push_stats) = client.push_with_progress(
+                &odb,
+                vec![update],
+                self.force,
+                |progress| {
+                    if let Some(ref pb) = pb {
+                        let (percent, msg) = match progress.phase {
+                            PushPhase::Collecting => {
+                                if progress.total > 0 {
+                                    let pct = (progress.current * 100 / progress.total) as u64;
+                                    (pct.min(30), format!("Collecting... {}/{} objects", progress.current, progress.total))
+                                } else {
+                                    (10, format!("Collecting objects..."))
+                                }
+                            }
+                            PushPhase::Packing => {
+                                if progress.total > 0 {
+                                    let pct = 30 + (progress.current * 40 / progress.total) as u64;
+                                    (pct.min(70), format!("Packing... {}/{} objects", progress.current, progress.total))
+                                } else {
+                                    (50, format!("Packing..."))
+                                }
+                            }
+                            PushPhase::Uploading => {
+                                if progress.total > 0 {
+                                    let pct = 70 + (progress.current * 30 / progress.total) as u64;
+                                    let bytes_str = if progress.total > 1024 * 1024 {
+                                        format!("{:.1} MiB", progress.total as f64 / (1024.0 * 1024.0))
+                                    } else if progress.total > 1024 {
+                                        format!("{:.1} KiB", progress.total as f64 / 1024.0)
+                                    } else {
+                                        format!("{} B", progress.total)
+                                    };
+                                    (pct.min(100), format!("Uploading... {}", bytes_str))
+                                } else {
+                                    (90, format!("Uploading..."))
+                                }
+                            }
+                        };
+                        pb.set_position(percent);
+                        pb.set_message(msg);
+                    }
+                },
+            ).await?;
 
-            // Estimate bytes uploaded (simplified - would need actual tracking from protocol)
-            stats.bytes_uploaded = 1024; // Placeholder
-            stats.objects_sent = 1;
+            // Finish progress bar
+            if let Some(pb) = pb {
+                pb.finish_and_clear();
+            }
 
-            upload_pb.finish_with_message("Upload complete");
+            // Update operation stats from push stats
+            stats.bytes_uploaded = push_stats.bytes_uploaded as u64;
+            stats.objects_sent = push_stats.objects_count as u64;
 
             if !result.success {
                 anyhow::bail!(
@@ -233,6 +274,23 @@ impl PushCmd {
             }
 
             if !self.quiet {
+                // Show what was updated
+                if let Some(ref remote) = remote_oid {
+                    println!(
+                        "{} Updated {} → {}",
+                        style("→").cyan(),
+                        &remote[..8],
+                        &local_oid_str[..8]
+                    );
+                } else {
+                    println!(
+                        "{} Created {} at {}",
+                        style("*").green(),
+                        ref_to_push,
+                        &local_oid_str[..8]
+                    );
+                }
+
                 println!("{} Push successful!", style("✓").green().bold());
                 for res in result.results {
                     if res.success {
@@ -242,6 +300,14 @@ impl PushCmd {
             }
         } else {
             if !self.quiet {
+                if let Some(ref remote) = remote_oid {
+                    println!(
+                        "{} Would update {} → {}",
+                        style("→").cyan(),
+                        &remote[..8],
+                        &local_oid_str[..8]
+                    );
+                }
                 println!(
                     "{} Dry run complete (no changes made)",
                     style("ℹ").blue()
@@ -252,7 +318,7 @@ impl PushCmd {
         // Print operation summary
         stats.duration_ms = start_time.elapsed().as_millis() as u64;
         if !self.quiet && !self.dry_run {
-            println!("\n{} {}", style("📊").cyan(), stats.summary());
+            println!("{} {}", style("📊").cyan(), stats.summary());
         }
 
         Ok(())
