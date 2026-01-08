@@ -4,11 +4,13 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use indicatif::{ProgressBar, ProgressStyle};
 use mediagit_storage::LocalBackend;
 use mediagit_versioning::{ChunkStrategy, Commit, Index, IndexEntry, ObjectDatabase, ObjectType, Oid, RefDatabase, StorageConfig, Tree};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 // Cross-platform path canonicalization that handles Windows \\?\ prefix
 // On Windows: returns simplified paths without \\?\ prefix when possible
@@ -75,9 +77,9 @@ pub struct AddCmd {
     #[arg(long)]
     pub chunking: bool,
 
-    /// Enable delta compression for similar files (experimental)
+    /// Disable delta compression (delta is enabled by default for suitable files)
     #[arg(long)]
-    pub delta: bool,
+    pub no_delta: bool,
 }
 
 impl AddCmd {
@@ -103,30 +105,28 @@ impl AddCmd {
         // Check if optimizations are enabled (via flags or environment)
         let config = StorageConfig::from_env();
         let chunking_enabled = self.chunking || config.chunking_enabled;
-        let delta_enabled = self.delta || config.delta_enabled;
+        // Delta is enabled by default, can be disabled with --no-delta
+        let delta_enabled = !self.no_delta && (config.delta_enabled || true);
 
-        // Create ODB with appropriate optimizations
-        let odb = if chunking_enabled || delta_enabled {
+        // Create ODB with appropriate optimizations (delta always enabled by default)
+        let odb = if chunking_enabled {
             if !self.quiet {
-                if chunking_enabled {
-                    output::info("Chunking enabled for large media files");
-                }
-                if delta_enabled {
-                    output::info("Delta compression enabled for similar files");
-                }
+                output::info("Chunking enabled for large media files");
             }
             ObjectDatabase::with_optimizations(
                 storage,
                 1000,
-                if chunking_enabled {
-                    Some(ChunkStrategy::MediaAware)
-                } else {
-                    None
-                },
+                Some(ChunkStrategy::MediaAware),
                 delta_enabled
             )
         } else {
-            ObjectDatabase::with_smart_compression(storage, 1000)
+            // Use smart compression with delta enabled by default
+            ObjectDatabase::with_optimizations(
+                storage,
+                1000,
+                None,
+                delta_enabled
+            )
         };
 
         // Load the index
@@ -156,8 +156,38 @@ impl AddCmd {
 
         // Note: Don't bail early if files_to_add is empty - we may still have deletions to stage
 
+        // Calculate total bytes for progress bar (only if not quiet and files exist)
+        let (total_files, total_bytes) = if !self.quiet && !files_to_add.is_empty() {
+            let mut bytes = 0u64;
+            for f in &files_to_add {
+                if let Ok(meta) = std::fs::metadata(f) {
+                    bytes += meta.len();
+                }
+            }
+            (files_to_add.len() as u64, bytes)
+        } else {
+            (files_to_add.len() as u64, 0)
+        };
+
+        // Create progress bar for staging
+        let progress_bar = if !self.quiet && !self.dry_run && total_files > 0 {
+            let pb = ProgressBar::new(total_bytes);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%) {msg}")
+                    .unwrap()
+                    .progress_chars("█▓░"),
+            );
+            pb.enable_steady_tick(Duration::from_millis(100));
+            pb.set_message(format!("0/{} files", total_files));
+            Some(pb)
+        } else {
+            None
+        };
+
         let mut added_count = 0;
         let mut skipped_count = 0;
+        let mut processed_bytes = 0u64;
 
         for file_path in &files_to_add {
             if !self.dry_run {
@@ -251,6 +281,13 @@ impl AddCmd {
                 }
 
                 added_count += 1;
+
+                // Update progress bar
+                processed_bytes += content.len() as u64;
+                if let Some(ref pb) = progress_bar {
+                    pb.set_position(processed_bytes);
+                    pb.set_message(format!("{}/{} files", added_count + skipped_count, total_files));
+                }
             } else {
                 // Dry run - still count but don't actually add
                 added_count += 1;
@@ -291,6 +328,11 @@ impl AddCmd {
                     deleted_count += 1;
                 }
             }
+        }
+
+        // Finish progress bar
+        if let Some(pb) = progress_bar {
+            pb.finish_and_clear();
         }
 
         // Save the index

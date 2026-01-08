@@ -20,9 +20,10 @@ Complete setup guide for MediaGit development - from beginner setup to productio
    - [Google Cloud Storage](#5-google-cloud-storage-backend)
 6. [Server Setup](#server-setup)
 7. [Client-Server Workflows](#client-server-workflows)
-8. [Testing Your Setup](#testing-your-setup)
-9. [Troubleshooting](#troubleshooting)
-10. [Performance Tuning](#performance-tuning)
+8. [Complete Configuration Reference](#complete-configuration-reference)
+9. [Testing Your Setup](#testing-your-setup)
+10. [Troubleshooting](#troubleshooting)
+11. [Performance Tuning](#performance-tuning)
 
 ---
 
@@ -500,8 +501,6 @@ host = "127.0.0.1"
 
 [storage]
 backend = "s3"  # MinIO uses S3-compatible API
-
-[storage.s3]
 bucket = "mediagit-bucket"
 region = "us-east-1"  # MinIO doesn't enforce regions
 access_key_id = "minioadmin"
@@ -624,8 +623,6 @@ Attach policy to IAM user or role.
 ```toml
 [storage]
 backend = "s3"
-
-[storage.s3]
 bucket = "my-mediagit-bucket"
 region = "us-east-1"
 access_key_id = "AKIAIOSFODNN7EXAMPLE"
@@ -654,8 +651,6 @@ Simplified config:
 ```toml
 [storage]
 backend = "s3"
-
-[storage.s3]
 bucket = "my-mediagit-bucket"
 region = "us-east-1"
 encryption = true
@@ -670,8 +665,6 @@ For EC2 deployments, use IAM instance roles (no credentials needed):
 ```toml
 [storage]
 backend = "s3"
-
-[storage.s3]
 bucket = "my-mediagit-bucket"
 region = "us-east-1"
 encryption = true
@@ -1233,6 +1226,206 @@ export MEDIAGIT_AUTH_TOKEN=your-jwt-token
 
 # Or store in config file
 echo "auth_token = \"your-jwt-token\"" >> .mediagit/config.toml
+```
+
+---
+
+## Complete Configuration Reference
+
+This section provides a comprehensive reference for all configuration files used by MediaGit.
+
+### Architecture Overview
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                           MediaGit Architecture                              │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌─────────────────┐                    ┌───────────────────┐                │
+│  │   MediaGit CLI  │                    │  MediaGit Server  │                │
+│  │ (mediagit.exe)  │                    │ (mediagit-server) │                │
+│  │                 │                    │                   │                │
+│  │ LOCAL STORAGE   │     HTTP/HTTPS     │  CONFIGURABLE     │                │
+│  │ .mediagit/      │ ─────────────────► │  STORAGE BACKEND  │                │
+│  │                 │  Push/Pull/Clone   │                   │                │
+│  └─────────────────┘                    └─────────┬─────────┘                │
+│                                                   │                          │
+│                                                   │ S3 API                   │
+│                                                   ▼                          │
+│                                         ┌───────────────────┐                │
+│                                         │  MinIO / S3 /     │                │
+│                                         │  Azure / GCS      │                │
+│                                         └───────────────────┘                │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key Points:**
+- The **CLI never directly talks to cloud storage** - it always goes through the server
+- The **server** is where you configure storage backends (S3, MinIO, Azure, etc.)
+- The **CLI** only configures remote server URLs
+
+### Configuration File Summary
+
+| Config File | Location | Purpose |
+|-------------|----------|---------|
+| Client config | `my-project/.mediagit/config.toml` | Remotes, compression, performance |
+| Server config | `./mediagit-server.toml` | Port, auth, rate limiting, TLS |
+| Server repo config | `repos/<repo>/.mediagit/config.toml` | Storage backend (S3, MinIO, etc.) |
+
+---
+
+### Client Config (`.mediagit/config.toml`)
+
+Located in: **your working repository** (e.g., `my-project/.mediagit/config.toml`)
+
+```toml
+# ============================================
+# REMOTES - Where to push/pull from (REQUIRED for push/pull)
+# ============================================
+[remotes.origin]
+url = "http://localhost:3000/my-repo"     # MediaGit server URL
+
+[remotes.backup]                          # Optional: multiple remotes
+url = "http://backup-server:3000/my-repo"
+
+# ============================================
+# OPTIONAL OVERRIDES (usually not needed)
+# ============================================
+# Compression is automatic - only override if needed:
+# [compression]
+# algorithm = "zstd"    # zstd (default), brotli, or none
+# level = 3             # 1-22 for zstd
+
+# Performance tuning (defaults work well):
+# [performance]
+# max_concurrency = 8
+```
+
+> **Note**: Compression is **automatic** - MediaGit detects file types and applies optimal compression. Pre-compressed files (JPEG, PNG, MP4, etc.) are stored as-is.
+
+---
+
+### Server Config (`mediagit-server.toml`)
+
+Located in: **same directory where you run the server**
+
+```toml
+# ============================================
+# SERVER SETTINGS
+# ============================================
+port = 3000                   # HTTP port
+host = "127.0.0.1"            # Bind address (use 0.0.0.0 for all interfaces)
+repos_dir = "./repos"         # Where server repos are stored
+
+# ============================================
+# AUTHENTICATION (optional)
+# ============================================
+enable_auth = false           # Set true for production
+jwt_secret = "your-secret"    # Required if enable_auth = true
+
+# ============================================
+# RATE LIMITING (optional)
+# ============================================
+enable_rate_limiting = false
+rate_limit_rps = 10           # Requests per second
+rate_limit_burst = 20         # Burst size
+
+# ============================================
+# TLS/HTTPS (optional)
+# ============================================
+enable_tls = false
+tls_port = 3443
+tls_cert_path = "/path/to/cert.pem"
+tls_key_path = "/path/to/key.pem"
+tls_self_signed = false       # Use self-signed for dev
+```
+
+---
+
+### Server Repository Config (`repos/<repo-name>/.mediagit/config.toml`)
+
+Located in: **each repository on the server**
+
+This is where you configure the **storage backend** (S3, MinIO, Azure, etc.).
+
+#### Option 1: Local Filesystem (Default)
+
+```toml
+[storage]
+backend = "filesystem"
+base_path = "./data"
+```
+
+#### Option 2: MinIO / S3-Compatible
+
+```toml
+[storage]
+backend = "s3"
+bucket = "mediagit-test"
+region = "us-east-1"
+endpoint = "http://localhost:9000"    # MinIO endpoint
+access_key_id = "minioadmin"
+secret_access_key = "minioadmin"
+# prefix = "objects/"                 # Optional path prefix
+# encryption = true                   # Optional SSE
+```
+
+#### Option 3: AWS S3
+
+```toml
+[storage]
+backend = "s3"
+bucket = "my-mediagit-bucket"
+region = "us-west-2"
+# access_key_id = "..."              # Or use AWS env vars/IAM role
+# encryption = true
+# encryption_algorithm = "AES256"
+```
+
+#### Option 4: Azure Blob Storage
+
+```toml
+[storage]
+backend = "azure"
+account_name = "mystorageaccount"
+container = "mediagit"
+account_key = "..."
+# connection_string = "..."          # Alternative to account_key
+```
+
+#### Option 5: Google Cloud Storage
+
+```toml
+[storage]
+backend = "gcs"
+bucket = "my-mediagit-bucket"
+project_id = "my-project"
+# credentials_path = "/path/to/credentials.json"
+```
+
+---
+
+### Data Flow Example: Push with MinIO
+
+```
+1. CLI: mediagit push origin main
+   │
+   ▼
+2. CLI reads local objects from .mediagit/objects/
+   │
+   ▼
+3. CLI packs objects and sends HTTP POST to server
+   │   POST http://localhost:3000/repo-name/objects/pack
+   ▼
+4. Server receives pack, unpacks objects
+   │
+   ▼
+5. Server reads its config → sees backend="s3"
+   │
+   ▼
+6. Server writes objects to MinIO via S3 API
+   └──► PUT http://localhost:9000/mediagit-test/objects/abc123...
 ```
 
 ---

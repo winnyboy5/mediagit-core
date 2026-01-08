@@ -28,7 +28,7 @@ impl ProgressTracker {
             ProgressStyle::default_bar()
                 .template("{spinner:.cyan} {msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
                 .unwrap()
-                .progress_chars("=>-"),
+                .progress_chars("█▓░"),
         );
         pb.set_message(msg.to_string());
         pb.enable_steady_tick(Duration::from_millis(100));
@@ -36,6 +36,7 @@ impl ProgressTracker {
     }
 
     /// Create progress bar for upload operations
+    #[allow(dead_code)]
     pub fn upload_bar(&self, msg: &str) -> ProgressBar {
         if self.quiet {
             return ProgressBar::hidden();
@@ -46,7 +47,7 @@ impl ProgressTracker {
             ProgressStyle::default_bar()
                 .template("{spinner:.green} {msg} [{bar:40.green/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
                 .unwrap()
-                .progress_chars("=>-"),
+                .progress_chars("█▓░"),
         );
         pb.set_message(msg.to_string());
         pb.enable_steady_tick(Duration::from_millis(100));
@@ -64,7 +65,7 @@ impl ProgressTracker {
             ProgressStyle::default_bar()
                 .template("{spinner:.yellow} {msg} [{bar:40.yellow/blue}] {pos}/{len} ({percent}%)")
                 .unwrap()
-                .progress_chars("=>-"),
+                .progress_chars("█▓░"),
         );
         pb.set_message(msg.to_string());
         pb.enable_steady_tick(Duration::from_millis(100));
@@ -83,7 +84,7 @@ impl ProgressTracker {
             ProgressStyle::default_bar()
                 .template("{spinner:.magenta} {msg} [{bar:40.magenta/blue}] {pos}/{len} files ({percent}%)")
                 .unwrap()
-                .progress_chars("=>-"),
+                .progress_chars("█▓░"),
         );
         pb.set_message(msg.to_string());
         pb.enable_steady_tick(Duration::from_millis(100));

@@ -12,7 +12,7 @@ use mediagit_protocol::{
 };
 use mediagit_security::auth::AuthUser;
 use mediagit_storage::{LocalBackend, StorageBackend, S3Backend, MinIOBackend, AzureBackend};
-use mediagit_versioning::{ObjectDatabase, Oid, ObjectType, PackReader, PackWriter, Ref, RefDatabase};
+use mediagit_versioning::{Commit, ObjectDatabase, Oid, ObjectType, PackReader, PackWriter, Ref, RefDatabase, Tree};
 use std::path::Path as StdPath;
 use std::sync::Arc;
 
@@ -60,8 +60,17 @@ async fn create_storage_backend(
     // Create storage backend based on configuration
     let storage: Arc<dyn StorageBackend> = match &config.storage {
         mediagit_config::StorageConfig::FileSystem(fs_config) => {
-            tracing::debug!("Using filesystem storage backend: {}", fs_config.base_path);
-            let storage = LocalBackend::new(repo_path)
+            // Use configured base_path - it can be absolute or relative to repo
+            let storage_path = if std::path::Path::new(&fs_config.base_path).is_absolute() {
+                std::path::PathBuf::from(&fs_config.base_path)
+            } else if fs_config.base_path == "./data" {
+                // Default config value - use .mediagit instead
+                repo_path.join(".mediagit")
+            } else {
+                repo_path.join(&fs_config.base_path)
+            };
+            tracing::debug!("Using filesystem storage backend: {}", storage_path.display());
+            let storage = LocalBackend::new(&storage_path)
                 .await
                 .map_err(|e| {
                     tracing::error!("Failed to initialize filesystem backend: {}", e);
@@ -253,7 +262,7 @@ pub async fn upload_pack(
 
     // Initialize storage and odb
     let storage = create_storage_backend(&repo_path).await?;
-    let odb = ObjectDatabase::new(storage, 1000);
+    let odb = ObjectDatabase::with_smart_compression(storage, 1000);
 
     // Unpack the pack file
     let pack_reader = PackReader::new(body.to_vec()).map_err(|e| {
@@ -306,38 +315,141 @@ pub async fn download_pack(
 
     // Initialize storage and odb
     let storage = create_storage_backend(&repo_path).await?;
-    let odb = ObjectDatabase::new(storage, 1000);
+    let odb = ObjectDatabase::with_smart_compression(storage, 1000);
 
-    // Generate pack file with wanted objects
-    let mut pack_writer = PackWriter::new();
+    // Collect all objects recursively (commit -> tree -> blobs)
+    let mut objects_to_pack: Vec<Oid> = Vec::new();
+    let mut visited: std::collections::HashSet<Oid> = std::collections::HashSet::new();
 
+    // For clones, simply add all requested OIDs plus their children
+    // We read the object, identify type, and if commit/tree, add children
     for oid_str in &want_list {
         let oid = Oid::from_hex(oid_str)
             .map_err(|_| StatusCode::BAD_REQUEST)?;
+        
+        // Read the object data
+        let obj_data = match odb.read(&oid).await {
+            Ok(data) => data,
+            Err(e) => {
+                tracing::error!("Object {} not found: {}", oid, e);
+                continue;
+            }
+        };
+        
+        objects_to_pack.push(oid);
+        
+        // Try to parse as Commit to get tree+blob children
+        match Commit::deserialize(&obj_data) {
+            Ok(commit) => {
+                tracing::info!("Found commit {} -> tree {}", oid, commit.tree);
+                
+                // Add tree
+                match odb.read(&commit.tree).await {
+                    Ok(tree_data) => {
+                        objects_to_pack.push(commit.tree);
+                        
+                        // Parse tree to get blobs
+                        if let Ok(tree) = Tree::deserialize(&tree_data) {
+                            for entry in tree.iter() {
+                                if !objects_to_pack.contains(&entry.oid) {
+                                    objects_to_pack.push(entry.oid);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Tree {} not found: {}", commit.tree, e);
+                    }
+                }
+            }
+            Err(e) => {
+                // Not a commit - might be tree or blob, log the first 20 bytes for debugging
+                tracing::debug!("Object {} not a commit (err: {}), data len: {}, first bytes: {:?}", 
+                    oid, e, obj_data.len(), &obj_data[..std::cmp::min(20, obj_data.len())]);
+            }
+        }
+    }
 
+    tracing::info!("Collecting {} objects for pack (from {} requested)", objects_to_pack.len(), want_list.len());
+
+    // Generate pack file with all collected objects
+    let mut pack_writer = PackWriter::new();
+
+    for oid in &objects_to_pack {
         let obj_data = odb
-            .read(&oid)
+            .read(oid)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         // Determine object type from data header
-        // Git objects start with: "type size\0" where type is blob/tree/commit
         let object_type = detect_object_type(&obj_data).unwrap_or(ObjectType::Blob);
 
-        // Add to pack (returns offset as u64, not Result)
-        let _offset = pack_writer.add_object(oid, object_type, &obj_data);
+        // Add to pack
+        let _offset = pack_writer.add_object(*oid, object_type, &obj_data);
     }
 
-    // Finalize pack (returns Vec<u8> directly, not Result)
+    // Finalize pack
     let pack_data = pack_writer.finalize();
 
-    tracing::info!("Sending pack file ({} bytes)", pack_data.len());
+    tracing::info!("Sending pack file ({} bytes, {} objects)", pack_data.len(), objects_to_pack.len());
 
     Ok((
         StatusCode::OK,
         [("Content-Type", "application/octet-stream")],
         pack_data,
     ))
+}
+
+/// Recursively collect an object and its children (for commits and trees)
+async fn collect_objects_recursive(
+    odb: &ObjectDatabase,
+    oid: Oid,
+    collected: &mut Vec<Oid>,
+    visited: &mut std::collections::HashSet<Oid>,
+) -> Result<(), anyhow::Error> {
+    // Skip if already visited
+    if visited.contains(&oid) {
+        return Ok(());
+    }
+    visited.insert(oid);
+
+    // Try to read the object
+    let obj_data = match odb.read(&oid).await {
+        Ok(data) => data,
+        Err(e) => {
+            tracing::warn!("Object {} not found: {}", oid, e);
+            return Ok(()); // Skip missing objects
+        }
+    };
+
+    // Add this object to collection
+    collected.push(oid);
+
+    // Determine type and recursively collect children
+    let obj_type = detect_object_type(&obj_data).unwrap_or(ObjectType::Blob);
+    
+    match obj_type {
+        ObjectType::Commit => {
+            // Parse commit to get tree OID using Commit's own deserializer
+            if let Ok(commit) = Commit::deserialize(&obj_data) {
+                // Collect the tree
+                Box::pin(collect_objects_recursive(odb, commit.tree, collected, visited)).await?;
+            }
+        }
+        ObjectType::Tree => {
+            // Parse tree to get entry OIDs using Tree's own deserializer
+            if let Ok(tree) = Tree::deserialize(&obj_data) {
+                for entry in tree.iter() {
+                    Box::pin(collect_objects_recursive(odb, entry.oid, collected, visited)).await?;
+                }
+            }
+        }
+        ObjectType::Blob => {
+            // Blobs have no children
+        }
+    }
+
+    Ok(())
 }
 
 /// POST /:repo/objects/want - Request specific objects
@@ -447,24 +559,19 @@ pub async fn update_refs(
 }
 
 /// Helper function to detect object type from raw object data
-/// Git objects start with "type size\0" header
+/// MediaGit stores objects with bincode serialization, so we try to deserialize
+/// as Commit or Tree. If neither works, it's a Blob.
 fn detect_object_type(data: &[u8]) -> Option<ObjectType> {
-    // Find the null byte that separates header from content
-    let null_pos = data.iter().position(|&b| b == 0)?;
-
-    // Parse the header
-    let header = std::str::from_utf8(&data[..null_pos]).ok()?;
-    let parts: Vec<&str> = header.split(' ').collect();
-
-    if parts.is_empty() {
-        return None;
+    // Try to deserialize as Commit first using its own deserializer
+    if Commit::deserialize(data).is_ok() {
+        return Some(ObjectType::Commit);
     }
-
-    // Determine type from header
-    match parts[0] {
-        "blob" => Some(ObjectType::Blob),
-        "tree" => Some(ObjectType::Tree),
-        "commit" => Some(ObjectType::Commit),
-        _ => None,
+    
+    // Try to deserialize as Tree using its own deserializer
+    if Tree::deserialize(data).is_ok() {
+        return Some(ObjectType::Tree);
     }
+    
+    // If neither, it's a Blob (or at minimum treat it as one)
+    Some(ObjectType::Blob)
 }
