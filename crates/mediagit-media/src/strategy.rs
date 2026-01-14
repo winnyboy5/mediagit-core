@@ -111,12 +111,16 @@ impl MediaType {
             // === VFX/CREATIVE APPS ===
             // Adobe suite
             "indd" | "indt" | "ai" | "ait" | "aep" | "aet" | "prproj" | "mogrt" | "sesx" |
+            // Documents (PDF is cross-platform but used heavily in creative workflows)
+            "pdf" |
             // Video editing
             "pproj" | "drp" | "fcpxml" | "fcpbundle" |
             // Compositing
             "nk" | "nknc" | "comp" |
             // Motion graphics
-            "aaf" | "omf" | "edl" => MediaType::Vfx,
+            "aaf" | "omf" | "edl" |
+            // Design tools
+            "fig" | "sketch" | "xd" => MediaType::Vfx,
 
             _ => MediaType::Unknown,
         }
@@ -563,6 +567,12 @@ mod tests {
         assert_eq!(MediaType::from_extension("prproj"), MediaType::Vfx);
         assert_eq!(MediaType::from_extension("nk"), MediaType::Vfx);
         assert_eq!(MediaType::from_extension("drp"), MediaType::Vfx);
+
+        // Documents and design tools
+        assert_eq!(MediaType::from_extension("pdf"), MediaType::Vfx);
+        assert_eq!(MediaType::from_extension("fig"), MediaType::Vfx);
+        assert_eq!(MediaType::from_extension("sketch"), MediaType::Vfx);
+        assert_eq!(MediaType::from_extension("xd"), MediaType::Vfx);
 
         // Unknown
         assert_eq!(MediaType::from_extension("unknown"), MediaType::Unknown);

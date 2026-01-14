@@ -522,6 +522,12 @@ impl ContentChunker {
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
                 self.chunk_rolling(data, avg, min, max).await
             }
+
+            // Design tools - Rolling CDC for incremental design changes
+            "fig" | "sketch" | "xd" | "indd" | "indt" => {
+                let (avg, min, max) = get_chunk_params(data.len() as u64);
+                self.chunk_rolling(data, avg, min, max).await
+            }
             
             // Lossless audio - Rolling CDC
             "flac" | "aiff" | "alac" => {
