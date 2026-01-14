@@ -319,7 +319,6 @@ pub async fn download_pack(
 
     // Collect all objects recursively (commit -> tree -> blobs)
     let mut objects_to_pack: Vec<Oid> = Vec::new();
-    let mut visited: std::collections::HashSet<Oid> = std::collections::HashSet::new();
 
     // For clones, simply add all requested OIDs plus their children
     // We read the object, identify type, and if commit/tree, add children
@@ -401,6 +400,7 @@ pub async fn download_pack(
 }
 
 /// Recursively collect an object and its children (for commits and trees)
+#[allow(dead_code)]
 async fn collect_objects_recursive(
     odb: &ObjectDatabase,
     oid: Oid,
