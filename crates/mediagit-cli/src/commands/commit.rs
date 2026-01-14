@@ -224,15 +224,26 @@ impl CommitCmd {
                 target: Some(branch),
                 ..
             } => {
-                // Update branch reference
+                // Update branch reference (normal case)
                 let branch_ref = Ref::new_direct(branch.clone(), commit_oid);
                 refdb
                     .write(&branch_ref)
                     .await
                     .context("Failed to update branch reference")?;
             }
+            Ref {
+                ref_type: mediagit_versioning::RefType::Direct,
+                ..
+            } => {
+                // Detached HEAD - update HEAD directly to point to new commit
+                let head_direct = Ref::new_direct("HEAD".to_string(), commit_oid);
+                refdb
+                    .write(&head_direct)
+                    .await
+                    .context("Failed to update HEAD in detached state")?;
+            }
             _ => {
-                anyhow::bail!("HEAD is not pointing to a branch");
+                anyhow::bail!("HEAD is in an invalid state");
             }
         }
 

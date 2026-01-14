@@ -648,14 +648,14 @@ mod tests {
             CompressionStrategy::Zstd(CompressionLevel::Best)
         );
 
-        // Text → Brotli Best
+        // Text → Zstd Default (fast with good compression, better than Brotli for large files)
         assert_eq!(
             CompressionStrategy::for_object_type(ObjectType::Text),
-            CompressionStrategy::Brotli(CompressionLevel::Best)
+            CompressionStrategy::Zstd(CompressionLevel::Default)
         );
         assert_eq!(
             CompressionStrategy::for_object_type(ObjectType::Json),
-            CompressionStrategy::Brotli(CompressionLevel::Best)
+            CompressionStrategy::Zstd(CompressionLevel::Default)
         );
 
         // Documents → Zstd Default

@@ -385,9 +385,9 @@ mod tests {
 
         // Speed should use Zstd Fast
         assert_eq!(text_strategy_speed, CompressionStrategy::Zstd(CompressionLevel::Fast));
-        // Balanced should use Brotli Best
-        assert_eq!(text_strategy_balanced, CompressionStrategy::Brotli(CompressionLevel::Best));
-        // Max should use Brotli Best
+        // Balanced should use Zstd Default (delegated from for_object_type)
+        assert_eq!(text_strategy_balanced, CompressionStrategy::Zstd(CompressionLevel::Default));
+        // Max should use Brotli Best (maximum compression for text)
         assert_eq!(text_strategy_max, CompressionStrategy::Brotli(CompressionLevel::Best));
     }
 
