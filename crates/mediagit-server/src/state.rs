@@ -1,18 +1,32 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
 
 use mediagit_security::auth::{ApiKeyAuth, AuthLayer, AuthService, JwtAuth};
+
+/// Unique request ID generator
+static REQUEST_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Generate a unique request ID for want/pack coordination
+pub fn generate_request_id() -> String {
+    let id = REQUEST_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("{}-{}", timestamp, id)
+}
 
 /// Shared application state
 pub struct AppState {
     /// Directory containing repositories
     pub repos_dir: PathBuf,
 
-    /// Cache of objects wanted by clients (repo_name -> list of OIDs)
-    /// Used to coordinate between POST /objects/want and GET /objects/pack
-    pub want_cache: Mutex<HashMap<String, Vec<String>>>,
+    /// Cache of objects wanted by clients (request_id -> (repo_name, list of OIDs))
+    /// Uses unique request IDs to prevent race conditions between concurrent clients
+    pub want_cache: Mutex<HashMap<String, (String, Vec<String>)>>,
 
     /// Authentication layer (optional - can be disabled for development)
     pub auth_layer: Option<Arc<AuthLayer>>,

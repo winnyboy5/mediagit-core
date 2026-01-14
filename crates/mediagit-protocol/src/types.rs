@@ -29,6 +29,14 @@ pub struct WantRequest {
     pub have: Vec<String>,
 }
 
+/// Response from POST /objects/want
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct WantResponse {
+    /// Unique request ID to use when fetching the pack
+    /// Must be included in X-Request-ID header for GET /objects/pack
+    pub request_id: String,
+}
+
 /// A single reference update operation
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RefUpdate {
