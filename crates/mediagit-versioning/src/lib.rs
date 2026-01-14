@@ -61,7 +61,7 @@
 
 mod branch;
 mod checkout;
-mod chunking;
+pub mod chunking;
 mod commit;
 mod config;
 mod conflict;

@@ -530,8 +530,6 @@ Then simplified config:
 ```toml
 [storage]
 backend = "s3"
-
-[storage.s3]
 bucket = "mediagit-bucket"
 region = "us-east-1"
 endpoint = "http://localhost:9000"

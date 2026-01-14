@@ -5,14 +5,14 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
-use indicatif::{ProgressBar, ProgressStyle};
+use crate::progress::{ProgressTracker, OperationStats};
 use mediagit_storage::LocalBackend;
 use mediagit_versioning::{
     CheckoutManager, ObjectDatabase, RefDatabase,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Clone a repository into a new directory
 ///
@@ -77,31 +77,17 @@ impl CloneCmd {
             );
         }
 
-        // Create progress bar
-        let progress = if !self.quiet {
-            let pb = ProgressBar::new_spinner();
-            pb.set_style(
-                ProgressStyle::default_spinner()
-                    .template("{spinner:.green} {msg}")
-                    .unwrap(),
-            );
-            pb.enable_steady_tick(Duration::from_millis(100));
-            Some(pb)
-        } else {
-            None
-        };
+        // Create progress tracker and stats (matching pull.rs pattern)
+        let mut stats = OperationStats::new();
+        let progress = ProgressTracker::new(self.quiet);
 
         // Step 1: Create directory
-        if let Some(ref pb) = progress {
-            pb.set_message("Creating directory...");
-        }
+        let init_spinner = progress.spinner("Creating directory...");
         std::fs::create_dir_all(&target_dir)
             .context("Failed to create target directory")?;
 
         // Step 2: Initialize repository
-        if let Some(ref pb) = progress {
-            pb.set_message("Initializing repository...");
-        }
+        init_spinner.set_message("Initializing repository...");
         let storage_path = target_dir.join(".mediagit");
         std::fs::create_dir_all(&storage_path)?;
         std::fs::create_dir_all(storage_path.join("objects"))?;
@@ -113,9 +99,7 @@ impl CloneCmd {
         std::fs::write(storage_path.join("HEAD"), head_content)?;
 
         // Step 3: Configure remote
-        if let Some(ref pb) = progress {
-            pb.set_message("Configuring remote...");
-        }
+        init_spinner.set_message("Configuring remote...");
         let config_content = format!(
             r#"[remotes.origin]
 url = "{}"
@@ -125,9 +109,7 @@ url = "{}"
         std::fs::write(storage_path.join("config.toml"), config_content)?;
 
         // Step 4: Initialize storage and fetch
-        if let Some(ref pb) = progress {
-            pb.set_message("Connecting to remote...");
-        }
+        init_spinner.set_message("Connecting to remote...");
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
         let odb = Arc::new(ObjectDatabase::with_smart_compression(
@@ -140,10 +122,9 @@ url = "{}"
         let client = mediagit_protocol::ProtocolClient::new(self.url.clone());
 
         // Step 5: Get remote refs
-        if let Some(ref pb) = progress {
-            pb.set_message("Fetching remote refs...");
-        }
+        init_spinner.set_message("Fetching remote refs...");
         let remote_refs = client.get_refs().await?;
+        init_spinner.finish_with_message("Connected");
         let remote_ref_name = format!("refs/heads/{}", branch);
         let remote_ref = remote_refs
             .refs
@@ -156,28 +137,30 @@ url = "{}"
         }
 
         // Step 6: Pull objects
-        if let Some(ref pb) = progress {
-            pb.set_message("Receiving objects...");
-        }
-        let pack_data = client.pull(&odb, &remote_ref_name).await?;
-        let pack_size = pack_data.len();
+        let download_pb = progress.download_bar("Receiving objects");
+        let (pack_data, chunked_oids) = client.pull(&odb, &remote_ref_name).await?;
+        let pack_size = pack_data.len() as u64;
+        download_pb.set_length(pack_size);
+        download_pb.set_position(pack_size);
+        stats.bytes_downloaded = pack_size;
+        download_pb.finish_with_message("Download complete");
 
         if self.verbose {
-            println!("  Received {} bytes", pack_size);
+            println!("  Received {} bytes pack, {} chunked objects", pack_size, chunked_oids.len());
         }
 
-        // Step 7: Unpack objects
-        if let Some(ref pb) = progress {
-            pb.set_message("Unpacking objects...");
-        }
+        // Step 7: Unpack objects (non-chunked)
         let pack_reader = mediagit_versioning::PackReader::new(pack_data)?;
         let objects = pack_reader.list_objects();
         let object_count = objects.len();
+        stats.objects_received = object_count as u64;
 
-        for oid in &objects {
+        let unpack_pb = progress.object_bar("Unpacking objects", object_count as u64);
+        for (idx, oid) in objects.iter().enumerate() {
             // Use get_object_with_type to preserve the correct object type
             let (obj_type, obj_data) = pack_reader.get_object_with_type(oid)?;
             let written_oid = odb.write(obj_type, &obj_data).await?;
+            unpack_pb.set_position((idx + 1) as u64);
             
             // Verify OID matches (for debugging)
             if self.verbose && written_oid != *oid {
@@ -185,47 +168,55 @@ url = "{}"
                     &oid.to_hex()[..8], &oid.to_hex()[..8], &written_oid.to_hex()[..8]);
             }
         }
+        unpack_pb.finish_with_message("Unpack complete");
 
         if self.verbose {
             println!("  Unpacked {} objects", object_count);
         }
 
-        // Step 8: Update refs
-        if let Some(ref pb) = progress {
-            pb.set_message("Updating refs...");
+        // Step 7b: Download chunked objects (large files)
+        if !chunked_oids.is_empty() {
+            let chunk_pb = progress.object_bar("Downloading large files", chunked_oids.len() as u64);
+
+            let chunks_downloaded = client.download_chunked_objects(&odb, &chunked_oids, |_current, _total, _msg| {
+                // Progress tracking handled by chunk_pb
+            }).await?;
+
+            chunk_pb.finish_with_message("Download complete");
+
+            if self.verbose {
+                println!("  Downloaded {} chunks for {} large files", chunks_downloaded, chunked_oids.len());
+            }
         }
+
+        // Step 8: Update refs
         let remote_oid = mediagit_versioning::Oid::from_hex(&remote_ref.oid)
             .map_err(|e| anyhow::anyhow!("Invalid remote OID: {}", e))?;
         let ref_update = mediagit_versioning::Ref::new_direct(remote_ref_name.clone(), remote_oid);
         refdb.write(&ref_update).await?;
 
         // Step 9: Checkout working directory
-        if let Some(ref pb) = progress {
-            pb.set_message("Checking out files...");
-        }
+        let checkout_pb = progress.file_bar("Checking out", 0);
         let checkout_mgr = CheckoutManager::new(&odb, &target_dir);
         let files_count = checkout_mgr.checkout_commit(&remote_oid).await?;
+        checkout_pb.set_length(files_count as u64);
+        checkout_pb.set_position(files_count as u64);
+        checkout_pb.finish_with_message("Checkout complete");
+        stats.files_updated = files_count as u64;
 
         if self.verbose {
             println!("  Checked out {} files", files_count);
         }
 
-        // Finish progress
-        if let Some(pb) = progress {
-            pb.finish_and_clear();
-        }
-
-        // Summary
-        let duration = start_time.elapsed();
+        // Summary with stats
+        stats.duration_ms = start_time.elapsed().as_millis() as u64;
         if !self.quiet {
             println!(
-                "{} Cloned into '{}' ({} objects, {} files) in {:.1}s",
+                "\n{} Cloned into '{}'",
                 style("✅").green().bold(),
-                target_dir.display(),
-                object_count,
-                files_count,
-                duration.as_secs_f64()
+                target_dir.display()
             );
+            println!("{} {}", style("📊").cyan(), stats.summary());
         }
 
         Ok(())

@@ -257,19 +257,16 @@ impl<'a> CheckoutManager<'a> {
 
                 match entry.mode {
                     FileMode::Regular | FileMode::Executable => {
-                        // Read blob data
-                        let blob_data = self.odb.read(&entry.oid).await
-                            .with_context(|| format!("Failed to read blob: {}", entry.oid))?;
-
                         // Ensure parent directory exists
                         if let Some(parent) = full_path.parent() {
                             fs::create_dir_all(parent)
                                 .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
                         }
 
-                        // Write file
-                        fs::write(&full_path, blob_data)
-                            .with_context(|| format!("Failed to write file: {}", full_path.display()))?;
+                        // Use streaming write for checkout (constant memory)
+                        // This method handles both chunked and non-chunked objects
+                        self.odb.read_to_file(&entry.oid, &full_path).await
+                            .with_context(|| format!("Failed to checkout file: {}", full_path.display()))?;
 
                         // Set executable permission if needed
                         #[cfg(unix)]
@@ -286,6 +283,7 @@ impl<'a> CheckoutManager<'a> {
                     FileMode::Symlink => {
                         // Read symlink target
                         let target_data = self.odb.read(&entry.oid).await?;
+                        #[allow(unused_variables)]
                         let target = String::from_utf8(target_data)
                             .context("Symlink target is not valid UTF-8")?;
 
@@ -370,19 +368,15 @@ impl<'a> CheckoutManager<'a> {
                         }
 
                         if !skip_write {
-                            // Read blob data
-                            let blob_data = self.odb.read(&entry.oid).await
-                                .with_context(|| format!("Failed to read blob: {}", entry.oid))?;
-
                             // Ensure parent directory exists
                             if let Some(parent) = full_path.parent() {
                                 fs::create_dir_all(parent)
                                     .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
                             }
 
-                            // Write file
-                            fs::write(&full_path, blob_data)
-                                .with_context(|| format!("Failed to write file: {}", full_path.display()))?;
+                            // Use streaming write for checkout (constant memory)
+                            self.odb.read_to_file(&entry.oid, &full_path).await
+                                .with_context(|| format!("Failed to checkout file: {}", full_path.display()))?;
 
                             // Set executable permission if needed
                             #[cfg(unix)]

@@ -73,9 +73,9 @@ pub struct AddCmd {
     #[arg(short, long)]
     pub verbose: bool,
 
-    /// Enable chunking for large media files (experimental)
+    /// Disable automatic chunking for large files (chunking is ON by default)
     #[arg(long)]
-    pub chunking: bool,
+    pub no_chunking: bool,
 
     /// Disable delta compression (delta is enabled by default for suitable files)
     #[arg(long)]
@@ -102,32 +102,22 @@ impl AddCmd {
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
 
-        // Check if optimizations are enabled (via flags or environment)
-        let config = StorageConfig::from_env();
-        let chunking_enabled = self.chunking || config.chunking_enabled;
+        // Check if optimizations are enabled
+        let _config = StorageConfig::from_env();
         // Delta is enabled by default, can be disabled with --no-delta
-        let delta_enabled = !self.no_delta && (config.delta_enabled || true);
+        let delta_enabled = !self.no_delta;
 
-        // Create ODB with appropriate optimizations (delta always enabled by default)
-        let odb = if chunking_enabled {
-            if !self.quiet {
-                output::info("Chunking enabled for large media files");
-            }
-            ObjectDatabase::with_optimizations(
-                storage,
-                1000,
-                Some(ChunkStrategy::MediaAware),
-                delta_enabled
-            )
-        } else {
-            // Use smart compression with delta enabled by default
-            ObjectDatabase::with_optimizations(
-                storage,
-                1000,
-                None,
-                delta_enabled
-            )
-        };
+        // Create ODB with chunking always enabled (per-file decisions made by should_use_chunking)
+        let odb = ObjectDatabase::with_optimizations(
+            storage,
+            1000,
+            Some(ChunkStrategy::MediaAware),
+            delta_enabled
+        );
+        
+        if !self.quiet && self.verbose {
+            output::info("Auto-chunking enabled for large files");
+        }
 
         // Load the index
         let mut index = Index::load(&repo_root)?;
@@ -191,69 +181,102 @@ impl AddCmd {
 
         for file_path in &files_to_add {
             if !self.dry_run {
-                // Read file content
-                let content = tokio::fs::read(file_path)
+                // Get file metadata FIRST to check size
+                let metadata = tokio::fs::metadata(file_path)
                     .await
-                    .context(format!("Failed to read file: {}", file_path.display()))?;
+                    .context(format!("Failed to read file metadata: {}", file_path.display()))?;
+                
+                let file_size = metadata.len();
+                const STREAMING_THRESHOLD: u64 = 100 * 1024 * 1024; // 100MB
 
                 // Get relative path early so we can check against HEAD
                 let relative_path = file_path.strip_prefix(&repo_root)
                     .unwrap_or(file_path)
                     .to_path_buf();
-
-                // Compute OID to check if file has changed
-                let content_oid = Oid::hash(&content);
-
-                // Check if file is already in HEAD with the same OID (unchanged)
-                if let Some(head_oid) = head_files.get(&relative_path) {
-                    if *head_oid == content_oid {
-                        // File is unchanged from HEAD, skip it
-                        skipped_count += 1;
-                        if self.verbose {
-                            output::detail("skipped (unchanged)", &relative_path.display().to_string());
-                        }
-                        continue;
-                    }
-                }
-
-                // Get file metadata
-                let metadata = tokio::fs::metadata(file_path)
-                    .await
-                    .context(format!("Failed to read file metadata: {}", file_path.display()))?;
-
-                // Write to object database with intelligent feature selection
+                
+                // Get filename for type detection
                 let filename = file_path.file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("");
 
-                // Intelligent feature selection based on file type and size
-                let oid = if chunking_enabled && Self::should_use_chunking(content.len(), filename) {
-                    // Chunking recommended for this file type/size
+                // Choose streaming vs in-memory based on file size
+                let (_content_oid, oid) = if file_size >= STREAMING_THRESHOLD {
+                    // STREAMING PATH: Files >= 100MB
+                    // Use streaming hash (constant memory)
+                    let content_oid = Oid::from_file_async(file_path).await
+                        .context(format!("Failed to hash file: {}", file_path.display()))?;
+                    
+                    // Check if file is unchanged from HEAD
+                    if let Some(head_oid) = head_files.get(&relative_path) {
+                        if *head_oid == content_oid {
+                            skipped_count += 1;
+                            if self.verbose {
+                                output::detail("skipped (unchanged)", &relative_path.display().to_string());
+                            }
+                            continue;
+                        }
+                    }
+                    
                     if self.verbose {
                         output::detail(
-                            "chunking",
-                            &format!("{} ({:.2} MB)", file_path.display(), content.len() as f64 / 1_048_576.0)
+                            "streaming",
+                            &format!("{} ({:.2} MB)", file_path.display(), file_size as f64 / 1_048_576.0)
                         );
                     }
-                    odb.write_chunked(ObjectType::Blob, &content, filename)
+                    
+                    // Use streaming chunked write (constant memory)
+                    let oid = odb.write_chunked_from_file(file_path, filename)
                         .await
-                        .context("Failed to write chunked object")?
-                } else if delta_enabled && Self::should_use_delta(filename, &content) {
-                    // Delta compression recommended for this file type
-                    if self.verbose {
-                        output::detail(
-                            "delta",
-                            &format!("{} ({:.2} MB)", file_path.display(), content.len() as f64 / 1_048_576.0)
-                        );
-                    }
-                    odb.write_with_delta(ObjectType::Blob, &content, filename)
-                        .await
-                        .context("Failed to write object with delta")?
+                        .context("Failed to write chunked object (streaming)")?;
+                    
+                    (content_oid, oid)
                 } else {
-                    // Standard write with smart compression
-                    odb.write_with_path(ObjectType::Blob, &content, filename)
+                    // IN-MEMORY PATH: Files < 100MB (faster for small files)
+                    let content = tokio::fs::read(file_path)
                         .await
-                        .context("Failed to write object")?
+                        .context(format!("Failed to read file: {}", file_path.display()))?;
+                    
+                    let content_oid = Oid::hash(&content);
+                    
+                    // Check if file is unchanged from HEAD
+                    if let Some(head_oid) = head_files.get(&relative_path) {
+                        if *head_oid == content_oid {
+                            skipped_count += 1;
+                            if self.verbose {
+                                output::detail("skipped (unchanged)", &relative_path.display().to_string());
+                            }
+                            continue;
+                        }
+                    }
+                    
+                    // Intelligent feature selection based on file type and size
+                    let oid = if Self::should_use_chunking(content.len(), filename) {
+                        if self.verbose {
+                            output::detail(
+                                "chunking",
+                                &format!("{} ({:.2} MB)", file_path.display(), content.len() as f64 / 1_048_576.0)
+                            );
+                        }
+                        odb.write_chunked(ObjectType::Blob, &content, filename)
+                            .await
+                            .context("Failed to write chunked object")?
+                    } else if delta_enabled && Self::should_use_delta(filename, &content) {
+                        if self.verbose {
+                            output::detail(
+                                "delta",
+                                &format!("{} ({:.2} MB)", file_path.display(), content.len() as f64 / 1_048_576.0)
+                            );
+                        }
+                        odb.write_with_delta(ObjectType::Blob, &content, filename)
+                            .await
+                            .context("Failed to write object with delta")?
+                    } else {
+                        odb.write_with_path(ObjectType::Blob, &content, filename)
+                            .await
+                            .context("Failed to write object")?
+                    };
+                    
+                    (content_oid, oid)
                 };
 
                 let mode = if cfg!(unix) {
@@ -283,7 +306,7 @@ impl AddCmd {
                 added_count += 1;
 
                 // Update progress bar
-                processed_bytes += content.len() as u64;
+                processed_bytes += file_size;
                 if let Some(ref pb) = progress_bar {
                     pb.set_position(processed_bytes);
                     pb.set_message(format!("{}/{} files", added_count + skipped_count, total_files));
@@ -494,10 +517,17 @@ impl AddCmd {
     }
 
     /// Determine if file should use chunking based on size AND type
+    /// 
+    /// Auto-chunking thresholds:
+    /// - Text/CSV/ML Data: >5MB (excellent CDC dedup)
+    /// - Video/Audio: >5MB (structure-aware)
+    /// - PSD/3D Models: >5MB (Rolling CDC for dedup)
+    /// - Pre-compressed (JPG, ZIP): NEVER (no benefit)
     fn should_use_chunking(size: usize, filename: &str) -> bool {
-        const MIN_CHUNK_SIZE: usize = 5 * 1024 * 1024; // 5 MB
+        const MIN_SIZE_5MB: usize = 5 * 1024 * 1024;
+        const MIN_SIZE_10MB: usize = 10 * 1024 * 1024;
 
-        if size < MIN_CHUNK_SIZE {
+        if size < MIN_SIZE_5MB {
             return false;
         }
 
@@ -507,18 +537,37 @@ impl AddCmd {
             .unwrap_or("");
 
         match ext.to_lowercase().as_str() {
-            // Video formats: Chunk at lower threshold (benefits most)
-            "mp4" | "mov" | "avi" | "mkv" | "flv" | "wmv" => size > MIN_CHUNK_SIZE,
-            // Large uncompressed formats: Chunk at moderate threshold
-            "psd" | "tif" | "tiff" | "bmp" | "wav" | "aiff" => size > 10 * 1024 * 1024,
-            // Compressed images: Higher threshold (already compressed)
-            "jpg" | "jpeg" | "png" | "webp" => size > 50 * 1024 * 1024,
-            // 3D models: Chunk at moderate threshold
-            "obj" | "fbx" | "blend" | "gltf" | "glb" => size > 20 * 1024 * 1024,
-            // Archives: Don't chunk (already compressed)
-            "zip" | "gz" | "bz2" | "7z" | "rar" => false,
-            // Unknown: Use generic large file threshold
-            _ => size > 50 * 1024 * 1024,
+            // === TEXT/DATA: Excellent CDC dedup (5MB threshold) ===
+            "csv" | "json" | "jsonl" | "txt" | "xml" | "yaml" | "yml" | "toml" => true,
+            
+            // === ML DATA: Excellent dedup for incremental datasets (5MB) ===
+            "parquet" | "arrow" | "feather" | "orc" | "avro" |
+            "hdf5" | "h5" | "npy" | "npz" | "tfrecords" | "petastorm" => true,
+            
+            // === ML MODELS: Good dedup for checkpoint files (5MB) ===
+            "pt" | "pth" | "safetensors" | "ckpt" | "pb" | "onnx" |
+            "gguf" | "ggml" | "tflite" | "keras" | "bin" => true,
+            
+            // === VIDEO: Structure-aware chunking (5MB) ===
+            "mp4" | "mov" | "avi" | "mkv" | "webm" | "flv" | "wmv" => true,
+            
+            // === UNCOMPRESSED IMAGES: Rolling CDC (5MB) ===
+            // PSD uses Rolling CDC for excellent layer-edit deduplication
+            "psd" | "tif" | "tiff" | "bmp" | "exr" | "hdr" | "raw" => true,
+            
+            // === LOSSLESS AUDIO: Good dedup (10MB) ===
+            "wav" | "flac" | "aiff" | "alac" => size > MIN_SIZE_10MB,
+            
+            // === 3D MODELS: Good dedup (10MB) ===
+            "glb" | "gltf" | "obj" | "fbx" | "blend" | "usd" | "usda" | "usdc" => size > MIN_SIZE_10MB,
+            
+            // === PRE-COMPRESSED: Never chunk (no benefit) ===
+            "jpg" | "jpeg" | "png" | "webp" | "gif" | "avif" | "heic" |
+            "mp3" | "aac" | "ogg" | "opus" |
+            "zip" | "gz" | "bz2" | "xz" | "7z" | "rar" | "tar.gz" | "tgz" => false,
+            
+            // === UNKNOWN: Conservative threshold (10MB) ===
+            _ => size > MIN_SIZE_10MB,
         }
     }
 

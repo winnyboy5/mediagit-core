@@ -293,7 +293,7 @@ pub async fn download_pack(
     Path(repo): Path<String>,
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<axum::response::Response<axum::body::Body>, StatusCode> {
     tracing::info!("GET /{}/objects/pack", repo);
 
     // Check permission: repo:read required
@@ -372,13 +372,25 @@ pub async fn download_pack(
     tracing::info!("Collecting {} objects for pack (from {} requested)", objects_to_pack.len(), want_list.len());
 
     // Generate pack file with all collected objects
+    // Skip chunked blobs - they'll be transferred separately
     let mut pack_writer = PackWriter::new();
+    let mut chunked_objects: Vec<String> = Vec::new();
 
     for oid in &objects_to_pack {
+        // Check if this is a chunked blob - skip if so
+        if odb.is_chunked(oid).await.unwrap_or(false) {
+            tracing::debug!(oid = %oid, "Skipping chunked blob in pack generation");
+            chunked_objects.push(oid.to_hex());
+            continue;
+        }
+
         let obj_data = odb
             .read(oid)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|e| {
+                tracing::error!(oid = %oid, error = %e, "Failed to read object");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
 
         // Determine object type from data header
         let object_type = detect_object_type(&obj_data).unwrap_or(ObjectType::Blob);
@@ -390,13 +402,31 @@ pub async fn download_pack(
     // Finalize pack
     let pack_data = pack_writer.finalize();
 
-    tracing::info!("Sending pack file ({} bytes, {} objects)", pack_data.len(), objects_to_pack.len());
+    tracing::info!(
+        "Sending pack file ({} bytes, {} packed, {} chunked)", 
+        pack_data.len(), 
+        objects_to_pack.len() - chunked_objects.len(),
+        chunked_objects.len()
+    );
 
-    Ok((
-        StatusCode::OK,
-        [("Content-Type", "application/octet-stream")],
-        pack_data,
-    ))
+    // Build response with optional chunked objects header
+    use axum::response::Response;
+    use axum::http::header;
+
+    let mut response_builder = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/octet-stream");
+    
+    if !chunked_objects.is_empty() {
+        response_builder = response_builder.header("X-Chunked-Objects", chunked_objects.join(","));
+        tracing::info!(
+            "Including {} chunked objects in header for separate transfer",
+            chunked_objects.len()
+        );
+    }
+
+    response_builder.body(axum::body::Body::from(pack_data))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Recursively collect an object and its children (for commits and trees)
@@ -574,4 +604,240 @@ fn detect_object_type(data: &[u8]) -> Option<ObjectType> {
     
     // If neither, it's a Blob (or at minimum treat it as one)
     Some(ObjectType::Blob)
+}
+
+// ============================================================================
+// Chunk Transfer Endpoints - For efficient large file push
+// ============================================================================
+
+/// POST /:repo/chunks/check - Check which chunks exist on remote
+/// 
+/// Request body: JSON array of chunk IDs (hex strings)
+/// Response: JSON array of MISSING chunk IDs
+pub async fn check_chunks_exist(
+    Path(repo): Path<String>,
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    Json(chunk_ids): Json<Vec<String>>,
+) -> Result<Json<Vec<String>>, StatusCode> {
+    // Check write permission
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+    )?;
+
+    tracing::debug!(repo = %repo, chunk_count = chunk_ids.len(), "Checking chunk existence");
+
+    // Resolve repository path
+    let repo_path = state.repos_dir.join(&repo);
+    if !repo_path.exists() {
+        tracing::warn!(repo = %repo, "Repository not found");
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // Create storage backend
+    let storage = create_storage_backend(&repo_path).await?;
+
+    // Check each chunk and collect missing ones
+    let mut missing = Vec::new();
+    for chunk_id_hex in chunk_ids {
+        let chunk_key = format!("chunks/{}", chunk_id_hex);
+        match storage.exists(&chunk_key).await {
+            Ok(exists) => {
+                if !exists {
+                    missing.push(chunk_id_hex);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(chunk = %chunk_id_hex, error = %e, "Error checking chunk");
+                // Assume missing on error
+                missing.push(chunk_id_hex);
+            }
+        }
+    }
+
+    tracing::debug!(
+        repo = %repo,
+        missing_count = missing.len(),
+        "Chunk existence check complete"
+    );
+
+    Ok(Json(missing))
+}
+
+/// PUT /:repo/chunks/:chunk_id - Upload a single chunk
+/// 
+/// Request body: Raw compressed chunk data
+pub async fn upload_chunk(
+    Path((repo, chunk_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    body: Bytes,
+) -> Result<StatusCode, StatusCode> {
+    // Check write permission
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+    )?;
+
+    tracing::debug!(
+        repo = %repo,
+        chunk_id = %chunk_id,
+        size = body.len(),
+        "Uploading chunk"
+    );
+
+    // Resolve repository path
+    let repo_path = state.repos_dir.join(&repo);
+    if !repo_path.exists() {
+        tracing::warn!(repo = %repo, "Repository not found");
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // Create storage backend
+    let storage = create_storage_backend(&repo_path).await?;
+
+    // Store chunk directly (already compressed)
+    let chunk_key = format!("chunks/{}", chunk_id);
+    storage.put(&chunk_key, &body).await.map_err(|e| {
+        tracing::error!(chunk = %chunk_id, error = %e, "Failed to store chunk");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    tracing::debug!(chunk = %chunk_id, "Chunk stored successfully");
+    Ok(StatusCode::OK)
+}
+
+/// PUT /:repo/manifests/:oid - Upload a chunk manifest
+/// 
+/// Request body: Serialized ChunkManifest
+pub async fn upload_manifest(
+    Path((repo, oid)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    body: Bytes,
+) -> Result<StatusCode, StatusCode> {
+    // Check write permission
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+    )?;
+
+    tracing::debug!(
+        repo = %repo,
+        oid = %oid,
+        size = body.len(),
+        "Uploading manifest"
+    );
+
+    // Resolve repository path
+    let repo_path = state.repos_dir.join(&repo);
+    if !repo_path.exists() {
+        tracing::warn!(repo = %repo, "Repository not found");
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // Create storage backend
+    let storage = create_storage_backend(&repo_path).await?;
+
+    // Store manifest
+    let manifest_key = format!("manifests/{}", oid);
+    storage.put(&manifest_key, &body).await.map_err(|e| {
+        tracing::error!(oid = %oid, error = %e, "Failed to store manifest");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    tracing::debug!(oid = %oid, "Manifest stored successfully");
+    Ok(StatusCode::OK)
+}
+
+// ============================================================================
+// Chunk Download Endpoints - For efficient large file pull/clone
+// ============================================================================
+
+/// GET /:repo/chunks/:chunk_id - Download a single chunk
+/// 
+/// Returns raw compressed chunk data
+pub async fn download_chunk(
+    Path((repo, chunk_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+) -> Result<impl IntoResponse, StatusCode> {
+    // Check read permission
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+    )?;
+
+    tracing::debug!(repo = %repo, chunk_id = %chunk_id, "Downloading chunk");
+
+    // Resolve repository path
+    let repo_path = state.repos_dir.join(&repo);
+    if !repo_path.exists() {
+        tracing::warn!(repo = %repo, "Repository not found");
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // Create storage backend
+    let storage = create_storage_backend(&repo_path).await?;
+
+    // Read compressed chunk directly (no decompression)
+    let chunk_key = format!("chunks/{}", chunk_id);
+    let chunk_data = storage.get(&chunk_key).await.map_err(|e| {
+        tracing::warn!(chunk = %chunk_id, error = %e, "Chunk not found");
+        StatusCode::NOT_FOUND
+    })?;
+
+    tracing::debug!(chunk = %chunk_id, size = chunk_data.len(), "Chunk downloaded");
+    Ok((
+        StatusCode::OK,
+        [("Content-Type", "application/octet-stream")],
+        chunk_data,
+    ))
+}
+
+/// GET /:repo/manifests/:oid - Download a chunk manifest
+/// 
+/// Returns serialized ChunkManifest
+pub async fn download_manifest(
+    Path((repo, oid)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+) -> Result<impl IntoResponse, StatusCode> {
+    // Check read permission
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+    )?;
+
+    tracing::debug!(repo = %repo, oid = %oid, "Downloading manifest");
+
+    // Resolve repository path
+    let repo_path = state.repos_dir.join(&repo);
+    if !repo_path.exists() {
+        tracing::warn!(repo = %repo, "Repository not found");
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // Create storage backend
+    let storage = create_storage_backend(&repo_path).await?;
+
+    // Read manifest
+    let manifest_key = format!("manifests/{}", oid);
+    let manifest_data = storage.get(&manifest_key).await.map_err(|e| {
+        tracing::warn!(oid = %oid, error = %e, "Manifest not found");
+        StatusCode::NOT_FOUND
+    })?;
+
+    tracing::debug!(oid = %oid, size = manifest_data.len(), "Manifest downloaded");
+    Ok((
+        StatusCode::OK,
+        [("Content-Type", "application/octet-stream")],
+        manifest_data,
+    ))
 }

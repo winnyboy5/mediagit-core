@@ -142,9 +142,14 @@ impl ProtocolClient {
             // Only upload if there are new objects
             if !objects.is_empty() {
                 // Generate and upload pack file with new objects only
-                let pack_data = self.generate_pack(odb, objects).await?;
+                let (pack_data, chunked_oids) = self.generate_pack(odb, objects).await?;
                 stats.bytes_uploaded = pack_data.len();
                 self.upload_pack(&pack_data).await?;
+
+                // Upload chunked objects (large files) if any
+                if !chunked_oids.is_empty() {
+                    self.upload_chunked_objects(odb, &chunked_oids, |_, _, _| {}).await?;
+                }
             } else {
                 tracing::info!("No new objects to push - remote already has all objects");
             }
@@ -229,7 +234,7 @@ impl ProtocolClient {
                 message: "Generating pack...".to_string(),
             });
 
-            let pack_data = self.generate_pack(odb, objects).await?;
+            let (pack_data, chunked_oids) = self.generate_pack(odb, objects).await?;
             stats.bytes_uploaded = pack_data.len();
 
             on_progress(PushProgress {
@@ -239,12 +244,12 @@ impl ProtocolClient {
                 message: format!("Packed {} objects ({} bytes)", total_objects, pack_data.len()),
             });
 
-            // Phase 3: Upload with progress
+            // Phase 3: Upload pack with progress
             on_progress(PushProgress {
                 phase: PushPhase::Uploading,
                 current: 0,
                 total: pack_data.len() as u64,
-                message: "Uploading...".to_string(),
+                message: "Uploading pack...".to_string(),
             });
 
             self.upload_pack(&pack_data).await?;
@@ -253,8 +258,29 @@ impl ProtocolClient {
                 phase: PushPhase::Uploading,
                 current: pack_data.len() as u64,
                 total: pack_data.len() as u64,
-                message: "Upload complete".to_string(),
+                message: "Pack upload complete".to_string(),
             });
+
+            // Phase 4: Upload chunked objects (large files)
+            if !chunked_oids.is_empty() {
+                on_progress(PushProgress {
+                    phase: PushPhase::Uploading,
+                    current: 0,
+                    total: chunked_oids.len() as u64,
+                    message: format!("Uploading {} chunked files...", chunked_oids.len()),
+                });
+
+                let chunks_uploaded = self.upload_chunked_objects(odb, &chunked_oids, |current, total, msg| {
+                    tracing::info!("Chunked upload: {}/{} - {}", current, total, msg);
+                }).await?;
+
+                on_progress(PushProgress {
+                    phase: PushPhase::Uploading,
+                    current: chunked_oids.len() as u64,
+                    total: chunked_oids.len() as u64,
+                    message: format!("Uploaded {} chunked files ({} chunks)", chunked_oids.len(), chunks_uploaded),
+                });
+            }
         } else {
             tracing::info!("No new objects to push");
         }
@@ -265,12 +291,14 @@ impl ProtocolClient {
         Ok((response, stats))
     }
 
-    /// Pull objects from remote and return pack data
+    /// Pull objects from remote and return pack data with chunked object OIDs
     ///
     /// # Arguments
     /// * `odb` - Local object database
     /// * `remote_ref` - Remote ref to pull
-    pub async fn pull(&self, _odb: &ObjectDatabase, remote_ref: &str) -> Result<Vec<u8>> {
+    /// 
+    /// Returns (pack_data, chunked_oids)
+    pub async fn pull(&self, _odb: &ObjectDatabase, remote_ref: &str) -> Result<(Vec<u8>, Vec<Oid>)> {
         // Get remote refs
         let remote_refs = self.get_refs().await?;
 
@@ -314,7 +342,9 @@ impl ProtocolClient {
     }
 
     /// Download a pack file from the server
-    async fn download_pack(&self, want: Vec<String>, have: Vec<String>) -> Result<Vec<u8>> {
+    /// 
+    /// Returns (pack_data, chunked_oids) - chunked objects need separate transfer
+    pub async fn download_pack(&self, want: Vec<String>, have: Vec<String>) -> Result<(Vec<u8>, Vec<Oid>)> {
         // First, send want request
         let want_url = format!("{}/objects/want", self.base_url);
         tracing::debug!("POST {}", want_url);
@@ -354,12 +384,32 @@ impl ProtocolClient {
             );
         }
 
+        // Parse X-Chunked-Objects header for large files that need separate transfer
+        let chunked_oids: Vec<Oid> = response
+            .headers()
+            .get("X-Chunked-Objects")
+            .and_then(|h| h.to_str().ok())
+            .map(|s| {
+                s.split(',')
+                    .filter_map(|oid_str| Oid::from_hex(oid_str.trim()).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if !chunked_oids.is_empty() {
+            tracing::info!(
+                count = chunked_oids.len(),
+                "Received {} chunked objects for separate download",
+                chunked_oids.len()
+            );
+        }
+
         let pack_data = response
             .bytes()
             .await
             .context("Failed to read pack data")?;
 
-        Ok(pack_data.to_vec())
+        Ok((pack_data.to_vec(), chunked_oids))
     }
 
     /// Update remote refs
@@ -462,14 +512,15 @@ impl ProtocolClient {
             // Add to result (this is a NEW object)
             result.push((oid, obj_type));
 
-            // Read object data
-            let obj_data = odb
-                .read(&oid)
-                .await
-                .context(format!("Failed to read object {}", oid))?;
-
+            // Only read object data for commits and trees (need to traverse refs)
+            // Blobs are leaf nodes - no need to read their contents here
             match obj_type {
                 ObjectType::Commit => {
+                    let obj_data = odb
+                        .read(&oid)
+                        .await
+                        .context(format!("Failed to read commit {}", oid))?;
+                    
                     // Deserialize commit to extract tree and parent refs
                     let commit: Commit = bincode::deserialize(&obj_data)
                         .context(format!("Failed to deserialize commit {}", oid))?;
@@ -487,6 +538,11 @@ impl ProtocolClient {
                     }
                 }
                 ObjectType::Tree => {
+                    let obj_data = odb
+                        .read(&oid)
+                        .await
+                        .context(format!("Failed to read tree {}", oid))?;
+                    
                     // Deserialize tree to extract blob/subtree refs
                     let tree: Tree = bincode::deserialize(&obj_data)
                         .context(format!("Failed to deserialize tree {}", oid))?;
@@ -504,6 +560,7 @@ impl ProtocolClient {
                 }
                 ObjectType::Blob => {
                     // Blobs are leaf nodes - no references to follow
+                    // Don't read blob content here as it could be huge (20GB chunked files)
                 }
             }
         }
@@ -512,14 +569,28 @@ impl ProtocolClient {
     }
 
     /// Generate a pack file containing specified objects with their types
+    /// 
+    /// Note: Chunked blobs (large files stored as chunks) are SKIPPED in packs.
+    /// They should be transferred separately via manifest + chunks.
+    /// 
+    /// Returns: (pack_data, chunked_object_oids)
     async fn generate_pack(
         &self,
         odb: &ObjectDatabase,
         objects: Vec<(Oid, ObjectType)>,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<(Vec<u8>, Vec<Oid>)> {
         let mut pack_writer = PackWriter::new();
+        let mut chunked_objects: Vec<Oid> = Vec::new();
 
         for (oid, object_type) in objects {
+            // Skip chunked blobs - they're too large to fit in memory
+            // They will be transferred separately
+            if object_type == ObjectType::Blob && odb.is_chunked(&oid).await.unwrap_or(false) {
+                tracing::debug!(oid = %oid, "Skipping chunked blob in pack generation");
+                chunked_objects.push(oid);
+                continue;
+            }
+            
             // Read object data from ODB
             let obj_data = odb
                 .read(&oid)
@@ -530,9 +601,324 @@ impl ProtocolClient {
             let _offset = pack_writer.add_object(oid, object_type, &obj_data);
         }
 
+        if !chunked_objects.is_empty() {
+            tracing::info!(
+                count = chunked_objects.len(),
+                "Chunked objects to transfer separately"
+            );
+        }
+
         // Finalize pack
         let pack_data = pack_writer.finalize();
-        Ok(pack_data)
+        Ok((pack_data, chunked_objects))
+    }
+
+    // ========================================================================
+    // Chunk Transfer Methods - For efficient large file push
+    // ========================================================================
+
+    /// Check which chunks exist on the remote server
+    /// 
+    /// Returns list of chunk IDs that are MISSING (need to be uploaded)
+    async fn check_chunks_exist(&self, chunk_ids: &[String]) -> Result<Vec<String>> {
+        let url = format!("{}/chunks/check", self.base_url);
+        tracing::debug!(count = chunk_ids.len(), "Checking chunk existence on remote");
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&chunk_ids)
+            .send()
+            .await
+            .context("Failed to POST /chunks/check")?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("POST /chunks/check failed with status: {}", response.status());
+        }
+
+        response
+            .json::<Vec<String>>()
+            .await
+            .context("Failed to parse chunks check response")
+    }
+
+    /// Upload a single chunk to the remote server
+    #[allow(dead_code)]
+    async fn upload_single_chunk(&self, chunk_id: &str, data: &[u8]) -> Result<()> {
+        let url = format!("{}/chunks/{}", self.base_url, chunk_id);
+        
+        let response = self
+            .client
+            .put(&url)
+            .body(data.to_vec())
+            .send()
+            .await
+            .context(format!("Failed to PUT /chunks/{}", chunk_id))?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("PUT /chunks/{} failed with status: {}", chunk_id, response.status());
+        }
+
+        Ok(())
+    }
+
+    /// Upload a manifest to the remote server
+    async fn upload_manifest(&self, oid: &Oid, data: &[u8]) -> Result<()> {
+        let url = format!("{}/manifests/{}", self.base_url, oid.to_hex());
+        
+        let response = self
+            .client
+            .put(&url)
+            .body(data.to_vec())
+            .send()
+            .await
+            .context(format!("Failed to PUT /manifests/{}", oid))?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("PUT /manifests/{} failed with status: {}", oid, response.status());
+        }
+
+        Ok(())
+    }
+
+    /// Upload all chunks for a chunked object with parallel uploads
+    /// 
+    /// Uses 8 concurrent uploads for optimal throughput (>100MB/s target)
+    pub async fn upload_chunked_objects<F>(
+        &self,
+        odb: &ObjectDatabase,
+        chunked_oids: &[Oid],
+        mut on_progress: F,
+    ) -> Result<usize>
+    where
+        F: FnMut(usize, usize, &str),
+    {
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+
+        if chunked_oids.is_empty() {
+            return Ok(0);
+        }
+
+        let mut total_chunks_uploaded = 0;
+        let concurrent_uploads = 8;
+        let semaphore = Arc::new(Semaphore::new(concurrent_uploads));
+
+        for (obj_idx, oid) in chunked_oids.iter().enumerate() {
+            // Get manifest for this object
+            let manifest = match odb.get_chunk_manifest(oid).await? {
+                Some(m) => m,
+                None => {
+                    tracing::warn!(oid = %oid, "No manifest found for chunked object");
+                    continue;
+                }
+            };
+
+            let total_chunks = manifest.chunks.len();
+            on_progress(obj_idx + 1, chunked_oids.len(), 
+                &format!("Object {}/{}: {} chunks", obj_idx + 1, chunked_oids.len(), total_chunks));
+
+            // Get all chunk IDs
+            let chunk_ids: Vec<String> = manifest.chunks.iter()
+                .map(|c| c.id.to_hex())
+                .collect();
+
+            // Check which chunks the remote needs
+            let missing_chunks = self.check_chunks_exist(&chunk_ids).await?;
+            
+            if missing_chunks.is_empty() {
+                tracing::debug!(oid = %oid, "All chunks already exist on remote");
+            } else {
+                tracing::info!(
+                    oid = %oid, 
+                    missing = missing_chunks.len(),
+                    total = total_chunks,
+                    "Uploading missing chunks"
+                );
+
+                // Upload missing chunks in parallel
+                let missing_set: std::collections::HashSet<String> = missing_chunks.into_iter().collect();
+                let mut upload_handles = Vec::new();
+
+                for chunk_ref in &manifest.chunks {
+                    if missing_set.contains(&chunk_ref.id.to_hex()) {
+                        let chunk_id = chunk_ref.id;
+                        let sem = Arc::clone(&semaphore);
+                        let client = self.client.clone();
+                        let base_url = self.base_url.clone();
+                        
+                        // Get compressed chunk data (no decompression needed)
+                        let chunk_data = odb.get_compressed_chunk(&chunk_id).await?;
+
+                        let handle = tokio::spawn(async move {
+                            let _permit = sem.acquire().await.unwrap();
+                            let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
+                            
+                            client.put(&url)
+                                .body(chunk_data)
+                                .send()
+                                .await
+                                .map(|_| ())
+                                .map_err(|e| anyhow::anyhow!("Failed to upload chunk {}: {}", chunk_id, e))
+                        });
+
+                        upload_handles.push(handle);
+                    }
+                }
+
+                // Wait for all uploads to complete
+                for handle in upload_handles {
+                    handle.await??;
+                    total_chunks_uploaded += 1;
+                }
+            }
+
+            // Upload manifest last (ensures all chunks exist first)
+            let manifest_data = bincode::serialize(&manifest)
+                .context("Failed to serialize manifest")?;
+            self.upload_manifest(oid, &manifest_data).await?;
+            
+            tracing::debug!(oid = %oid, "Manifest uploaded");
+        }
+
+        Ok(total_chunks_uploaded)
+    }
+
+    // ========================================================================
+    // Chunk Download Methods - For efficient large file pull/clone
+    // ========================================================================
+
+    /// Download a manifest from the remote server
+    pub async fn download_manifest(&self, oid: &Oid) -> Result<mediagit_versioning::chunking::ChunkManifest> {
+        let url = format!("{}/manifests/{}", self.base_url, oid.to_hex());
+        
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .context(format!("Failed to GET /manifests/{}", oid))?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("GET /manifests/{} failed with status: {}", oid, response.status());
+        }
+
+        let data = response.bytes().await?;
+        bincode::deserialize(&data).context("Failed to deserialize manifest")
+    }
+
+    /// Download a single chunk from the remote server
+    pub async fn download_chunk(&self, chunk_id: &Oid) -> Result<Vec<u8>> {
+        let url = format!("{}/chunks/{}", self.base_url, chunk_id.to_hex());
+        
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .context(format!("Failed to GET /chunks/{}", chunk_id))?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("GET /chunks/{} failed with status: {}", chunk_id, response.status());
+        }
+
+        Ok(response.bytes().await?.to_vec())
+    }
+
+    /// Download all chunks for chunked objects with parallel downloads
+    /// 
+    /// Uses 8 concurrent downloads for optimal throughput (>100MB/s target)
+    pub async fn download_chunked_objects<F>(
+        &self,
+        odb: &ObjectDatabase,
+        chunked_oids: &[Oid],
+        mut on_progress: F,
+    ) -> Result<usize>
+    where
+        F: FnMut(usize, usize, &str),
+    {
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+
+        if chunked_oids.is_empty() {
+            return Ok(0);
+        }
+
+        let mut total_chunks_downloaded = 0;
+        let concurrent_downloads = 8;
+        let semaphore = Arc::new(Semaphore::new(concurrent_downloads));
+
+        for (obj_idx, oid) in chunked_oids.iter().enumerate() {
+            // Download manifest first
+            let manifest = self.download_manifest(oid).await?;
+            let total_chunks = manifest.chunks.len();
+
+            on_progress(obj_idx + 1, chunked_oids.len(), 
+                &format!("Object {}/{}: {} chunks", obj_idx + 1, chunked_oids.len(), total_chunks));
+
+            // Check which chunks we already have locally
+            let mut missing_chunks: Vec<Oid> = Vec::new();
+            for chunk_ref in &manifest.chunks {
+                if !odb.chunk_exists(&chunk_ref.id).await.unwrap_or(false) {
+                    missing_chunks.push(chunk_ref.id);
+                }
+            }
+
+            if missing_chunks.is_empty() {
+                tracing::debug!(oid = %oid, "All chunks already exist locally");
+            } else {
+                tracing::info!(
+                    oid = %oid,
+                    missing = missing_chunks.len(),
+                    total = total_chunks,
+                    "Downloading missing chunks"
+                );
+
+                // Download missing chunks in parallel
+                let mut download_handles = Vec::new();
+
+                for chunk_id in missing_chunks {
+                    let sem = Arc::clone(&semaphore);
+                    let client = self.client.clone();
+                    let base_url = self.base_url.clone();
+
+                    let handle = tokio::spawn(async move {
+                        let _permit = sem.acquire().await.unwrap();
+                        let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
+                        
+                        let response = client.get(&url)
+                            .send()
+                            .await
+                            .map_err(|e| anyhow::anyhow!("Failed to download chunk {}: {}", chunk_id, e))?;
+                        
+                        if !response.status().is_success() {
+                            anyhow::bail!("GET /chunks/{} failed with status: {}", chunk_id, response.status());
+                        }
+                        
+                        let data = response.bytes().await
+                            .map_err(|e| anyhow::anyhow!("Failed to read chunk {}: {}", chunk_id, e))?;
+                        
+                        Ok::<_, anyhow::Error>((chunk_id, data.to_vec()))
+                    });
+
+                    download_handles.push(handle);
+                }
+
+                // Wait for all downloads and store chunks
+                for handle in download_handles {
+                    let (chunk_id, chunk_data) = handle.await??;
+                    odb.put_compressed_chunk(&chunk_id, &chunk_data).await?;
+                    total_chunks_downloaded += 1;
+                }
+            }
+
+            // Store manifest locally
+            odb.put_manifest(oid, &manifest).await?;
+            
+            tracing::debug!(oid = %oid, "Chunked object downloaded");
+        }
+
+        Ok(total_chunks_downloaded)
     }
 }
 

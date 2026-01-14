@@ -18,11 +18,19 @@
 //! - **Automatic deduplication**: Identical content is stored only once
 //! - **LRU caching**: Frequently accessed objects are cached in memory
 //! - **Observable metrics**: Track cache performance and deduplication efficiency
+//! - **Delta compression**: Store only differences between similar objects
+//! - **Delta chain limits**: Prevent unbounded delta chains for consistent read performance
+
+/// Maximum delta chain depth before re-storing as full object.
+/// This prevents read performance degradation from long delta chains.
+/// After this depth, objects are stored as full copies to break the chain.
+pub const MAX_DELTA_DEPTH: u8 = 10;
+
 
 use crate::{ObjectType, Oid, OdbMetrics};
-use crate::chunking::{ChunkManifest, ChunkStrategy, ContentChunker};
+use crate::chunking::{ChunkManifest, ChunkRef, ChunkStrategy, ContentChunker};
 use crate::delta::{Delta, DeltaDecoder, DeltaEncoder};
-use mediagit_compression::{Compressor, SmartCompressor, TypeAwareCompressor, ZlibCompressor};
+use mediagit_compression::{Compressor, SmartCompressor, TypeAwareCompressor, ZlibCompressor, CompressionAlgorithm};
 use mediagit_compression::ObjectType as CompressionObjectType;
 use mediagit_storage::StorageBackend;
 use moka::future::Cache;
@@ -560,6 +568,7 @@ impl ObjectDatabase {
 
         // Store each chunk with smart compression
         for chunk in &chunks {
+            // Use to_hex() for consistent storage paths (LocalBackend handles sharding)
             let chunk_key = format!("chunks/{}", chunk.id.to_hex());
 
             // Check if chunk exists (deduplication at chunk level)
@@ -567,10 +576,14 @@ impl ObjectDatabase {
                 .map_err(|e| anyhow::anyhow!("Failed to check chunk existence for {}: {}", chunk_key, e))?;
             
             if !exists {
-                // Determine compression strategy for chunk
+                // Determine compression strategy for chunk based on file type
                 let compressed = if let Some(smart_comp) = &self.smart_compressor {
-                    // Use generic compression for chunks
-                    let chunk_comp_type = CompressionObjectType::Unknown;
+                    // Use file type for optimal compression (e.g., Brotli for CSV, Zstd for ML)
+                    let chunk_comp_type = if !filename.is_empty() {
+                        CompressionObjectType::from_path(filename)
+                    } else {
+                        CompressionObjectType::Unknown
+                    };
                     smart_comp.compress_typed(&chunk.data, chunk_comp_type)
                         .map_err(|e| anyhow::anyhow!("Failed to compress chunk {}: {}", chunk_key, e))?
                 } else {
@@ -600,7 +613,7 @@ impl ObjectDatabase {
             Some(filename.to_string()),
         );
 
-        // Store manifest
+        // Store manifest (use to_hex() for consistent storage paths)
         let manifest_key = format!("manifests/{}", oid.to_hex());
         let manifest_data = bincode::serialize(&manifest)
             .map_err(|e| anyhow::anyhow!("Failed to serialize chunk manifest for {}: {}", oid, e))?;
@@ -623,6 +636,164 @@ impl ObjectDatabase {
         Ok(oid)
     }
 
+    /// Write a file with chunking using streaming reads (constant memory)
+    ///
+    /// This method processes files of any size without loading them entirely
+    /// into memory. Chunks are generated and written incrementally.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the file to chunk and store
+    /// * `filename` - Filename for format detection
+    ///
+    /// # Returns
+    ///
+    /// The OID (SHA-256 hash) of the file content
+    ///
+    /// # Memory Usage
+    ///
+    /// Memory usage is bounded by chunk size (~8MB max for TB+ files)
+    /// regardless of total file size.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use mediagit_versioning::ObjectDatabase;
+    /// # async fn example() -> anyhow::Result<()> {
+    /// # let odb: ObjectDatabase = todo!();
+    /// let oid = odb.write_chunked_from_file(
+    ///     "/path/to/large_video.mp4",
+    ///     "large_video.mp4"
+    /// ).await?;
+    /// println!("Stored file with OID: {}", oid);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn write_chunked_from_file<P: AsRef<std::path::Path>>(
+        &self,
+        path: P,
+        filename: &str,
+    ) -> anyhow::Result<Oid> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        
+        let path = path.as_ref();
+        let file_size = std::fs::metadata(path)?.len();
+        
+        info!(
+            "Streaming chunked write: file={}, size={}MB",
+            filename,
+            file_size / (1024 * 1024)
+        );
+        
+        // Compute file OID using streaming hash (constant memory)
+        let file_oid = Oid::from_file_async(path).await?;
+        
+        // Check if we already have this file (use to_hex for consistency)
+        if self.storage.exists(&format!("manifests/{}", file_oid.to_hex())).await? {
+            debug!("File already exists in storage: {}", file_oid);
+            return Ok(file_oid);
+        }
+        
+        // Track written chunks and bytes
+        let chunks_written = AtomicU64::new(0);
+        let bytes_written = AtomicU64::new(0);
+        
+        // Create chunker with MediaAware strategy
+        let chunker = ContentChunker::new(
+            self.chunk_strategy.clone().unwrap_or(ChunkStrategy::MediaAware)
+        );
+        
+        // Use streaming callback pattern - each chunk written immediately
+        let storage = self.storage.clone();
+        let compressor = self.compressor.clone();
+        let smart_comp = self.smart_compressor.clone();
+        let compression_enabled = self.compression_enabled;
+        
+        // Track chunk refs for manifest
+        let chunk_refs = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<ChunkRef>::new()));
+        let chunk_refs_clone = chunk_refs.clone();
+        
+        let filename_owned = filename.to_string();
+        
+        let _chunk_oids = chunker.chunk_file_streaming(path, |chunk| {
+            let storage = storage.clone();
+            let compressor = compressor.clone();
+            let smart_comp = smart_comp.clone();
+            let chunks_written = &chunks_written;
+            let bytes_written = &bytes_written;
+            let chunk_refs = chunk_refs_clone.clone();
+            let filename = filename_owned.clone();
+            
+            async move {
+                // Use to_hex() for consistent storage paths (LocalBackend handles sharding)
+                let chunk_key = format!("chunks/{}", chunk.id.to_hex());
+                
+                // Build ChunkRef for manifest
+                let chunk_ref = ChunkRef {
+                    id: chunk.id,
+                    offset: chunk.offset,
+                    size: chunk.size,
+                    chunk_type: chunk.chunk_type,
+                };
+                
+                // Skip if chunk already exists (deduplication)
+                if storage.exists(&chunk_key).await? {
+                    debug!("Chunk already exists: {}", chunk.id);
+                    chunk_refs.lock().await.push(chunk_ref);
+                    return Ok(());
+                }
+                
+                // Compress chunk with smart compressor (type-aware compression)
+                // Use Brotli for CSV/text, Zstd for binary, etc.
+                let comp_type = CompressionObjectType::from_path(&filename);
+                let data_to_store = if let Some(ref smart) = smart_comp {
+                    // Use smart compressor for optimal compression by file type
+                    smart.compress_typed(&chunk.data, comp_type)?
+                } else if compression_enabled {
+                    // Fall back to default compressor
+                    compressor.compress(&chunk.data)?
+                } else {
+                    chunk.data.clone()
+                };
+                
+                // Store chunk
+                storage.put(&chunk_key, &data_to_store).await?;
+                
+                chunks_written.fetch_add(1, Ordering::Relaxed);
+                bytes_written.fetch_add(chunk.size as u64, Ordering::Relaxed);
+                
+                // Add to manifest refs
+                chunk_refs.lock().await.push(chunk_ref);
+                
+                Ok(())
+            }
+        }).await?;
+        
+        // Create and store manifest  
+        let chunk_refs_final = chunk_refs.lock().await.clone();
+        let manifest = ChunkManifest {
+            chunks: chunk_refs_final,
+            total_size: file_size,
+            filename: Some(filename.to_string()),
+        };
+        
+        let manifest_data = bincode::serialize(&manifest)?;
+        // Use to_hex() for consistent storage paths
+        let manifest_key = format!("manifests/{}", file_oid.to_hex());
+        self.storage.put(&manifest_key, &manifest_data).await?;
+        
+        info!(
+            "Streaming chunked write complete: {} chunks, {}MB written",
+            chunks_written.load(Ordering::Relaxed),
+            bytes_written.load(Ordering::Relaxed) / (1024 * 1024)
+        );
+        
+        // Update metrics
+        let mut metrics = self.metrics.write().await;
+        metrics.record_write(file_size, true);
+        
+        Ok(file_oid)
+    }
     /// Write an object with delta compression if similar object found
     ///
     /// Attempts to find a similar object in recent history and stores only the
@@ -694,14 +865,26 @@ impl ObjectDatabase {
             // Read base object
             match self.read(&base_oid).await {
                 Ok(base_data) => {
-                    // Create delta
-                    let delta = DeltaEncoder::encode(&base_data, data);
-                    let delta_data = delta.to_bytes();
+                    // Check delta chain depth - prevent unbounded chains
+                    let base_depth = self.get_delta_depth(&base_oid).await.unwrap_or(0);
+                    if base_depth >= MAX_DELTA_DEPTH {
+                        info!(
+                            oid = %oid,
+                            base_oid = %base_oid,
+                            depth = base_depth,
+                            max_depth = MAX_DELTA_DEPTH,
+                            "Delta chain limit reached, storing as full object"
+                        );
+                        // Fall through to standard write
+                    } else {
+                        // Create delta
+                        let delta = DeltaEncoder::encode(&base_data, data);
+                        let delta_data = delta.to_bytes();
 
-                    // Only use delta if it's smaller than 80% of original
-                    let delta_ratio = delta_data.len() as f64 / data.len() as f64;
+                        // Only use delta if it's smaller than 80% of original
+                        let delta_ratio = delta_data.len() as f64 / data.len() as f64;
 
-                    if delta_ratio < 0.80 {
+                        if delta_ratio < 0.80 {
                         info!(
                             oid = %oid,
                             original_size = data.len(),
@@ -720,10 +903,18 @@ impl ObjectDatabase {
 
                         self.storage.put(&delta_key, &compressed_delta).await?;
 
-                        // Store delta metadata (base OID reference)
-                        let delta_meta = format!("base:{}", base_oid.to_hex());
+                        // Store delta metadata (base OID reference + chain depth)
+                        let new_depth = base_depth + 1;
+                        let delta_meta = format!("base:{}:depth:{}", base_oid.to_hex(), new_depth);
                         let meta_key = format!("deltas/{}.meta", oid.to_hex());
                         self.storage.put(&meta_key, delta_meta.as_bytes()).await?;
+                        
+                        debug!(
+                            oid = %oid,
+                            base_oid = %base_oid,
+                            depth = new_depth,
+                            "Stored delta with chain depth"
+                        );
 
                         // Update metrics
                         let mut metrics = self.metrics.write().await;
@@ -744,6 +935,7 @@ impl ObjectDatabase {
                             "Delta not beneficial, using standard storage"
                         );
                     }
+                    } // Close depth check else branch
                 }
                 Err(e) => {
                     warn!(
@@ -766,7 +958,41 @@ impl ObjectDatabase {
         self.write_with_path(obj_type, data, filename).await
     }
 
+    /// Get the delta chain depth for an object
+    ///
+    /// Returns 0 if object is not a delta (full object).
+    /// Returns the chain depth if object is stored as a delta.
+    ///
+    /// # Arguments
+    ///
+    /// * `oid` - Object identifier to check
+    ///
+    /// # Returns
+    ///
+    /// The delta chain depth (0 = full object, 1+ = delta depth)
+    async fn get_delta_depth(&self, oid: &Oid) -> anyhow::Result<u8> {
+        let meta_key = format!("deltas/{}.meta", oid.to_hex());
+        
+        // Check if delta metadata exists
+        if !self.storage.exists(&meta_key).await? {
+            return Ok(0); // Not a delta, depth is 0
+        }
+        
+        // Read and parse metadata
+        let meta_data = self.storage.get(&meta_key).await?;
+        let meta_str = String::from_utf8_lossy(&meta_data);
+        
+        // Parse format: "base:{oid}:depth:{n}" or legacy "base:{oid}"
+        if let Some(depth_part) = meta_str.split(":depth:").nth(1) {
+            Ok(depth_part.parse::<u8>().unwrap_or(1))
+        } else {
+            // Legacy format without depth, assume depth 1
+            Ok(1)
+        }
+    }
+
     /// List all pack files in the database
+
     ///
     /// Returns a list of pack file keys
     async fn list_pack_files(&self) -> anyhow::Result<Vec<String>> {
@@ -902,7 +1128,7 @@ impl ObjectDatabase {
     async fn read_chunked(&self, oid: &Oid) -> anyhow::Result<Vec<u8>> {
         debug!(oid = %oid, "Reconstructing chunked object");
 
-        // Load chunk manifest
+        // Load chunk manifest (use to_hex() for consistent storage paths)
         let manifest_key = format!("manifests/{}", oid.to_hex());
         let manifest_data = self.storage.get(&manifest_key).await?;
         let manifest: ChunkManifest = bincode::deserialize(&manifest_data)
@@ -919,19 +1145,39 @@ impl ObjectDatabase {
         let mut reconstructed = Vec::with_capacity(manifest.total_size as usize);
 
         for (idx, chunk_ref) in manifest.chunks.iter().enumerate() {
+            // Use to_hex() for consistent storage paths
             let chunk_key = format!("chunks/{}", chunk_ref.id.to_hex());
 
             // Read compressed chunk
             let compressed = self.storage.get(&chunk_key).await
                 .map_err(|e| anyhow::anyhow!("Failed to read chunk {}: {}", chunk_ref.id.to_hex(), e))?;
 
-            // Decompress chunk
+            // Decompress chunk using auto-detection
             let decompressed = if let Some(smart_comp) = &self.smart_compressor {
+                // Smart compressor has auto-detection built-in
                 smart_comp.decompress_typed(&compressed)
                     .map_err(|e| anyhow::anyhow!("Failed to decompress chunk {}: {}", chunk_ref.id.to_hex(), e))?
             } else {
-                self.compressor.decompress(&compressed)
-                    .map_err(|e| anyhow::anyhow!("Failed to decompress chunk {}: {}", chunk_ref.id.to_hex(), e))?
+                // Fallback: use auto-detection to handle Store (raw) chunks
+                let algo = CompressionAlgorithm::detect(&compressed);
+                match algo {
+                    CompressionAlgorithm::None => {
+                        // Store strategy - data is uncompressed
+                        compressed.to_vec()
+                    }
+                    CompressionAlgorithm::Zstd => {
+                        // Use zstd decompressor
+                        use mediagit_compression::ZstdCompressor;
+                        let zstd = ZstdCompressor::new(mediagit_compression::CompressionLevel::Default);
+                        zstd.decompress(&compressed)
+                            .map_err(|e| anyhow::anyhow!("Failed to decompress chunk {}: {}", chunk_ref.id.to_hex(), e))?
+                    }
+                    _ => {
+                        // For Zlib or Brotli, try zlib (original behavior)
+                        self.compressor.decompress(&compressed)
+                            .map_err(|e| anyhow::anyhow!("Failed to decompress chunk {}: {}", chunk_ref.id.to_hex(), e))?
+                    }
+                }
             };
 
             // Verify chunk size matches manifest
@@ -1163,6 +1409,137 @@ impl ObjectDatabase {
         })
     }
 
+    /// Read an object and stream directly to file (constant memory)
+    ///
+    /// This method writes chunked objects directly to disk without loading
+    /// the entire file into memory. Suitable for files of any size.
+    ///
+    /// # Arguments
+    ///
+    /// * `oid` - The object identifier to read
+    /// * `path` - Path where the file should be written
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes written to the file
+    ///
+    /// # Memory Usage
+    ///
+    /// Memory is bounded by chunk size (~8MB max) regardless of total file size.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use mediagit_versioning::ObjectDatabase;
+    /// # use mediagit_versioning::Oid;
+    /// # async fn example() -> anyhow::Result<()> {
+    /// # let odb: ObjectDatabase = todo!();
+    /// # let oid: Oid = todo!();
+    /// let bytes_written = odb.read_to_file(&oid, "/path/to/output.mp4").await?;
+    /// println!("Wrote {} bytes", bytes_written);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn read_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        oid: &Oid,
+        path: P,
+    ) -> anyhow::Result<u64> {
+        use tokio::io::AsyncWriteExt;
+        
+        let path = path.as_ref();
+        
+        // Check for chunk manifest (use to_hex() for consistent storage paths)
+        let manifest_key = format!("manifests/{}", oid.to_hex());
+        
+        if self.storage.exists(&manifest_key).await? {
+            // CHUNKED OBJECT: Stream chunks directly to file
+            info!(oid = %oid, "Streaming chunked object to file");
+            
+            let manifest_data = self.storage.get(&manifest_key).await?;
+            let manifest: ChunkManifest = bincode::deserialize(&manifest_data)
+                .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
+            
+            // Ensure parent directory exists
+            if let Some(parent) = path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            
+            // Open file for streaming write
+            let mut file = tokio::fs::File::create(path).await?;
+            let mut bytes_written = 0u64;
+            
+            for chunk_ref in &manifest.chunks {
+                // Use to_hex() for consistent storage paths
+                let chunk_key = format!("chunks/{}", chunk_ref.id.to_hex());
+                
+                // Read compressed chunk
+                let compressed = self.storage.get(&chunk_key).await
+                    .map_err(|e| anyhow::anyhow!("Failed to read chunk {}: {}", chunk_ref.id.to_hex(), e))?;
+                
+                // Decompress chunk using auto-detection
+                let decompressed = if let Some(smart_comp) = &self.smart_compressor {
+                    smart_comp.decompress_typed(&compressed)
+                        .map_err(|e| anyhow::anyhow!("Failed to decompress chunk {}: {}", chunk_ref.id.to_hex(), e))?
+                } else {
+                    // Fallback: use auto-detection to handle Store (raw) chunks
+                    let algo = CompressionAlgorithm::detect(&compressed);
+                    match algo {
+                        CompressionAlgorithm::None => {
+                            compressed.to_vec()
+                        }
+                        CompressionAlgorithm::Zstd => {
+                            use mediagit_compression::ZstdCompressor;
+                            let zstd = ZstdCompressor::new(mediagit_compression::CompressionLevel::Default);
+                            zstd.decompress(&compressed)
+                                .map_err(|e| anyhow::anyhow!("Failed to decompress chunk {}: {}", chunk_ref.id.to_hex(), e))?
+                        }
+                        _ => {
+                            self.compressor.decompress(&compressed)
+                                .map_err(|e| anyhow::anyhow!("Failed to decompress chunk {}: {}", chunk_ref.id.to_hex(), e))?
+                        }
+                    }
+                };
+                
+                // Verify chunk size
+                if decompressed.len() != chunk_ref.size {
+                    anyhow::bail!(
+                        "Chunk size mismatch for {}: expected {}, got {}",
+                        chunk_ref.id.to_hex(),
+                        chunk_ref.size,
+                        decompressed.len()
+                    );
+                }
+                
+                // Stream to file (chunk is dropped after write)
+                file.write_all(&decompressed).await?;
+                bytes_written += decompressed.len() as u64;
+            }
+            
+            file.flush().await?;
+            
+            info!(
+                oid = %oid,
+                bytes = bytes_written,
+                chunks = manifest.chunks.len(),
+                "Streaming write complete"
+            );
+            
+            Ok(bytes_written)
+        } else {
+            // NON-CHUNKED OBJECT: Read and write normally
+            let data = self.read(oid).await?;
+            
+            // Ensure parent directory exists
+            if let Some(parent) = path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            
+            tokio::fs::write(path, &data).await?;
+            Ok(data.len() as u64)
+        }
+    }
+
     /// Read an object from the database
     ///
     /// Checks the cache first, then reads from storage if not cached.
@@ -1215,6 +1592,7 @@ impl ObjectDatabase {
         drop(metrics); // Release lock before I/O
 
         // Check if object has chunk manifest (chunked object)
+        // Use to_hex() for consistent storage paths
         let manifest_key = format!("manifests/{}", oid.to_hex());
         if self.storage.exists(&manifest_key).await? {
             debug!(oid = %oid, "Found chunk manifest, reconstructing from chunks");
@@ -1354,6 +1732,96 @@ impl ObjectDatabase {
         Ok(data.len())
     }
 
+    /// Check if an object is stored as chunks (without reading the full object)
+    ///
+    /// This is used to determine how to handle large objects during push
+    /// without loading them fully into memory.
+    pub async fn is_chunked(&self, oid: &Oid) -> anyhow::Result<bool> {
+        let manifest_key = format!("manifests/{}", oid.to_hex());
+        self.storage.exists(&manifest_key).await
+    }
+
+    /// Get the chunk manifest for a chunked object
+    ///
+    /// Returns None if the object is not chunked.
+    pub async fn get_chunk_manifest(&self, oid: &Oid) -> anyhow::Result<Option<crate::chunking::ChunkManifest>> {
+        let manifest_key = format!("manifests/{}", oid.to_hex());
+        
+        if !self.storage.exists(&manifest_key).await? {
+            return Ok(None);
+        }
+        
+        let manifest_data = self.storage.get(&manifest_key).await?;
+        let manifest: crate::chunking::ChunkManifest = bincode::deserialize(&manifest_data)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
+        
+        Ok(Some(manifest))
+    }
+
+    /// Get chunk data by chunk ID
+    ///
+    /// Reads and decompresses a single chunk.
+    pub async fn get_chunk(&self, chunk_id: &Oid) -> anyhow::Result<Vec<u8>> {
+        let chunk_key = format!("chunks/{}", chunk_id.to_hex());
+        let compressed = self.storage.get(&chunk_key).await?;
+        
+        // Decompress using auto-detection
+        if let Some(smart_comp) = &self.smart_compressor {
+            smart_comp.decompress_typed(&compressed)
+                .map_err(|e| anyhow::anyhow!("Failed to decompress chunk: {}", e))
+        } else {
+            // Fallback: use auto-detection to handle Store (raw) chunks
+            let algo = CompressionAlgorithm::detect(&compressed);
+            match algo {
+                CompressionAlgorithm::None => Ok(compressed.to_vec()),
+                CompressionAlgorithm::Zstd => {
+                    use mediagit_compression::ZstdCompressor;
+                    let zstd = ZstdCompressor::new(mediagit_compression::CompressionLevel::Default);
+                    zstd.decompress(&compressed)
+                        .map_err(|e| anyhow::anyhow!("Failed to decompress chunk: {}", e))
+                }
+                _ => {
+                    self.compressor.decompress(&compressed)
+                        .map_err(|e| anyhow::anyhow!("Failed to decompress chunk: {}", e))
+                }
+            }
+        }
+    }
+
+    /// Get raw compressed chunk data (no decompression)
+    ///
+    /// Used for efficient network transfer - chunks are sent as-is to remote.
+    /// This avoids costly decompress/recompress cycle during push.
+    pub async fn get_compressed_chunk(&self, chunk_id: &Oid) -> anyhow::Result<Vec<u8>> {
+        let chunk_key = format!("chunks/{}", chunk_id.to_hex());
+        self.storage.get(&chunk_key).await
+            .map_err(|e| anyhow::anyhow!("Failed to read compressed chunk {}: {}", chunk_id, e))
+    }
+
+    /// Store raw compressed chunk data (no compression)
+    ///
+    /// Used when receiving pre-compressed chunks from remote.
+    pub async fn put_compressed_chunk(&self, chunk_id: &Oid, data: &[u8]) -> anyhow::Result<()> {
+        let chunk_key = format!("chunks/{}", chunk_id.to_hex());
+        self.storage.put(&chunk_key, data).await
+            .map_err(|e| anyhow::anyhow!("Failed to store chunk {}: {}", chunk_id, e))
+    }
+
+    /// Store chunk manifest
+    pub async fn put_manifest(&self, oid: &Oid, manifest: &crate::chunking::ChunkManifest) -> anyhow::Result<()> {
+        let manifest_key = format!("manifests/{}", oid.to_hex());
+        let manifest_data = bincode::serialize(manifest)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize manifest: {}", e))?;
+        self.storage.put(&manifest_key, &manifest_data).await
+            .map_err(|e| anyhow::anyhow!("Failed to store manifest {}: {}", oid, e))
+    }
+
+    /// Check if a chunk exists
+    pub async fn chunk_exists(&self, chunk_id: &Oid) -> anyhow::Result<bool> {
+        let chunk_key = format!("chunks/{}", chunk_id.to_hex());
+        self.storage.exists(&chunk_key).await
+    }
+
     /// Check if an object exists in the database
     ///
     /// Checks cache first for efficiency, then queries storage.
@@ -1382,11 +1850,18 @@ impl ObjectDatabase {
             return Ok(true);
         }
 
+        // Check for regular loose object
         // CRITICAL FIX: Use oid.to_hex() for consistency with read() and write()
         // LocalBackend::object_path() automatically adds "objects/" prefix and sharding
         // This ensures compatibility with both pre-GC and post-GC reorganized object paths
         let key = oid.to_hex();
-        self.storage.exists(&key).await
+        if self.storage.exists(&key).await? {
+            return Ok(true);
+        }
+
+        // Also check for chunked object (stored as manifest + chunks)
+        let manifest_key = format!("manifests/{}", oid.to_hex());
+        self.storage.exists(&manifest_key).await
     }
 
     /// Verify object integrity
