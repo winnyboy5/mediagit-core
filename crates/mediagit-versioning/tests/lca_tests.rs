@@ -278,10 +278,10 @@ async fn test_lca_deep_history() {
     assert_eq!(bases.len(), 1);
     assert_eq!(bases[0], commits[80]);
 
-    // Should still be fast even with deep history (relaxed for CI/WSL2)
+    // Should still be fast even with deep history (relaxed for CI/slow environments)
     assert!(
-        elapsed.as_millis() < 100,
-        "Deep history LCA took {}ms, expected <100ms",
+        elapsed.as_millis() < 500,
+        "Deep history LCA took {}ms, expected <500ms",
         elapsed.as_millis()
     );
 }

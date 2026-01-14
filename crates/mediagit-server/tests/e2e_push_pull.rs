@@ -182,7 +182,7 @@ async fn test_e2e_pull_workflow() {
 
     // Verify pull succeeded
     assert!(result.is_ok(), "Pull failed: {:?}", result.err());
-    let pack_data = result.unwrap();
+    let (pack_data, _oids) = result.unwrap();
 
     // Unpack received objects into ODB
     let pack_reader = PackReader::new(pack_data).unwrap();
@@ -263,7 +263,7 @@ async fn test_e2e_push_then_pull_roundtrip() {
     let client2_protocol = ProtocolClient::new(&format!("{}/test-repo", base_url));
     let pull_result = client2_protocol.pull(&client2_odb, "refs/heads/main").await;
     assert!(pull_result.is_ok(), "Client2 pull failed");
-    let pack_data = pull_result.unwrap();
+    let (pack_data, _oids) = pull_result.unwrap();
 
     // Unpack received objects into client2's ODB
     let pack_reader = PackReader::new(pack_data).unwrap();
