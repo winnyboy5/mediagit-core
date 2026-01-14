@@ -217,6 +217,13 @@ impl MergeCmd {
                 format!("Merge branch '{}' into HEAD", self.branch)
             });
 
+            // Verify both parent commits exist in the object database
+            // This prevents creating merge commits with invalid parent references
+            odb.read(&our_oid).await
+                .context(format!("Parent commit {} (ours) not found in object database", our_oid))?;
+            odb.read(&their_oid).await
+                .context(format!("Parent commit {} (theirs) not found in object database", their_oid))?;
+
             let merge_commit = Commit {
                 tree: tree_oid,
                 parents: vec![our_oid, their_oid],

@@ -178,9 +178,17 @@ impl PullCmd {
         }
 
         if !self.dry_run {
+            // Build the "have" list from local ref state for incremental pull
+            let local_have: Vec<String> = local_ref
+                .as_ref()
+                .and_then(|r| r.oid.as_ref())
+                .map(|oid| vec![oid.to_hex()])
+                .unwrap_or_default();
+
             // Pull using protocol client (downloads pack file)
+            // Pass local OIDs to avoid downloading objects we already have
             let download_pb = progress.download_bar("Receiving objects");
-            let (pack_data, chunked_oids) = client.pull(&odb, &remote_ref).await?;
+            let (pack_data, chunked_oids) = client.pull_with_have(&odb, &remote_ref, local_have).await?;
             let pack_size = pack_data.len() as u64;
 
             download_pb.set_length(pack_size);

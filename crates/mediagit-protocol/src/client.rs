@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use mediagit_versioning::{Commit, FileMode, ObjectDatabase, ObjectType, Oid, PackWriter, Tree};
 use std::collections::{HashSet, VecDeque};
 
-use crate::types::{RefUpdate, RefUpdateRequest, RefUpdateResponse, RefsResponse, WantRequest};
+use crate::types::{RefUpdate, RefUpdateRequest, RefUpdateResponse, RefsResponse, WantRequest, WantResponse};
 
 /// Statistics from a push operation
 #[derive(Debug, Clone, Default)]
@@ -296,9 +296,18 @@ impl ProtocolClient {
     /// # Arguments
     /// * `odb` - Local object database
     /// * `remote_ref` - Remote ref to pull
-    /// 
+    /// * `local_oids` - List of OIDs we already have locally (for incremental pull)
+    ///
+    /// Pass local commit OIDs to avoid downloading objects we already have.
+    /// If empty, all objects reachable from the remote ref will be downloaded.
+    ///
     /// Returns (pack_data, chunked_oids)
-    pub async fn pull(&self, _odb: &ObjectDatabase, remote_ref: &str) -> Result<(Vec<u8>, Vec<Oid>)> {
+    pub async fn pull_with_have(
+        &self,
+        _odb: &ObjectDatabase,
+        remote_ref: &str,
+        local_oids: Vec<String>,
+    ) -> Result<(Vec<u8>, Vec<Oid>)> {
         // Get remote refs
         let remote_refs = self.get_refs().await?;
 
@@ -310,11 +319,17 @@ impl ProtocolClient {
             .ok_or_else(|| anyhow::anyhow!("Remote ref '{}' not found", remote_ref))?;
 
         // Request objects we don't have
-        // Simplified: request the commit OID (should walk tree recursively)
         let want = vec![ref_info.oid.clone()];
-        let have = Vec::new(); // TODO: compute what we already have
+        let have = local_oids; // OIDs we already have locally
 
         self.download_pack(want, have).await
+    }
+
+    /// Pull objects from a remote ref (backwards compatible, downloads all objects)
+    ///
+    /// For incremental pulls, use `pull_with_have` instead.
+    pub async fn pull(&self, odb: &ObjectDatabase, remote_ref: &str) -> Result<(Vec<u8>, Vec<Oid>)> {
+        self.pull_with_have(odb, remote_ref, Vec::new()).await
     }
 
     /// Upload a pack file to the server
@@ -342,7 +357,7 @@ impl ProtocolClient {
     }
 
     /// Download a pack file from the server
-    /// 
+    ///
     /// Returns (pack_data, chunked_oids) - chunked objects need separate transfer
     pub async fn download_pack(&self, want: Vec<String>, have: Vec<String>) -> Result<(Vec<u8>, Vec<Oid>)> {
         // First, send want request
@@ -366,13 +381,20 @@ impl ProtocolClient {
             );
         }
 
-        // Then download the pack
+        // Parse the response to get the request_id (required for GET /objects/pack)
+        let want_response: WantResponse = response
+            .json()
+            .await
+            .context("Failed to parse want response")?;
+
+        // Then download the pack with the request_id header
         let pack_url = format!("{}/objects/pack", self.base_url);
-        tracing::debug!("GET {}", pack_url);
+        tracing::debug!("GET {} (request_id: {})", pack_url, want_response.request_id);
 
         let response = self
             .client
             .get(&pack_url)
+            .header("X-Request-ID", &want_response.request_id)
             .send()
             .await
             .context("Failed to download pack file")?;

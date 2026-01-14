@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{StatusCode, HeaderMap},
     response::IntoResponse,
     Extension,
     Json,
@@ -8,7 +8,7 @@ use axum::{
 use bytes::Bytes;
 use mediagit_protocol::{
     RefInfo, RefUpdateRequest, RefUpdateResponse, RefUpdateResult, RefsResponse,
-    WantRequest,
+    WantRequest, WantResponse,
 };
 use mediagit_security::auth::AuthUser;
 use mediagit_storage::{LocalBackend, StorageBackend, S3Backend, MinIOBackend, AzureBackend};
@@ -289,23 +289,49 @@ pub async fn upload_pack(
 }
 
 /// GET /:repo/objects/pack - Download a pack file (after POST to /objects/want)
+/// Requires X-Request-ID header with the request_id from POST /objects/want response.
 pub async fn download_pack(
     Path(repo): Path<String>,
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
+    headers: HeaderMap,
 ) -> Result<axum::response::Response<axum::body::Body>, StatusCode> {
     tracing::info!("GET /{}/objects/pack", repo);
 
     // Check permission: repo:read required
     check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
 
-    // Get the wanted objects from state (stored by POST /objects/want)
+    // Get request ID from header (required to prevent race conditions)
+    let request_id = headers
+        .get("X-Request-ID")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            tracing::warn!("Missing X-Request-ID header in GET /objects/pack");
+            StatusCode::BAD_REQUEST
+        })?;
+
+    // Get the wanted objects from state using request_id (prevents race conditions)
     let want_list = {
-        let want_map = state.want_cache.lock().await;
-        want_map
-            .get(&repo)
-            .cloned()
-            .ok_or(StatusCode::BAD_REQUEST)?
+        let mut want_map = state.want_cache.lock().await;
+        // Remove from cache after retrieval (one-time use)
+        let entry = want_map.remove(request_id);
+        match entry {
+            Some((cached_repo, want_list)) => {
+                // Verify the request is for the same repo
+                if cached_repo != repo {
+                    tracing::error!(
+                        "Request ID {} was for repo '{}' but pack requested for '{}'",
+                        request_id, cached_repo, repo
+                    );
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+                want_list
+            }
+            None => {
+                tracing::warn!("Request ID {} not found or already used", request_id);
+                return Err(StatusCode::BAD_REQUEST);
+            }
+        }
     };
 
     let repo_path = state.repos_dir.join(&repo);
@@ -333,12 +359,13 @@ pub async fn download_pack(
             continue;
         }
 
-        // Read the object data
+        // Read the object data - return error if requested object is missing
+        // Missing objects indicate repository corruption or incomplete state
         let obj_data = match odb.read(&oid).await {
             Ok(data) => data,
             Err(e) => {
-                tracing::error!("Object {} not found: {}", oid, e);
-                continue;
+                tracing::error!("Requested object {} not found: {}", oid, e);
+                return Err(StatusCode::UNPROCESSABLE_ENTITY);
             }
         };
 
@@ -492,12 +519,14 @@ async fn collect_objects_recursive(
 }
 
 /// POST /:repo/objects/want - Request specific objects
+/// Returns a unique request_id that must be used in the X-Request-ID header
+/// when calling GET /objects/pack to retrieve the objects.
 pub async fn request_objects(
     Path(repo): Path<String>,
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
     Json(want_req): Json<WantRequest>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<Json<WantResponse>, StatusCode> {
     tracing::info!(
         "POST /{}/objects/want (want: {}, have: {})",
         repo,
@@ -508,13 +537,16 @@ pub async fn request_objects(
     // Check permission: repo:read required
     check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
 
-    // Store the want list in cache for subsequent GET /objects/pack
+    // Generate unique request ID to prevent race conditions between concurrent clients
+    let request_id = crate::state::generate_request_id();
+
+    // Store the want list in cache keyed by request_id (not repo name)
     {
         let mut want_map = state.want_cache.lock().await;
-        want_map.insert(repo, want_req.want);
+        want_map.insert(request_id.clone(), (repo, want_req.want));
     }
 
-    Ok(StatusCode::OK)
+    Ok(Json(WantResponse { request_id }))
 }
 
 /// POST /:repo/refs/update - Update repository refs

@@ -275,18 +275,20 @@ async fn test_read_permission_allows_download_pack() {
     let repo_path = state.repos_dir.join("test-repo");
     std::fs::create_dir_all(&repo_path).unwrap();
 
-    // Pre-populate want cache for this test
+    // Pre-populate want cache for this test (new format: request_id -> (repo_name, oids))
+    let test_request_id = "test-request-123";
     {
         let mut want_cache = state.want_cache.lock().await;
-        want_cache.insert("test-repo".to_string(), vec![]);
+        want_cache.insert(test_request_id.to_string(), ("test-repo".to_string(), vec![]));
     }
 
     let app = create_router(state);
 
-    // GET /objects/pack with read permission
+    // GET /objects/pack with read permission and request ID header
     let request = Request::builder()
         .uri("/test-repo/objects/pack")
         .header("Authorization", format!("Bearer {}", read_token))
+        .header("X-Request-ID", test_request_id)
         .body(Body::empty())
         .unwrap();
 

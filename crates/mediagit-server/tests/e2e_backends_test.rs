@@ -349,8 +349,12 @@ async fn test_local_backend_complete_flow() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
+    // Parse the WantResponse to get the request_id
+    let want_response: mediagit_protocol::WantResponse = resp.json().await.unwrap();
+
     let resp = client
         .get(&server.url(&format!("/{}/objects/pack", repo)))
+        .header("X-Request-ID", &want_response.request_id)
         .send()
         .await
         .unwrap();
