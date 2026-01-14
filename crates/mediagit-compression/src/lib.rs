@@ -182,21 +182,31 @@ impl CompressionAlgorithm {
             return CompressionAlgorithm::None;
         }
 
-        // Check zlib first (Git compatibility)
-        if data.len() >= 2 && data[0] == 0x78 {
-            return CompressionAlgorithm::Zlib;
-        }
-
-        // Check other formats
+        // Check other formats first (they have more reliable magic bytes)
         if data.len() >= 4 {
+            // Zstd magic: 0xFD2FB528 (little-endian)
             if data.starts_with(b"\x28\xb5\x2f\xfd") {
                 return CompressionAlgorithm::Zstd;
             }
+            // Brotli: No standard magic, but we use "BRT\x01" as custom marker
             if data.starts_with(b"BRT\x01") {
                 return CompressionAlgorithm::Brotli;
             }
         }
 
+        // Check zlib (Git compatibility) - requires proper header validation
+        // Zlib header: CMF (0x78) + FLG where (CMF * 256 + FLG) % 31 == 0
+        if data.len() >= 2 && data[0] == 0x78 {
+            let cmf = data[0] as u16;
+            let flg = data[1] as u16;
+            let header_check = cmf * 256 + flg;
+            // Valid zlib headers: 0x789C (default), 0x78DA (best), 0x7801 (no compression)
+            if header_check % 31 == 0 {
+                return CompressionAlgorithm::Zlib;
+            }
+        }
+
+        // No recognized compression format - treat as uncompressed (Store)
         CompressionAlgorithm::None
     }
 }
