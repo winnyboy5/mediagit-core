@@ -30,7 +30,7 @@ pub const MAX_DELTA_DEPTH: u8 = 10;
 use crate::{ObjectType, Oid, OdbMetrics};
 use crate::chunking::{ChunkManifest, ChunkRef, ChunkStrategy, ContentChunker};
 use crate::delta::DeltaEncoder;
-use mediagit_compression::{Compressor, SmartCompressor, TypeAwareCompressor, ZlibCompressor};
+use mediagit_compression::{Compressor, SmartCompressor, TypeAwareCompressor, ZlibCompressor, CompressionAlgorithm};
 use mediagit_compression::ObjectType as CompressionObjectType;
 use mediagit_storage::StorageBackend;
 use moka::future::Cache;
@@ -1148,13 +1148,32 @@ impl ObjectDatabase {
             let compressed = self.storage.get(&chunk_key).await
                 .map_err(|e| anyhow::anyhow!("Failed to read chunk {}: {}", chunk_ref.id.to_hex(), e))?;
 
-            // Decompress chunk
+            // Decompress chunk using auto-detection
             let decompressed = if let Some(smart_comp) = &self.smart_compressor {
+                // Smart compressor has auto-detection built-in
                 smart_comp.decompress_typed(&compressed)
                     .map_err(|e| anyhow::anyhow!("Failed to decompress chunk {}: {}", chunk_ref.id.to_hex(), e))?
             } else {
-                self.compressor.decompress(&compressed)
-                    .map_err(|e| anyhow::anyhow!("Failed to decompress chunk {}: {}", chunk_ref.id.to_hex(), e))?
+                // Fallback: use auto-detection to handle Store (raw) chunks
+                let algo = CompressionAlgorithm::detect(&compressed);
+                match algo {
+                    CompressionAlgorithm::None => {
+                        // Store strategy - data is uncompressed
+                        compressed.to_vec()
+                    }
+                    CompressionAlgorithm::Zstd => {
+                        // Use zstd decompressor
+                        use mediagit_compression::ZstdCompressor;
+                        let zstd = ZstdCompressor::new(mediagit_compression::CompressionLevel::Default);
+                        zstd.decompress(&compressed)
+                            .map_err(|e| anyhow::anyhow!("Failed to decompress chunk {}: {}", chunk_ref.id.to_hex(), e))?
+                    }
+                    _ => {
+                        // For Zlib or Brotli, try zlib (original behavior)
+                        self.compressor.decompress(&compressed)
+                            .map_err(|e| anyhow::anyhow!("Failed to decompress chunk {}: {}", chunk_ref.id.to_hex(), e))?
+                    }
+                }
             };
 
             // Verify chunk size matches manifest
@@ -1284,13 +1303,28 @@ impl ObjectDatabase {
                 let compressed = self.storage.get(&chunk_key).await
                     .map_err(|e| anyhow::anyhow!("Failed to read chunk {}: {}", chunk_ref.id.to_hex(), e))?;
                 
-                // Decompress chunk
+                // Decompress chunk using auto-detection
                 let decompressed = if let Some(smart_comp) = &self.smart_compressor {
                     smart_comp.decompress_typed(&compressed)
                         .map_err(|e| anyhow::anyhow!("Failed to decompress chunk {}: {}", chunk_ref.id.to_hex(), e))?
                 } else {
-                    self.compressor.decompress(&compressed)
-                        .map_err(|e| anyhow::anyhow!("Failed to decompress chunk {}: {}", chunk_ref.id.to_hex(), e))?
+                    // Fallback: use auto-detection to handle Store (raw) chunks
+                    let algo = CompressionAlgorithm::detect(&compressed);
+                    match algo {
+                        CompressionAlgorithm::None => {
+                            compressed.to_vec()
+                        }
+                        CompressionAlgorithm::Zstd => {
+                            use mediagit_compression::ZstdCompressor;
+                            let zstd = ZstdCompressor::new(mediagit_compression::CompressionLevel::Default);
+                            zstd.decompress(&compressed)
+                                .map_err(|e| anyhow::anyhow!("Failed to decompress chunk {}: {}", chunk_ref.id.to_hex(), e))?
+                        }
+                        _ => {
+                            self.compressor.decompress(&compressed)
+                                .map_err(|e| anyhow::anyhow!("Failed to decompress chunk {}: {}", chunk_ref.id.to_hex(), e))?
+                        }
+                    }
                 };
                 
                 // Verify chunk size
@@ -1549,13 +1583,26 @@ impl ObjectDatabase {
         let chunk_key = format!("chunks/{}", chunk_id.to_hex());
         let compressed = self.storage.get(&chunk_key).await?;
         
-        // Decompress
+        // Decompress using auto-detection
         if let Some(smart_comp) = &self.smart_compressor {
             smart_comp.decompress_typed(&compressed)
                 .map_err(|e| anyhow::anyhow!("Failed to decompress chunk: {}", e))
         } else {
-            self.compressor.decompress(&compressed)
-                .map_err(|e| anyhow::anyhow!("Failed to decompress chunk: {}", e))
+            // Fallback: use auto-detection to handle Store (raw) chunks
+            let algo = CompressionAlgorithm::detect(&compressed);
+            match algo {
+                CompressionAlgorithm::None => Ok(compressed.to_vec()),
+                CompressionAlgorithm::Zstd => {
+                    use mediagit_compression::ZstdCompressor;
+                    let zstd = ZstdCompressor::new(mediagit_compression::CompressionLevel::Default);
+                    zstd.decompress(&compressed)
+                        .map_err(|e| anyhow::anyhow!("Failed to decompress chunk: {}", e))
+                }
+                _ => {
+                    self.compressor.decompress(&compressed)
+                        .map_err(|e| anyhow::anyhow!("Failed to decompress chunk: {}", e))
+                }
+            }
         }
     }
 
