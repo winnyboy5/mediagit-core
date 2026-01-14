@@ -180,7 +180,7 @@ impl PullCmd {
         if !self.dry_run {
             // Pull using protocol client (downloads pack file)
             let download_pb = progress.download_bar("Receiving objects");
-            let pack_data = client.pull(&odb, &remote_ref).await?;
+            let (pack_data, chunked_oids) = client.pull(&odb, &remote_ref).await?;
             let pack_size = pack_data.len() as u64;
 
             download_pb.set_length(pack_size);
@@ -188,15 +188,24 @@ impl PullCmd {
             stats.bytes_downloaded = pack_size;
 
             if !self.quiet {
-                println!(
-                    "{} Received {} bytes",
-                    style("↓").cyan(),
-                    pack_size
-                );
+                if chunked_oids.is_empty() {
+                    println!(
+                        "{} Received {} bytes",
+                        style("↓").cyan(),
+                        pack_size
+                    );
+                } else {
+                    println!(
+                        "{} Received {} bytes pack + {} chunked objects",
+                        style("↓").cyan(),
+                        pack_size,
+                        chunked_oids.len()
+                    );
+                }
             }
             download_pb.finish_with_message("Download complete");
 
-            // Unpack received objects
+            // Unpack received objects (non-chunked)
             let pack_reader = mediagit_versioning::PackReader::new(pack_data)?;
             let objects = pack_reader.list_objects();
             let object_count = objects.len() as u64;
@@ -214,6 +223,27 @@ impl PullCmd {
                 println!("{} Unpacked objects", style("✓").green());
             }
             unpack_pb.finish_with_message("Unpack complete");
+
+            // Download chunked objects (large files)
+            if !chunked_oids.is_empty() {
+                let chunk_pb = progress.object_bar("Downloading large files", chunked_oids.len() as u64);
+                
+                // Download with simple logging callback (no progress bar in closure)
+                let chunks_downloaded = client.download_chunked_objects(&odb, &chunked_oids, |_current, _total, _msg| {
+                    // Progress tracking handled outside closure
+                }).await?;
+
+                chunk_pb.finish_with_message("Download complete");
+
+                if !self.quiet {
+                    println!(
+                        "{} Downloaded {} chunks for {} large files",
+                        style("✓").green(),
+                        chunks_downloaded,
+                        chunked_oids.len()
+                    );
+                }
+            }
 
             // Get remote ref OID
             let remote_refs = client.get_refs().await?;

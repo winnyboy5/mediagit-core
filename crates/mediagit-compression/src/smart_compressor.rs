@@ -31,6 +31,9 @@ pub enum ObjectType {
     Avif,
     Heic,
 
+    // GPU-compressed texture formats (game dev)
+    GpuTexture,
+
     // Uncompressed/lossless image formats
     Tiff,
     Bmp,
@@ -81,6 +84,18 @@ pub enum ObjectType {
     SevenZ,
     Rar,
 
+    // ML/Data formats (already internally compressed)
+    Parquet,
+    
+    // ML data formats (arrays, tensors)
+    MlData,
+    
+    // ML model weights (PyTorch, TensorFlow, etc.)
+    MlModel,
+    
+    // ML deployment formats (ONNX, TFLite, etc.)
+    MlDeployment,
+
     // Git object types (for interoperability)
     GitBlob,
     GitTree,
@@ -101,6 +116,9 @@ impl ObjectType {
             "webp" => ObjectType::Webp,
             "avif" => ObjectType::Avif,
             "heic" | "heif" => ObjectType::Heic,
+
+            // GPU-compressed textures (game dev)
+            "dds" | "ktx" | "ktx2" | "astc" | "pvr" | "basis" => ObjectType::GpuTexture,
 
             // Uncompressed images
             "tif" | "tiff" => ObjectType::Tiff,
@@ -158,6 +176,21 @@ impl ObjectType {
             "gz" | "gzip" => ObjectType::Gz,
             "7z" => ObjectType::SevenZ,
             "rar" => ObjectType::Rar,
+
+            // ML/Data formats (internally compressed)
+            "parquet" | "arrow" | "feather" | "orc" | "avro" => ObjectType::Parquet,
+            
+            // ML data formats (arrays, tensors)
+            "hdf5" | "h5" | "nc" | "netcdf" | "npy" | "npz" | 
+            "tfrecords" | "petastorm" => ObjectType::MlData,
+            
+            // ML model weights
+            "pt" | "pth" | "ckpt" | "pb" | "safetensors" | "bin" |
+            "pkl" | "joblib" => ObjectType::MlModel,
+            
+            // ML deployment formats
+            "onnx" | "gguf" | "ggml" | "tflite" | "mlmodel" | "coreml" |
+            "keras" | "pte" | "mleap" | "pmml" | "llamafile" => ObjectType::MlDeployment,
 
             _ => ObjectType::Unknown,
         }
@@ -241,6 +274,7 @@ impl ObjectType {
                 | ObjectType::Webp
                 | ObjectType::Avif
                 | ObjectType::Heic
+                | ObjectType::GpuTexture
                 | ObjectType::Mp4
                 | ObjectType::Mov
                 | ObjectType::Avi
@@ -258,6 +292,7 @@ impl ObjectType {
                 | ObjectType::Gz
                 | ObjectType::SevenZ
                 | ObjectType::Rar
+                | ObjectType::Parquet
         )
     }
 
@@ -265,7 +300,7 @@ impl ObjectType {
     pub fn category(self) -> ObjectCategory {
         match self {
             ObjectType::Jpeg | ObjectType::Png | ObjectType::Gif | ObjectType::Webp |
-            ObjectType::Avif | ObjectType::Heic | ObjectType::Tiff | ObjectType::Bmp |
+            ObjectType::Avif | ObjectType::Heic | ObjectType::GpuTexture | ObjectType::Tiff | ObjectType::Bmp |
             ObjectType::Psd | ObjectType::Raw | ObjectType::Exr | ObjectType::Hdr => ObjectCategory::Image,
 
             ObjectType::Mp4 | ObjectType::Mov | ObjectType::Avi | ObjectType::Mkv |
@@ -281,6 +316,9 @@ impl ObjectType {
 
             ObjectType::Zip | ObjectType::Tar | ObjectType::Gz | ObjectType::SevenZ |
             ObjectType::Rar => ObjectCategory::Archive,
+
+            ObjectType::Parquet | ObjectType::MlData | ObjectType::MlModel |
+            ObjectType::MlDeployment => ObjectCategory::Archive, // ML formats as data archives
 
             ObjectType::GitBlob | ObjectType::GitTree | ObjectType::GitCommit => ObjectCategory::GitObject,
 
@@ -331,7 +369,8 @@ impl CompressionStrategy {
             | ObjectType::Gif
             | ObjectType::Webp
             | ObjectType::Avif
-            | ObjectType::Heic => CompressionStrategy::Store,
+            | ObjectType::Heic
+            | ObjectType::GpuTexture => CompressionStrategy::Store,
 
             // Uncompressed images: Zstd best compression
             ObjectType::Tiff
@@ -368,22 +407,29 @@ impl CompressionStrategy {
                 CompressionStrategy::Zstd(CompressionLevel::Default)
             }
 
-            // Text/Code: Brotli best (excellent for text)
+            // Text/Code: Zstd default (fast with good compression)
+            // Note: Brotli has better ratios but is 100x slower for large files
             ObjectType::Text
             | ObjectType::Json
             | ObjectType::Xml
             | ObjectType::Yaml
             | ObjectType::Toml
-            | ObjectType::Csv => CompressionStrategy::Brotli(CompressionLevel::Best),
+            | ObjectType::Csv => CompressionStrategy::Zstd(CompressionLevel::Default),
 
             // Already compressed archives: store
             ObjectType::Zip
             | ObjectType::Gz
             | ObjectType::SevenZ
-            | ObjectType::Rar => CompressionStrategy::Store,
+            | ObjectType::Rar
+            | ObjectType::Parquet => CompressionStrategy::Store,
 
             // TAR is uncompressed container
             ObjectType::Tar => CompressionStrategy::Zstd(CompressionLevel::Default),
+
+            // ML data/models: Zstd fast (good for large numeric arrays)
+            ObjectType::MlData
+            | ObjectType::MlModel
+            | ObjectType::MlDeployment => CompressionStrategy::Zstd(CompressionLevel::Fast),
 
             // Git objects: Zlib for compatibility
             ObjectType::GitBlob
