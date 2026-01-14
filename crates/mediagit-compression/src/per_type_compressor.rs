@@ -245,22 +245,27 @@ impl PerObjectTypeCompressor {
 
     /// Get statistics for a specific object type
     pub fn stats_for_type(&self, obj_type: ObjectType) -> Option<PerTypeStats> {
-        self.stats.lock().unwrap().get(&obj_type).cloned()
+        self.stats.lock().ok()?.get(&obj_type).cloned()
     }
 
     /// Get statistics for all object types
     pub fn all_stats(&self) -> HashMap<ObjectType, PerTypeStats> {
-        self.stats.lock().unwrap().clone()
+        self.stats.lock().ok().map(|s| s.clone()).unwrap_or_default()
     }
 
     /// Reset all statistics
     pub fn reset_stats(&self) {
-        self.stats.lock().unwrap().clear();
+        if let Ok(mut stats) = self.stats.lock() {
+            stats.clear();
+        }
     }
 
     /// Export metrics in Prometheus format
     pub fn to_prometheus_metrics(&self) -> String {
-        let stats = self.stats.lock().unwrap();
+        let stats = match self.stats.lock() {
+            Ok(s) => s,
+            Err(_) => return String::from("# ERROR: Stats lock poisoned\n"),
+        };
         let mut output = String::new();
 
         output.push_str("# HELP mediagit_compression_per_type_ratio Compression ratio by object type\n");

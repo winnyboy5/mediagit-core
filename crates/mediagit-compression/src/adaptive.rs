@@ -464,12 +464,14 @@ impl AdaptiveCompressor {
 
     /// Get performance statistics
     pub fn stats(&self) -> PerformanceStats {
-        self.stats.lock().unwrap().clone()
+        self.stats.lock().ok().map(|s| s.clone()).unwrap_or_default()
     }
 
     /// Reset statistics
     pub fn reset_stats(&self) {
-        *self.stats.lock().unwrap() = PerformanceStats::default();
+        if let Ok(mut stats) = self.stats.lock() {
+            *stats = PerformanceStats::default();
+        }
     }
 }
 
