@@ -683,27 +683,27 @@ impl MetricsAggregator {
 
     /// Get global statistics
     pub fn global_stats(&self) -> AggregatedStats {
-        self.global.lock().unwrap().clone()
+        self.global.lock().ok().map(|s| s.clone()).unwrap_or_default()
     }
 
     /// Get statistics for a specific algorithm
     pub fn algorithm_stats(&self, algorithm: CompressionAlgorithm) -> Option<AggregatedStats> {
-        self.per_algorithm.lock().unwrap().get(&algorithm).cloned()
+        self.per_algorithm.lock().ok()?.get(&algorithm).cloned()
     }
 
     /// Get statistics for a specific level
     pub fn level_stats(&self, level: CompressionLevel) -> Option<AggregatedStats> {
-        self.per_level.lock().unwrap().get(&level).cloned()
+        self.per_level.lock().ok()?.get(&level).cloned()
     }
 
     /// Get all algorithm statistics
     pub fn all_algorithm_stats(&self) -> HashMap<CompressionAlgorithm, AggregatedStats> {
-        self.per_algorithm.lock().unwrap().clone()
+        self.per_algorithm.lock().ok().map(|s| s.clone()).unwrap_or_default()
     }
 
     /// Get all level statistics
     pub fn all_level_stats(&self) -> HashMap<CompressionLevel, AggregatedStats> {
-        self.per_level.lock().unwrap().clone()
+        self.per_level.lock().ok().map(|s| s.clone()).unwrap_or_default()
     }
 
     /// Reset all statistics

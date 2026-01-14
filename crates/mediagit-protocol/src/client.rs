@@ -773,7 +773,8 @@ impl ProtocolClient {
                         let chunk_data = odb.get_compressed_chunk(&chunk_id).await?;
 
                         let handle = tokio::spawn(async move {
-                            let _permit = sem.acquire().await.unwrap();
+                            let _permit = sem.acquire().await
+                                .map_err(|_| anyhow::anyhow!("Semaphore closed during chunk upload"))?;
                             let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
                             
                             client.put(&url)
@@ -905,9 +906,10 @@ impl ProtocolClient {
                     let base_url = self.base_url.clone();
 
                     let handle = tokio::spawn(async move {
-                        let _permit = sem.acquire().await.unwrap();
+                        let _permit = sem.acquire().await
+                            .map_err(|_| anyhow::anyhow!("Semaphore closed during chunk download"))?;
                         let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
-                        
+
                         let response = client.get(&url)
                             .send()
                             .await
