@@ -203,9 +203,9 @@ impl PullCmd {
 
             let unpack_pb = progress.object_bar("Unpacking objects", object_count);
             for (idx, oid) in objects.iter().enumerate() {
-                let obj_data = pack_reader.get_object(oid)?;
-                // Write object to ODB (assuming Blob type for now)
-                odb.write(mediagit_versioning::ObjectType::Blob, &obj_data).await?;
+                // Use get_object_with_type to preserve the correct object type
+                let (obj_type, obj_data) = pack_reader.get_object_with_type(oid)?;
+                odb.write(obj_type, &obj_data).await?;
                 unpack_pb.set_position((idx + 1) as u64);
             }
             stats.objects_received = object_count;
@@ -277,11 +277,14 @@ impl PullCmd {
                             "user@mediagit.local".to_string(),
                             Utc::now(),
                         );
-                        let merge_commit = Commit::new(
+                        // Create merge commit with both parents (local HEAD and remote)
+                        let branch_name = head.target.as_deref().unwrap_or("HEAD");
+                        let merge_commit = Commit::with_parents(
                             tree_oid,
+                            vec![head_oid, remote_oid_parsed],
                             author.clone(),
                             author,
-                            "Merge commit".to_string(),
+                            format!("Merge remote branch into {}", branch_name),
                         );
                         let commit_oid = merge_commit.write(&odb).await?;
 
