@@ -481,7 +481,21 @@ impl ProtocolClient {
             let mut have_queue = VecDeque::new();
             for oid in have_oids {
                 if visited.insert(oid) {
-                    have_queue.push_back((oid, ObjectType::Commit));
+                    // Detect actual object type by reading and inspecting the object
+                    let obj_type = if let Ok(obj_data) = odb.read(&oid).await {
+                        // Try to deserialize as each type to detect the actual type
+                        if bincode::deserialize::<Commit>(&obj_data).is_ok() {
+                            ObjectType::Commit
+                        } else if bincode::deserialize::<Tree>(&obj_data).is_ok() {
+                            ObjectType::Tree
+                        } else {
+                            ObjectType::Blob
+                        }
+                    } else {
+                        // Object not found locally - assume Commit for remote objects
+                        ObjectType::Commit
+                    };
+                    have_queue.push_back((oid, obj_type));
                 }
             }
 

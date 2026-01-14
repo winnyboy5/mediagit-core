@@ -553,7 +553,7 @@ impl AddCmd {
             "gguf" | "ggml" | "tflite" | "keras" | "bin" => true,
             
             // === VIDEO: Structure-aware chunking (5MB) ===
-            "mp4" | "mov" | "avi" | "mkv" | "webm" | "flv" | "wmv" => true,
+            "mp4" | "mov" | "avi" | "mkv" | "webm" | "flv" | "wmv" | "mpg" | "mpeg" | "m4v" | "3gp" => true,
             
             // === UNCOMPRESSED IMAGES: Rolling CDC (5MB) ===
             // PSD uses Rolling CDC for excellent layer-edit deduplication
@@ -564,7 +564,10 @@ impl AddCmd {
             
             // === 3D MODELS: Good dedup (10MB) ===
             "glb" | "gltf" | "obj" | "fbx" | "blend" | "usd" | "usda" | "usdc" => size > MIN_SIZE_10MB,
-            
+
+            // === ARCHIVES: Uncompressed archives benefit from chunking (5MB) ===
+            "tar" | "cpio" | "iso" | "dmg" => true,
+
             // === PRE-COMPRESSED: Never chunk (no benefit) ===
             "jpg" | "jpeg" | "png" | "webp" | "gif" | "avif" | "heic" |
             "mp3" | "aac" | "ogg" | "opus" |
