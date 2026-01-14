@@ -378,6 +378,10 @@ impl AddCmd {
                 if skipped_count > 0 {
                     output::info("No new or modified files to stage");
                 } else if head_files.is_empty() && files_to_add.is_empty() {
+                    // If explicit paths were provided but nothing was staged, return an error
+                    if !self.paths.is_empty() && !self.all {
+                        anyhow::bail!("No files were staged");
+                    }
                     output::warning("No files to stage");
                 }
             }
