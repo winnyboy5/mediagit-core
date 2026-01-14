@@ -61,6 +61,88 @@ impl Oid {
         Oid(bytes)
     }
 
+    /// Compute OID from file using streaming hash (constant memory)
+    ///
+    /// This method reads the file in 64KB chunks, maintaining constant memory
+    /// usage regardless of file size. Suitable for files of any size including
+    /// multi-terabyte files.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the file to hash
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use mediagit_versioning::Oid;
+    /// use std::path::Path;
+    ///
+    /// let oid = Oid::from_file(Path::new("large_video.mp4")).unwrap();
+    /// println!("File OID: {}", oid);
+    /// ```
+    pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> anyhow::Result<Self> {
+        use std::io::Read;
+        
+        let mut file = std::fs::File::open(path.as_ref())?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024]; // 64KB buffer - stack allocated
+        
+        loop {
+            let bytes_read = file.read(&mut buffer)?;
+            if bytes_read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..bytes_read]);
+        }
+        
+        let result = hasher.finalize();
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&result);
+        Ok(Oid(bytes))
+    }
+
+    /// Compute OID from file using async streaming hash (constant memory)
+    ///
+    /// Async version of `from_file` that uses tokio for non-blocking I/O.
+    /// Suitable for use in async contexts where blocking I/O would be problematic.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the file to hash
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use mediagit_versioning::Oid;
+    /// use std::path::Path;
+    ///
+    /// # async fn example() -> anyhow::Result<()> {
+    /// let oid = Oid::from_file_async(Path::new("large_video.mp4")).await?;
+    /// println!("File OID: {}", oid);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn from_file_async<P: AsRef<std::path::Path>>(path: P) -> anyhow::Result<Self> {
+        use tokio::io::AsyncReadExt;
+        
+        let mut file = tokio::fs::File::open(path.as_ref()).await?;
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; 64 * 1024]; // 64KB buffer - heap for async
+        
+        loop {
+            let bytes_read = file.read(&mut buffer).await?;
+            if bytes_read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..bytes_read]);
+        }
+        
+        let result = hasher.finalize();
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&result);
+        Ok(Oid(bytes))
+    }
+
     /// Get the raw bytes of the OID
     ///
     /// # Examples
@@ -223,5 +305,70 @@ mod tests {
         let display = format!("{}", oid);
         assert_eq!(display.len(), 64);
         assert!(display.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_from_file_matches_hash() {
+        // Create a temp file with known content
+        let temp_dir = std::env::temp_dir();
+        let test_path = temp_dir.join("mediagit_test_oid_streaming.bin");
+        let test_data = b"Hello, World! This is test content for streaming hash.";
+        std::fs::write(&test_path, test_data).expect("Failed to write test file");
+        
+        // Compute both hashes
+        let memory_oid = Oid::hash(test_data);
+        let file_oid = Oid::from_file(&test_path).expect("Failed to hash file");
+        
+        // Cleanup
+        let _ = std::fs::remove_file(&test_path);
+        
+        // Verify they match
+        assert_eq!(memory_oid, file_oid, "Streaming hash should match in-memory hash");
+    }
+
+    #[test]
+    fn test_from_file_empty() {
+        // Test with empty file
+        let temp_dir = std::env::temp_dir();
+        let test_path = temp_dir.join("mediagit_test_oid_empty.bin");
+        std::fs::write(&test_path, b"").expect("Failed to write empty test file");
+        
+        let memory_oid = Oid::hash(b"");
+        let file_oid = Oid::from_file(&test_path).expect("Failed to hash empty file");
+        
+        let _ = std::fs::remove_file(&test_path);
+        
+        assert_eq!(memory_oid, file_oid, "Empty file hash should match empty slice hash");
+    }
+
+    #[tokio::test]
+    async fn test_from_file_async_matches_hash() {
+        let temp_dir = std::env::temp_dir();
+        let test_path = temp_dir.join("mediagit_test_oid_async.bin");
+        let test_data = b"Async streaming hash test content with more data to ensure buffer works.";
+        tokio::fs::write(&test_path, test_data).await.expect("Failed to write test file");
+        
+        let memory_oid = Oid::hash(test_data);
+        let file_oid = Oid::from_file_async(&test_path).await.expect("Failed to hash file async");
+        
+        let _ = tokio::fs::remove_file(&test_path).await;
+        
+        assert_eq!(memory_oid, file_oid, "Async streaming hash should match in-memory hash");
+    }
+
+    #[test]
+    fn test_from_file_large_data() {
+        // Test with data larger than buffer (64KB)
+        let temp_dir = std::env::temp_dir();
+        let test_path = temp_dir.join("mediagit_test_oid_large.bin");
+        let test_data: Vec<u8> = (0..100_000).map(|i| (i % 256) as u8).collect();
+        std::fs::write(&test_path, &test_data).expect("Failed to write large test file");
+        
+        let memory_oid = Oid::hash(&test_data);
+        let file_oid = Oid::from_file(&test_path).expect("Failed to hash large file");
+        
+        let _ = std::fs::remove_file(&test_path);
+        
+        assert_eq!(memory_oid, file_oid, "Large file streaming hash should match in-memory hash");
     }
 }
