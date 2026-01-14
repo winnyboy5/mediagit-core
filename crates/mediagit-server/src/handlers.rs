@@ -318,14 +318,21 @@ pub async fn download_pack(
     let odb = ObjectDatabase::with_smart_compression(storage, 1000);
 
     // Collect all objects recursively (commit -> tree -> blobs)
+    // Use HashSet for O(1) contains checks, Vec for maintaining insertion order
     let mut objects_to_pack: Vec<Oid> = Vec::new();
+    let mut seen_objects: std::collections::HashSet<Oid> = std::collections::HashSet::new();
 
     // For clones, simply add all requested OIDs plus their children
     // We read the object, identify type, and if commit/tree, add children
     for oid_str in &want_list {
         let oid = Oid::from_hex(oid_str)
             .map_err(|_| StatusCode::BAD_REQUEST)?;
-        
+
+        // Skip if already processed
+        if !seen_objects.insert(oid) {
+            continue;
+        }
+
         // Read the object data
         let obj_data = match odb.read(&oid).await {
             Ok(data) => data,
@@ -334,36 +341,38 @@ pub async fn download_pack(
                 continue;
             }
         };
-        
+
         objects_to_pack.push(oid);
-        
+
         // Try to parse as Commit to get tree+blob children
         match Commit::deserialize(&obj_data) {
             Ok(commit) => {
                 tracing::info!("Found commit {} -> tree {}", oid, commit.tree);
-                
-                // Add tree
-                match odb.read(&commit.tree).await {
-                    Ok(tree_data) => {
-                        objects_to_pack.push(commit.tree);
-                        
-                        // Parse tree to get blobs
-                        if let Ok(tree) = Tree::deserialize(&tree_data) {
-                            for entry in tree.iter() {
-                                if !objects_to_pack.contains(&entry.oid) {
-                                    objects_to_pack.push(entry.oid);
+
+                // Add tree if not already seen
+                if seen_objects.insert(commit.tree) {
+                    match odb.read(&commit.tree).await {
+                        Ok(tree_data) => {
+                            objects_to_pack.push(commit.tree);
+
+                            // Parse tree to get blobs
+                            if let Ok(tree) = Tree::deserialize(&tree_data) {
+                                for entry in tree.iter() {
+                                    if seen_objects.insert(entry.oid) {
+                                        objects_to_pack.push(entry.oid);
+                                    }
                                 }
                             }
                         }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Tree {} not found: {}", commit.tree, e);
+                        Err(e) => {
+                            tracing::warn!("Tree {} not found: {}", commit.tree, e);
+                        }
                     }
                 }
             }
             Err(e) => {
                 // Not a commit - might be tree or blob, log the first 20 bytes for debugging
-                tracing::debug!("Object {} not a commit (err: {}), data len: {}, first bytes: {:?}", 
+                tracing::debug!("Object {} not a commit (err: {}), data len: {}, first bytes: {:?}",
                     oid, e, obj_data.len(), &obj_data[..std::cmp::min(20, obj_data.len())]);
             }
         }

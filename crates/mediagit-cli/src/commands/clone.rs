@@ -161,11 +161,16 @@ url = "{}"
             let (obj_type, obj_data) = pack_reader.get_object_with_type(oid)?;
             let written_oid = odb.write(obj_type, &obj_data).await?;
             unpack_pb.set_position((idx + 1) as u64);
-            
-            // Verify OID matches (for debugging)
-            if self.verbose && written_oid != *oid {
-                println!("  Warning: OID mismatch for {}: expected {}, got {}", 
-                    &oid.to_hex()[..8], &oid.to_hex()[..8], &written_oid.to_hex()[..8]);
+
+            // Verify OID matches - mismatch indicates data corruption
+            if written_oid != *oid {
+                anyhow::bail!(
+                    "Data integrity error: OID mismatch for object {}: expected {}, computed {}. \
+                     This indicates data corruption during transfer.",
+                    &oid.to_hex()[..12],
+                    oid.to_hex(),
+                    written_oid.to_hex()
+                );
             }
         }
         unpack_pb.finish_with_message("Unpack complete");
