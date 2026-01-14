@@ -16,7 +16,7 @@ pub use auth_routes::create_auth_router;
 use axum::{
     extract::DefaultBodyLimit,
     middleware,
-    routing::{get, post},
+    routing::{get, post, put},
     Router,
 };
 use std::sync::Arc;
@@ -33,6 +33,13 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/:repo/objects/want", post(handlers::request_objects))
         .route("/:repo/objects/pack", get(handlers::download_pack))
         .route("/:repo/objects/pack", post(handlers::upload_pack))
+        // Chunk transfer endpoints for large files (push)
+        .route("/:repo/chunks/check", post(handlers::check_chunks_exist))
+        .route("/:repo/chunks/:chunk_id", put(handlers::upload_chunk))
+        .route("/:repo/manifests/:oid", put(handlers::upload_manifest))
+        // Chunk download endpoints for large files (pull/clone)
+        .route("/:repo/chunks/:chunk_id", get(handlers::download_chunk))
+        .route("/:repo/manifests/:oid", get(handlers::download_manifest))
         .with_state(Arc::clone(&state));
 
     // Apply authentication middleware to Git routes if enabled
@@ -138,6 +145,13 @@ pub fn create_router_with_rate_limit(
         .route("/:repo/objects/want", post(handlers::request_objects))
         .route("/:repo/objects/pack", get(handlers::download_pack))
         .route("/:repo/objects/pack", post(handlers::upload_pack))
+        // Chunk transfer endpoints for large files (push)
+        .route("/:repo/chunks/check", post(handlers::check_chunks_exist))
+        .route("/:repo/chunks/:chunk_id", put(handlers::upload_chunk))
+        .route("/:repo/manifests/:oid", put(handlers::upload_manifest))
+        // Chunk download endpoints for large files (pull/clone)
+        .route("/:repo/chunks/:chunk_id", get(handlers::download_chunk))
+        .route("/:repo/manifests/:oid", get(handlers::download_manifest))
         .with_state(Arc::clone(&state));
 
     // Apply middleware layers

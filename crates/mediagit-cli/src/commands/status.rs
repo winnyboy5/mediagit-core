@@ -169,22 +169,30 @@ impl StatusCmd {
 
                 let full_path = repo_root.join(path);
 
-                // OPTIMIZATION 1: Size-based quick check
-                if let Ok(_metadata) = std::fs::metadata(&full_path) {
-                    // Quick size comparison - avoids reading file if size differs significantly
-                    // This is a heuristic; we still need to read for hash comparison
-                    // For now, we always read to compute hash; future optimization could cache sizes
-
-                    // Read file content
-                    if let Ok(content) = std::fs::read(&full_path) {
-                        // OPTIMIZATION 2: Direct hash computation (no async overhead)
-                        // Compute OID directly instead of using odb.write() for comparison
-                        let working_oid = Oid::hash(&content);
-
-                        if working_oid != **head_oid {
-                            // File is modified
-                            return Some((*path).clone());
+                // OPTIMIZATION 1: Size-based quick check and streaming for large files
+                if let Ok(metadata) = std::fs::metadata(&full_path) {
+                    let file_size = metadata.len();
+                    const STREAMING_THRESHOLD: u64 = 100 * 1024 * 1024; // 100MB
+                    
+                    // Compute hash - use streaming for large files
+                    let working_oid = if file_size >= STREAMING_THRESHOLD {
+                        // STREAMING: Use constant-memory hash for large files
+                        match Oid::from_file(&full_path) {
+                            Ok(oid) => oid,
+                            Err(_) => return None,
                         }
+                    } else {
+                        // IN-MEMORY: Faster for small files
+                        if let Ok(content) = std::fs::read(&full_path) {
+                            Oid::hash(&content)
+                        } else {
+                            return None;
+                        }
+                    };
+
+                    if working_oid != **head_oid {
+                        // File is modified
+                        return Some((*path).clone());
                     }
                 }
 
