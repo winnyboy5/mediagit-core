@@ -71,12 +71,53 @@ impl MediaType {
     /// Detect media type from file extension
     pub fn from_extension(ext: &str) -> Self {
         match ext.to_lowercase().as_str() {
-            "jpg" | "jpeg" | "png" | "tiff" | "tif" | "webp" => MediaType::Image,
-            "psd" => MediaType::Psd,
-            "mp4" | "mov" | "avi" | "mkv" => MediaType::Video,
-            "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" => MediaType::Audio,
-            "obj" | "fbx" | "gltf" | "glb" | "blend" => MediaType::Model3D,
-            "indd" | "indt" | "ai" | "ait" | "aep" | "aet" | "prproj" => MediaType::Vfx,
+            // === IMAGES ===
+            // Standard web/photo formats
+            "jpg" | "jpeg" | "png" | "gif" | "bmp" | "tiff" | "tif" | "webp" | "svg" |
+            // RAW camera formats
+            "raw" | "cr2" | "cr3" | "nef" | "arw" | "dng" | "orf" | "rw2" | "pef" | "srw" |
+            // HDR/professional formats
+            "heic" | "heif" | "exr" | "hdr" | "avif" | "jxl" => MediaType::Image,
+
+            // === PSD/LAYERED IMAGES ===
+            "psd" | "psb" | "xcf" | "kra" | "ora" => MediaType::Psd,
+
+            // === VIDEO ===
+            // Container formats
+            "mp4" | "mov" | "avi" | "mkv" | "webm" | "flv" | "wmv" | "m4v" | "3gp" | "3g2" |
+            // MPEG formats
+            "mpg" | "mpeg" | "mts" | "m2ts" | "vob" | "ts" |
+            // Professional video
+            "mxf" | "r3d" | "braw" | "ari" => MediaType::Video,
+
+            // === AUDIO ===
+            // Common formats
+            "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" | "wma" | "aiff" | "aif" |
+            // Professional/lossless
+            "opus" | "alac" | "ape" | "dsd" | "dsf" | "dff" |
+            // MIDI
+            "mid" | "midi" => MediaType::Audio,
+
+            // === 3D MODELS ===
+            // Common interchange formats
+            "obj" | "fbx" | "gltf" | "glb" | "stl" | "dae" | "3ds" | "ply" |
+            // USD ecosystem
+            "usd" | "usda" | "usdc" | "usdz" |
+            // Alembic cache
+            "abc" |
+            // Application-specific
+            "blend" | "max" | "ma" | "mb" | "c4d" | "hip" | "hiplc" | "hipnc" | "zpr" | "ztl" => MediaType::Model3D,
+
+            // === VFX/CREATIVE APPS ===
+            // Adobe suite
+            "indd" | "indt" | "ai" | "ait" | "aep" | "aet" | "prproj" | "mogrt" | "sesx" |
+            // Video editing
+            "pproj" | "drp" | "fcpxml" | "fcpbundle" |
+            // Compositing
+            "nk" | "nknc" | "comp" |
+            // Motion graphics
+            "aaf" | "omf" | "edl" => MediaType::Vfx,
+
             _ => MediaType::Unknown,
         }
     }
@@ -470,14 +511,60 @@ mod tests {
 
     #[test]
     fn test_media_type_detection() {
+        // Image formats
         assert_eq!(MediaType::from_extension("jpg"), MediaType::Image);
+        assert_eq!(MediaType::from_extension("jpeg"), MediaType::Image);
+        assert_eq!(MediaType::from_extension("png"), MediaType::Image);
+        assert_eq!(MediaType::from_extension("gif"), MediaType::Image);
+        assert_eq!(MediaType::from_extension("webp"), MediaType::Image);
+        assert_eq!(MediaType::from_extension("heic"), MediaType::Image);
+        assert_eq!(MediaType::from_extension("exr"), MediaType::Image);
+        assert_eq!(MediaType::from_extension("cr2"), MediaType::Image);
+        assert_eq!(MediaType::from_extension("dng"), MediaType::Image);
+
+        // PSD/layered formats
         assert_eq!(MediaType::from_extension("psd"), MediaType::Psd);
+        assert_eq!(MediaType::from_extension("psb"), MediaType::Psd);
+        assert_eq!(MediaType::from_extension("xcf"), MediaType::Psd);
+
+        // Video formats
         assert_eq!(MediaType::from_extension("mp4"), MediaType::Video);
+        assert_eq!(MediaType::from_extension("mov"), MediaType::Video);
+        assert_eq!(MediaType::from_extension("mkv"), MediaType::Video);
+        assert_eq!(MediaType::from_extension("webm"), MediaType::Video);
+        assert_eq!(MediaType::from_extension("mpg"), MediaType::Video);
+        assert_eq!(MediaType::from_extension("mpeg"), MediaType::Video);
+        assert_eq!(MediaType::from_extension("mxf"), MediaType::Video);
+
+        // Audio formats
         assert_eq!(MediaType::from_extension("mp3"), MediaType::Audio);
+        assert_eq!(MediaType::from_extension("wav"), MediaType::Audio);
+        assert_eq!(MediaType::from_extension("flac"), MediaType::Audio);
+        assert_eq!(MediaType::from_extension("aiff"), MediaType::Audio);
+        assert_eq!(MediaType::from_extension("opus"), MediaType::Audio);
+        assert_eq!(MediaType::from_extension("mid"), MediaType::Audio);
+
+        // 3D model formats
         assert_eq!(MediaType::from_extension("obj"), MediaType::Model3D);
+        assert_eq!(MediaType::from_extension("fbx"), MediaType::Model3D);
+        assert_eq!(MediaType::from_extension("gltf"), MediaType::Model3D);
+        assert_eq!(MediaType::from_extension("glb"), MediaType::Model3D);
+        assert_eq!(MediaType::from_extension("stl"), MediaType::Model3D);
+        assert_eq!(MediaType::from_extension("usd"), MediaType::Model3D);
+        assert_eq!(MediaType::from_extension("usdz"), MediaType::Model3D);
+        assert_eq!(MediaType::from_extension("abc"), MediaType::Model3D);
+        assert_eq!(MediaType::from_extension("blend"), MediaType::Model3D);
+        assert_eq!(MediaType::from_extension("c4d"), MediaType::Model3D);
+
+        // VFX formats
         assert_eq!(MediaType::from_extension("indd"), MediaType::Vfx);
         assert_eq!(MediaType::from_extension("ai"), MediaType::Vfx);
         assert_eq!(MediaType::from_extension("aep"), MediaType::Vfx);
+        assert_eq!(MediaType::from_extension("prproj"), MediaType::Vfx);
+        assert_eq!(MediaType::from_extension("nk"), MediaType::Vfx);
+        assert_eq!(MediaType::from_extension("drp"), MediaType::Vfx);
+
+        // Unknown
         assert_eq!(MediaType::from_extension("unknown"), MediaType::Unknown);
     }
 
