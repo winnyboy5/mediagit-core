@@ -1166,19 +1166,21 @@ impl ObjectDatabase {
                         compressed.to_vec()
                     }
                     CompressionAlgorithm::Zstd => {
-                        // Use zstd decompressor
+                        // Use zstd decompressor with fallback for false positive detection
                         use mediagit_compression::ZstdCompressor;
                         let zstd = ZstdCompressor::new(mediagit_compression::CompressionLevel::Default);
                         zstd.decompress(&compressed)
-                            .map_err(|e| anyhow::anyhow!("Failed to decompress chunk {}: {}", chunk_ref.id.to_hex(), e))?
+                            .unwrap_or_else(|_| compressed.to_vec())
                     }
                     _ => {
-                        // For Zlib or Brotli, try zlib (original behavior)
+                        // For Zlib or Brotli, try decompression with fallback to raw
+                        // False positive detection possible for raw binary data
                         self.compressor.decompress(&compressed)
-                            .map_err(|e| anyhow::anyhow!("Failed to decompress chunk {}: {}", chunk_ref.id.to_hex(), e))?
+                            .unwrap_or_else(|_| compressed.to_vec())
                     }
                 }
             };
+
 
             // Verify chunk size matches manifest
             if decompressed.len() != chunk_ref.size {
@@ -1492,14 +1494,15 @@ impl ObjectDatabase {
                             use mediagit_compression::ZstdCompressor;
                             let zstd = ZstdCompressor::new(mediagit_compression::CompressionLevel::Default);
                             zstd.decompress(&compressed)
-                                .map_err(|e| anyhow::anyhow!("Failed to decompress chunk {}: {}", chunk_ref.id.to_hex(), e))?
+                                .unwrap_or_else(|_| compressed.to_vec())
                         }
                         _ => {
                             self.compressor.decompress(&compressed)
-                                .map_err(|e| anyhow::anyhow!("Failed to decompress chunk {}: {}", chunk_ref.id.to_hex(), e))?
+                                .unwrap_or_else(|_| compressed.to_vec())
                         }
                     }
                 };
+
                 
                 // Verify chunk size
                 if decompressed.len() != chunk_ref.size {
@@ -1777,16 +1780,17 @@ impl ObjectDatabase {
                 CompressionAlgorithm::Zstd => {
                     use mediagit_compression::ZstdCompressor;
                     let zstd = ZstdCompressor::new(mediagit_compression::CompressionLevel::Default);
-                    zstd.decompress(&compressed)
-                        .map_err(|e| anyhow::anyhow!("Failed to decompress chunk: {}", e))
+                    Ok(zstd.decompress(&compressed)
+                        .unwrap_or_else(|_| compressed.to_vec()))
                 }
                 _ => {
-                    self.compressor.decompress(&compressed)
-                        .map_err(|e| anyhow::anyhow!("Failed to decompress chunk: {}", e))
+                    Ok(self.compressor.decompress(&compressed)
+                        .unwrap_or_else(|_| compressed.to_vec()))
                 }
             }
         }
     }
+
 
     /// Get raw compressed chunk data (no decompression)
     ///
