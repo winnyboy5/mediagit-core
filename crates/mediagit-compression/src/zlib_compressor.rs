@@ -93,8 +93,15 @@ impl Compressor for ZlibCompressor {
         }
 
         // Check if this looks like zlib compressed data
-        // Zlib header starts with 0x78 followed by various flags
-        if data.len() >= 2 && data[0] == 0x78 {
+        // Zlib header: CMF (0x78) + FLG where (CMF * 256 + FLG) % 31 == 0
+        // Valid headers: 0x789C (default), 0x78DA (best), 0x7801 (no compression)
+        let is_zlib = data.len() >= 2 && data[0] == 0x78 && {
+            let cmf = data[0] as u16;
+            let flg = data[1] as u16;
+            (cmf * 256 + flg) % 31 == 0
+        };
+
+        if is_zlib {
             let mut decoder = ZlibDecoder::new(data);
             let mut decompressed = Vec::new();
 
@@ -112,6 +119,7 @@ impl Compressor for ZlibCompressor {
         }
     }
 }
+
 
 #[cfg(test)]
 mod tests {
