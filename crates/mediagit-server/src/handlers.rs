@@ -11,7 +11,7 @@ use mediagit_protocol::{
     WantRequest, WantResponse,
 };
 use mediagit_security::auth::AuthUser;
-use mediagit_storage::{LocalBackend, StorageBackend, S3Backend, MinIOBackend, AzureBackend};
+use mediagit_storage::{LocalBackend, StorageBackend, MinIOBackend, AzureBackend};
 use mediagit_versioning::{Commit, ObjectDatabase, Oid, ObjectType, PackReader, PackWriter, Ref, RefDatabase, Tree};
 use std::path::Path as StdPath;
 use std::sync::Arc;
@@ -103,24 +103,22 @@ async fn create_storage_backend(
             } else {
                 tracing::info!("Using AWS S3 storage backend: bucket={}", s3_config.bucket);
 
-                // Set AWS credentials from config if provided
-                if let Some(key_id) = &s3_config.access_key_id {
-                    std::env::set_var("AWS_ACCESS_KEY_ID", key_id);
-                }
-                if let Some(secret) = &s3_config.secret_access_key {
-                    std::env::set_var("AWS_SECRET_ACCESS_KEY", secret);
-                }
-                std::env::set_var("AWS_REGION", &s3_config.region);
+                // For AWS S3 without custom endpoint, we use MinIOBackend with the AWS S3 endpoint
+                // This avoids setting global environment variables which could cause race conditions
+                // in concurrent requests.
+                let aws_endpoint = format!("https://s3.{}.amazonaws.com", s3_config.region);
 
-                let mut backend_config = mediagit_storage::s3::S3Config::default();
-                backend_config.bucket = s3_config.bucket.clone();
-
-                let storage = S3Backend::with_config(backend_config)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!("Failed to initialize S3 backend: {}", e);
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })?;
+                let storage = MinIOBackend::new(
+                    &aws_endpoint,
+                    &s3_config.bucket,
+                    s3_config.access_key_id.as_deref().unwrap_or(""),
+                    s3_config.secret_access_key.as_deref().unwrap_or(""),
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to initialize S3 backend: {}", e);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
                 Arc::new(storage)
             }
         }
@@ -201,33 +199,30 @@ pub async fn get_refs(
         });
     }
 
-    // Recursively read all refs in refs/heads, refs/tags, etc.
+    // Recursively read all refs in refs/heads, refs/tags, refs/remotes, etc.
     if refs_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&refs_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    // Read refs/heads/, refs/tags/, etc.
-                    let ref_type = path.file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("");
+        // Use walkdir pattern to recursively traverse all ref directories
+        let mut dirs_to_visit = vec![refs_dir.clone()];
 
-                    if let Ok(ref_entries) = std::fs::read_dir(&path) {
-                        for ref_entry in ref_entries.flatten() {
-                            if ref_entry.path().is_file() {
-                                let ref_name = format!(
-                                    "refs/{}/{}",
-                                    ref_type,
-                                    ref_entry.file_name().to_string_lossy()
-                                );
+        while let Some(current_dir) = dirs_to_visit.pop() {
+            if let Ok(entries) = std::fs::read_dir(&current_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        // Add subdirectory to visit (for nested refs like feature/branch or remotes/origin/main)
+                        dirs_to_visit.push(path);
+                    } else if path.is_file() {
+                        // Construct ref name relative to refs_dir
+                        // e.g., refs/heads/main, refs/heads/feature/branch, refs/remotes/origin/main
+                        if let Ok(relative_path) = path.strip_prefix(&refs_dir) {
+                            let ref_name = format!("refs/{}", relative_path.to_string_lossy().replace('\\', "/"));
 
-                                if let Ok(r) = refdb.read(&ref_name).await {
-                                    ref_infos.push(RefInfo {
-                                        name: ref_name,
-                                        oid: r.oid.map(|o| o.to_hex()).unwrap_or_default(),
-                                        target: r.target,
-                                    });
-                                }
+                            if let Ok(r) = refdb.read(&ref_name).await {
+                                ref_infos.push(RefInfo {
+                                    name: ref_name,
+                                    oid: r.oid.map(|o| o.to_hex()).unwrap_or_default(),
+                                    target: r.target,
+                                });
                             }
                         }
                     }

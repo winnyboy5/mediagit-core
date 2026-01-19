@@ -93,6 +93,8 @@ impl CloneCmd {
         std::fs::create_dir_all(storage_path.join("objects"))?;
         std::fs::create_dir_all(storage_path.join("refs").join("heads"))?;
         std::fs::create_dir_all(storage_path.join("refs").join("tags"))?;
+        std::fs::create_dir_all(storage_path.join("refs").join("remotes").join("origin"))?;
+
 
         // Create HEAD pointing to main branch
         let head_content = format!("ref: refs/heads/{}\n", branch);
@@ -200,6 +202,29 @@ url = "{}"
         let ref_update = mediagit_versioning::Ref::new_direct(remote_ref_name.clone(), remote_oid);
         refdb.write(&ref_update).await?;
 
+        // Step 8b: Create remote tracking refs for ALL branches
+        for ref_info in &remote_refs.refs {
+            if ref_info.name.starts_with("refs/heads/") {
+                // Use unwrap_or to safely handle refs that don't have the expected prefix
+                let branch_name = ref_info.name.strip_prefix("refs/heads/")
+                    .unwrap_or(&ref_info.name);
+                let tracking_ref_name = format!("refs/remotes/origin/{}", branch_name);
+                
+                if let Ok(tracking_oid) = mediagit_versioning::Oid::from_hex(&ref_info.oid) {
+                    let tracking_ref = mediagit_versioning::Ref::new_direct(
+                        tracking_ref_name.clone(),
+                        tracking_oid,
+                    );
+                    refdb.write(&tracking_ref).await?;
+                    
+                    if self.verbose {
+                        println!("  Created tracking ref: {} -> {}", tracking_ref_name, &ref_info.oid[..8]);
+                    }
+                }
+            }
+        }
+
+
         // Step 9: Checkout working directory
         let checkout_pb = progress.file_bar("Checking out", 0);
         let checkout_mgr = CheckoutManager::new(&odb, &target_dir);
@@ -235,6 +260,8 @@ url = "{}"
 
         // Extract name from URL
         // e.g., http://localhost:3000/my-project -> my-project
+        // Note: URLs always use forward slashes per RFC 3986, regardless of OS,
+        // so rsplit('/') is correct for cross-platform URL parsing.
         let url = self.url.trim_end_matches('/');
         let name = url
             .rsplit('/')
