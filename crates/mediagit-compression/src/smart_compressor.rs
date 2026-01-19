@@ -1217,4 +1217,293 @@ mod tests {
             CompressionStrategy::Zstd(CompressionLevel::Best)
         );
     }
+
+    // ============================================================================
+    // INTEGRATION TESTS - VERIFY ALL COMPRESSION/DECOMPRESSION FLOWS
+    // ============================================================================
+
+    #[test]
+    fn test_integration_brotli_text_roundtrip() {
+        // Test that Brotli compression for text types works end-to-end
+        let compressor = SmartCompressor::new();
+
+        // Test JSON
+        let json_data = r#"{"name": "MediaGit", "version": "1.0", "features": ["compression", "delta"]}"#.repeat(50);
+        let compressed = compressor.compress_typed(json_data.as_bytes(), ObjectType::Json).unwrap();
+        assert!(compressed.len() < json_data.len(), "JSON should compress");
+        let decompressed = compressor.decompress_typed(&compressed).unwrap();
+        assert_eq!(json_data.as_bytes(), &decompressed[..], "JSON roundtrip failed");
+
+        // Test CSV
+        let csv_data = "id,name,value\n1,Alice,100\n2,Bob,200\n".repeat(100);
+        let compressed = compressor.compress_typed(csv_data.as_bytes(), ObjectType::Csv).unwrap();
+        assert!(compressed.len() < csv_data.len(), "CSV should compress");
+        let decompressed = compressor.decompress_typed(&compressed).unwrap();
+        assert_eq!(csv_data.as_bytes(), &decompressed[..], "CSV roundtrip failed");
+
+        // Test XML
+        let xml_data = "<root><item id=\"1\">Value</item></root>".repeat(50);
+        let compressed = compressor.compress_typed(xml_data.as_bytes(), ObjectType::Xml).unwrap();
+        assert!(compressed.len() < xml_data.len(), "XML should compress");
+        let decompressed = compressor.decompress_typed(&compressed).unwrap();
+        assert_eq!(xml_data.as_bytes(), &decompressed[..], "XML roundtrip failed");
+
+        // Test plain text
+        let text_data = "The quick brown fox jumps over the lazy dog. ".repeat(100);
+        let compressed = compressor.compress_typed(text_data.as_bytes(), ObjectType::Text).unwrap();
+        assert!(compressed.len() < text_data.len(), "Text should compress");
+        let decompressed = compressor.decompress_typed(&compressed).unwrap();
+        assert_eq!(text_data.as_bytes(), &decompressed[..], "Text roundtrip failed");
+    }
+
+    #[test]
+    fn test_integration_creative_project_roundtrip() {
+        // Test that creative project files use correct compression
+        let compressor = SmartCompressor::new();
+
+        // Simulate PSD file data (binary with some structure)
+        let psd_data = vec![0x38, 0x42, 0x50, 0x53]; // "8BPS" header
+        let mut data = psd_data.clone();
+        data.extend_from_slice(&vec![0xAB; 10000]); // Add some data
+
+        let compressed = compressor.compress_typed(&data, ObjectType::AdobePhotoshop).unwrap();
+        assert!(compressed.len() < data.len(), "PSD should compress");
+
+        let decompressed = compressor.decompress_typed(&compressed).unwrap();
+        assert_eq!(data, decompressed, "PSD roundtrip failed");
+    }
+
+    #[test]
+    fn test_integration_ml_specialized_roundtrip() {
+        // Test ML checkpoint (Zstd Fast) vs inference model (Zstd Default)
+        let compressor = SmartCompressor::new();
+
+        // Simulate model weights (numeric data)
+        let model_data = (0..5000).map(|x| (x % 256) as u8).collect::<Vec<_>>();
+
+        // Test checkpoint compression
+        let checkpoint_compressed = compressor.compress_typed(&model_data, ObjectType::MlCheckpoint).unwrap();
+        let checkpoint_decompressed = compressor.decompress_typed(&checkpoint_compressed).unwrap();
+        assert_eq!(model_data, checkpoint_decompressed, "Checkpoint roundtrip failed");
+
+        // Test inference model compression
+        let inference_compressed = compressor.compress_typed(&model_data, ObjectType::MlInference).unwrap();
+        let inference_decompressed = compressor.decompress_typed(&inference_compressed).unwrap();
+        assert_eq!(model_data, inference_decompressed, "Inference model roundtrip failed");
+
+        // Both should work, but inference might compress better (Default vs Fast)
+        // We just verify both decompress correctly
+    }
+
+    #[test]
+    fn test_integration_office_document_roundtrip() {
+        // Test office documents (ZIP containers with XML)
+        let compressor = SmartCompressor::new();
+
+        // Simulate docx structure (ZIP-like)
+        let docx_data = b"PK\x03\x04...document content...".repeat(100);
+
+        let compressed = compressor.compress_typed(&docx_data, ObjectType::WordDocument).unwrap();
+        let decompressed = compressor.decompress_typed(&compressed).unwrap();
+        assert_eq!(docx_data, &decompressed[..], "DOCX roundtrip failed");
+    }
+
+    #[test]
+    fn test_integration_database_roundtrip() {
+        // Test SQLite database compression
+        let compressor = SmartCompressor::new();
+
+        // Simulate SQLite data
+        let db_data = b"SQLite format 3\x00...table data...".repeat(100);
+
+        let compressed = compressor.compress_typed(&db_data, ObjectType::SqliteDatabase).unwrap();
+        let decompressed = compressor.decompress_typed(&compressed).unwrap();
+        assert_eq!(db_data, &decompressed[..], "SQLite roundtrip failed");
+    }
+
+    #[test]
+    fn test_integration_auto_detection_mixed_types() {
+        // Test that auto-detection works across all compression types
+        let compressor = SmartCompressor::new();
+
+        let test_data = b"Test data for compression ".repeat(50);
+
+        // Compress with different types and verify all decompress correctly
+        let types = vec![
+            ObjectType::Text,           // Brotli
+            ObjectType::Json,           // Brotli
+            ObjectType::AdobePhotoshop, // Zstd Default
+            ObjectType::MlCheckpoint,   // Zstd Fast
+            ObjectType::WordDocument,   // Zstd Default
+            ObjectType::Tiff,           // Zstd Best
+        ];
+
+        for obj_type in types {
+            let compressed = compressor.compress_typed(&test_data, obj_type).unwrap();
+            let decompressed = compressor.decompress_typed(&compressed).unwrap();
+            assert_eq!(
+                test_data,
+                &decompressed[..],
+                "Auto-detection failed for {:?}",
+                obj_type
+            );
+        }
+    }
+
+    #[test]
+    fn test_integration_already_compressed_types() {
+        // Verify that already-compressed types are stored without recompression
+        let compressor = SmartCompressor::new();
+
+        // Simulate compressed formats
+        let jpeg_data = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46];
+        let mp4_data = b"....ftypisom....";
+        let zip_data = vec![0x50, 0x4B, 0x03, 0x04];
+
+        // These should be stored as-is
+        let jpeg_compressed = compressor.compress_typed(&jpeg_data, ObjectType::Jpeg).unwrap();
+        assert_eq!(jpeg_data, jpeg_compressed, "JPEG should not be recompressed");
+
+        let mp4_compressed = compressor.compress_typed(mp4_data, ObjectType::Mp4).unwrap();
+        assert_eq!(mp4_data, &mp4_compressed[..], "MP4 should not be recompressed");
+
+        let zip_compressed = compressor.compress_typed(&zip_data, ObjectType::Zip).unwrap();
+        assert_eq!(zip_data, zip_compressed, "ZIP should not be recompressed");
+    }
+
+    #[test]
+    fn test_integration_compression_ratio_expectations() {
+        // Test that compression ratios meet expectations for different types
+        let compressor = SmartCompressor::new();
+
+        // Highly repetitive text should compress very well with Brotli
+        let repetitive_text = "AAAAAAAAAA".repeat(1000);
+        let compressed = compressor.compress_typed(repetitive_text.as_bytes(), ObjectType::Text).unwrap();
+        let ratio = compressed.len() as f64 / repetitive_text.len() as f64;
+        assert!(ratio < 0.1, "Repetitive text should compress to <10% with Brotli, got {:.2}%", ratio * 100.0);
+
+        // Verify decompression
+        let decompressed = compressor.decompress_typed(&compressed).unwrap();
+        assert_eq!(repetitive_text.as_bytes(), &decompressed[..]);
+    }
+
+    #[test]
+    fn test_integration_empty_data_all_types() {
+        // Verify empty data handling for all compression strategies
+        let compressor = SmartCompressor::new();
+        let empty: &[u8] = b"";
+
+        let types = vec![
+            ObjectType::Text,           // Brotli
+            ObjectType::Json,           // Brotli
+            ObjectType::AdobePhotoshop, // Zstd Default
+            ObjectType::MlCheckpoint,   // Zstd Fast
+            ObjectType::Tiff,           // Zstd Best
+            ObjectType::Jpeg,           // Store
+        ];
+
+        for obj_type in types {
+            let compressed = compressor.compress_typed(empty, obj_type).unwrap();
+            let decompressed = compressor.decompress_typed(&compressed).unwrap();
+            assert_eq!(empty, &decompressed[..], "Empty data failed for {:?}", obj_type);
+        }
+    }
+
+    #[test]
+    fn test_integration_large_data_performance() {
+        // Test that large files compress/decompress correctly
+        let compressor = SmartCompressor::new();
+
+        // 1MB of structured data
+        let large_json = format!(r#"{{"data": [{}]}}"#, (0..10000).map(|i| format!("{}", i)).collect::<Vec<_>>().join(","));
+
+        let compressed = compressor.compress_typed(large_json.as_bytes(), ObjectType::Json).unwrap();
+        assert!(compressed.len() < large_json.len(), "Large JSON should compress");
+
+        let decompressed = compressor.decompress_typed(&compressed).unwrap();
+        assert_eq!(large_json.as_bytes(), &decompressed[..], "Large JSON roundtrip failed");
+
+        // Verify significant compression for structured data
+        let ratio = compressed.len() as f64 / large_json.len() as f64;
+        assert!(ratio < 0.5, "Large JSON should compress to <50%, got {:.2}%", ratio * 100.0);
+    }
+
+    #[test]
+    fn test_integration_all_new_extensions_mapped() {
+        // Verify all new extensions have valid mappings
+        let new_extensions = vec![
+            // Creative projects
+            ("psd", ObjectType::AdobePhotoshop),
+            ("ai", ObjectType::AdobeIllustrator),
+            ("indd", ObjectType::AdobeIndesign),
+            ("aep", ObjectType::AdobeAfterEffects),
+            ("prproj", ObjectType::AdobePremiere),
+            ("drp", ObjectType::DavinciResolve),
+            ("blend", ObjectType::Blender),
+            ("ma", ObjectType::Maya),
+            ("als", ObjectType::AbletonLive),
+            ("dwg", ObjectType::AutoCad),
+            ("unity", ObjectType::UnityProject),
+            // Office
+            ("docx", ObjectType::WordDocument),
+            ("xlsx", ObjectType::ExcelSpreadsheet),
+            ("pptx", ObjectType::PowerpointPresentation),
+            ("odt", ObjectType::OpenDocument),
+            // ML
+            ("ckpt", ObjectType::MlCheckpoint),
+            ("onnx", ObjectType::MlInference),
+            // Database
+            ("sqlite", ObjectType::SqliteDatabase),
+        ];
+
+        for (ext, expected_type) in new_extensions {
+            let detected_type = ObjectType::from_extension(ext);
+            assert_eq!(
+                detected_type,
+                expected_type,
+                "Extension '{}' should map to {:?}, got {:?}",
+                ext,
+                expected_type,
+                detected_type
+            );
+
+            // Verify each type has a compression strategy
+            let strategy = CompressionStrategy::for_object_type(detected_type);
+            assert!(
+                matches!(
+                    strategy,
+                    CompressionStrategy::Store
+                        | CompressionStrategy::Zlib(_)
+                        | CompressionStrategy::Zstd(_)
+                        | CompressionStrategy::Brotli(_)
+                        | CompressionStrategy::Delta
+                ),
+                "Type {:?} has invalid strategy: {:?}",
+                detected_type,
+                strategy
+            );
+        }
+    }
+
+    #[test]
+    fn test_integration_category_coverage() {
+        // Verify all new categories are properly configured
+        let category_samples = vec![
+            (ObjectType::AdobePhotoshop, ObjectCategory::CreativeProject),
+            (ObjectType::WordDocument, ObjectCategory::Office),
+            (ObjectType::MlCheckpoint, ObjectCategory::MlSpecialized),
+            (ObjectType::SqliteDatabase, ObjectCategory::Database),
+        ];
+
+        for (obj_type, expected_category) in category_samples {
+            let category = obj_type.category();
+            assert_eq!(
+                category,
+                expected_category,
+                "{:?} should be in {:?} category",
+                obj_type,
+                expected_category
+            );
+        }
+    }
 }
