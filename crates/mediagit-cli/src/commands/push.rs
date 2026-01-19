@@ -9,6 +9,46 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use crate::progress::OperationStats;
 
+/// Validate a ref name for safety
+/// Ref names must not contain special characters that could cause filesystem issues
+fn validate_ref_name(name: &str) -> Result<()> {
+    // Empty ref names are invalid
+    if name.is_empty() {
+        anyhow::bail!("Ref name cannot be empty");
+    }
+
+    // Check for prohibited characters that could cause filesystem issues
+    // Based on git's ref naming rules
+    let prohibited_chars = ['\\', ':', '?', '*', '"', '<', '>', '|', '\0'];
+    for c in prohibited_chars {
+        if name.contains(c) {
+            anyhow::bail!("Ref name '{}' contains prohibited character '{}'", name, c);
+        }
+    }
+
+    // Check for prohibited patterns
+    if name.starts_with('.') || name.ends_with('.') {
+        anyhow::bail!("Ref name '{}' cannot start or end with '.'", name);
+    }
+    if name.starts_with('/') || name.ends_with('/') {
+        anyhow::bail!("Ref name '{}' cannot start or end with '/'", name);
+    }
+    if name.contains("..") {
+        anyhow::bail!("Ref name '{}' cannot contain '..'", name);
+    }
+    if name.contains("//") {
+        anyhow::bail!("Ref name '{}' cannot contain consecutive '/'", name);
+    }
+    if name.ends_with(".lock") {
+        anyhow::bail!("Ref name '{}' cannot end with '.lock'", name);
+    }
+    if name.contains("@{") {
+        anyhow::bail!("Ref name '{}' cannot contain '@{{'", name);
+    }
+
+    Ok(())
+}
+
 /// Update remote references and send objects
 ///
 /// Pushes local commits to a remote repository, updating the remote
@@ -146,49 +186,79 @@ impl PushCmd {
             mediagit_versioning::ObjectDatabase::with_smart_compression(Arc::clone(&storage), 1000);
 
         // Determine which refs to push
-        let ref_to_push = if self.refspec.is_empty() {
+        let refs_to_push: Vec<String> = if self.all {
+            // Push all local branches
+            let branches = refdb.list_branches().await?;
+            if branches.is_empty() {
+                anyhow::bail!("No branches to push");
+            }
+            if self.verbose {
+                println!("  Pushing {} branches", branches.len());
+            }
+            branches
+        } else if self.refspec.is_empty() {
             // Default: push current branch (reuse head from above)
-            head.target.ok_or_else(|| {
+            let ref_name = head.target.ok_or_else(|| {
                 anyhow::anyhow!("HEAD is detached, please specify a refspec")
-            })?
+            })?;
+            vec![ref_name]
         } else {
-            // Use first refspec - normalize to handle both short and full ref names
-            mediagit_versioning::normalize_ref_name(&self.refspec[0])
+            // Use refspecs - normalize to handle both short and full ref names
+            self.refspec.iter()
+                .map(|r| mediagit_versioning::normalize_ref_name(r))
+                .collect()
         };
-
-        // Read local ref OID
-        let local_ref = refdb.read(&ref_to_push).await?;
-        let local_oid = local_ref
-            .oid
-            .ok_or_else(|| anyhow::anyhow!("Ref '{}' has no OID", ref_to_push))?;
 
         // Get remote refs to check current state
         let remote_refs = client.get_refs().await?;
-        let remote_oid = remote_refs
-            .refs
-            .iter()
-            .find(|r| r.name == ref_to_push)
-            .map(|r| r.oid.clone());
 
-        // Create ref update (convert Oid to hex string)
-        let local_oid_str = local_oid.to_hex();
+        // Build list of ref updates, skipping those already up-to-date
+        let mut updates = Vec::new();
+        let mut skipped_uptodate = 0;
 
-        // Check if already up-to-date (avoid redundant push)
-        if let Some(ref remote) = remote_oid {
-            if remote == &local_oid_str {
-                if !self.quiet {
-                    println!("{} Already up to date", style("✓").green());
-                    println!("  {} {}", style("→").cyan(), &local_oid_str[..8]);
+        for ref_to_push in &refs_to_push {
+            // Validate ref name before pushing
+            validate_ref_name(ref_to_push)?;
+
+            // Read local ref OID
+            let local_ref = refdb.read(ref_to_push).await?;
+            let local_oid = local_ref
+                .oid
+                .ok_or_else(|| anyhow::anyhow!("Ref '{}' has no OID", ref_to_push))?;
+
+            let remote_oid = remote_refs
+                .refs
+                .iter()
+                .find(|r| &r.name == ref_to_push)
+                .map(|r| r.oid.clone());
+
+            let local_oid_str = local_oid.to_hex();
+
+            // Check if already up-to-date
+            if let Some(ref remote) = remote_oid {
+                if remote == &local_oid_str {
+                    skipped_uptodate += 1;
+                    if self.verbose {
+                        println!("  {} already up to date", ref_to_push);
+                    }
+                    continue;
                 }
-                return Ok(());
             }
+
+            updates.push(mediagit_protocol::RefUpdate {
+                name: ref_to_push.clone(),
+                old_oid: remote_oid,
+                new_oid: local_oid_str,
+            });
         }
 
-        let update = mediagit_protocol::RefUpdate {
-            name: ref_to_push.clone(),
-            old_oid: remote_oid.clone(),
-            new_oid: local_oid_str.clone(),
-        };
+        // If all refs are up-to-date, exit early
+        if updates.is_empty() {
+            if !self.quiet {
+                println!("{} All {} refs already up to date", style("✓").green(), skipped_uptodate);
+            }
+            return Ok(());
+        }
 
         if !self.dry_run {
             // Create progress bar for push
@@ -206,10 +276,10 @@ impl PushCmd {
                 None
             };
 
-            // Push with progress callback
+            // Push all refs with progress callback
             let (result, push_stats) = client.push_with_progress(
                 &odb,
-                vec![update],
+                updates.clone(),
                 self.force,
                 |progress| {
                     if let Some(ref pb) = pb {
@@ -219,7 +289,7 @@ impl PushCmd {
                                     let pct = (progress.current * 100 / progress.total) as u64;
                                     (pct.min(30), format!("Collecting... {}/{} objects", progress.current, progress.total))
                                 } else {
-                                    (10, format!("Collecting objects..."))
+                                    (10, "Collecting objects...".to_string())
                                 }
                             }
                             PushPhase::Packing => {
@@ -227,7 +297,7 @@ impl PushCmd {
                                     let pct = 30 + (progress.current * 40 / progress.total) as u64;
                                     (pct.min(70), format!("Packing... {}/{} objects", progress.current, progress.total))
                                 } else {
-                                    (50, format!("Packing..."))
+                                    (50, "Packing...".to_string())
                                 }
                             }
                             PushPhase::Uploading => {
@@ -242,7 +312,7 @@ impl PushCmd {
                                     };
                                     (pct.min(100), format!("Uploading... {}", bytes_str))
                                 } else {
-                                    (90, format!("Uploading..."))
+                                    (90, "Uploading...".to_string())
                                 }
                             }
                         };
@@ -262,51 +332,67 @@ impl PushCmd {
             stats.objects_sent = push_stats.objects_count as u64;
 
             if !result.success {
-                anyhow::bail!(
-                    "Push failed: {}",
-                    result
-                        .results
-                        .iter()
-                        .filter_map(|r| r.error.as_ref())
-                        .next()
-                        .unwrap_or(&"unknown error".to_string())
-                );
+                let errors: Vec<_> = result
+                    .results
+                    .iter()
+                    .filter(|r| !r.success)
+                    .filter_map(|r| r.error.as_ref().map(|e| format!("{}: {}", r.ref_name, e)))
+                    .collect();
+                anyhow::bail!("Push failed: {}", errors.join(", "));
             }
 
             if !self.quiet {
-                // Show what was updated
-                if let Some(ref remote) = remote_oid {
-                    println!(
-                        "{} Updated {} → {}",
-                        style("→").cyan(),
-                        &remote[..8],
-                        &local_oid_str[..8]
-                    );
-                } else {
-                    println!(
-                        "{} Created {} at {}",
-                        style("*").green(),
-                        ref_to_push,
-                        &local_oid_str[..8]
-                    );
-                }
-
                 println!("{} Push successful!", style("✓").green().bold());
                 for res in result.results {
                     if res.success {
-                        println!("  {} {}", style("✓").green(), res.ref_name);
+                        // Find the corresponding update to show old->new
+                        if let Some(update) = updates.iter().find(|u| u.name == res.ref_name) {
+                            if let Some(ref old) = update.old_oid {
+                                println!(
+                                    "  {} {} {} → {}",
+                                    style("✓").green(),
+                                    res.ref_name,
+                                    &old[..8],
+                                    &update.new_oid[..8]
+                                );
+                            } else {
+                                println!(
+                                    "  {} {} (new) → {}",
+                                    style("*").green(),
+                                    res.ref_name,
+                                    &update.new_oid[..8]
+                                );
+                            }
+                        } else {
+                            println!("  {} {}", style("✓").green(), res.ref_name);
+                        }
                     }
+                }
+                if skipped_uptodate > 0 {
+                    println!("  {} {} refs already up to date", style("ℹ").blue(), skipped_uptodate);
                 }
             }
         } else {
             if !self.quiet {
-                if let Some(ref remote) = remote_oid {
-                    println!(
-                        "{} Would update {} → {}",
-                        style("→").cyan(),
-                        &remote[..8],
-                        &local_oid_str[..8]
-                    );
+                println!("{} Would push {} refs:", style("ℹ").blue(), updates.len());
+                for update in &updates {
+                    if let Some(ref old) = update.old_oid {
+                        println!(
+                            "  {} {} → {}",
+                            update.name,
+                            &old[..8],
+                            &update.new_oid[..8]
+                        );
+                    } else {
+                        println!(
+                            "  {} (new) → {}",
+                            update.name,
+                            &update.new_oid[..8]
+                        );
+                    }
+                }
+                if skipped_uptodate > 0 {
+                    println!("  {} {} refs already up to date", style("ℹ").blue(), skipped_uptodate);
                 }
                 println!(
                     "{} Dry run complete (no changes made)",

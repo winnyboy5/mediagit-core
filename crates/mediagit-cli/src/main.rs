@@ -73,6 +73,9 @@ enum Commands {
     /// Fetch and integrate remote changes
     Pull(PullCmd),
 
+    /// Fetch remote changes without merging
+    Fetch(FetchCmd),
+
     /// Manage remote repositories
     Remote(RemoteCmd),
 
@@ -185,6 +188,7 @@ async fn main() -> Result<()> {
         Some(Commands::Commit(cmd)) => cmd.execute().await,
         Some(Commands::Push(cmd)) => cmd.execute().await,
         Some(Commands::Pull(cmd)) => cmd.execute().await,
+        Some(Commands::Fetch(cmd)) => cmd.execute().await,
         Some(Commands::Remote(cmd)) => cmd.execute().await,
         Some(Commands::Branch(cmd)) => cmd.execute().await,
         Some(Commands::Tag(cmd)) => {
@@ -228,6 +232,7 @@ async fn main() -> Result<()> {
             println!("  commit       Record changes to the repository");
             println!("  push         Update remote references");
             println!("  pull         Fetch and integrate remote changes");
+            println!("  fetch        Fetch remote changes without merging");
             println!("  remote       Manage remote repositories");
             println!("  branch       Manage branches");
             println!("  tag          Manage tags");

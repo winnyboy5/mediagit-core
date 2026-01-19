@@ -855,6 +855,13 @@ impl ObjectDatabase {
         drop(detector);
 
         if let Some((base_oid, score)) = similar {
+            // CRITICAL: Prevent self-referencing delta (OID == base OID)
+            if oid == base_oid {
+                warn!(
+                    oid = %oid,
+                    "Attempted to create self-referencing delta, storing as full object"
+                );
+            } else {
             info!(
                 oid = %oid,
                 base_oid = %base_oid,
@@ -867,7 +874,18 @@ impl ObjectDatabase {
                 Ok(base_data) => {
                     // Check delta chain depth - prevent unbounded chains
                     let base_depth = self.get_delta_depth(&base_oid).await.unwrap_or(0);
-                    if base_depth >= MAX_DELTA_DEPTH {
+                    
+                    // Also check if base's chain already contains this OID (would create cycle)
+                    let would_create_cycle = self.delta_chain_contains(&base_oid, &oid).await.unwrap_or(false);
+                    
+                    if would_create_cycle {
+                        warn!(
+                            oid = %oid,
+                            base_oid = %base_oid,
+                            "Base's delta chain already contains this OID, storing as full object to prevent cycle"
+                        );
+                        // Fall through to standard write
+                    } else if base_depth >= MAX_DELTA_DEPTH {
                         info!(
                             oid = %oid,
                             base_oid = %base_oid,
@@ -946,6 +964,7 @@ impl ObjectDatabase {
                     );
                 }
             }
+            } // Close else block for oid != base_oid check
         }
 
         // No similar object found or delta not beneficial
@@ -980,15 +999,83 @@ impl ObjectDatabase {
         
         // Read and parse metadata
         let meta_data = self.storage.get(&meta_key).await?;
-        let meta_str = String::from_utf8_lossy(&meta_data);
-        
+        let meta_str = String::from_utf8(meta_data)
+            .map_err(|e| anyhow::anyhow!("Invalid delta metadata encoding in get_delta_depth: {}", e))?;
+
         // Parse format: "base:{oid}:depth:{n}" or legacy "base:{oid}"
         if let Some(depth_part) = meta_str.split(":depth:").nth(1) {
-            Ok(depth_part.parse::<u8>().unwrap_or(1))
+            // Trim to handle any trailing whitespace/newlines
+            let trimmed = depth_part.trim();
+            match trimmed.parse::<u8>() {
+                Ok(depth) => Ok(depth),
+                Err(e) => {
+                    warn!(meta_str = %meta_str, error = %e, "Failed to parse delta depth, defaulting to 1");
+                    Ok(1)
+                }
+            }
         } else {
             // Legacy format without depth, assume depth 1
             Ok(1)
         }
+    }
+
+    /// Check if a target OID exists in the delta chain starting from a given OID
+    ///
+    /// This is used to prevent creating circular delta references.
+    /// Walks the delta chain from `start_oid` and returns true if `target_oid` is found.
+    ///
+    /// # Arguments
+    ///
+    /// * `start_oid` - Starting point of the delta chain to check
+    /// * `target_oid` - OID to search for in the chain
+    ///
+    /// # Returns
+    ///
+    /// True if target_oid is found in the chain, false otherwise
+    async fn delta_chain_contains(&self, start_oid: &Oid, target_oid: &Oid) -> anyhow::Result<bool> {
+        let mut current_oid = *start_oid;
+        let mut visited = std::collections::HashSet::new();
+        
+        // Walk the chain with depth limit to prevent infinite loops
+        for _ in 0..=MAX_DELTA_DEPTH {
+            // Check if current matches target
+            if current_oid == *target_oid {
+                return Ok(true);
+            }
+            
+            // Check for cycles in our walk
+            if !visited.insert(current_oid) {
+                // Already visited this OID, we're in a cycle (shouldn't happen but be safe)
+                return Ok(false);
+            }
+            
+            // Try to get the base OID of current
+            let meta_key = format!("deltas/{}.meta", current_oid.to_hex());
+            if !self.storage.exists(&meta_key).await? {
+                // Not a delta, end of chain
+                return Ok(false);
+            }
+            
+            // Parse base OID from metadata
+            let meta_data = self.storage.get(&meta_key).await?;
+            let meta_str = String::from_utf8(meta_data)?;
+            let after_prefix = meta_str
+                .strip_prefix("base:")
+                .ok_or_else(|| anyhow::anyhow!("Invalid delta metadata format"))?
+                .trim();
+            
+            // Handle both formats: "base:{oid}:depth:{n}" and legacy "base:{oid}"
+            let base_oid_hex = if let Some(idx) = after_prefix.find(":depth:") {
+                &after_prefix[..idx]
+            } else {
+                after_prefix
+            };
+            
+            current_oid = Oid::from_hex(base_oid_hex)?;
+        }
+        
+        // Exceeded depth limit without finding target
+        Ok(false)
     }
 
     /// List all pack files in the database
@@ -1170,13 +1257,19 @@ impl ObjectDatabase {
                         use mediagit_compression::ZstdCompressor;
                         let zstd = ZstdCompressor::new(mediagit_compression::CompressionLevel::Default);
                         zstd.decompress(&compressed)
-                            .unwrap_or_else(|_| compressed.to_vec())
+                            .unwrap_or_else(|e| {
+                                debug!(error = %e, "Zstd decompression failed, treating as raw data");
+                                compressed.to_vec()
+                            })
                     }
                     _ => {
                         // For Zlib or Brotli, try decompression with fallback to raw
                         // False positive detection possible for raw binary data
                         self.compressor.decompress(&compressed)
-                            .unwrap_or_else(|_| compressed.to_vec())
+                            .unwrap_or_else(|e| {
+                                debug!(error = %e, "Decompression failed, treating as raw data");
+                                compressed.to_vec()
+                            })
                     }
                 }
             };
@@ -1261,14 +1354,21 @@ impl ObjectDatabase {
         let meta_data = self.storage.get(&meta_key).await
             .map_err(|e| anyhow::anyhow!("Failed to read delta metadata for {}: {}", oid, e))?;
 
-        // Parse base OID from metadata (format: "base:{hex_oid}")
+        // Parse base OID from metadata (format: "base:{hex_oid}:depth:{n}" or legacy "base:{hex_oid}")
         let meta_str = String::from_utf8(meta_data)
             .map_err(|e| anyhow::anyhow!("Invalid delta metadata encoding: {}", e))?;
 
-        let base_oid_hex = meta_str
+        let after_prefix = meta_str
             .strip_prefix("base:")
             .ok_or_else(|| anyhow::anyhow!("Invalid delta metadata format: {}", meta_str))?
             .trim();
+
+        // Handle both formats: "base:{oid}:depth:{n}" and legacy "base:{oid}"
+        let base_oid_hex = if let Some(idx) = after_prefix.find(":depth:") {
+            &after_prefix[..idx]
+        } else {
+            after_prefix
+        };
 
         let base_oid = Oid::from_hex(base_oid_hex)
             .map_err(|e| anyhow::anyhow!("Invalid base OID in delta metadata: {}", e))?;
@@ -1330,18 +1430,40 @@ impl ObjectDatabase {
         Ok(reconstructed)
     }
 
-    /// Read delta with depth tracking to prevent infinite recursion
+    /// Read delta with depth tracking and circular reference detection
     ///
-    /// Maximum delta chain depth is 10 levels.
+    /// Maximum delta chain depth is 10 levels (consistent with MAX_DELTA_DEPTH).
     /// Uses Box::pin to handle async recursion.
+    /// Tracks visited OIDs to detect actual circular references.
     fn read_delta_with_depth(&self, oid: &Oid, depth: usize) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Vec<u8>>> + Send + '_>> {
         let oid = *oid;
+        // Create a new visited set for the initial call
+        let visited = std::collections::HashSet::new();
+        self.read_delta_with_depth_internal(oid, depth, visited)
+    }
+
+    /// Internal delta reading with visited set for circular reference detection
+    fn read_delta_with_depth_internal(
+        &self,
+        oid: Oid,
+        depth: usize,
+        mut visited: std::collections::HashSet<Oid>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Vec<u8>>> + Send + '_>> {
         Box::pin(async move {
-            const MAX_DELTA_CHAIN_DEPTH: usize = 10;
+            // Use the same limit as the write side (MAX_DELTA_DEPTH = 10)
+            const MAX_DELTA_CHAIN_DEPTH: usize = MAX_DELTA_DEPTH as usize;
+
+            // Check for circular reference FIRST (before depth check)
+            if !visited.insert(oid) {
+                anyhow::bail!(
+                    "Circular reference detected in delta chain at OID {}",
+                    oid
+                );
+            }
 
             if depth > MAX_DELTA_CHAIN_DEPTH {
                 anyhow::bail!(
-                    "Delta chain too deep (> {}): possible circular reference at {}",
+                    "Delta chain too deep (> {}): chain starting at {}",
                     MAX_DELTA_CHAIN_DEPTH,
                     oid
                 );
@@ -1355,17 +1477,23 @@ impl ObjectDatabase {
             // Check if this is also a delta
             let meta_key = format!("deltas/{}.meta", oid.to_hex());
             if self.storage.exists(&meta_key).await? {
-                // Read delta metadata
+                // Read delta metadata (format: "base:{oid}:depth:{n}" or legacy "base:{oid}")
                 let meta_data = self.storage.get(&meta_key).await?;
                 let meta_str = String::from_utf8(meta_data)?;
-                let base_oid_hex = meta_str
+                let after_prefix = meta_str
                     .strip_prefix("base:")
                     .ok_or_else(|| anyhow::anyhow!("Invalid delta metadata format"))?
                     .trim();
+                // Handle both formats
+                let base_oid_hex = if let Some(idx) = after_prefix.find(":depth:") {
+                    &after_prefix[..idx]
+                } else {
+                    after_prefix
+                };
                 let base_oid = Oid::from_hex(base_oid_hex)?;
 
-                // Recursively read base with incremented depth
-                let base_data = self.read_delta_with_depth(&base_oid, depth + 1).await?;
+                // Recursively read base with incremented depth, passing the visited set
+                let base_data = self.read_delta_with_depth_internal(base_oid, depth + 1, visited).await?;
 
                 // Read and apply delta
                 let delta_key = format!("deltas/{}", oid.to_hex());
@@ -1646,7 +1774,7 @@ impl ObjectDatabase {
                     }
                 }
             }
-        } else if self.compression_enabled || storage_data.len() >= 2 && storage_data[0] == 0x78 {
+        } else if self.compression_enabled || (storage_data.len() >= 2 && storage_data[0] == 0x78) {
             // Standard decompression path
             match self.compressor.decompress(&storage_data) {
                 Ok(decompressed) => {
@@ -2525,5 +2653,40 @@ mod tests {
         // Additional check: Verify size queries work
         let size1 = odb.get_object_size(&oid1).await.unwrap();
         assert_eq!(size1, data1.len(), "Size query should work after GC");
+    }
+
+    #[test]
+    fn test_delta_metadata_parsing() {
+        // Test the delta metadata parsing logic handles both formats correctly
+        // Format 1 (new): "base:{oid}:depth:{n}"
+        // Format 2 (legacy): "base:{oid}"
+
+        let test_oid = "57b77408e3f862ecc9288b59a6cd6da6c529bd4d61883483c5e8dc7989e1e918";
+
+        // Test new format with depth
+        let meta_new = format!("base:{}:depth:1", test_oid);
+        let after_prefix = meta_new.strip_prefix("base:").unwrap().trim();
+        let base_oid_hex = if let Some(idx) = after_prefix.find(":depth:") {
+            &after_prefix[..idx]
+        } else {
+            after_prefix
+        };
+        assert_eq!(base_oid_hex, test_oid, "Should parse new format correctly");
+        assert_eq!(base_oid_hex.len(), 64, "OID should be 64 chars");
+
+        // Test legacy format without depth
+        let meta_legacy = format!("base:{}", test_oid);
+        let after_prefix = meta_legacy.strip_prefix("base:").unwrap().trim();
+        let base_oid_hex = if let Some(idx) = after_prefix.find(":depth:") {
+            &after_prefix[..idx]
+        } else {
+            after_prefix
+        };
+        assert_eq!(base_oid_hex, test_oid, "Should parse legacy format correctly");
+        assert_eq!(base_oid_hex.len(), 64, "OID should be 64 chars");
+
+        // Verify OID can be parsed
+        let oid = Oid::from_hex(base_oid_hex).unwrap();
+        assert_eq!(oid.to_hex(), test_oid);
     }
 }
