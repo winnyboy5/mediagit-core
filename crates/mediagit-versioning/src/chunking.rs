@@ -459,10 +459,34 @@ impl ContentChunker {
         match extension.to_lowercase().as_str() {
             // Media - Structure-aware chunking
             "avi" | "riff" | "wav" => self.chunk_avi(data).await,
-            "mp4" | "mov" | "m4v" | "m4a" => self.chunk_mp4(data).await,
+            "mp4" | "mov" | "m4v" | "m4a" | "3gp" => self.chunk_mp4(data).await,
             "mkv" | "webm" | "mka" | "mk3d" => self.chunk_matroska(data).await,
+            "mpg" | "mpeg" | "vob" | "mts" | "m2ts" => {
+                // MPEG Program/Transport Streams - use rolling CDC
+                let (avg, min, max) = get_chunk_params(data.len() as u64);
+                self.chunk_rolling(data, avg, min, max).await
+            }
+
+            // 3D Models - Structure-aware chunking
             "glb" | "gltf" => self.chunk_glb(data).await,
-            
+            "obj" | "stl" | "ply" => self.chunk_3d_text(data).await,
+            "fbx" => self.chunk_fbx(data).await,
+            "usd" | "usda" | "usdc" | "usdz" => {
+                // USD ecosystem - rolling CDC for scene graph dedup
+                let (avg, min, max) = get_chunk_params(data.len() as u64);
+                self.chunk_rolling(data, avg, min, max).await
+            }
+            "abc" => {
+                // Alembic cache - rolling CDC for animation dedup
+                let (avg, min, max) = get_chunk_params(data.len() as u64);
+                self.chunk_rolling(data, avg, min, max).await
+            }
+            "blend" | "max" | "ma" | "mb" | "c4d" | "hip" | "zpr" | "ztl" => {
+                // Application-specific 3D formats - rolling CDC
+                let (avg, min, max) = get_chunk_params(data.len() as u64);
+                self.chunk_rolling(data, avg, min, max).await
+            }
+
             // Text/Code - Rolling CDC for incremental dedup (Brotli compression)
             "csv" | "tsv" | "json" | "xml" | "html" | "txt" | "md" | "rst" |
             "rs" | "py" | "js" | "ts" | "go" | "java" | "c" | "cpp" | "h" |
@@ -495,6 +519,12 @@ impl ContentChunker {
             
             // Documents - Rolling CDC
             "pdf" | "svg" | "eps" | "ai" => {
+                let (avg, min, max) = get_chunk_params(data.len() as u64);
+                self.chunk_rolling(data, avg, min, max).await
+            }
+
+            // Design tools - Rolling CDC for incremental design changes
+            "fig" | "sketch" | "xd" | "indd" | "indt" => {
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
                 self.chunk_rolling(data, avg, min, max).await
             }
@@ -1083,7 +1113,159 @@ impl ContentChunker {
             total_size = data.len(),
             "GLB chunking complete"
         );
-        
+
+        Ok(chunks)
+    }
+
+    /// Text-based 3D model chunking (OBJ, STL ASCII, PLY ASCII)
+    ///
+    /// These formats are line-oriented text files that benefit from
+    /// structure-aware chunking at logical boundaries:
+    /// - OBJ: groups (g), objects (o), material uses (usemtl)
+    /// - STL: facet boundaries
+    /// - PLY: header vs data sections
+    async fn chunk_3d_text(&self, data: &[u8]) -> Result<Vec<ContentChunk>> {
+        // Check if data is valid UTF-8 text
+        if !data.iter().take(1024).all(|&b| b < 128 || b >= 0xC0) {
+            // Binary format - use rolling CDC
+            let (avg, min, max) = get_chunk_params(data.len() as u64);
+            return self.chunk_rolling(data, avg, min, max).await;
+        }
+
+        let mut chunks = Vec::new();
+        let mut chunk_start = 0;
+        let min_chunk_size = 256 * 1024;  // 256KB minimum chunk
+        let max_chunk_size = 4 * 1024 * 1024;  // 4MB maximum
+
+        // Parse as text, split at logical boundaries
+        let text = String::from_utf8_lossy(data);
+        let lines: Vec<&str> = text.lines().collect();
+        let mut current_pos = 0;
+
+        for line in lines.iter() {
+            let line_len = line.len() + 1; // +1 for newline
+            let chunk_size = current_pos - chunk_start;
+
+            // Check for logical boundaries (OBJ groups/objects, STL facets)
+            let is_boundary = line.starts_with("g ")
+                || line.starts_with("o ")
+                || line.starts_with("usemtl ")
+                || line.starts_with("facet ")
+                || line.starts_with("end_header");
+
+            // Create chunk at boundary if size is acceptable
+            if is_boundary && chunk_size >= min_chunk_size {
+                let chunk_data = &data[chunk_start..current_pos];
+                chunks.push(ContentChunk {
+                    id: Oid::hash(chunk_data),
+                    data: chunk_data.to_vec(),
+                    offset: chunk_start as u64,
+                    size: chunk_data.len(),
+                    chunk_type: ChunkType::Generic,
+                    perceptual_hash: None,
+                });
+                chunk_start = current_pos;
+            }
+
+            // Force chunk if we exceed max size
+            if chunk_size >= max_chunk_size {
+                let chunk_data = &data[chunk_start..current_pos];
+                chunks.push(ContentChunk {
+                    id: Oid::hash(chunk_data),
+                    data: chunk_data.to_vec(),
+                    offset: chunk_start as u64,
+                    size: chunk_data.len(),
+                    chunk_type: ChunkType::Generic,
+                    perceptual_hash: None,
+                });
+                chunk_start = current_pos;
+            }
+
+            current_pos += line_len;
+
+            // Prevent going past data length due to line ending differences
+            if current_pos > data.len() {
+                current_pos = data.len();
+            }
+        }
+
+        // Final chunk
+        if chunk_start < data.len() {
+            let chunk_data = &data[chunk_start..];
+            chunks.push(ContentChunk {
+                id: Oid::hash(chunk_data),
+                data: chunk_data.to_vec(),
+                offset: chunk_start as u64,
+                size: chunk_data.len(),
+                chunk_type: ChunkType::Generic,
+                perceptual_hash: None,
+            });
+        }
+
+        // Fallback if no chunks created
+        if chunks.is_empty() {
+            return self.chunk_fixed(data, 4 * 1024 * 1024).await;
+        }
+
+        info!(
+            chunks = chunks.len(),
+            total_size = data.len(),
+            "3D text model chunking complete"
+        );
+
+        Ok(chunks)
+    }
+
+    /// FBX binary format chunking
+    ///
+    /// FBX binary files have a node-based structure that can be parsed
+    /// for structure-aware chunking. Falls back to CDC for ASCII FBX.
+    async fn chunk_fbx(&self, data: &[u8]) -> Result<Vec<ContentChunk>> {
+        // FBX binary magic: "Kaydara FBX Binary  \x00"
+        const FBX_MAGIC: &[u8] = b"Kaydara FBX Binary  \x00";
+
+        if data.len() < 27 || &data[0..21] != FBX_MAGIC {
+            // ASCII FBX or invalid - use rolling CDC
+            debug!("FBX file is ASCII or invalid, using rolling CDC");
+            let (avg, min, max) = get_chunk_params(data.len() as u64);
+            return self.chunk_rolling(data, avg, min, max).await;
+        }
+
+        // Parse FBX version (bytes 23-26, little-endian)
+        let _version = u32::from_le_bytes([data[23], data[24], data[25], data[26]]);
+
+        let mut chunks = Vec::new();
+
+        // Header chunk (first 27 bytes)
+        let header = &data[0..27];
+        chunks.push(ContentChunk {
+            id: Oid::hash(header),
+            data: header.to_vec(),
+            offset: 0,
+            size: 27,
+            chunk_type: ChunkType::Metadata,
+            perceptual_hash: None,
+        });
+
+        // For FBX, use adaptive rolling CDC on the rest of the data
+        // Full FBX node parsing is complex; CDC provides good dedup
+        if data.len() > 27 {
+            let content = &data[27..];
+            let (avg, min, max) = get_chunk_params(content.len() as u64);
+            let sub_chunks = self.chunk_rolling(content, avg, min, max).await?;
+
+            for mut chunk in sub_chunks {
+                chunk.offset += 27;
+                chunks.push(chunk);
+            }
+        }
+
+        info!(
+            chunks = chunks.len(),
+            total_size = data.len(),
+            "FBX chunking complete"
+        );
+
         Ok(chunks)
     }
 }

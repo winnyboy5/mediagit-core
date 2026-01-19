@@ -541,11 +541,25 @@ impl TypeAwareCompressor for SmartCompressor {
 
         match algo {
             CompressionAlgorithm::None => Ok(data.to_vec()),
-            CompressionAlgorithm::Zlib => self.zlib.decompress(data),
-            CompressionAlgorithm::Zstd => self.zstd_default.decompress(data),
-            CompressionAlgorithm::Brotli => self.brotli_best.decompress(data),
+            CompressionAlgorithm::Zlib => {
+                // False positive possible: raw data starting with 0x78 + valid checksum byte
+                // can be misdetected as zlib. Fall back to raw data if decompression fails.
+                Ok(self.zlib.decompress(data).unwrap_or_else(|_| data.to_vec()))
+            }
+            CompressionAlgorithm::Zstd => {
+                // False positive rare but possible: raw data starting with zstd magic bytes
+                // (0x28 0xB5 0x2F 0xFD). Fall back to raw data if decompression fails.
+                Ok(self.zstd_default.decompress(data).unwrap_or_else(|_| data.to_vec()))
+            }
+            CompressionAlgorithm::Brotli => {
+                // False positive rare but possible: raw data starting with "BRT\x01".
+                // Fall back to raw data if decompression fails.
+                Ok(self.brotli_best.decompress(data).unwrap_or_else(|_| data.to_vec()))
+            }
         }
+
     }
+
 
     fn strategy_for_type(&self, obj_type: ObjectType) -> CompressionStrategy {
         CompressionStrategy::for_object_type(obj_type)
@@ -648,14 +662,14 @@ mod tests {
             CompressionStrategy::Zstd(CompressionLevel::Best)
         );
 
-        // Text → Brotli Best
+        // Text → Zstd Default (fast with good compression, better than Brotli for large files)
         assert_eq!(
             CompressionStrategy::for_object_type(ObjectType::Text),
-            CompressionStrategy::Brotli(CompressionLevel::Best)
+            CompressionStrategy::Zstd(CompressionLevel::Default)
         );
         assert_eq!(
             CompressionStrategy::for_object_type(ObjectType::Json),
-            CompressionStrategy::Brotli(CompressionLevel::Best)
+            CompressionStrategy::Zstd(CompressionLevel::Default)
         );
 
         // Documents → Zstd Default

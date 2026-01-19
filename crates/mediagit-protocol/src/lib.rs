@@ -15,5 +15,5 @@ pub use streaming::{
 };
 pub use types::{
     RefInfo, RefUpdate, RefUpdateRequest, RefUpdateResponse, RefUpdateResult, RefsResponse,
-    WantRequest,
+    WantRequest, WantResponse,
 };

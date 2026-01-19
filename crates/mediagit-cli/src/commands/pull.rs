@@ -40,7 +40,7 @@ pub struct PullCmd {
     #[arg(value_name = "BRANCH")]
     pub branch: Option<String>,
 
-    /// Rebase instead of merge
+    /// Rebase instead of merge (not yet implemented - will fall back to merge)
     #[arg(short = 'r', long)]
     pub rebase: bool,
 
@@ -178,9 +178,17 @@ impl PullCmd {
         }
 
         if !self.dry_run {
+            // Build the "have" list from local ref state for incremental pull
+            let local_have: Vec<String> = local_ref
+                .as_ref()
+                .and_then(|r| r.oid.as_ref())
+                .map(|oid| vec![oid.to_hex()])
+                .unwrap_or_default();
+
             // Pull using protocol client (downloads pack file)
+            // Pass local OIDs to avoid downloading objects we already have
             let download_pb = progress.download_bar("Receiving objects");
-            let (pack_data, chunked_oids) = client.pull(&odb, &remote_ref).await?;
+            let (pack_data, chunked_oids) = client.pull_with_have(&odb, &remote_ref, local_have).await?;
             let pack_size = pack_data.len() as u64;
 
             download_pb.set_length(pack_size);
@@ -212,9 +220,9 @@ impl PullCmd {
 
             let unpack_pb = progress.object_bar("Unpacking objects", object_count);
             for (idx, oid) in objects.iter().enumerate() {
-                let obj_data = pack_reader.get_object(oid)?;
-                // Write object to ODB (assuming Blob type for now)
-                odb.write(mediagit_versioning::ObjectType::Blob, &obj_data).await?;
+                // Use get_object_with_type to preserve the correct object type
+                let (obj_type, obj_data) = pack_reader.get_object_with_type(oid)?;
+                odb.write(obj_type, &obj_data).await?;
                 unpack_pb.set_position((idx + 1) as u64);
             }
             stats.objects_received = object_count;
@@ -258,8 +266,29 @@ impl PullCmd {
             // Update local ref to match remote
             let remote_oid_parsed = mediagit_versioning::Oid::from_hex(&remote_oid)
                 .map_err(|e| anyhow::anyhow!("Invalid remote OID: {}", e))?;
+
+            // Update remote tracking ref first (refs/remotes/<remote>/<branch>)
+            if remote_ref.starts_with("refs/heads/") {
+                // Safe: we just checked for the prefix above
+                let branch_name = remote_ref.strip_prefix("refs/heads/")
+                    .unwrap_or(&remote_ref);
+                let tracking_ref_name = format!("refs/remotes/{}/{}", remote, branch_name);
+                
+                // Create remotes directory if needed
+                let remotes_dir = storage_path.join("refs").join("remotes").join(remote);
+                std::fs::create_dir_all(&remotes_dir)?;
+                
+                let tracking_ref = mediagit_versioning::Ref::new_direct(tracking_ref_name.clone(), remote_oid_parsed);
+                refdb.write(&tracking_ref).await?;
+                
+                if self.verbose {
+                    println!("  Updated tracking ref: {} -> {}", tracking_ref_name, &remote_oid[..8]);
+                }
+            }
+
             let ref_update = mediagit_versioning::Ref::new_direct(remote_ref.clone(), remote_oid_parsed);
             refdb.write(&ref_update).await?;
+
 
             if !self.quiet {
                 println!(
@@ -307,11 +336,14 @@ impl PullCmd {
                             "user@mediagit.local".to_string(),
                             Utc::now(),
                         );
-                        let merge_commit = Commit::new(
+                        // Create merge commit with both parents (local HEAD and remote)
+                        let branch_name = head.target.as_deref().unwrap_or("HEAD");
+                        let merge_commit = Commit::with_parents(
                             tree_oid,
+                            vec![head_oid, remote_oid_parsed],
                             author.clone(),
                             author,
-                            "Merge commit".to_string(),
+                            format!("Merge remote branch into {}", branch_name),
                         );
                         let commit_oid = merge_commit.write(&odb).await?;
 

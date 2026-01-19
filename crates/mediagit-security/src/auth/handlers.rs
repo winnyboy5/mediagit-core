@@ -121,8 +121,12 @@ pub async fn register_handler(
     State(auth_service): State<Arc<AuthService>>,
     Json(req): Json<RegisterRequest>,
 ) -> Result<(StatusCode, Json<AuthResponse>), (StatusCode, Json<ErrorResponse>)> {
-    // Validate input
-    if req.username.is_empty() || req.email.is_empty() || req.password.is_empty() {
+    // Validate input - check for empty or whitespace-only strings
+    let username = req.username.trim();
+    let email = req.email.trim();
+    let password = &req.password; // Don't trim password (whitespace can be intentional)
+
+    if username.is_empty() || email.is_empty() || password.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -131,7 +135,27 @@ pub async fn register_handler(
         ));
     }
 
-    if req.password.len() < 8 {
+    // Validate username length and characters
+    if username.len() < 3 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Username must be at least 3 characters".to_string(),
+            }),
+        ));
+    }
+
+    // Basic email format validation
+    if !email.contains('@') || !email.contains('.') {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid email format".to_string(),
+            }),
+        ));
+    }
+
+    if password.len() < 8 {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {

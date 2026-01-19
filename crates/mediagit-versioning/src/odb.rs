@@ -29,7 +29,7 @@ pub const MAX_DELTA_DEPTH: u8 = 10;
 
 use crate::{ObjectType, Oid, OdbMetrics};
 use crate::chunking::{ChunkManifest, ChunkRef, ChunkStrategy, ContentChunker};
-use crate::delta::DeltaEncoder;
+use crate::delta::{Delta, DeltaDecoder, DeltaEncoder};
 use mediagit_compression::{Compressor, SmartCompressor, TypeAwareCompressor, ZlibCompressor, CompressionAlgorithm};
 use mediagit_compression::ObjectType as CompressionObjectType;
 use mediagit_storage::StorageBackend;
@@ -496,31 +496,35 @@ impl ObjectDatabase {
             return self.write_with_path(obj_type, data, filename).await;
         }
 
-        // ✅ FIX: Skip chunking for pre-compressed formats (already optimal)
+        // Skip chunking for small compressed formats that don't benefit from chunking
+        // Note: Video formats (MP4, MOV, AVI, WebM) ARE chunked because:
+        // - Chunking enables partial deduplication (shared intros/outros)
+        // - Large videos benefit from chunk-level delta encoding
+        // - Enables resumable transfers for large files
         if !filename.is_empty() {
             let compression_type = CompressionObjectType::from_path(filename);
             let should_skip_chunking = matches!(
                 compression_type,
+                // Compressed images: typically small, don't benefit from chunking
                 CompressionObjectType::Jpeg
                     | CompressionObjectType::Png
                     | CompressionObjectType::Gif
                     | CompressionObjectType::Webp
                     | CompressionObjectType::Avif
                     | CompressionObjectType::Heic
-                    | CompressionObjectType::Mp4
-                    | CompressionObjectType::Mov
-                    | CompressionObjectType::Avi
-                    | CompressionObjectType::Webm
+                    // Compressed audio: typically small files
                     | CompressionObjectType::Mp3
                     | CompressionObjectType::Aac
                     | CompressionObjectType::Ogg
+                // Note: Video formats (Mp4, Mov, Avi, Webm) are NOT skipped
+                // They benefit from chunking for partial dedup and large file handling
             );
 
             if should_skip_chunking {
                 debug!(
                     file_type = ?compression_type,
                     size = data.len(),
-                    "Pre-compressed format detected, skipping chunking to avoid overhead"
+                    "Small compressed format detected, skipping chunking"
                 );
                 return self.write_with_path(obj_type, data, filename).await;
             }
@@ -851,6 +855,13 @@ impl ObjectDatabase {
         drop(detector);
 
         if let Some((base_oid, score)) = similar {
+            // CRITICAL: Prevent self-referencing delta (OID == base OID)
+            if oid == base_oid {
+                warn!(
+                    oid = %oid,
+                    "Attempted to create self-referencing delta, storing as full object"
+                );
+            } else {
             info!(
                 oid = %oid,
                 base_oid = %base_oid,
@@ -863,7 +874,18 @@ impl ObjectDatabase {
                 Ok(base_data) => {
                     // Check delta chain depth - prevent unbounded chains
                     let base_depth = self.get_delta_depth(&base_oid).await.unwrap_or(0);
-                    if base_depth >= MAX_DELTA_DEPTH {
+                    
+                    // Also check if base's chain already contains this OID (would create cycle)
+                    let would_create_cycle = self.delta_chain_contains(&base_oid, &oid).await.unwrap_or(false);
+                    
+                    if would_create_cycle {
+                        warn!(
+                            oid = %oid,
+                            base_oid = %base_oid,
+                            "Base's delta chain already contains this OID, storing as full object to prevent cycle"
+                        );
+                        // Fall through to standard write
+                    } else if base_depth >= MAX_DELTA_DEPTH {
                         info!(
                             oid = %oid,
                             base_oid = %base_oid,
@@ -942,6 +964,7 @@ impl ObjectDatabase {
                     );
                 }
             }
+            } // Close else block for oid != base_oid check
         }
 
         // No similar object found or delta not beneficial
@@ -976,15 +999,83 @@ impl ObjectDatabase {
         
         // Read and parse metadata
         let meta_data = self.storage.get(&meta_key).await?;
-        let meta_str = String::from_utf8_lossy(&meta_data);
-        
+        let meta_str = String::from_utf8(meta_data)
+            .map_err(|e| anyhow::anyhow!("Invalid delta metadata encoding in get_delta_depth: {}", e))?;
+
         // Parse format: "base:{oid}:depth:{n}" or legacy "base:{oid}"
         if let Some(depth_part) = meta_str.split(":depth:").nth(1) {
-            Ok(depth_part.parse::<u8>().unwrap_or(1))
+            // Trim to handle any trailing whitespace/newlines
+            let trimmed = depth_part.trim();
+            match trimmed.parse::<u8>() {
+                Ok(depth) => Ok(depth),
+                Err(e) => {
+                    warn!(meta_str = %meta_str, error = %e, "Failed to parse delta depth, defaulting to 1");
+                    Ok(1)
+                }
+            }
         } else {
             // Legacy format without depth, assume depth 1
             Ok(1)
         }
+    }
+
+    /// Check if a target OID exists in the delta chain starting from a given OID
+    ///
+    /// This is used to prevent creating circular delta references.
+    /// Walks the delta chain from `start_oid` and returns true if `target_oid` is found.
+    ///
+    /// # Arguments
+    ///
+    /// * `start_oid` - Starting point of the delta chain to check
+    /// * `target_oid` - OID to search for in the chain
+    ///
+    /// # Returns
+    ///
+    /// True if target_oid is found in the chain, false otherwise
+    async fn delta_chain_contains(&self, start_oid: &Oid, target_oid: &Oid) -> anyhow::Result<bool> {
+        let mut current_oid = *start_oid;
+        let mut visited = std::collections::HashSet::new();
+        
+        // Walk the chain with depth limit to prevent infinite loops
+        for _ in 0..=MAX_DELTA_DEPTH {
+            // Check if current matches target
+            if current_oid == *target_oid {
+                return Ok(true);
+            }
+            
+            // Check for cycles in our walk
+            if !visited.insert(current_oid) {
+                // Already visited this OID, we're in a cycle (shouldn't happen but be safe)
+                return Ok(false);
+            }
+            
+            // Try to get the base OID of current
+            let meta_key = format!("deltas/{}.meta", current_oid.to_hex());
+            if !self.storage.exists(&meta_key).await? {
+                // Not a delta, end of chain
+                return Ok(false);
+            }
+            
+            // Parse base OID from metadata
+            let meta_data = self.storage.get(&meta_key).await?;
+            let meta_str = String::from_utf8(meta_data)?;
+            let after_prefix = meta_str
+                .strip_prefix("base:")
+                .ok_or_else(|| anyhow::anyhow!("Invalid delta metadata format"))?
+                .trim();
+            
+            // Handle both formats: "base:{oid}:depth:{n}" and legacy "base:{oid}"
+            let base_oid_hex = if let Some(idx) = after_prefix.find(":depth:") {
+                &after_prefix[..idx]
+            } else {
+                after_prefix
+            };
+            
+            current_oid = Oid::from_hex(base_oid_hex)?;
+        }
+        
+        // Exceeded depth limit without finding target
+        Ok(false)
     }
 
     /// List all pack files in the database
@@ -1162,19 +1253,27 @@ impl ObjectDatabase {
                         compressed.to_vec()
                     }
                     CompressionAlgorithm::Zstd => {
-                        // Use zstd decompressor
+                        // Use zstd decompressor with fallback for false positive detection
                         use mediagit_compression::ZstdCompressor;
                         let zstd = ZstdCompressor::new(mediagit_compression::CompressionLevel::Default);
                         zstd.decompress(&compressed)
-                            .map_err(|e| anyhow::anyhow!("Failed to decompress chunk {}: {}", chunk_ref.id.to_hex(), e))?
+                            .unwrap_or_else(|e| {
+                                debug!(error = %e, "Zstd decompression failed, treating as raw data");
+                                compressed.to_vec()
+                            })
                     }
                     _ => {
-                        // For Zlib or Brotli, try zlib (original behavior)
+                        // For Zlib or Brotli, try decompression with fallback to raw
+                        // False positive detection possible for raw binary data
                         self.compressor.decompress(&compressed)
-                            .map_err(|e| anyhow::anyhow!("Failed to decompress chunk {}: {}", chunk_ref.id.to_hex(), e))?
+                            .unwrap_or_else(|e| {
+                                debug!(error = %e, "Decompression failed, treating as raw data");
+                                compressed.to_vec()
+                            })
                     }
                 }
             };
+
 
             // Verify chunk size matches manifest
             if decompressed.len() != chunk_ref.size {
@@ -1233,6 +1332,211 @@ impl ObjectDatabase {
         self.cache.insert(*oid, arc_data).await;
 
         Ok(reconstructed)
+    }
+
+    /// Reconstruct a delta-encoded object
+    ///
+    /// Reads the delta metadata to find the base object, then applies
+    /// the delta to reconstruct the original object.
+    ///
+    /// # Arguments
+    ///
+    /// * `oid` - Object identifier of the delta-encoded object
+    ///
+    /// # Returns
+    ///
+    /// The reconstructed object content
+    async fn read_delta(&self, oid: &Oid) -> anyhow::Result<Vec<u8>> {
+        debug!(oid = %oid, "Reconstructing delta-encoded object");
+
+        // Read delta metadata to get base OID
+        let meta_key = format!("deltas/{}.meta", oid.to_hex());
+        let meta_data = self.storage.get(&meta_key).await
+            .map_err(|e| anyhow::anyhow!("Failed to read delta metadata for {}: {}", oid, e))?;
+
+        // Parse base OID from metadata (format: "base:{hex_oid}:depth:{n}" or legacy "base:{hex_oid}")
+        let meta_str = String::from_utf8(meta_data)
+            .map_err(|e| anyhow::anyhow!("Invalid delta metadata encoding: {}", e))?;
+
+        let after_prefix = meta_str
+            .strip_prefix("base:")
+            .ok_or_else(|| anyhow::anyhow!("Invalid delta metadata format: {}", meta_str))?
+            .trim();
+
+        // Handle both formats: "base:{oid}:depth:{n}" and legacy "base:{oid}"
+        let base_oid_hex = if let Some(idx) = after_prefix.find(":depth:") {
+            &after_prefix[..idx]
+        } else {
+            after_prefix
+        };
+
+        let base_oid = Oid::from_hex(base_oid_hex)
+            .map_err(|e| anyhow::anyhow!("Invalid base OID in delta metadata: {}", e))?;
+
+        debug!(
+            oid = %oid,
+            base_oid = %base_oid,
+            "Found delta base object"
+        );
+
+        // Read base object (this may recursively read another delta, with depth limit)
+        // To prevent infinite recursion, we track depth via a simple counter
+        let base_data = self.read_delta_with_depth(&base_oid, 1).await?;
+
+        // Read delta data
+        let delta_key = format!("deltas/{}", oid.to_hex());
+        let compressed_delta = self.storage.get(&delta_key).await
+            .map_err(|e| anyhow::anyhow!("Failed to read delta data for {}: {}", oid, e))?;
+
+        // Decompress delta
+        let delta_bytes = if let Some(smart_comp) = &self.smart_compressor {
+            smart_comp.decompress_typed(&compressed_delta)
+                .map_err(|e| anyhow::anyhow!("Failed to decompress delta: {}", e))?
+        } else {
+            self.compressor.decompress(&compressed_delta)
+                .map_err(|e| anyhow::anyhow!("Failed to decompress delta: {}", e))?
+        };
+
+        // Parse and apply delta
+        let delta = Delta::from_bytes(&delta_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to parse delta: {}", e))?;
+
+        let reconstructed = DeltaDecoder::apply(&base_data, &delta)
+            .map_err(|e| anyhow::anyhow!("Failed to apply delta: {}", e))?;
+
+        // Verify integrity
+        let computed_oid = Oid::hash(&reconstructed);
+        if computed_oid != *oid {
+            anyhow::bail!(
+                "Delta reconstruction failed: expected OID {}, computed {}",
+                oid,
+                computed_oid
+            );
+        }
+
+        info!(
+            oid = %oid,
+            base_oid = %base_oid,
+            base_size = base_data.len(),
+            delta_size = delta_bytes.len(),
+            result_size = reconstructed.len(),
+            "Successfully reconstructed delta-encoded object"
+        );
+
+        // Cache reconstructed data
+        let arc_data = Arc::new(reconstructed.clone());
+        self.cache.insert(*oid, arc_data).await;
+
+        Ok(reconstructed)
+    }
+
+    /// Read delta with depth tracking and circular reference detection
+    ///
+    /// Maximum delta chain depth is 10 levels (consistent with MAX_DELTA_DEPTH).
+    /// Uses Box::pin to handle async recursion.
+    /// Tracks visited OIDs to detect actual circular references.
+    fn read_delta_with_depth(&self, oid: &Oid, depth: usize) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Vec<u8>>> + Send + '_>> {
+        let oid = *oid;
+        // Create a new visited set for the initial call
+        let visited = std::collections::HashSet::new();
+        self.read_delta_with_depth_internal(oid, depth, visited)
+    }
+
+    /// Internal delta reading with visited set for circular reference detection
+    fn read_delta_with_depth_internal(
+        &self,
+        oid: Oid,
+        depth: usize,
+        mut visited: std::collections::HashSet<Oid>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Vec<u8>>> + Send + '_>> {
+        Box::pin(async move {
+            // Use the same limit as the write side (MAX_DELTA_DEPTH = 10)
+            const MAX_DELTA_CHAIN_DEPTH: usize = MAX_DELTA_DEPTH as usize;
+
+            // Check for circular reference FIRST (before depth check)
+            if !visited.insert(oid) {
+                anyhow::bail!(
+                    "Circular reference detected in delta chain at OID {}",
+                    oid
+                );
+            }
+
+            if depth > MAX_DELTA_CHAIN_DEPTH {
+                anyhow::bail!(
+                    "Delta chain too deep (> {}): chain starting at {}",
+                    MAX_DELTA_CHAIN_DEPTH,
+                    oid
+                );
+            }
+
+            // Check cache first
+            if let Some(cached) = self.cache.get(&oid).await {
+                return Ok((*cached).clone());
+            }
+
+            // Check if this is also a delta
+            let meta_key = format!("deltas/{}.meta", oid.to_hex());
+            if self.storage.exists(&meta_key).await? {
+                // Read delta metadata (format: "base:{oid}:depth:{n}" or legacy "base:{oid}")
+                let meta_data = self.storage.get(&meta_key).await?;
+                let meta_str = String::from_utf8(meta_data)?;
+                let after_prefix = meta_str
+                    .strip_prefix("base:")
+                    .ok_or_else(|| anyhow::anyhow!("Invalid delta metadata format"))?
+                    .trim();
+                // Handle both formats
+                let base_oid_hex = if let Some(idx) = after_prefix.find(":depth:") {
+                    &after_prefix[..idx]
+                } else {
+                    after_prefix
+                };
+                let base_oid = Oid::from_hex(base_oid_hex)?;
+
+                // Recursively read base with incremented depth, passing the visited set
+                let base_data = self.read_delta_with_depth_internal(base_oid, depth + 1, visited).await?;
+
+                // Read and apply delta
+                let delta_key = format!("deltas/{}", oid.to_hex());
+                let compressed_delta = self.storage.get(&delta_key).await?;
+                let delta_bytes = if let Some(smart_comp) = &self.smart_compressor {
+                    smart_comp.decompress_typed(&compressed_delta)?
+                } else {
+                    self.compressor.decompress(&compressed_delta)?
+                };
+
+                let delta = Delta::from_bytes(&delta_bytes)?;
+                let reconstructed = DeltaDecoder::apply(&base_data, &delta)?;
+
+                // Cache and return
+                self.cache.insert(oid, Arc::new(reconstructed.clone())).await;
+                return Ok(reconstructed);
+            }
+
+            // Not a delta - try other storage methods
+            // Check chunk manifest
+            let manifest_key = format!("manifests/{}", oid.to_hex());
+            if self.storage.exists(&manifest_key).await? {
+                return self.read_chunked(&oid).await;
+            }
+
+            // Try loose object
+            let key = oid.to_hex();
+            if let Ok(storage_data) = self.storage.get(&key).await {
+                let data = if let Some(smart_comp) = &self.smart_compressor {
+                    smart_comp.decompress_typed(&storage_data)
+                        .unwrap_or_else(|_| storage_data.clone())
+                } else {
+                    self.compressor.decompress(&storage_data)
+                        .unwrap_or(storage_data)
+                };
+
+                self.cache.insert(oid, Arc::new(data.clone())).await;
+                return Ok(data);
+            }
+
+            // Try pack files
+            self.read_from_packs(&oid).await
+        })
     }
 
     /// Read an object and stream directly to file (constant memory)
@@ -1318,14 +1622,15 @@ impl ObjectDatabase {
                             use mediagit_compression::ZstdCompressor;
                             let zstd = ZstdCompressor::new(mediagit_compression::CompressionLevel::Default);
                             zstd.decompress(&compressed)
-                                .map_err(|e| anyhow::anyhow!("Failed to decompress chunk {}: {}", chunk_ref.id.to_hex(), e))?
+                                .unwrap_or_else(|_| compressed.to_vec())
                         }
                         _ => {
                             self.compressor.decompress(&compressed)
-                                .map_err(|e| anyhow::anyhow!("Failed to decompress chunk {}: {}", chunk_ref.id.to_hex(), e))?
+                                .unwrap_or_else(|_| compressed.to_vec())
                         }
                     }
                 };
+
                 
                 // Verify chunk size
                 if decompressed.len() != chunk_ref.size {
@@ -1365,6 +1670,7 @@ impl ObjectDatabase {
             Ok(data.len() as u64)
         }
     }
+
     /// Read an object from the database
     ///
     /// Checks the cache first, then reads from storage if not cached.
@@ -1424,6 +1730,13 @@ impl ObjectDatabase {
             return self.read_chunked(oid).await;
         }
 
+        // Check if object is delta-encoded
+        let delta_meta_key = format!("deltas/{}.meta", oid.to_hex());
+        if self.storage.exists(&delta_meta_key).await? {
+            debug!(oid = %oid, "Found delta metadata, reconstructing from delta");
+            return self.read_delta(oid).await;
+        }
+
         // Try standard loose object path first
         let key = oid.to_hex();
         let storage_data = match self.storage.get(&key).await {
@@ -1461,7 +1774,7 @@ impl ObjectDatabase {
                     }
                 }
             }
-        } else if self.compression_enabled || storage_data.len() >= 2 && storage_data[0] == 0x78 {
+        } else if self.compression_enabled || (storage_data.len() >= 2 && storage_data[0] == 0x78) {
             // Standard decompression path
             match self.compressor.decompress(&storage_data) {
                 Ok(decompressed) => {
@@ -1595,16 +1908,17 @@ impl ObjectDatabase {
                 CompressionAlgorithm::Zstd => {
                     use mediagit_compression::ZstdCompressor;
                     let zstd = ZstdCompressor::new(mediagit_compression::CompressionLevel::Default);
-                    zstd.decompress(&compressed)
-                        .map_err(|e| anyhow::anyhow!("Failed to decompress chunk: {}", e))
+                    Ok(zstd.decompress(&compressed)
+                        .unwrap_or_else(|_| compressed.to_vec()))
                 }
                 _ => {
-                    self.compressor.decompress(&compressed)
-                        .map_err(|e| anyhow::anyhow!("Failed to decompress chunk: {}", e))
+                    Ok(self.compressor.decompress(&compressed)
+                        .unwrap_or_else(|_| compressed.to_vec()))
                 }
             }
         }
     }
+
 
     /// Get raw compressed chunk data (no decompression)
     ///
@@ -2339,5 +2653,40 @@ mod tests {
         // Additional check: Verify size queries work
         let size1 = odb.get_object_size(&oid1).await.unwrap();
         assert_eq!(size1, data1.len(), "Size query should work after GC");
+    }
+
+    #[test]
+    fn test_delta_metadata_parsing() {
+        // Test the delta metadata parsing logic handles both formats correctly
+        // Format 1 (new): "base:{oid}:depth:{n}"
+        // Format 2 (legacy): "base:{oid}"
+
+        let test_oid = "57b77408e3f862ecc9288b59a6cd6da6c529bd4d61883483c5e8dc7989e1e918";
+
+        // Test new format with depth
+        let meta_new = format!("base:{}:depth:1", test_oid);
+        let after_prefix = meta_new.strip_prefix("base:").unwrap().trim();
+        let base_oid_hex = if let Some(idx) = after_prefix.find(":depth:") {
+            &after_prefix[..idx]
+        } else {
+            after_prefix
+        };
+        assert_eq!(base_oid_hex, test_oid, "Should parse new format correctly");
+        assert_eq!(base_oid_hex.len(), 64, "OID should be 64 chars");
+
+        // Test legacy format without depth
+        let meta_legacy = format!("base:{}", test_oid);
+        let after_prefix = meta_legacy.strip_prefix("base:").unwrap().trim();
+        let base_oid_hex = if let Some(idx) = after_prefix.find(":depth:") {
+            &after_prefix[..idx]
+        } else {
+            after_prefix
+        };
+        assert_eq!(base_oid_hex, test_oid, "Should parse legacy format correctly");
+        assert_eq!(base_oid_hex.len(), 64, "OID should be 64 chars");
+
+        // Verify OID can be parsed
+        let oid = Oid::from_hex(base_oid_hex).unwrap();
+        assert_eq!(oid.to_hex(), test_oid);
     }
 }

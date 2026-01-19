@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{StatusCode, HeaderMap},
     response::IntoResponse,
     Extension,
     Json,
@@ -8,10 +8,10 @@ use axum::{
 use bytes::Bytes;
 use mediagit_protocol::{
     RefInfo, RefUpdateRequest, RefUpdateResponse, RefUpdateResult, RefsResponse,
-    WantRequest,
+    WantRequest, WantResponse,
 };
 use mediagit_security::auth::AuthUser;
-use mediagit_storage::{LocalBackend, StorageBackend, S3Backend, MinIOBackend, AzureBackend};
+use mediagit_storage::{LocalBackend, StorageBackend, MinIOBackend, AzureBackend};
 use mediagit_versioning::{Commit, ObjectDatabase, Oid, ObjectType, PackReader, PackWriter, Ref, RefDatabase, Tree};
 use std::path::Path as StdPath;
 use std::sync::Arc;
@@ -103,24 +103,22 @@ async fn create_storage_backend(
             } else {
                 tracing::info!("Using AWS S3 storage backend: bucket={}", s3_config.bucket);
 
-                // Set AWS credentials from config if provided
-                if let Some(key_id) = &s3_config.access_key_id {
-                    std::env::set_var("AWS_ACCESS_KEY_ID", key_id);
-                }
-                if let Some(secret) = &s3_config.secret_access_key {
-                    std::env::set_var("AWS_SECRET_ACCESS_KEY", secret);
-                }
-                std::env::set_var("AWS_REGION", &s3_config.region);
+                // For AWS S3 without custom endpoint, we use MinIOBackend with the AWS S3 endpoint
+                // This avoids setting global environment variables which could cause race conditions
+                // in concurrent requests.
+                let aws_endpoint = format!("https://s3.{}.amazonaws.com", s3_config.region);
 
-                let mut backend_config = mediagit_storage::s3::S3Config::default();
-                backend_config.bucket = s3_config.bucket.clone();
-
-                let storage = S3Backend::with_config(backend_config)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!("Failed to initialize S3 backend: {}", e);
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })?;
+                let storage = MinIOBackend::new(
+                    &aws_endpoint,
+                    &s3_config.bucket,
+                    s3_config.access_key_id.as_deref().unwrap_or(""),
+                    s3_config.secret_access_key.as_deref().unwrap_or(""),
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to initialize S3 backend: {}", e);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
                 Arc::new(storage)
             }
         }
@@ -201,33 +199,30 @@ pub async fn get_refs(
         });
     }
 
-    // Recursively read all refs in refs/heads, refs/tags, etc.
+    // Recursively read all refs in refs/heads, refs/tags, refs/remotes, etc.
     if refs_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&refs_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    // Read refs/heads/, refs/tags/, etc.
-                    let ref_type = path.file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("");
+        // Use walkdir pattern to recursively traverse all ref directories
+        let mut dirs_to_visit = vec![refs_dir.clone()];
 
-                    if let Ok(ref_entries) = std::fs::read_dir(&path) {
-                        for ref_entry in ref_entries.flatten() {
-                            if ref_entry.path().is_file() {
-                                let ref_name = format!(
-                                    "refs/{}/{}",
-                                    ref_type,
-                                    ref_entry.file_name().to_string_lossy()
-                                );
+        while let Some(current_dir) = dirs_to_visit.pop() {
+            if let Ok(entries) = std::fs::read_dir(&current_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        // Add subdirectory to visit (for nested refs like feature/branch or remotes/origin/main)
+                        dirs_to_visit.push(path);
+                    } else if path.is_file() {
+                        // Construct ref name relative to refs_dir
+                        // e.g., refs/heads/main, refs/heads/feature/branch, refs/remotes/origin/main
+                        if let Ok(relative_path) = path.strip_prefix(&refs_dir) {
+                            let ref_name = format!("refs/{}", relative_path.to_string_lossy().replace('\\', "/"));
 
-                                if let Ok(r) = refdb.read(&ref_name).await {
-                                    ref_infos.push(RefInfo {
-                                        name: ref_name,
-                                        oid: r.oid.map(|o| o.to_hex()).unwrap_or_default(),
-                                        target: r.target,
-                                    });
-                                }
+                            if let Ok(r) = refdb.read(&ref_name).await {
+                                ref_infos.push(RefInfo {
+                                    name: ref_name,
+                                    oid: r.oid.map(|o| o.to_hex()).unwrap_or_default(),
+                                    target: r.target,
+                                });
                             }
                         }
                     }
@@ -289,23 +284,49 @@ pub async fn upload_pack(
 }
 
 /// GET /:repo/objects/pack - Download a pack file (after POST to /objects/want)
+/// Requires X-Request-ID header with the request_id from POST /objects/want response.
 pub async fn download_pack(
     Path(repo): Path<String>,
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
+    headers: HeaderMap,
 ) -> Result<axum::response::Response<axum::body::Body>, StatusCode> {
     tracing::info!("GET /{}/objects/pack", repo);
 
     // Check permission: repo:read required
     check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
 
-    // Get the wanted objects from state (stored by POST /objects/want)
+    // Get request ID from header (required to prevent race conditions)
+    let request_id = headers
+        .get("X-Request-ID")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            tracing::warn!("Missing X-Request-ID header in GET /objects/pack");
+            StatusCode::BAD_REQUEST
+        })?;
+
+    // Get the wanted objects from state using request_id (prevents race conditions)
     let want_list = {
-        let want_map = state.want_cache.lock().await;
-        want_map
-            .get(&repo)
-            .cloned()
-            .ok_or(StatusCode::BAD_REQUEST)?
+        let mut want_map = state.want_cache.lock().await;
+        // Remove from cache after retrieval (one-time use)
+        let entry = want_map.remove(request_id);
+        match entry {
+            Some((cached_repo, want_list)) => {
+                // Verify the request is for the same repo
+                if cached_repo != repo {
+                    tracing::error!(
+                        "Request ID {} was for repo '{}' but pack requested for '{}'",
+                        request_id, cached_repo, repo
+                    );
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+                want_list
+            }
+            None => {
+                tracing::warn!("Request ID {} not found or already used", request_id);
+                return Err(StatusCode::BAD_REQUEST);
+            }
+        }
     };
 
     let repo_path = state.repos_dir.join(&repo);
@@ -318,53 +339,62 @@ pub async fn download_pack(
     let odb = ObjectDatabase::with_smart_compression(storage, 1000);
 
     // Collect all objects recursively (commit -> tree -> blobs)
+    // Use HashSet for O(1) contains checks, Vec for maintaining insertion order
     let mut objects_to_pack: Vec<Oid> = Vec::new();
-    let mut _visited: std::collections::HashSet<Oid> = std::collections::HashSet::new();
+    let mut seen_objects: std::collections::HashSet<Oid> = std::collections::HashSet::new();
 
     // For clones, simply add all requested OIDs plus their children
     // We read the object, identify type, and if commit/tree, add children
     for oid_str in &want_list {
         let oid = Oid::from_hex(oid_str)
             .map_err(|_| StatusCode::BAD_REQUEST)?;
-        
-        // Read the object data
+
+        // Skip if already processed
+        if !seen_objects.insert(oid) {
+            continue;
+        }
+
+        // Read the object data - return error if requested object is missing
+        // Missing objects indicate repository corruption or incomplete state
         let obj_data = match odb.read(&oid).await {
             Ok(data) => data,
             Err(e) => {
-                tracing::error!("Object {} not found: {}", oid, e);
-                continue;
+                tracing::error!("Requested object {} not found: {}", oid, e);
+                return Err(StatusCode::UNPROCESSABLE_ENTITY);
             }
         };
-        
+
         objects_to_pack.push(oid);
-        
+
         // Try to parse as Commit to get tree+blob children
         match Commit::deserialize(&obj_data) {
             Ok(commit) => {
                 tracing::info!("Found commit {} -> tree {}", oid, commit.tree);
-                
-                // Add tree
-                match odb.read(&commit.tree).await {
-                    Ok(tree_data) => {
-                        objects_to_pack.push(commit.tree);
-                        
-                        // Parse tree to get blobs
-                        if let Ok(tree) = Tree::deserialize(&tree_data) {
-                            for entry in tree.iter() {
-                                if !objects_to_pack.contains(&entry.oid) {
-                                    objects_to_pack.push(entry.oid);
+
+                // Add tree if not already seen
+                if seen_objects.insert(commit.tree) {
+                    match odb.read(&commit.tree).await {
+                        Ok(tree_data) => {
+                            objects_to_pack.push(commit.tree);
+
+                            // Parse tree to get blobs
+                            if let Ok(tree) = Tree::deserialize(&tree_data) {
+                                for entry in tree.iter() {
+                                    if seen_objects.insert(entry.oid) {
+                                        objects_to_pack.push(entry.oid);
+                                    }
                                 }
                             }
                         }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Tree {} not found: {}", commit.tree, e);
+                        Err(e) => {
+                            tracing::warn!("Tree {} not found: {}", commit.tree, e);
+                        }
                     }
                 }
             }
             Err(e) => {
                 // Not a commit - might be tree or blob, log the first 20 bytes for debugging
-                tracing::debug!("Object {} not a commit (err: {}), data len: {}, first bytes: {:?}", 
+                tracing::debug!("Object {} not a commit (err: {}), data len: {}, first bytes: {:?}",
                     oid, e, obj_data.len(), &obj_data[..std::cmp::min(20, obj_data.len())]);
             }
         }
@@ -484,12 +514,14 @@ async fn collect_objects_recursive(
 }
 
 /// POST /:repo/objects/want - Request specific objects
+/// Returns a unique request_id that must be used in the X-Request-ID header
+/// when calling GET /objects/pack to retrieve the objects.
 pub async fn request_objects(
     Path(repo): Path<String>,
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
     Json(want_req): Json<WantRequest>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<Json<WantResponse>, StatusCode> {
     tracing::info!(
         "POST /{}/objects/want (want: {}, have: {})",
         repo,
@@ -500,13 +532,16 @@ pub async fn request_objects(
     // Check permission: repo:read required
     check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
 
-    // Store the want list in cache for subsequent GET /objects/pack
+    // Generate unique request ID to prevent race conditions between concurrent clients
+    let request_id = crate::state::generate_request_id();
+
+    // Store the want list in cache keyed by request_id (not repo name)
     {
         let mut want_map = state.want_cache.lock().await;
-        want_map.insert(repo, want_req.want);
+        want_map.insert(request_id.clone(), (repo, want_req.want));
     }
 
-    Ok(StatusCode::OK)
+    Ok(Json(WantResponse { request_id }))
 }
 
 /// POST /:repo/refs/update - Update repository refs
