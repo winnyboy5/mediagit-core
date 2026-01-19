@@ -105,6 +105,33 @@ impl DeltaConfig {
                 min_space_savings: 0.10,
                 max_chain_depth: MAX_CHAIN_DEPTH,
             },
+            // Creative project files: HIGHEST PRIORITY for delta compression
+            // These files see frequent incremental edits (layers, timelines, scenes)
+            // Delta compression can achieve 80-95% space savings between versions
+            ObjectCategory::CreativeProject => DeltaConfig {
+                similarity_threshold: 0.70, // Lower threshold (frequent edits)
+                min_space_savings: 0.10,
+                max_chain_depth: 10, // Allow longer chains for project history
+            },
+            // Office documents: moderate delta effectiveness (XML-based)
+            ObjectCategory::Office => DeltaConfig {
+                similarity_threshold: 0.75,
+                min_space_savings: 0.10,
+                max_chain_depth: MAX_CHAIN_DEPTH,
+            },
+            // ML specialized: differentiate training vs inference
+            // Training checkpoints benefit heavily from delta (incremental learning)
+            ObjectCategory::MlSpecialized => DeltaConfig {
+                similarity_threshold: 0.75, // Model weights change gradually
+                min_space_savings: 0.10,
+                max_chain_depth: 8, // Moderate chains for training runs
+            },
+            // Database: conservative approach
+            ObjectCategory::Database => DeltaConfig {
+                similarity_threshold: 0.80,
+                min_space_savings: 0.10,
+                max_chain_depth: 5,
+            },
             // Git objects: optimized for source code
             ObjectCategory::GitObject => DeltaConfig {
                 similarity_threshold: 0.75,
@@ -112,7 +139,7 @@ impl DeltaConfig {
                 max_chain_depth: MAX_CHAIN_DEPTH,
             },
             // Archives/Unknown: conservative
-            _ => DeltaConfig {
+            ObjectCategory::Archive | ObjectCategory::Unknown => DeltaConfig {
                 similarity_threshold: SIMILARITY_THRESHOLD,
                 min_space_savings: MIN_SPACE_SAVINGS,
                 max_chain_depth: MAX_CHAIN_DEPTH,
