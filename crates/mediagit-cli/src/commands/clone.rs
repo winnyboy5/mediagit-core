@@ -93,6 +93,8 @@ impl CloneCmd {
         std::fs::create_dir_all(storage_path.join("objects"))?;
         std::fs::create_dir_all(storage_path.join("refs").join("heads"))?;
         std::fs::create_dir_all(storage_path.join("refs").join("tags"))?;
+        std::fs::create_dir_all(storage_path.join("refs").join("remotes").join("origin"))?;
+
 
         // Create HEAD pointing to main branch
         let head_content = format!("ref: refs/heads/{}\n", branch);
@@ -161,11 +163,16 @@ url = "{}"
             let (obj_type, obj_data) = pack_reader.get_object_with_type(oid)?;
             let written_oid = odb.write(obj_type, &obj_data).await?;
             unpack_pb.set_position((idx + 1) as u64);
-            
-            // Verify OID matches (for debugging)
-            if self.verbose && written_oid != *oid {
-                println!("  Warning: OID mismatch for {}: expected {}, got {}", 
-                    &oid.to_hex()[..8], &oid.to_hex()[..8], &written_oid.to_hex()[..8]);
+
+            // Verify OID matches - mismatch indicates data corruption
+            if written_oid != *oid {
+                anyhow::bail!(
+                    "Data integrity error: OID mismatch for object {}: expected {}, computed {}. \
+                     This indicates data corruption during transfer.",
+                    &oid.to_hex()[..12],
+                    oid.to_hex(),
+                    written_oid.to_hex()
+                );
             }
         }
         unpack_pb.finish_with_message("Unpack complete");
@@ -194,6 +201,29 @@ url = "{}"
             .map_err(|e| anyhow::anyhow!("Invalid remote OID: {}", e))?;
         let ref_update = mediagit_versioning::Ref::new_direct(remote_ref_name.clone(), remote_oid);
         refdb.write(&ref_update).await?;
+
+        // Step 8b: Create remote tracking refs for ALL branches
+        for ref_info in &remote_refs.refs {
+            if ref_info.name.starts_with("refs/heads/") {
+                // Use unwrap_or to safely handle refs that don't have the expected prefix
+                let branch_name = ref_info.name.strip_prefix("refs/heads/")
+                    .unwrap_or(&ref_info.name);
+                let tracking_ref_name = format!("refs/remotes/origin/{}", branch_name);
+                
+                if let Ok(tracking_oid) = mediagit_versioning::Oid::from_hex(&ref_info.oid) {
+                    let tracking_ref = mediagit_versioning::Ref::new_direct(
+                        tracking_ref_name.clone(),
+                        tracking_oid,
+                    );
+                    refdb.write(&tracking_ref).await?;
+                    
+                    if self.verbose {
+                        println!("  Created tracking ref: {} -> {}", tracking_ref_name, &ref_info.oid[..8]);
+                    }
+                }
+            }
+        }
+
 
         // Step 9: Checkout working directory
         let checkout_pb = progress.file_bar("Checking out", 0);
@@ -230,6 +260,8 @@ url = "{}"
 
         // Extract name from URL
         // e.g., http://localhost:3000/my-project -> my-project
+        // Note: URLs always use forward slashes per RFC 3986, regardless of OS,
+        // so rsplit('/') is correct for cross-platform URL parsing.
         let url = self.url.trim_end_matches('/');
         let name = url
             .rsplit('/')

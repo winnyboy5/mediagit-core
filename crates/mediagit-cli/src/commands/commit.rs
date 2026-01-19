@@ -216,31 +216,54 @@ impl CommitCmd {
             .await
             .context("Failed to write commit object")?;
 
+        // Clear the index BEFORE updating refs for atomicity
+        // If ref update fails after this, user can re-stage and retry.
+        // This prevents the issue where ref is updated but index isn't cleared.
+        let mut index = Index::load(&repo_root)?;
+        let index_backup = index.clone();
+        index.clear();
+        index.save(&repo_root)
+            .context("Failed to clear index")?;
+
         // Update HEAD reference
         let head_ref = refdb.read("HEAD").await?;
-        match head_ref {
+        let ref_update_result = match head_ref {
             Ref {
                 ref_type: mediagit_versioning::RefType::Symbolic,
                 target: Some(branch),
                 ..
             } => {
-                // Update branch reference
+                // Update branch reference (normal case)
                 let branch_ref = Ref::new_direct(branch.clone(), commit_oid);
                 refdb
                     .write(&branch_ref)
                     .await
-                    .context("Failed to update branch reference")?;
+                    .context("Failed to update branch reference")
+            }
+            Ref {
+                ref_type: mediagit_versioning::RefType::Direct,
+                ..
+            } => {
+                // Detached HEAD - update HEAD directly to point to new commit
+                let head_direct = Ref::new_direct("HEAD".to_string(), commit_oid);
+                refdb
+                    .write(&head_direct)
+                    .await
+                    .context("Failed to update HEAD in detached state")
             }
             _ => {
-                anyhow::bail!("HEAD is not pointing to a branch");
+                Err(anyhow::anyhow!("HEAD is in an invalid state"))
             }
-        }
+        };
 
-        // Clear the index after successful commit
-        let mut index = Index::load(&repo_root)?;
-        index.clear();
-        index.save(&repo_root)
-            .context("Failed to clear index")?;
+        // If ref update failed, restore the index backup
+        if let Err(e) = ref_update_result {
+            // Attempt to restore index - log but don't fail on restore error
+            if let Err(restore_err) = index_backup.save(&repo_root) {
+                tracing::error!("Failed to restore index after ref update failure: {}", restore_err);
+            }
+            return Err(e);
+        }
 
         if !self.quiet {
             output::success(&format!("Created commit {}", commit_oid));

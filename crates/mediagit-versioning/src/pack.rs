@@ -32,11 +32,15 @@
 //! ```
 
 use crate::{ObjectType, Oid};
+use crate::delta::{Delta, DeltaDecoder};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::BTreeMap;
 use std::io;
 use tracing::{debug, info, warn};
+
+/// Magic bytes for delta-encoded objects in pack files
+const DELTA_MAGIC: &[u8; 5] = b"DELTA";
 
 const PACK_SIGNATURE: &[u8; 4] = b"PACK";
 const PACK_VERSION: u32 = 2;
@@ -548,10 +552,27 @@ impl PackReader {
 
     /// Get object data and type by OID
     ///
+    /// Handles both regular objects and delta-encoded objects.
+    /// For delta objects, recursively retrieves the base object and applies the delta.
+    ///
     /// # Errors
     ///
     /// Returns error if object not found or data is corrupted
     pub fn get_object_with_type(&self, oid: &Oid) -> io::Result<(ObjectType, Vec<u8>)> {
+        self.get_object_with_type_depth(oid, 0)
+    }
+
+    /// Internal method with depth tracking to prevent infinite recursion in delta chains
+    fn get_object_with_type_depth(&self, oid: &Oid, depth: usize) -> io::Result<(ObjectType, Vec<u8>)> {
+        const MAX_DELTA_CHAIN_DEPTH: usize = 10;
+
+        if depth > MAX_DELTA_CHAIN_DEPTH {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Delta chain too deep (> {})", MAX_DELTA_CHAIN_DEPTH),
+            ));
+        }
+
         let (offset, total_size) = self
             .index
             .lookup(oid)
@@ -567,7 +588,12 @@ impl PackReader {
             ));
         }
 
-        // Read the type from the 1-byte header
+        // Check if this is a delta-encoded object (starts with "DELTA" magic)
+        if total_size >= DELTA_MAGIC.len() && &self.data[offset..offset + DELTA_MAGIC.len()] == DELTA_MAGIC {
+            return self.read_delta_object(oid, offset, total_size, depth);
+        }
+
+        // Regular object: read type from 1-byte header
         let type_byte = self.data[offset];
         let object_type = ObjectType::from_u8(type_byte)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid object type"))?;
@@ -585,6 +611,57 @@ impl PackReader {
         let data = self.data[offset + header_size..offset + header_size + data_size].to_vec();
 
         Ok((object_type, data))
+    }
+
+    /// Read and reconstruct a delta-encoded object from the pack
+    fn read_delta_object(&self, oid: &Oid, offset: usize, total_size: usize, depth: usize) -> io::Result<(ObjectType, Vec<u8>)> {
+        // Delta format: "DELTA" (5 bytes) + base_oid (32 bytes) + delta_data
+        const BASE_OID_SIZE: usize = 32;
+        let min_delta_size = DELTA_MAGIC.len() + BASE_OID_SIZE;
+
+        if total_size < min_delta_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Delta object too small",
+            ));
+        }
+
+        // Read base OID
+        let base_oid_start = offset + DELTA_MAGIC.len();
+        let mut base_oid_bytes = [0u8; 32];
+        base_oid_bytes.copy_from_slice(&self.data[base_oid_start..base_oid_start + BASE_OID_SIZE]);
+        let base_oid = Oid::from(base_oid_bytes);
+
+        // Read delta data
+        let delta_data_start = base_oid_start + BASE_OID_SIZE;
+        let delta_data = &self.data[delta_data_start..offset + total_size];
+
+        debug!(
+            oid = %oid,
+            base_oid = %base_oid,
+            delta_size = delta_data.len(),
+            "Reading delta object from pack"
+        );
+
+        // Get base object (may be another delta, so use depth tracking)
+        let (base_type, base_data) = self.get_object_with_type_depth(&base_oid, depth + 1)?;
+
+        // Parse and apply delta
+        let delta = Delta::from_bytes(delta_data)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to parse delta: {}", e)))?;
+
+        let reconstructed = DeltaDecoder::apply(&base_data, &delta)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to apply delta: {}", e)))?;
+
+        debug!(
+            oid = %oid,
+            base_size = base_data.len(),
+            result_size = reconstructed.len(),
+            "Reconstructed delta object"
+        );
+
+        // Delta objects inherit the type from their base object
+        Ok((base_type, reconstructed))
     }
 
     /// Get the index reference

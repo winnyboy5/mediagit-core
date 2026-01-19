@@ -161,13 +161,16 @@ impl AuditEvent {
 
 /// Helper functions for common audit events
 
+/// Default IP address for unknown clients
+const UNKNOWN_IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0));
+
 /// Log a failed authentication attempt
 pub fn log_authentication_failed(client_ip: Option<IpAddr>, user_id: Option<String>, reason: &str) {
     AuditEvent::new(
         AuditEventType::AuthenticationFailed,
         format!("Authentication failed: {}", reason),
     )
-    .with_client_ip(client_ip.unwrap_or_else(|| "0.0.0.0".parse().unwrap()))
+    .with_client_ip(client_ip.unwrap_or(UNKNOWN_IP))
     .with_user_id(user_id.unwrap_or_else(|| "unknown".to_string()))
     .log();
 }

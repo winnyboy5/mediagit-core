@@ -1,0 +1,19 @@
+# CODEOWNERS file for mediagit-core
+# This file defines who is required to review and approve pull requests
+
+# Default owner for all files - requires approval for all PRs
+* @winnyboy5
+
+# Core libraries require owner approval
+/crates/mediagit-versioning/ @winnyboy5
+/crates/mediagit-compression/ @winnyboy5
+/crates/mediagit-protocol/ @winnyboy5
+/crates/mediagit-storage/ @winnyboy5
+/crates/mediagit-cli/ @winnyboy5
+/crates/mediagit-server/ @winnyboy5
+/crates/mediagit-config/ @winnyboy5
+
+# Configuration files
+Cargo.toml @winnyboy5
+Cargo.lock @winnyboy5
+/.github/ @winnyboy5
