@@ -29,7 +29,8 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     let storage = Arc::new(LocalBackend::new("/path/to/repo")?);
+//!     let storage: Arc<dyn mediagit_storage::StorageBackend> =
+//!         Arc::new(LocalBackend::new("/path/to/repo").await?);
 //!     let checker = FsckChecker::new(storage);
 //!
 //!     // Run full integrity check
@@ -325,7 +326,8 @@ impl FsckChecker {
     /// # use std::sync::Arc;
     /// # #[tokio::main]
     /// # async fn main() -> anyhow::Result<()> {
-    /// # let storage = Arc::new(LocalBackend::new("/tmp")?);
+    /// # let storage: Arc<dyn mediagit_storage::StorageBackend> =
+    /// #     Arc::new(LocalBackend::new("/tmp").await?);
     /// let checker = FsckChecker::new(storage);
     /// let report = checker.check(FsckOptions::full()).await?;
     /// println!("Found {} issues", report.total_issues());
@@ -783,7 +785,8 @@ impl FsckRepair {
     /// # use std::sync::Arc;
     /// # #[tokio::main]
     /// # async fn main() -> anyhow::Result<()> {
-    /// # let storage = Arc::new(LocalBackend::new("/tmp")?);
+    /// # let storage: Arc<dyn mediagit_storage::StorageBackend> =
+    /// #     Arc::new(LocalBackend::new("/tmp").await?);
     /// let checker = FsckChecker::new(storage.clone());
     /// let report = checker.check(FsckOptions::full()).await?;
     ///
