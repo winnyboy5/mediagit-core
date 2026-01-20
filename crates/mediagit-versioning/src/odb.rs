@@ -414,10 +414,10 @@ impl ObjectDatabase {
             let mut metrics = self.metrics.write().await;
             metrics.record_write(data.len() as u64, false);
         } else {
-            // Use smart compressor
+            // Use smart compressor with size-aware strategy
             let storage_data = if let Some(smart_comp) = &self.smart_compressor {
                 let compressed = smart_comp
-                    .compress_typed(data, compression_type)
+                    .compress_typed_with_size(data, compression_type)
                     .map_err(|e| anyhow::anyhow!("Smart compression failed: {}", e))?;
 
                 debug!(
@@ -576,15 +576,15 @@ impl ObjectDatabase {
                 .map_err(|e| anyhow::anyhow!("Failed to check chunk existence for {}: {}", chunk_key, e))?;
             
             if !exists {
-                // Determine compression strategy for chunk based on file type
+                // Determine compression strategy for chunk based on file type and size
                 let compressed = if let Some(smart_comp) = &self.smart_compressor {
-                    // Use file type for optimal compression (e.g., Brotli for CSV, Zstd for ML)
+                    // Use file type and size for optimal compression (Brotli for small CSV, Zstd for large CSV)
                     let chunk_comp_type = if !filename.is_empty() {
                         CompressionObjectType::from_path(filename)
                     } else {
                         CompressionObjectType::Unknown
                     };
-                    smart_comp.compress_typed(&chunk.data, chunk_comp_type)
+                    smart_comp.compress_typed_with_size(&chunk.data, chunk_comp_type)
                         .map_err(|e| anyhow::anyhow!("Failed to compress chunk {}: {}", chunk_key, e))?
                 } else {
                     self.compressor.compress(&chunk.data)
@@ -743,12 +743,12 @@ impl ObjectDatabase {
                     return Ok(());
                 }
                 
-                // Compress chunk with smart compressor (type-aware compression)
-                // Use Brotli for CSV/text, Zstd for binary, etc.
+                // Compress chunk with smart compressor (type-aware + size-aware compression)
+                // Use Brotli for small CSV/text, Zstd for large files or binary
                 let comp_type = CompressionObjectType::from_path(&filename);
                 let data_to_store = if let Some(ref smart) = smart_comp {
-                    // Use smart compressor for optimal compression by file type
-                    smart.compress_typed(&chunk.data, comp_type)?
+                    // Use smart compressor with size awareness for optimal compression
+                    smart.compress_typed_with_size(&chunk.data, comp_type)?
                 } else if compression_enabled {
                     // Fall back to default compressor
                     compressor.compress(&chunk.data)?

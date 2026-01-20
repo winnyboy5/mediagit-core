@@ -466,6 +466,11 @@ pub enum ObjectCategory {
     Unknown,
 }
 
+/// Size threshold for switching from Brotli to Zstd for text files
+/// At 500MB+, Brotli level 9 becomes too slow; Zstd provides 10x faster compression
+/// with only ~20% compression ratio loss
+const LARGE_TEXT_THRESHOLD: usize = 500 * 1024 * 1024; // 500 MB
+
 /// Compression strategy selection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompressionStrategy {
@@ -608,6 +613,25 @@ impl CompressionStrategy {
             ObjectType::Unknown => CompressionStrategy::Zstd(CompressionLevel::Default),
         }
     }
+
+    /// Select optimal strategy for object type with size consideration
+    /// 
+    /// For large text files (>500MB), switches from Brotli to Zstd for 10x faster compression
+    /// with only ~20% compression ratio loss.
+    pub fn for_object_type_with_size(obj_type: ObjectType, data_size: usize) -> Self {
+        // Check if this is a text type that would normally use Brotli
+        let base_strategy = Self::for_object_type(obj_type);
+        
+        // For large text files, switch from Brotli to Zstd for faster compression
+        if data_size >= LARGE_TEXT_THRESHOLD {
+            if let CompressionStrategy::Brotli(_) = base_strategy {
+                // Use Zstd Default for large text files (10x faster, ~20% worse ratio)
+                return CompressionStrategy::Zstd(CompressionLevel::Default);
+            }
+        }
+        
+        base_strategy
+    }
 }
 
 /// Type-aware compressor trait
@@ -615,11 +639,18 @@ pub trait TypeAwareCompressor: Send + Sync {
     /// Compress with automatic strategy selection
     fn compress_typed(&self, data: &[u8], obj_type: ObjectType) -> CompressionResult<Vec<u8>>;
 
+    /// Compress with automatic strategy selection considering data size
+    /// For large text files (>500MB), uses Zstd instead of Brotli for faster compression
+    fn compress_typed_with_size(&self, data: &[u8], obj_type: ObjectType) -> CompressionResult<Vec<u8>>;
+
     /// Decompress data (auto-detects algorithm)
     fn decompress_typed(&self, data: &[u8]) -> CompressionResult<Vec<u8>>;
 
     /// Get compression strategy for object type
     fn strategy_for_type(&self, obj_type: ObjectType) -> CompressionStrategy;
+
+    /// Get compression strategy for object type with size consideration
+    fn strategy_for_type_with_size(&self, obj_type: ObjectType, data_size: usize) -> CompressionStrategy;
 }
 
 /// Smart compressor with automatic type-based strategy selection
@@ -701,6 +732,11 @@ impl TypeAwareCompressor for SmartCompressor {
         self.compress_with_strategy(data, strategy)
     }
 
+    fn compress_typed_with_size(&self, data: &[u8], obj_type: ObjectType) -> CompressionResult<Vec<u8>> {
+        let strategy = self.strategy_for_type_with_size(obj_type, data.len());
+        self.compress_with_strategy(data, strategy)
+    }
+
     fn decompress_typed(&self, data: &[u8]) -> CompressionResult<Vec<u8>> {
         // Auto-detect compression algorithm
         use crate::CompressionAlgorithm;
@@ -731,6 +767,10 @@ impl TypeAwareCompressor for SmartCompressor {
 
     fn strategy_for_type(&self, obj_type: ObjectType) -> CompressionStrategy {
         CompressionStrategy::for_object_type(obj_type)
+    }
+
+    fn strategy_for_type_with_size(&self, obj_type: ObjectType, data_size: usize) -> CompressionStrategy {
+        CompressionStrategy::for_object_type_with_size(obj_type, data_size)
     }
 }
 

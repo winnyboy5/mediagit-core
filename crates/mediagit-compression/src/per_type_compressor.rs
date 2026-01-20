@@ -360,6 +360,46 @@ impl TypeAwareCompressor for PerObjectTypeCompressor {
     fn strategy_for_type(&self, obj_type: ObjectType) -> CompressionStrategy {
         self.strategy_for_type(obj_type)
     }
+
+    fn compress_typed_with_size(&self, data: &[u8], obj_type: ObjectType) -> CompressionResult<Vec<u8>> {
+        let start = Instant::now();
+        let strategy = CompressionStrategy::for_object_type_with_size(obj_type, data.len());
+        let result = self.compress_with_strategy(data, strategy)?;
+        let duration = start.elapsed();
+
+        // Record metrics
+        let mut metrics = CompressionMetrics::default();
+        let algorithm = match strategy {
+            CompressionStrategy::Store => MetricsAlgorithm::None,
+            CompressionStrategy::Zlib(_) => MetricsAlgorithm::Zlib,
+            CompressionStrategy::Zstd(_) => MetricsAlgorithm::Zstd,
+            CompressionStrategy::Brotli(_) => MetricsAlgorithm::Brotli,
+            CompressionStrategy::Delta => MetricsAlgorithm::Zstd,
+        };
+        let level = match strategy {
+            CompressionStrategy::Store => MetricsLevel::Fast,
+            CompressionStrategy::Zlib(l) | CompressionStrategy::Zstd(l) | CompressionStrategy::Brotli(l) => {
+                match l {
+                    CompressionLevel::Fast => MetricsLevel::Fast,
+                    CompressionLevel::Default => MetricsLevel::Default,
+                    CompressionLevel::Best => MetricsLevel::Best,
+                }
+            }
+            CompressionStrategy::Delta => MetricsLevel::Default,
+        };
+        metrics.record_compression(data, &result, duration, algorithm, level);
+
+        // Update per-type stats
+        if let Ok(mut stats) = self.stats.lock() {
+            stats.entry(obj_type).or_insert_with(PerTypeStats::default).record(&metrics);
+        }
+
+        Ok(result)
+    }
+
+    fn strategy_for_type_with_size(&self, obj_type: ObjectType, data_size: usize) -> CompressionStrategy {
+        CompressionStrategy::for_object_type_with_size(obj_type, data_size)
+    }
 }
 
 impl Compressor for PerObjectTypeCompressor {
