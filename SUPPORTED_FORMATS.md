@@ -263,6 +263,31 @@ MediaGit is a version control system optimized for large media files. This docum
 | Houdini | `hip`, `hiplc`, `hipnc` |
 | ZBrush | `zpr`, `ztl` |
 
+### 🎹 Audio DAWs/Sessions (`ObjectType::CreativeProject`)
+
+| Application | Extensions |
+|-------------|------------|
+| Pro Tools | `ptx`, `pts` |
+| Ableton Live | `als` |
+| FL Studio | `flp` |
+| Logic Pro | `logic`, `logicx` |
+
+### 📐 CAD/Design (`ObjectType::CreativeProject`)
+
+| Application | Extensions |
+|-------------|------------|
+| AutoCAD | `dwg`, `dxf` |
+| SketchUp | `skp` |
+| Revit | `rvt` |
+
+### 🎮 Game Engine Projects (`ObjectType::CreativeProject`)
+
+| Engine | Extensions |
+|--------|------------|
+| Unity | `unity`, `unitypackage` |
+| Unreal Engine | `uasset`, `umap` |
+| Godot | `tscn`, `tres` |
+
 ### 🎞️ VFX/Creative Apps (`MediaType::Vfx`)
 
 | Category | Extensions |
@@ -280,6 +305,21 @@ MediaGit is a version control system optimized for large media files. This docum
 | Figma | `fig` |
 | Sketch | `sketch` |
 | Adobe XD | `xd` |
+| Avid Media Composer | `avb`, `avp` |
+
+### 📄 Office Documents (`ObjectType::Office`)
+
+| Suite | Extensions |
+|-------|------------|
+| Microsoft Office | `docx`, `xlsx`, `pptx` |
+| OpenDocument | `odt`, `ods`, `odp` |
+| Rich Text | `rtf` |
+
+### 🗄️ Database (`ObjectType::Database`)
+
+| Type | Extensions |
+|------|------------|
+| SQLite | `sqlite`, `db`, `db3` |
 
 ### 📄 Text/Code (Rolling CDC)
 
@@ -347,12 +387,48 @@ MediaGit is a version control system optimized for large media files. This docum
 
 ## Compression Pipeline
 
-| Compressor | Use Case | Ratio | Speed |
-|------------|----------|-------|-------|
-| **Zstd** | Default for most files | High | Fast |
-| **Brotli** | Text and code files | Very High | Medium |
-| **LZ4** | Real-time streaming | Medium | Very Fast |
-| **Delta** | Similar file versions | Very High | Medium |
+### Algorithm Selection by File Type
+
+| File Type | Algorithm | Improvement | Notes |
+|-----------|-----------|-------------|-------|
+| Text/JSON/XML/CSV/YAML (<500MB) | **Brotli** | 15-30% better compression | Dictionary-based, excels at structured data |
+| Text/JSON/XML/CSV/YAML (≥500MB) | **Zstd Default** | 10x faster | Auto-fallback for large files |
+| ML Training Checkpoints | **Zstd Fast** | Faster compression | Optimized for huge, frequently-updated files |
+| ML Inference Models | **Zstd Default** | Better archival | Balance of ratio and speed |
+| Creative Projects | **Zstd Default + Delta** | 80-95% savings | Aggressive delta between versions |
+| Office Documents | **Zstd Default + Delta** | High dedup | Similar delta optimization |
+| Already Compressed | **Store** | No overhead | JPG, PNG, MP3, ZIP - skip recompression |
+| General Files | **Zstd Default** | High ratio, fast | Balanced default strategy |
+
+> **Size-Based Threshold**: Text/structured data files larger than **500MB** automatically use Zstd Default instead of Brotli. This provides 10x faster compression with only ~20% worse compression ratio, dramatically reducing processing time for large datasets (e.g., 6GB CSV: ~43 seconds with Zstd vs ~10+ minutes with Brotli).
+
+### Compression Algorithms
+
+| Algorithm | Quality Levels | Use Case | Compression Ratio | Speed |
+|-----------|---------------|----------|-------------------|-------|
+| **Zstd Fast** | 1-3 | Large, frequent files (ML checkpoints) | Medium | Very Fast |
+| **Zstd Default** | 3-6 | General purpose, creative projects | High | Fast |
+| **Zstd Best** | 19-22 | Archival, small files | Very High | Slow |
+| **Brotli** | 6-9 | Text, JSON, XML, structured data | Very High (15-30% better) | Medium |
+| **LZ4** | - | Real-time streaming | Medium | Very Fast |
+| **Delta** | - | Similar file versions | Very High (80-95%) | Medium |
+
+---
+
+## Delta Compression Configurations
+
+Delta compression is applied per-category with optimized thresholds:
+
+| Category | Similarity Threshold | Chain Depth | Use Cases |
+|----------|---------------------|-------------|------------|
+| **CreativeProject** | 70% | 10 | Adobe apps, DAWs, 3D/CAD, game engines |
+| **Office** | 75% | 10 | Word, Excel, PowerPoint, OpenDocument |
+| **MlSpecialized** | 75% | 8 | Training checkpoints, incremental training |
+| **Database** | 80% | 5 | SQLite databases |
+| **Video** | 80% | 3 | Video container formats |
+| **Image** | 85% | 3 | Standard images |
+
+> **Note**: Higher similarity thresholds reduce false-positive delta matches. Lower thresholds (like 70% for creative projects) enable more aggressive deduplication for files that change frequently but retain significant content.
 
 ---
 
