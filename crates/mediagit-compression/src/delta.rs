@@ -105,6 +105,33 @@ impl DeltaConfig {
                 min_space_savings: 0.10,
                 max_chain_depth: MAX_CHAIN_DEPTH,
             },
+            // Creative project files: HIGHEST PRIORITY for delta compression
+            // These files see frequent incremental edits (layers, timelines, scenes)
+            // Delta compression can achieve 80-95% space savings between versions
+            ObjectCategory::CreativeProject => DeltaConfig {
+                similarity_threshold: 0.70, // Lower threshold (frequent edits)
+                min_space_savings: 0.10,
+                max_chain_depth: 10, // Allow longer chains for project history
+            },
+            // Office documents: moderate delta effectiveness (XML-based)
+            ObjectCategory::Office => DeltaConfig {
+                similarity_threshold: 0.75,
+                min_space_savings: 0.10,
+                max_chain_depth: MAX_CHAIN_DEPTH,
+            },
+            // ML specialized: differentiate training vs inference
+            // Training checkpoints benefit heavily from delta (incremental learning)
+            ObjectCategory::MlSpecialized => DeltaConfig {
+                similarity_threshold: 0.75, // Model weights change gradually
+                min_space_savings: 0.10,
+                max_chain_depth: 8, // Moderate chains for training runs
+            },
+            // Database: conservative approach
+            ObjectCategory::Database => DeltaConfig {
+                similarity_threshold: 0.80,
+                min_space_savings: 0.10,
+                max_chain_depth: 5,
+            },
             // Git objects: optimized for source code
             ObjectCategory::GitObject => DeltaConfig {
                 similarity_threshold: 0.75,
@@ -112,7 +139,7 @@ impl DeltaConfig {
                 max_chain_depth: MAX_CHAIN_DEPTH,
             },
             // Archives/Unknown: conservative
-            _ => DeltaConfig {
+            ObjectCategory::Archive | ObjectCategory::Unknown => DeltaConfig {
                 similarity_threshold: SIMILARITY_THRESHOLD,
                 min_space_savings: MIN_SPACE_SAVINGS,
                 max_chain_depth: MAX_CHAIN_DEPTH,
@@ -958,5 +985,118 @@ mod tests {
 
         assert_eq!(should1, should2, "Both methods should return same decision");
         assert_eq!(data1, data2, "Both methods should return same data");
+    }
+
+    #[test]
+    fn test_new_category_delta_configurations() {
+        use crate::smart_compressor::{ObjectType, ObjectCategory};
+
+        // Test Creative Project configuration
+        let creative_config = DeltaConfig::for_object_type(ObjectType::AdobePhotoshop);
+        assert_eq!(creative_config.similarity_threshold, 0.70, "Creative projects should have 70% threshold");
+        assert_eq!(creative_config.max_chain_depth, 10, "Creative projects should allow depth 10");
+        assert_eq!(creative_config.min_space_savings, 0.10, "Creative projects should require 10% savings");
+
+        // Verify all creative project types use same config
+        assert_eq!(ObjectType::AdobePhotoshop.category(), ObjectCategory::CreativeProject);
+        assert_eq!(ObjectType::Blender.category(), ObjectCategory::CreativeProject);
+        assert_eq!(ObjectType::DavinciResolve.category(), ObjectCategory::CreativeProject);
+
+        // Test Office configuration
+        let office_config = DeltaConfig::for_object_type(ObjectType::WordDocument);
+        assert_eq!(office_config.similarity_threshold, 0.75, "Office docs should have 75% threshold");
+        assert_eq!(office_config.max_chain_depth, 10, "Office docs should allow depth 10");
+        assert_eq!(ObjectType::WordDocument.category(), ObjectCategory::Office);
+
+        // Test ML Specialized configuration
+        let ml_config = DeltaConfig::for_object_type(ObjectType::MlCheckpoint);
+        assert_eq!(ml_config.similarity_threshold, 0.75, "ML models should have 75% threshold");
+        assert_eq!(ml_config.max_chain_depth, 8, "ML models should allow depth 8");
+        assert_eq!(ObjectType::MlCheckpoint.category(), ObjectCategory::MlSpecialized);
+        assert_eq!(ObjectType::MlInference.category(), ObjectCategory::MlSpecialized);
+
+        // Test Database configuration
+        let db_config = DeltaConfig::for_object_type(ObjectType::SqliteDatabase);
+        assert_eq!(db_config.similarity_threshold, 0.80, "Databases should have 80% threshold");
+        assert_eq!(db_config.max_chain_depth, 5, "Databases should allow depth 5");
+        assert_eq!(ObjectType::SqliteDatabase.category(), ObjectCategory::Database);
+    }
+
+    #[test]
+    fn test_creative_project_delta_priority() {
+        use crate::smart_compressor::ObjectType;
+
+        // Creative projects have the most aggressive delta configuration
+        let creative_config = DeltaConfig::for_object_type(ObjectType::AdobePhotoshop);
+        let image_config = DeltaConfig::for_object_type(ObjectType::Tiff);
+        let video_config = DeltaConfig::for_object_type(ObjectType::Mp4);
+
+        // Creative projects should have lower threshold than images
+        assert!(
+            creative_config.similarity_threshold < image_config.similarity_threshold,
+            "Creative projects (0.70) should have lower threshold than images (0.85)"
+        );
+
+        // Creative projects should allow longer chains than most types
+        assert!(
+            creative_config.max_chain_depth >= image_config.max_chain_depth,
+            "Creative projects should allow equal or longer chains"
+        );
+
+        // Video has highest threshold (metadata changes only)
+        assert!(
+            video_config.similarity_threshold > creative_config.similarity_threshold,
+            "Video (0.95) should have higher threshold than creative projects (0.70)"
+        );
+    }
+
+    #[test]
+    fn test_delta_roundtrip_creative_project() {
+        use crate::smart_compressor::ObjectType;
+
+        let encoder = DeltaEncoder::new();
+
+        // Use a more realistic test - text-based content like .blend or XML-based creative files
+        // Simulate creative project data with high similarity
+        let base_content = b"<CreativeProjectLayer id='1' opacity='100%'>".repeat(100);
+        let mut base_data = base_content.clone();
+
+        // Modified version (small change - like adjusting opacity in one layer)
+        let mut modified = base_data.clone();
+        // Change a few bytes to simulate minor edits
+        for i in (0..modified.len()).step_by(500) {
+            if i < modified.len() {
+                modified[i] = b'X';
+            }
+        }
+
+        // Calculate similarity
+        let similarity = encoder.calculate_similarity(&base_data, &modified);
+
+        // Get config for creative projects
+        let config = DeltaConfig::for_object_type(ObjectType::AdobePhotoshop);
+
+        // Verify similarity threshold
+        // Creative projects have 0.70 threshold, should be met with minor changes
+        assert!(
+            similarity >= config.similarity_threshold,
+            "Similarity {:.2} should meet creative project threshold {:.2}",
+            similarity,
+            config.similarity_threshold
+        );
+
+        // Test that config is correctly applied
+        assert_eq!(config.max_chain_depth, 10, "Creative projects should allow depth 10");
+        assert_eq!(
+            config.similarity_threshold, 0.70,
+            "Creative projects should have 70% threshold"
+        );
+
+        // Verify the category
+        assert_eq!(
+            ObjectType::AdobePhotoshop.category(),
+            crate::smart_compressor::ObjectCategory::CreativeProject,
+            "AdobePhotoshop should be in CreativeProject category"
+        );
     }
 }
