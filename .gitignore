@@ -43,6 +43,9 @@ coverage/
 *.tar.gz
 *.zip
 
+# MediaGit test repositories
+**/.mediagit/
+
 # Documentation
 # mdBook build output (generated HTML) - exclude built docs
 book/book/
