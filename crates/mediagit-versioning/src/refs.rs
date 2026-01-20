@@ -137,7 +137,7 @@ impl Ref {
     /// # Examples
     ///
     /// ```
-    /// use mediagit_versioning::Ref;
+    /// use mediagit_versioning::{Ref, Oid};
     ///
     /// let r = Ref::new_direct("refs/heads/main".to_string(), Oid::hash(b"x"));
     /// assert_eq!(r.namespace(), Some("heads"));
@@ -155,7 +155,7 @@ impl Ref {
     /// # Examples
     ///
     /// ```
-    /// use mediagit_versioning::Ref;
+    /// use mediagit_versioning::{Ref, Oid};
     ///
     /// let r = Ref::new_direct("refs/heads/feature/auth".to_string(), Oid::hash(b"x"));
     /// assert_eq!(r.short_name(), "heads/feature/auth");
@@ -172,7 +172,7 @@ impl Ref {
     /// # Examples
     ///
     /// ```
-    /// use mediagit_versioning::Ref;
+    /// use mediagit_versioning::{Ref, Oid};
     ///
     /// let r = Ref::new_direct("refs/heads/feature/auth".to_string(), Oid::hash(b"x"));
     /// assert_eq!(r.branch_name(), "auth");
