@@ -1059,7 +1059,7 @@ mod tests {
         // Use a more realistic test - text-based content like .blend or XML-based creative files
         // Simulate creative project data with high similarity
         let base_content = b"<CreativeProjectLayer id='1' opacity='100%'>".repeat(100);
-        let mut base_data = base_content.clone();
+        let base_data = base_content.clone();
 
         // Modified version (small change - like adjusting opacity in one layer)
         let mut modified = base_data.clone();
