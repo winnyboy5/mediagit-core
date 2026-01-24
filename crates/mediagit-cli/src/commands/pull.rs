@@ -140,12 +140,14 @@ impl PullCmd {
         );
 
         // Determine remote ref to pull
+        // Clone head.target early since we need it later for branch comparison
+        let current_head_target = head.target.clone();
         let remote_ref = if let Some(branch) = &self.branch {
             // Normalize branch name to handle both short and full ref paths
             mediagit_versioning::normalize_ref_name(branch)
         } else {
             // Default: pull tracking branch for current HEAD (reuse head from above)
-            head.target.ok_or_else(|| {
+            current_head_target.clone().ok_or_else(|| {
                 anyhow::anyhow!("HEAD is detached, please specify a branch")
             })?
         };
@@ -299,8 +301,26 @@ impl PullCmd {
                 );
             }
 
-            // Integrate changes (merge or rebase)
-            if self.rebase {
+            // Integrate changes (merge or rebase) - ONLY if pulling the current branch
+            // Check if we're pulling the current branch or a different one
+            let is_pulling_current_branch = match &current_head_target {
+                Some(target) => target == &remote_ref,
+                None => false, // Detached HEAD - don't auto-merge
+            };
+
+            if !is_pulling_current_branch {
+                // Pulled a different branch - just update refs, don't merge into current
+                let branch_short = remote_ref.strip_prefix("refs/heads/")
+                    .unwrap_or(&remote_ref);
+                if !self.quiet {
+                    println!(
+                        "{} Fetched branch '{}' (use: mediagit branch switch {})",
+                        style("✓").green(),
+                        branch_short,
+                        branch_short
+                    );
+                }
+            } else if self.rebase {
                 // TODO: Implement rebase integration
                 if !self.quiet {
                     println!(
@@ -310,7 +330,7 @@ impl PullCmd {
                     println!("  Use merge strategy instead (default)");
                 }
             } else {
-                // Merge integration
+                // Merge integration - only for CURRENT branch
                 let head = refdb.read("HEAD").await?;
                 if let Some(head_oid) = head.oid {
                     let merge_engine =

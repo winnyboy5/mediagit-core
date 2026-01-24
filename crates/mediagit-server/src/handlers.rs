@@ -343,61 +343,19 @@ pub async fn download_pack(
     let mut objects_to_pack: Vec<Oid> = Vec::new();
     let mut seen_objects: std::collections::HashSet<Oid> = std::collections::HashSet::new();
 
-    // For clones, simply add all requested OIDs plus their children
-    // We read the object, identify type, and if commit/tree, add children
+    // Recursively collect all objects reachable from wanted OIDs
+    // This properly handles nested trees (subdirectories) and parent commits (history)
     for oid_str in &want_list {
         let oid = Oid::from_hex(oid_str)
             .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-        // Skip if already processed
-        if !seen_objects.insert(oid) {
-            continue;
-        }
-
-        // Read the object data - return error if requested object is missing
-        // Missing objects indicate repository corruption or incomplete state
-        let obj_data = match odb.read(&oid).await {
-            Ok(data) => data,
-            Err(e) => {
-                tracing::error!("Requested object {} not found: {}", oid, e);
-                return Err(StatusCode::UNPROCESSABLE_ENTITY);
-            }
-        };
-
-        objects_to_pack.push(oid);
-
-        // Try to parse as Commit to get tree+blob children
-        match Commit::deserialize(&obj_data) {
-            Ok(commit) => {
-                tracing::info!("Found commit {} -> tree {}", oid, commit.tree);
-
-                // Add tree if not already seen
-                if seen_objects.insert(commit.tree) {
-                    match odb.read(&commit.tree).await {
-                        Ok(tree_data) => {
-                            objects_to_pack.push(commit.tree);
-
-                            // Parse tree to get blobs
-                            if let Ok(tree) = Tree::deserialize(&tree_data) {
-                                for entry in tree.iter() {
-                                    if seen_objects.insert(entry.oid) {
-                                        objects_to_pack.push(entry.oid);
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("Tree {} not found: {}", commit.tree, e);
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                // Not a commit - might be tree or blob, log the first 20 bytes for debugging
-                tracing::debug!("Object {} not a commit (err: {}), data len: {}, first bytes: {:?}",
-                    oid, e, obj_data.len(), &obj_data[..std::cmp::min(20, obj_data.len())]);
-            }
-        }
+        // Use recursive collection to get all commits, trees, and blobs
+        collect_objects_recursive(&odb, oid, &mut objects_to_pack, &mut seen_objects)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to collect objects from {}: {}", oid, e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
     }
 
     tracing::info!("Collecting {} objects for pack (from {} requested)", objects_to_pack.len(), want_list.len());
@@ -460,8 +418,8 @@ pub async fn download_pack(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-/// Recursively collect an object and its children (for commits and trees)
-#[allow(dead_code)]
+/// Recursively collect an object and its children (for commits and trees).
+/// Used by download_pack to ensure all nested objects are included in packs.
 async fn collect_objects_recursive(
     odb: &ObjectDatabase,
     oid: Oid,

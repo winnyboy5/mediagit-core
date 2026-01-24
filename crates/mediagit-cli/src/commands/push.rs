@@ -114,6 +114,10 @@ pub struct PushCmd {
     #[arg(short = 'u', long)]
     pub set_upstream: bool,
 
+    /// Push without setting upstream (not recommended for long-lived branches)
+    #[arg(long)]
+    pub no_track: bool,
+
     /// Quiet mode
     #[arg(short, long)]
     pub quiet: bool,
@@ -252,6 +256,34 @@ impl PushCmd {
             });
         }
 
+        // BLOCK: Check for new branches without upstream (Git-like behavior)
+        // For non-default branches, require explicit -u or --no-track
+        if !self.set_upstream && !self.no_track {
+            for update in &updates {
+                // Only check new branches (no old_oid means it doesn't exist on remote)
+                if update.old_oid.is_none() && update.name.starts_with("refs/heads/") {
+                    let branch_name = update.name.strip_prefix("refs/heads/")
+                        .unwrap_or(&update.name);
+                    
+                    // Default branches (main/master) are allowed without -u
+                    let is_default_branch = branch_name == "main" || branch_name == "master";
+                    
+                    // Check if upstream is already configured
+                    let has_upstream = config.get_branch_upstream(branch_name).is_some();
+                    
+                    // Block if: new branch + not default + no upstream configured
+                    if !is_default_branch && !has_upstream {
+                        anyhow::bail!(
+                            "The current branch '{}' has no upstream branch.\n\
+                            To push the current branch and set the remote as upstream, use:\n\n\
+                            \x20   mediagit push -u {} {}\n",
+                            branch_name, remote, branch_name
+                        );
+                    }
+                }
+            }
+        }
+
         // If all refs are up-to-date, exit early
         if updates.is_empty() {
             if !self.quiet {
@@ -341,8 +373,12 @@ impl PushCmd {
                 anyhow::bail!("Push failed: {}", errors.join(", "));
             }
 
+            // Track which branches are new (didn't exist on remote before this push)
+            let mut new_branches: Vec<String> = Vec::new();
+
             if !self.quiet {
                 println!("{} Push successful!", style("✓").green().bold());
+                
                 for res in result.results {
                     if res.success {
                         // Find the corresponding update to show old->new
@@ -356,6 +392,12 @@ impl PushCmd {
                                     &update.new_oid[..8]
                                 );
                             } else {
+                                // Track new branches for auto-upstream
+                                if res.ref_name.starts_with("refs/heads/") {
+                                    let branch_name = res.ref_name.strip_prefix("refs/heads/")
+                                        .unwrap_or(&res.ref_name);
+                                    new_branches.push(branch_name.to_string());
+                                }
                                 println!(
                                     "  {} {} (new) → {}",
                                     style("*").green(),
@@ -370,6 +412,84 @@ impl PushCmd {
                 }
                 if skipped_uptodate > 0 {
                     println!("  {} {} refs already up to date", style("ℹ").blue(), skipped_uptodate);
+                }
+            } else {
+                // Even in quiet mode, we need to track new branches for upstream
+                for update in &updates {
+                    if update.old_oid.is_none() && update.name.starts_with("refs/heads/") {
+                        let branch_name = update.name.strip_prefix("refs/heads/")
+                            .unwrap_or(&update.name);
+                        new_branches.push(branch_name.to_string());
+                    }
+                }
+            }
+
+            // Create/update tracking refs for pushed branches (refs/remotes/origin/branch)
+            // This ensures `branch list -r` shows pushed branches in the original repo
+            for update in &updates {
+                if update.name.starts_with("refs/heads/") {
+                    let branch_name = update.name.strip_prefix("refs/heads/")
+                        .unwrap_or(&update.name);
+                    let tracking_ref_name = format!("refs/remotes/{}/{}", remote, branch_name);
+                    
+                    if let Ok(oid) = mediagit_versioning::Oid::from_hex(&update.new_oid) {
+                        let tracking_ref = mediagit_versioning::Ref::new_direct(
+                            tracking_ref_name.clone(),
+                            oid,
+                        );
+                        if let Err(e) = refdb.write(&tracking_ref).await {
+                            if self.verbose {
+                                println!("  Warning: Failed to update tracking ref {}: {}", tracking_ref_name, e);
+                            }
+                        } else if self.verbose {
+                            println!("  Updated tracking ref: {}", tracking_ref_name);
+                        }
+                    }
+                }
+            }
+
+            // Auto-setup upstream tracking for default branches, or when -u is explicitly used
+            // Non-default branches without -u are blocked before push, so they won't reach here
+            let should_process_upstream = self.set_upstream || !new_branches.is_empty();
+            
+            if should_process_upstream && !refs_to_push.is_empty() {
+                let mut config = config; // Make mutable
+                let mut any_upstream_set = false;
+                
+                for ref_to_push in &refs_to_push {
+                    // Extract branch name from full ref (e.g., "refs/heads/main" -> "main")
+                    let branch_name = ref_to_push.strip_prefix("refs/heads/")
+                        .unwrap_or(ref_to_push);
+                    
+                    // Check if this is a new branch
+                    let is_new_branch = new_branches.contains(&branch_name.to_string());
+                    let has_upstream = config.get_branch_upstream(branch_name).is_some();
+                    
+                    // Determine if this is a default branch (main or master)
+                    let is_default_branch = branch_name == "main" || branch_name == "master";
+                    
+                    // Set upstream if:
+                    // 1. -u flag explicitly requested, OR
+                    // 2. New DEFAULT branch (main/master) without existing upstream
+                    if self.set_upstream || (is_new_branch && !has_upstream && is_default_branch) {
+                        config.set_branch_upstream(branch_name, remote, ref_to_push.clone());
+                        any_upstream_set = true;
+                        
+                        if !self.quiet {
+                            println!(
+                                "{} Branch '{}' set up to track '{}/{}'",
+                                style("ℹ").blue(),
+                                branch_name,
+                                remote,
+                                branch_name
+                            );
+                        }
+                    }
+                }
+                
+                // Save the updated config only if we made changes
+                if any_upstream_set {
+                    config.save(&repo_root)?;
                 }
             }
         } else {

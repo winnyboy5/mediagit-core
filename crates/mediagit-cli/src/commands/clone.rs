@@ -202,81 +202,17 @@ url = "{}"
         let ref_update = mediagit_versioning::Ref::new_direct(remote_ref_name.clone(), remote_oid);
         refdb.write(&ref_update).await?;
 
-        // Step 8b: Download objects for all remote branches and create tracking refs
+        // Step 8b: Create tracking refs for all remote branches (LAZY CLONE)
+        // We only download objects for the default branch. Other branches' objects
+        // will be fetched on-demand when user runs `pull origin branch` or `branch switch`.
+        let mut other_branches = Vec::new();
         for ref_info in &remote_refs.refs {
             if ref_info.name.starts_with("refs/heads/") {
-                // Use unwrap_or to safely handle refs that don't have the expected prefix
                 let branch_name = ref_info.name.strip_prefix("refs/heads/")
                     .unwrap_or(&ref_info.name);
                 let tracking_ref_name = format!("refs/remotes/origin/{}", branch_name);
 
-                // Skip the branch we already downloaded (the default checkout branch)
-                if ref_info.name == remote_ref_name {
-                    // Just create the tracking ref for the default branch (objects already downloaded)
-                    if let Ok(tracking_oid) = mediagit_versioning::Oid::from_hex(&ref_info.oid) {
-                        let tracking_ref = mediagit_versioning::Ref::new_direct(
-                            tracking_ref_name.clone(),
-                            tracking_oid,
-                        );
-                        refdb.write(&tracking_ref).await?;
-
-                        if self.verbose {
-                            println!("  Created tracking ref: {} -> {}", tracking_ref_name, &ref_info.oid[..8]);
-                        }
-                    }
-                    continue;
-                }
-
-                // For other branches, download objects first
-                if self.verbose {
-                    println!("  Downloading objects for branch: {}", branch_name);
-                }
-
-                // Download objects for this branch
-                let (branch_pack_data, branch_chunked_oids) = client.pull(&odb, &ref_info.name).await?;
-                let branch_pack_size = branch_pack_data.len();
-
-                if self.verbose {
-                    println!("    Received {} bytes pack, {} chunked objects", branch_pack_size, branch_chunked_oids.len());
-                }
-
-                // Unpack objects for this branch
-                if branch_pack_size > 0 {
-                    let branch_pack_reader = mediagit_versioning::PackReader::new(branch_pack_data)?;
-                    let branch_objects = branch_pack_reader.list_objects();
-
-                    for oid in branch_objects.iter() {
-                        let (obj_type, obj_data) = branch_pack_reader.get_object_with_type(oid)?;
-                        let written_oid = odb.write(obj_type, &obj_data).await?;
-
-                        // Verify OID matches
-                        if written_oid != *oid {
-                            anyhow::bail!(
-                                "Data integrity error: OID mismatch for object {}: expected {}, computed {}",
-                                &oid.to_hex()[..12],
-                                oid.to_hex(),
-                                written_oid.to_hex()
-                            );
-                        }
-                    }
-
-                    if self.verbose {
-                        println!("    Unpacked {} objects", branch_objects.len());
-                    }
-                }
-
-                // Download chunked objects for this branch (large files)
-                if !branch_chunked_oids.is_empty() {
-                    let chunks_downloaded = client.download_chunked_objects(&odb, &branch_chunked_oids, |_current, _total, _msg| {
-                        // Silent progress for additional branches
-                    }).await?;
-
-                    if self.verbose {
-                        println!("    Downloaded {} chunks for {} large files", chunks_downloaded, branch_chunked_oids.len());
-                    }
-                }
-
-                // Now create the tracking ref with objects available
+                // Create tracking ref for this branch (just the reference, not objects)
                 if let Ok(tracking_oid) = mediagit_versioning::Oid::from_hex(&ref_info.oid) {
                     let tracking_ref = mediagit_versioning::Ref::new_direct(
                         tracking_ref_name.clone(),
@@ -287,8 +223,24 @@ url = "{}"
                     if self.verbose {
                         println!("  Created tracking ref: {} -> {}", tracking_ref_name, &ref_info.oid[..8]);
                     }
+                    
+                    // Track other branches for summary
+                    if ref_info.name != remote_ref_name {
+                        other_branches.push(branch_name.to_string());
+                    }
                 }
             }
+        }
+        
+        // Show available branches to user
+        if !other_branches.is_empty() && !self.quiet {
+            println!(
+                "{} {} other branch(es) available: {}",
+                style("ℹ").blue(),
+                other_branches.len(),
+                other_branches.join(", ")
+            );
+            println!("  Use 'mediagit pull origin <branch>' then 'mediagit branch switch <branch>' to access");
         }
 
 
