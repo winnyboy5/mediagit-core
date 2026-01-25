@@ -202,26 +202,45 @@ url = "{}"
         let ref_update = mediagit_versioning::Ref::new_direct(remote_ref_name.clone(), remote_oid);
         refdb.write(&ref_update).await?;
 
-        // Step 8b: Create remote tracking refs for ALL branches
+        // Step 8b: Create tracking refs for all remote branches (LAZY CLONE)
+        // We only download objects for the default branch. Other branches' objects
+        // will be fetched on-demand when user runs `pull origin branch` or `branch switch`.
+        let mut other_branches = Vec::new();
         for ref_info in &remote_refs.refs {
             if ref_info.name.starts_with("refs/heads/") {
-                // Use unwrap_or to safely handle refs that don't have the expected prefix
                 let branch_name = ref_info.name.strip_prefix("refs/heads/")
                     .unwrap_or(&ref_info.name);
                 let tracking_ref_name = format!("refs/remotes/origin/{}", branch_name);
-                
+
+                // Create tracking ref for this branch (just the reference, not objects)
                 if let Ok(tracking_oid) = mediagit_versioning::Oid::from_hex(&ref_info.oid) {
                     let tracking_ref = mediagit_versioning::Ref::new_direct(
                         tracking_ref_name.clone(),
                         tracking_oid,
                     );
                     refdb.write(&tracking_ref).await?;
-                    
+
                     if self.verbose {
                         println!("  Created tracking ref: {} -> {}", tracking_ref_name, &ref_info.oid[..8]);
                     }
+                    
+                    // Track other branches for summary
+                    if ref_info.name != remote_ref_name {
+                        other_branches.push(branch_name.to_string());
+                    }
                 }
             }
+        }
+        
+        // Show available branches to user
+        if !other_branches.is_empty() && !self.quiet {
+            println!(
+                "{} {} other branch(es) available: {}",
+                style("ℹ").blue(),
+                other_branches.len(),
+                other_branches.join(", ")
+            );
+            println!("  Use 'mediagit pull origin <branch>' then 'mediagit branch switch <branch>' to access");
         }
 
 
