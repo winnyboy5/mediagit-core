@@ -1,54 +1,76 @@
-# MediaGit-Core: Unimplemented Features & Incomplete Functionalities
+# MediaGit-Core: Unimplemented Features & Implementation Plan
 
-**Last Updated**: 2026-01-24
-**Status**: Tracking Document
-**PRD Compliance**: 99.6% (excluding items below)
+**Last Updated**: 2026-01-25
+**Status**: Active Development Tracker
+**PRD Compliance**: 99.6%
+**Total Items**: 15
 
 ---
 
 ## Overview
 
-This document tracks all unimplemented features, incomplete functionalities, and placeholders in the mediagit-core codebase. Use this for planning future development work.
+This document tracks unimplemented features, incomplete functionalities, and provides a detailed implementation plan aligned with mediagit-core's roadmap (v0.2.0 and beyond).
 
 ---
 
 ## Priority Legend
 
-| Priority | Description | Action Required |
-|----------|-------------|-----------------|
-| 🔴 P0 | Breaking - Users will hit errors | Immediate fix or remove |
-| 🟡 P1 | Major missing feature | Plan for next release |
-| 🟠 P2 | Minor missing feature | Backlog |
-| 🔵 P3 | Technical debt | Low priority |
+| Priority | Description | SLA | Action |
+|----------|-------------|-----|--------|
+| 🔴 P0 | Breaking - Users hit errors | This sprint | Immediate fix or feature flag |
+| 🟡 P1 | Major missing feature | Next release | Plan for v0.2.0 |
+| 🟠 P2 | Minor missing feature | Backlog | Plan for v0.2.x |
+| 🔵 P3 | Technical debt | Opportunistic | Low priority |
+
+---
+
+## Summary by Category
+
+| Category | P0 | P1 | P2 | P3 | Total |
+|----------|-----|-----|-----|-----|-------|
+| Storage Backend | 1 | 1 | 0 | 0 | 2 |
+| CLI Commands | 0 | 3 | 4 | 0 | 7 |
+| Git Integration | 0 | 0 | 1 | 0 | 1 |
+| Media Processing | 0 | 0 | 0 | 1 | 1 |
+| Versioning | 0 | 0 | 0 | 1 | 1 |
+| Security | 0 | 0 | 0 | 3 | 3 |
+| **Total** | **1** | **4** | **5** | **5** | **15** |
 
 ---
 
 ## 1. Storage Backend
 
-### 🔴 P0: B2/Spaces Backend Not Implemented
+### 🔴 P0-STORAGE-001: B2/Spaces Backend Not Implemented
 
-**Location**: `crates/mediagit-storage/src/b2_spaces.rs`
+**Location**: `crates/mediagit-storage/src/b2_spaces.rs:476-590`
+
+**Impact**: Backblaze B2 and DigitalOcean Spaces storage backends advertised but completely unusable.
 
 | Method | Line | Current Behavior |
 |--------|------|------------------|
-| `get()` | 476-487 | Returns error: "AWS SDK S3 dependency required" |
-| `put()` | 489-513 | Returns error: "AWS SDK S3 dependency required" |
-| `exists()` | 515-540 | Returns error: "AWS SDK S3 dependency required" |
-| `delete()` | 542-565 | Returns error: "AWS SDK S3 dependency required" |
-| `list_objects()` | 567-590 | Returns error: "AWS SDK S3 dependency required" |
+| `get()` | 476-487 | Returns `Err("AWS SDK S3 dependency required")` |
+| `put()` | 489-513 | Returns `Err("AWS SDK S3 dependency required")` |
+| `exists()` | 515-540 | Returns `Err("AWS SDK S3 dependency required")` |
+| `delete()` | 542-565 | Returns `Err("AWS SDK S3 dependency required")` |
+| `list_objects()` | 567-590 | Returns `Err("AWS SDK S3 dependency required")` |
 
-**Impact**: Backblaze B2 and DigitalOcean Spaces storage completely unusable.
+**Decision Required**:
+| Option | Effort | Recommendation |
+|--------|--------|----------------|
+| A. Implement using `aws-sdk-s3` with custom endpoint | 2-3 days | ✅ Recommended |
+| B. Remove from crate, document as unsupported | 1 day | Acceptable |
+| C. Add `#[cfg(feature = "b2_spaces")]` compile-time flag | 0.5 day | Stopgap |
 
-**Resolution Options**:
-1. Implement using `aws-sdk-s3` with custom endpoint
-2. Remove from crate and document as unsupported
-3. Add compile-time feature flag to exclude
+**Dependencies**: aws-sdk-s3 (already in workspace)
 
-**Effort Estimate**: Medium (2-3 days)
+**Implementation Notes**:
+- Both B2 and Spaces are S3-compatible
+- Existing S3Backend can be adapted with custom endpoint configuration
+- Consider refactoring to share S3 client code
 
 ---
 
-### 🟡 P1: GCS Multi-Backend Server Support
+### 🟡 P1-STORAGE-002: GCS Multi-Backend Server Support
 
 **Location**: `crates/mediagit-server/src/handlers.rs:154`
 
@@ -56,138 +78,126 @@ This document tracks all unimplemented features, incomplete functionalities, and
 tracing::error!("GCS and Multi-backend storage are not yet implemented");
 ```
 
-**Impact**: Server can't use GCS backend directly.
+**Impact**: Server cannot use GCS backend directly. CLI works fine.
 
-**Effort Estimate**: Medium (1-2 days)
+**Effort**: 1-2 days
 
 ---
 
 ## 2. CLI Commands
 
-### 🟡 P1: Branch List Cross-Platform Path Handling (Test Failure)
+### 🟡 P1-CLI-001: Branch List Cross-Platform Path Handling (Test Failure)
 
-**Location**: `crates/mediagit-cli/src/commands/branch.rs` (branch list implementation)
+**Location**: `crates/mediagit-cli/src/commands/branch.rs`
+**Test**: `comprehensive_e2e_tests.rs:375` - `e2e_branch_create_and_switch`
 
-**Test**: `crates/mediagit-cli/tests/comprehensive_e2e_tests.rs:375` - `e2e_branch_create_and_switch`
-
-**Failure Details**:
+**Failure (Windows)**:
 ```
-thread 'e2e_branch_create_and_switch' panicked:
-Unexpected stdout, failed var.contains(* feature)
-├── var:   refs/heads\feature
-│     refs/heads\main
+Expected: * feature
+Actual:   refs/heads\feature
 ```
 
-**Root Cause**: Two issues identified:
-1. **Path separator**: Windows outputs `refs/heads\feature` (backslash) instead of `refs/heads/feature`
-2. **Format mismatch**: Output shows full refs path instead of short branch name with `*` current marker
-
-**Expected Output**:
-```
-* feature
-  main
-```
-
-**Actual Output (Windows)**:
-```
-  refs/heads\feature
-  refs/heads\main
-```
-
-**Impact**: Branch list output inconsistent across platforms, missing current branch indicator.
+**Root Causes**:
+1. Path separator: Windows `\` vs Unix `/`
+2. Full refs path instead of short branch name
+3. Missing `*` current branch marker
 
 **Resolution**:
-1. Normalize path separators to forward slashes
-2. Display short branch names (strip `refs/heads/`)
-3. Add `*` marker for current/HEAD branch
+```rust
+// Normalize path separators
+let normalized = path.replace('\\', "/");
+// Strip refs/heads/ prefix
+let short_name = normalized.strip_prefix("refs/heads/").unwrap_or(&normalized);
+// Add current branch marker
+let marker = if is_current { "* " } else { "  " };
+```
 
-**Effort Estimate**: Small (1 day)
+**Effort**: 0.5 day
 
 ---
 
-### 🟡 P1: Rebase Command Incomplete
+### 🟡 P1-CLI-002: Rebase Command Incomplete
 
 **Location**: `crates/mediagit-cli/src/commands/rebase.rs`
 
-| Feature | Line | Current Behavior |
-|---------|------|------------------|
-| Interactive (`-i`) | 72 | `anyhow::bail!("Interactive rebase not yet implemented")` |
-| Merge commits | 75 | `anyhow::bail!("Rebase with merge commits not yet implemented")` |
-| `--abort` | 263 | `anyhow::bail!("Rebase abort not yet implemented")` |
-| `--continue` | 270 | `anyhow::bail!("Rebase continue not yet implemented")` |
-| `--skip` | 277 | `anyhow::bail!("Rebase skip not yet implemented")` |
+| Feature | Line | Status |
+|---------|------|--------|
+| Interactive (`-i`) | 72 | `bail!("not yet implemented")` |
+| Merge commits | 75 | `bail!("not yet implemented")` |
+| `--abort` | 263 | `bail!("not yet implemented")` |
+| `--continue` | 270 | `bail!("not yet implemented")` |
+| `--skip` | 277 | `bail!("not yet implemented")` |
 
-**Impact**: Users cannot use interactive rebase or recover from rebase conflicts.
+**Impact**: Users cannot use interactive rebase or recover from conflicts.
 
-**Effort Estimate**: Large (1-2 weeks)
+**Effort**: Large (1-2 weeks)
 
----
-
-### 🟡 P1: Pull Rebase Integration
-
-**Location**: `crates/mediagit-cli/src/commands/pull.rs`
-
-| Feature | Line | Current Behavior |
-|---------|------|------------------|
-| `--rebase` flag | 43 | Documented but falls back to merge |
-| Rebase integration | 324-327 | Prints warning, uses merge instead |
-
-**Impact**: `pull --rebase` silently falls back to merge.
-
-**Effort Estimate**: Medium (depends on rebase implementation)
+**Dependencies**: Requires conflict resolution framework
 
 ---
 
-### 🟠 P2: Branch Command Features
+### 🟡 P1-CLI-003: Pull Rebase Integration
 
-**Location**: `crates/mediagit-cli/src/commands/branch.rs`
+**Location**: `crates/mediagit-cli/src/commands/pull.rs:324-327`
 
-| Feature | Line | Current Behavior |
-|---------|------|------------------|
-| `--protect` | 579 | `anyhow::bail!("Branch protection not yet implemented")` |
-| `--merge` | 695 | `anyhow::bail!("Branch merge not yet implemented")` |
+**Current**: `--rebase` flag documented but silently falls back to merge.
 
-**Impact**: Cannot protect branches or merge via branch command.
-
-**Note**: `--merge` redirects users to use `mediagit merge` command.
-
-**Effort Estimate**: Small-Medium
+**Effort**: Medium (depends on P1-CLI-002)
 
 ---
 
-### 🟠 P2: Remote Show Details
+### 🟠 P2-CLI-004: Branch Protection
 
-**Location**: `crates/mediagit-cli/src/commands/remote.rs`
+**Location**: `crates/mediagit-cli/src/commands/branch.rs:579`
 
-| Feature | Line | Current Behavior |
-|---------|------|------------------|
-| HEAD branch | 292 | Prints "(not yet implemented)" |
-| Remote refs | 296 | Prints "(not yet implemented)" |
+```rust
+anyhow::bail!("Branch protection not yet implemented")
+```
 
-**Impact**: `remote show <name>` provides incomplete information.
+**Impact**: Cannot protect branches from force-push or deletion.
 
-**Effort Estimate**: Small (1 day)
+**Effort**: 1-2 days
 
 ---
 
-### 🟠 P2: Verify Commit Range
+### 🟠 P2-CLI-005: Branch Merge via Branch Command
 
-**Location**: `crates/mediagit-cli/src/commands/verify.rs`
+**Location**: `crates/mediagit-cli/src/commands/branch.rs:695`
 
-| Feature | Line | Current Behavior |
-|---------|------|------------------|
-| `--from` | 58 | Struct field exists, not used |
-| `--to` | 62 | Struct field exists, not used |
+**Current**: Redirects users to `mediagit merge` command.
 
-**Impact**: Cannot verify specific commit ranges.
+**Resolution**: Either implement or improve error message with exact command.
 
-**Effort Estimate**: Small (1 day)
+**Effort**: 0.5 day (message) or 1 day (implement)
+
+---
+
+### 🟠 P2-CLI-006: Remote Show Details
+
+**Location**: `crates/mediagit-cli/src/commands/remote.rs:292-296`
+
+| Feature | Status |
+|---------|--------|
+| HEAD branch | Prints "(not yet implemented)" |
+| Remote refs | Prints "(not yet implemented)" |
+
+**Effort**: 1 day
+
+---
+
+### 🟠 P2-CLI-007: Verify Commit Range
+
+**Location**: `crates/mediagit-cli/src/commands/verify.rs:58-62`
+
+**Current**: `--from` and `--to` flags exist in struct but are unused.
+
+**Effort**: 1 day
 
 ---
 
 ## 3. Git Integration
 
-### 🟠 P2: Smudge Filter Object Retrieval
+### 🟠 P2-GIT-001: Smudge Filter Object Retrieval
 
 **Location**: `crates/mediagit-git/src/filter.rs:330`
 
@@ -195,32 +205,29 @@ Unexpected stdout, failed var.contains(* feature)
 warn!("Object retrieval not yet implemented, outputting pointer file");
 ```
 
-**Impact**: Git smudge filter outputs pointer instead of actual file content.
+**Impact**: Git smudge filter outputs pointer instead of actual content.
 
-**Effort Estimate**: Medium (2-3 days)
+**Effort**: 2-3 days
 
 ---
 
 ## 4. Media Processing
 
-### 🔵 P3: Image Metadata Extraction
+### 🔵 P3-MEDIA-001: Image Metadata Extraction
 
-**Location**: `crates/mediagit-media/src/image.rs`
+**Location**: `crates/mediagit-media/src/image.rs:399-418`
 
-| Feature | Line | Current Behavior |
-|---------|------|------------------|
-| Full metadata | 399 | Returns empty metadata placeholder |
-| Extended metadata | 418 | Returns empty metadata placeholder |
+**Current**: Returns empty metadata placeholder.
 
-**Impact**: Image metadata not fully extracted for merge intelligence.
+**Impact**: Image metadata not available for merge intelligence.
 
-**Effort Estimate**: Medium (2-3 days)
+**Effort**: 2-3 days
 
 ---
 
 ## 5. Versioning
 
-### 🔵 P3: Pack Delta Count
+### 🔵 P3-VERSION-001: Pack Delta Count
 
 **Location**: `crates/mediagit-versioning/src/pack.rs:696`
 
@@ -228,94 +235,146 @@ warn!("Object retrieval not yet implemented, outputting pointer file");
 delta_count: 0, // Placeholder
 ```
 
-**Impact**: Pack statistics don't report accurate delta counts.
+**Impact**: Pack statistics show 0 deltas regardless of actual count.
 
-**Effort Estimate**: Small (few hours)
+**Effort**: Few hours
 
 ---
 
 ## 6. Security
 
-### 🔵 P3: TLS Feature Stubs
+### 🔵 P3-SECURITY-001: TLS Feature Stubs
 
 **Location**: `crates/mediagit-security/src/tls/`
 
-| Feature | File | Line | Status |
-|---------|------|------|--------|
-| Certificate loading | config.rs | 193 | Stub for non-TLS feature |
-| Self-signed generation | cert.rs | 234 | Stub for non-TLS feature |
+| Feature | File:Line | Status |
+|---------|-----------|--------|
+| Certificate loading | config.rs:193 | Stub for non-TLS |
+| Self-signed generation | cert.rs:234 | Stub for non-TLS |
 
-**Impact**: None when TLS feature is disabled. Stubs exist for API completeness.
-
-**Effort Estimate**: N/A (intentional stubs)
+**Impact**: None when TLS disabled. Intentional API stubs.
 
 ---
 
-### 🔵 P3: Encryption Benchmark
+### 🔵 P3-SECURITY-002: Encryption Benchmark
 
 **Location**: `crates/mediagit-security/benches/encryption_benchmark.rs`
 
-Entire file is a placeholder benchmark with no real tests.
+**Current**: Placeholder benchmark with no real tests.
 
-**Impact**: No performance baseline for encryption.
-
-**Effort Estimate**: Small (1 day)
+**Effort**: 1 day
 
 ---
 
-## Summary Statistics
+### 🔵 P3-SECURITY-003: Security Audit Trail
 
-| Priority | Count | Percentage |
-|----------|-------|------------|
-| 🔴 P0 (Breaking) | 1 | 7% |
-| 🟡 P1 (Major) | 4 | 27% |
-| 🟠 P2 (Minor) | 5 | 33% |
-| 🔵 P3 (Tech Debt) | 5 | 33% |
-| **Total** | **15** | 100% |
+**Status**: No structured audit logging for security events.
+
+**Effort**: 2-3 days
 
 ---
 
-## Code Markers Reference
+## Implementation Plan
 
-Search patterns for finding these in code:
+### Sprint 1: Fix Breaking Issues (P0)
+
+**Duration**: 1 week
+**Goal**: Zero P0 issues
+
+| ID | Task | Owner | Status | Notes |
+|----|------|-------|--------|-------|
+| P0-STORAGE-001 | B2/Spaces Backend | TBD | 🔲 Pending | Decision: Implement or feature-flag |
+
+**Deliverables**:
+- [ ] B2/Spaces decision made and implemented
+- [ ] All tests passing on Windows + Linux
+
+---
+
+### Sprint 2: Core CLI Polish (P1)
+
+**Duration**: 2 weeks
+**Goal**: Cross-platform stability, basic rebase
+
+| ID | Task | Effort | Dependencies |
+|----|------|--------|--------------|
+| P1-CLI-001 | Branch list path handling | 0.5 day | None |
+| P1-STORAGE-002 | GCS server support | 1-2 days | None |
+| P1-CLI-002 | Rebase basics (non-interactive) | 1 week | None |
+| P1-CLI-003 | Pull --rebase | 2 days | P1-CLI-002 |
+
+**Deliverables**:
+- [ ] `branch list` works identically on Windows/Linux/macOS
+- [ ] Basic `rebase` command functional
+- [ ] `pull --rebase` uses actual rebase
+
+---
+
+### Sprint 3: CLI Feature Completion (P2)
+
+**Duration**: 1 week
+**Goal**: Complete minor CLI features
+
+| ID | Task | Effort |
+|----|------|--------|
+| P2-CLI-004 | Branch protection | 1-2 days |
+| P2-CLI-006 | Remote show details | 1 day |
+| P2-CLI-007 | Verify commit range | 1 day |
+| P2-GIT-001 | Smudge filter | 2-3 days |
+
+---
+
+### Sprint 4: Technical Debt (P3)
+
+**Duration**: 1 week
+**Goal**: Clean up placeholders
+
+| ID | Task | Effort |
+|----|------|--------|
+| P3-VERSION-001 | Pack delta count | Few hours |
+| P3-MEDIA-001 | Image metadata | 2-3 days |
+| P3-SECURITY-002 | Encryption benchmark | 1 day |
+
+---
+
+## Code Search Patterns
 
 ```bash
-# All "not implemented" markers
+# Find all "not implemented" markers
 grep -rn "not yet implemented\|not implemented" crates/
 
-# All placeholders
-grep -rn "placeholder\|Placeholder" crates/
+# Find all bail! macros (potential incomplete features)
+grep -rn 'bail!\|anyhow::bail!' crates/
 
-# All stubs
-grep -rn "stub\|Stub" crates/
+# Find all placeholders
+grep -rn "placeholder\|Placeholder\|TODO\|FIXME" crates/
 
-# B2/Spaces specific
+# Find B2/Spaces specific
 grep -rn "AWS SDK S3 dependency required" crates/
+
+# Find test failures
+cargo test 2>&1 | grep -E "FAILED|error\[E"
 ```
 
 ---
 
-## Implementation Roadmap Suggestion
+## Alignment with README Roadmap
 
-### Phase 1: Fix Breaking Issues
-- [ ] B2/Spaces: Decide implement vs remove
+### v0.2.0 (Next Release) - Alignment Check
 
-### Phase 2: Complete Core Git Operations
-- [ ] Branch list cross-platform path handling (P1 - test failure)
-- [ ] Rebase interactive mode
-- [ ] Rebase abort/continue/skip
-- [ ] Pull --rebase integration
+| README Goal | Tracker Item | Status |
+|-------------|--------------|--------|
+| Branch switching optimization | P1-CLI-001 | ✅ Tracked |
+| Real cloud provider testing | P0-STORAGE-001 | ✅ Tracked |
+| Enhanced error messages | Multiple P2 items | ✅ Tracked |
 
-### Phase 3: Polish CLI
-- [ ] Remote show details
-- [ ] Verify commit ranges
-- [ ] Branch protection
+### Items NOT in README (Consider Adding)
 
-### Phase 4: Technical Debt
-- [ ] Smudge filter completion
-- [ ] Image metadata extraction
-- [ ] Pack delta counting
-- [ ] Encryption benchmarks
+| Item | Recommendation |
+|------|----------------|
+| Rebase command | Add to v0.2.0 roadmap |
+| Pull --rebase | Add to v0.2.0 roadmap |
+| Cross-platform path handling | Add as bug fix |
 
 ---
 
@@ -323,10 +382,27 @@ grep -rn "AWS SDK S3 dependency required" crates/
 
 | Date | Change | Author |
 |------|--------|--------|
-| 2026-01-25 | Added P1: Branch list cross-platform path handling (test failure) | Claude |
-| 2026-01-25 | Added P1: Branch list cross-platform path handling (test failure) | Claude |
+| 2026-01-25 | Restructured document with implementation plan | Claude |
+| 2026-01-25 | Added P1-CLI-001: Branch list cross-platform (test failure) | Claude |
 | 2026-01-24 | Initial document created from codebase analysis | Claude |
 
 ---
 
-*This document should be updated whenever features are implemented or new incomplete functionality is discovered.*
+## Metrics & Tracking
+
+### Current Status
+- **P0 (Breaking)**: 1 item (7%)
+- **P1 (Major)**: 4 items (27%)
+- **P2 (Minor)**: 5 items (33%)
+- **P3 (Tech Debt)**: 5 items (33%)
+- **Total**: 15 items
+
+### Target (v0.2.0)
+- **P0**: 0 items
+- **P1**: 0 items
+- **P2**: ≤3 items
+- **P3**: Best effort
+
+---
+
+*This document is the source of truth for incomplete features. Update when features are implemented or new gaps discovered.*
