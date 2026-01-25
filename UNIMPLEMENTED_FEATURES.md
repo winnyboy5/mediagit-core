@@ -64,6 +64,47 @@ tracing::error!("GCS and Multi-backend storage are not yet implemented");
 
 ## 2. CLI Commands
 
+### 🟡 P1: Branch List Cross-Platform Path Handling (Test Failure)
+
+**Location**: `crates/mediagit-cli/src/commands/branch.rs` (branch list implementation)
+
+**Test**: `crates/mediagit-cli/tests/comprehensive_e2e_tests.rs:375` - `e2e_branch_create_and_switch`
+
+**Failure Details**:
+```
+thread 'e2e_branch_create_and_switch' panicked:
+Unexpected stdout, failed var.contains(* feature)
+├── var:   refs/heads\feature
+│     refs/heads\main
+```
+
+**Root Cause**: Two issues identified:
+1. **Path separator**: Windows outputs `refs/heads\feature` (backslash) instead of `refs/heads/feature`
+2. **Format mismatch**: Output shows full refs path instead of short branch name with `*` current marker
+
+**Expected Output**:
+```
+* feature
+  main
+```
+
+**Actual Output (Windows)**:
+```
+  refs/heads\feature
+  refs/heads\main
+```
+
+**Impact**: Branch list output inconsistent across platforms, missing current branch indicator.
+
+**Resolution**:
+1. Normalize path separators to forward slashes
+2. Display short branch names (strip `refs/heads/`)
+3. Add `*` marker for current/HEAD branch
+
+**Effort Estimate**: Small (1 day)
+
+---
+
 ### 🟡 P1: Rebase Command Incomplete
 
 **Location**: `crates/mediagit-cli/src/commands/rebase.rs`
@@ -227,10 +268,10 @@ Entire file is a placeholder benchmark with no real tests.
 | Priority | Count | Percentage |
 |----------|-------|------------|
 | 🔴 P0 (Breaking) | 1 | 7% |
-| 🟡 P1 (Major) | 3 | 21% |
-| 🟠 P2 (Minor) | 5 | 36% |
-| 🔵 P3 (Tech Debt) | 5 | 36% |
-| **Total** | **14** | 100% |
+| 🟡 P1 (Major) | 4 | 27% |
+| 🟠 P2 (Minor) | 5 | 33% |
+| 🔵 P3 (Tech Debt) | 5 | 33% |
+| **Total** | **15** | 100% |
 
 ---
 
@@ -260,6 +301,7 @@ grep -rn "AWS SDK S3 dependency required" crates/
 - [ ] B2/Spaces: Decide implement vs remove
 
 ### Phase 2: Complete Core Git Operations
+- [ ] Branch list cross-platform path handling (P1 - test failure)
 - [ ] Rebase interactive mode
 - [ ] Rebase abort/continue/skip
 - [ ] Pull --rebase integration
@@ -281,6 +323,8 @@ grep -rn "AWS SDK S3 dependency required" crates/
 
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-01-25 | Added P1: Branch list cross-platform path handling (test failure) | Claude |
+| 2026-01-25 | Added P1: Branch list cross-platform path handling (test failure) | Claude |
 | 2026-01-24 | Initial document created from codebase analysis | Claude |
 
 ---
