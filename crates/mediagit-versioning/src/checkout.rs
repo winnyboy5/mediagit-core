@@ -195,14 +195,37 @@ impl<'a> CheckoutManager<'a> {
     ///
     /// Returns true if directory still exists (has contents or couldn't be removed)
     fn try_remove_empty_dirs(&self, dir: &Path, removed_any: &mut bool) -> Result<bool> {
-        if !dir.exists() || !dir.is_dir() || dir == self.repo_root {
-            return Ok(false);
+        if !dir.exists() || !dir.is_dir() {
+            return Ok(false); // Directory doesn't exist
+        }
+        
+        // Don't try to remove the repo root
+        if dir == self.repo_root {
+            // But still process its contents
+            for entry in fs::read_dir(dir)? {
+                let entry = entry?;
+                let path = entry.path();
+
+                // Skip .mediagit directory
+                if path.file_name().and_then(|n| n.to_str()) == Some(".mediagit") {
+                    continue;
+                }
+
+                if path.is_dir() {
+                    self.try_remove_empty_dirs(&path, removed_any)?;
+                }
+            }
+            return Ok(true); // Repo root always "has contents"
         }
 
         let mut has_contents = false;
 
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
+        // First pass: recursively process subdirectories
+        let entries: Vec<_> = fs::read_dir(dir)?
+            .filter_map(|e| e.ok())
+            .collect();
+        
+        for entry in &entries {
             let path = entry.path();
 
             // Skip .mediagit directory
@@ -221,18 +244,31 @@ impl<'a> CheckoutManager<'a> {
             }
         }
 
-        // Remove directory if empty
+        // Remove directory if empty (re-check after subdirectory processing)
         if !has_contents {
-            match fs::remove_dir(dir) {
-                Ok(_) => {
-                    debug!("Removed empty directory: {}", dir.display());
-                    *removed_any = true;
-                    Ok(false) // Successfully removed
-                }
-                Err(e) => {
-                    // Log but don't fail (might be permission issue)
-                    debug!("Failed to remove empty directory {}: {}", dir.display(), e);
-                    Ok(true) // Still has directory (couldn't remove)
+            // On Windows, there can be timing issues with file handles
+            // Retry a few times with small delays
+            let mut attempts = 0;
+            const MAX_ATTEMPTS: u32 = 3;
+            
+            loop {
+                match fs::remove_dir(dir) {
+                    Ok(_) => {
+                        debug!("Removed empty directory: {}", dir.display());
+                        *removed_any = true;
+                        return Ok(false); // Successfully removed
+                    }
+                    Err(e) => {
+                        attempts += 1;
+                        if attempts >= MAX_ATTEMPTS {
+                            // Log but don't fail (might be permission issue or file locks)
+                            debug!("Failed to remove empty directory {} after {} attempts: {}", 
+                                   dir.display(), attempts, e);
+                            return Ok(true); // Still has directory (couldn't remove)
+                        }
+                        // Small delay before retry (Windows file handle release)
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
                 }
             }
         } else {

@@ -27,6 +27,10 @@ pub struct Config {
     #[serde(default)]
     pub remotes: HashMap<String, RemoteConfig>,
 
+    /// Branch tracking configuration (upstream branches)
+    #[serde(default)]
+    pub branches: HashMap<String, BranchConfig>,
+
     /// Custom user-defined settings
     #[serde(default)]
     pub custom: HashMap<String, serde_json::Value>,
@@ -83,6 +87,22 @@ impl Config {
         let toml_str = toml::to_string_pretty(self)?;
         std::fs::write(&config_path, toml_str)?;
         Ok(())
+    }
+
+    /// Get upstream tracking for a branch
+    /// Returns (remote_name, remote_branch) if tracked
+    pub fn get_branch_upstream(&self, branch: &str) -> Option<(&str, &str)> {
+        self.branches.get(branch).map(|bc| (bc.remote.as_str(), bc.merge.as_str()))
+    }
+
+    /// Set upstream tracking for a branch
+    pub fn set_branch_upstream(&mut self, branch: impl Into<String>, remote: impl Into<String>, merge: impl Into<String>) {
+        self.branches.insert(branch.into(), BranchConfig::new(remote, merge));
+    }
+
+    /// Remove upstream tracking for a branch
+    pub fn remove_branch_upstream(&mut self, branch: &str) -> Option<BranchConfig> {
+        self.branches.remove(branch)
     }
 }
 
@@ -515,6 +535,26 @@ pub struct RateLimitConfig {
     pub burst_size: u32,
 }
 
+/// Branch tracking configuration (similar to Git's branch.<name>.remote and branch.<name>.merge)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BranchConfig {
+    /// The remote to push/pull from by default
+    pub remote: String,
+
+    /// The remote branch to merge from (e.g., "refs/heads/main")
+    pub merge: String,
+}
+
+impl BranchConfig {
+    /// Create a new branch tracking config
+    pub fn new(remote: impl Into<String>, merge: impl Into<String>) -> Self {
+        Self {
+            remote: remote.into(),
+            merge: merge.into(),
+        }
+    }
+}
+
 // Default value functions
 fn default_true() -> bool {
     true
@@ -650,6 +690,7 @@ impl Default for Config {
             observability: ObservabilityConfig::default(),
             security: SecurityConfig::default(),
             remotes: HashMap::new(),
+            branches: HashMap::new(),
             custom: HashMap::new(),
         }
     }

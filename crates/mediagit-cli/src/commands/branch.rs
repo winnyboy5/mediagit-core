@@ -276,6 +276,7 @@ impl BranchCmd {
 
     async fn list(&self, opts: &ListOpts) -> Result<()> {
         use crate::output;
+        use console::style;
 
         let repo_root = self.find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
@@ -283,35 +284,80 @@ impl BranchCmd {
             Arc::new(LocalBackend::new(&storage_path).await?);
         let refdb = RefDatabase::new(&storage_path);
 
-        // List local branches from refs/heads (pass namespace only, not full path)
-        let branches = refdb.list("heads").await?;
-
-        if branches.is_empty() {
-            if !opts.quiet {
-                output::info("No branches found");
-            }
-            return Ok(());
-        }
-
-        // Get current branch
+        // Get current branch for highlighting
         let head = refdb.read("HEAD").await.ok();
         let current_branch = head.and_then(|h| h.target);
 
-        for branch_name in branches {
-            let is_current = current_branch
-                .as_ref()
-                .map(|cb| cb == &branch_name)
-                .unwrap_or(false);
+        let mut any_branches_found = false;
 
-            let prefix = if is_current { "* " } else { "  " };
-            let display_name = branch_name.strip_prefix("refs/heads/").unwrap_or(&branch_name);
+        // List local branches (unless --remote only)
+        if !opts.remote {
+            let local_branches = refdb.list("heads").await?;
+            
+            if !local_branches.is_empty() {
+                any_branches_found = true;
+                
+                for branch_name in local_branches {
+                    let is_current = current_branch
+                        .as_ref()
+                        .map(|cb| cb == &branch_name)
+                        .unwrap_or(false);
 
-            if opts.verbose {
-                let branch_ref = refdb.read(&branch_name).await.ok();
-                let oid_display = branch_ref.and_then(|r| r.oid).map(|o| o.to_string()).unwrap_or_else(|| "unknown".to_string());
-                output::info(&format!("{}{} -> {}", prefix, display_name, oid_display));
-            } else {
-                println!("{}{}", prefix, display_name);
+                    let prefix = if is_current { "* " } else { "  " };
+                    let display_name = branch_name.strip_prefix("refs/heads/").unwrap_or(&branch_name);
+
+                    if opts.verbose {
+                        let branch_ref = refdb.read(&branch_name).await.ok();
+                        let oid_display = branch_ref.and_then(|r| r.oid).map(|o| format!("{}", &o.to_string()[..8])).unwrap_or_else(|| "unknown".to_string());
+                        if is_current {
+                            println!("{}{} -> {}", style(prefix).green(), style(display_name).green().bold(), oid_display);
+                        } else {
+                            println!("{}{} -> {}", prefix, display_name, oid_display);
+                        }
+                    } else {
+                        if is_current {
+                            println!("{}{}", style(prefix).green(), style(display_name).green().bold());
+                        } else {
+                            println!("{}{}", prefix, display_name);
+                        }
+                    }
+                }
+            }
+        }
+
+        // List remote branches (if --remote or --all)
+        if opts.remote || opts.all {
+            let remote_branches = refdb.list("remotes").await?;
+            
+            if !remote_branches.is_empty() {
+                any_branches_found = true;
+                
+                // Add separator if we printed local branches
+                if opts.all && !opts.remote {
+                    println!();  // Empty line between local and remote
+                }
+                
+                for branch_name in remote_branches {
+                    let display_name = branch_name.strip_prefix("refs/remotes/").unwrap_or(&branch_name);
+
+                    if opts.verbose {
+                        let branch_ref = refdb.read(&branch_name).await.ok();
+                        let oid_display = branch_ref.and_then(|r| r.oid).map(|o| format!("{}", &o.to_string()[..8])).unwrap_or_else(|| "unknown".to_string());
+                        println!("  {} -> {}", style(display_name).red(), oid_display);
+                    } else {
+                        println!("  {}", style(display_name).red());
+                    }
+                }
+            }
+        }
+
+        if !any_branches_found {
+            if !opts.quiet {
+                if opts.remote {
+                    output::info("No remote branches found");
+                } else {
+                    output::info("No branches found");
+                }
             }
         }
 

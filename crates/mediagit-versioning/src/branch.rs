@@ -122,7 +122,9 @@ impl BranchManager {
     /// # use std::sync::Arc;
     /// # #[tokio::main]
     /// # async fn main() -> anyhow::Result<()> {
-    /// # let storage = Arc::new(LocalBackend::new("/tmp/test")?);
+    /// # let storage: Arc<dyn mediagit_storage::StorageBackend> =
+    /// #     Arc::new(LocalBackend::new("/tmp/test").await?);
+    /// # let storage_path = std::path::PathBuf::from("/tmp/test");
     /// let branch_mgr = BranchManager::new(&storage_path);
     /// let oid = Oid::hash(b"commit");
     /// branch_mgr.create("develop", oid).await?;

@@ -17,7 +17,7 @@ use tempfile::TempDir;
 async fn setup_branch_manager_async() -> (BranchManager, ObjectDatabase, TempDir) {
     let temp_dir = TempDir::new().unwrap();
     let storage = Arc::new(LocalBackend::new(temp_dir.path().to_str().unwrap()).await.unwrap());
-    let branch_mgr = BranchManager::new(storage.clone());
+    let branch_mgr = BranchManager::new(temp_dir.path());
     let odb = ObjectDatabase::new(storage, 1000);
     (branch_mgr, odb, temp_dir)
 }

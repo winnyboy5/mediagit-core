@@ -103,7 +103,8 @@ impl fmt::Display for Signature {
 ///
 /// #[tokio::main]
 /// async fn main() -> anyhow::Result<()> {
-///     let storage = Arc::new(LocalBackend::new("/tmp/odb")?);
+///     let storage: Arc<dyn mediagit_storage::StorageBackend> =
+///         Arc::new(LocalBackend::new("/tmp/odb").await?);
 ///     let odb = ObjectDatabase::new(storage, 100);
 ///
 ///     // Create a tree and write it

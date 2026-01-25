@@ -33,7 +33,8 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     let storage = Arc::new(LocalBackend::new("/tmp/mediagit")?);
+//!     let storage: Arc<dyn mediagit_storage::StorageBackend> =
+//!         Arc::new(LocalBackend::new("/tmp/mediagit").await?);
 //!     let odb = Arc::new(ObjectDatabase::new(storage, 100));
 //!     let lca_finder = LcaFinder::new(odb);
 //!
@@ -108,8 +109,11 @@ impl LcaFinder {
     /// # use std::sync::Arc;
     /// # #[tokio::main]
     /// # async fn main() -> anyhow::Result<()> {
-    /// # let storage = Arc::new(LocalBackend::new("/tmp/test")?);
+    /// # let storage: Arc<dyn mediagit_storage::StorageBackend> =
+    /// #     Arc::new(LocalBackend::new("/tmp/test").await?);
     /// # let odb = Arc::new(ObjectDatabase::new(storage, 100));
+    /// # let oid1 = Oid::hash(b"commit1");
+    /// # let oid2 = Oid::hash(b"commit2");
     /// let lca_finder = LcaFinder::new(odb);
     /// let base = lca_finder.find_merge_base(&oid1, &oid2).await?;
     /// # Ok(())

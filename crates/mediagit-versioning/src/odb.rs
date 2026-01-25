@@ -59,7 +59,8 @@ use tracing::{debug, info, warn};
 ///
 /// #[tokio::main]
 /// async fn main() -> anyhow::Result<()> {
-///     let storage = Arc::new(LocalBackend::new("/tmp/test-odb")?);
+///     let storage: Arc<dyn mediagit_storage::StorageBackend> =
+///         Arc::new(LocalBackend::new("/tmp/test-odb").await?);
 ///     let odb = ObjectDatabase::new(storage, 1000);
 ///
 ///     // Write an object
@@ -123,9 +124,13 @@ impl ObjectDatabase {
     /// use mediagit_storage::LocalBackend;
     /// use std::sync::Arc;
     ///
-    /// let storage = Arc::new(LocalBackend::new("/tmp/odb").unwrap());
+    /// # #[tokio::main]
+    /// # async fn main() -> anyhow::Result<()> {
+    /// let storage: Arc<dyn mediagit_storage::StorageBackend> =
+    ///     Arc::new(LocalBackend::new("/tmp/odb").await?);
     /// let odb = ObjectDatabase::new(storage, 1000);
-    /// ```
+    /// # Ok(())
+    /// # }
     pub fn new(storage: Arc<dyn StorageBackend>, cache_capacity: u64) -> Self {
         info!(
             capacity = cache_capacity,
@@ -286,7 +291,8 @@ impl ObjectDatabase {
     /// # use std::sync::Arc;
     /// # #[tokio::main]
     /// # async fn main() -> anyhow::Result<()> {
-    /// # let storage = Arc::new(LocalBackend::new("/tmp/odb")?);
+    /// # let storage: Arc<dyn mediagit_storage::StorageBackend> =
+    /// #     Arc::new(LocalBackend::new("/tmp/odb").await?);
     /// # let odb = ObjectDatabase::new(storage, 100);
     ///
     /// let data = b"file content";
@@ -1696,7 +1702,8 @@ impl ObjectDatabase {
     /// # use std::sync::Arc;
     /// # #[tokio::main]
     /// # async fn main() -> anyhow::Result<()> {
-    /// # let storage = Arc::new(LocalBackend::new("/tmp/odb")?);
+    /// # let storage: Arc<dyn mediagit_storage::StorageBackend> =
+    /// #     Arc::new(LocalBackend::new("/tmp/odb").await?);
     /// # let odb = ObjectDatabase::new(storage, 100);
     /// # let oid = odb.write(ObjectType::Blob, b"data").await?;
     ///
@@ -1843,7 +1850,8 @@ impl ObjectDatabase {
     /// # use std::sync::Arc;
     /// # #[tokio::main]
     /// # async fn main() -> anyhow::Result<()> {
-    /// # let storage = Arc::new(LocalBackend::new("/tmp/odb")?);
+    /// # let storage: Arc<dyn mediagit_storage::StorageBackend> =
+    /// #     Arc::new(LocalBackend::new("/tmp/odb").await?);
     /// # let odb = ObjectDatabase::new(storage, 100);
     /// # let oid = odb.write(ObjectType::Blob, b"test data").await?;
     /// let size = odb.get_object_size(&oid).await?;
@@ -1966,7 +1974,8 @@ impl ObjectDatabase {
     /// # use std::sync::Arc;
     /// # #[tokio::main]
     /// # async fn main() -> anyhow::Result<()> {
-    /// # let storage = Arc::new(LocalBackend::new("/tmp/odb")?);
+    /// # let storage: Arc<dyn mediagit_storage::StorageBackend> =
+    /// #     Arc::new(LocalBackend::new("/tmp/odb").await?);
     /// # let odb = ObjectDatabase::new(storage, 100);
     /// # let oid = odb.write(ObjectType::Blob, b"data").await?;
     ///
@@ -2016,7 +2025,8 @@ impl ObjectDatabase {
     /// # use std::sync::Arc;
     /// # #[tokio::main]
     /// # async fn main() -> anyhow::Result<()> {
-    /// # let storage = Arc::new(LocalBackend::new("/tmp/odb")?);
+    /// # let storage: Arc<dyn mediagit_storage::StorageBackend> =
+    /// #     Arc::new(LocalBackend::new("/tmp/odb").await?);
     /// # let odb = ObjectDatabase::new(storage, 100);
     /// # let oid = odb.write(ObjectType::Blob, b"data").await?;
     ///
@@ -2048,7 +2058,8 @@ impl ObjectDatabase {
     /// # use std::sync::Arc;
     /// # #[tokio::main]
     /// # async fn main() -> anyhow::Result<()> {
-    /// # let storage = Arc::new(LocalBackend::new("/tmp/odb")?);
+    /// # let storage: Arc<dyn mediagit_storage::StorageBackend> =
+    /// #     Arc::new(LocalBackend::new("/tmp/odb").await?);
     /// # let odb = ObjectDatabase::new(storage, 100);
     ///
     /// let metrics = odb.metrics().await;
@@ -2110,7 +2121,8 @@ impl ObjectDatabase {
     /// # use std::sync::Arc;
     /// # #[tokio::main]
     /// # async fn main() -> anyhow::Result<()> {
-    /// # let storage = Arc::new(LocalBackend::new("/tmp/odb")?);
+    /// # let storage: Arc<dyn mediagit_storage::StorageBackend> =
+    /// #     Arc::new(LocalBackend::new("/tmp/odb").await?);
     /// # let odb = ObjectDatabase::new(storage, 1000);
     /// // Repack up to 1000 objects, keep loose objects
     /// let stats = odb.repack(1000, false).await?;

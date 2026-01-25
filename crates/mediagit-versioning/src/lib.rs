@@ -38,7 +38,8 @@
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
 //!     // Create object database with local storage
-//!     let storage = Arc::new(LocalBackend::new("/tmp/mediagit-odb")?);
+//!     let storage: Arc<dyn mediagit_storage::StorageBackend> =
+//!         Arc::new(LocalBackend::new("/tmp/mediagit-odb").await?);
 //!     let odb = ObjectDatabase::new(storage, 1000);
 //!
 //!     // Write an object
@@ -67,7 +68,7 @@ mod config;
 mod conflict;
 mod delta;
 mod diff;
-mod fsck;
+pub mod fsck;
 mod similarity;
 mod index;
 mod lca;
