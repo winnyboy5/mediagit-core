@@ -37,6 +37,9 @@ blake3.workspace = true
 # Serialization for metadata
 serde_json.workspace = true
 
+# Regex for metadata parsing
+regex-lite = "0.1"
+
 [dev-dependencies]
 tokio-test.workspace = true
 tempfile.workspace = true

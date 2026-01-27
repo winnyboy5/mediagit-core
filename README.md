@@ -362,19 +362,56 @@ cargo build --features tls
 ### Testing
 
 ```bash
-# Run all tests
-cargo test
+# Run all tests (uses memory-optimized settings via .cargo/config.toml)
+cargo test --workspace
 
-# Run specific test suite
-cargo test --test medieval_village_test
+# Limit threads for memory-constrained systems
+cargo test --workspace -- --test-threads=2
 
-# Run with logging
+# Run tests with logging
 RUST_LOG=debug cargo test -- --nocapture
 
-# Integration tests
-./tests/psd_layer_preservation_test.sh
-./tests/extreme_scale_test.sh
+# Run ignored tests (large file tests, memory-intensive)
+cargo test --workspace -- --ignored
 ```
+
+#### Test Organization
+
+| Crate | Test File | Coverage |
+|-------|-----------|----------|
+| **mediagit-cli** | `tests/*.rs` | 20+ test files: init, add, commit, branch, merge, etc. |
+| **mediagit-metrics** | `tests/metrics_test.rs` | Registry, dedup, compression, cache metrics |
+| **mediagit-migration** | `tests/migration_test.rs` | State, progress, integrity verification |
+| **mediagit-security** | `tests/security_test.rs` | Encryption, KDF, audit logging |
+| **mediagit-compression** | `tests/proptest_compression.rs` | Property-based compression roundtrip |
+| **mediagit-versioning** | `tests/proptest_odb.rs` | Property-based ODB operations |
+| **mediagit-storage** | `tests/*.rs` | S3, Azure, GCS, MinIO backends |
+
+#### E2E Tests
+
+```bash
+# Run comprehensive E2E suite
+cargo test -p mediagit-cli --test comprehensive_e2e_tests
+
+# Run large file tests (requires test files)
+cargo test -p mediagit-cli --test large_file_test -- --ignored
+
+# Run performance benchmarks
+cargo test -p mediagit-cli --test performance_benchmark_test -- --ignored
+```
+
+#### Crate-Specific Tests
+
+```bash
+# Test individual crates
+cargo test -p mediagit-metrics
+cargo test -p mediagit-security
+cargo test -p mediagit-migration
+cargo test -p mediagit-compression
+cargo test -p mediagit-versioning
+cargo test -p mediagit-storage
+```
+
 
 ### Code Quality
 

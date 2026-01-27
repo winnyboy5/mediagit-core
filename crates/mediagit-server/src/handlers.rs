@@ -11,7 +11,7 @@ use mediagit_protocol::{
     WantRequest, WantResponse,
 };
 use mediagit_security::auth::AuthUser;
-use mediagit_storage::{LocalBackend, StorageBackend, MinIOBackend, AzureBackend};
+use mediagit_storage::{LocalBackend, StorageBackend, MinIOBackend, AzureBackend, GcsBackend};
 use mediagit_versioning::{Commit, ObjectDatabase, Oid, ObjectType, PackReader, PackWriter, Ref, RefDatabase, Tree};
 use std::path::Path as StdPath;
 use std::sync::Arc;
@@ -150,8 +150,42 @@ async fn create_storage_backend(
             };
             Arc::new(storage)
         }
-        mediagit_config::StorageConfig::GCS(_) | mediagit_config::StorageConfig::Multi(_) => {
-            tracing::error!("GCS and Multi-backend storage are not yet implemented");
+        mediagit_config::StorageConfig::GCS(gcs_config) => {
+            tracing::info!(
+                "Using GCS storage backend: bucket={}, project={}",
+                gcs_config.bucket,
+                gcs_config.project_id
+            );
+
+            // Determine credentials path - from config or default application credentials
+            let credentials_path = gcs_config
+                .credentials_path
+                .as_deref()
+                .or_else(|| std::env::var("GOOGLE_APPLICATION_CREDENTIALS").ok().as_deref().map(|_| ""))
+                .unwrap_or("");
+
+            let storage = if credentials_path.is_empty() {
+                // Use default credentials (ADC) - for GKE, Cloud Run, etc.
+                GcsBackend::with_default_credentials(&gcs_config.project_id, &gcs_config.bucket)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Failed to initialize GCS backend with default credentials: {}", e);
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?
+            } else {
+                // Use service account JSON file
+                GcsBackend::new(&gcs_config.project_id, &gcs_config.bucket, credentials_path)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Failed to initialize GCS backend: {}", e);
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?
+            };
+
+            Arc::new(storage)
+        }
+        mediagit_config::StorageConfig::Multi(_) => {
+            tracing::error!("Multi-backend storage is not yet implemented");
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
@@ -306,21 +340,20 @@ pub async fn download_pack(
         })?;
 
     // Get the wanted objects from state using request_id (prevents race conditions)
-    let want_list = {
-        let mut want_map = state.want_cache.lock().await;
+    let want_entry = {
+        let mut want_cache = state.want_cache.lock().await;
         // Remove from cache after retrieval (one-time use)
-        let entry = want_map.remove(request_id);
-        match entry {
-            Some((cached_repo, want_list)) => {
+        match want_cache.remove(request_id) {
+            Some(entry) => {
                 // Verify the request is for the same repo
-                if cached_repo != repo {
+                if entry.repo != repo {
                     tracing::error!(
                         "Request ID {} was for repo '{}' but pack requested for '{}'",
-                        request_id, cached_repo, repo
+                        request_id, entry.repo, repo
                     );
                     return Err(StatusCode::BAD_REQUEST);
                 }
-                want_list
+                entry
             }
             None => {
                 tracing::warn!("Request ID {} not found or already used", request_id);
@@ -328,6 +361,7 @@ pub async fn download_pack(
             }
         }
     };
+    let want_list = want_entry.want_list;
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -495,8 +529,8 @@ pub async fn request_objects(
 
     // Store the want list in cache keyed by request_id (not repo name)
     {
-        let mut want_map = state.want_cache.lock().await;
-        want_map.insert(request_id.clone(), (repo, want_req.want));
+        let mut want_cache = state.want_cache.lock().await;
+        want_cache.insert(request_id.clone(), repo, want_req.want);
     }
 
     Ok(Json(WantResponse { request_id }))

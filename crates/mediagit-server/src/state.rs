@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 use tokio::sync::Mutex;
 
 use mediagit_security::auth::{ApiKeyAuth, AuthLayer, AuthService, JwtAuth};
@@ -19,14 +20,90 @@ pub fn generate_request_id() -> String {
     format!("{}-{}", timestamp, id)
 }
 
+/// Entry in the want cache with timestamp for TTL-based cleanup
+#[derive(Debug, Clone)]
+pub struct WantEntry {
+    pub repo: String,
+    pub want_list: Vec<String>,
+    pub created_at: Instant,
+}
+
+/// Bounded cache for want requests with automatic cleanup
+pub struct WantCache {
+    entries: HashMap<String, WantEntry>,
+    max_entries: usize,
+}
+
+impl WantCache {
+    /// Default maximum entries
+    pub const DEFAULT_MAX_ENTRIES: usize = 10_000;
+    
+    /// Create a new want cache with default capacity
+    pub fn new() -> Self {
+        Self::with_capacity(Self::DEFAULT_MAX_ENTRIES)
+    }
+    
+    /// Create a new want cache with specified capacity
+    pub fn with_capacity(max_entries: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            max_entries,
+        }
+    }
+    
+    /// Insert a want entry, evicting oldest if at capacity
+    pub fn insert(&mut self, request_id: String, repo: String, want_list: Vec<String>) {
+        // Evict oldest entry if at capacity
+        if self.entries.len() >= self.max_entries {
+            if let Some((oldest_key, _)) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.created_at)
+                .map(|(k, e)| (k.clone(), e.clone()))
+            {
+                self.entries.remove(&oldest_key);
+                tracing::debug!("Evicted oldest want entry: {}", oldest_key);
+            }
+        }
+        
+        self.entries.insert(request_id, WantEntry {
+            repo,
+            want_list,
+            created_at: Instant::now(),
+        });
+    }
+    
+    /// Remove and return a want entry
+    pub fn remove(&mut self, request_id: &str) -> Option<WantEntry> {
+        self.entries.remove(request_id)
+    }
+    
+    /// Get current entry count
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    
+    /// Check if cache is empty
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl Default for WantCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Shared application state
 pub struct AppState {
     /// Directory containing repositories
     pub repos_dir: PathBuf,
 
-    /// Cache of objects wanted by clients (request_id -> (repo_name, list of OIDs))
+    /// Cache of objects wanted by clients (request_id -> WantEntry)
     /// Uses unique request IDs to prevent race conditions between concurrent clients
-    pub want_cache: Mutex<HashMap<String, (String, Vec<String>)>>,
+    /// Bounded to prevent memory leaks from abandoned requests
+    pub want_cache: Mutex<WantCache>,
 
     /// Authentication layer (optional - can be disabled for development)
     pub auth_layer: Option<Arc<AuthLayer>>,
@@ -40,7 +117,7 @@ impl AppState {
     pub fn new(repos_dir: PathBuf) -> Self {
         Self {
             repos_dir,
-            want_cache: Mutex::new(HashMap::new()),
+            want_cache: Mutex::new(WantCache::new()),
             auth_layer: None,
             auth_service: None,
         }
@@ -58,7 +135,7 @@ impl AppState {
 
         Self {
             repos_dir,
-            want_cache: Mutex::new(HashMap::new()),
+            want_cache: Mutex::new(WantCache::new()),
             auth_layer: Some(auth_layer),
             auth_service: Some(auth_service),
         }
@@ -75,7 +152,7 @@ impl AppState {
 
         Self {
             repos_dir,
-            want_cache: Mutex::new(HashMap::new()),
+            want_cache: Mutex::new(WantCache::new()),
             auth_layer: Some(auth_layer),
             auth_service: Some(auth_service),
         }
@@ -96,3 +173,4 @@ impl AppState {
         self.auth_service.as_ref()
     }
 }
+

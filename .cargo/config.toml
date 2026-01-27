@@ -1,0 +1,7 @@
+[env]
+# Limit proptest cases to reduce memory usage
+# Default is 256, which can cause memory issues on Windows
+PROPTEST_CASES = "32"
+
+# Note: For memory-constrained environments, also use:
+# cargo test -- --test-threads=2
