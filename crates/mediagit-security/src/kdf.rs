@@ -236,16 +236,41 @@ pub fn derive_key(
 ///
 /// Stores derived keys in memory to avoid expensive re-computation.
 /// Keys are indexed by (password_hash, salt_hex) for security.
+/// 
+/// The cache has a configurable maximum size (default 10,000 entries).
+/// When full, the oldest entry is evicted to make room for new ones.
 #[derive(Clone)]
 pub struct KeyCache {
-    cache: Arc<RwLock<HashMap<String, EncryptionKey>>>,
+    cache: Arc<RwLock<KeyCacheInner>>,
+}
+
+/// Internal cache state with LRU tracking
+struct KeyCacheInner {
+    /// Key -> (EncryptionKey, insertion_order)
+    entries: HashMap<String, (EncryptionKey, u64)>,
+    /// Maximum number of entries
+    max_entries: usize,
+    /// Counter for tracking insertion order (for LRU eviction)
+    insertion_counter: u64,
 }
 
 impl KeyCache {
-    /// Create a new key cache
+    /// Default maximum cache entries
+    pub const DEFAULT_MAX_ENTRIES: usize = 10_000;
+
+    /// Create a new key cache with default capacity
     pub fn new() -> Self {
+        Self::with_capacity(Self::DEFAULT_MAX_ENTRIES)
+    }
+
+    /// Create a new key cache with specified maximum entries
+    pub fn with_capacity(max_entries: usize) -> Self {
         Self {
-            cache: Arc::new(RwLock::new(HashMap::new())),
+            cache: Arc::new(RwLock::new(KeyCacheInner {
+                entries: HashMap::new(),
+                max_entries,
+                insertion_counter: 0,
+            })),
         }
     }
 
@@ -280,7 +305,7 @@ impl KeyCache {
         // Check cache first
         {
             let cache = self.cache.read().await;
-            if let Some(cached_key) = cache.get(&key) {
+            if let Some((cached_key, _)) = cache.entries.get(&key) {
                 debug!("Using cached key");
                 return Ok(cached_key.clone());
             }
@@ -290,10 +315,27 @@ impl KeyCache {
         debug!("Cache miss, deriving key");
         let derived_key = derive_key(password, salt, params)?;
 
-        // Store in cache
+        // Store in cache with eviction if needed
         {
             let mut cache = self.cache.write().await;
-            cache.insert(key, derived_key.clone());
+            
+            // Evict oldest entry if at capacity
+            if cache.entries.len() >= cache.max_entries {
+                // Find the entry with the lowest insertion_counter (oldest)
+                if let Some((oldest_key, _)) = cache
+                    .entries
+                    .iter()
+                    .min_by_key(|(_, (_, order))| order)
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                {
+                    cache.entries.remove(&oldest_key);
+                    debug!("Evicted oldest key from cache");
+                }
+            }
+            
+            cache.insertion_counter += 1;
+            let order = cache.insertion_counter;
+            cache.entries.insert(key, (derived_key.clone(), order));
         }
 
         Ok(derived_key)
@@ -302,7 +344,8 @@ impl KeyCache {
     /// Clear all cached keys
     pub async fn clear(&self) {
         let mut cache = self.cache.write().await;
-        cache.clear();
+        cache.entries.clear();
+        cache.insertion_counter = 0;
         info!("Key cache cleared");
     }
 
@@ -310,7 +353,8 @@ impl KeyCache {
     pub async fn stats(&self) -> CacheStats {
         let cache = self.cache.read().await;
         CacheStats {
-            entries: cache.len(),
+            entries: cache.entries.len(),
+            max_entries: cache.max_entries,
         }
     }
 }
@@ -325,6 +369,7 @@ impl Default for KeyCache {
 #[derive(Debug, Clone)]
 pub struct CacheStats {
     pub entries: usize,
+    pub max_entries: usize,
 }
 
 #[cfg(test)]

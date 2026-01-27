@@ -17,6 +17,7 @@ pub mod merge;
 pub mod pull;
 pub mod push;
 pub mod rebase;
+pub mod rebase_state;
 pub mod remote;
 pub mod show;
 pub mod stash;

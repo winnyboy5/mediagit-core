@@ -322,17 +322,139 @@ impl FilterDriver {
         let pointer = PointerFile::parse(&input)?;
         debug!("Parsed pointer for {}: OID={}, size={}", path_info, pointer.oid, pointer.size);
 
-        // NOTE: Object retrieval integration pending
-        // The actual file content should be retrieved from the object database using mediagit-storage.
-        // Current implementation passes through pointer files without retrieval.
-        // Integration requires: StorageBackend trait implementation + ODB read operations.
+        // Try to retrieve object from storage
+        if let Some(ref storage_path) = self.config.storage_path {
+            match self.retrieve_object(storage_path, &pointer.oid) {
+                Ok(content) => {
+                    debug!("Retrieved object {} ({} bytes)", pointer.oid, content.len());
+                    io::stdout()
+                        .write_all(&content)
+                        .map_err(|e| GitError::FilterFailed(format!("Failed to write stdout: {}", e)))?;
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!("Failed to retrieve object {}: {}", pointer.oid, e);
+                    // Fall through to output pointer file
+                }
+            }
+        } else {
+            // Try default .mediagit path
+            if let Ok(cwd) = std::env::current_dir() {
+                let default_storage = cwd.join(".mediagit");
+                if default_storage.exists() {
+                    match self.retrieve_object(default_storage.to_str().unwrap_or(""), &pointer.oid) {
+                        Ok(content) => {
+                            debug!("Retrieved object {} ({} bytes)", pointer.oid, content.len());
+                            io::stdout()
+                                .write_all(&content)
+                                .map_err(|e| GitError::FilterFailed(format!("Failed to write stdout: {}", e)))?;
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            debug!("Object retrieval failed: {}", e);
+                        }
+                    }
+                }
+            }
+        }
 
-        warn!("Object retrieval not yet implemented, outputting pointer file");
+        // Object not found - output pointer file (allows partial checkouts)
+        warn!("Object {} not found in storage, outputting pointer file", pointer.oid);
         io::stdout()
             .write_all(input.as_bytes())
             .map_err(|e| GitError::FilterFailed(format!("Failed to write stdout: {}", e)))?;
 
         Ok(())
+    }
+
+    /// Retrieve an object from the local storage
+    fn retrieve_object(&self, storage_path: &str, oid: &str) -> GitResult<Vec<u8>> {
+        // Objects are stored with loose object format: objects/xx/xxxx...
+        // where xx is first 2 chars and rest is remaining chars
+        if oid.len() < 3 {
+            return Err(GitError::FilterFailed(format!("Invalid OID: {}", oid)));
+        }
+
+        let prefix = &oid[..2];
+        let suffix = &oid[2..];
+        let object_path = Path::new(storage_path)
+            .join("objects")
+            .join(prefix)
+            .join(suffix);
+
+        if object_path.exists() {
+            let content = fs::read(&object_path)
+                .map_err(|e| GitError::FilterFailed(format!("Failed to read object {}: {}", oid, e)))?;
+
+            // Object might be compressed - try to decompress
+            if let Ok(decompressed) = self.try_decompress(&content) {
+                return Ok(decompressed);
+            }
+
+            // Return raw content if not compressed
+            return Ok(content);
+        }
+
+        // Try chunks directory for large files
+        let chunks_dir = Path::new(storage_path)
+            .join("objects")
+            .join(prefix)
+            .join(format!("{}.chunks", suffix));
+
+        if chunks_dir.exists() {
+            return self.retrieve_chunked_object(&chunks_dir);
+        }
+
+        Err(GitError::FilterFailed(format!("Object {} not found", oid)))
+    }
+
+    /// Try to decompress zstd-compressed content
+    fn try_decompress(&self, data: &[u8]) -> Result<Vec<u8>, ()> {
+        // Check for zstd magic number (0x28 0xB5 0x2F 0xFD)
+        if data.len() >= 4 && data[0] == 0x28 && data[1] == 0xB5 && data[2] == 0x2F && data[3] == 0xFD {
+            if let Ok(decompressed) = zstd::decode_all(std::io::Cursor::new(data)) {
+                return Ok(decompressed);
+            }
+        }
+        Err(())
+    }
+
+    /// Retrieve and reassemble a chunked object
+    fn retrieve_chunked_object(&self, chunks_dir: &Path) -> GitResult<Vec<u8>> {
+        // Read chunk manifest
+        let manifest_path = chunks_dir.join("manifest.json");
+        if !manifest_path.exists() {
+            return Err(GitError::FilterFailed("Chunk manifest not found".to_string()));
+        }
+
+        let manifest_content = fs::read_to_string(&manifest_path)
+            .map_err(|e| GitError::FilterFailed(format!("Failed to read manifest: {}", e)))?;
+
+        // Parse manifest to get chunk order
+        let manifest: serde_json::Value = serde_json::from_str(&manifest_content)
+            .map_err(|e| GitError::FilterFailed(format!("Failed to parse manifest: {}", e)))?;
+
+        let chunks = manifest["chunks"]
+            .as_array()
+            .ok_or_else(|| GitError::FilterFailed("Invalid manifest format".to_string()))?;
+
+        let mut result = Vec::new();
+
+        for chunk_info in chunks {
+            let chunk_oid = chunk_info["oid"]
+                .as_str()
+                .ok_or_else(|| GitError::FilterFailed("Invalid chunk OID".to_string()))?;
+
+            let chunk_path = chunks_dir.join(chunk_oid);
+            let chunk_data = fs::read(&chunk_path)
+                .map_err(|e| GitError::FilterFailed(format!("Failed to read chunk {}: {}", chunk_oid, e)))?;
+
+            // Try to decompress chunk
+            let chunk_content = self.try_decompress(&chunk_data).unwrap_or(chunk_data);
+            result.extend(chunk_content);
+        }
+
+        Ok(result)
     }
 }
 

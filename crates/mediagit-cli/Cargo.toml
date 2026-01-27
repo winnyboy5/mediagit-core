@@ -48,6 +48,7 @@ name = "mediagit"
 path = "src/main.rs"
 
 [dev-dependencies]
+mediagit-test-utils = { path = "../mediagit-test-utils" }
 assert_cmd = "2.0"
 predicates = "3.1"
 tempfile.workspace = true

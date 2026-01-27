@@ -213,7 +213,7 @@ claudedocs/
 test-files/
 .env
 docs/
-tests/
+dev-tests/
 test-archives/
 
 # Storage emulator test data

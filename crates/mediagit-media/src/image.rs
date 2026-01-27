@@ -392,14 +392,11 @@ impl ImageMetadataParser {
         Ok(metadata)
     }
 
-    /// Extract IPTC metadata
-    #[instrument(skip(_data))]
-    async fn extract_iptc(_data: &[u8]) -> Result<IptcMetadata> {
-        // IPTC parsing would go here
-        // For now, return empty metadata as a placeholder
-        warn!("IPTC extraction not yet fully implemented");
-
-        Ok(IptcMetadata {
+    /// Extract IPTC metadata from image data
+    /// IPTC-IIM is typically stored in JPEG APP13 segment with "Photoshop 3.0" marker
+    #[instrument(skip(data))]
+    async fn extract_iptc(data: &[u8]) -> Result<IptcMetadata> {
+        let mut metadata = IptcMetadata {
             keywords: Vec::new(),
             caption: None,
             copyright: None,
@@ -408,22 +405,174 @@ impl ImageMetadataParser {
             source: None,
             city: None,
             country: None,
-        })
+        };
+
+        // Look for IPTC data in JPEG APP13 segment
+        // Marker: 0xFF 0xED followed by "Photoshop 3.0\0" and "8BIM" blocks
+        if let Some(iptc_data) = Self::find_iptc_segment(data) {
+            // Parse IPTC-IIM records
+            // Format: 0x1C (marker) + record_number (1 byte) + dataset_number (1 byte) + size (2 bytes) + data
+            let mut pos = 0;
+            while pos + 5 <= iptc_data.len() {
+                if iptc_data[pos] != 0x1C {
+                    pos += 1;
+                    continue;
+                }
+
+                let record = iptc_data[pos + 1];
+                let dataset = iptc_data[pos + 2];
+                let size = u16::from_be_bytes([iptc_data[pos + 3], iptc_data[pos + 4]]) as usize;
+
+                if pos + 5 + size > iptc_data.len() {
+                    break;
+                }
+
+                let value_data = &iptc_data[pos + 5..pos + 5 + size];
+                if let Ok(value) = String::from_utf8(value_data.to_vec()) {
+                    // Record 2 contains application records
+                    if record == 2 {
+                        match dataset {
+                            25 => metadata.keywords.push(value), // Keywords
+                            120 => metadata.caption = Some(value), // Caption
+                            116 => metadata.copyright = Some(value), // Copyright
+                            80 => metadata.creator = Some(value), // By-line (creator)
+                            110 => metadata.credit = Some(value), // Credit
+                            115 => metadata.source = Some(value), // Source
+                            90 => metadata.city = Some(value), // City
+                            101 => metadata.country = Some(value), // Country
+                            _ => {}
+                        }
+                    }
+                }
+
+                pos += 5 + size;
+            }
+        }
+
+        if !metadata.keywords.is_empty() || metadata.caption.is_some() {
+            debug!("Extracted IPTC metadata with {} keywords", metadata.keywords.len());
+        }
+
+        Ok(metadata)
     }
 
-    /// Extract XMP metadata
-    #[instrument(skip(_data))]
-    async fn extract_xmp(_data: &[u8]) -> Result<XmpMetadata> {
-        // XMP parsing would go here
-        // For now, return empty metadata as a placeholder
-        warn!("XMP extraction not yet fully implemented");
+    /// Find IPTC segment in JPEG data
+    fn find_iptc_segment(data: &[u8]) -> Option<&[u8]> {
+        // Look for APP13 marker (0xFF 0xED) followed by "Photoshop 3.0\0"
+        let photoshop_marker = b"Photoshop 3.0\0";
+        let iptc_marker = b"8BIM\x04\x04"; // IPTC-IIM resource ID
 
-        Ok(XmpMetadata {
+        for i in 0..data.len().saturating_sub(14) {
+            if data[i] == 0xFF && data[i + 1] == 0xED {
+                // Found APP13
+                if i + 4 + photoshop_marker.len() <= data.len() {
+                    let segment_len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+                    if i + 4 + segment_len <= data.len() {
+                        let segment = &data[i + 4..i + 4 + segment_len];
+                        // Look for 8BIM marker within segment
+                        for j in 0..segment.len().saturating_sub(6) {
+                            if segment[j..].starts_with(iptc_marker) {
+                                // Found IPTC block, return data after header
+                                let header_len = 12; // Approximate header size
+                                if j + header_len < segment.len() {
+                                    return Some(&segment[j + header_len..]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Extract XMP metadata from image data
+    /// XMP is stored as XML in JPEG APP1 segment with "http://ns.adobe.com/xap/1.0/" namespace
+    #[instrument(skip(data))]
+    async fn extract_xmp(data: &[u8]) -> Result<XmpMetadata> {
+        let mut metadata = XmpMetadata {
             rating: None,
             color_label: None,
             history: Vec::new(),
             raw_fields: HashMap::new(),
-        })
+        };
+
+        // Look for XMP data in JPEG APP1 segment
+        let xmp_marker = b"http://ns.adobe.com/xap/1.0/\0";
+
+        for i in 0..data.len().saturating_sub(xmp_marker.len() + 4) {
+            if data[i] == 0xFF && data[i + 1] == 0xE1 {
+                // Found APP1
+                let segment_len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+                if i + 4 + segment_len <= data.len() {
+                    let segment = &data[i + 4..i + 4 + segment_len];
+                    if segment.starts_with(xmp_marker) {
+                        // Extract XMP XML
+                        let xmp_xml = &segment[xmp_marker.len()..];
+                        if let Ok(xmp_str) = std::str::from_utf8(xmp_xml) {
+                            // Parse rating (xmp:Rating)
+                            if let Some(rating) = Self::extract_xmp_field(xmp_str, "xmp:Rating") {
+                                metadata.rating = rating.parse().ok();
+                            }
+
+                            // Parse color label (xmp:Label)
+                            if let Some(label) = Self::extract_xmp_field(xmp_str, "xmp:Label") {
+                                metadata.color_label = Some(label);
+                            }
+
+                            // Parse history entries (stEvt:action in xmpMM:History)
+                            let history_re = regex_lite::Regex::new(r#"stEvt:action="([^"]+)""#).ok();
+                            if let Some(re) = history_re {
+                                for cap in re.captures_iter(xmp_str) {
+                                    if let Some(action) = cap.get(1) {
+                                        metadata.history.push(action.as_str().to_string());
+                                    }
+                                }
+                            }
+
+                            // Extract other common fields
+                            for field in &["dc:creator", "dc:title", "dc:description", "photoshop:Credit"] {
+                                if let Some(value) = Self::extract_xmp_field(xmp_str, field) {
+                                    metadata.raw_fields.insert(field.to_string(), value);
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        if metadata.rating.is_some() || !metadata.history.is_empty() {
+            debug!("Extracted XMP metadata with {} history entries", metadata.history.len());
+        }
+
+        Ok(metadata)
+    }
+
+    /// Extract a field value from XMP XML
+    fn extract_xmp_field(xmp: &str, field: &str) -> Option<String> {
+        // Try attribute format: field="value"
+        let attr_pattern = format!(r#"{}="([^"]+)""#, field);
+        if let Ok(re) = regex_lite::Regex::new(&attr_pattern) {
+            if let Some(cap) = re.captures(xmp) {
+                if let Some(m) = cap.get(1) {
+                    return Some(m.as_str().to_string());
+                }
+            }
+        }
+
+        // Try element format: <field>value</field>
+        let elem_pattern = format!(r#"<{}[^>]*>([^<]+)</{}>"#, field, field);
+        if let Ok(re) = regex_lite::Regex::new(&elem_pattern) {
+            if let Some(cap) = re.captures(xmp) {
+                if let Some(m) = cap.get(1) {
+                    return Some(m.as_str().to_string());
+                }
+            }
+        }
+
+        None
     }
 
     /// Compare two image metadata for merge intelligence

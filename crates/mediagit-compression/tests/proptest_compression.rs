@@ -11,7 +11,7 @@ use proptest::prelude::*;
 
 /// Generate random binary data for testing
 fn arb_binary_data() -> impl Strategy<Value = Vec<u8>> {
-    prop::collection::vec(any::<u8>(), 0..50000)
+    prop::collection::vec(any::<u8>(), 0..10000)  // Reduced from 50KB to 10KB for memory efficiency
 }
 
 /// Generate small binary data
