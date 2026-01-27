@@ -269,6 +269,98 @@ impl S3Backend {
         })
     }
 
+    /// Create a new S3 backend with explicit credentials
+    ///
+    /// Use this for S3-compatible services (B2, DigitalOcean Spaces, MinIO) that
+    /// require explicit access key and secret key configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Custom S3 configuration with endpoint
+    /// * `access_key` - Access Key ID
+    /// * `secret_key` - Secret Access Key
+    /// * `region` - Region string (e.g., "us-west-002" for B2)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(S3Backend)` - Successfully created backend
+    /// * `Err` - If initialization fails
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use mediagit_storage::s3::{S3Backend, S3Config};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> anyhow::Result<()> {
+    /// let config = S3Config {
+    ///     bucket: "my-bucket".to_string(),
+    ///     endpoint: Some("https://s3.us-west-002.backblazeb2.com".to_string()),
+    ///     ..Default::default()
+    /// };
+    ///
+    /// let storage = S3Backend::with_credentials(
+    ///     config,
+    ///     "access_key_id",
+    ///     "secret_access_key",
+    ///     "us-west-002",
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn with_credentials(
+        config: S3Config,
+        access_key: &str,
+        secret_key: &str,
+        region: &str,
+    ) -> Result<Self> {
+        use aws_sdk_s3::config::{Credentials, Region};
+
+        // Create explicit credentials
+        let credentials = Credentials::new(
+            access_key,
+            secret_key,
+            None, // session token
+            None, // expiry
+            "mediagit-explicit-credentials",
+        );
+
+        // Build S3 config with explicit credentials and endpoint
+        let mut s3_config_builder = aws_sdk_s3::config::Builder::new()
+            .credentials_provider(credentials)
+            .region(Region::new(region.to_string()))
+            .force_path_style(true); // Required for most S3-compatible services
+
+        if let Some(endpoint) = &config.endpoint {
+            debug!("Using custom S3 endpoint with credentials: {}", endpoint);
+            s3_config_builder = s3_config_builder.endpoint_url(endpoint.clone());
+        }
+
+        let client = Client::from_conf(s3_config_builder.build());
+
+        // Verify bucket access
+        client
+            .head_bucket()
+            .bucket(&config.bucket)
+            .send()
+            .await
+            .context(format!(
+                "Failed to verify bucket access: {}. Check credentials and endpoint.",
+                config.bucket
+            ))?;
+
+        debug!(
+            "Successfully connected to S3-compatible bucket: {} at {:?}",
+            config.bucket, config.endpoint
+        );
+
+        Ok(S3Backend {
+            client,
+            config: Arc::new(config),
+            stats: Arc::new(S3Stats::new()),
+        })
+    }
+
     /// Get current statistics
     pub fn stats(&self) -> (u64, u64, u64) {
         (

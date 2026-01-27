@@ -31,6 +31,10 @@ pub struct Config {
     #[serde(default)]
     pub branches: HashMap<String, BranchConfig>,
 
+    /// Branch protection rules
+    #[serde(default)]
+    pub protected_branches: HashMap<String, BranchProtection>,
+
     /// Custom user-defined settings
     #[serde(default)]
     pub custom: HashMap<String, serde_json::Value>,
@@ -103,6 +107,36 @@ impl Config {
     /// Remove upstream tracking for a branch
     pub fn remove_branch_upstream(&mut self, branch: &str) -> Option<BranchConfig> {
         self.branches.remove(branch)
+    }
+
+    /// Check if a branch is protected
+    pub fn is_branch_protected(&self, branch: &str) -> bool {
+        self.protected_branches.contains_key(branch)
+    }
+
+    /// Get protection rules for a branch
+    pub fn get_branch_protection(&self, branch: &str) -> Option<&BranchProtection> {
+        self.protected_branches.get(branch)
+    }
+
+    /// Protect a branch with default rules
+    pub fn protect_branch(&mut self, branch: impl Into<String>) {
+        self.protected_branches.insert(branch.into(), BranchProtection::default_protection());
+    }
+
+    /// Protect a branch with custom rules
+    pub fn protect_branch_with(&mut self, branch: impl Into<String>, protection: BranchProtection) {
+        self.protected_branches.insert(branch.into(), protection);
+    }
+
+    /// Unprotect a branch
+    pub fn unprotect_branch(&mut self, branch: &str) -> Option<BranchProtection> {
+        self.protected_branches.remove(branch)
+    }
+
+    /// List all protected branches
+    pub fn list_protected_branches(&self) -> Vec<&String> {
+        self.protected_branches.keys().collect()
     }
 }
 
@@ -555,6 +589,52 @@ impl BranchConfig {
     }
 }
 
+/// Branch protection rules
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct BranchProtection {
+    /// Prevent force-push to this branch
+    #[serde(default = "default_true")]
+    pub prevent_force_push: bool,
+
+    /// Prevent deletion of this branch
+    #[serde(default = "default_true")]
+    pub prevent_deletion: bool,
+
+    /// Require pull request reviews before merge
+    #[serde(default)]
+    pub require_reviews: bool,
+
+    /// Minimum number of approvals required (if require_reviews is true)
+    #[serde(default = "default_min_approvals")]
+    pub min_approvals: u32,
+}
+
+impl BranchProtection {
+    /// Create default protection (prevent force-push and deletion)
+    pub fn default_protection() -> Self {
+        Self {
+            prevent_force_push: true,
+            prevent_deletion: true,
+            require_reviews: false,
+            min_approvals: 1,
+        }
+    }
+
+    /// Create protection with review requirement
+    pub fn with_reviews(min_approvals: u32) -> Self {
+        Self {
+            prevent_force_push: true,
+            prevent_deletion: true,
+            require_reviews: true,
+            min_approvals,
+        }
+    }
+}
+
+fn default_min_approvals() -> u32 {
+    1
+}
+
 // Default value functions
 fn default_true() -> bool {
     true
@@ -691,6 +771,7 @@ impl Default for Config {
             security: SecurityConfig::default(),
             remotes: HashMap::new(),
             branches: HashMap::new(),
+            protected_branches: HashMap::new(),
             custom: HashMap::new(),
         }
     }

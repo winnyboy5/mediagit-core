@@ -288,14 +288,79 @@ impl RemoteCmd {
             style(push_url).cyan()
         );
 
-        // Show HEAD branch info (if available)
-        println!("  HEAD branch: {}", style("(not yet implemented)").dim());
+        // Try to fetch remote refs to show HEAD and branches
+        let remote_url = remote.url.clone();
+        match self.fetch_remote_info(&remote_url).await {
+            Ok((head_branch, branches)) => {
+                // Show HEAD branch
+                if let Some(head) = head_branch {
+                    println!("  HEAD branch: {}", style(&head).green());
+                } else {
+                    println!("  HEAD branch: {}", style("(unknown)").dim());
+                }
 
-        // Show remote branches (if available)
-        println!("  Remote branches:");
-        println!("    {}", style("(not yet implemented)").dim());
+                // Show remote branches
+                println!("  Remote branches:");
+                if branches.is_empty() {
+                    println!("    {}", style("(none)").dim());
+                } else {
+                    for branch in branches {
+                        let short_name = branch
+                            .strip_prefix("refs/heads/")
+                            .unwrap_or(&branch);
+                        println!("    {}", style(short_name).cyan());
+                    }
+                }
+            }
+            Err(e) => {
+                // Graceful degradation - show what we can
+                println!("  HEAD branch: {}", style("(could not connect)").dim());
+                println!("  Remote branches:");
+                println!("    {} {}", style("(could not fetch:").dim(), style(e.to_string()).dim());
+
+                // Try to show locally cached remote tracking branches
+                let storage_path = repo_root.join(".mediagit");
+                let remotes_dir = storage_path.join("refs").join("remotes").join(name);
+                if remotes_dir.exists() {
+                    println!("  Locally tracked branches:");
+                    if let Ok(entries) = std::fs::read_dir(&remotes_dir) {
+                        for entry in entries.flatten() {
+                            if let Some(name) = entry.file_name().to_str() {
+                                println!("    {}", style(name).cyan());
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(())
+    }
+
+    /// Fetch remote info (HEAD branch and list of branches)
+    async fn fetch_remote_info(&self, remote_url: &str) -> Result<(Option<String>, Vec<String>)> {
+        let client = mediagit_protocol::ProtocolClient::new(remote_url.to_string());
+        let refs = client.get_refs().await?;
+
+        // Find HEAD
+        let head_ref = refs.refs.iter().find(|r| r.name == "HEAD");
+        let head_branch = if let Some(head) = head_ref {
+            // Try to find which branch HEAD points to by matching OID
+            refs.refs.iter()
+                .find(|r| r.name.starts_with("refs/heads/") && r.oid == head.oid)
+                .map(|r| r.name.strip_prefix("refs/heads/").unwrap_or(&r.name).to_string())
+        } else {
+            None
+        };
+
+        // Collect branches
+        let branches: Vec<String> = refs.refs
+            .iter()
+            .filter(|r| r.name.starts_with("refs/heads/"))
+            .map(|r| r.name.clone())
+            .collect();
+
+        Ok((head_branch, branches))
     }
 
     async fn set_url(&self, name: &str, url: &str, push: bool) -> Result<()> {

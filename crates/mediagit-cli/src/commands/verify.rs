@@ -17,7 +17,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_storage::LocalBackend;
-use mediagit_versioning::{FsckChecker, FsckOptions, IssueSeverity};
+use mediagit_versioning::{Commit, FsckChecker, FsckOptions, IssueSeverity, ObjectDatabase, Oid, RefDatabase};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Verify repository integrity with quick checks
@@ -55,11 +56,11 @@ pub struct VerifyCmd {
     #[arg(long)]
     pub checksums: bool,
 
-    /// Start at this commit (future: not yet implemented)
+    /// Start at this commit (verify commits from this point)
     #[arg(long, value_name = "COMMIT")]
     pub start: Option<String>,
 
-    /// End at this commit (future: not yet implemented)
+    /// End at this commit (verify commits up to and including this point)
     #[arg(long, value_name = "COMMIT")]
     pub end: Option<String>,
 
@@ -102,6 +103,11 @@ impl VerifyCmd {
             LocalBackend::new(&mediagit_dir).await
                 .context("Failed to open repository. Is this a MediaGit repository?")?,
         );
+
+        // Handle commit range verification
+        if self.start.is_some() || self.end.is_some() {
+            return self.verify_commit_range(&mediagit_dir, storage).await;
+        }
 
         // Create FSCK checker (verify is a lightweight wrapper)
         let checker = FsckChecker::new(storage);
@@ -204,5 +210,207 @@ impl VerifyCmd {
         }
 
         Ok(())
+    }
+
+    /// Verify a specific range of commits
+    async fn verify_commit_range(
+        &self,
+        mediagit_dir: &str,
+        storage: Arc<LocalBackend>,
+    ) -> Result<()> {
+        let refdb = RefDatabase::new(mediagit_dir);
+        let odb = Arc::new(ObjectDatabase::with_smart_compression(storage.clone(), 1000));
+
+        // Resolve start commit (defaults to root)
+        let start_oid = if let Some(ref start) = self.start {
+            self.resolve_commit(&refdb, start).await?
+        } else {
+            None
+        };
+
+        // Resolve end commit (defaults to HEAD)
+        let end_oid = if let Some(ref end) = self.end {
+            self.resolve_commit(&refdb, end).await?
+        } else {
+            // Default to HEAD
+            let head = refdb.read("HEAD").await?;
+            if let Some(target) = &head.target {
+                let target_ref = refdb.read(target).await?;
+                target_ref.oid
+            } else {
+                head.oid
+            }
+        };
+
+        let end_oid = end_oid.ok_or_else(|| anyhow::anyhow!("Cannot determine end commit"))?;
+
+        if !self.quiet {
+            let start_str = start_oid
+                .map(|o| o.to_string()[..7].to_string())
+                .unwrap_or_else(|| "(root)".to_string());
+            println!(
+                "  Range: {} → {}",
+                style(&start_str).cyan(),
+                style(&end_oid.to_string()[..7]).cyan()
+            );
+        }
+
+        // Collect commits in range
+        let commits_in_range = self.collect_commits_in_range(&odb, start_oid, end_oid).await?;
+
+        if !self.quiet {
+            println!("  Commits to verify: {}", commits_in_range.len());
+        }
+
+        // Verify each commit
+        let mut errors = 0;
+        let mut verified = 0;
+
+        for commit_oid in &commits_in_range {
+            // Verify commit object exists and is valid
+            match odb.read(commit_oid).await {
+                Ok(data) => {
+                    // Try to parse as commit
+                    match Commit::deserialize(&data) {
+                        Ok(commit) => {
+                            verified += 1;
+
+                            if self.verbose {
+                                let msg = commit.message.lines().next().unwrap_or("");
+                                println!(
+                                    "  {} {} {}",
+                                    style("✓").green(),
+                                    &commit_oid.to_string()[..7],
+                                    style(msg).dim()
+                                );
+                            }
+
+                            // Verify tree exists
+                            if odb.read(&commit.tree).await.is_err() {
+                                errors += 1;
+                                if !self.quiet {
+                                    println!(
+                                        "  {} {} missing tree {}",
+                                        style("✗").red(),
+                                        &commit_oid.to_string()[..7],
+                                        &commit.tree.to_string()[..7]
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            errors += 1;
+                            if !self.quiet {
+                                println!(
+                                    "  {} {} invalid commit: {}",
+                                    style("✗").red(),
+                                    &commit_oid.to_string()[..7],
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    errors += 1;
+                    if !self.quiet {
+                        println!(
+                            "  {} {} missing or corrupt: {}",
+                            style("✗").red(),
+                            &commit_oid.to_string()[..7],
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        // Summary
+        if !self.quiet {
+            println!();
+            if errors == 0 {
+                println!(
+                    "{} Verified {} commits in range - all OK",
+                    style("✅").green().bold(),
+                    verified
+                );
+            } else {
+                println!(
+                    "{} Verified {} commits, {} errors found",
+                    style("❌").red().bold(),
+                    verified,
+                    errors
+                );
+            }
+        }
+
+        if errors > 0 {
+            anyhow::bail!("Verification failed with {} error(s)", errors);
+        }
+
+        Ok(())
+    }
+
+    /// Resolve a commit reference to an OID
+    async fn resolve_commit(&self, refdb: &RefDatabase, spec: &str) -> Result<Option<Oid>> {
+        // Try as hex OID first
+        if let Ok(oid) = Oid::from_hex(spec) {
+            return Ok(Some(oid));
+        }
+
+        // Try as reference
+        if let Ok(r) = refdb.read(spec).await {
+            return Ok(r.oid);
+        }
+
+        // Try with refs/heads/ prefix
+        let with_prefix = format!("refs/heads/{}", spec);
+        if let Ok(r) = refdb.read(&with_prefix).await {
+            return Ok(r.oid);
+        }
+
+        anyhow::bail!("Cannot resolve commit: {}", spec)
+    }
+
+    /// Collect commits between start and end (walking back from end to start)
+    async fn collect_commits_in_range(
+        &self,
+        odb: &Arc<ObjectDatabase>,
+        start_oid: Option<Oid>,
+        end_oid: Oid,
+    ) -> Result<Vec<Oid>> {
+        let mut commits = Vec::new();
+        let mut visited = HashSet::new();
+        let mut queue = vec![end_oid];
+
+        while let Some(current) = queue.pop() {
+            // Stop if we've reached the start commit
+            if let Some(start) = start_oid {
+                if current == start {
+                    continue;
+                }
+            }
+
+            if visited.contains(&current) {
+                continue;
+            }
+            visited.insert(current);
+            commits.push(current);
+
+            // Read commit to get parents
+            if let Ok(data) = odb.read(&current).await {
+                if let Ok(commit) = Commit::deserialize(&data) {
+                    for parent in commit.parents {
+                        if !visited.contains(&parent) {
+                            queue.push(parent);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Reverse to get chronological order
+        commits.reverse();
+        Ok(commits)
     }
 }
