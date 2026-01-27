@@ -690,10 +690,24 @@ impl PackReader {
             1.0
         };
 
+        // Count delta-encoded objects by checking for DELTA_MAGIC at each object's offset
+        let delta_count = self
+            .index
+            .iter()
+            .filter(|(_, (offset, size))| {
+                let offset = *offset as usize;
+                let size = *size as usize;
+                // Check if object data starts with DELTA_MAGIC
+                size >= DELTA_MAGIC.len()
+                    && offset + DELTA_MAGIC.len() <= self.data.len()
+                    && &self.data[offset..offset + DELTA_MAGIC.len()] == DELTA_MAGIC
+            })
+            .count() as u32;
+
         PackMetadata {
             total_size,
             object_count,
-            delta_count: 0, // Placeholder
+            delta_count,
             uncompressed_size,
             compression_ratio,
         }

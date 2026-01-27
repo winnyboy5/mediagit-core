@@ -362,6 +362,85 @@ impl GcsBackend {
         Self::new(project_id, bucket_name, service_account_path).await
     }
 
+    /// Create a new GCS backend using Application Default Credentials (ADC)
+    ///
+    /// This method uses Google Cloud's Application Default Credentials which
+    /// automatically detect credentials from the environment:
+    /// - On GKE: Uses the node's service account
+    /// - On Cloud Run/Functions: Uses the service's identity
+    /// - On Compute Engine: Uses the instance's service account
+    /// - Locally: Uses `GOOGLE_APPLICATION_CREDENTIALS` env var if set
+    ///
+    /// # Arguments
+    ///
+    /// * `project_id` - Google Cloud Project ID
+    /// * `bucket_name` - GCS bucket name
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(GcsBackend)` - Successfully initialized backend
+    /// * `Err` - If ADC cannot find valid credentials
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use mediagit_storage::gcs::GcsBackend;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> anyhow::Result<()> {
+    /// // On GKE, Cloud Run, or with GOOGLE_APPLICATION_CREDENTIALS set
+    /// let storage = GcsBackend::with_default_credentials(
+    ///     "my-project",
+    ///     "my-bucket"
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn with_default_credentials(
+        project_id: impl Into<String>,
+        bucket_name: impl Into<String>,
+    ) -> anyhow::Result<Self> {
+        let project_id = project_id.into();
+        let bucket_name = bucket_name.into();
+
+        if project_id.is_empty() {
+            return Err(anyhow::anyhow!("project_id cannot be empty"));
+        }
+        if bucket_name.is_empty() {
+            return Err(anyhow::anyhow!("bucket_name cannot be empty"));
+        }
+
+        // Check if GOOGLE_APPLICATION_CREDENTIALS is set - use that file
+        if let Ok(creds_path) = std::env::var("GOOGLE_APPLICATION_CREDENTIALS") {
+            debug!(
+                project_id = %project_id,
+                bucket_name = %bucket_name,
+                credentials_path = %creds_path,
+                "Using GOOGLE_APPLICATION_CREDENTIALS for GCS"
+            );
+            return Self::new(&project_id, &bucket_name, &creds_path).await;
+        }
+
+        // Otherwise use default client config (ADC)
+        debug!(
+            project_id = %project_id,
+            bucket_name = %bucket_name,
+            "Using Application Default Credentials for GCS"
+        );
+
+        let client_config = ClientConfig::default()
+            .with_auth()
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to create GCS client with ADC: {}", e))?;
+
+        let client = GcsClient::new(client_config);
+
+        Ok(GcsBackend {
+            client: Arc::new(client),
+            config: GcsConfig::new(project_id, bucket_name),
+        })
+    }
+
     /// Retry logic with exponential backoff for transient failures
     async fn retry<F, Fut, T>(&self, mut f: F) -> anyhow::Result<T>
     where

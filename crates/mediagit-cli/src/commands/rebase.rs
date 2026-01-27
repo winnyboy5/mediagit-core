@@ -6,6 +6,8 @@ use mediagit_versioning::{Commit, LcaFinder, ObjectDatabase, ObjectType, Oid, Re
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use super::rebase_state::RebaseState;
+
 /// Rebase commits
 #[derive(Parser, Debug)]
 pub struct RebaseCmd {
@@ -56,15 +58,24 @@ pub struct RebaseCmd {
 
 impl RebaseCmd {
     pub async fn execute(&self) -> Result<()> {
+        let repo_root = self.find_repo_root()?;
+
         // Handle special operations
         if self.abort {
-            return self.abort_rebase().await;
+            return self.abort_rebase(&repo_root).await;
         }
         if self.continue_rebase {
-            return self.continue_rebase_process().await;
+            return self.continue_rebase_process(&repo_root).await;
         }
         if self.skip {
-            return self.skip_commit().await;
+            return self.skip_commit(&repo_root).await;
+        }
+
+        // Check if rebase already in progress
+        if RebaseState::in_progress(&repo_root) {
+            anyhow::bail!(
+                "A rebase is already in progress. Use --continue, --skip, or --abort."
+            );
         }
 
         // Interactive and merge rebases not yet supported
@@ -75,8 +86,6 @@ impl RebaseCmd {
             anyhow::bail!("Rebase with merge commits not yet implemented.");
         }
 
-        // Find repository root
-        let repo_root = self.find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
@@ -148,15 +157,99 @@ impl RebaseCmd {
             );
         }
 
-        // Rebase commits one by one
-        let mut new_parent = upstream_oid;
+        // Collect commit OIDs for state tracking
+        let commit_oids: Vec<Oid> = {
+            let mut oids = Vec::new();
+            let mut current = current_oid;
+            let mut visited = HashSet::new();
 
-        for (i, original_commit) in commits_to_rebase.iter().enumerate() {
+            loop {
+                if visited.contains(&current) || current == base_oid {
+                    break;
+                }
+                visited.insert(current);
+
+                let data = odb.read(&current).await?;
+                let commit = Commit::deserialize(&data)?;
+                oids.push(current);
+
+                if let Some(parent) = commit.parents.first() {
+                    current = *parent;
+                } else {
+                    break;
+                }
+            }
+            oids.reverse();
+            oids
+        };
+
+        // Create and save initial rebase state
+        let mut state = RebaseState::new(
+            current_oid,
+            head_target.clone(),
+            upstream_oid,
+            commit_oids.clone(),
+        );
+        state.save(&repo_root)?;
+
+        // Rebase commits one by one
+        let result = self.apply_commits(&repo_root, &odb, &refdb, &mut state, &commits_to_rebase).await;
+
+        match result {
+            Ok(new_head) => {
+                // Update HEAD to point to new commit chain
+                if let Some(ref target) = head_target {
+                    let new_ref = Ref::new_direct(target.clone(), new_head);
+                    refdb.write(&new_ref).await?;
+                } else {
+                    let new_ref = Ref::new_direct("HEAD".to_string(), new_head);
+                    refdb.write(&new_ref).await?;
+                }
+
+                // Clear rebase state on success
+                RebaseState::clear(&repo_root)?;
+
+                if !self.quiet {
+                    println!(
+                        "{} Successfully rebased {} commit(s)",
+                        style("✓").green().bold(),
+                        commits_to_rebase.len()
+                    );
+                }
+                Ok(())
+            }
+            Err(e) => {
+                // State is preserved for continue/abort
+                Err(e)
+            }
+        }
+    }
+
+    /// Apply commits during rebase, updating state as we go.
+    async fn apply_commits(
+        &self,
+        repo_root: &std::path::Path,
+        odb: &Arc<ObjectDatabase>,
+        _refdb: &RefDatabase,
+        state: &mut RebaseState,
+        commits: &[Commit],
+    ) -> Result<Oid> {
+        let mut new_parent = state.new_parent;
+
+        for (_i, original_commit) in commits.iter().enumerate() {
+            // Update state for current commit
+            if !state.commits_remaining.is_empty() {
+                state.advance();
+            }
+            state.set_new_parent(new_parent);
+            state.save(repo_root)?;
+
             if self.verbose {
+                let (current, total) = state.progress();
                 println!(
                     "  [{}/{}] {}",
-                    i + 1,
-                    commits_to_rebase.len(),
+                    current,
+                    total,
                     original_commit.message.lines().next().unwrap_or("")
                 );
             }
@@ -177,26 +270,14 @@ impl RebaseCmd {
             let commit_oid = odb.write(ObjectType::Commit, &commit_data).await?;
 
             new_parent = commit_oid;
+
+            // Update state with new parent for next iteration
+            state.set_new_parent(new_parent);
+            state.current_commit = None; // Mark current as complete
+            state.save(repo_root)?;
         }
 
-        // Update HEAD to point to new commit chain
-        if let Some(ref target) = head_target {
-            let new_ref = Ref::new_direct(target.clone(), new_parent);
-            refdb.write(&new_ref).await?;
-        } else {
-            let new_ref = Ref::new_direct("HEAD".to_string(), new_parent);
-            refdb.write(&new_ref).await?;
-        }
-
-        if !self.quiet {
-            println!(
-                "{} Successfully rebased {} commit(s)",
-                style("✓").green().bold(),
-                commits_to_rebase.len()
-            );
-        }
-
-        Ok(())
+        Ok(new_parent)
     }
 
     async fn collect_commits(
@@ -256,25 +337,175 @@ impl RebaseCmd {
         }
     }
 
-    async fn abort_rebase(&self) -> Result<()> {
+    async fn abort_rebase(&self, repo_root: &std::path::Path) -> Result<()> {
+        // Check if rebase is in progress
+        if !RebaseState::in_progress(repo_root) {
+            anyhow::bail!("No rebase in progress");
+        }
+
+        let state = RebaseState::load(repo_root)?;
+
         if !self.quiet {
             println!("{} Aborting rebase...", style("✗").red());
         }
-        anyhow::bail!("Rebase abort not yet implemented")
+
+        let storage_path = repo_root.join(".mediagit");
+        let refdb = RefDatabase::new(&storage_path);
+
+        // Restore HEAD to original position
+        if let Some(ref branch) = state.original_branch {
+            // HEAD was on a branch
+            let new_ref = Ref::new_direct(branch.clone(), state.original_head);
+            refdb.write(&new_ref).await?;
+        } else {
+            // Detached HEAD
+            let new_ref = Ref::new_direct("HEAD".to_string(), state.original_head);
+            refdb.write(&new_ref).await?;
+        }
+
+        // Clear rebase state
+        RebaseState::clear(repo_root)?;
+
+        if !self.quiet {
+            println!(
+                "{} Rebase aborted. HEAD restored to {}",
+                style("✓").green(),
+                &state.original_head.to_string()[..7]
+            );
+        }
+
+        Ok(())
     }
 
-    async fn continue_rebase_process(&self) -> Result<()> {
+    async fn continue_rebase_process(&self, repo_root: &std::path::Path) -> Result<()> {
+        // Check if rebase is in progress
+        if !RebaseState::in_progress(repo_root) {
+            anyhow::bail!("No rebase in progress");
+        }
+
+        let mut state = RebaseState::load(repo_root)?;
+
+        // Check for unresolved conflicts
+        if state.has_conflicts() {
+            anyhow::bail!(
+                "Cannot continue: unresolved conflicts in:\n  {}",
+                state.conflict_files
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n  ")
+            );
+        }
+
         if !self.quiet {
             println!("{} Continuing rebase...", style("→").cyan());
         }
-        anyhow::bail!("Rebase continue not yet implemented")
+
+        let storage_path = repo_root.join(".mediagit");
+        let storage: Arc<dyn mediagit_storage::StorageBackend> =
+            Arc::new(LocalBackend::new(&storage_path).await?);
+        let refdb = RefDatabase::new(&storage_path);
+        let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
+
+        // Collect remaining commits to apply
+        let remaining_commits = self.load_remaining_commits(&odb, &state).await?;
+
+        if remaining_commits.is_empty() {
+            // No more commits, finalize
+            if let Some(ref branch) = state.original_branch {
+                let new_ref = Ref::new_direct(branch.clone(), state.new_parent);
+                refdb.write(&new_ref).await?;
+            } else {
+                let new_ref = Ref::new_direct("HEAD".to_string(), state.new_parent);
+                refdb.write(&new_ref).await?;
+            }
+
+            RebaseState::clear(repo_root)?;
+
+            if !self.quiet {
+                println!(
+                    "{} Rebase complete",
+                    style("✓").green().bold()
+                );
+            }
+            return Ok(());
+        }
+
+        // Continue applying remaining commits
+        let result = self.apply_commits(repo_root, &odb, &refdb, &mut state, &remaining_commits).await;
+
+        match result {
+            Ok(new_head) => {
+                // Update HEAD
+                if let Some(ref branch) = state.original_branch {
+                    let new_ref = Ref::new_direct(branch.clone(), new_head);
+                    refdb.write(&new_ref).await?;
+                } else {
+                    let new_ref = Ref::new_direct("HEAD".to_string(), new_head);
+                    refdb.write(&new_ref).await?;
+                }
+
+                RebaseState::clear(repo_root)?;
+
+                if !self.quiet {
+                    println!(
+                        "{} Successfully rebased remaining commit(s)",
+                        style("✓").green().bold()
+                    );
+                }
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 
-    async fn skip_commit(&self) -> Result<()> {
-        if !self.quiet {
-            println!("{} Skipping commit...", style("→").cyan());
+    async fn skip_commit(&self, repo_root: &std::path::Path) -> Result<()> {
+        // Check if rebase is in progress
+        if !RebaseState::in_progress(repo_root) {
+            anyhow::bail!("No rebase in progress");
         }
-        anyhow::bail!("Rebase skip not yet implemented")
+
+        let mut state = RebaseState::load(repo_root)?;
+
+        if state.current_commit.is_none() && state.commits_remaining.is_empty() {
+            anyhow::bail!("No commit to skip");
+        }
+
+        if !self.quiet {
+            if let Some(current) = state.current_commit {
+                println!(
+                    "{} Skipping commit {}...",
+                    style("→").cyan(),
+                    &current.to_string()[..7]
+                );
+            } else {
+                println!("{} Skipping commit...", style("→").cyan());
+            }
+        }
+
+        // Skip current commit
+        state.skip_current();
+        state.save(repo_root)?;
+
+        // Continue with remaining
+        self.continue_rebase_process(repo_root).await
+    }
+
+    /// Load remaining commits from state
+    async fn load_remaining_commits(
+        &self,
+        odb: &Arc<ObjectDatabase>,
+        state: &RebaseState,
+    ) -> Result<Vec<Commit>> {
+        let mut commits = Vec::new();
+
+        for oid in &state.commits_remaining {
+            let data = odb.read(oid).await?;
+            let commit = Commit::deserialize(&data)?;
+            commits.push(commit);
+        }
+
+        Ok(commits)
     }
 
     fn find_repo_root(&self) -> Result<std::path::PathBuf> {

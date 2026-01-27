@@ -7,6 +7,7 @@ use mediagit_versioning::{Commit, MergeStrategy, RefDatabase, Signature};
 use std::sync::Arc;
 use std::time::Instant;
 use crate::progress::{ProgressTracker, OperationStats};
+use super::rebase::RebaseCmd;
 
 /// Fetch and integrate remote changes
 ///
@@ -40,7 +41,7 @@ pub struct PullCmd {
     #[arg(value_name = "BRANCH")]
     pub branch: Option<String>,
 
-    /// Rebase instead of merge (not yet implemented - will fall back to merge)
+    /// Rebase instead of merge
     #[arg(short = 'r', long)]
     pub rebase: bool,
 
@@ -321,13 +322,67 @@ impl PullCmd {
                     );
                 }
             } else if self.rebase {
-                // TODO: Implement rebase integration
-                if !self.quiet {
-                    println!(
-                        "{} Rebase integration not yet implemented",
-                        style("⚠").yellow()
-                    );
-                    println!("  Use merge strategy instead (default)");
+                // Rebase integration using the RebaseCmd
+                let head = refdb.read("HEAD").await?;
+                if let Some(head_oid) = head.oid {
+                    // Get upstream ref name (e.g., "origin/main" or just "main")
+                    let upstream_name = if remote_ref.starts_with("refs/heads/") {
+                        // Use remote tracking ref as upstream
+                        let branch_name = remote_ref.strip_prefix("refs/heads/")
+                            .unwrap_or(&remote_ref);
+                        format!("{}/{}", remote, branch_name)
+                    } else {
+                        remote_oid.clone()
+                    };
+
+                    if self.verbose {
+                        let head_hex = head_oid.to_hex();
+                        println!("  Rebasing {} onto {}", &head_hex[..8], &remote_oid[..8]);
+                    }
+
+                    // Create and execute rebase command
+                    let rebase_cmd = RebaseCmd {
+                        upstream: upstream_name,
+                        branch: None, // Rebase current branch
+                        interactive: false,
+                        rebase_merges: false,
+                        keep_empty: false,
+                        autosquash: false,
+                        abort: false,
+                        continue_rebase: false,
+                        skip: false,
+                        quiet: self.quiet,
+                        verbose: self.verbose,
+                    };
+
+                    rebase_cmd.execute().await?;
+
+                    if !self.quiet {
+                        println!(
+                            "{} Rebased successfully",
+                            style("✓").green().bold()
+                        );
+                    }
+                } else {
+                    // No local commits, just update HEAD (fast-forward)
+                    let remote_oid_parsed = mediagit_versioning::Oid::from_hex(&remote_oid)
+                        .map_err(|e| anyhow::anyhow!("Invalid remote OID: {}", e))?;
+
+                    if let Some(target) = &head.target {
+                        let target_ref = mediagit_versioning::Ref::new_direct(target.clone(), remote_oid_parsed);
+                        refdb.write(&target_ref).await?;
+                    } else {
+                        let head_ref = mediagit_versioning::Ref::new_direct("HEAD".to_string(), remote_oid_parsed);
+                        refdb.write(&head_ref).await?;
+                    }
+
+                    if !self.quiet {
+                        println!(
+                            "{} Fast-forwarded to {}",
+                            style("✓").green().bold(),
+                            &remote_oid[..8]
+                        );
+                    }
                 }
             } else {
                 // Merge integration - only for CURRENT branch

@@ -293,18 +293,26 @@ impl BranchCmd {
         // List local branches (unless --remote only)
         if !opts.remote {
             let local_branches = refdb.list("heads").await?;
-            
+
             if !local_branches.is_empty() {
                 any_branches_found = true;
-                
+
                 for branch_name in local_branches {
-                    let is_current = current_branch
+                    // Normalize path separators for cross-platform compatibility (Windows uses \)
+                    let normalized_branch = branch_name.replace('\\', "/");
+                    let normalized_current = current_branch
                         .as_ref()
-                        .map(|cb| cb == &branch_name)
+                        .map(|cb| cb.replace('\\', "/"));
+
+                    let is_current = normalized_current
+                        .as_ref()
+                        .map(|cb| cb == &normalized_branch)
                         .unwrap_or(false);
 
                     let prefix = if is_current { "* " } else { "  " };
-                    let display_name = branch_name.strip_prefix("refs/heads/").unwrap_or(&branch_name);
+                    let display_name = normalized_branch
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(&normalized_branch);
 
                     if opts.verbose {
                         let branch_ref = refdb.read(&branch_name).await.ok();
@@ -338,7 +346,11 @@ impl BranchCmd {
                 }
                 
                 for branch_name in remote_branches {
-                    let display_name = branch_name.strip_prefix("refs/remotes/").unwrap_or(&branch_name);
+                    // Normalize path separators for cross-platform compatibility
+                    let normalized_branch = branch_name.replace('\\', "/");
+                    let display_name = normalized_branch
+                        .strip_prefix("refs/remotes/")
+                        .unwrap_or(&normalized_branch);
 
                     if opts.verbose {
                         let branch_ref = refdb.read(&branch_name).await.ok();
@@ -530,6 +542,9 @@ impl BranchCmd {
             Arc::new(LocalBackend::new(&storage_path).await?);
         let refdb = RefDatabase::new(&storage_path);
 
+        // Load config to check branch protection
+        let config = mediagit_config::Config::load(&repo_root).await?;
+
         // Get current branch to prevent deletion
         let head = refdb.read("HEAD").await?;
         let current_branch = head.target;
@@ -545,6 +560,19 @@ impl BranchCmd {
                     output::warning(&format!("Cannot delete current branch '{}'", branch_name));
                 }
                 continue;
+            }
+
+            // Check branch protection
+            if let Some(protection) = config.get_branch_protection(branch_name) {
+                if protection.prevent_deletion && !opts.force {
+                    if !opts.quiet {
+                        output::warning(&format!(
+                            "Branch '{}' is protected (use --force to override)",
+                            branch_name
+                        ));
+                    }
+                    continue;
+                }
             }
 
             // Verify branch exists
@@ -573,10 +601,53 @@ impl BranchCmd {
         Ok(())
     }
 
-    async fn protect(&self, _opts: &ProtectOpts) -> Result<()> {
-        // NOTE: Branch protection implementation pending
-        // Requires: protection rules storage, validation enforcement
-        anyhow::bail!("Branch protection not yet implemented")
+    async fn protect(&self, opts: &ProtectOpts) -> Result<()> {
+        use crate::output;
+        use mediagit_config::BranchProtection;
+
+        let repo_root = self.find_repo_root()?;
+        let mut config = mediagit_config::Config::load(&repo_root).await?;
+
+        // Normalize branch name
+        let branch_name = opts.branch.strip_prefix("refs/heads/")
+            .unwrap_or(&opts.branch)
+            .to_string();
+
+        if opts.unprotect {
+            // Remove protection
+            if config.unprotect_branch(&branch_name).is_some() {
+                config.save(&repo_root)?;
+                if !opts.quiet {
+                    output::success(&format!("Removed protection from branch '{}'", branch_name));
+                }
+            } else if !opts.quiet {
+                output::warning(&format!("Branch '{}' was not protected", branch_name));
+            }
+        } else {
+            // Add protection
+            let protection = if opts.require_reviews {
+                BranchProtection::with_reviews(1)
+            } else {
+                BranchProtection::default_protection()
+            };
+
+            config.protect_branch_with(&branch_name, protection);
+            config.save(&repo_root)?;
+
+            if !opts.quiet {
+                let mut rules = vec!["prevent force-push", "prevent deletion"];
+                if opts.require_reviews {
+                    rules.push("require reviews");
+                }
+                output::success(&format!(
+                    "Protected branch '{}' ({})",
+                    branch_name,
+                    rules.join(", ")
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     async fn rename(&self, opts: &RenameOpts) -> Result<()> {

@@ -271,6 +271,8 @@ mod tests {
         assert!(manager.base_dir.exists());
 
         let state_path = manager.current_state_path();
-        assert!(state_path.to_string_lossy().contains("migration/state.json"));
+        // Normalize path separators for cross-platform compatibility (Windows uses \)
+        let normalized_path = state_path.to_string_lossy().replace('\\', "/");
+        assert!(normalized_path.contains("migration/state.json"));
     }
 }

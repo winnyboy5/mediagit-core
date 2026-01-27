@@ -10,7 +10,10 @@ members = [
     "crates/mediagit-git",
     "crates/mediagit-security",
     "crates/mediagit-metrics",
-    "crates/mediagit-migration", "crates/mediagit-protocol", "crates/mediagit-server",
+    "crates/mediagit-migration",
+    "crates/mediagit-protocol",
+    "crates/mediagit-server",
+    "crates/mediagit-test-utils",
 ]
 resolver = "2"
 

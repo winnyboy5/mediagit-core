@@ -308,7 +308,8 @@ async fn collect_refs_recursive(
         if file_type.is_file() {
             // Convert absolute path to ref name: refs/heads/feat/bunny-audio
             if let Ok(rel) = path.strip_prefix(refs_root) {
-                let ref_name = format!("refs/{}", rel.display());
+                // Normalize path separators for cross-platform compatibility (Windows uses \\)
+                let ref_name = format!("refs/{}", rel.to_string_lossy().replace('\\', "/"));
                 refs.push(ref_name);
             }
         } else if file_type.is_dir() {
