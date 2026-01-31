@@ -6,6 +6,7 @@ use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use super::super::repo::find_repo_root;
 
 /// Show the working tree status
 ///
@@ -76,7 +77,7 @@ impl StatusCmd {
         use crate::output;
 
         // Find repository root
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
 
         if !self.quiet {
             output::header("Repository Status");
@@ -315,17 +316,4 @@ impl StatusCmd {
         Ok(())
     }
 
-    fn find_repo_root(&self) -> Result<std::path::PathBuf> {
-        let mut current = std::env::current_dir()?;
-
-        loop {
-            if current.join(".mediagit").exists() {
-                return Ok(current);
-            }
-
-            if !current.pop() {
-                anyhow::bail!("Not a mediagit repository (or any parent up to mount point)");
-            }
-        }
-    }
 }

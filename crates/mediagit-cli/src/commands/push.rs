@@ -8,6 +8,7 @@ use mediagit_versioning::RefDatabase;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use crate::progress::OperationStats;
+use super::super::repo::find_repo_root;
 
 /// Validate a ref name for safety
 /// Ref names must not contain special characters that could cause filesystem issues
@@ -135,7 +136,7 @@ impl PushCmd {
         let remote = self.remote.as_deref().unwrap_or("origin");
 
         // Validate repository
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
@@ -530,17 +531,4 @@ impl PushCmd {
         Ok(())
     }
 
-    fn find_repo_root(&self) -> Result<std::path::PathBuf> {
-        let mut current = std::env::current_dir()?;
-
-        loop {
-            if current.join(".mediagit").exists() {
-                return Ok(current);
-            }
-
-            if !current.pop() {
-                anyhow::bail!("Not a mediagit repository");
-            }
-        }
-    }
 }

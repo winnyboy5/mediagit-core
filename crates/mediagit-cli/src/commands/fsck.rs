@@ -28,29 +28,35 @@ use std::sync::Arc;
 /// - Checks commit graph connectivity
 /// - Detects missing or corrupted objects
 /// - Optionally finds dangling (unreferenced) objects
-///
-/// # Examples
-///
-/// Basic integrity check:
-/// ```bash
-/// mediagit fsck
-/// ```
-///
-/// Full check including dangling objects:
-/// ```bash
-/// mediagit fsck --full
-/// ```
-///
-/// Quick check (objects and refs only):
-/// ```bash
-/// mediagit fsck --quick
-/// ```
-///
-/// Repair mode (fix repairable issues):
-/// ```bash
-/// mediagit fsck --repair
-/// ```
 #[derive(Parser, Debug)]
+#[command(after_help = "EXAMPLES:
+    # Basic integrity check
+    mediagit fsck
+
+    # Full check including dangling objects
+    mediagit fsck --full
+
+    # Quick check (objects and refs only)
+    mediagit fsck --quick
+
+    # Repair mode (fix repairable issues)
+    mediagit fsck --repair
+
+    # Dry-run repair to see what would be fixed
+    mediagit fsck --repair --dry-run
+
+FSCK vs VERIFY:
+    fsck    - Comprehensive integrity check (full graph analysis)
+            - Checks connectivity, finds dangling/unreachable objects
+            - Supports repair mode (--repair)
+            - Use for thorough repository audits and recovery
+
+    verify  - Fast integrity check (checksums + refs only)
+            - Skips connectivity and dangling object checks
+            - Use for quick health checks and CI pipelines
+
+SEE ALSO:
+    mediagit-verify(1), mediagit-gc(1)")]
 pub struct FsckCmd {
     /// Full check including dangling objects (slower)
     #[arg(long)]
