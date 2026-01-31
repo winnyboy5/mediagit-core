@@ -99,16 +99,16 @@ fn test_gc_auto() {
 }
 
 #[test]
-fn test_gc_prune() {
+fn test_gc_no_prune() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
 
     add_and_commit(temp_dir.path(), "file.txt", "Content", "Initial commit");
 
+    // Test with --no-prune flag (gc prunes by default)
     mediagit()
         .arg("gc")
-        .arg("--prune")
-        .arg("7")
+        .arg("--no-prune")
         .current_dir(temp_dir.path())
         .assert()
         .success();

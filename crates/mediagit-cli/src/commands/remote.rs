@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use console::style;
 use mediagit_config::Config;
+use super::super::repo::find_repo_root;
 
 /// Manage remote repositories
 #[derive(Parser, Debug)]
@@ -94,7 +95,7 @@ impl RemoteCmd {
     }
 
     async fn add_remote(&self, name: &str, url: &str, fetch: bool) -> Result<()> {
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
 
         // Validate remote name
         if name.is_empty() {
@@ -146,7 +147,7 @@ impl RemoteCmd {
     }
 
     async fn remove_remote(&self, name: &str) -> Result<()> {
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
 
         // Load existing config
         let mut config = Config::load(&repo_root).await?;
@@ -172,7 +173,7 @@ impl RemoteCmd {
     }
 
     async fn list_remotes(&self, verbose: bool) -> Result<()> {
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let config = Config::load(&repo_root).await?;
 
         if config.remotes.is_empty() {
@@ -225,7 +226,7 @@ impl RemoteCmd {
     }
 
     async fn rename_remote(&self, old_name: &str, new_name: &str) -> Result<()> {
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
 
         // Validate new name
         if new_name.is_empty() {
@@ -264,7 +265,7 @@ impl RemoteCmd {
     }
 
     async fn show_remote(&self, name: &str) -> Result<()> {
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let config = Config::load(&repo_root).await?;
 
         // Get remote
@@ -364,7 +365,7 @@ impl RemoteCmd {
     }
 
     async fn set_url(&self, name: &str, url: &str, push: bool) -> Result<()> {
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
 
         // Validate URL
         validate_url(url)?;
@@ -404,19 +405,6 @@ impl RemoteCmd {
         Ok(())
     }
 
-    fn find_repo_root(&self) -> Result<std::path::PathBuf> {
-        let mut current = std::env::current_dir()?;
-
-        loop {
-            if current.join(".mediagit").exists() {
-                return Ok(current);
-            }
-
-            if !current.pop() {
-                anyhow::bail!("Not a mediagit repository (or any of the parent directories)");
-            }
-        }
-    }
 }
 
 /// Validate remote URL format

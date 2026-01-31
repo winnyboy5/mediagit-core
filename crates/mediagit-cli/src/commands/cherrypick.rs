@@ -4,6 +4,7 @@ use console::style;
 use mediagit_versioning::{CheckoutManager, Commit, Index, MergeEngine, ObjectDatabase, Oid, Ref, RefDatabase, Tree};
 use std::path::PathBuf;
 use std::sync::Arc;
+use super::super::repo::find_repo_root;
 
 /// Apply changes from existing commits
 #[derive(Parser, Debug)]
@@ -43,7 +44,7 @@ pub struct CherryPickCmd {
 
 impl CherryPickCmd {
     pub async fn execute(&self) -> Result<()> {
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
 
         // Handle special operations
         if self.abort {
@@ -468,19 +469,6 @@ impl CherryPickCmd {
             .context(format!("Cannot resolve commit reference: {}", commit_ref))
     }
 
-    fn find_repo_root(&self) -> Result<PathBuf> {
-        let mut current = std::env::current_dir()?;
-
-        loop {
-            if current.join(".mediagit").exists() {
-                return Ok(current);
-            }
-
-            if !current.pop() {
-                anyhow::bail!("Not a mediagit repository (or any of the parent directories)");
-            }
-        }
-    }
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]

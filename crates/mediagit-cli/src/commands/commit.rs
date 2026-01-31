@@ -7,6 +7,7 @@ use clap::Parser;
 use mediagit_storage::LocalBackend;
 use mediagit_versioning::{Commit, Index, ObjectDatabase, Ref, RefDatabase, Signature, Tree, TreeEntry, FileMode};
 use std::sync::Arc;
+use super::super::repo::find_repo_root;
 
 /// Record changes to the repository
 ///
@@ -100,7 +101,7 @@ impl CommitCmd {
         }
 
         // Find repository root
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
 
         if self.dry_run {
             output::info("Running in dry-run mode");
@@ -276,17 +277,4 @@ impl CommitCmd {
         Ok(())
     }
 
-    fn find_repo_root(&self) -> Result<std::path::PathBuf> {
-        let mut current = std::env::current_dir()?;
-
-        loop {
-            if current.join(".mediagit").exists() {
-                return Ok(current);
-            }
-
-            if !current.pop() {
-                anyhow::bail!("Not a mediagit repository");
-            }
-        }
-    }
 }

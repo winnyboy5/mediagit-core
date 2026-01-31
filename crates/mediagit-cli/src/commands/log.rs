@@ -5,6 +5,7 @@ use mediagit_storage::LocalBackend;
 use mediagit_versioning::{Commit, ObjectDatabase, Oid, RefDatabase};
 use std::collections::HashSet;
 use std::sync::Arc;
+use super::super::repo::find_repo_root;
 
 /// Show commit history
 ///
@@ -102,7 +103,7 @@ impl LogCmd {
             return Ok(());
         }
 
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
@@ -258,17 +259,4 @@ impl LogCmd {
         Ok(())
     }
 
-    fn find_repo_root(&self) -> Result<std::path::PathBuf> {
-        let mut current = std::env::current_dir()?;
-
-        loop {
-            if current.join(".mediagit").exists() {
-                return Ok(current);
-            }
-
-            if !current.pop() {
-                anyhow::bail!("Not a mediagit repository");
-            }
-        }
-    }
 }

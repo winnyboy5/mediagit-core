@@ -14,6 +14,7 @@
 mod commands;
 mod output;
 mod progress;
+mod repo;
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};

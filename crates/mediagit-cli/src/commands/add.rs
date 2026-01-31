@@ -7,6 +7,7 @@ use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use mediagit_storage::LocalBackend;
 use mediagit_versioning::{ChunkStrategy, Commit, Index, IndexEntry, ObjectDatabase, ObjectType, Oid, RefDatabase, StorageConfig, Tree};
+use super::super::repo::find_repo_root;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -87,7 +88,7 @@ impl AddCmd {
         use crate::output;
 
         // Find repository root
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
 
         if self.dry_run {
             output::info("Running in dry-run mode");
@@ -388,20 +389,6 @@ impl AddCmd {
         }
 
         Ok(())
-    }
-
-    fn find_repo_root(&self) -> Result<std::path::PathBuf> {
-        let mut current = std::env::current_dir()?;
-
-        loop {
-            if current.join(".mediagit").exists() {
-                return Ok(current);
-            }
-
-            if !current.pop() {
-                anyhow::bail!("Not a mediagit repository");
-            }
-        }
     }
 
     /// Check if path is outside .mediagit directory

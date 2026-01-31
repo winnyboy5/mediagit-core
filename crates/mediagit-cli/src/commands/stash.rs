@@ -4,6 +4,7 @@ use console::style;
 use mediagit_versioning::{CheckoutManager, Commit, Index, ObjectDatabase, Oid, RefDatabase};
 use std::path::PathBuf;
 use std::sync::Arc;
+use super::super::repo::find_repo_root;
 
 /// Stash changes in working directory
 #[derive(Parser, Debug)]
@@ -135,7 +136,7 @@ impl StashCmd {
     }
 
     async fn save(&self, opts: &SaveOpts) -> Result<()> {
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let mediagit_dir = repo_root.join(".mediagit");
         let storage = Arc::new(mediagit_storage::LocalBackend::new(&mediagit_dir).await?);
         let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
@@ -217,7 +218,7 @@ impl StashCmd {
     }
 
     async fn apply(&self, opts: &ApplyOpts) -> Result<()> {
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let mediagit_dir = repo_root.join(".mediagit");
         let storage = Arc::new(mediagit_storage::LocalBackend::new(&mediagit_dir).await?);
         let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
@@ -247,7 +248,7 @@ impl StashCmd {
     }
 
     async fn list(&self, opts: &ListOpts) -> Result<()> {
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let mediagit_dir = repo_root.join(".mediagit");
 
         let stash_list = self.load_all_stashes(&mediagit_dir)?;
@@ -281,7 +282,7 @@ impl StashCmd {
     }
 
     async fn show(&self, opts: &ShowOpts) -> Result<()> {
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let mediagit_dir = repo_root.join(".mediagit");
 
         let stash_index = opts.stash.unwrap_or(0);
@@ -302,7 +303,7 @@ impl StashCmd {
     }
 
     async fn drop(&self, opts: &DropOpts) -> Result<()> {
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let mediagit_dir = repo_root.join(".mediagit");
 
         let stash_index = opts.stash.unwrap_or(0);
@@ -333,7 +334,7 @@ impl StashCmd {
     }
 
     async fn pop(&self, opts: &PopOpts) -> Result<()> {
-        let _repo_root = self.find_repo_root()?;
+        let _repo_root = find_repo_root()?;
 
         // Apply stash
         let apply_opts = ApplyOpts {
@@ -354,7 +355,7 @@ impl StashCmd {
     }
 
     async fn clear(&self, opts: &ClearOpts) -> Result<()> {
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let mediagit_dir = repo_root.join(".mediagit");
 
         if !opts.force {
@@ -426,19 +427,6 @@ impl StashCmd {
         Ok(())
     }
 
-    fn find_repo_root(&self) -> Result<PathBuf> {
-        let mut current = std::env::current_dir()?;
-
-        loop {
-            if current.join(".mediagit").exists() {
-                return Ok(current);
-            }
-
-            if !current.pop() {
-                anyhow::bail!("Not a mediagit repository (or any of the parent directories)");
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

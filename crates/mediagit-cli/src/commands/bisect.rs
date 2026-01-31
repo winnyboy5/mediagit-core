@@ -5,6 +5,7 @@ use mediagit_versioning::{CheckoutManager, ObjectDatabase, Oid, RefDatabase};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::collections::HashSet;
+use super::super::repo::find_repo_root;
 
 /// Find commit that introduced a bug using binary search
 #[derive(Parser, Debug)]
@@ -104,7 +105,7 @@ impl BisectCmd {
     }
 
     async fn start(&self, opts: &StartOpts) -> Result<()> {
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let mediagit_dir = repo_root.join(".mediagit");
         let refdb = RefDatabase::new(&mediagit_dir);
 
@@ -161,7 +162,7 @@ impl BisectCmd {
     }
 
     async fn good(&self, opts: &GoodOpts) -> Result<()> {
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let mediagit_dir = repo_root.join(".mediagit");
         let refdb = RefDatabase::new(&mediagit_dir);
 
@@ -201,7 +202,7 @@ impl BisectCmd {
     }
 
     async fn bad(&self, opts: &BadOpts) -> Result<()> {
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let mediagit_dir = repo_root.join(".mediagit");
         let refdb = RefDatabase::new(&mediagit_dir);
 
@@ -240,7 +241,7 @@ impl BisectCmd {
     }
 
     async fn skip(&self, opts: &SkipOpts) -> Result<()> {
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let mediagit_dir = repo_root.join(".mediagit");
         let refdb = RefDatabase::new(&mediagit_dir);
 
@@ -273,7 +274,7 @@ impl BisectCmd {
     }
 
     async fn reset(&self, opts: &ResetOpts) -> Result<()> {
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let mediagit_dir = repo_root.join(".mediagit");
 
         // Load bisect state
@@ -313,7 +314,7 @@ impl BisectCmd {
     }
 
     async fn log(&self, _opts: &LogOpts) -> Result<()> {
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let mediagit_dir = repo_root.join(".mediagit");
 
         // Load bisect state
@@ -528,19 +529,6 @@ impl BisectCmd {
             .context(format!("Cannot resolve commit reference: {}", commit_ref))
     }
 
-    fn find_repo_root(&self) -> Result<PathBuf> {
-        let mut current = std::env::current_dir()?;
-
-        loop {
-            if current.join(".mediagit").exists() {
-                return Ok(current);
-            }
-
-            if !current.pop() {
-                anyhow::bail!("Not a mediagit repository (or any of the parent directories)");
-            }
-        }
-    }
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]

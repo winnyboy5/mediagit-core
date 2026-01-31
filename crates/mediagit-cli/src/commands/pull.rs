@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use crate::progress::{ProgressTracker, OperationStats};
 use super::rebase::RebaseCmd;
+use super::super::repo::find_repo_root;
 
 /// Fetch and integrate remote changes
 ///
@@ -45,12 +46,12 @@ pub struct PullCmd {
     #[arg(short = 'r', long)]
     pub rebase: bool,
 
-    /// Merge strategy
-    #[arg(short = 's', long, value_name = "STRATEGY")]
+    /// Merge strategy (hidden - MediaGit uses binary-aware merge for media files)
+    #[arg(short = 's', long, value_name = "STRATEGY", hide = true)]
     pub strategy: Option<String>,
 
-    /// Merge option
-    #[arg(short = 'X', long, value_name = "OPTION")]
+    /// Merge option (hidden - not applicable to binary media files)
+    #[arg(short = 'X', long, value_name = "OPTION", hide = true)]
     pub strategy_option: Option<String>,
 
     /// Perform validation without pulling
@@ -87,7 +88,7 @@ impl PullCmd {
         let remote = self.remote.as_deref().unwrap_or("origin");
 
         // Validate repository
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
@@ -160,15 +161,63 @@ impl PullCmd {
         // Get current local ref state BEFORE downloading
         let local_ref = refdb.read(&remote_ref).await.ok();
 
-        // Get remote refs to check current state
-        let remote_refs_check = client.get_refs().await?;
-        let remote_oid_check = remote_refs_check
+        // ================================================================
+        // STEP 1: Fetch ALL remote branch refs and update tracking refs
+        // This ensures new branches pushed by other collaborators are visible
+        // NOTE: This runs BEFORE the "already up to date" check so users
+        // always see new remote branches even when current branch is synced
+        // ================================================================
+        let all_remote_refs = client.get_refs().await?;
+        let remote_branches: Vec<_> = all_remote_refs.refs.iter()
+            .filter(|r| r.name.starts_with("refs/heads/"))
+            .collect();
+
+        // Get remote OID for current branch (for sync check below)
+        let remote_oid_check = all_remote_refs
             .refs
             .iter()
             .find(|r| r.name == remote_ref)
             .map(|r| r.oid.clone());
 
-        // Check if already synchronized (avoid redundant pull)
+        if !self.dry_run {
+            // Create remotes directory for tracking refs
+            let remotes_dir = storage_path.join("refs").join("remotes").join(remote);
+            std::fs::create_dir_all(&remotes_dir)?;
+
+            let mut tracking_refs_updated = 0;
+            for branch_ref in &remote_branches {
+                let branch_name = branch_ref.name.strip_prefix("refs/heads/")
+                    .unwrap_or(&branch_ref.name);
+                let tracking_ref_name = format!("refs/remotes/{}/{}", remote, branch_name);
+
+                // Parse remote OID and update tracking ref
+                if let Ok(branch_oid) = mediagit_versioning::Oid::from_hex(&branch_ref.oid) {
+                    // Create parent directories for nested branches (e.g., feature/auth)
+                    let tracking_path = storage_path.join("refs").join("remotes").join(remote).join(branch_name);
+                    if let Some(parent) = tracking_path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+
+                    let tracking_ref = mediagit_versioning::Ref::new_direct(tracking_ref_name.clone(), branch_oid);
+                    refdb.write(&tracking_ref).await?;
+                    tracking_refs_updated += 1;
+
+                    if self.verbose {
+                        println!("  {} {} -> {}", style("→").cyan(), tracking_ref_name, &branch_ref.oid[..8.min(branch_ref.oid.len())]);
+                    }
+                }
+            }
+
+            if !self.quiet && tracking_refs_updated > 0 {
+                println!(
+                    "{} Fetched {} remote tracking refs",
+                    style("✓").green(),
+                    tracking_refs_updated
+                );
+            }
+        }
+
+        // Check if current branch is already synchronized (avoid redundant object download)
         if let (Some(local), Some(remote)) = (local_ref.as_ref().and_then(|r| r.oid.as_ref()), remote_oid_check.as_ref()) {
             let local_oid_str = local.to_hex();
             if &local_oid_str == remote {
@@ -181,6 +230,9 @@ impl PullCmd {
         }
 
         if !self.dry_run {
+            // ================================================================
+            // STEP 2: Pull the specific branch's objects
+            // ================================================================
             // Build the "have" list from local ref state for incremental pull
             let local_have: Vec<String> = local_ref
                 .as_ref()
@@ -486,17 +538,4 @@ impl PullCmd {
         Ok(())
     }
 
-    fn find_repo_root(&self) -> Result<std::path::PathBuf> {
-        let mut current = std::env::current_dir()?;
-
-        loop {
-            if current.join(".mediagit").exists() {
-                return Ok(current);
-            }
-
-            if !current.pop() {
-                anyhow::bail!("Not a mediagit repository");
-            }
-        }
-    }
 }

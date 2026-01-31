@@ -18,12 +18,12 @@ pub struct GcCmd {
     #[arg(long)]
     pub aggressive: bool,
 
-    /// Prune unreachable objects
+    /// Skip pruning unreachable objects (by default, gc prunes)
     #[arg(long)]
-    pub prune: Option<String>,
+    pub no_prune: bool,
 
-    /// Auto gc threshold
-    #[arg(long, value_name = "NUM")]
+    /// Auto gc threshold (run only if thresholds exceeded)
+    #[arg(long)]
     pub auto: bool,
 
     /// Show what would be done without deleting
@@ -423,6 +423,22 @@ impl GcCmd {
 
         // Calculate total size to reclaim
         let total_size: u64 = unreachable.iter().map(|(_, size)| size).sum();
+
+        // Skip pruning if --no-prune flag is set
+        if self.no_prune {
+            if !self.quiet {
+                println!(
+                    "{} Found {} unreachable objects ({}) - skipping prune (--no-prune)",
+                    style("ℹ").blue(),
+                    unreachable.len(),
+                    GcStats::format_bytes(total_size)
+                );
+            }
+            stats.unreachable_objects = unreachable.len() as u64;
+            stats.duration_secs = start.elapsed().as_secs_f64();
+            stats.print_summary(self.quiet);
+            return Ok(());
+        }
 
         if self.dry_run {
             println!(
