@@ -5,6 +5,7 @@ use mediagit_versioning::{Ref, RefDatabase};
 use std::sync::Arc;
 use std::time::Instant;
 use crate::progress::{ProgressTracker, OperationStats};
+use super::super::repo::find_repo_root;
 
 /// Manage branches
 ///
@@ -278,7 +279,7 @@ impl BranchCmd {
         use crate::output;
         use console::style;
 
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
         let _storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
@@ -376,24 +377,10 @@ impl BranchCmd {
         Ok(())
     }
 
-    fn find_repo_root(&self) -> Result<std::path::PathBuf> {
-        let mut current = std::env::current_dir()?;
-
-        loop {
-            if current.join(".mediagit").exists() {
-                return Ok(current);
-            }
-
-            if !current.pop() {
-                anyhow::bail!("Not a mediagit repository");
-            }
-        }
-    }
-
     async fn create(&self, opts: &CreateOpts) -> Result<()> {
         use crate::output;
 
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
         let _storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
@@ -441,7 +428,7 @@ impl BranchCmd {
         let mut stats = OperationStats::new();
         let progress = ProgressTracker::new(opts.quiet);
 
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
@@ -536,7 +523,7 @@ impl BranchCmd {
     async fn delete(&self, opts: &DeleteOpts) -> Result<()> {
         use crate::output;
 
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
         let _storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
@@ -605,7 +592,7 @@ impl BranchCmd {
         use crate::output;
         use mediagit_config::BranchProtection;
 
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let mut config = mediagit_config::Config::load(&repo_root).await?;
 
         // Normalize branch name
@@ -653,7 +640,7 @@ impl BranchCmd {
     async fn rename(&self, opts: &RenameOpts) -> Result<()> {
         use crate::output;
 
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
         let _storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
@@ -720,7 +707,7 @@ impl BranchCmd {
     async fn show(&self, opts: &ShowOpts) -> Result<()> {
         use crate::output;
 
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
         let _storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);

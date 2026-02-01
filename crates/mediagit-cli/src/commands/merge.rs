@@ -4,6 +4,7 @@ use console::style;
 use mediagit_storage::LocalBackend;
 use mediagit_versioning::{CheckoutManager, Commit, MergeEngine, MergeStrategy, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Signature};
 use std::sync::Arc;
+use super::super::repo::find_repo_root;
 
 /// Merge branches
 ///
@@ -95,7 +96,7 @@ impl MergeCmd {
         }
 
         // Find repository root
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
@@ -294,7 +295,7 @@ impl MergeCmd {
             println!("{} Aborting merge...", style("✗").red());
         }
 
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let mediagit_dir = repo_root.join(".mediagit");
 
         // Clean up merge state files
@@ -338,7 +339,7 @@ impl MergeCmd {
             println!("{} Continuing merge...", style("→").cyan());
         }
 
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let mediagit_dir = repo_root.join(".mediagit");
 
         // Check if merge is in progress
@@ -429,17 +430,4 @@ impl MergeCmd {
         Ok(())
     }
 
-    fn find_repo_root(&self) -> Result<std::path::PathBuf> {
-        let mut current = std::env::current_dir()?;
-
-        loop {
-            if current.join(".mediagit").exists() {
-                return Ok(current);
-            }
-
-            if !current.pop() {
-                anyhow::bail!("Not a mediagit repository");
-            }
-        }
-    }
 }

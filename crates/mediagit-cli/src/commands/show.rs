@@ -4,6 +4,7 @@ use console::style;
 use mediagit_storage::LocalBackend;
 use mediagit_versioning::{resolve_revision, Commit, ObjectDatabase, RefDatabase};
 use std::sync::Arc;
+use super::super::repo::find_repo_root;
 
 /// Show object information
 #[derive(Parser, Debug)]
@@ -12,20 +13,20 @@ pub struct ShowCmd {
     #[arg(value_name = "OBJECT")]
     pub object: Option<String>,
 
-    /// Show patch
-    #[arg(short = 'p', long)]
+    /// Show patch (not yet implemented)
+    #[arg(short = 'p', long, hide = true)]
     pub patch: bool,
 
-    /// Show statistics
-    #[arg(long)]
+    /// Show statistics (not yet implemented)
+    #[arg(long, hide = true)]
     pub stat: bool,
 
-    /// Show pretty format
-    #[arg(long, value_name = "FORMAT")]
+    /// Show pretty format (not yet implemented)
+    #[arg(long, value_name = "FORMAT", hide = true)]
     pub pretty: Option<String>,
 
-    /// Number of context lines
-    #[arg(short = 'U', long, value_name = "NUM")]
+    /// Number of context lines (not yet implemented)
+    #[arg(short = 'U', long, value_name = "NUM", hide = true)]
     pub unified: Option<usize>,
 
     /// Quiet mode
@@ -43,7 +44,7 @@ impl ShowCmd {
             return Ok(());
         }
 
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
         let storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
@@ -108,17 +109,4 @@ impl ShowCmd {
     }
 
 
-    fn find_repo_root(&self) -> Result<std::path::PathBuf> {
-        let mut current = std::env::current_dir()?;
-
-        loop {
-            if current.join(".mediagit").exists() {
-                return Ok(current);
-            }
-
-            if !current.pop() {
-                anyhow::bail!("Not a mediagit repository");
-            }
-        }
-    }
 }
