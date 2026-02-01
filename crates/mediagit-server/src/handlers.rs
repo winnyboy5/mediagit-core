@@ -483,10 +483,15 @@ async fn collect_objects_recursive(
     
     match obj_type {
         ObjectType::Commit => {
-            // Parse commit to get tree OID using Commit's own deserializer
+            // Parse commit to get tree OID and parent commits using Commit's own deserializer
             if let Ok(commit) = Commit::deserialize(&obj_data) {
                 // Collect the tree
                 Box::pin(collect_objects_recursive(odb, commit.tree, collected, visited)).await?;
+
+                // Collect parent commits (REQUIRED for complete history)
+                for parent in &commit.parents {
+                    Box::pin(collect_objects_recursive(odb, *parent, collected, visited)).await?;
+                }
             }
         }
         ObjectType::Tree => {

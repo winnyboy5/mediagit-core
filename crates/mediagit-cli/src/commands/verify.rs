@@ -29,24 +29,29 @@ use std::sync::Arc;
 ///
 /// For comprehensive checks including connectivity and dangling objects,
 /// use `mediagit fsck --full` instead.
-///
-/// # Examples
-///
-/// Quick verification:
-/// ```bash
-/// mediagit verify
-/// ```
-///
-/// Verify with detailed output:
-/// ```bash
-/// mediagit verify --detailed
-/// ```
-///
-/// Verify specific commit range:
-/// ```bash
-/// mediagit verify --start abc123 --end def456
-/// ```
 #[derive(Parser, Debug)]
+#[command(after_help = "EXAMPLES:
+    # Quick verification
+    mediagit verify
+
+    # Verify with detailed output
+    mediagit verify --detailed
+
+    # Verify specific commit range
+    mediagit verify --start abc123 --end def456
+
+VERIFY vs FSCK:
+    verify  - Fast integrity check (checksums + refs only)
+            - Use for quick health checks and CI pipelines
+            - Does NOT check connectivity or dangling objects
+
+    fsck    - Comprehensive integrity check (full graph analysis)
+            - Use for thorough repository audits
+            - Checks connectivity, finds dangling/unreachable objects
+            - Supports repair mode (--repair)
+
+SEE ALSO:
+    mediagit-fsck(1)")]
 pub struct VerifyCmd {
     /// Verify file integrity (checksums)
     #[arg(long)]

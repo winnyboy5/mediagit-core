@@ -2,3 +2,4 @@
 // Exposes internal modules for testing
 
 pub mod progress;
+pub mod repo;

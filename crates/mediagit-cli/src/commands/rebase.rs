@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::rebase_state::RebaseState;
+use super::super::repo::find_repo_root;
 
 /// Rebase commits
 #[derive(Parser, Debug)]
@@ -19,20 +20,20 @@ pub struct RebaseCmd {
     #[arg(value_name = "BRANCH")]
     pub branch: Option<String>,
 
-    /// Interactive rebase
-    #[arg(short, long)]
+    /// Interactive rebase (not yet implemented)
+    #[arg(short, long, hide = true)]
     pub interactive: bool,
 
-    /// Rebase merge commits
-    #[arg(short = 'm', long)]
+    /// Rebase merge commits (not yet implemented)
+    #[arg(short = 'm', long, hide = true)]
     pub rebase_merges: bool,
 
     /// Keep empty commits
     #[arg(long)]
     pub keep_empty: bool,
 
-    /// Autosquash (automatically apply fixup/squash)
-    #[arg(long)]
+    /// Autosquash - automatically apply fixup/squash (not yet implemented)
+    #[arg(long, hide = true)]
     pub autosquash: bool,
 
     /// Abort rebase
@@ -58,7 +59,7 @@ pub struct RebaseCmd {
 
 impl RebaseCmd {
     pub async fn execute(&self) -> Result<()> {
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
 
         // Handle special operations
         if self.abort {
@@ -508,17 +509,4 @@ impl RebaseCmd {
         Ok(commits)
     }
 
-    fn find_repo_root(&self) -> Result<std::path::PathBuf> {
-        let mut current = std::env::current_dir()?;
-
-        loop {
-            if current.join(".mediagit").exists() {
-                return Ok(current);
-            }
-
-            if !current.pop() {
-                anyhow::bail!("Not a mediagit repository");
-            }
-        }
-    }
 }

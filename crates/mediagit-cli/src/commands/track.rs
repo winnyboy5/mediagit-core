@@ -8,6 +8,7 @@ use clap::Args;
 use console::style;
 use std::fs;
 use std::path::PathBuf;
+use super::super::repo::find_repo_root;
 
 #[derive(Debug, Args)]
 pub struct TrackCmd {
@@ -22,7 +23,7 @@ pub struct TrackCmd {
 
 impl TrackCmd {
     pub fn execute(self) -> Result<()> {
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let gitattributes_path = repo_root.join(".gitattributes");
 
         if self.list {
@@ -112,19 +113,6 @@ impl TrackCmd {
         Ok(())
     }
 
-    fn find_repo_root(&self) -> Result<PathBuf> {
-        let mut current = std::env::current_dir()?;
-
-        loop {
-            if current.join(".mediagit").exists() || current.join(".git").exists() {
-                return Ok(current);
-            }
-
-            if !current.pop() {
-                anyhow::bail!("Not in a git or mediagit repository");
-            }
-        }
-    }
 }
 
 #[derive(Debug, Args)]
@@ -136,7 +124,7 @@ pub struct UntrackCmd {
 
 impl UntrackCmd {
     pub fn execute(self) -> Result<()> {
-        let repo_root = self.find_repo_root()?;
+        let repo_root = find_repo_root()?;
         let gitattributes_path = repo_root.join(".gitattributes");
 
         if !gitattributes_path.exists() {
@@ -185,17 +173,4 @@ impl UntrackCmd {
         Ok(())
     }
 
-    fn find_repo_root(&self) -> Result<PathBuf> {
-        let mut current = std::env::current_dir()?;
-
-        loop {
-            if current.join(".mediagit").exists() || current.join(".git").exists() {
-                return Ok(current);
-            }
-
-            if !current.pop() {
-                anyhow::bail!("Not in a git or mediagit repository");
-            }
-        }
-    }
 }
