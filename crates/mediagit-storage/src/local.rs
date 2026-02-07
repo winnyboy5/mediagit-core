@@ -76,6 +76,27 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
+/// Result type for adaptive loading - either memory-mapped or heap-allocated
+///
+/// Large files (>10MB) are memory-mapped for efficiency,
+/// while small files are loaded into a Vec for simpler handling.
+#[derive(Debug)]
+pub enum MmapOrVec {
+    /// Memory-mapped file view (for large files)
+    Mmap(memmap2::Mmap),
+    /// Heap-allocated data (for small files)
+    Vec(Vec<u8>),
+}
+
+impl AsRef<[u8]> for MmapOrVec {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            MmapOrVec::Mmap(mmap) => mmap.as_ref(),
+            MmapOrVec::Vec(vec) => vec.as_ref(),
+        }
+    }
+}
+
 /// Local filesystem storage backend
 ///
 /// Stores objects in a sharded directory structure with atomic writes.
@@ -249,6 +270,88 @@ impl LocalBackend {
             }
         }
         Ok(())
+    }
+
+    /// Get a memory-mapped view of an object
+    ///
+    /// Memory mapping is more efficient for large files as it doesn't require
+    /// loading the entire file into heap memory. The OS handles paging data
+    /// in and out as needed.
+    ///
+    /// # Safety
+    ///
+    /// This function uses unsafe code internally, but the Mmap is safe to use
+    /// as long as the file is not modified while the mmap is open.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The object identifier
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Mmap)` - Memory-mapped view of the file
+    /// * `Err` - If the key doesn't exist or an I/O error occurs
+    pub fn get_mmap(&self, key: &str) -> anyhow::Result<memmap2::Mmap> {
+        if key.is_empty() {
+            return Err(anyhow::anyhow!("key cannot be empty"));
+        }
+
+        let path = self.object_path(key);
+        let file = std::fs::File::open(&path)?;
+
+        // SAFETY: The file is opened read-only and we assume it won't be modified
+        // while the mmap is open. The mmap will be invalidated if the file is deleted.
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+
+        Ok(mmap)
+    }
+
+    /// Get file size in bytes
+    ///
+    /// Returns the size of an object without reading its contents.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The object identifier
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(u64)` - File size in bytes
+    /// * `Err` - If the key doesn't exist or an I/O error occurs
+    pub async fn get_size(&self, key: &str) -> anyhow::Result<u64> {
+        if key.is_empty() {
+            return Err(anyhow::anyhow!("key cannot be empty"));
+        }
+
+        let path = self.object_path(key);
+        let metadata = fs::metadata(&path).await?;
+        Ok(metadata.len())
+    }
+
+    /// Adaptive get: uses mmap for large files, normal read for small files
+    ///
+    /// Threshold is 10MB - files larger than this are memory-mapped for
+    /// better performance and lower memory usage.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The object identifier
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(MmapOrVec)` - Either a memory-mapped view or a Vec<u8>
+    /// * `Err` - If the key doesn't exist or an I/O error occurs
+    pub async fn get_adaptive(&self, key: &str) -> anyhow::Result<MmapOrVec> {
+        const MMAP_THRESHOLD: u64 = 10 * 1024 * 1024; // 10MB
+
+        let size = self.get_size(key).await?;
+
+        if size > MMAP_THRESHOLD {
+            tracing::debug!(key = %key, size = size, "Using mmap for large file");
+            Ok(MmapOrVec::Mmap(self.get_mmap(key)?))
+        } else {
+            Ok(MmapOrVec::Vec(fs::read(self.object_path(key)).await?))
+        }
     }
 }
 
@@ -882,4 +985,96 @@ mod tests {
         assert!(path.exists());
         assert_eq!(backend.root(), &path);
     }
+
+    #[tokio::test]
+    async fn test_mmap_read() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path()).await.unwrap();
+
+        // Write test data
+        let test_data = b"Memory-mapped test data for reading";
+        backend.put("mmap_test", test_data).await.unwrap();
+
+        // Read using mmap
+        let mmap = backend.get_mmap("mmap_test").unwrap();
+        assert_eq!(mmap.as_ref(), test_data);
+    }
+
+    #[tokio::test]
+    async fn test_mmap_large_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path()).await.unwrap();
+
+        // Write 5MB file
+        let large_data = vec![0xABu8; 5 * 1024 * 1024];
+        backend.put("large_mmap_test", &large_data).await.unwrap();
+
+        // Read using mmap
+        let mmap = backend.get_mmap("large_mmap_test").unwrap();
+        assert_eq!(mmap.len(), 5 * 1024 * 1024);
+        assert_eq!(&mmap[..100], &large_data[..100]);
+        assert_eq!(&mmap[mmap.len() - 100..], &large_data[large_data.len() - 100..]);
+    }
+
+    #[tokio::test]
+    async fn test_get_size() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path()).await.unwrap();
+
+        let test_data = vec![0u8; 12345];
+        backend.put("size_test", &test_data).await.unwrap();
+
+        let size = backend.get_size("size_test").await.unwrap();
+        assert_eq!(size, 12345);
+    }
+
+    #[tokio::test]
+    async fn test_adaptive_loading_small() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path()).await.unwrap();
+
+        // Small file (<10MB) should use Vec
+        let small_data = vec![1u8; 1024 * 1024]; // 1MB
+        backend.put("small_adaptive", &small_data).await.unwrap();
+
+        let result = backend.get_adaptive("small_adaptive").await.unwrap();
+        match &result {
+            super::MmapOrVec::Vec(v) => assert_eq!(v.len(), 1024 * 1024),
+            super::MmapOrVec::Mmap(_) => panic!("Expected Vec for small file"),
+        }
+        assert_eq!(result.as_ref(), &small_data[..]);
+    }
+
+    #[tokio::test]
+    async fn test_adaptive_loading_large() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path()).await.unwrap();
+
+        // Large file (>10MB) should use mmap
+        let large_data = vec![2u8; 11 * 1024 * 1024]; // 11MB
+        backend.put("large_adaptive", &large_data).await.unwrap();
+
+        let result = backend.get_adaptive("large_adaptive").await.unwrap();
+        match &result {
+            super::MmapOrVec::Mmap(m) => assert_eq!(m.len(), 11 * 1024 * 1024),
+            super::MmapOrVec::Vec(_) => panic!("Expected Mmap for large file"),
+        }
+        assert_eq!(result.as_ref().len(), large_data.len());
+    }
+
+    #[tokio::test]
+    async fn test_mmap_or_vec_as_ref() {
+        // Test that MmapOrVec::as_ref works correctly for both variants
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path()).await.unwrap();
+
+        let data = b"test data for as_ref";
+        backend.put("asref_test", data).await.unwrap();
+
+        // Small file gives Vec
+        let result = backend.get_adaptive("asref_test").await.unwrap();
+        let slice: &[u8] = result.as_ref();
+        assert_eq!(slice, data);
+    }
 }
+

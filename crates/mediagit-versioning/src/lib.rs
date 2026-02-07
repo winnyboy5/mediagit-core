@@ -80,6 +80,9 @@ mod oid;
 mod pack;
 mod refs;
 mod revision;
+mod streaming_index;
+mod streaming_pack;
+mod transaction;
 mod tree;
 
 pub use branch::{BranchInfo, BranchManager, DetachedHead};
@@ -103,6 +106,9 @@ pub use odb::{ObjectDatabase, RepackStats};
 pub use oid::Oid;
 pub use pack::{PackHeader, PackIndex, PackMetadata, PackObjectEntry, PackReader, PackWriter};
 pub use refs::{normalize_ref_name, Ref, RefDatabase, RefType};
+pub use streaming_index::StreamingPackIndex;
+pub use streaming_pack::{StreamingPackReader, StreamingPackWriter};
+pub use transaction::{PackTransaction, RecoveryReport, recover_incomplete_transactions};
 pub use revision::resolve_revision;
 pub use tree::{FileMode, Tree, TreeEntry};
 

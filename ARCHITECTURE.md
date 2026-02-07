@@ -2,7 +2,7 @@
 
 > **High-performance Git-like version control optimized for large media files and binary assets**
 
-MediaGit is a Rust-based workspace with **14 specialized crates**, **28 CLI commands**, **100+ file formats**, and cloud-native storage backends.
+MediaGit is a Rust-based workspace with **14 specialized crates**, **28 CLI commands**, **100+ file formats**, **~68,800 lines of Rust code**, and cloud-native storage backends.
 
 ---
 
@@ -111,24 +111,24 @@ graph LR
 
 | Crate | Purpose | Key Components |
 |-------|---------|----------------|
-| **mediagit-protocol** | Network sync | `client` (pack uploads/downloads), `streaming` (chunk transfer), `types` (RefInfo, WantRequest) |
+| **mediagit-protocol** | Network sync | `client` (pack uploads/downloads, streaming pull), `streaming` (chunk transfer), `types` (RefInfo, WantRequest), `adaptive_config` (TB-scale timeouts) – 5 modules |
 
 ### Core Engine Layer
 
 | Crate | Lines | Purpose | Key Modules |
 |-------|-------|---------|-------------|
-| **mediagit-versioning** | 22 modules | Object database & VCS | `odb` (2705), `chunking` (2000), `branch`, `merge`, `refs`, `index`, `pack`, `delta`, `conflict` (685), `checkout`, `similarity`, `lca`, `tree`, `commit`, `fsck` |
-| **mediagit-compression** | 10 modules | Smart compression | `smart_compressor` (1550, 60+ types), `adaptive`, `delta`, `per_type`, `zstd`, `brotli`, `zlib` |
-| **mediagit-media** | 10 modules | Media intelligence | `psd`, `video`, `audio`, `image`, `model3d`, `vfx`, `phash`, `strategy` |
+| **mediagit-versioning** | 25 modules | Object database & VCS | `odb` (107KB), `chunking` (73KB), `checkout`, `branch`, `merge`, `refs`, `index`, `pack`, `delta`, `conflict`, `similarity`, `lca`, `tree`, `commit`, `fsck`, `streaming_pack`, `streaming_index`, `transaction`, `revision`, `diff`, `metrics`, `config`, `object`, `oid` |
+| **mediagit-compression** | 7 modules | Smart compression | `smart_compressor` (60+ types), `adaptive`, `delta`, `per_type_compressor`, `zstd_compressor`, `brotli_compressor`, `zlib_compressor` |
+| **mediagit-media** | 10 modules | Media intelligence | `psd` (20KB), `video` (17KB), `audio` (15KB), `image` (30KB), `model3d` (21KB), `vfx` (21KB), `phash` (12KB), `strategy` (23KB), `error` |
 | **mediagit-git** | 4 modules | Git interop | `filter`, `pointer` |
 
 ### Infrastructure Layer
 
 | Crate | Lines | Purpose | Key Modules |
 |-------|-------|---------|-------------|
-| **mediagit-storage** | 8 backends | Storage abstraction | `s3`, `azure`, `gcs`, `minio`, `b2_spaces`, `local`, `cache`, `mock` |
+| **mediagit-storage** | 8 backends | Storage abstraction | `s3`, `azure`, `gcs`, `minio`, `b2_spaces`, `local` (mmap support), `cache` (LRU with metrics), `mock` |
 | **mediagit-config** | 931 | Configuration | `schema` (storage, remotes, branches, protection) |
-| **mediagit-security** | 12 modules | Security | `auth/` (jwt, apikey, credentials, middleware), `encryption`, `kdf`, `audit`, `tls/` |
+| **mediagit-security** | 12 modules | Security | `auth/` (jwt, apikey, credentials, middleware – 7 files), `encryption` (16KB), `kdf` (14KB), `audit` (11KB), `tls/` (3 files) |
 
 ### Observability Layer
 
@@ -157,20 +157,24 @@ graph LR
 
 ---
 
-## Server API Endpoints (12)
+## Server API Endpoints (14)
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/:repo/info/refs` | List all refs |
-| `POST` | `/:repo/objects/pack` | Upload pack file |
+| `POST` | `/:repo/objects/pack` | Upload pack file (streaming) |
 | `GET` | `/:repo/objects/pack` | Download pack (X-Request-ID) |
 | `POST` | `/:repo/objects/want` | Request specific objects |
-| `POST` | `/:repo/refs/update` | Update refs |
-| `POST` | `/:repo/chunks/check` | Check chunk existence |
+| `POST` | `/:repo/refs/update` | Update refs (with force-with-lease) |
+| `POST` | `/:repo/chunks/check` | Check chunk existence (bulk) |
 | `PUT` | `/:repo/chunks/:id` | Upload chunk |
 | `GET` | `/:repo/chunks/:id` | Download chunk |
 | `PUT` | `/:repo/manifests/:oid` | Upload manifest |
 | `GET` | `/:repo/manifests/:oid` | Download manifest |
+| `POST` | `/auth/login` | JWT authentication |
+| `POST` | `/auth/refresh` | Token refresh |
+| `GET` | `/health` | Health check |
+| `GET` | `/metrics` | Prometheus metrics |
 
 ---
 
@@ -385,13 +389,86 @@ flowchart LR
 | `write_with_delta()` | Delta compression vs similar |
 | `read()` | Read with LRU cache |
 | `repack()` | Pack file optimization |
+| `storage()` | Access storage backend for transactions |
 
 ### Constants
 
 | Constant | Value |
 |----------|-------|
 | `MAX_DELTA_DEPTH` | 10 |
-| Cache | Moka LRU |
+| Cache | LRU with metrics |
+
+---
+
+## Streaming Infrastructure
+
+### Streaming Pack Protocol
+
+Memory-efficient pack transfer for large files (GB/TB scale):
+
+```mermaid
+flowchart LR
+    subgraph Client["Client"]
+        CLI_C[CLI]
+        PROTO_C[Protocol Client]
+        STREAM_R[StreamingPackReader]
+        TX[PackTransaction]
+    end
+
+    subgraph Server["Server"]
+        HANDLER[Handlers]
+        PACK_W[PackWriter]
+        ODB_S[ODB]
+    end
+
+    CLI_C --> PROTO_C
+    PROTO_C -->|pull_streaming| HANDLER
+    HANDLER --> PACK_W
+    PACK_W --> ODB_S
+    PROTO_C --> STREAM_R
+    STREAM_R --> TX
+    TX -->|commit| ODB_S
+```
+
+### Streaming Components
+
+| Module | Purpose | Memory |
+|--------|---------|--------|
+| `StreamingPackReader` | Async pack parsing | O(1) |
+| `StreamingPackWriter` | Async pack generation | O(1) |
+| `StreamingPackIndex` | Disk-based index (TB-scale) | O(1) |
+| `PackTransaction` | Atomic writes with rollback | Temp dir |
+| `AdaptiveTransferConfig` | TB-scale timeouts/chunking | Config |
+
+### Transaction Model
+
+```mermaid
+flowchart TD
+    START[Start Transaction] --> TEMP[Create temp dir]
+    TEMP --> WRITE[Write objects to temp]
+    WRITE --> VERIFY{Verify?}
+    VERIFY -->|Success| COMMIT[Commit: move to ODB]
+    VERIFY -->|Failure| ROLLBACK[Rollback: delete temp]
+    COMMIT --> CLEANUP[Cleanup temp]
+    ROLLBACK --> DONE[Done]
+    CLEANUP --> DONE
+```
+
+### Memory Profile
+
+| Scale | Traditional | Streaming |
+|-------|-------------|-----------|
+| 10M objects | 440MB RAM | ~1MB RAM |
+| 100M objects | 4.4GB → OOM | ~1MB RAM |
+| TB file | OOM | ~50MB bounded |
+
+### Adaptive Transfer Config
+
+| Profile | Chunk Size | Read Timeout |
+|---------|------------|--------------|
+| Default (GB) | 4MB | 5 min |
+| TB-Scale | 16-64MB | Infinite |
+| Fast Local | 8MB | 30 sec |
 
 ---
 
@@ -444,6 +521,8 @@ sequenceDiagram
 | MinIO Upload | **108 MB/s** |
 | MinIO Download | **263 MB/s** |
 | Staging Throughput | **3-35 MB/s** |
+| Streaming Memory | **~50MB bounded** |
+| Parquet (129MB) Clone | **4 seconds** |
 
 ---
 
@@ -460,7 +539,8 @@ sequenceDiagram
 | Compression | Zstd, Brotli, xdelta3 |
 | Cloud | aws-sdk-s3, azure_storage_blobs, google-cloud-storage |
 | Media | mp4parse, symphonia, psd, image |
-| Caching | Moka |
+| Caching | LRU (custom) |
+| Streaming | tokio-util, futures, async-stream |
 
 ---
 
@@ -471,6 +551,29 @@ sequenceDiagram
 | **Crates** | 14 |
 | **CLI Commands** | 28 |
 | **File Formats** | 100+ |
-| **Lines of Code** | 15,000+ Rust |
-| **Tests** | 599 passing |
+| **Lines of Code** | ~68,800 Rust |
+| **Tests** | 921+ unit tests |
+| **API Endpoints** | 14 HTTP endpoints |
 | **Max File Tested** | 6GB (1,541 chunks) |
+| **Rust Version** | 1.91.0 |
+
+---
+
+## LRU Cache System
+
+The storage layer includes an LRU cache with comprehensive metrics:
+
+| Feature | Description |
+|---------|-------------|
+| **Size-based eviction** | Configurable max bytes |
+| **Count-based eviction** | Configurable max entries |
+| **Large object skip** | Objects > 50MB bypass cache |
+| **Metrics** | hits, misses, evictions, hit_rate |
+
+```rust
+let cache = LruCache::with_all_limits(
+    256 * 1024 * 1024,  // 256MB max size
+    10_000,              // 10k max entries
+    50 * 1024 * 1024,    // 50MB max object size
+);
+```

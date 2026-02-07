@@ -26,6 +26,11 @@
 /// After this depth, objects are stored as full copies to break the chain.
 pub const MAX_DELTA_DEPTH: u8 = 10;
 
+/// Maximum allowed object size (16 GB).
+/// This prevents memory allocation failures from corrupted chunk manifests
+/// that may contain extremely large total_size values.
+pub const MAX_OBJECT_SIZE: u64 = 16 * 1024 * 1024 * 1024;
+
 
 use crate::{ObjectType, Oid, OdbMetrics};
 use crate::chunking::{ChunkManifest, ChunkRef, ChunkStrategy, ContentChunker};
@@ -267,6 +272,13 @@ impl ObjectDatabase {
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
             ))),
         }
+    }
+
+    /// Get reference to the underlying storage backend
+    ///
+    /// Useful for creating transactions or accessing storage directly.
+    pub fn storage(&self) -> &Arc<dyn StorageBackend> {
+        &self.storage
     }
 
     /// Write an object to the database
@@ -1233,6 +1245,17 @@ impl ObjectDatabase {
             total_size = manifest.total_size,
             "Loaded chunk manifest"
         );
+
+        // Validate total_size before allocation to prevent OOM from corrupted manifests
+        if manifest.total_size > MAX_OBJECT_SIZE {
+            anyhow::bail!(
+                "ChunkManifest total_size {} bytes exceeds maximum allowed size {} bytes for object {}. \
+                This may indicate a corrupted manifest.",
+                manifest.total_size,
+                MAX_OBJECT_SIZE,
+                oid
+            );
+        }
 
         // Reconstruct from chunks
         let mut reconstructed = Vec::with_capacity(manifest.total_size as usize);

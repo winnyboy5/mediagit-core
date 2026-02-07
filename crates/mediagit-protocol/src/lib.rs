@@ -3,6 +3,7 @@
 //! This crate provides client and server-side components for the MediaGit
 //! network protocol, enabling push/pull operations between repositories.
 
+pub mod adaptive_config;
 pub mod client;
 pub mod streaming;
 pub mod types;

@@ -425,7 +425,7 @@ impl BranchCmd {
         use mediagit_versioning::{CheckoutManager, Index, ObjectDatabase};
 
         let start_time = Instant::now();
-        let mut stats = OperationStats::new();
+        let mut stats = OperationStats::for_operation("switch");
         let progress = ProgressTracker::new(opts.quiet);
 
         let repo_root = find_repo_root()?;
@@ -515,6 +515,11 @@ impl BranchCmd {
         stats.duration_ms = start_time.elapsed().as_millis() as u64;
         if !opts.quiet && stats.files_updated > 0 {
             println!("\n📊 {}", stats.summary());
+        }
+
+        // Save stats for later retrieval by stats command
+        if let Err(e) = stats.save(&storage_path) {
+            tracing::warn!("Failed to save operation stats: {}", e);
         }
 
         Ok(())

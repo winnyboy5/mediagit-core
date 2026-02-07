@@ -78,7 +78,7 @@ impl CloneCmd {
         }
 
         // Create progress tracker and stats (matching pull.rs pattern)
-        let mut stats = OperationStats::new();
+        let mut stats = OperationStats::for_operation("clone");
         let progress = ProgressTracker::new(self.quiet);
 
         // Step 1: Create directory
@@ -138,50 +138,17 @@ url = "{}"
             println!("  Remote ref: {} -> {}", remote_ref.name, &remote_ref.oid[..8]);
         }
 
-        // Step 6: Pull objects
+        // Step 6: Pull objects using streaming (memory-efficient)
         let download_pb = progress.download_bar("Receiving objects");
-        let (pack_data, chunked_oids) = client.pull(&odb, &remote_ref_name).await?;
-        let pack_size = pack_data.len() as u64;
-        download_pb.set_length(pack_size);
-        download_pb.set_position(pack_size);
-        stats.bytes_downloaded = pack_size;
+        // Use streaming pull to avoid OOM with large files
+        let chunked_oids = client.pull_streaming(&odb, &remote_ref_name, vec![]).await?;
         download_pb.finish_with_message("Download complete");
 
         if self.verbose {
-            println!("  Received {} bytes pack, {} chunked objects", pack_size, chunked_oids.len());
+            println!("  Received objects via streaming, {} chunked objects", chunked_oids.len());
         }
 
-        // Step 7: Unpack objects (non-chunked)
-        let pack_reader = mediagit_versioning::PackReader::new(pack_data)?;
-        let objects = pack_reader.list_objects();
-        let object_count = objects.len();
-        stats.objects_received = object_count as u64;
-
-        let unpack_pb = progress.object_bar("Unpacking objects", object_count as u64);
-        for (idx, oid) in objects.iter().enumerate() {
-            // Use get_object_with_type to preserve the correct object type
-            let (obj_type, obj_data) = pack_reader.get_object_with_type(oid)?;
-            let written_oid = odb.write(obj_type, &obj_data).await?;
-            unpack_pb.set_position((idx + 1) as u64);
-
-            // Verify OID matches - mismatch indicates data corruption
-            if written_oid != *oid {
-                anyhow::bail!(
-                    "Data integrity error: OID mismatch for object {}: expected {}, computed {}. \
-                     This indicates data corruption during transfer.",
-                    &oid.to_hex()[..12],
-                    oid.to_hex(),
-                    written_oid.to_hex()
-                );
-            }
-        }
-        unpack_pb.finish_with_message("Unpack complete");
-
-        if self.verbose {
-            println!("  Unpacked {} objects", object_count);
-        }
-
-        // Step 7b: Download chunked objects (large files)
+        // Step 7: Download chunked objects (large files)
         if !chunked_oids.is_empty() {
             let chunk_pb = progress.object_bar("Downloading large files", chunked_oids.len() as u64);
 
@@ -266,6 +233,11 @@ url = "{}"
                 target_dir.display()
             );
             println!("{} {}", style("📊").cyan(), stats.summary());
+        }
+
+        // Save stats for later retrieval by stats command
+        if let Err(e) = stats.save(&storage_path) {
+            tracing::warn!("Failed to save operation stats: {}", e);
         }
 
         Ok(())
