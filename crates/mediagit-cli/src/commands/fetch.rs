@@ -63,7 +63,7 @@ pub struct FetchCmd {
 impl FetchCmd {
     pub async fn execute(&self) -> Result<()> {
         let start_time = Instant::now();
-        let mut stats = OperationStats::new();
+        let mut stats = OperationStats::for_operation("fetch");
         let progress = ProgressTracker::new(self.quiet);
 
         let remote = self.remote.as_deref().unwrap_or("origin");
@@ -252,6 +252,11 @@ impl FetchCmd {
                 );
             }
             println!("{} {}", style("📊").cyan(), stats.summary());
+        }
+
+        // Save stats for later retrieval by stats command
+        if let Err(e) = stats.save(&storage_path) {
+            tracing::warn!("Failed to save operation stats: {}", e);
         }
 
         Ok(())

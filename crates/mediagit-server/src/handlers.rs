@@ -12,9 +12,11 @@ use mediagit_protocol::{
 };
 use mediagit_security::auth::AuthUser;
 use mediagit_storage::{LocalBackend, StorageBackend, MinIOBackend, AzureBackend, GcsBackend};
-use mediagit_versioning::{Commit, ObjectDatabase, Oid, ObjectType, PackReader, PackWriter, Ref, RefDatabase, Tree};
+use mediagit_versioning::{Commit, ObjectDatabase, Oid, ObjectType, Ref, RefDatabase, Tree, StreamingPackWriter};
 use std::path::Path as StdPath;
 use std::sync::Arc;
+use tokio::io::duplex;
+use tokio_util::io::ReaderStream;
 
 use crate::state::AppState;
 
@@ -271,14 +273,14 @@ pub async fn get_refs(
     }))
 }
 
-/// POST /:repo/objects/pack - Upload a pack file
+/// POST /:repo/objects/pack - Upload a pack file (streaming)
 pub async fn upload_pack(
     Path(repo): Path<String>,
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
-    body: Bytes,
+    body: axum::body::Body,
 ) -> Result<StatusCode, StatusCode> {
-    tracing::info!("POST /{}/objects/pack ({} bytes)", repo, body.len());
+    tracing::info!("POST /{}/objects/pack (streaming)", repo);
 
     // Check permission: repo:write required
     check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
@@ -289,31 +291,70 @@ pub async fn upload_pack(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Initialize storage and odb
+    // Initialize storage for transaction
     let storage = create_storage_backend(&repo_path).await?;
-    let odb = ObjectDatabase::with_smart_compression(storage, 1000);
 
-    // Unpack the pack file
-    let pack_reader = PackReader::new(body.to_vec()).map_err(|e| {
-        tracing::error!("Failed to read pack file: {}", e);
+    // Create transaction for atomic writes
+    let temp_path = repo_path.join("temp");
+    tokio::fs::create_dir_all(&temp_path).await.map_err(|e| {
+        tracing::error!("Failed to create temp directory: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    for oid in pack_reader.list_objects() {
-        let (object_type, obj_data) = pack_reader.get_object_with_type(&oid).map_err(|e| {
-            tracing::error!("Failed to get object {}: {}", oid, e);
+    let mut transaction = mediagit_versioning::PackTransaction::new(storage, &temp_path)
+        .map_err(|e| {
+            tracing::error!("Failed to create transaction: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-        // Write object to ODB with correct type
-        odb.write(object_type, &obj_data)
+
+    // Convert body to AsyncRead stream
+    use futures::stream::TryStreamExt;
+    use tokio_util::io::StreamReader;
+
+    let stream = body
+        .into_data_stream()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+
+    let stream_reader = StreamReader::new(stream);
+
+    // Create streaming pack reader
+    let mut reader = mediagit_versioning::StreamingPackReader::new(stream_reader)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to create streaming pack reader: {}", e);
+            StatusCode::BAD_REQUEST
+        })?;
+
+    tracing::info!("Processing streaming pack upload");
+
+    // Process objects incrementally
+    let mut object_count = 0;
+    while let Some(result) = reader.next_object().await {
+        let (oid, obj_type, data) = result.map_err(|e| {
+            tracing::error!("Failed to read object from pack stream: {}", e);
+            StatusCode::BAD_REQUEST
+        })?;
+
+        transaction.add_object(oid, obj_type, &data)
             .await
             .map_err(|e| {
-                tracing::error!("Failed to write object {}: {}", oid, e);
+                tracing::error!("Failed to add object to transaction: {}", e);
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
+
+        object_count += 1;
+        if object_count % 100 == 0 {
+            tracing::debug!("Processed {} objects", object_count);
+        }
     }
 
-    tracing::info!("Successfully unpacked {} bytes", body.len());
+    // Commit transaction
+    transaction.commit().await.map_err(|e| {
+        tracing::error!("Failed to commit transaction: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    tracing::info!("Successfully unpacked {} objects (streaming)", object_count);
     Ok(StatusCode::OK)
 }
 
@@ -394,52 +435,83 @@ pub async fn download_pack(
 
     tracing::info!("Collecting {} objects for pack (from {} requested)", objects_to_pack.len(), want_list.len());
 
-    // Generate pack file with all collected objects
-    // Skip chunked blobs - they'll be transferred separately
-    let mut pack_writer = PackWriter::new();
+    // Filter out chunked objects - they'll be transferred separately
     let mut chunked_objects: Vec<String> = Vec::new();
+    let mut non_chunked_objects: Vec<Oid> = Vec::new();
 
     for oid in &objects_to_pack {
-        // Check if this is a chunked blob - skip if so
         if odb.is_chunked(oid).await.unwrap_or(false) {
             tracing::debug!(oid = %oid, "Skipping chunked blob in pack generation");
             chunked_objects.push(oid.to_hex());
-            continue;
+        } else {
+            non_chunked_objects.push(*oid);
         }
-
-        let obj_data = odb
-            .read(oid)
-            .await
-            .map_err(|e| {
-                tracing::error!(oid = %oid, error = %e, "Failed to read object");
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-
-        // Determine object type from data header
-        let object_type = detect_object_type(&obj_data).unwrap_or(ObjectType::Blob);
-
-        // Add to pack
-        let _offset = pack_writer.add_object(*oid, object_type, &obj_data);
     }
 
-    // Finalize pack
-    let pack_data = pack_writer.finalize();
-
     tracing::info!(
-        "Sending pack file ({} bytes, {} packed, {} chunked)", 
-        pack_data.len(), 
-        objects_to_pack.len() - chunked_objects.len(),
+        "Generating pack ({} objects, {} chunked)",
+        non_chunked_objects.len(),
         chunked_objects.len()
     );
 
-    // Build response with optional chunked objects header
+    // Use streaming pack generation for O(64KB) memory instead of O(pack_size)
+    // This prevents server OOM when generating large packs
     use axum::response::Response;
     use axum::http::header;
 
+    // Create 64KB buffered duplex channel for streaming
+    let (writer, reader) = duplex(64 * 1024);
+
+    // Wrap ODB in Arc for sharing with background task
+    let odb_arc = Arc::new(odb);
+    let odb_clone = odb_arc.clone();
+    let objects_to_stream = non_chunked_objects.clone();
+    let object_count = objects_to_stream.len() as u32;
+
+    tracing::info!(
+        object_count = object_count,
+        "Starting streaming pack generation"
+    );
+
+    // Spawn background task to write pack to channel
+    tokio::spawn(async move {
+        let temp_dir = std::env::temp_dir();
+        let result: Result<(), anyhow::Error> = async {
+            let mut pack_writer = StreamingPackWriter::new(
+                writer,
+                object_count,
+                &temp_dir,
+            ).await
+                .map_err(|e| anyhow::anyhow!("Failed to create streaming pack writer: {}", e))?;
+
+            for oid in objects_to_stream {
+                let obj_data = odb_clone.read(&oid).await?;
+                let obj_type = detect_object_type(&obj_data).unwrap_or(ObjectType::Blob);
+                pack_writer.write_object(oid, obj_type, &obj_data).await
+                    .map_err(|e| anyhow::anyhow!("Failed to write object {}: {}", oid, e))?;
+            }
+
+            pack_writer.finalize().await
+                .map_err(|e| anyhow::anyhow!("Failed to finalize pack: {}", e))?;
+            
+            tracing::info!("Streaming pack generation completed successfully");
+            Ok(())
+        }.await;
+
+        if let Err(e) = result {
+            tracing::error!(error = %e, "Streaming pack generation failed");
+        }
+    });
+
+    // Create streaming response body from reader
+    let stream = ReaderStream::new(reader);
+    let body = axum::body::Body::from_stream(stream);
+
+    // Build response (chunked transfer encoding, no Content-Length)
     let mut response_builder = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/octet-stream");
-    
+
     if !chunked_objects.is_empty() {
         response_builder = response_builder.header("X-Chunked-Objects", chunked_objects.join(","));
         tracing::info!(
@@ -448,7 +520,7 @@ pub async fn download_pack(
         );
     }
 
-    response_builder.body(axum::body::Body::from(pack_data))
+    response_builder.body(body)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
@@ -466,7 +538,15 @@ async fn collect_objects_recursive(
     }
     visited.insert(oid);
 
-    // Try to read the object
+    // Check if this is a chunked object BEFORE reading - avoids massive memory allocation
+    // Chunked objects will be streamed separately, not included in pack
+    if odb.is_chunked(&oid).await.unwrap_or(false) {
+        tracing::debug!(oid = %oid, "Object is chunked - adding to collection without reading content");
+        collected.push(oid);
+        return Ok(()); // Chunked blobs have no children to recurse into
+    }
+
+    // Try to read the object - only for non-chunked objects
     let obj_data = match odb.read(&oid).await {
         Ok(data) => data,
         Err(e) => {
