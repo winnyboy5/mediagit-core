@@ -224,6 +224,7 @@ MediaGit is a version control system optimized for large media files. This docum
 | Web/Photo | `jpg`, `jpeg`, `png`, `gif`, `bmp`, `tiff`, `tif`, `webp`, `svg` |
 | RAW Camera | `raw`, `cr2`, `cr3`, `nef`, `arw`, `dng`, `orf`, `rw2`, `pef`, `srw` |
 | HDR/Professional | `heic`, `heif`, `exr`, `hdr`, `avif`, `jxl` |
+| GPU Textures | `dds`, `ktx`, `ktx2`, `astc`, `pvr`, `basis` |
 
 ### 🎨 Layered Images (`MediaType::Psd`)
 
@@ -335,14 +336,15 @@ MediaGit is a version control system optimized for large media files. This docum
 
 | Category | Extensions |
 |----------|------------|
-| PyTorch | `pt`, `pth`, `ckpt` |
+| PyTorch | `pt`, `pth`, `ckpt`, `bin` |
 | TensorFlow | `pb`, `tfrecords` |
-| Safe Tensors | `safetensors`, `bin` |
+| Safe Tensors | `safetensors` |
 | Pickle | `pkl`, `joblib` |
 | ONNX | `onnx` |
 | GGML/GGUF | `gguf`, `ggml`, `llamafile` |
-| Mobile | `tflite`, `mlmodel`, `coreml`, `pte` |
-| Data | `parquet`, `arrow`, `feather`, `hdf5`, `h5` |
+| Mobile | `tflite`, `mlmodel`, `coreml`, `pte`, `keras` |
+| Deployment | `mleap`, `pmml` |
+| Data | `parquet`, `arrow`, `feather`, `orc`, `avro`, `hdf5`, `h5`, `nc`, `netcdf`, `npy`, `npz`, `petastorm` |
 
 ### 📦 Archives (Fixed Chunking)
 

@@ -61,8 +61,16 @@ struct LruCacheInner {
     max_size: usize,
     /// Maximum number of entries (0 = unlimited)
     max_entries: usize,
+    /// Maximum single object size (objects larger than this are not cached)
+    max_object_size: usize,
     /// Access counter for ordering
     access_counter: u64,
+    /// Cache hit count
+    hits: u64,
+    /// Cache miss count
+    misses: u64,
+    /// Total eviction count
+    evictions: u64,
 }
 
 impl LruCache {
@@ -80,6 +88,16 @@ impl LruCache {
     /// * `max_size` - Maximum cache size in bytes
     /// * `max_entries` - Maximum number of entries (0 = unlimited)
     pub fn with_limits(max_size: usize, max_entries: usize) -> Self {
+        Self::with_all_limits(max_size, max_entries, 50 * 1024 * 1024) // 50MB default
+    }
+
+    /// Create new LRU cache with all configurable limits
+    ///
+    /// # Arguments
+    /// * `max_size` - Maximum cache size in bytes
+    /// * `max_entries` - Maximum number of entries (0 = unlimited)
+    /// * `max_object_size` - Maximum size of individual objects to cache (larger objects are skipped)
+    pub fn with_all_limits(max_size: usize, max_entries: usize, max_object_size: usize) -> Self {
         Self {
             inner: Arc::new(RwLock::new(LruCacheInner {
                 entries: HashMap::new(),
@@ -87,7 +105,11 @@ impl LruCache {
                 current_size: 0,
                 max_size,
                 max_entries,
+                max_object_size,
                 access_counter: 0,
+                hits: 0,
+                misses: 0,
+                evictions: 0,
             })),
         }
     }
@@ -98,10 +120,19 @@ impl LruCache {
     pub async fn get(&self, key: &str) -> Option<Vec<u8>> {
         let mut inner = self.inner.write().await;
 
-        // Check if key exists and clone data
-        let data = inner.entries.get(key).map(|entry| entry.data.clone())?;
+        // Check if key exists first
+        if !inner.entries.contains_key(key) {
+            inner.misses += 1;
+            return None;
+        }
 
-        // Update access order (after we're done with the entry reference)
+        // Key exists - record hit
+        inner.hits += 1;
+
+        // Clone the data
+        let data = inner.entries.get(key).map(|e| e.data.clone());
+
+        // Update access order
         inner.access_counter += 1;
         let access_order = inner.access_counter;
         if let Some(entry) = inner.entries.get_mut(key) {
@@ -114,16 +145,22 @@ impl LruCache {
         }
         inner.access_queue.push_back(key.to_string());
 
-        Some(data)
+        data
     }
 
     /// Put value into cache
     ///
     /// Evicts least recently used entries if necessary to maintain limits.
+    /// Objects larger than max_object_size are skipped to prevent cache thrashing.
     pub async fn put(&self, key: impl Into<String>, data: Vec<u8>) {
         let key = key.into();
         let size = data.len();
         let mut inner = self.inner.write().await;
+
+        // Skip objects larger than max_object_size
+        if size > inner.max_object_size {
+            return;
+        }
 
         // Remove old entry if exists
         if let Some(old_entry) = inner.entries.remove(&key) {
@@ -140,6 +177,7 @@ impl LruCache {
             if let Some(evict_key) = inner.access_queue.pop_front() {
                 if let Some(evicted) = inner.entries.remove(&evict_key) {
                     inner.current_size -= evicted.size;
+                    inner.evictions += 1;
                 }
             } else {
                 break; // No more entries to evict
@@ -194,11 +232,22 @@ impl LruCache {
     /// Get current cache statistics
     pub async fn stats(&self) -> CacheStats {
         let inner = self.inner.read().await;
+        let total_accesses = inner.hits + inner.misses;
+        let hit_rate = if total_accesses > 0 {
+            inner.hits as f64 / total_accesses as f64
+        } else {
+            0.0
+        };
         CacheStats {
             entry_count: inner.entries.len(),
             total_size: inner.current_size,
             max_size: inner.max_size,
             max_entries: inner.max_entries,
+            max_object_size: inner.max_object_size,
+            hits: inner.hits,
+            misses: inner.misses,
+            evictions: inner.evictions,
+            hit_rate,
         }
     }
 }
@@ -214,6 +263,16 @@ pub struct CacheStats {
     pub max_size: usize,
     /// Maximum entries (0 = unlimited)
     pub max_entries: usize,
+    /// Maximum single object size (larger objects are skipped)
+    pub max_object_size: usize,
+    /// Total cache hits
+    pub hits: u64,
+    /// Total cache misses
+    pub misses: u64,
+    /// Total evictions
+    pub evictions: u64,
+    /// Hit rate (0.0 to 1.0)
+    pub hit_rate: f64,
 }
 
 #[cfg(test)]
@@ -357,4 +416,108 @@ mod tests {
         let stats = cache.stats().await;
         assert!(stats.entry_count > 0);
     }
+
+    #[tokio::test]
+    async fn test_cache_metrics_hits_misses() {
+        let cache = LruCache::new(1024);
+
+        // Initial stats should be zero
+        let stats = cache.stats().await;
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.misses, 0);
+
+        // Cache miss
+        assert_eq!(cache.get("nonexistent").await, None);
+        let stats = cache.stats().await;
+        assert_eq!(stats.misses, 1);
+        assert_eq!(stats.hits, 0);
+
+        // Add entry
+        cache.put("key1", vec![1, 2, 3]).await;
+
+        // Cache hit
+        assert!(cache.get("key1").await.is_some());
+        let stats = cache.stats().await;
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 1);
+
+        // Another hit
+        let _ = cache.get("key1").await;
+        let stats = cache.stats().await;
+        assert_eq!(stats.hits, 2);
+        assert_eq!(stats.misses, 1);
+    }
+
+    #[tokio::test]
+    async fn test_cache_hit_rate() {
+        let cache = LruCache::new(1024);
+
+        // With no accesses, hit_rate should be 0
+        let stats = cache.stats().await;
+        assert_eq!(stats.hit_rate, 0.0);
+
+        cache.put("key1", vec![1, 2, 3]).await;
+
+        // 2 hits, 1 miss = 66% hit rate
+        let _ = cache.get("key1").await; // hit
+        let _ = cache.get("key1").await; // hit
+        let _ = cache.get("missing").await; // miss
+
+        let stats = cache.stats().await;
+        assert!(stats.hit_rate > 0.6);
+        assert!(stats.hit_rate < 0.7);
+    }
+
+    #[tokio::test]
+    async fn test_cache_eviction_count() {
+        let cache = LruCache::with_limits(10, 2); // Max 2 entries, 10 bytes
+
+        // Initial evictions should be zero
+        let stats = cache.stats().await;
+        assert_eq!(stats.evictions, 0);
+
+        // Add 3 entries, should trigger 1 eviction
+        cache.put("key1", vec![1]).await;
+        cache.put("key2", vec![2]).await;
+        cache.put("key3", vec![3]).await;
+
+        let stats = cache.stats().await;
+        assert_eq!(stats.evictions, 1);
+
+        // Add another, should trigger another eviction
+        cache.put("key4", vec![4]).await;
+        let stats = cache.stats().await;
+        assert_eq!(stats.evictions, 2);
+    }
+
+    #[tokio::test]
+    async fn test_skip_large_objects() {
+        // Create cache with 100 byte max_object_size
+        let cache = LruCache::with_all_limits(1024, 10, 100);
+
+        // Small object should be cached
+        let small_data = vec![1u8; 50];
+        cache.put("small", small_data.clone()).await;
+        assert_eq!(cache.get("small").await, Some(small_data));
+
+        // Large object should NOT be cached (>100 bytes)
+        let large_data = vec![2u8; 150];
+        cache.put("large", large_data).await;
+        assert_eq!(cache.get("large").await, None);
+
+        // Verify stats show the small object, not the large one
+        let stats = cache.stats().await;
+        assert_eq!(stats.entry_count, 1);
+        assert_eq!(stats.total_size, 50);
+    }
+
+    #[tokio::test]
+    async fn test_max_object_size_threshold() {
+        // 50MB default max_object_size
+        let cache = LruCache::with_limits(100 * 1024 * 1024, 100);
+
+        let stats = cache.stats().await;
+        assert_eq!(stats.max_object_size, 50 * 1024 * 1024);
+    }
 }
+

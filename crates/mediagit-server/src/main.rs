@@ -1,11 +1,33 @@
 use anyhow::Result;
+use clap::Parser;
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use mediagit_server::{create_router, create_router_with_rate_limit, AppState, RateLimitConfig, ServerConfig};
 
+/// MediaGit Server - HTTP(S) server for MediaGit repositories
+#[derive(Parser, Debug)]
+#[command(name = "mediagit-server")]
+#[command(about = "MediaGit repository server", long_about = None)]
+struct Args {
+    /// Port to listen on (overrides config file)
+    #[arg(short, long)]
+    port: Option<u16>,
+
+    /// Host address to bind to (overrides config file)
+    #[arg(long)]
+    host: Option<String>,
+
+    /// Path to config file
+    #[arg(short, long, default_value = "mediagit-server.toml")]
+    config: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Parse CLI arguments
+    let args = Args::parse();
+
     // Setup tracing
     tracing_subscriber::registry()
         .with(
@@ -15,8 +37,19 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Load configuration
-    let config = ServerConfig::load()?;
+    // Load configuration from file
+    let mut config = ServerConfig::load()?;
+    
+    // Override config with CLI arguments if provided
+    if let Some(port) = args.port {
+        tracing::info!("Overriding port from CLI: {} -> {}", config.port, port);
+        config.port = port;
+    }
+    if let Some(host) = args.host {
+        tracing::info!("Overriding host from CLI: {} -> {}", config.host, host);
+        config.host = host;
+    }
+    
     tracing::info!("Server configuration: {:?}", config);
 
     // Create repos directory if it doesn't exist

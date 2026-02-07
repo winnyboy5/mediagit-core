@@ -434,6 +434,159 @@ impl ProtocolClient {
         Ok((pack_data.to_vec(), chunked_oids))
     }
 
+    /// Download pack using streaming (memory-efficient for large files)
+    ///
+    /// This method processes the pack incrementally without loading it entirely into memory.
+    /// Objects are written directly to the ODB as they're received.
+    ///
+    /// Returns the list of chunked objects that need separate transfer.
+    pub async fn download_pack_streaming(
+        &self,
+        odb: &ObjectDatabase,
+        want: Vec<String>,
+        have: Vec<String>,
+    ) -> Result<Vec<Oid>> {
+        // Send want request
+        let want_url = format!("{}/objects/want", self.base_url);
+        tracing::debug!("POST {} (streaming)", want_url);
+
+        let want_req = WantRequest { want, have };
+
+        let response = self
+            .client
+            .post(&want_url)
+            .json(&want_req)
+            .send()
+            .await
+            .context("Failed to send want request")?;
+
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "POST /objects/want failed with status: {}",
+                response.status()
+            );
+        }
+
+        let want_response: WantResponse = response
+            .json()
+            .await
+            .context("Failed to parse want response")?;
+
+        // Download pack with streaming
+        let pack_url = format!("{}/objects/pack", self.base_url);
+        tracing::debug!("GET {} (streaming, request_id: {})", pack_url, want_response.request_id);
+
+        let response = self
+            .client
+            .get(&pack_url)
+            .header("X-Request-ID", &want_response.request_id)
+            .send()
+            .await
+            .context("Failed to download pack file")?;
+
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "GET /objects/pack failed with status: {}",
+                response.status()
+            );
+        }
+
+        // Parse X-Chunked-Objects header
+        let chunked_oids: Vec<Oid> = response
+            .headers()
+            .get("X-Chunked-Objects")
+            .and_then(|h| h.to_str().ok())
+            .map(|s| {
+                s.split(',')
+                    .filter_map(|oid_str| Oid::from_hex(oid_str.trim()).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if !chunked_oids.is_empty() {
+            tracing::info!(
+                count = chunked_oids.len(),
+                "Received {} chunked objects for separate download",
+                chunked_oids.len()
+            );
+        }
+
+        // Create transaction for atomic writes
+        let storage = odb.storage().clone();
+        let temp_path = std::path::PathBuf::from(".mediagit/temp");
+        std::fs::create_dir_all(&temp_path)?;
+
+        let mut transaction = mediagit_versioning::PackTransaction::new(storage, &temp_path)
+            .context("Failed to create transaction")?;
+
+        // Stream response body and process pack
+        use futures::stream::TryStreamExt;
+        use tokio_util::io::StreamReader;
+
+        let stream = response
+            .bytes_stream()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+
+        let stream_reader = StreamReader::new(stream);
+
+        let mut reader = mediagit_versioning::StreamingPackReader::new(stream_reader)
+            .await
+            .context("Failed to create streaming pack reader")?;
+
+        tracing::info!("Processing streaming pack download");
+
+        let mut object_count = 0;
+        while let Some(result) = reader.next_object().await {
+            let (oid, obj_type, data) = result.context("Failed to read object from pack stream")?;
+
+            transaction
+                .add_object(oid, obj_type, &data)
+                .await
+                .context("Failed to add object to transaction")?;
+
+            object_count += 1;
+            if object_count % 100 == 0 {
+                tracing::debug!("Downloaded {} objects", object_count);
+            }
+        }
+
+        // Commit transaction
+        transaction
+            .commit()
+            .await
+            .context("Failed to commit transaction")?;
+
+        tracing::info!("Successfully downloaded {} objects (streaming)", object_count);
+
+        Ok(chunked_oids)
+    }
+
+    /// Pull using streaming (memory-efficient)
+    ///
+    /// Returns the list of chunked objects that need separate transfer.
+    pub async fn pull_streaming(
+        &self,
+        odb: &ObjectDatabase,
+        remote_ref: &str,
+        local_oids: Vec<String>,
+    ) -> Result<Vec<Oid>> {
+        // Get remote refs
+        let remote_refs = self.get_refs().await?;
+
+        // Find the ref we want
+        let ref_info = remote_refs
+            .refs
+            .iter()
+            .find(|r| r.name == remote_ref)
+            .ok_or_else(|| anyhow::anyhow!("Remote ref '{}' not found", remote_ref))?;
+
+        // Request objects we don't have
+        let want = vec![ref_info.oid.clone()];
+        let have = local_oids;
+
+        self.download_pack_streaming(odb, want, have).await
+    }
+
     /// Update remote refs
     async fn update_refs(&self, request: RefUpdateRequest) -> Result<RefUpdateResponse> {
         let url = format!("{}/refs/update", self.base_url);
@@ -606,6 +759,7 @@ impl ProtocolClient {
 
     /// Generate a pack file containing specified objects with their types
     /// 
+    /// Uses incremental pack generation to minimize memory usage.
     /// Note: Chunked blobs (large files stored as chunks) are SKIPPED in packs.
     /// They should be transferred separately via manifest + chunks.
     /// 
@@ -615,26 +769,17 @@ impl ProtocolClient {
         odb: &ObjectDatabase,
         objects: Vec<(Oid, ObjectType)>,
     ) -> Result<(Vec<u8>, Vec<Oid>)> {
-        let mut pack_writer = PackWriter::new();
+        // First, filter out chunked objects
         let mut chunked_objects: Vec<Oid> = Vec::new();
+        let mut non_chunked: Vec<(Oid, ObjectType)> = Vec::new();
 
         for (oid, object_type) in objects {
-            // Skip chunked blobs - they're too large to fit in memory
-            // They will be transferred separately
             if object_type == ObjectType::Blob && odb.is_chunked(&oid).await.unwrap_or(false) {
                 tracing::debug!(oid = %oid, "Skipping chunked blob in pack generation");
                 chunked_objects.push(oid);
-                continue;
+            } else {
+                non_chunked.push((oid, object_type));
             }
-            
-            // Read object data from ODB
-            let obj_data = odb
-                .read(&oid)
-                .await
-                .context(format!("Failed to read object {}", oid))?;
-
-            // Add to pack with correct type
-            let _offset = pack_writer.add_object(oid, object_type, &obj_data);
         }
 
         if !chunked_objects.is_empty() {
@@ -642,6 +787,24 @@ impl ProtocolClient {
                 count = chunked_objects.len(),
                 "Chunked objects to transfer separately"
             );
+        }
+
+        // Use standard PackWriter but process objects incrementally
+        // Each object is read, added to pack, then data is dropped before next read
+        // This avoids holding all object data in memory simultaneously
+        let mut pack_writer = PackWriter::new();
+
+        for (oid, obj_type) in non_chunked {
+            // Read single object
+            let obj_data = odb
+                .read(&oid)
+                .await
+                .context(format!("Failed to read object {}", oid))?;
+
+            // Add to pack (internally compressed/processed)
+            pack_writer.add_object(oid, obj_type, &obj_data);
+            
+            // obj_data is dropped here, freeing memory before next iteration
         }
 
         // Finalize pack

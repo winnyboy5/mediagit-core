@@ -143,6 +143,21 @@ impl Oid {
         Ok(Oid(bytes))
     }
 
+    /// Create OID from raw bytes
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mediagit_versioning::Oid;
+    ///
+    /// let bytes = [0u8; 32];
+    /// let oid = Oid::from_bytes(bytes);
+    /// assert_eq!(oid.as_bytes(), &bytes);
+    /// ```
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Oid(bytes)
+    }
+
     /// Get the raw bytes of the OID
     ///
     /// # Examples
