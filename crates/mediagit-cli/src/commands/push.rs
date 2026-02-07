@@ -131,7 +131,7 @@ pub struct PushCmd {
 impl PushCmd {
     pub async fn execute(&self) -> Result<()> {
         let start_time = Instant::now();
-        let mut stats = OperationStats::new();
+        let mut stats = OperationStats::for_operation("push");
 
         let remote = self.remote.as_deref().unwrap_or("origin");
 
@@ -526,6 +526,13 @@ impl PushCmd {
         stats.duration_ms = start_time.elapsed().as_millis() as u64;
         if !self.quiet && !self.dry_run {
             println!("{} {}", style("📊").cyan(), stats.summary());
+        }
+
+        // Save stats for later retrieval by stats command
+        if !self.dry_run {
+            if let Err(e) = stats.save(&storage_path) {
+                tracing::warn!("Failed to save operation stats: {}", e);
+            }
         }
 
         Ok(())

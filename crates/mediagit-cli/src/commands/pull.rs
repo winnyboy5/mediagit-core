@@ -82,7 +82,7 @@ pub struct PullCmd {
 impl PullCmd {
     pub async fn execute(&self) -> Result<()> {
         let start_time = Instant::now();
-        let mut stats = OperationStats::new();
+        let mut stats = OperationStats::for_operation("pull");
         let progress = ProgressTracker::new(self.quiet);
 
         let remote = self.remote.as_deref().unwrap_or("origin");
@@ -240,52 +240,28 @@ impl PullCmd {
                 .map(|oid| vec![oid.to_hex()])
                 .unwrap_or_default();
 
-            // Pull using protocol client (downloads pack file)
+            // Pull using streaming protocol (memory-efficient for large files)
             // Pass local OIDs to avoid downloading objects we already have
             let download_pb = progress.download_bar("Receiving objects");
-            let (pack_data, chunked_oids) = client.pull_with_have(&odb, &remote_ref, local_have).await?;
-            let pack_size = pack_data.len() as u64;
 
-            download_pb.set_length(pack_size);
-            download_pb.set_position(pack_size);
-            stats.bytes_downloaded = pack_size;
+            // Use streaming pull - objects are written directly to ODB as they're received
+            let chunked_oids = client.pull_streaming(&odb, &remote_ref, local_have).await?;
 
             if !self.quiet {
                 if chunked_oids.is_empty() {
                     println!(
-                        "{} Received {} bytes",
-                        style("↓").cyan(),
-                        pack_size
+                        "{} Received and unpacked objects (streaming)",
+                        style("↓").cyan()
                     );
                 } else {
                     println!(
-                        "{} Received {} bytes pack + {} chunked objects",
+                        "{} Received pack (streaming) + {} chunked objects",
                         style("↓").cyan(),
-                        pack_size,
                         chunked_oids.len()
                     );
                 }
             }
             download_pb.finish_with_message("Download complete");
-
-            // Unpack received objects (non-chunked)
-            let pack_reader = mediagit_versioning::PackReader::new(pack_data)?;
-            let objects = pack_reader.list_objects();
-            let object_count = objects.len() as u64;
-
-            let unpack_pb = progress.object_bar("Unpacking objects", object_count);
-            for (idx, oid) in objects.iter().enumerate() {
-                // Use get_object_with_type to preserve the correct object type
-                let (obj_type, obj_data) = pack_reader.get_object_with_type(oid)?;
-                odb.write(obj_type, &obj_data).await?;
-                unpack_pb.set_position((idx + 1) as u64);
-            }
-            stats.objects_received = object_count;
-
-            if !self.quiet {
-                println!("{} Unpacked objects", style("✓").green());
-            }
-            unpack_pb.finish_with_message("Unpack complete");
 
             // Download chunked objects (large files)
             if !chunked_oids.is_empty() {
@@ -533,6 +509,13 @@ impl PullCmd {
         stats.duration_ms = start_time.elapsed().as_millis() as u64;
         if !self.quiet && !self.dry_run {
             println!("\n{} {}", style("📊").cyan(), stats.summary());
+        }
+        
+        // Save stats for later retrieval by stats command
+        if !self.dry_run {
+            if let Err(e) = stats.save(&storage_path) {
+                tracing::warn!("Failed to save operation stats: {}", e);
+            }
         }
 
         Ok(())

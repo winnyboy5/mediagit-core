@@ -1,10 +1,25 @@
 use anyhow::Result;
+use chrono::Duration;
 use clap::Parser;
 use console::style;
 use mediagit_storage::LocalBackend;
 use mediagit_versioning::{ObjectDatabase, RefDatabase};
 use std::sync::Arc;
 use super::super::repo::find_repo_root;
+
+/// Format a duration as a human-readable "time ago" string
+fn format_duration_ago(duration: Duration) -> String {
+    let secs = duration.num_seconds();
+    if secs < 60 {
+        format!("{} seconds ago", secs)
+    } else if secs < 3600 {
+        format!("{} minutes ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{} hours ago", secs / 3600)
+    } else {
+        format!("{} days ago", secs / 86400)
+    }
+}
 
 /// Show repository statistics
 #[derive(Parser, Debug)]
@@ -81,9 +96,9 @@ impl StatsCmd {
 
         let show_all = self.all || (!self.storage && !self.files && !self.commits && !self.branches && !self.authors && !self.compression);
 
-        // Operation Statistics (example data - would be persisted in production)
+        // Operation Statistics from persisted data
         if show_all {
-            self.show_operation_stats();
+            self.show_operation_stats(&storage_path);
         }
 
         // Storage statistics
@@ -184,11 +199,41 @@ impl StatsCmd {
         Ok(())
     }
 
-    fn show_operation_stats(&self) {
+    fn show_operation_stats(&self, storage_path: &std::path::Path) {
+        use crate::progress::OperationStats;
+        
         println!("{}", style("Recent Operations:").bold());
-        println!("  Last pull: Demo data (↓ 1.50 MB, 42 objects, 1500ms)");
-        println!("  Last push: Demo data (↑ 500.00 KB, 15 objects, 800ms)");
-        println!("  Last branch switch: Demo data (10 files updated, 250ms)");
+        
+        // Load and display last pull
+        match OperationStats::load_last_by_type(storage_path, "pull") {
+            Ok(Some(stats)) => {
+                let time_ago = chrono::Utc::now().signed_duration_since(stats.timestamp);
+                let time_str = format_duration_ago(time_ago);
+                println!("  Last pull: {} ({})", stats.summary(), time_str);
+            }
+            _ => println!("  Last pull: No history"),
+        }
+        
+        // Load and display last push
+        match OperationStats::load_last_by_type(storage_path, "push") {
+            Ok(Some(stats)) => {
+                let time_ago = chrono::Utc::now().signed_duration_since(stats.timestamp);
+                let time_str = format_duration_ago(time_ago);
+                println!("  Last push: {} ({})", stats.summary(), time_str);
+            }
+            _ => println!("  Last push: No history"),
+        }
+        
+        // Load and display last branch switch
+        match OperationStats::load_last_by_type(storage_path, "switch") {
+            Ok(Some(stats)) => {
+                let time_ago = chrono::Utc::now().signed_duration_since(stats.timestamp);
+                let time_str = format_duration_ago(time_ago);
+                println!("  Last branch switch: {} ({})", stats.summary(), time_str);
+            }
+            _ => println!("  Last branch switch: No history"),
+        }
+        
         println!();
     }
 

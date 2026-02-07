@@ -1,4 +1,7 @@
+use chrono::{DateTime, Utc};
 use indicatif::{HumanBytes, HumanDuration, MultiProgress, ProgressBar, ProgressStyle};
+use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -116,8 +119,11 @@ impl ProgressTracker {
 }
 
 /// Statistics for Git operations
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct OperationStats {
+    pub operation_name: String,
+    #[serde(default = "default_timestamp")]
+    pub timestamp: DateTime<Utc>,
     pub bytes_downloaded: u64,
     pub bytes_uploaded: u64,
     pub objects_received: u64,
@@ -126,9 +132,25 @@ pub struct OperationStats {
     pub duration_ms: u64,
 }
 
+fn default_timestamp() -> DateTime<Utc> {
+    Utc::now()
+}
+
 impl OperationStats {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            timestamp: Utc::now(),
+            ..Default::default()
+        }
+    }
+
+    /// Create stats for a specific operation type
+    pub fn for_operation(operation_name: &str) -> Self {
+        Self {
+            operation_name: operation_name.to_string(),
+            timestamp: Utc::now(),
+            ..Default::default()
+        }
     }
 
     /// Format stats as human-readable string
@@ -164,6 +186,87 @@ impl OperationStats {
 
     fn format_bytes(bytes: u64) -> String {
         format!("{}", HumanBytes(bytes))
+    }
+
+    /// Save stats to .mediagit/stats/ directory
+    pub fn save(&self, storage_path: &Path) -> anyhow::Result<()> {
+        let stats_dir = storage_path.join("stats");
+        std::fs::create_dir_all(&stats_dir)?;
+
+        // Create filename with timestamp and operation name
+        let filename = format!(
+            "{}_{}.json",
+            self.timestamp.format("%Y%m%d_%H%M%S"),
+            self.operation_name
+        );
+        let file_path = stats_dir.join(&filename);
+
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(&file_path, json)?;
+
+        // Keep only the last 100 stats files to prevent unbounded growth
+        Self::cleanup_old_stats(&stats_dir, 100)?;
+
+        Ok(())
+    }
+
+    /// Load recent stats from .mediagit/stats/ directory
+    pub fn load_recent(storage_path: &Path, limit: usize) -> anyhow::Result<Vec<OperationStats>> {
+        let stats_dir = storage_path.join("stats");
+        if !stats_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut entries: Vec<_> = std::fs::read_dir(&stats_dir)?
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path().extension().map(|ext| ext == "json").unwrap_or(false)
+            })
+            .collect();
+
+        // Sort by filename (which includes timestamp) in descending order
+        entries.sort_by(|a, b| b.path().cmp(&a.path()));
+
+        let mut stats = Vec::new();
+        for entry in entries.into_iter().take(limit) {
+            if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                if let Ok(stat) = serde_json::from_str::<OperationStats>(&content) {
+                    stats.push(stat);
+                }
+            }
+        }
+
+        Ok(stats)
+    }
+
+    /// Load the most recent stats for a specific operation type
+    pub fn load_last_by_type(storage_path: &Path, operation_name: &str) -> anyhow::Result<Option<OperationStats>> {
+        let all_stats = Self::load_recent(storage_path, 50)?;
+        Ok(all_stats.into_iter().find(|s| s.operation_name == operation_name))
+    }
+
+    /// Cleanup old stats files, keeping only the most recent `keep_count`
+    fn cleanup_old_stats(stats_dir: &Path, keep_count: usize) -> anyhow::Result<()> {
+        let mut entries: Vec<_> = std::fs::read_dir(stats_dir)?
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path().extension().map(|ext| ext == "json").unwrap_or(false)
+            })
+            .collect();
+
+        if entries.len() <= keep_count {
+            return Ok(());
+        }
+
+        // Sort by filename (newest first)
+        entries.sort_by(|a, b| b.path().cmp(&a.path()));
+
+        // Remove oldest files
+        for entry in entries.into_iter().skip(keep_count) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+
+        Ok(())
     }
 }
 
