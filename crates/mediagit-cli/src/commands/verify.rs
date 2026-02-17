@@ -16,10 +16,12 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
-use mediagit_storage::LocalBackend;
+use mediagit_storage::StorageBackend;
 use mediagit_versioning::{Commit, FsckChecker, FsckOptions, IssueSeverity, ObjectDatabase, Oid, RefDatabase};
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
+use crate::repo::create_storage_backend;
 
 /// Verify repository integrity with quick checks
 ///
@@ -93,8 +95,9 @@ pub struct VerifyCmd {
 impl VerifyCmd {
     pub async fn execute(&self) -> Result<()> {
         // Determine repository path
-        let repo_path = self.path.as_deref().unwrap_or(".");
-        let mediagit_dir = format!("{}/.mediagit", repo_path);
+        let repo_path_str = self.path.as_deref().unwrap_or(".");
+        let repo_path = std::path::PathBuf::from(repo_path_str);
+        let mediagit_dir = repo_path.join(".mediagit");
 
         if !self.quiet {
             println!(
@@ -104,14 +107,12 @@ impl VerifyCmd {
         }
 
         // Create storage backend
-        let storage = Arc::new(
-            LocalBackend::new(&mediagit_dir).await
-                .context("Failed to open repository. Is this a MediaGit repository?")?,
-        );
+        let storage = create_storage_backend(&repo_path).await
+            .context("Failed to open repository. Is this a MediaGit repository?")?;
 
         // Handle commit range verification
         if self.start.is_some() || self.end.is_some() {
-            return self.verify_commit_range(&mediagit_dir, storage).await;
+            return self.verify_commit_range(&mediagit_dir, storage.clone()).await;
         }
 
         // Create FSCK checker (verify is a lightweight wrapper)
@@ -220,8 +221,8 @@ impl VerifyCmd {
     /// Verify a specific range of commits
     async fn verify_commit_range(
         &self,
-        mediagit_dir: &str,
-        storage: Arc<LocalBackend>,
+        mediagit_dir: &Path,
+        storage: Arc<dyn StorageBackend>,
     ) -> Result<()> {
         let refdb = RefDatabase::new(mediagit_dir);
         let odb = Arc::new(ObjectDatabase::with_smart_compression(storage.clone(), 1000));

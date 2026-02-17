@@ -1,13 +1,12 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
-use mediagit_storage::LocalBackend;
 use mediagit_versioning::{Commit, LcaFinder, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Signature};
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::rebase_state::RebaseState;
-use super::super::repo::find_repo_root;
+use super::super::repo::{find_repo_root, create_storage_backend};
 
 /// Rebase commits
 #[derive(Parser, Debug)]
@@ -88,8 +87,7 @@ impl RebaseCmd {
         }
 
         let storage_path = repo_root.join(".mediagit");
-        let storage: Arc<dyn mediagit_storage::StorageBackend> =
-            Arc::new(LocalBackend::new(&storage_path).await?);
+        let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
         let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
 
@@ -403,8 +401,7 @@ impl RebaseCmd {
         }
 
         let storage_path = repo_root.join(".mediagit");
-        let storage: Arc<dyn mediagit_storage::StorageBackend> =
-            Arc::new(LocalBackend::new(&storage_path).await?);
+        let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
         let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
 

@@ -306,6 +306,10 @@ async fn collect_refs_recursive(
         let file_type = entry.file_type().await?;
 
         if file_type.is_file() {
+            // Skip .meta sidecar files (used for annotated tag metadata)
+            if path.extension().and_then(|e| e.to_str()) == Some("meta") {
+                continue;
+            }
             // Convert absolute path to ref name: refs/heads/feat/bunny-audio
             if let Ok(rel) = path.strip_prefix(refs_root) {
                 // Normalize path separators for cross-platform compatibility (Windows uses \\)

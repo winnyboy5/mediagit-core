@@ -4,10 +4,8 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use mediagit_storage::LocalBackend;
-use mediagit_versioning::{Commit, Index, ObjectDatabase, Ref, RefDatabase, Signature, Tree, TreeEntry, FileMode};
-use std::sync::Arc;
-use super::super::repo::find_repo_root;
+use mediagit_versioning::{Commit, Index, ObjectDatabase, Oid, Ref, RefDatabase, Reflog, ReflogEntry, Signature, Tree, TreeEntry, FileMode};
+use super::super::repo::{find_repo_root, create_storage_backend};
 
 /// Record changes to the repository
 ///
@@ -114,8 +112,7 @@ impl CommitCmd {
 
         // Initialize storage and databases
         let storage_path = repo_root.join(".mediagit");
-        let storage: Arc<dyn mediagit_storage::StorageBackend> =
-            Arc::new(LocalBackend::new(&storage_path).await?);
+        let storage = create_storage_backend(&repo_root).await?;
         let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
         let refdb = RefDatabase::new(&storage_path);
 
@@ -264,6 +261,19 @@ impl CommitCmd {
                 tracing::error!("Failed to restore index after ref update failure: {}", restore_err);
             }
             return Err(e);
+        }
+
+        // Record reflog entry for HEAD and the branch
+        let reflog = Reflog::new(&storage_path);
+        let old_oid = parent_oid.unwrap_or_else(|| Oid::from_bytes([0u8; 32]));
+        let reflog_msg = format!("commit: {}", message);
+        let entry = ReflogEntry::now(old_oid, commit_oid, &author_name, &author_email, &reflog_msg);
+        // Best-effort: don't fail the commit if reflog write fails
+        let _ = reflog.append("HEAD", &entry).await;
+        if let Ok(head_ref) = refdb.read("HEAD").await {
+            if let Some(branch) = head_ref.target {
+                let _ = reflog.append(&branch, &entry).await;
+            }
         }
 
         if !self.quiet {

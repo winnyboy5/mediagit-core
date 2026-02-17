@@ -16,9 +16,8 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
-use mediagit_storage::LocalBackend;
 use mediagit_versioning::{FsckChecker, FsckOptions, FsckRepair, IssueSeverity};
-use std::sync::Arc;
+use crate::repo::create_storage_backend;
 
 /// Check repository integrity with comprehensive verification
 ///
@@ -106,22 +105,21 @@ pub struct FsckCmd {
 impl FsckCmd {
     pub async fn execute(&self) -> Result<()> {
         // Determine repository path
-        let repo_path = self.path.as_deref().unwrap_or(".");
-        let mediagit_dir = format!("{}/.mediagit", repo_path);
+        let repo_path_str = self.path.as_deref().unwrap_or(".");
+        let repo_path = std::path::PathBuf::from(repo_path_str);
+        let mediagit_dir = repo_path.join(".mediagit");
 
         if !self.quiet {
             println!(
                 "{} Checking repository integrity at {}",
                 style("🔍").cyan().bold(),
-                style(&mediagit_dir).dim()
+                style(&mediagit_dir.display()).dim()
             );
         }
 
         // Create storage backend
-        let storage = Arc::new(
-            LocalBackend::new(&mediagit_dir).await
-                .context("Failed to open repository. Is this a MediaGit repository?")?,
-        );
+        let storage = create_storage_backend(&repo_path).await
+            .context("Failed to open repository. Is this a MediaGit repository?")?;
 
         // Create FSCK checker
         let checker = FsckChecker::new(storage.clone());

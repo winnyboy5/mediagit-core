@@ -46,6 +46,13 @@ pub fn get_similarity_threshold(filename: Option<&str>) -> f64 {
             .unwrap_or("");
 
         match ext.to_lowercase().as_str() {
+            // Creative/PDF containers: Very low threshold (embedded compressed streams
+            // shift chunk boundaries, but structural similarity remains)
+            "ai" | "ait" | "indd" | "idml" | "indt" | "eps" | "pdf" => 0.15,
+
+            // Office documents (ZIP containers with shared structure)
+            "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" => 0.20,
+
             // Text/code: High similarity threshold (small changes matter)
             "txt" | "md" | "py" | "rs" | "js" | "ts" | "go" | "java" | "c" | "cpp" | "h" | "hpp" => 0.85,
 
@@ -70,6 +77,42 @@ pub fn get_similarity_threshold(filename: Option<&str>) -> f64 {
     } else {
         // No filename: use default threshold
         MIN_SIMILARITY_THRESHOLD
+    }
+}
+
+/// Get type-aware size ratio threshold based on file extension
+///
+/// Creative files (AI, PDF) can have large size differences between
+/// versions while still sharing significant internal structure.
+/// A lower threshold allows delta matching across larger size changes.
+///
+/// # Arguments
+///
+/// * `filename` - Optional filename for type inference
+///
+/// # Returns
+///
+/// Size ratio threshold (0.0 to 1.0). Candidate chunks with
+/// (smaller/larger) below this ratio are skipped during similarity search.
+pub fn get_size_ratio_threshold(filename: Option<&str>) -> f64 {
+    if let Some(name) = filename {
+        let ext = std::path::Path::new(name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+
+        match ext.to_lowercase().as_str() {
+            // Creative/PDF containers: allow 50% size difference
+            "ai" | "ait" | "indd" | "idml" | "indt" | "eps" | "pdf" => 0.50,
+            // Office documents: allow 40% size difference
+            "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" => 0.60,
+            // Video: allow 30% size difference
+            "mp4" | "mov" | "avi" | "mkv" => 0.70,
+            // Default: 80% (20% max difference)
+            _ => 0.80,
+        }
+    } else {
+        0.80
     }
 }
 
@@ -144,6 +187,9 @@ pub struct ObjectMetadata {
 
     /// Sample hashes for quick comparison
     pub sample_hashes: Vec<u64>,
+
+    /// Whether this chunk was stored as a delta (avoid using as base)
+    pub is_delta: bool,
 }
 
 impl ObjectMetadata {
@@ -160,6 +206,7 @@ impl ObjectMetadata {
             obj_type,
             filename,
             sample_hashes: Vec::new(),
+            is_delta: false,
         }
     }
 
@@ -243,10 +290,26 @@ impl SimilarityDetector {
     /// Find similar objects for delta base selection
     ///
     /// Returns the best matching object metadata and similarity score.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - The object to find matches for
+    /// * `min_similarity` - Minimum similarity score threshold
+    /// * `size_ratio_threshold` - Optional size ratio threshold (defaults to 0.80)
     pub fn find_similar(
         &self,
         target: &ObjectMetadata,
         min_similarity: f64,
+    ) -> Option<(Oid, SimilarityScore)> {
+        self.find_similar_with_size_ratio(target, min_similarity, 0.80)
+    }
+
+    /// Find similar objects with configurable size ratio threshold
+    pub fn find_similar_with_size_ratio(
+        &self,
+        target: &ObjectMetadata,
+        min_similarity: f64,
+        size_ratio_threshold: f64,
     ) -> Option<(Oid, SimilarityScore)> {
         if self.recent_objects.is_empty() || target.sample_hashes.is_empty() {
             return None;
@@ -266,18 +329,24 @@ impl SimilarityDetector {
                 continue;
             }
 
-            // Size-based filtering: only consider objects within 20% size difference
+            // Skip delta chunks to prevent delta chains (no I/O needed)
+            if candidate.is_delta {
+                continue;
+            }
+
+            // Size-based filtering using configurable threshold
             let size_ratio = if candidate.size < target.size {
                 candidate.size as f64 / target.size as f64
             } else {
                 target.size as f64 / candidate.size as f64
             };
 
-            if size_ratio < 0.80 {
+            if size_ratio < size_ratio_threshold {
                 debug!(
                     target_oid = %target.oid,
                     candidate_oid = %candidate.oid,
                     size_ratio,
+                    threshold = size_ratio_threshold,
                     "Size difference too large, skipping"
                 );
                 continue;

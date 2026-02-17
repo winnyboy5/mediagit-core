@@ -248,6 +248,10 @@ pub async fn get_refs(
                         // Add subdirectory to visit (for nested refs like feature/branch or remotes/origin/main)
                         dirs_to_visit.push(path);
                     } else if path.is_file() {
+                        // Skip .meta sidecar files (annotated tag metadata)
+                        if path.extension().and_then(|e| e.to_str()) == Some("meta") {
+                            continue;
+                        }
                         // Construct ref name relative to refs_dir
                         // e.g., refs/heads/main, refs/heads/feature/branch, refs/remotes/origin/main
                         if let Ok(relative_path) = path.strip_prefix(&refs_dir) {
@@ -291,21 +295,9 @@ pub async fn upload_pack(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Initialize storage for transaction
+    // Initialize storage and ODB for proper compression and storage
     let storage = create_storage_backend(&repo_path).await?;
-
-    // Create transaction for atomic writes
-    let temp_path = repo_path.join("temp");
-    tokio::fs::create_dir_all(&temp_path).await.map_err(|e| {
-        tracing::error!("Failed to create temp directory: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    let mut transaction = mediagit_versioning::PackTransaction::new(storage, &temp_path)
-        .map_err(|e| {
-            tracing::error!("Failed to create transaction: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let odb = ObjectDatabase::with_smart_compression(storage, 1000);
 
     // Convert body to AsyncRead stream
     use futures::stream::TryStreamExt;
@@ -327,7 +319,7 @@ pub async fn upload_pack(
 
     tracing::info!("Processing streaming pack upload");
 
-    // Process objects incrementally
+    // Process objects incrementally using ODB (proper compression + storage paths)
     let mut object_count = 0;
     while let Some(result) = reader.next_object().await {
         let (oid, obj_type, data) = result.map_err(|e| {
@@ -335,12 +327,21 @@ pub async fn upload_pack(
             StatusCode::BAD_REQUEST
         })?;
 
-        transaction.add_object(oid, obj_type, &data)
+        // Write through ODB which handles compression and correct storage paths
+        let stored_oid = odb.write(obj_type, &data)
             .await
             .map_err(|e| {
-                tracing::error!("Failed to add object to transaction: {}", e);
+                tracing::error!("Failed to write object {} to ODB: {}", oid, e);
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
+
+        if stored_oid != oid {
+            tracing::warn!(
+                expected = %oid,
+                actual = %stored_oid,
+                "OID mismatch during pack upload (object may have different content)"
+            );
+        }
 
         object_count += 1;
         if object_count % 100 == 0 {
@@ -348,13 +349,7 @@ pub async fn upload_pack(
         }
     }
 
-    // Commit transaction
-    transaction.commit().await.map_err(|e| {
-        tracing::error!("Failed to commit transaction: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    tracing::info!("Successfully unpacked {} objects (streaming)", object_count);
+    tracing::info!("Successfully unpacked {} objects (streaming via ODB)", object_count);
     Ok(StatusCode::OK)
 }
 

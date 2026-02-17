@@ -3,9 +3,8 @@ use clap::{Parser, Subcommand};
 use console::style;
 use mediagit_versioning::{CheckoutManager, ObjectDatabase, Oid, RefDatabase};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::collections::HashSet;
-use super::super::repo::find_repo_root;
+use super::super::repo::{find_repo_root, create_storage_backend};
 
 /// Find commit that introduced a bug using binary search
 #[derive(Parser, Debug)]
@@ -289,7 +288,7 @@ impl BisectCmd {
         };
 
         // Checkout original HEAD
-        let storage = Arc::new(mediagit_storage::LocalBackend::new(&mediagit_dir).await?);
+        let storage = create_storage_backend(&repo_root).await?;
         let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
         let refdb = RefDatabase::new(&mediagit_dir);
 
@@ -353,8 +352,7 @@ impl BisectCmd {
     }
 
     async fn find_next_commit(&self, repo_root: &PathBuf, state: &mut BisectState) -> Result<()> {
-        let mediagit_dir = repo_root.join(".mediagit");
-        let storage = Arc::new(mediagit_storage::LocalBackend::new(&mediagit_dir).await?);
+        let storage = create_storage_backend(repo_root).await?;
         let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
 
         // Get all commits between good and bad

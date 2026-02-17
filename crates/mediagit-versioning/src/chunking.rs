@@ -157,8 +157,8 @@ fn get_chunk_params(file_size: u64) -> (usize, usize, usize) {
     match file_size {
         0..=100_000_000 => (1 * MB, 512 * 1024, 4 * MB),           // < 100MB: 1MB avg
         100_000_001..=10_000_000_000 => (2 * MB, 1 * MB, 8 * MB),  // 100MB-10GB: 2MB avg
-        10_000_000_001..=100_000_000_000 => (4 * MB, 2 * MB, 16 * MB), // 10GB-100GB: 4MB avg
-        _ => (8 * MB, 4 * MB, 32 * MB),                           // > 100GB: 8MB avg
+        10_000_000_001..=100_000_000_000 => (4 * MB, 1 * MB, 16 * MB), // 10GB-100GB: 4MB avg
+        _ => (8 * MB, 1 * MB, 32 * MB),                           // > 100GB: 8MB avg
     }
 }
 
@@ -178,7 +178,7 @@ impl ContentChunker {
         match self.strategy {
             ChunkStrategy::Fixed { size } => self.chunk_fixed(data, size).await,
             ChunkStrategy::Rolling { avg_size, min_size, max_size } => {
-                self.chunk_rolling(data, avg_size, min_size, max_size).await
+                self.chunk_fastcdc(data, avg_size, min_size, max_size).await
             }
             ChunkStrategy::MediaAware => self.chunk_media_aware(data, filename).await,
         }
@@ -233,8 +233,6 @@ impl ContentChunker {
         F: FnMut(ContentChunk) -> Fut,
         Fut: std::future::Future<Output = Result<()>>,
     {
-        use tokio::io::AsyncReadExt;
-        
         let path = path.as_ref();
         let file_size = std::fs::metadata(path)
             .map_err(|e| anyhow::anyhow!("Failed to get file metadata: {}", e))?
@@ -282,67 +280,41 @@ impl ContentChunker {
             return Ok(chunk_oids);
         }
         
-        // Large files: Stream with adaptive chunk sizes
-        let (avg_size, _min_size, _max_size) = get_chunk_params(file_size);
+        // Large files: Stream with FastCDC content-defined chunking
+        // FastCDC's StreamCDC uses gear table for O(1) boundary detection - fast enough for streaming
+        let (avg_size, min_size, max_size) = get_chunk_params(file_size);
         info!(
-            "Streaming chunking: file_size={}, avg_chunk={}KB",
+            "FastCDC streaming: file_size={}, avg_chunk={}KB",
             file_size,
             avg_size / 1024
         );
         
-        // Open file for streaming
-        let mut file = tokio::fs::File::open(path).await
+        // Read file into memory for FastCDC (required by current API)
+        // Note: FastCDC StreamCDC requires Read trait, but for truly streaming
+        // we need to buffer chunks. Memory usage is bounded by max_chunk_size.
+        let file = std::fs::File::open(path)
             .map_err(|e| anyhow::anyhow!("Failed to open file: {}", e))?;
         
-        // For streaming large files, use FIXED-SIZE chunking (much faster)
-        // Rolling hash CDC is too slow for streaming (O(n) byte-by-byte checks)
-        let chunk_size = avg_size;
-        let mut buffer = vec![0u8; chunk_size];
-        let mut file_offset = 0u64;
+        let chunker = fastcdc::v2020::StreamCDC::new(file, min_size as u32, avg_size as u32, max_size as u32);
         
-        loop {
-            // Read exactly one chunk worth of data
-            let mut bytes_in_chunk = 0;
-            loop {
-                let bytes_read = file.read(&mut buffer[bytes_in_chunk..]).await?;
-                if bytes_read == 0 {
-                    break; // EOF
-                }
-                bytes_in_chunk += bytes_read;
-                if bytes_in_chunk >= chunk_size {
-                    break; // Full chunk
-                }
-            }
-            
-            if bytes_in_chunk == 0 {
-                break; // EOF
-            }
-            
-            // Create chunk from data (may be less than chunk_size at EOF)
-            let chunk_data = &buffer[..bytes_in_chunk];
-            let id = Oid::hash(chunk_data);
+        for result in chunker {
+            let entry = result.map_err(|e| anyhow::anyhow!("FastCDC stream error: {}", e))?;
+            let id = Oid::hash(&entry.data);
             
             let chunk = ContentChunk {
                 id,
-                data: chunk_data.to_vec(),
-                offset: file_offset,
-                size: chunk_data.len(),
+                data: entry.data,
+                offset: entry.offset as u64,
+                size: entry.length,
                 chunk_type: ChunkType::Generic,
                 perceptual_hash: None,
             };
             
             on_chunk(chunk).await?;
             chunk_oids.push(id);
-            
-            file_offset += bytes_in_chunk as u64;
-            
-            // If we read less than chunk_size, we hit EOF
-            if bytes_in_chunk < chunk_size {
-                break;
-            }
         }
         
-        info!("Streaming chunking complete: {} chunks created", chunk_oids.len());
+        info!("FastCDC streaming complete: {} chunks created", chunk_oids.len());
         Ok(chunk_oids)
     }
 
@@ -376,75 +348,43 @@ impl ContentChunker {
         Ok(chunks)
     }
 
-    /// Rolling hash chunking with content-defined boundaries
-    async fn chunk_rolling(
+    /// Content-defined chunking using FastCDC algorithm
+    /// 
+    /// Uses gear table-based hashing for O(1) boundary detection per byte,
+    /// approximately 10x faster than traditional rolling hash implementations.
+    async fn chunk_fastcdc(
         &self,
         data: &[u8],
         avg_size: usize,
         min_size: usize,
         max_size: usize,
     ) -> Result<Vec<ContentChunk>> {
+        use fastcdc::v2020::FastCDC;
+        
+        let chunker = FastCDC::new(data, min_size as u32, avg_size as u32, max_size as u32);
         let mut chunks = Vec::new();
-        let mut offset = 0u64;
-        let mut start = 0;
-
-        // Rolling hash window
-        const WINDOW_SIZE: usize = 48;
-        let mask = (1 << (avg_size.trailing_zeros())) - 1;
-
-        let mut i = min_size;
-        while i < data.len() {
-            // Calculate rolling hash for boundary detection
-            let window_end = (i + WINDOW_SIZE).min(data.len());
-            let hash = rolling_hash(&data[i..window_end]);
-
-            // Check if we hit a boundary or max size
-            let is_boundary = (hash & mask) == 0;
-            let chunk_size = i - start;
-
-            if is_boundary || chunk_size >= max_size || i + WINDOW_SIZE >= data.len() {
-                let chunk_data = &data[start..i];
-                let id = Oid::hash(chunk_data);
-
-                chunks.push(ContentChunk {
-                    id,
-                    data: chunk_data.to_vec(),
-                    offset,
-                    size: chunk_data.len(),
-                    chunk_type: ChunkType::Generic,
-                    perceptual_hash: None,
-                });
-
-                offset += chunk_data.len() as u64;
-                start = i;
-                i += min_size;
-            } else {
-                i += 1;
-            }
-        }
-
-        // Handle remaining data
-        if start < data.len() {
-            let chunk_data = &data[start..];
+        
+        for entry in chunker {
+            let chunk_data = &data[entry.offset..entry.offset + entry.length];
             let id = Oid::hash(chunk_data);
-
+            
             chunks.push(ContentChunk {
                 id,
                 data: chunk_data.to_vec(),
-                offset,
-                size: chunk_data.len(),
+                offset: entry.offset as u64,
+                size: entry.length,
                 chunk_type: ChunkType::Generic,
                 perceptual_hash: None,
             });
         }
-
+        
         debug!(
             chunks = chunks.len(),
             avg_size = avg_size,
             total_size = data.len(),
-            "Rolling hash chunking complete"
+            "FastCDC chunking complete"
         );
-
+        
         Ok(chunks)
     }
 
@@ -464,7 +404,7 @@ impl ContentChunker {
             "mpg" | "mpeg" | "vob" | "mts" | "m2ts" => {
                 // MPEG Program/Transport Streams - use rolling CDC
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
-                self.chunk_rolling(data, avg, min, max).await
+                self.chunk_fastcdc(data, avg, min, max).await
             }
 
             // 3D Models - Structure-aware chunking
@@ -474,17 +414,17 @@ impl ContentChunker {
             "usd" | "usda" | "usdc" | "usdz" => {
                 // USD ecosystem - rolling CDC for scene graph dedup
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
-                self.chunk_rolling(data, avg, min, max).await
+                self.chunk_fastcdc(data, avg, min, max).await
             }
             "abc" => {
                 // Alembic cache - rolling CDC for animation dedup
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
-                self.chunk_rolling(data, avg, min, max).await
+                self.chunk_fastcdc(data, avg, min, max).await
             }
             "blend" | "max" | "ma" | "mb" | "c4d" | "hip" | "zpr" | "ztl" => {
                 // Application-specific 3D formats - rolling CDC
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
-                self.chunk_rolling(data, avg, min, max).await
+                self.chunk_fastcdc(data, avg, min, max).await
             }
 
             // Text/Code - Rolling CDC for incremental dedup (Brotli compression)
@@ -493,46 +433,46 @@ impl ContentChunker {
             "yaml" | "yml" | "toml" | "ini" | "cfg" |
             "sql" | "graphql" | "proto" => {
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
-                self.chunk_rolling(data, avg, min, max).await
+                self.chunk_fastcdc(data, avg, min, max).await
             }
             
             // ML Data formats - Rolling CDC for dataset versioning
             "parquet" | "arrow" | "feather" | "orc" | "avro" |
             "hdf5" | "h5" | "nc" | "netcdf" | "npy" | "npz" | "tfrecords" | "petastorm" => {
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
-                self.chunk_rolling(data, avg, min, max).await
+                self.chunk_fastcdc(data, avg, min, max).await
             }
             
             // ML Models - Rolling CDC for fine-tuning dedup
             "pt" | "pth" | "ckpt" | "pb" | "safetensors" | "bin" |
             "pkl" | "joblib" => {
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
-                self.chunk_rolling(data, avg, min, max).await
+                self.chunk_fastcdc(data, avg, min, max).await
             }
             
             // ML Deployment - Rolling CDC for model versioning
             "onnx" | "gguf" | "ggml" | "tflite" | "mlmodel" | "coreml" |
             "keras" | "pte" | "mleap" | "pmml" | "llamafile" => {
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
-                self.chunk_rolling(data, avg, min, max).await
+                self.chunk_fastcdc(data, avg, min, max).await
             }
             
             // Documents - Rolling CDC
             "pdf" | "svg" | "eps" | "ai" => {
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
-                self.chunk_rolling(data, avg, min, max).await
+                self.chunk_fastcdc(data, avg, min, max).await
             }
 
             // Design tools - Rolling CDC for incremental design changes
             "fig" | "sketch" | "xd" | "indd" | "indt" => {
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
-                self.chunk_rolling(data, avg, min, max).await
+                self.chunk_fastcdc(data, avg, min, max).await
             }
             
             // Lossless audio - Rolling CDC
             "flac" | "aiff" | "alac" => {
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
-                self.chunk_rolling(data, avg, min, max).await
+                self.chunk_fastcdc(data, avg, min, max).await
             }
             
             // Compressed formats - Fixed chunking (already compressed, replaced entirely)
@@ -546,7 +486,7 @@ impl ContentChunker {
             _ => {
                 debug!(extension = extension, "Unknown type, using rolling (CDC) chunking for dedup");
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
-                self.chunk_rolling(data, avg, min, max).await
+                self.chunk_fastcdc(data, avg, min, max).await
             }
         }
     }
@@ -781,7 +721,7 @@ impl ContentChunker {
                         let mdat_content = &atom_data[atom.header_size as usize..];
                         let base_offset = atom.offset + atom.header_size as u64;
 
-                        let sub_chunks = self.chunk_rolling(
+                        let sub_chunks = self.chunk_fastcdc(
                             mdat_content,
                             1 * 1024 * 1024,  // 1MB average
                             512 * 1024,       // 512KB minimum
@@ -1129,7 +1069,7 @@ impl ContentChunker {
         if !data.iter().take(1024).all(|&b| b < 128 || b >= 0xC0) {
             // Binary format - use rolling CDC
             let (avg, min, max) = get_chunk_params(data.len() as u64);
-            return self.chunk_rolling(data, avg, min, max).await;
+            return self.chunk_fastcdc(data, avg, min, max).await;
         }
 
         let mut chunks = Vec::new();
@@ -1228,7 +1168,7 @@ impl ContentChunker {
             // ASCII FBX or invalid - use rolling CDC
             debug!("FBX file is ASCII or invalid, using rolling CDC");
             let (avg, min, max) = get_chunk_params(data.len() as u64);
-            return self.chunk_rolling(data, avg, min, max).await;
+            return self.chunk_fastcdc(data, avg, min, max).await;
         }
 
         // Parse FBX version (bytes 23-26, little-endian)
@@ -1252,7 +1192,7 @@ impl ContentChunker {
         if data.len() > 27 {
             let content = &data[27..];
             let (avg, min, max) = get_chunk_params(content.len() as u64);
-            let sub_chunks = self.chunk_rolling(content, avg, min, max).await?;
+            let sub_chunks = self.chunk_fastcdc(content, avg, min, max).await?;
 
             for mut chunk in sub_chunks {
                 chunk.offset += 27;
@@ -1268,15 +1208,6 @@ impl ContentChunker {
 
         Ok(chunks)
     }
-}
-
-/// Calculate rolling hash for boundary detection (Rabin fingerprint)
-fn rolling_hash(window: &[u8]) -> u64 {
-    let mut hash = 0u64;
-    for &byte in window {
-        hash = hash.wrapping_mul(31).wrapping_add(byte as u64);
-    }
-    hash
 }
 
 /// Parse MP4 atoms from data
@@ -1699,17 +1630,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rolling_hash() {
-        let window = b"test data for hashing";
-        let hash1 = rolling_hash(window);
-        let hash2 = rolling_hash(window);
-
-        assert_eq!(hash1, hash2); // Deterministic
-
-        let different = b"different data here!!";
-        let hash3 = rolling_hash(different);
-
-        assert_ne!(hash1, hash3); // Different content
+    async fn test_fastcdc_deterministic() {
+        // FastCDC should produce the same chunk boundaries for the same data
+        let data = (0..50_000).map(|i| (i % 256) as u8).collect::<Vec<u8>>();
+        
+        // Use Rolling strategy with appropriate chunk sizes for test data
+        let chunker = ContentChunker::new(ChunkStrategy::Rolling { 
+            avg_size: 8192, 
+            min_size: 4096, 
+            max_size: 16384 
+        });
+        
+        // Chunk the same data twice
+        let chunks1 = chunker.chunk(&data, "test.bin").await.unwrap();
+        let chunks2 = chunker.chunk(&data, "test.bin").await.unwrap();
+        
+        // Should produce identical chunks
+        assert_eq!(chunks1.len(), chunks2.len(), "FastCDC should be deterministic");
+        for (c1, c2) in chunks1.iter().zip(chunks2.iter()) {
+            assert_eq!(c1.id, c2.id, "Chunk IDs should match for same content");
+        }
+        
+        // Different data should produce different chunks
+        let different = (0..50_000).map(|i| ((i + 1) % 256) as u8).collect::<Vec<u8>>();
+        let chunks3 = chunker.chunk(&different, "test.bin").await.unwrap();
+        assert_ne!(chunks1[0].id, chunks3[0].id, "Different content should produce different chunks");
     }
 
     #[test]
