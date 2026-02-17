@@ -4,7 +4,7 @@ use console::style;
 use mediagit_versioning::{CheckoutManager, Commit, Index, MergeEngine, ObjectDatabase, Oid, Ref, RefDatabase, Tree};
 use std::path::PathBuf;
 use std::sync::Arc;
-use super::super::repo::find_repo_root;
+use super::super::repo::{find_repo_root, create_storage_backend};
 
 /// Apply changes from existing commits
 #[derive(Parser, Debug)]
@@ -65,8 +65,8 @@ impl CherryPickCmd {
 
     async fn start_cherrypick(&self, repo_root: &PathBuf) -> Result<()> {
         let mediagit_dir = repo_root.join(".mediagit");
-        let storage = Arc::new(mediagit_storage::LocalBackend::new(&mediagit_dir).await?);
-        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
+        let storage = create_storage_backend(repo_root).await?;
+        let odb = Arc::new(ObjectDatabase::with_smart_compression(storage.clone(), 1000));
         let refdb = RefDatabase::new(&mediagit_dir);
 
         // Get current HEAD
@@ -101,7 +101,7 @@ impl CherryPickCmd {
 
                     if !self.no_commit {
                         // Create commit automatically
-                        self.create_cherry_pick_commit(&odb, &refdb, repo_root, &commit_oid).await?;
+                        self.create_cherry_pick_commit(odb.as_ref(), &refdb, repo_root, &commit_oid).await?;
                     }
                 }
                 Err(e) => {
@@ -137,35 +137,25 @@ impl CherryPickCmd {
 
     async fn apply_commit(
         &self,
-        odb: &ObjectDatabase,
+        odb: &Arc<ObjectDatabase>,
         refdb: &RefDatabase,
         repo_root: &PathBuf,
         commit_oid: &Oid,
     ) -> Result<()> {
         // Load the commit
-        let commit = Commit::read(odb, commit_oid).await
+        let commit = Commit::read(odb.as_ref(), commit_oid).await
             .context("Failed to read commit")?;
 
-        // Get parent commit
+        // Verify parent exists
         if commit.parents.is_empty() {
             anyhow::bail!("Cannot cherry-pick initial commit");
         }
 
-        let parent_oid = &commit.parents[0];
-        let _parent_commit = Commit::read(odb, parent_oid).await
-            .context("Failed to read parent commit")?;
-
-        // Get current HEAD commit
+        // Get current HEAD
         let current_oid = refdb.resolve("HEAD").await?;
-        let _current_commit = Commit::read(odb, &current_oid).await?;
-
-        // Create Arc for MergeEngine (it requires Arc<ObjectDatabase>)
-        let mediagit_dir = repo_root.join(".mediagit");
-        let storage = Arc::new(mediagit_storage::LocalBackend::new(&mediagit_dir).await?);
-        let odb_arc = Arc::new(ObjectDatabase::with_smart_compression(storage.clone(), 1000));
 
         // Perform three-way merge: current HEAD vs commit being cherry-picked
-        let merger = MergeEngine::new(odb_arc.clone());
+        let merger = MergeEngine::new(odb.clone());
         let merge_result = merger
             .merge(&current_oid, commit_oid, mediagit_versioning::MergeStrategy::Recursive)
             .await?;
@@ -178,7 +168,7 @@ impl CherryPickCmd {
 
         // Checkout the merged tree if merge was successful
         if let Some(tree_oid) = merge_result.tree_oid {
-            let checkout_mgr = CheckoutManager::new(&odb_arc, repo_root);
+            let checkout_mgr = CheckoutManager::new(odb.as_ref(), repo_root);
             let commit_to_checkout = Commit {
                 tree: tree_oid,
                 parents: vec![current_oid],
@@ -187,7 +177,7 @@ impl CherryPickCmd {
                 message: commit.message.clone(),
             };
             // Write temporary commit to get OID for checkout
-            let temp_oid = commit_to_checkout.write(&odb_arc).await?;
+            let temp_oid = commit_to_checkout.write(odb.as_ref()).await?;
             checkout_mgr.checkout_commit(&temp_oid).await?;
         }
 
@@ -273,7 +263,7 @@ impl CherryPickCmd {
 
         // Create commit for current pick
         let mediagit_dir = repo_root.join(".mediagit");
-        let storage = Arc::new(mediagit_storage::LocalBackend::new(&mediagit_dir).await?);
+        let storage = create_storage_backend(repo_root).await?;
         let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
         let refdb = RefDatabase::new(&mediagit_dir);
 
@@ -369,7 +359,7 @@ impl CherryPickCmd {
         if let Some(original_head) = &state.original_head {
             // Reset to original HEAD
             let mediagit_dir = repo_root.join(".mediagit");
-            let storage = Arc::new(mediagit_storage::LocalBackend::new(&mediagit_dir).await?);
+            let storage = create_storage_backend(repo_root).await?;
             let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
             let refdb = RefDatabase::new(&mediagit_dir);
 

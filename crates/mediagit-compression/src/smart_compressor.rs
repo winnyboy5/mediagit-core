@@ -395,6 +395,14 @@ impl ObjectType {
                 | ObjectType::SevenZ
                 | ObjectType::Rar
                 | ObjectType::Parquet
+                // PDF-based creative containers with embedded compressed streams
+                | ObjectType::AdobeIllustrator
+                | ObjectType::AdobeIndesign
+                // Office documents are ZIP containers with compressed XML
+                | ObjectType::WordDocument
+                | ObjectType::ExcelSpreadsheet
+                | ObjectType::PowerpointPresentation
+                | ObjectType::OpenDocument
         )
     }
 
@@ -569,11 +577,15 @@ impl CompressionStrategy {
                 CompressionStrategy::Zstd(CompressionLevel::Default)
             }
 
+            // PDF-based creative containers: store without recompression
+            // AI/InDesign files are PDF containers with embedded compressed streams
+            // Zstd compression expands the data on every chunk, wasting CPU
+            ObjectType::AdobeIllustrator
+            | ObjectType::AdobeIndesign => CompressionStrategy::Store,
+
             // Creative project files: Zstd default with heavy delta compression
             // These files have internal structure and benefit from both compression + delta
             ObjectType::AdobePhotoshop
-            | ObjectType::AdobeIllustrator
-            | ObjectType::AdobeIndesign
             | ObjectType::AdobeAfterEffects
             | ObjectType::AdobePremiere
             | ObjectType::DavinciResolve
@@ -595,11 +607,11 @@ impl CompressionStrategy {
             | ObjectType::UnrealProject
             | ObjectType::GodotProject => CompressionStrategy::Zstd(CompressionLevel::Default),
 
-            // Office documents: Zstd default (ZIP containers with XML)
+            // Office documents: store without recompression (ZIP containers with compressed XML)
             ObjectType::WordDocument
             | ObjectType::ExcelSpreadsheet
             | ObjectType::PowerpointPresentation
-            | ObjectType::OpenDocument => CompressionStrategy::Zstd(CompressionLevel::Default),
+            | ObjectType::OpenDocument => CompressionStrategy::Store,
 
             // Database: Zstd default
             ObjectType::SqliteDatabase => CompressionStrategy::Zstd(CompressionLevel::Default),
@@ -676,17 +688,28 @@ impl SmartCompressor {
     }
 
     /// Compress with explicit strategy
+    /// 
+    /// If compression would EXPAND the data (common for already-compressed content
+    /// like embedded JPEGs in AI/PSD files), automatically falls back to Store mode.
     fn compress_with_strategy(
         &self,
         data: &[u8],
         strategy: CompressionStrategy,
     ) -> CompressionResult<Vec<u8>> {
-        match strategy {
-            CompressionStrategy::Store => Ok(data.to_vec()),
+        // Store mode: prefix with 0x00 magic byte
+        if matches!(strategy, CompressionStrategy::Store) {
+            let mut result = Vec::with_capacity(data.len() + 1);
+            result.push(0x00); // Store magic byte
+            result.extend_from_slice(data);
+            return Ok(result);
+        }
+        
+        let compressed = match strategy {
+            CompressionStrategy::Store => unreachable!(), // Handled above
 
             CompressionStrategy::Zlib(level) => {
                 let compressor = ZlibCompressor::new(level);
-                compressor.compress(data)
+                compressor.compress(data)?
             }
 
             CompressionStrategy::Zstd(level) => {
@@ -695,20 +718,37 @@ impl SmartCompressor {
                     CompressionLevel::Default => &self.zstd_default,
                     CompressionLevel::Best => &self.zstd_best,
                 };
-                compressor.compress(data)
+                compressor.compress(data)?
             }
 
             CompressionStrategy::Brotli(level) => {
                 let compressor = BrotliCompressor::new(level);
-                compressor.compress(data)
+                compressor.compress(data)?
             }
 
             CompressionStrategy::Delta => {
                 // Delta compression requires a base - not implemented in simple compress
                 // Fall back to Zstd
-                self.zstd_default.compress(data)
+                self.zstd_default.compress(data)?
             }
+        };
+        
+        // CRITICAL FIX: If compression expanded the data (happens with already-compressed
+        // content like embedded JPEGs in AI/PSD files), fall back to Store mode.
+        // This prevents significant size overhead on creative files.
+        if compressed.len() >= data.len() {
+            tracing::debug!(
+                original_size = data.len(),
+                compressed_size = compressed.len(),
+                "Compression expanded data, falling back to Store mode"
+            );
+            let mut result = Vec::with_capacity(data.len() + 1);
+            result.push(0x00); // Store magic byte
+            result.extend_from_slice(data);
+            return Ok(result);
         }
+        
+        Ok(compressed)
     }
 }
 
@@ -740,6 +780,18 @@ impl TypeAwareCompressor for SmartCompressor {
     fn decompress_typed(&self, data: &[u8]) -> CompressionResult<Vec<u8>> {
         // Auto-detect compression algorithm
         use crate::CompressionAlgorithm;
+
+        // Check for Store mode magic byte (0x00 prefix added by compress_with_strategy fallback)
+        // This handles data that couldn't be compressed efficiently (already-compressed content).
+        if !data.is_empty() && data[0] == 0x00 {
+            // Check if this looks like Store mode (no compression magic after the prefix)
+            let remaining = &data[1..];
+            let algo = CompressionAlgorithm::detect(remaining);
+            if algo == CompressionAlgorithm::None {
+                // Strip the Store prefix and return raw data
+                return Ok(remaining.to_vec());
+            }
+        }
 
         let algo = CompressionAlgorithm::detect(data);
 
@@ -841,11 +893,19 @@ mod tests {
         assert!(ObjectType::Png.is_already_compressed());
         assert!(ObjectType::Mp4.is_already_compressed());
         assert!(ObjectType::Zip.is_already_compressed());
+        // PDF-based creative containers
+        assert!(ObjectType::AdobeIllustrator.is_already_compressed());
+        assert!(ObjectType::AdobeIndesign.is_already_compressed());
+        // Office ZIP containers
+        assert!(ObjectType::WordDocument.is_already_compressed());
+        assert!(ObjectType::ExcelSpreadsheet.is_already_compressed());
 
         assert!(!ObjectType::Tiff.is_already_compressed());
         assert!(!ObjectType::Bmp.is_already_compressed());
         assert!(!ObjectType::Text.is_already_compressed());
         assert!(!ObjectType::Raw.is_already_compressed());
+        // PSD is NOT already compressed (uncompressed layer data)
+        assert!(!ObjectType::AdobePhotoshop.is_already_compressed());
     }
 
     #[test]
@@ -885,6 +945,28 @@ mod tests {
             CompressionStrategy::for_object_type(ObjectType::Pdf),
             CompressionStrategy::Zstd(CompressionLevel::Default)
         );
+
+        // PDF-based creative containers → Store (already compressed internally)
+        assert_eq!(
+            CompressionStrategy::for_object_type(ObjectType::AdobeIllustrator),
+            CompressionStrategy::Store
+        );
+        assert_eq!(
+            CompressionStrategy::for_object_type(ObjectType::AdobeIndesign),
+            CompressionStrategy::Store
+        );
+
+        // Office ZIP containers → Store (already compressed internally)
+        assert_eq!(
+            CompressionStrategy::for_object_type(ObjectType::WordDocument),
+            CompressionStrategy::Store
+        );
+
+        // PSD still gets Zstd (uncompressed layer data benefits from compression)
+        assert_eq!(
+            CompressionStrategy::for_object_type(ObjectType::AdobePhotoshop),
+            CompressionStrategy::Zstd(CompressionLevel::Default)
+        );
     }
 
     #[test]
@@ -896,8 +978,10 @@ mod tests {
             .compress_typed(&jpeg_data, ObjectType::Jpeg)
             .unwrap();
 
-        // Should store as-is (no compression)
-        assert_eq!(compressed, jpeg_data);
+        // Should store with 0x00 prefix (Store mode magic byte)
+        assert_eq!(compressed.len(), jpeg_data.len() + 1);
+        assert_eq!(compressed[0], 0x00);
+        assert_eq!(&compressed[1..], &jpeg_data[..]);
     }
 
     #[test]
@@ -1033,8 +1117,8 @@ mod tests {
         let text_result = compressor.compress_typed(&content, ObjectType::Text).unwrap();
         let tiff_result = compressor.compress_typed(&content, ObjectType::Tiff).unwrap();
 
-        // JPEG should not compress (store)
-        assert_eq!(jpeg_result.len(), content.len());
+        // JPEG should not compress (store with 0x00 prefix)
+        assert_eq!(jpeg_result.len(), content.len() + 1);
 
         // Text and TIFF should compress (different algorithms)
         assert!(text_result.len() < content.len());
@@ -1204,11 +1288,11 @@ mod tests {
     fn test_office_compression_strategy() {
         assert_eq!(
             CompressionStrategy::for_object_type(ObjectType::WordDocument),
-            CompressionStrategy::Zstd(CompressionLevel::Default)
+            CompressionStrategy::Store
         );
         assert_eq!(
             CompressionStrategy::for_object_type(ObjectType::ExcelSpreadsheet),
-            CompressionStrategy::Zstd(CompressionLevel::Default)
+            CompressionStrategy::Store
         );
     }
 
@@ -1400,15 +1484,18 @@ mod tests {
         let mp4_data = b"....ftypisom....";
         let zip_data = vec![0x50, 0x4B, 0x03, 0x04];
 
-        // These should be stored as-is
+        // These should be stored with 0x00 Store prefix (not recompressed)
         let jpeg_compressed = compressor.compress_typed(&jpeg_data, ObjectType::Jpeg).unwrap();
-        assert_eq!(jpeg_data, jpeg_compressed, "JPEG should not be recompressed");
+        assert_eq!(jpeg_compressed[0], 0x00, "JPEG should have Store prefix");
+        assert_eq!(&jpeg_compressed[1..], &jpeg_data[..], "JPEG should not be recompressed");
 
         let mp4_compressed = compressor.compress_typed(mp4_data, ObjectType::Mp4).unwrap();
-        assert_eq!(mp4_data, &mp4_compressed[..], "MP4 should not be recompressed");
+        assert_eq!(mp4_compressed[0], 0x00, "MP4 should have Store prefix");
+        assert_eq!(&mp4_compressed[1..], mp4_data, "MP4 should not be recompressed");
 
         let zip_compressed = compressor.compress_typed(&zip_data, ObjectType::Zip).unwrap();
-        assert_eq!(zip_data, zip_compressed, "ZIP should not be recompressed");
+        assert_eq!(zip_compressed[0], 0x00, "ZIP should have Store prefix");
+        assert_eq!(&zip_compressed[1..], &zip_data[..], "ZIP should not be recompressed");
     }
 
     #[test]

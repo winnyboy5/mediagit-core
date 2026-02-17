@@ -126,6 +126,15 @@ enum Commands {
     /// Show repository statistics
     Stats(StatsCmd),
 
+    /// Show reference logs (reflog)
+    Reflog(ReflogCmd),
+
+    /// Reset current HEAD to specified state
+    Reset(ResetCmd),
+
+    /// Revert commits by creating inverse commits
+    Revert(RevertCmd),
+
     /// Git filter driver operations (clean/smudge)
     #[command(subcommand)]
     Filter(FilterCmd),
@@ -150,10 +159,43 @@ enum Commands {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() {
+    // Parse CLI args on the main thread (lightweight, no async needed)
     let cli = Cli::parse();
 
+    // Run async work on a thread with 8MB stack to handle deeply nested
+    // async futures (merge engine → LCA finder → checkout → recursive tree).
+    // Windows default main thread stack is 1MB which is insufficient.
+    const STACK_SIZE: usize = 8 * 1024 * 1024; // 8MB
+
+    let builder = std::thread::Builder::new()
+        .name("mediagit-main".into())
+        .stack_size(STACK_SIZE);
+
+    let handler = builder
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create tokio runtime")
+                .block_on(async_main(cli))
+        })
+        .expect("Failed to spawn main thread");
+
+    match handler.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            output::error(&format!("Error: {:#}", e));
+            std::process::exit(1);
+        }
+        Err(_) => {
+            eprintln!("Fatal: mediagit panicked");
+            std::process::exit(2);
+        }
+    }
+}
+
+async fn async_main(cli: Cli) -> Result<()> {
     // Initialize structured logging
     if !cli.quiet {
         let level = if cli.verbose { "debug" } else { "info" };
@@ -182,7 +224,7 @@ async fn main() -> Result<()> {
     }
 
     // Execute command
-    let result = match cli.command {
+    match cli.command {
         Some(Commands::Init(cmd)) => cmd.execute().await,
         Some(Commands::Clone(cmd)) => cmd.execute().await,
         Some(Commands::Add(cmd)) => cmd.execute().await,
@@ -209,6 +251,9 @@ async fn main() -> Result<()> {
         Some(Commands::Fsck(cmd)) => cmd.execute().await,
         Some(Commands::Verify(cmd)) => cmd.execute().await,
         Some(Commands::Stats(cmd)) => cmd.execute().await,
+        Some(Commands::Reflog(cmd)) => cmd.execute().await,
+        Some(Commands::Reset(cmd)) => cmd.execute().await,
+        Some(Commands::Revert(cmd)) => cmd.execute().await,
         Some(Commands::Filter(cmd)) => cmd.execute(),
         Some(Commands::Install(cmd)) => cmd.execute(),
         Some(Commands::Track(cmd)) => cmd.execute(),
@@ -260,15 +305,7 @@ async fn main() -> Result<()> {
             println!("Run 'mediagit <COMMAND> --help' for command-specific help");
             Ok(())
         }
-    };
-
-    // Handle errors
-    if let Err(e) = result {
-        output::error(&format!("Error: {:#}", e));
-        std::process::exit(1);
     }
-
-    Ok(())
 }
 
 fn print_version() {

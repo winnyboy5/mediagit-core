@@ -1,11 +1,9 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use mediagit_storage::LocalBackend;
-use mediagit_versioning::{Ref, RefDatabase};
-use std::sync::Arc;
+use mediagit_versioning::{Oid, Ref, RefDatabase, Reflog, ReflogEntry};
 use std::time::Instant;
 use crate::progress::{ProgressTracker, OperationStats};
-use super::super::repo::find_repo_root;
+use super::super::repo::{find_repo_root, create_storage_backend};
 
 /// Manage branches
 ///
@@ -198,15 +196,18 @@ pub struct ProtectOpts {
 }
 
 /// Rename a branch
+///
+/// Usage: `branch rename <new-name>` renames the current branch.
+///        `branch rename <old-name> <new-name>` renames a specific branch.
 #[derive(Parser, Debug)]
 pub struct RenameOpts {
-    /// New branch name
-    #[arg(value_name = "NEW_NAME")]
-    pub new_name: String,
+    /// New branch name, or old branch name if two arguments given
+    #[arg(value_name = "NAME")]
+    pub first_arg: String,
 
-    /// Old branch name (current branch if not specified)
-    #[arg(value_name = "OLD_NAME")]
-    pub old_name: Option<String>,
+    /// New branch name (when renaming a different branch)
+    #[arg(value_name = "NEW_NAME")]
+    pub second_arg: Option<String>,
 
     /// Force rename
     #[arg(short = 'f', long)]
@@ -281,8 +282,7 @@ impl BranchCmd {
 
         let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
-        let _storage: Arc<dyn mediagit_storage::StorageBackend> =
-            Arc::new(LocalBackend::new(&storage_path).await?);
+        let _storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
 
         // Get current branch for highlighting
@@ -382,8 +382,7 @@ impl BranchCmd {
 
         let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
-        let _storage: Arc<dyn mediagit_storage::StorageBackend> =
-            Arc::new(LocalBackend::new(&storage_path).await?);
+        let _storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
 
         // Validate branch name
@@ -430,8 +429,7 @@ impl BranchCmd {
 
         let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
-        let storage: Arc<dyn mediagit_storage::StorageBackend> =
-            Arc::new(LocalBackend::new(&storage_path).await?);
+        let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
 
         // Strip refs/heads/ prefix if already present
@@ -498,6 +496,14 @@ impl BranchCmd {
 
         stats.files_updated = files_updated as u64;
 
+        // Record reflog entry for branch switch
+        let reflog = Reflog::new(&storage_path);
+        let old_oid = current_commit_oid.clone().unwrap_or_else(|| Oid::from_bytes([0u8; 32]));
+        let reflog_msg = format!("checkout: moving from {} to {}",
+            old_oid.to_hex().get(..8).unwrap_or("00000000"), branch_name);
+        let entry = ReflogEntry::now(old_oid, target_commit_oid, "user", "user@mediagit", &reflog_msg);
+        let _ = reflog.append("HEAD", &entry).await;
+
         // Clear the index (staging area) when switching branches
         // This ensures a clean state on the new branch
         let mut index = Index::load(&repo_root)?;
@@ -530,8 +536,7 @@ impl BranchCmd {
 
         let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
-        let _storage: Arc<dyn mediagit_storage::StorageBackend> =
-            Arc::new(LocalBackend::new(&storage_path).await?);
+        let _storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
 
         // Load config to check branch protection
@@ -647,31 +652,33 @@ impl BranchCmd {
 
         let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
-        let _storage: Arc<dyn mediagit_storage::StorageBackend> =
-            Arc::new(LocalBackend::new(&storage_path).await?);
+        let _storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
 
-        // Determine old branch name (current branch if not specified)
-        let old_branch = if let Some(old_name) = &opts.old_name {
-            old_name.clone()
+        // Determine old and new branch names.
+        // With one arg: rename current branch to first_arg.
+        // With two args: rename first_arg to second_arg (like git branch -m old new).
+        let (old_branch, new_branch) = if let Some(ref new_name) = opts.second_arg {
+            (opts.first_arg.clone(), new_name.clone())
         } else {
-            // Get current branch from HEAD
+            // Only one arg: rename current branch
             let head = refdb.read("HEAD").await?;
-            match head.target {
+            let current = match head.target {
                 Some(target) => target
                     .strip_prefix("refs/heads/")
                     .unwrap_or(&target)
                     .to_string(),
                 None => anyhow::bail!("HEAD is not pointing to a branch"),
-            }
+            };
+            (current, opts.first_arg.clone())
         };
 
         let old_ref_name = format!("refs/heads/{}", old_branch);
-        let new_ref_name = format!("refs/heads/{}", opts.new_name);
+        let new_ref_name = format!("refs/heads/{}", new_branch);
 
         // Validate new branch name
-        if opts.new_name.contains("..") || opts.new_name.starts_with('/') || opts.new_name.ends_with('/') {
-            anyhow::bail!("Invalid branch name: {}", opts.new_name);
+        if new_branch.contains("..") || new_branch.starts_with('/') || new_branch.ends_with('/') {
+            anyhow::bail!("Invalid branch name: {}", new_branch);
         }
 
         // Check if old branch exists
@@ -682,7 +689,7 @@ impl BranchCmd {
 
         // Check if new branch already exists (unless force)
         if !opts.force && refdb.read(&new_ref_name).await.is_ok() {
-            anyhow::bail!("Branch '{}' already exists. Use --force to overwrite.", opts.new_name);
+            anyhow::bail!("Branch '{}' already exists. Use --force to overwrite.", new_branch);
         }
 
         // Get the OID from the old branch
@@ -703,7 +710,7 @@ impl BranchCmd {
         refdb.delete(&old_ref_name).await?;
 
         if !opts.quiet {
-            output::success(&format!("Renamed branch '{}' to '{}'", old_branch, opts.new_name));
+            output::success(&format!("Renamed branch '{}' to '{}'", old_branch, new_branch));
         }
 
         Ok(())
@@ -714,8 +721,7 @@ impl BranchCmd {
 
         let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
-        let _storage: Arc<dyn mediagit_storage::StorageBackend> =
-            Arc::new(LocalBackend::new(&storage_path).await?);
+        let _storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
 
         // Determine which branch to show

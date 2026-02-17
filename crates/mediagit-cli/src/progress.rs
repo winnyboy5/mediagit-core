@@ -1,5 +1,8 @@
 use chrono::{DateTime, Utc};
-use indicatif::{HumanBytes, HumanDuration, MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{
+    HumanBytes, HumanCount, HumanDuration, MultiProgress, ProgressBar, ProgressDrawTarget,
+    ProgressFinish, ProgressStyle,
+};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
@@ -13,9 +16,14 @@ pub struct ProgressTracker {
 
 impl ProgressTracker {
     /// Create new progress tracker
+    /// Uses stderr for progress output to keep stdout clean for piping
     pub fn new(quiet: bool) -> Self {
         Self {
-            multi: Arc::new(MultiProgress::new()),
+            multi: Arc::new(if quiet {
+                MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
+            } else {
+                MultiProgress::with_draw_target(ProgressDrawTarget::stderr())
+            }),
             quiet,
         }
     }
@@ -76,7 +84,6 @@ impl ProgressTracker {
     }
 
     /// Create progress bar for file operations
-    #[allow(dead_code)]
     pub fn file_bar(&self, msg: &str, total: u64) -> ProgressBar {
         if self.quiet {
             return ProgressBar::hidden();
@@ -94,13 +101,81 @@ impl ProgressTracker {
         pb
     }
 
+    /// Create progress bar for verification operations (fsck, verify)
+    #[allow(dead_code)]
+    pub fn verify_bar(&self, msg: &str, total: u64) -> ProgressBar {
+        if self.quiet {
+            return ProgressBar::hidden();
+        }
+
+        let pb = self.multi.add(
+            ProgressBar::new(total).with_finish(ProgressFinish::WithMessage("✓ verified".into())),
+        );
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.blue} {msg} [{bar:40.blue/cyan}] {pos}/{len} ({percent}%, {per_sec})")
+                .unwrap()
+                .progress_chars("█▓░"),
+        );
+        pb.set_message(msg.to_string());
+        pb.enable_steady_tick(Duration::from_millis(100));
+        pb
+    }
+
+    /// Create progress bar for merge/rebase operations
+    #[allow(dead_code)]
+    pub fn merge_bar(&self, msg: &str, total: u64) -> ProgressBar {
+        if self.quiet {
+            return ProgressBar::hidden();
+        }
+
+        let pb = self.multi.add(
+            ProgressBar::new(total).with_finish(ProgressFinish::WithMessage("✓ complete".into())),
+        );
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.magenta} {msg} [{bar:40.magenta/blue}] {pos}/{len}")
+                .unwrap()
+                .progress_chars("█▓░"),
+        );
+        pb.set_message(msg.to_string());
+        pb.enable_steady_tick(Duration::from_millis(100));
+        pb
+    }
+
+    /// Create progress bar for streaming I/O operations
+    /// Suitable for use with wrap_read()/wrap_write()
+    #[allow(dead_code)]
+    pub fn io_bar(&self, msg: &str, total_bytes: u64) -> ProgressBar {
+        if self.quiet {
+            return ProgressBar::hidden();
+        }
+
+        let pb = self.multi.add(
+            ProgressBar::new(total_bytes)
+                .with_finish(ProgressFinish::WithMessage("✓ complete".into())),
+        );
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.cyan} {msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec})")
+                .unwrap()
+                .progress_chars("█▓░"),
+        );
+        pb.set_message(msg.to_string());
+        pb.enable_steady_tick(Duration::from_millis(100));
+        pb
+    }
+
     /// Create spinner for indeterminate operations
+    /// Auto-clears on completion for clean output
     pub fn spinner(&self, msg: &str) -> ProgressBar {
         if self.quiet {
             return ProgressBar::hidden();
         }
 
-        let pb = self.multi.add(ProgressBar::new_spinner());
+        let pb = self.multi.add(
+            ProgressBar::new_spinner().with_finish(ProgressFinish::AndClear),
+        );
         pb.set_style(
             ProgressStyle::default_spinner()
                 .template("{spinner:.cyan} {msg}")
@@ -111,10 +186,16 @@ impl ProgressTracker {
         pb
     }
 
-    /// Finish all progress bars
+    /// Check if progress bars are hidden (quiet mode)
     #[allow(dead_code)]
-    pub fn finish_all(&self) {
-        // All progress bars finish when dropped
+    pub fn is_quiet(&self) -> bool {
+        self.quiet
+    }
+
+    /// Format a count with thousands separators
+    #[allow(dead_code)]
+    pub fn format_count(count: u64) -> String {
+        format!("{}", HumanCount(count))
     }
 }
 
@@ -137,6 +218,7 @@ fn default_timestamp() -> DateTime<Utc> {
 }
 
 impl OperationStats {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             timestamp: Utc::now(),

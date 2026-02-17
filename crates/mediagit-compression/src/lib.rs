@@ -56,10 +56,11 @@
 //!     let text_data = b"Some text content...";
 //!     let compressed = compressor.compress_typed(text_data, ObjectType::Text)?;
 //!
-//!     // Already compressed formats stored without recompression
+//!     // Already compressed formats stored without recompression (with Store prefix)
 //!     let jpeg_data = vec![0xFF, 0xD8, 0xFF, 0xE0];
 //!     let stored = compressor.compress_typed(&jpeg_data, ObjectType::Jpeg)?;
-//!     assert_eq!(stored, jpeg_data); // No recompression overhead
+//!     assert_eq!(stored[0], 0x00); // Store mode magic byte
+//!     assert_eq!(&stored[1..], &jpeg_data[..]); // No recompression overhead
 //!
 //!     Ok(())
 //! }

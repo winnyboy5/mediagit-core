@@ -476,6 +476,16 @@ impl<'a> CheckoutManager<'a> {
         })
     }
 
+    /// Apply a commit's tree on top of the current working directory without cleaning.
+    ///
+    /// Unlike `checkout_commit`, this does NOT remove files that aren't in the target tree.
+    /// This is used for stash apply, which should overlay stashed files on top of HEAD.
+    pub async fn apply_tree_overlay(&self, commit_oid: &Oid) -> Result<usize> {
+        info!("Applying tree overlay from commit: {}", commit_oid);
+        let commit = Commit::read(self.odb, commit_oid).await?;
+        self.checkout_tree(&commit.tree, Path::new("")).await
+    }
+
     /// Checkout to an empty working directory
     ///
     /// Useful for initial clone or reset operations

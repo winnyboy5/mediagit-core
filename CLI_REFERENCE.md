@@ -1,6 +1,6 @@
 # MediaGit CLI Reference
 
-Complete command reference for MediaGit - Git for Media Files.
+Complete command reference for MediaGit — Git for Media Files.
 
 ---
 
@@ -14,8 +14,23 @@ Complete command reference for MediaGit - Git for Media Files.
 | **Remote** | `push`, `pull`, `fetch` |
 | **Tags** | `tag` |
 | **Stashing** | `stash` |
+| **History** | `reset`, `revert`, `reflog` |
+| **Debugging** | `bisect` |
 | **Maintenance** | `gc`, `fsck`, `verify`, `stats` |
-| **Advanced** | `bisect`, `filter`, `track` |
+| **Advanced** | `filter`, `track`, `untrack` |
+| **Meta** | `version`, `completions` |
+
+### Global Flags
+
+These flags are available on **every** command:
+
+| Flag | Description |
+|------|-------------|
+| `-v, --verbose` | Enable verbose / debug output |
+| `-q, --quiet` | Suppress output |
+| `--color <WHEN>` | Colored output (`always`, `auto`, `never`) |
+| `-C, --repository <PATH>` | Run as if started in `<PATH>` |
+| `-h, --help` | Show help |
 
 ---
 
@@ -70,7 +85,7 @@ mediagit clone -b develop http://server:3000/project
 
 ### `mediagit install`
 
-Install MediaGit filter driver.
+Install MediaGit filter driver for Git integration.
 
 ```bash
 mediagit install
@@ -116,7 +131,7 @@ mediagit remote set-url origin http://new-server:3000/project
 
 ### `mediagit add`
 
-Stage file contents for commit.
+Stage file contents for commit with smart compression, chunking, and delta encoding.
 
 ```bash
 mediagit add <PATHS>...
@@ -129,8 +144,11 @@ mediagit add <PATHS>...
 | `--dry-run` | Preview what would be added |
 | `-f, --force` | Add ignored files |
 | `-u, --update` | Update tracked files only |
+| `--ignore-removal` | Ignore removal of files in the index |
 | `--no-chunking` | Disable chunking for large files |
 | `--no-delta` | Disable delta compression |
+| `--no-parallel` | Disable parallel file processing |
+| `-j, --jobs <N>` | Number of parallel worker threads (default: CPU cores, max 8) |
 | `-q, --quiet` | Suppress output |
 | `-v, --verbose` | Detailed output |
 
@@ -138,8 +156,9 @@ mediagit add <PATHS>...
 ```bash
 mediagit add .                   # Stage all changes
 mediagit add file.psd            # Stage specific file
-mediagit add -p                  # Interactive staging
-mediagit add --all --verbose     # Stage all with details
+mediagit add -A --verbose        # Stage all with details
+mediagit add --dry-run *.psd     # Preview what would be staged
+mediagit add -j 4 *.psd         # Limit to 4 threads
 ```
 
 ---
@@ -445,6 +464,9 @@ mediagit push [REMOTE] [REFSPEC]...
 | `-q, --quiet` | Suppress output |
 | `-v, --verbose` | Detailed output |
 
+> **Auto-upstream**: `main`/`master` branches automatically set upstream tracking on first push.
+> Other branches display a hint to use `-u`.
+
 **Examples:**
 ```bash
 mediagit push                     # Push current branch
@@ -589,6 +611,105 @@ mediagit stash save "WIP: new feature"
 mediagit stash list
 mediagit stash pop
 mediagit stash apply stash@{2}
+```
+
+---
+
+## History Manipulation
+
+### `mediagit reset`
+
+Reset current HEAD to specified state.
+
+```bash
+mediagit reset [COMMIT] [PATHS]...
+```
+
+**Modes:**
+
+| Flag | Effect |
+|------|--------|
+| `--soft` | Only move HEAD (keep index and working tree) |
+| *(default)* | Move HEAD and reset index (mixed mode) |
+| `--hard` | Move HEAD, reset index, **and** reset working tree |
+
+| Flag | Description |
+|------|-------------|
+| `-q, --quiet` | Suppress output |
+
+> **Path mode**: When `PATHS` are specified, `reset` unstages the given files
+> (restores the index entry to match HEAD) without changing HEAD or working tree.
+> `--soft` and `--hard` cannot be used with paths.
+
+**Examples:**
+```bash
+mediagit reset --soft HEAD~1     # Undo last commit, keep changes staged
+mediagit reset HEAD~1            # Undo last commit, unstage changes
+mediagit reset --hard HEAD~1     # Undo last commit, discard all changes
+mediagit reset file.txt          # Unstage a specific file
+```
+
+---
+
+### `mediagit revert`
+
+Create new commits that undo changes from existing commits.
+
+```bash
+mediagit revert <COMMITS>...
+```
+
+| Flag | Description |
+|------|-------------|
+| `-n, --no-commit` | Apply revert without committing |
+| `-m, --message <MSG>` | Custom commit message |
+| `--continue` | Continue after resolving conflicts |
+| `--abort` | Abort current revert |
+| `--skip` | Skip current commit |
+| `-q, --quiet` | Suppress output |
+
+**Examples:**
+```bash
+mediagit revert HEAD             # Revert the last commit
+mediagit revert abc1234          # Revert a specific commit
+mediagit revert --no-commit HEAD # Revert without auto-committing
+mediagit revert --continue       # Continue after conflict resolution
+mediagit revert --abort          # Abort the revert operation
+```
+
+---
+
+### `mediagit reflog`
+
+Show reference logs — when branch tips and other refs were updated.
+
+```bash
+mediagit reflog [SUBCOMMAND] [REF]
+```
+
+**Subcommands:**
+
+| Subcommand | Usage | Description |
+|------------|-------|-------------|
+| `show` | `reflog show [REF]` | Show reflog entries (default) |
+| `delete` | `reflog delete <REF>` | Delete reflog for a reference |
+| `expire` | `reflog expire [REF]` | Prune old reflog entries |
+
+| Flag | Description |
+|------|-------------|
+| `-n, --count <N>` | Number of entries to show |
+| `--all` | Show reflogs for all refs (with `show`) |
+| `--keep <N>` | Entries to keep when expiring (default: 90) |
+| `-q, --quiet` | Only show OIDs |
+
+**Examples:**
+```bash
+mediagit reflog                             # Show reflog for HEAD
+mediagit reflog show refs/heads/main        # Show reflog for main
+mediagit reflog show -n 5                   # Show last 5 entries
+mediagit reflog show --all                  # Show all reflogs
+mediagit reflog delete refs/heads/feature   # Delete reflog
+mediagit reflog expire --keep 30            # Keep last 30 entries
 ```
 
 ---
@@ -740,11 +861,11 @@ mediagit stats --json > stats.json
 
 ---
 
-## Advanced Features
+## Git Integration
 
 ### `mediagit filter`
 
-Git filter driver (clean/smudge).
+Git filter driver (clean/smudge). Used internally by Git when MediaGit filter is installed.
 
 ```bash
 mediagit filter <SUBCOMMAND>
@@ -754,14 +875,14 @@ mediagit filter <SUBCOMMAND>
 
 | Subcommand | Usage | Description |
 |------------|-------|-------------|
-| `clean` | `filter clean [FILE]` | Convert to pointer |
-| `smudge` | `filter smudge [FILE]` | Restore from pointer |
+| `clean` | `filter clean [FILE]` | Convert to pointer (on `git add`) |
+| `smudge` | `filter smudge [FILE]` | Restore from pointer (on `git checkout`) |
 
 ---
 
 ### `mediagit track`
 
-Manage file pattern tracking.
+Register file patterns for MediaGit tracking via `.gitattributes`.
 
 ```bash
 mediagit track [PATTERN]
@@ -780,16 +901,58 @@ mediagit track --list
 
 ---
 
-## Common Flags
+### `mediagit untrack`
 
-These flags are available on most commands:
+Remove a file pattern from MediaGit tracking.
 
-| Flag | Description |
-|------|-------------|
-| `-q, --quiet` | Suppress output |
-| `-v, --verbose` | Detailed output |
-| `--dry-run` | Preview without executing |
-| `-h, --help` | Show help |
+```bash
+mediagit untrack <PATTERN>
+```
+
+**Examples:**
+```bash
+mediagit untrack "*.psd"
+mediagit untrack "*.mp4"
+```
+
+---
+
+## Meta
+
+### `mediagit version`
+
+Show version information including Rust toolchain version and license.
+
+```bash
+mediagit version
+```
+
+---
+
+### `mediagit completions`
+
+Generate shell completions for your shell.
+
+```bash
+mediagit completions <SHELL>
+```
+
+Supported shells: `bash`, `elvish`, `fish`, `powershell`, `zsh`
+
+**Examples:**
+```bash
+# Bash
+mediagit completions bash > ~/.local/share/bash-completion/completions/mediagit
+
+# Zsh
+mediagit completions zsh > ~/.zfunc/_mediagit
+
+# Fish
+mediagit completions fish > ~/.config/fish/completions/mediagit.fish
+
+# PowerShell
+mediagit completions powershell >> $PROFILE
+```
 
 ---
 
@@ -799,7 +962,7 @@ These flags are available on most commands:
 |------|---------|
 | 0 | Success |
 | 1 | General error |
-| 128 | Fatal error |
+| 2 | Fatal error (panic) |
 
 ---
 
@@ -809,6 +972,7 @@ These flags are available on most commands:
 |----------|-------------|
 | `MEDIAGIT_DIR` | Repository path |
 | `MEDIAGIT_WORK_TREE` | Working tree path |
+| `MEDIAGIT_REPO` | Repository path (set by `-C` flag) |
 | `MEDIAGIT_AUTHOR_NAME` | Default author name |
 | `MEDIAGIT_AUTHOR_EMAIL` | Default author email |
 
@@ -816,6 +980,5 @@ These flags are available on most commands:
 
 ## See Also
 
-- [Workflow Documentation](WORKFLOW.md)
+- [Architecture](ARCHITECTURE.md)
 - [Supported Formats](SUPPORTED_FORMATS.md)
-- [Server Configuration](SERVER.md)

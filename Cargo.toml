@@ -81,7 +81,7 @@ aws-config = { version = "1.7", default-features = false, features = ["behavior-
 aws-sdk-s3 = { version = "1.66", default-features = false, features = ["behavior-version-latest", "rustls", "rt-tokio"] }
 
 # Progress & UI
-indicatif = "0.17"
+indicatif = { version = "0.17", features = ["rayon", "futures"] }
 console = "0.15"
 
 [profile.release]
