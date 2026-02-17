@@ -2,7 +2,6 @@ use anyhow::Result;
 use clap::Parser;
 use console::style;
 use dialoguer::Confirm;
-use indicatif::{ProgressBar, ProgressStyle};
 use mediagit_storage::StorageBackend;
 use mediagit_versioning::{BranchManager, Commit, Oid, RefDatabase, RefType, Tree, FileMode};
 use std::collections::HashSet;
@@ -10,6 +9,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info, warn};
+use crate::progress::ProgressTracker;
+use crate::repo::create_storage_backend;
 
 /// Clean up repository and optimize storage
 #[derive(Parser, Debug)]
@@ -321,14 +322,8 @@ impl GarbageCollector {
         }
 
         let progress = if !dry_run && !verbose {
-            let pb = ProgressBar::new(objects.len() as u64);
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
-                    .unwrap()
-                    .progress_chars("#>-"),
-            );
-            Some(pb)
+            let tracker = ProgressTracker::new(false);
+            Some(tracker.object_bar("Deleting objects", objects.len() as u64))
         } else {
             None
         };
@@ -388,9 +383,9 @@ impl GcCmd {
             println!("{} Running in dry-run mode (no changes will be made)", style("ℹ").blue());
         }
 
-        // Load storage backend (assume local for now)
+        // Load storage backend
         let storage_path = repo_root.join(".mediagit");
-        let storage: Arc<dyn StorageBackend> = Arc::new(mediagit_storage::LocalBackend::new(&storage_path).await?);
+        let storage = create_storage_backend(&repo_root).await?;
 
         let gc = GarbageCollector::new(storage.clone(), &storage_path);
         let mut stats = GcStats::default();

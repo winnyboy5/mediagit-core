@@ -21,16 +21,20 @@ pub struct IndexEntry {
     pub mode: u32,
     /// File size in bytes
     pub size: u64,
+    /// File modification time (seconds since UNIX epoch) for stat-cache
+    #[serde(default)]
+    pub mtime: Option<u64>,
 }
 
 impl IndexEntry {
     /// Create a new index entry
-    pub fn new(path: PathBuf, oid: Oid, mode: u32, size: u64) -> Self {
+    pub fn new(path: PathBuf, oid: Oid, mode: u32, size: u64, mtime: Option<u64>) -> Self {
         Self {
             path,
             oid,
             mode,
             size,
+            mtime,
         }
     }
 }
@@ -199,7 +203,7 @@ mod tests {
     fn test_index_add_entry() {
         let mut index = Index::new();
         let oid = Oid::hash(b"test content");
-        let entry = IndexEntry::new(PathBuf::from("test.txt"), oid, 0o100644, 12);
+        let entry = IndexEntry::new(PathBuf::from("test.txt"), oid, 0o100644, 12, None);
 
         index.add_entry(entry.clone());
         assert_eq!(index.len(), 1);
@@ -211,7 +215,7 @@ mod tests {
     fn test_index_remove_entry() {
         let mut index = Index::new();
         let oid = Oid::hash(b"test content");
-        let entry = IndexEntry::new(PathBuf::from("test.txt"), oid, 0o100644, 12);
+        let entry = IndexEntry::new(PathBuf::from("test.txt"), oid, 0o100644, 12, None);
 
         index.add_entry(entry.clone());
         let removed = index.remove_entry(Path::new("test.txt"));
@@ -229,7 +233,7 @@ mod tests {
 
         let mut index = Index::new();
         let oid = Oid::hash(b"test content");
-        let entry = IndexEntry::new(PathBuf::from("test.txt"), oid, 0o100644, 12);
+        let entry = IndexEntry::new(PathBuf::from("test.txt"), oid, 0o100644, 12, None);
         index.add_entry(entry.clone());
 
         // Save and load
@@ -257,8 +261,8 @@ mod tests {
         let oid1 = Oid::hash(b"content1");
         let oid2 = Oid::hash(b"content2");
 
-        index.add_entry(IndexEntry::new(PathBuf::from("file1.txt"), oid1, 0o100644, 8));
-        index.add_entry(IndexEntry::new(PathBuf::from("file2.txt"), oid2, 0o100644, 8));
+        index.add_entry(IndexEntry::new(PathBuf::from("file1.txt"), oid1, 0o100644, 8, None));
+        index.add_entry(IndexEntry::new(PathBuf::from("file2.txt"), oid2, 0o100644, 8, None));
 
         let paths = index.staged_paths();
         assert_eq!(paths.len(), 2);

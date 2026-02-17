@@ -1,12 +1,10 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use mediagit_storage::LocalBackend;
 use mediagit_versioning::{Index, ObjectDatabase, Oid, Ref, RefDatabase};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use super::super::repo::find_repo_root;
+use super::super::repo::{find_repo_root, create_storage_backend};
 
 /// Show the working tree status
 ///
@@ -85,8 +83,7 @@ impl StatusCmd {
 
         // Initialize storage and ref database
         let storage_path = repo_root.join(".mediagit");
-        let storage: Arc<dyn mediagit_storage::StorageBackend> =
-            Arc::new(LocalBackend::new(&storage_path).await?);
+        let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
 
         // Read HEAD

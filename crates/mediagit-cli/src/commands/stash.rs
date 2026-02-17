@@ -3,8 +3,7 @@ use clap::{Parser, Subcommand};
 use console::style;
 use mediagit_versioning::{CheckoutManager, Commit, Index, ObjectDatabase, Oid, RefDatabase};
 use std::path::PathBuf;
-use std::sync::Arc;
-use super::super::repo::find_repo_root;
+use super::super::repo::{find_repo_root, create_storage_backend};
 
 /// Stash changes in working directory
 #[derive(Parser, Debug)]
@@ -39,9 +38,13 @@ pub enum StashSubcommand {
 
 #[derive(Parser, Debug)]
 pub struct SaveOpts {
-    /// Stash message
+    /// Stash message (flag form, e.g. -m "WIP")
+    #[arg(short = 'm', long = "message", value_name = "MESSAGE")]
+    pub message_flag: Option<String>,
+
+    /// Stash message (positional, for git-compatible `stash save "msg"`)
     #[arg(value_name = "MESSAGE")]
-    pub message: Option<String>,
+    pub message_positional: Option<String>,
 
     /// Include untracked files
     #[arg(short = 'u', long)]
@@ -138,7 +141,7 @@ impl StashCmd {
     async fn save(&self, opts: &SaveOpts) -> Result<()> {
         let repo_root = find_repo_root()?;
         let mediagit_dir = repo_root.join(".mediagit");
-        let storage = Arc::new(mediagit_storage::LocalBackend::new(&mediagit_dir).await?);
+        let storage = create_storage_backend(&repo_root).await?;
         let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
         let refdb = RefDatabase::new(&mediagit_dir);
 
@@ -166,8 +169,9 @@ impl StashCmd {
         }
         let tree_oid = tree.write(&odb).await?;
 
-        // Create stash commit
-        let message = opts.message.as_deref()
+        // Create stash commit (-m flag takes priority over positional)
+        let message = opts.message_flag.as_deref()
+            .or(opts.message_positional.as_deref())
             .unwrap_or("WIP on branch")
             .to_string();
 
@@ -220,7 +224,7 @@ impl StashCmd {
     async fn apply(&self, opts: &ApplyOpts) -> Result<()> {
         let repo_root = find_repo_root()?;
         let mediagit_dir = repo_root.join(".mediagit");
-        let storage = Arc::new(mediagit_storage::LocalBackend::new(&mediagit_dir).await?);
+        let storage = create_storage_backend(&repo_root).await?;
         let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
 
         // Load stash entry
@@ -229,9 +233,10 @@ impl StashCmd {
 
         let stash_oid = Oid::from_hex(&stash_entry.commit_oid)?;
 
-        // Apply stash commit to working directory
+        // Apply stash tree on top of current working directory (overlay, not replace).
+        // checkout_commit would wipe files not in the stash tree.
         let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
-        let files_updated = checkout_mgr.checkout_commit(&stash_oid).await?;
+        let files_updated = checkout_mgr.apply_tree_overlay(&stash_oid).await?;
 
         if !opts.quiet {
             println!(

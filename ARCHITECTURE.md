@@ -1,579 +1,815 @@
-# MediaGit-Core Complete Architecture Reference
+# MediaGit Architecture
 
-> **High-performance Git-like version control optimized for large media files and binary assets**
-
-MediaGit is a Rust-based workspace with **14 specialized crates**, **28 CLI commands**, **100+ file formats**, **~68,800 lines of Rust code**, and cloud-native storage backends.
+> **Media-first version control** built on Git semantics with intelligent compression,
+> content-defined chunking, delta encoding, and media-aware merging.
 
 ---
 
-## System Architecture
+## System Overview
 
 ```mermaid
-flowchart TD
-    subgraph Interface["🖥️ Interface Layer"]
-        CLI["mediagit-cli<br/>28 Commands"]
-        SERVER["mediagit-server<br/>Axum HTTP/HTTPS"]
+graph TD
+    subgraph CLI["mediagit-cli (31 commands)"]
+        ADD["add"]
+        COMMIT["commit"]
+        PUSH["push"]
+        PULL["pull"]
+        CLONE["clone"]
+        OTHER["30+ more..."]
     end
-    
-    subgraph Protocol["🔄 Protocol Layer"]
-        PROTO["mediagit-protocol<br/>Pack/Fetch/Push"]
+
+    subgraph Core["Core Libraries"]
+        VER["mediagit-versioning<br/>ODB · Index · Refs<br/>Chunks · Delta · Packs"]
+        COMP["mediagit-compression<br/>Zstd · Brotli · Zlib<br/>SmartCompressor"]
+        MEDIA["mediagit-media<br/>Image · PSD · Video<br/>Audio · 3D · VFX"]
     end
-    
-    subgraph Core["⚙️ Core Engine"]
-        VERSIONING["mediagit-versioning<br/>ODB • Branch • Merge"]
-        COMPRESSION["mediagit-compression<br/>Zstd • Brotli • Delta"]
-        MEDIA["mediagit-media<br/>PSD • Video • Audio • 3D"]
-        GIT["mediagit-git<br/>Git Interop"]
+
+    subgraph Infra["Infrastructure"]
+        STORE["mediagit-storage<br/>Local · S3 · Azure<br/>GCS · B2 · MinIO"]
+        SEC["mediagit-security<br/>AES-256-GCM · JWT<br/>TLS · Audit · KDF"]
+        PROTO["mediagit-protocol<br/>Client · Packs<br/>Chunk Transfer"]
     end
-    
-    subgraph Infra["💾 Infrastructure"]
-        STORAGE["mediagit-storage<br/>7 Backends"]
-        CONFIG["mediagit-config"]
-        SECURITY["mediagit-security<br/>Auth • Encryption • TLS"]
-    end
-    
-    subgraph Observe["📊 Observability"]
+
+    subgraph Support["Support"]
+        CFG["mediagit-config"]
         OBS["mediagit-observability"]
-        METRICS["mediagit-metrics"]
-        MIGRATION["mediagit-migration"]
+        MET["mediagit-metrics"]
+        GIT["mediagit-git"]
+        MIG["mediagit-migration"]
+        TEST["mediagit-test-utils"]
     end
-    
-    subgraph Cloud["☁️ Cloud Backends"]
-        S3[(AWS S3)]
-        AZURE[(Azure Blob)]
-        GCS[(GCS)]
-        MINIO[(MinIO)]
-        B2[(Backblaze)]
-        DO[(DO Spaces)]
-        LOCAL[(Local FS)]
+
+    subgraph Server["mediagit-server"]
+        AXUM["Axum REST API<br/>Auth · Rate Limit<br/>Security Middleware"]
     end
-    
-    CLI --> VERSIONING & COMPRESSION & MEDIA & GIT & PROTO & CONFIG & OBS & STORAGE
-    SERVER --> PROTO & VERSIONING & STORAGE & CONFIG & SECURITY
-    PROTO --> VERSIONING & STORAGE
-    VERSIONING --> STORAGE & COMPRESSION
-    METRICS --> OBS
-    MIGRATION --> STORAGE
-    STORAGE --> S3 & AZURE & GCS & MINIO & B2 & DO & LOCAL
+
+    CLI --> Core
+    Core --> Infra
+    Server --> Core
+    Server --> Infra
+    CLI --> Support
+    Server --> Support
 ```
 
 ---
 
-## Crate Dependency Graph
+## Workspace Crates (14)
 
-```mermaid
-graph LR
-    subgraph Apps["Applications"]
-        cli[mediagit-cli]
-        server[mediagit-server]
-    end
-    
-    subgraph Proto["Protocol"]
-        protocol[mediagit-protocol]
-    end
-    
-    subgraph Engine["Core Engine"]
-        versioning[mediagit-versioning]
-        compression[mediagit-compression]
-        media[mediagit-media]
-        git[mediagit-git]
-    end
-    
-    subgraph Infrastructure["Infrastructure"]
-        storage[mediagit-storage]
-        config[mediagit-config]
-        security[mediagit-security]
-        observability[mediagit-observability]
-        metrics[mediagit-metrics]
-        migration[mediagit-migration]
-    end
-    
-    cli --> config & storage & versioning & compression & media & git & observability & protocol
-    server --> protocol & versioning & storage & config & security
-    protocol --> versioning & storage
-    versioning --> storage & compression
-    metrics --> observability
-    migration --> storage
-```
+| Crate | Role | Key Modules |
+|-------|------|-------------|
+| **mediagit-cli** | CLI binary (31 commands) | `commands/`, main entry |
+| **mediagit-versioning** | Core VCS engine | ODB, index, refs, tree, commit, chunking, delta, similarity, packs, streaming |
+| **mediagit-compression** | Smart compression | Zstd, Brotli, Zlib, Store; `SmartCompressor` with type+size awareness |
+| **mediagit-media** | Media parsing & merging | Image, PSD, Video, Audio, 3D, VFX parsers & merge strategies |
+| **mediagit-storage** | Storage abstraction | `StorageBackend` trait + 7 implementations |
+| **mediagit-protocol** | Network protocol | Client, pack reader/writer, streaming pack, chunk transfer |
+| **mediagit-server** | HTTP server | Axum routes, handlers, auth middleware, rate limiting, security |
+| **mediagit-security** | Security layer | Encryption (AES-256-GCM), Auth (JWT + API keys), TLS, audit, KDF |
+| **mediagit-config** | Configuration | TOML config file management |
+| **mediagit-observability** | Logging/tracing | Structured tracing with env-filter |
+| **mediagit-metrics** | Prometheus metrics | Operation stats, dedup ratios |
+| **mediagit-git** | Git interop | Git repository integration |
+| **mediagit-migration** | Migration tools | Git → MediaGit migration |
+| **mediagit-test-utils** | Test utilities | Shared test helpers |
 
 ---
 
-## Complete Crate Reference
+## CLI Commands (31)
 
-### Interface Layer
+### Core Workflow
+| Command | Description |
+|---------|-------------|
+| `init` | Initialize a new `.mediagit` repository |
+| `add` | Stage files with smart compression, chunking, delta encoding |
+| `commit` | Create a commit from staged changes |
+| `status` | Show working tree and index status |
+| `log` | Display commit history |
+| `diff` | Show differences between versions |
 
-| Crate | Lines | Purpose | Key Modules |
-|-------|-------|---------|-------------|
-| **mediagit-cli** | 28 cmds | CLI application | `add`, `commit`, `push`, `pull`, `clone`, `branch`, `merge`, `rebase`, `cherry-pick`, `stash`, `tag`, `bisect`, `gc`, `fsck`, `verify`, `stats`, `remote`, `fetch`, `diff`, `log`, `show`, `status`, `init`, `install`, `filter`, `track` |
-| **mediagit-server** | 7 modules | HTTP server | `handlers` (12 endpoints), `auth_routes`, `security`, `config`, `state` |
+### Branching & History
+| Command | Description |
+|---------|-------------|
+| `branch` | List, create, or delete branches |
+| `checkout` | Switch branches or restore files |
+| `merge` | Merge branches |
+| `rebase` | Reapply commits on top of another base |
+| `cherry-pick` | Apply specific commits to current branch |
+| `tag` | Create, list, or delete tags |
+| `stash` | Temporarily shelve changes |
+| `bisect` | Binary search for bug-introducing commit |
 
-### Protocol Layer
+### Remote Operations
+| Command | Description |
+|---------|-------------|
+| `clone` | Clone a repository (all branches) |
+| `push` | Push commits and chunks to remote |
+| `pull` | Fetch and merge remote changes |
+| `fetch` | Fetch all remote refs without merging |
+| `remote` | Manage remote repositories |
 
-| Crate | Purpose | Key Components |
-|-------|---------|----------------|
-| **mediagit-protocol** | Network sync | `client` (pack uploads/downloads, streaming pull), `streaming` (chunk transfer), `types` (RefInfo, WantRequest), `adaptive_config` (TB-scale timeouts) – 5 modules |
+### File Operations
+| Command | Description |
+|---------|-------------|
+| `reset` | Unstage files or reset to a commit |
+| `revert` | Create a new commit that undoes changes |
+| `rm` | Remove files from tracking |
+| `mv` | Move or rename tracked files |
+| `show` | Show object contents |
+| `cat-file` | Low-level object inspection |
 
-### Core Engine Layer
-
-| Crate | Lines | Purpose | Key Modules |
-|-------|-------|---------|-------------|
-| **mediagit-versioning** | 25 modules | Object database & VCS | `odb` (107KB), `chunking` (73KB), `checkout`, `branch`, `merge`, `refs`, `index`, `pack`, `delta`, `conflict`, `similarity`, `lca`, `tree`, `commit`, `fsck`, `streaming_pack`, `streaming_index`, `transaction`, `revision`, `diff`, `metrics`, `config`, `object`, `oid` |
-| **mediagit-compression** | 7 modules | Smart compression | `smart_compressor` (60+ types), `adaptive`, `delta`, `per_type_compressor`, `zstd_compressor`, `brotli_compressor`, `zlib_compressor` |
-| **mediagit-media** | 10 modules | Media intelligence | `psd` (20KB), `video` (17KB), `audio` (15KB), `image` (30KB), `model3d` (21KB), `vfx` (21KB), `phash` (12KB), `strategy` (23KB), `error` |
-| **mediagit-git** | 4 modules | Git interop | `filter`, `pointer` |
-
-### Infrastructure Layer
-
-| Crate | Lines | Purpose | Key Modules |
-|-------|-------|---------|-------------|
-| **mediagit-storage** | 8 backends | Storage abstraction | `s3`, `azure`, `gcs`, `minio`, `b2_spaces`, `local` (mmap support), `cache` (LRU with metrics), `mock` |
-| **mediagit-config** | 931 | Configuration | `schema` (storage, remotes, branches, protection) |
-| **mediagit-security** | 12 modules | Security | `auth/` (jwt, apikey, credentials, middleware – 7 files), `encryption` (16KB), `kdf` (14KB), `audit` (11KB), `tls/` (3 files) |
-
-### Observability Layer
-
-| Crate | Purpose |
-|-------|---------|
-| **mediagit-observability** | Structured logging (tracing) |
-| **mediagit-metrics** | Prometheus integration |
-| **mediagit-migration** | Storage backend migration |
-| **mediagit-test-utils** | Test utilities |
-
----
-
-## CLI Commands (28)
-
-| Category | Commands | Key Flags |
-|----------|----------|-----------|
-| **Setup** | `init`, `clone`, `install`, `remote` | `--bare`, `--branch`, `--global` |
-| **Basic** | `add`, `commit`, `status`, `log`, `diff`, `show` | `--all`, `-m`, `--oneline`, `--stat`, `--no-chunking`, `--no-delta` |
-| **Branching** | `branch`, `merge`, `rebase`, `cherry-pick` | `--no-ff`, `-i`, `--abort`, `--continue`, `--protect` |
-| **Remote** | `push`, `pull`, `fetch` | `-f`, `--rebase`, `--prune`, `--set-upstream`, `--force-with-lease` |
-| **Tags** | `tag create/list/delete/show/verify` | `-m`, `--annotated`, `--sort` |
-| **Stash** | `stash save/apply/pop/list/drop/clear` | `--include-untracked`, `--index` |
-| **Debug** | `bisect start/good/bad/reset/log` | `--replay` |
-| **Maintenance** | `gc`, `fsck`, `verify`, `stats` | `--aggressive`, `--repair`, `--prune`, `--json`, `--prometheus` |
-| **Advanced** | `filter clean/smudge`, `track` | `--list` |
-
----
-
-## Server API Endpoints (14)
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/:repo/info/refs` | List all refs |
-| `POST` | `/:repo/objects/pack` | Upload pack file (streaming) |
-| `GET` | `/:repo/objects/pack` | Download pack (X-Request-ID) |
-| `POST` | `/:repo/objects/want` | Request specific objects |
-| `POST` | `/:repo/refs/update` | Update refs (with force-with-lease) |
-| `POST` | `/:repo/chunks/check` | Check chunk existence (bulk) |
-| `PUT` | `/:repo/chunks/:id` | Upload chunk |
-| `GET` | `/:repo/chunks/:id` | Download chunk |
-| `PUT` | `/:repo/manifests/:oid` | Upload manifest |
-| `GET` | `/:repo/manifests/:oid` | Download manifest |
-| `POST` | `/auth/login` | JWT authentication |
-| `POST` | `/auth/refresh` | Token refresh |
-| `GET` | `/health` | Health check |
-| `GET` | `/metrics` | Prometheus metrics |
-
----
-
-## File Formats (100+)
-
-### Media-Aware Chunking
-
-| Category | Extensions | Strategy |
-|----------|------------|----------|
-| **Video** | `mp4`, `mov`, `avi`, `mkv`, `webm`, `mxf`, `r3d`, `braw` | Atom/EBML/RIFF boundaries |
-| **Audio** | `wav`, `aiff` | RIFF structure |
-| **3D Models** | `glb`, `gltf`, `fbx`, `obj`, `stl` | Binary structure |
-
-### Rolling CDC Chunking
-
-| Category | Extensions |
-|----------|------------|
-| **Design** | `pdf`, `ai`, `fig`, `sketch`, `xd` |
-| **Text/Data** | `csv`, `json`, `xml`, `parquet`, `py`, `rs`, `js` |
-| **ML Models** | `pt`, `pth`, `ckpt`, `safetensors`, `onnx`, `gguf` |
-| **Creative** | `indd`, `aep`, `prproj`, `drp`, `nk`, `blend`, `c4d` |
-| **USD** | `usd`, `usda`, `usdc`, `usdz`, `abc` |
-
-### Fixed Chunking (Pre-Compressed)
-
-| Category | Extensions |
-|----------|------------|
-| **Images** | `jpg`, `png`, `gif`, `webp`, `heic`, `avif`, `exr` |
-| **Compressed Audio** | `mp3`, `aac`, `ogg`, `opus`, `flac` |
-| **Archives** | `zip`, `7z`, `rar`, `gz`, `tar` |
-
-### PSD/Layered Images
-
-| Application | Extensions |
-|-------------|------------|
-| Photoshop | `psd`, `psb` |
-| GIMP / Krita / OpenRaster | `xcf`, `kra`, `ora` |
-
----
-
-## Chunking Strategy
-
-```mermaid
-flowchart LR
-    FILE[File] --> SIZE{Size?}
-    SIZE -->|< 10MB| DIRECT[Store Direct]
-    SIZE -->|≥ 10MB| CHUNK{Type?}
-    
-    CHUNK -->|MP4/MOV| ATOMS[Atom Boundaries]
-    CHUNK -->|MKV/WebM| EBML[EBML Elements]
-    CHUNK -->|WAV/AVI| RIFF[RIFF Chunks]
-    CHUNK -->|GLB| GLB_C[GLB Binary]
-    CHUNK -->|Other| CDC[Rolling CDC]
-```
-
-### Size Parameters
-
-| File Size | Avg Chunk | Min | Max |
-|-----------|-----------|-----|-----|
-| < 100MB | 1MB | 512KB | 4MB |
-| 100MB - 10GB | 2MB | 1MB | 8MB |
-| 10GB - 100GB | 4MB | 2MB | 16MB |
-| > 100GB | 8MB | 4MB | 32MB |
-
----
-
-## Compression Pipeline
-
-### Algorithm Selection
-
-| File Type | Size | Algorithm | Ratio |
-|-----------|------|-----------|-------|
-| Text/CSV/JSON/XML | < 500MB | **Brotli** | 85-93% |
-| Text/CSV/JSON/XML | ≥ 500MB | **Zstd** | 80-90% |
-| ML Checkpoints | Any | **Zstd Fast** | 70-80% |
-| Creative Projects | Any | **Zstd + Delta** | 80-95% |
-| Already Compressed | Any | **Store** | 0% |
-
-> **Size Threshold**: Files > 500MB auto-switch from Brotli to Zstd for 10x faster compression.
-
-### Delta Compression
-
-| Category | Similarity | Chain Depth |
-|----------|------------|-------------|
-| Creative Projects | 70% | 10 |
-| ML Models | 75% | 8 |
-| Video | 80% | 3 |
-| Images | 85% | 3 |
-
----
-
-## Merge Strategies
-
-```mermaid
-flowchart TD
-    MERGE[Merge] --> TYPE{Media Type?}
-    
-    TYPE -->|Image| IMG[Perceptual Hash + Metadata]
-    TYPE -->|PSD| PSD_S[Layer-Based Merge]
-    TYPE -->|Video| VID[Timeline Merge]
-    TYPE -->|Audio| AUD[Track Merge]
-    TYPE -->|3D| M3D[Object/Material]
-    TYPE -->|VFX| VFX_S[Comp/Layer]
-    
-    IMG & PSD_S & VID & AUD & M3D & VFX_S --> RESULT{Success?}
-    RESULT -->|Yes| AUTO[AutoMerged]
-    RESULT -->|No| CONFLICT[Conflict]
-```
-
----
-
-## Conflict Detection
-
-### Conflict Types
-
-| Type | Description |
-|------|-------------|
-| **ModifyModify** | Both sides modified same file differently |
-| **AddAdd** | Both sides added same path with different content |
-| **DeleteModify** | One deleted, other modified |
-| **ModifyDelete** | One modified, other deleted |
-
-### Auto-Merge Rules
-
-| Scenario | Result |
-|----------|--------|
-| Same change both sides | ✅ Auto-merge |
-| One side changed, other unchanged | ✅ Auto-merge |
-| Different changes to same file | ❌ Conflict |
-| Delete vs modify | ❌ Conflict |
-
----
-
-## Configuration Schema
-
-```mermaid
-flowchart LR
-    subgraph Config["Config (schema.rs)"]
-        MAIN[Config]
-        APP[AppConfig]
-        STORAGE_C[StorageConfig]
-        REMOTE[RemoteConfig]
-        BRANCH[BranchConfig]
-        PROTECT[BranchProtection]
-    end
-    
-    subgraph Storage["Storage Backends"]
-        FS[FileSystemStorage]
-        S3_C[S3Storage]
-        AZURE_C[AzureStorage]
-        GCS_C[GCSStorage]
-        MULTI[MultiBackendStorage]
-    end
-    
-    MAIN --> APP & STORAGE_C & REMOTE & BRANCH & PROTECT
-    STORAGE_C --> FS & S3_C & AZURE_C & GCS_C & MULTI
-```
-
-### Config Methods
-
-| Method | Description |
-|--------|-------------|
-| `load()` / `save()` | TOML persistence |
-| `set_remote()` / `remove_remote()` | Remote management |
-| `set_branch_upstream()` | Tracking configuration |
-| `protect_branch()` / `unprotect_branch()` | Branch protection |
-
----
-
-## Security Architecture
-
-```mermaid
-flowchart LR
-    subgraph Auth["Authentication"]
-        JWT[JWT Tokens]
-        API[API Keys]
-        KEYRING[OS Keyring]
-    end
-    
-    subgraph Encrypt["Encryption"]
-        AES[AES-256-GCM]
-        ARGON[Argon2 KDF]
-        TLS[TLS 1.3]
-    end
-    
-    subgraph Protect["Protection"]
-        RATE[Rate Limiting]
-        AUDIT[Audit Logging]
-        CERT[Certificate Mgmt]
-    end
-```
-
-| Feature | Implementation |
-|---------|----------------|
-| Encryption at Rest | AES-256-GCM, ChaCha20-Poly1305 |
-| Key Derivation | Argon2 |
-| TLS | rustls + rcgen |
-| Secret Handling | zeroize, secrecy |
+### Administration
+| Command | Description |
+|---------|-------------|
+| `config` | Get/set configuration values |
+| `gc` | Garbage collection and pack optimization |
+| `fsck` | Verify object database integrity |
+| `migrate` | Migrate from Git to MediaGit |
+| `server` | Start the MediaGit HTTP server |
+| `completion` | Generate shell completions |
 
 ---
 
 ## Object Database (ODB)
 
-### Core Operations
+The ODB is the core storage engine (`mediagit-versioning/src/odb.rs`, 3,310 lines).
 
-| Method | Description |
-|--------|-------------|
-| `write()` | SHA-256 content-addressed storage |
-| `write_with_path()` | Smart compression by file type |
-| `write_chunked()` | Chunk large files with manifests |
-| `write_chunked_from_file()` | Streaming (constant memory) |
-| `write_with_delta()` | Delta compression vs similar |
-| `read()` | Read with LRU cache |
-| `repack()` | Pack file optimization |
-| `storage()` | Access storage backend for transactions |
+### Object Types
+- **Blob** — File content (raw or chunked)
+- **Tree** — Directory listing (path → OID mapping)
+- **Commit** — Snapshot with parent, tree, author, message, timestamp
+- **Tag** — Named pointer to any object
+
+### Content-Addressable Storage
+- **Hashing**: SHA-256 (via `sha2` crate)
+- **Deduplication**: Identical content → same OID, stored once
+- **LRU Cache**: Configurable in-memory cache for hot objects
+- **Metrics**: Tracks reads, writes, cache hits, bytes saved
+
+### ODB Write Pipeline
+
+```mermaid
+graph TD
+    A["ODB.write(data, filename)"] --> B{"Smart compression<br/>enabled?"}
+    B -->|No| Z1["Zlib compress + store"]
+    B -->|Yes| C["ObjectType::from_path(filename)"]
+    C --> D["CompressionStrategy::for_object_type_with_size()"]
+    D --> E{"should_use_chunking<br/>(size, filename)?"}
+    E -->|No| F["SmartCompressor.compress()"]
+    F --> G{"Compressed < Original?"}
+    G -->|Yes| H["Store compressed"]
+    G -->|No| I["Fallback: Store raw<br/>(0x00 prefix)"]
+    E -->|Yes| J{"File type?"}
+    J -->|"MP4/AVI/MKV/GLB/FBX"| K["MediaAware chunking<br/>(structure parsing)"]
+    J -->|"Text/ML/Docs/3D/Audio"| L["FastCDC Rolling CDC<br/>(gear table hashing)"]
+    J -->|"JPEG/PNG/MP3/ZIP"| M["Fixed 4MB blocks"]
+    K --> N["For each chunk"]
+    L --> N
+    M --> N
+    N --> O{"Delta eligible?<br/>(should_use_delta)"}
+    O -->|Yes| P["SimilarityDetector<br/>find_similar()"]
+    P --> Q{"Match found?<br/>(type-aware threshold)"}
+    Q -->|Yes| R["DeltaEncoder.encode()"]
+    Q -->|No| S["Compress chunk"]
+    O -->|No| S
+    R --> T["Store delta"]
+    S --> G
+    T --> U["Create ChunkManifest"]
+    H --> U
+    I --> U
+    U --> V["Store to backend<br/>(Local/S3/Azure/GCS/B2/MinIO)"]
+
+    style A fill:#4A90D9,color:#fff
+    style L fill:#E8A838,color:#fff
+    style K fill:#E8A838,color:#fff
+    style R fill:#7B68EE,color:#fff
+    style V fill:#27AE60,color:#fff
+```
 
 ### Constants
-
-| Constant | Value |
-|----------|-------|
-| `MAX_DELTA_DEPTH` | 10 |
-| Cache | LRU with metrics |
-
----
-
-## Streaming Infrastructure
-
-### Streaming Pack Protocol
-
-Memory-efficient pack transfer for large files (GB/TB scale):
-
-```mermaid
-flowchart LR
-    subgraph Client["Client"]
-        CLI_C[CLI]
-        PROTO_C[Protocol Client]
-        STREAM_R[StreamingPackReader]
-        TX[PackTransaction]
-    end
-
-    subgraph Server["Server"]
-        HANDLER[Handlers]
-        PACK_W[PackWriter]
-        ODB_S[ODB]
-    end
-
-    CLI_C --> PROTO_C
-    PROTO_C -->|pull_streaming| HANDLER
-    HANDLER --> PACK_W
-    PACK_W --> ODB_S
-    PROTO_C --> STREAM_R
-    STREAM_R --> TX
-    TX -->|commit| ODB_S
-```
-
-### Streaming Components
-
-| Module | Purpose | Memory |
-|--------|---------|--------|
-| `StreamingPackReader` | Async pack parsing | O(1) |
-| `StreamingPackWriter` | Async pack generation | O(1) |
-| `StreamingPackIndex` | Disk-based index (TB-scale) | O(1) |
-| `PackTransaction` | Atomic writes with rollback | Temp dir |
-| `AdaptiveTransferConfig` | TB-scale timeouts/chunking | Config |
-
-### Transaction Model
-
-```mermaid
-flowchart TD
-    START[Start Transaction] --> TEMP[Create temp dir]
-    TEMP --> WRITE[Write objects to temp]
-    WRITE --> VERIFY{Verify?}
-    VERIFY -->|Success| COMMIT[Commit: move to ODB]
-    VERIFY -->|Failure| ROLLBACK[Rollback: delete temp]
-    COMMIT --> CLEANUP[Cleanup temp]
-    ROLLBACK --> DONE[Done]
-    CLEANUP --> DONE
-```
-
-### Memory Profile
-
-| Scale | Traditional | Streaming |
-|-------|-------------|-----------|
-| 10M objects | 440MB RAM | ~1MB RAM |
-| 100M objects | 4.4GB → OOM | ~1MB RAM |
-| TB file | OOM | ~50MB bounded |
-
-### Adaptive Transfer Config
-
-| Profile | Chunk Size | Read Timeout |
-|---------|------------|--------------|
-| Default (GB) | 4MB | 5 min |
-| TB-Scale | 16-64MB | Infinite |
-| Fast Local | 8MB | 30 sec |
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `MAX_DELTA_DEPTH` | 10 | Max delta chain before re-storing as full object |
+| `MAX_OBJECT_SIZE` | 16 GB | Prevents allocation failures from corrupt manifests |
+| `LARGE_TEXT_THRESHOLD` | 500 MB | Switch from Brotli to Zstd for text files |
 
 ---
 
-## Data Flow
+## Compression Engine
+
+**Crate**: `mediagit-compression` · **Key file**: `smart_compressor.rs` (1,637 lines)
+
+### Compression Strategy Selection
 
 ```mermaid
-sequenceDiagram
-    participant User
-    participant CLI
-    participant Versioning
-    participant Compression
-    participant Storage
-    
-    User->>CLI: mediagit add large.mp4
-    CLI->>Versioning: Analyze & Chunk
-    Versioning->>Compression: Compress chunks
-    Versioning->>Storage: Write chunks + manifest
-    
-    User->>CLI: mediagit commit -m "msg"
-    CLI->>Versioning: Build tree + commit
-    Versioning->>Storage: Write objects
-    
-    User->>CLI: mediagit push origin main
-    CLI->>Versioning: Collect objects
-    CLI->>Storage: Upload pack + chunks
+graph TD
+    A["File Input"] --> B["ObjectType::from_path()"]
+    B --> C{"Already compressed?"}
+    C -->|"JPEG/PNG/GIF/WebP/AVIF/HEIC<br/>MP4/MOV/AVI/MKV/WebM<br/>MP3/AAC/OGG/Opus<br/>ZIP/GZ/7Z/RAR<br/>AI/InDesign<br/>DOCX/XLSX/PPTX"| D["💾 Store"]
+    C -->|No| E{"File category?"}
+    E -->|"TIFF/BMP/RAW/EXR/HDR<br/>WAV/AIFF/FLAC/ALAC"| F["🗜️ Zstd Best"]
+    E -->|"Text/Code/JSON/XML<br/>YAML/TOML/CSV"| G{"Size > 500MB?"}
+    G -->|No| H["📦 Brotli Default"]
+    G -->|Yes| I["🗜️ Zstd Default<br/>(10x faster)"]
+    E -->|"ML Data/Weights"| J["🗜️ Zstd Fast"]
+    E -->|"ML Checkpoints"| K["🗜️ Zstd Fast"]
+    E -->|"ML Inference/Deploy"| L["🗜️ Zstd Default"]
+    E -->|"Creative Projects<br/>(PSD/AEP/Blender/...)"| M["🗜️ Zstd Default"]
+    E -->|"Database (SQLite)"| N["🗜️ Zstd Default"]
+    E -->|"TAR (uncompressed)"| O["🗜️ Zstd Default"]
+    E -->|"Git Objects"| P["📋 Zlib Default"]
+    E -->|"Unknown/Binary"| Q["🗜️ Zstd Default"]
+
+    D --> R{"Compressed > Original?"}
+    F --> R
+    H --> R
+    I --> R
+    J --> R
+    K --> R
+    L --> R
+    M --> R
+    N --> R
+    O --> R
+    P --> R
+    Q --> R
+    R -->|Yes| S["Fallback → 💾 Store"]
+    R -->|No| T["Use compressed"]
+
+    style D fill:#95a5a6,color:#fff
+    style F fill:#3498db,color:#fff
+    style H fill:#9b59b6,color:#fff
+    style I fill:#3498db,color:#fff
+    style J fill:#3498db,color:#fff
+    style K fill:#3498db,color:#fff
+    style S fill:#e74c3c,color:#fff
 ```
+
+### Type Classification (`ObjectType`)
+
+60+ file types classified into categories:
+
+| Category | Types | Strategy |
+|----------|-------|----------|
+| **Image (compressed)** | JPEG, PNG, GIF, WebP, AVIF, HEIC, GPU textures | **Store** |
+| **Image (uncompressed)** | TIFF, BMP, RAW, EXR, HDR | **Zstd Best** |
+| **Video** | MP4, MOV, AVI, MKV, WebM, FLV, WMV, MPG | **Store** |
+| **Audio (compressed)** | MP3, AAC, OGG, Opus | **Store** |
+| **Audio (uncompressed)** | FLAC, WAV, AIFF, ALAC | **Zstd Best** |
+| **Text/Code** | 30+ extensions (rs, py, js, md, etc.) | **Brotli Default** (Zstd if >500MB) |
+| **Archives** | ZIP, GZ, 7Z, RAR, Parquet | **Store** |
+| **TAR** | Uncompressed containers | **Zstd Default** |
+| **ML Data** | HDF5, NPY, TFRecords, etc. | **Zstd Fast** |
+| **ML Checkpoints** | .pt, .pth, .ckpt, .bin | **Zstd Fast** |
+| **ML Inference** | ONNX, GGUF, TFLite, etc. | **Zstd Default** |
+| **Adobe PDF-based** | AI, InDesign | **Store** (internal compression) |
+| **Creative Projects** | PSD, AEP, Blender, Maya, C4D, etc. | **Zstd Default** |
+| **Office** | DOCX, XLSX, PPTX, ODP | **Store** (ZIP containers) |
+| **Database** | SQLite | **Zstd Default** |
+| **Git Objects** | Blob, Tree, Commit | **Zlib Default** |
+
+### Compression Algorithms
+
+| Algorithm | Levels | Use Case |
+|-----------|--------|----------|
+| **Zstd** | Fast (1), Default (3), Best (19) | General purpose, large files |
+| **Brotli** | Default (9) | Text/structured data, best ratio |
+| **Zlib** | Default (6) | Git object compatibility |
+| **Store** | — | Already-compressed content |
+| **Delta** | — | Similar file versions |
+
+### Smart Fallback
+If compression **expands** the data (common for embedded JPEGs in AI/PSD files),
+`compress_with_strategy()` automatically falls back to Store mode with a `0x00` prefix byte.
+
+### Decompression
+Auto-detects algorithm from magic bytes:
+- `0x00` → Store (strip prefix)
+- `0x78` → Zlib
+- `0x28 0xB5 0x2F 0xFD` → Zstd
+- Other → Brotli
+
+---
+
+## Chunking Engine
+
+**Crate**: `mediagit-versioning` · **Key file**: `chunking.rs` (1,945 lines)
+
+### Chunking Strategy Decision
+
+```mermaid
+graph TD
+    A["File ready for chunking"] --> B{"should_use_chunking<br/>(size, extension)?"}
+    B -->|"Pre-compressed<br/>(JPEG/PNG/MP3/ZIP)"| C["❌ Never chunk"]
+    B -->|"Text/ML Data/Video<br/>PSD/Creative/Office<br/>≥ 5MB"| D["✅ Chunk"]
+    B -->|"3D Models/Audio<br/>Creative Projects<br/>≥ 10MB"| D
+    B -->|"Unknown ≥ 10MB"| D
+    D --> E{"Select strategy<br/>by file type"}
+    E -->|"MP4/MOV/M4V/M4A/3GP"| F["🎬 MP4 Atom Parsing"]
+    E -->|"AVI/RIFF/WAV"| G["🎬 RIFF Chunk Parsing"]
+    E -->|"MKV/WebM/MKA/MK3D"| H["🎬 EBML Element Parsing"]
+    E -->|"GLB/glTF"| I["🎬 GLB Binary Parsing"]
+    E -->|"FBX (binary)"| J["🎬 FBX Node Parsing"]
+    E -->|"OBJ/STL/PLY"| K["🎬 Text 3D Parsing"]
+    E -->|"Text/Code/Data/ML<br/>Documents/Design<br/>3D Apps/Audio/MPEG"| L["✂️ FastCDC v2020<br/>(Rolling CDC)"]
+    E -->|"JPEG/PNG/MP3/ZIP<br/>(if forced)"| M["📐 Fixed 4MB"]
+
+    L --> N["fastcdc::v2020::FastCDC<br/>Gear table O(1)/byte"]
+    F --> O["Chunk per atom<br/>(ftyp/moov/mdat)"]
+
+    style L fill:#E8A838,color:#fff
+    style N fill:#E8A838,color:#fff
+    style F fill:#2ECC71,color:#fff
+    style G fill:#2ECC71,color:#fff
+    style H fill:#2ECC71,color:#fff
+    style I fill:#2ECC71,color:#fff
+    style J fill:#2ECC71,color:#fff
+    style K fill:#2ECC71,color:#fff
+    style C fill:#e74c3c,color:#fff
+```
+
+### FastCDC Integration
+
+MediaGit uses the **`fastcdc` crate v3.2** (specifically `fastcdc::v2020`, the 2020 algorithm revision) for all content-defined chunking. FastCDC replaces traditional rolling hash with a **gear table-based hash** that achieves **O(1) boundary detection per byte** — approximately **10× faster** than Buzhash or Rabin fingerprint.
+
+#### Two Modes of Operation
+
+| Mode | API | Used In | When |
+|------|-----|---------|------|
+| **In-memory** | `fastcdc::v2020::FastCDC::new(data, min, avg, max)` | `chunk_rolling()` | Files loaded into memory (default path via `chunk_media_aware`) |
+| **Streaming** | `fastcdc::v2020::StreamCDC::new(file, min, avg, max)` | `chunk_file_streaming()` | Large files streamed from disk (ODB streaming path) |
+
+#### FastCDC Data Flow
+
+```mermaid
+graph LR
+    subgraph InMemory["In-Memory Path (chunk_rolling)"]
+        A1["data: &[u8]"] --> B1["FastCDC::new(data,<br/>min, avg, max)"]
+        B1 --> C1["Iterator yields<br/>ChunkData entries"]
+        C1 --> D1["Oid::hash(chunk)"]
+        D1 --> E1["ContentChunk"]
+    end
+
+    subgraph Streaming["Streaming Path (chunk_file_streaming)"]
+        A2["File on disk"] --> B2["std::fs::File::open()"]
+        B2 --> C2["StreamCDC::new(file,<br/>min, avg, max)"]
+        C2 --> D2["Iterator yields<br/>ChunkData + data"]
+        D2 --> E2["Oid::hash(chunk)"]
+        E2 --> F2["on_chunk() callback<br/>(compress + store)"]
+    end
+
+    style B1 fill:#E8A838,color:#fff
+    style C2 fill:#E8A838,color:#fff
+```
+
+#### Where FastCDC Is Dispatched
+
+The `chunk_media_aware()` method dispatches to FastCDC (`chunk_rolling()`) for these format groups:
+
+| Format Group | Extensions | Chunk Params |
+|--------------|-----------|--------------|
+| **Text/Code** | csv, tsv, json, xml, html, txt, md, rs, py, js, ts, go, java, c, cpp, yaml, sql, proto, ... | Adaptive by size |
+| **ML Data** | parquet, arrow, feather, orc, avro, hdf5, h5, npy, npz, tfrecords, petastorm | Adaptive by size |
+| **ML Models** | pt, pth, ckpt, pb, safetensors, bin, pkl, joblib | Adaptive by size |
+| **ML Deployment** | onnx, gguf, ggml, tflite, mlmodel, coreml, keras, pte, mleap, pmml, llamafile | Adaptive by size |
+| **Documents** | pdf, svg, eps, ai | Adaptive by size |
+| **Design Tools** | fig, sketch, xd, indd, indt | Adaptive by size |
+| **Lossless Audio** | flac, aiff, alac | Adaptive by size |
+| **MPEG Streams** | mpg, mpeg, vob, mts, m2ts | Adaptive by size |
+| **USD/Alembic** | usd, usda, usdc, usdz, abc | Adaptive by size |
+| **3D Apps** | blend, max, ma, mb, c4d, hip, zpr, ztl | Adaptive by size |
+| **Unknown** | All unrecognized extensions | Adaptive by size |
+
+The `chunk_file_streaming()` method (ODB streaming path) also uses FastCDC's `StreamCDC` for streaming I/O on large files, reading directly from disk without loading the entire file into memory.
+
+### Chunk Sizing (Adaptive)
+
+The `get_chunk_params(file_size)` function selects FastCDC parameters:
+
+| File Size | Avg Chunk | Min Chunk | Max Chunk |
+|-----------|-----------|-----------|-----------|
+| < 1 MB | 256 KB | 128 KB | 512 KB |
+| 1–10 MB | 512 KB | 256 KB | 1 MB |
+| 10–100 MB | 1 MB | 512 KB | 2 MB |
+| 100 MB–1 GB | 2 MB | 1 MB | 4 MB |
+| > 1 GB | 4 MB | 2 MB | 8 MB |
+
+### Chunking Eligibility (`should_use_chunking`)
+
+| Category | Min Size | Examples |
+|----------|----------|---------|
+| Text/Data | 5 MB | CSV, JSON, XML, YAML |
+| ML Data | 5 MB | Parquet, HDF5, NPY, TFRecords |
+| ML Models | 5 MB | .pt, .safetensors, ONNX, GGUF |
+| Video | 5 MB | MP4, MKV, AVI, MOV |
+| Uncompressed Images | 5 MB | PSD, TIFF, BMP, EXR |
+| PDF/Creative | 5 MB | AI, InDesign, PDF, EPS |
+| Creative Projects | 10 MB | AEP, Premiere, DaVinci |
+| Lossless Audio | 10 MB | WAV, FLAC, AIFF |
+| 3D Models | 10 MB | GLB, FBX, Blender, USD |
+| Office | 5 MB | DOCX, XLSX, PPTX |
+| Pre-compressed | **Never** | JPEG, PNG, MP3, ZIP |
+| Unknown | 10 MB | Conservative default |
+
+---
+
+## Delta Compression
+
+**Crate**: `mediagit-versioning` · **Key files**: `delta.rs` (446 lines), `similarity.rs` (541 lines)
+
+### Delta Encoder
+- **Algorithm**: Sliding-window pattern matching
+- **Instructions**: `Copy { offset, length }` and `Insert(Vec<u8>)`
+- **Serialization**: Custom varint-based binary format
+- **Max chain depth**: 10 (then re-stored as full object)
+
+### Similarity Detection
+
+```mermaid
+graph TD
+    A["New chunk to store"] --> B{"Delta eligible?<br/>(should_use_delta)"}
+    B -->|"JPEG/PNG/ZIP/GZ"| C["❌ Skip delta"]
+    B -->|"Text/PSD/WAV/AVI<br/>MOV/Large MP4/MKV"| D["SimilarityDetector"]
+    D --> E["10 × 1KB samples<br/>FNV-1a hash each"]
+    E --> F["Search recent objects<br/>(max 50 candidates)"]
+    F --> G{"Same ObjectType?"}
+    G -->|No| H["Skip candidate"]
+    G -->|Yes| I{"Size ratio ≥<br/>threshold?"}
+    I -->|"Too different"| H
+    I -->|OK| J["Compute similarity<br/>score = samples×0.7 + size×0.3"]
+    J --> K{"Score ≥ type-aware<br/>threshold?"}
+    K -->|"Below threshold"| H
+    K -->|"Match found!"| L["DeltaEncoder.encode()<br/>(sliding window)"]
+    L --> M["Store as delta<br/>(base_oid + instructions)"]
+
+    style D fill:#7B68EE,color:#fff
+    style L fill:#7B68EE,color:#fff
+    style M fill:#7B68EE,color:#fff
+    style C fill:#e74c3c,color:#fff
+```
+
+**Sampling**: 10 evenly-distributed 1 KB samples per object, FNV-1a hashed.
+
+**Score formula**: `similarity = (sample_matches/total × 0.7) + (size_ratio × 0.3)`
+
+#### Type-Aware Similarity Thresholds
+
+| File Type | Threshold | Rationale |
+|-----------|-----------|-----------|
+| Creative/PDF (AI, InDesign) | 0.15 | Embedded compressed streams shift boundaries |
+| Office (DOCX, XLSX) | 0.20 | ZIP containers with shared structure |
+| Video (MP4, MKV) | 0.50 | Metadata/timeline changes significant |
+| Audio (WAV, MP3) | 0.65 | Medium structural similarity |
+| Images (JPEG, PSD) | 0.70 | Perceptual similarity |
+| 3D Models (FBX, Blend) | 0.70 | Geometric data similarity |
+| Text/Code | 0.85 | Small changes matter |
+| Config (JSON, YAML) | 0.95 | Near-exact matches preferred |
+| Default | 0.30 | Conservative baseline |
+
+#### Type-Aware Size Ratio Thresholds
+
+| File Type | Threshold | Max Size Diff Allowed |
+|-----------|-----------|----------------------|
+| Creative/PDF | 0.50 | 50% |
+| Office | 0.60 | 40% |
+| Video | 0.70 | 30% |
+| Default | 0.80 | 20% |
+
+### Delta Eligibility (`should_use_delta`)
+
+| Category | Eligible? | Condition |
+|----------|-----------|-----------|
+| Text/Code | ✅ Always | — |
+| Uncompressed media (PSD, TIFF, WAV) | ✅ Always | — |
+| Uncompressed video (AVI, MOV) | ✅ Always | — |
+| Compressed video (MP4, MKV) | ✅ Conditional | File > 100 MB |
+| Compressed images (JPEG, PNG) | ❌ Never | — |
+| Archives (ZIP, GZ) | ❌ Never | — |
+| Unknown | ✅ Conditional | File > 50 MB |
+
+---
+
+## Media Merge Strategies
+
+**Crate**: `mediagit-media` · **Key file**: `strategy.rs` (596 lines)
+
+```mermaid
+graph TD
+    A["3-way merge requested<br/>(base, ours, theirs)"] --> B["MediaType::from_extension()"]
+    B --> C{"Media type?"}
+    C -->|Image| D["ImageStrategy<br/>Perceptual hash comparison"]
+    C -->|PSD| E["PsdStrategy<br/>Layer-based analysis"]
+    C -->|Video| F["VideoStrategy<br/>Timeline segmentation"]
+    C -->|Audio| G["AudioStrategy<br/>Track-based analysis"]
+    C -->|"3D Model"| H["Model3DStrategy<br/>Structure analysis"]
+    C -->|VFX| I["VfxStrategy<br/>Composition analysis"]
+    C -->|Unknown| J["Generic<br/>→ Always conflict"]
+
+    D --> K{"≥95% similar?"}
+    K -->|Yes| L["✅ Auto-merge<br/>(merge metadata)"]
+    K -->|No| M["⚠️ Conflict"]
+
+    E --> N{"Non-overlapping<br/>layer changes?"}
+    N -->|Yes| O["✅ Auto-merge layers"]
+    N -->|No| P["⚠️ Layer conflict"]
+
+    F --> Q{"Non-overlapping<br/>timeline edits?"}
+    Q -->|Yes| R["✅ Auto-merge timeline"]
+    Q -->|No| S["⚠️ Timeline conflict"]
+
+    style L fill:#27AE60,color:#fff
+    style O fill:#27AE60,color:#fff
+    style R fill:#27AE60,color:#fff
+    style M fill:#e74c3c,color:#fff
+    style P fill:#e74c3c,color:#fff
+    style S fill:#e74c3c,color:#fff
+    style J fill:#e74c3c,color:#fff
+```
+
+Six format-specific merge strategies with automatic conflict detection:
+
+| Strategy | Formats | Auto-Merge Logic |
+|----------|---------|------------------|
+| **Image** | JPEG, PNG, TIFF, WebP, RAW, HEIC, EXR, AVIF | Perceptual hashing (95% threshold) + metadata merge (EXIF, IPTC, XMP) |
+| **PSD** | PSD, PSB, XCF, KRA, ORA | Layer-based: auto-merge non-overlapping layer changes |
+| **Video** | MP4, MOV, AVI, MKV, WebM, MXF, R3D, BRAW | Timeline-based: auto-merge non-overlapping segments |
+| **Audio** | MP3, WAV, FLAC, AAC, OGG, MIDI | Track-based: auto-merge non-overlapping track changes |
+| **3D Model** | OBJ, FBX, glTF/GLB, STL, USD, Alembic, Blender | Structure analysis (always flags for manual review) |
+| **VFX** | Adobe suite, DaVinci, Nuke, Figma, Sketch | Composition analysis (always flags for manual review) |
+| **Generic** | Unknown formats | Always creates conflict |
+
+---
+
+## Staging & Index
+
+**Crate**: `mediagit-versioning` · **Key file**: `index.rs` (269 lines)
+
+### IndexEntry Fields
+```rust
+pub struct IndexEntry {
+    pub path: PathBuf,      // Relative to repo root
+    pub oid: Oid,           // SHA-256 of staged content
+    pub mode: u32,          // File permissions
+    pub size: u64,          // File size in bytes
+    pub mtime: Option<u64>, // Modification time (stat-cache)
+}
+```
+
+### Stat-Cache Optimization
+The `add` command uses a **size + mtime** stat-cache to skip unchanged files:
+1. Build `HashMap<PathBuf, (size, mtime)>` from the current index
+2. Compare file's current metadata against the index entry
+3. If both match → skip (no re-hashing or re-chunking needed)
+4. Backward-compatible: `mtime` defaults to `None` via `#[serde(default)]`
 
 ---
 
 ## Storage Backends
 
-| Backend | Features |
-|---------|----------|
-| **Local FS** | Development, testing |
-| **AWS S3** | Encryption, multipart |
-| **Azure Blob** | Managed identity, tiers |
-| **GCS** | Service account auth |
-| **MinIO** | S3-compatible, 100+ MB/s |
-| **Backblaze B2** | Cost-effective |
-| **DO Spaces** | S3-compatible |
+**Crate**: `mediagit-storage` · **Trait**: `StorageBackend` (async, Send + Sync)
 
----
+| Backend | Module | Description |
+|---------|--------|-------------|
+| **Local** | `local.rs` | Filesystem-based (default) |
+| **S3** | `s3.rs` | Amazon S3 (via `aws-sdk-s3`) |
+| **Azure** | `azure.rs` | Azure Blob Storage |
+| **GCS** | `gcs.rs` | Google Cloud Storage |
+| **B2/Spaces** | `b2_spaces.rs` | Backblaze B2 / DigitalOcean Spaces |
+| **MinIO** | `minio.rs` | S3-compatible (self-hosted) |
+| **Mock** | `mock.rs` | In-memory backend for testing |
 
-## Performance Metrics
-
-| Metric | Achieved |
-|--------|----------|
-| Clone (depth=1) | **0.1ms** |
-| Shallow Clone | **0.9µs** |
-| MinIO Upload | **108 MB/s** |
-| MinIO Download | **263 MB/s** |
-| Staging Throughput | **3-35 MB/s** |
-| Streaming Memory | **~50MB bounded** |
-| Parquet (129MB) Clone | **4 seconds** |
-
----
-
-## Technology Stack
-
-| Layer | Technologies |
-|-------|-------------|
-| Runtime | Tokio, Rayon |
-| CLI | Clap 4.5, indicatif |
-| HTTP | Axum 0.7, Tower |
-| TLS | rustls, rcgen |
-| Serialization | Serde, TOML, bincode |
-| Hashing | SHA-256, BLAKE3 |
-| Compression | Zstd, Brotli, xdelta3 |
-| Cloud | aws-sdk-s3, azure_storage_blobs, google-cloud-storage |
-| Media | mp4parse, symphonia, psd, image |
-| Caching | LRU (custom) |
-| Streaming | tokio-util, futures, async-stream |
-
----
-
-## Stats Summary
-
-| Metric | Value |
-|--------|-------|
-| **Crates** | 14 |
-| **CLI Commands** | 28 |
-| **File Formats** | 100+ |
-| **Lines of Code** | ~68,800 Rust |
-| **Tests** | 921+ unit tests |
-| **API Endpoints** | 14 HTTP endpoints |
-| **Max File Tested** | 6GB (1,541 chunks) |
-| **Rust Version** | 1.91.0 |
-
----
-
-## LRU Cache System
-
-The storage layer includes an LRU cache with comprehensive metrics:
-
-| Feature | Description |
-|---------|-------------|
-| **Size-based eviction** | Configurable max bytes |
-| **Count-based eviction** | Configurable max entries |
-| **Large object skip** | Objects > 50MB bypass cache |
-| **Metrics** | hits, misses, evictions, hit_rate |
-
+### Trait Methods
 ```rust
-let cache = LruCache::with_all_limits(
-    256 * 1024 * 1024,  // 256MB max size
-    10_000,              // 10k max entries
-    50 * 1024 * 1024,    // 50MB max object size
-);
+#[async_trait]
+pub trait StorageBackend: Send + Sync + Debug {
+    async fn get(&self, key: &str) -> Result<Vec<u8>>;
+    async fn put(&self, key: &str, data: &[u8]) -> Result<()>;
+    async fn exists(&self, key: &str) -> Result<bool>;
+    async fn delete(&self, key: &str) -> Result<()>;
+    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>>;
+    // ... additional methods for streaming, size checks, etc.
+}
 ```
+
+---
+
+## Server & Protocol
+
+### HTTP Server
+
+**Crate**: `mediagit-server` · **Framework**: Axum · **Port**: Configurable
+
+#### Endpoints (11 routes)
+
+| Method | Path | Handler | Purpose |
+|--------|------|---------|---------|
+| GET | `/:repo/info/refs` | `get_refs` | List all refs |
+| POST | `/:repo/refs/update` | `update_refs` | Update refs |
+| POST | `/:repo/objects/want` | `request_objects` | Request specific objects |
+| GET | `/:repo/objects/pack` | `download_pack` | Download pack file |
+| POST | `/:repo/objects/pack` | `upload_pack` | Upload pack file |
+| POST | `/:repo/chunks/check` | `check_chunks_exist` | Check which chunks exist |
+| PUT | `/:repo/chunks/:chunk_id` | `upload_chunk` | Upload a single chunk |
+| PUT | `/:repo/manifests/:oid` | `upload_manifest` | Upload chunk manifest |
+| GET | `/:repo/chunks/:chunk_id` | `download_chunk` | Download a single chunk |
+| GET | `/:repo/manifests/:oid` | `download_manifest` | Download chunk manifest |
+| — | `/auth/*` | Auth routes | Login, register, token refresh |
+
+#### Security Middleware Stack
+
+```mermaid
+graph TD
+    REQ["Incoming HTTP Request"] --> PV["Path Validation<br/>(prevent traversal)"]
+    PV --> RL["Rate Limiting<br/>(Governor, IP-based)"]
+    RL --> AU["Audit Logging"]
+    AU --> SH["Security Headers<br/>(HSTS, X-Content-Type)"]
+    SH --> RV["Request Validation<br/>(body size ≤ 2GB)"]
+    RV --> AUTH["Authentication<br/>(JWT / API Key)"]
+    AUTH --> TR["Tracing<br/>(OpenTelemetry spans)"]
+    TR --> HANDLER["Route Handler"]
+    HANDLER --> RES["HTTP Response"]
+
+    style REQ fill:#3498db,color:#fff
+    style AUTH fill:#e67e22,color:#fff
+    style HANDLER fill:#27AE60,color:#fff
+    style RES fill:#3498db,color:#fff
+```
+
+### Protocol Client
+
+**Crate**: `mediagit-protocol`
+
+- **Pack format**: Custom binary with streaming support
+- **Chunk transfer**: Parallel upload/download of individual chunks
+- **Object negotiation**: Want/Have protocol for efficient sync
+- **Streaming**: `StreamingPackWriter` + `StreamingPackReader` for memory-efficient transfers
+
+---
+
+## Security
+
+**Crate**: `mediagit-security`
+
+| Module | Files | Purpose |
+|--------|-------|---------|
+| **Encryption** | `encryption.rs` | AES-256-GCM at-rest encryption |
+| **KDF** | `kdf.rs` | Key derivation (Argon2/PBKDF2) |
+| **Auth** | `auth/jwt.rs`, `auth/apikey.rs`, `auth/credentials.rs` | JWT tokens + API keys |
+| **Middleware** | `auth/middleware.rs` | Axum auth extraction |
+| **Handlers** | `auth/handlers.rs` | Login, register, token refresh |
+| **User** | `auth/user.rs` | User model and permissions |
+| **TLS** | `tls/cert.rs`, `tls/config.rs` | Certificate management |
+| **Audit** | `audit.rs` | Security event logging |
+
+---
+
+## Data Flow
+
+### `mediagit add <file>`
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant CLI as AddCmd
+    participant IDX as Index
+    participant ODB as ObjectDatabase
+    participant CDC as FastCDC
+    participant SIM as SimilarityDetector
+    participant BE as StorageBackend
+
+    User->>CLI: mediagit add <paths>
+    CLI->>CLI: expand_paths(globs, dirs, --all)
+    CLI->>IDX: Load index + HEAD tree
+    CLI->>CLI: Build stat-cache map(path → size+mtime)
+
+    loop For each file (parallel via Rayon)
+        CLI->>CLI: Stat-cache check
+        alt Unchanged (size+mtime match)
+            CLI-->>CLI: Skip file
+        else Changed or new
+            CLI->>CLI: Read file content
+            CLI->>CLI: ObjectType::from_path()
+            alt should_use_chunking(size, type)
+                CLI->>CDC: Chunk data (FastCDC / MediaAware / Fixed)
+                loop For each chunk
+                    alt should_use_delta(type, data)
+                        CDC->>SIM: find_similar()
+                        alt Match found
+                            SIM->>ODB: DeltaEncoder.encode()
+                        else No match
+                            SIM->>ODB: SmartCompressor.compress()
+                        end
+                    else Not delta eligible
+                        CDC->>ODB: SmartCompressor.compress()
+                    end
+                    ODB->>BE: Store chunk
+                end
+                ODB->>BE: Store ChunkManifest
+            else Small file / no chunking
+                CLI->>ODB: SmartCompressor.compress()
+                ODB->>BE: Store blob
+            end
+        end
+    end
+
+    CLI->>IDX: Update entries (path, OID, size, mtime)
+    CLI->>User: Summary (staged, skipped, bytes, dedup%)
+```
+
+### `mediagit push`
+
+```mermaid
+sequenceDiagram
+    participant CLI as PushCmd
+    participant Server as Remote Server
+    participant BE as StorageBackend
+
+    CLI->>Server: GET /:repo/info/refs
+    Server-->>CLI: Remote refs list
+
+    CLI->>CLI: Determine objects to send (local − remote)
+
+    alt Chunked objects
+        CLI->>Server: POST /:repo/chunks/check [chunk IDs]
+        Server-->>CLI: Missing chunk IDs
+        loop For each missing chunk
+            CLI->>Server: PUT /:repo/chunks/:id [data]
+        end
+        CLI->>Server: PUT /:repo/manifests/:oid [manifest]
+    end
+
+    alt Non-chunked objects
+        CLI->>CLI: StreamingPackWriter.pack(objects)
+        CLI->>Server: POST /:repo/objects/pack [pack data]
+    end
+
+    CLI->>Server: POST /:repo/refs/update [ref updates]
+    Server-->>CLI: Update results
+```
+
+### `mediagit clone`
+
+```mermaid
+sequenceDiagram
+    participant CLI as CloneCmd
+    participant Server as Remote Server
+    participant ODB as Local ODB
+    participant FS as Working Directory
+
+    CLI->>CLI: Create .mediagit directory
+
+    CLI->>Server: GET /:repo/info/refs
+    Server-->>CLI: All refs (branches + tags)
+
+    CLI->>Server: POST /:repo/objects/want [want OIDs]
+    Server-->>CLI: Request ID
+
+    CLI->>Server: GET /:repo/objects/pack [X-Request-ID]
+    Server-->>CLI: Pack file (streaming)
+
+    CLI->>ODB: Unpack objects into local ODB
+
+    loop For chunked objects
+        CLI->>Server: GET /:repo/manifests/:oid
+        Server-->>CLI: ChunkManifest
+        loop For each chunk in manifest
+            CLI->>Server: GET /:repo/chunks/:id
+            Server-->>CLI: Chunk data
+            CLI->>ODB: Store chunk
+        end
+    end
+
+    CLI->>CLI: Create refs/remotes/origin/*
+    CLI->>FS: Checkout default branch
+```
+
+---
+
+## Configuration
+
+**File**: `.mediagit/config.toml`
+
+```toml
+[core]
+compression = true          # Enable smart compression
+chunk_strategy = "rolling"  # fixed | rolling | media_aware
+delta_enabled = true        # Enable delta compression
+
+[remote "origin"]
+url = "http://localhost:3000"
+push_url = ""               # Optional separate push URL
+auth_method = "bearer"
+
+[branch "main"]
+remote = "origin"
+merge = "refs/heads/main"
+```
+
+---
+
+## Build & Distribution
+
+- **MSRV**: Rust 1.91.0
+- **License**: AGPL-3.0
+- **Release profile**: `opt-level = 3`, LTO, `codegen-units = 1`
+- **Distribution**: cargo-dist (v0.26.0) with GitHub CI
+- **Installers**: Shell, PowerShell, Homebrew, MSI
+- **Targets**: x86_64 + aarch64 for Linux, macOS, Windows

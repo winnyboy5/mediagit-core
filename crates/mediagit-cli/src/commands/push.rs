@@ -1,14 +1,12 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
-use indicatif::{ProgressBar, ProgressStyle};
 use mediagit_protocol::PushPhase;
-use mediagit_storage::LocalBackend;
 use mediagit_versioning::RefDatabase;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use crate::progress::OperationStats;
-use super::super::repo::find_repo_root;
+use crate::progress::{OperationStats, ProgressTracker};
+use super::super::repo::{find_repo_root, create_storage_backend};
 
 /// Validate a ref name for safety
 /// Ref names must not contain special characters that could cause filesystem issues
@@ -138,8 +136,7 @@ impl PushCmd {
         // Validate repository
         let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
-        let storage: Arc<dyn mediagit_storage::StorageBackend> =
-            Arc::new(LocalBackend::new(&storage_path).await?);
+        let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
 
         if self.dry_run {
@@ -294,17 +291,12 @@ impl PushCmd {
         }
 
         if !self.dry_run {
-            // Create progress bar for push
+            // Create progress bar for push using ProgressTracker
+            let tracker = ProgressTracker::new(self.quiet);
             let pb = if !self.quiet {
-                let pb = ProgressBar::new(100);
-                pb.set_style(
-                    ProgressStyle::default_bar()
-                        .template("{spinner:.green} [{bar:40.cyan/blue}] {msg}")
-                        .unwrap()
-                        .progress_chars("█▓░"),
-                );
-                pb.enable_steady_tick(Duration::from_millis(100));
-                Some(pb)
+                let bar = tracker.object_bar("Preparing push", 100);
+                bar.enable_steady_tick(Duration::from_millis(100));
+                Some(bar)
             } else {
                 None
             };

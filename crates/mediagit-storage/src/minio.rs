@@ -289,17 +289,15 @@ impl MinIOBackend {
             "MinIOBackend",
         );
 
-        // Load AWS configuration with behavior version for SDK compatibility
-        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .load()
-            .await;
-
-        // Build custom S3 configuration for MinIO
-        let s3_config = aws_sdk_s3::config::Builder::from(&aws_config)
+        // Build S3 configuration directly for MinIO/S3-compatible endpoints.
+        // We skip aws_config::defaults().load() to avoid IMDS region discovery
+        // which causes 2x 1-second timeouts in non-AWS environments.
+        let s3_config = aws_sdk_s3::config::Builder::new()
+            .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
             .endpoint_url(&config.endpoint)
             .credentials_provider(credentials)
             .force_path_style(config.path_style)
-            .region(aws_sdk_s3::config::Region::new("us-east-1")) // MinIO doesn't require region
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
             .build();
 
         let client = Client::from_conf(s3_config);

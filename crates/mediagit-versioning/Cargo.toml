@@ -23,6 +23,9 @@ tracing.workspace = true
 toml.workspace = true
 moka = { version = "0.12", features = ["future"] }
 uuid = { version = "1.11", features = ["v4"] }
+fastcdc = "3.2"
+num_cpus = "1.16"
+async-channel = "2.3"
 
 [dev-dependencies]
 tokio-test.workspace = true
