@@ -2,13 +2,12 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Parser;
 use console::style;
-use mediagit_storage::LocalBackend;
-use mediagit_versioning::{Commit, MergeStrategy, RefDatabase, Signature};
+use mediagit_versioning::{CheckoutManager, Commit, MergeStrategy, RefDatabase, Signature};
 use std::sync::Arc;
 use std::time::Instant;
 use crate::progress::{ProgressTracker, OperationStats};
 use super::rebase::RebaseCmd;
-use super::super::repo::find_repo_root;
+use super::super::repo::{find_repo_root, create_storage_backend};
 
 /// Fetch and integrate remote changes
 ///
@@ -90,8 +89,7 @@ impl PullCmd {
         // Validate repository
         let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
-        let storage: Arc<dyn mediagit_storage::StorageBackend> =
-            Arc::new(LocalBackend::new(&storage_path).await?);
+        let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
 
         if self.dry_run {
@@ -266,13 +264,15 @@ impl PullCmd {
             // Download chunked objects (large files)
             if !chunked_oids.is_empty() {
                 let chunk_pb = progress.object_bar("Downloading large files", chunked_oids.len() as u64);
-                
-                // Download with simple logging callback (no progress bar in closure)
-                let chunks_downloaded = client.download_chunked_objects(&odb, &chunked_oids, |_current, _total, _msg| {
-                    // Progress tracking handled outside closure
+
+                let chunk_pb_ref = chunk_pb.clone();
+                let chunks_downloaded = client.download_chunked_objects(&odb, &chunked_oids, move |current, _total, _msg| {
+                    chunk_pb_ref.set_position(current as u64);
                 }).await?;
 
                 chunk_pb.finish_with_message("Download complete");
+
+                stats.objects_received += chunks_downloaded as u64;
 
                 if !self.quiet {
                     println!(
@@ -404,6 +404,13 @@ impl PullCmd {
                         refdb.write(&head_ref).await?;
                     }
 
+                    // Checkout working directory to match new HEAD
+                    let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
+                    let files_count = checkout_mgr.checkout_commit(&remote_oid_parsed).await?;
+                    if self.verbose {
+                        println!("  Checked out {} files", files_count);
+                    }
+
                     if !self.quiet {
                         println!(
                             "{} Fast-forwarded to {}",
@@ -461,6 +468,13 @@ impl PullCmd {
                             refdb.write(&head_ref).await?;
                         }
 
+                        // Checkout working directory to match merge result
+                        let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
+                        let files_count = checkout_mgr.checkout_commit(&commit_oid).await?;
+                        if self.verbose {
+                            println!("  Checked out {} files", files_count);
+                        }
+
                         if !self.quiet {
                             let commit_hex = commit_oid.to_hex();
                             println!(
@@ -485,6 +499,13 @@ impl PullCmd {
                         // HEAD is detached, update HEAD directly
                         let head_ref = mediagit_versioning::Ref::new_direct("HEAD".to_string(), remote_oid_parsed);
                         refdb.write(&head_ref).await?;
+                    }
+
+                    // Checkout working directory to match new HEAD
+                    let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
+                    let files_count = checkout_mgr.checkout_commit(&remote_oid_parsed).await?;
+                    if self.verbose {
+                        println!("  Checked out {} files", files_count);
                     }
 
                     if !self.quiet {

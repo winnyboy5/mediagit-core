@@ -106,6 +106,15 @@ pub struct S3Config {
     /// Optional custom S3 endpoint (for S3-compatible services like MinIO)
     pub endpoint: Option<String>,
 
+    /// Optional AWS region (for custom endpoints)
+    pub region: Option<String>,
+
+    /// Optional access key ID (for custom endpoints)
+    pub access_key_id: Option<String>,
+
+    /// Optional secret access key (for custom endpoints)
+    pub secret_access_key: Option<String>,
+
     /// Multipart upload part size in bytes (default: 100MB)
     pub part_size: u64,
 
@@ -124,6 +133,9 @@ impl Default for S3Config {
         S3Config {
             bucket: String::new(),
             endpoint: None,
+            region: None,
+            access_key_id: None,
+            secret_access_key: None,
             part_size: 100 * 1024 * 1024, // 100MB default
             max_concurrent_parts: 8,
             max_retries: 3,
@@ -229,19 +241,31 @@ impl S3Backend {
     /// # }
     /// ```
     pub async fn with_config(config: S3Config) -> Result<Self> {
-        // Load AWS configuration with behavior version latest for stability
-        let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .load()
-            .await;
-
-        // Override endpoint if provided (for S3-compatible services)
+        // Override endpoint if provided (for S3-compatible services like MinIO)
+        // Skip aws_config::defaults().load() for custom endpoints to avoid IMDS timeouts
         let client = if let Some(endpoint) = &config.endpoint {
             debug!("Using custom S3 endpoint: {}", endpoint);
-            let s3_config = aws_sdk_s3::config::Builder::from(&sdk_config)
+            let mut builder = aws_sdk_s3::config::Builder::new()
+                .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
                 .endpoint_url(endpoint.clone())
-                .build();
-            Client::from_conf(s3_config)
+                .force_path_style(true);
+            if let Some(region) = &config.region {
+                builder = builder.region(aws_sdk_s3::config::Region::new(region.clone()));
+            } else {
+                builder = builder.region(aws_sdk_s3::config::Region::new("us-east-1"));
+            }
+            if let (Some(key_id), Some(secret)) = (&config.access_key_id, &config.secret_access_key) {
+                let credentials = aws_sdk_s3::config::Credentials::new(
+                    key_id, secret, None, None, "S3Backend",
+                );
+                builder = builder.credentials_provider(credentials);
+            }
+            Client::from_conf(builder.build())
         } else {
+            // Real AWS S3 - use standard config loading (IMDS is expected)
+            let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                .load()
+                .await;
             Client::new(&sdk_config)
         };
 
@@ -257,9 +281,9 @@ impl S3Backend {
             ))?;
 
         debug!(
-            "Successfully connected to S3 bucket: {} with region: {:?}",
+            "Successfully connected to S3 bucket: {} with endpoint: {:?}",
             config.bucket,
-            sdk_config.region()
+            config.endpoint.as_deref().unwrap_or("AWS default")
         );
 
         Ok(S3Backend {

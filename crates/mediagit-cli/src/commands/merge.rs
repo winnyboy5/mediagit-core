@@ -1,10 +1,9 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
-use mediagit_storage::LocalBackend;
-use mediagit_versioning::{CheckoutManager, Commit, MergeEngine, MergeStrategy, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Signature};
+use mediagit_versioning::{CheckoutManager, Commit, MergeEngine, MergeStrategy, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Reflog, ReflogEntry, Signature};
 use std::sync::Arc;
-use super::super::repo::find_repo_root;
+use super::super::repo::{find_repo_root, create_storage_backend};
 
 /// Merge branches
 ///
@@ -98,8 +97,7 @@ impl MergeCmd {
         // Find repository root
         let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
-        let storage: Arc<dyn mediagit_storage::StorageBackend> =
-            Arc::new(LocalBackend::new(&storage_path).await?);
+        let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
         let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
 
@@ -176,6 +174,12 @@ impl MergeCmd {
                     checkout_mgr.checkout_commit(&their_oid).await
                         .context("Failed to update working directory after fast-forward merge")?;
 
+                    // Record reflog entry
+                    let reflog = Reflog::new(&storage_path);
+                    let reflog_msg = format!("merge {}: fast-forward", self.branch);
+                    let entry = ReflogEntry::now(our_oid, their_oid, "user", "user@mediagit", &reflog_msg);
+                    let _ = reflog.append("HEAD", &entry).await;
+
                     return Ok(());
                 } else if self.ff_only {
                     anyhow::bail!("Fast-forward only requested but not possible");
@@ -249,6 +253,12 @@ impl MergeCmd {
             let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
             checkout_mgr.checkout_commit(&commit_oid).await
                 .context("Failed to update working directory after merge commit")?;
+
+            // Record reflog entry
+            let reflog = Reflog::new(&storage_path);
+            let reflog_msg = format!("merge {}: merge commit", self.branch);
+            let entry = ReflogEntry::now(our_oid, commit_oid, "user", "user@mediagit", &reflog_msg);
+            let _ = reflog.append("HEAD", &entry).await;
 
             if !self.quiet {
                 println!(
@@ -373,7 +383,7 @@ impl MergeCmd {
             anyhow::bail!("No changes staged. Use 'add' to stage resolved files.");
         }
 
-        let storage = Arc::new(mediagit_storage::LocalBackend::new(&mediagit_dir).await?);
+        let storage = create_storage_backend(&repo_root).await?;
         let odb = mediagit_versioning::ObjectDatabase::with_smart_compression(storage, 1000);
 
         let mut tree = mediagit_versioning::Tree::new();
@@ -409,6 +419,12 @@ impl MergeCmd {
 
         // Update HEAD (force=false, safe update)
         refdb.update("HEAD", commit_oid, false).await?;
+
+        // Record reflog
+        let reflog = Reflog::new(&mediagit_dir);
+        let reflog_msg = format!("merge: continue (resolved conflicts)");
+        let entry = ReflogEntry::now(current_oid, commit_oid, "user", "user@mediagit", &reflog_msg);
+        let _ = reflog.append("HEAD", &entry).await;
 
         // Clean up merge state after successful commit
         if merge_head_path.exists() {

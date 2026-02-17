@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use crate::progress::{ProgressTracker, OperationStats};
-use mediagit_storage::LocalBackend;
+use crate::repo::create_storage_backend;
 use mediagit_versioning::{
     CheckoutManager, ObjectDatabase, RefDatabase,
 };
@@ -112,8 +112,7 @@ url = "{}"
 
         // Step 4: Initialize storage and fetch
         init_spinner.set_message("Connecting to remote...");
-        let storage: Arc<dyn mediagit_storage::StorageBackend> =
-            Arc::new(LocalBackend::new(&storage_path).await?);
+        let storage = create_storage_backend(&target_dir).await?;
         let odb = Arc::new(ObjectDatabase::with_smart_compression(
             Arc::clone(&storage),
             1000,
@@ -152,11 +151,13 @@ url = "{}"
         if !chunked_oids.is_empty() {
             let chunk_pb = progress.object_bar("Downloading large files", chunked_oids.len() as u64);
 
-            let chunks_downloaded = client.download_chunked_objects(&odb, &chunked_oids, |_current, _total, _msg| {
-                // Progress tracking handled by chunk_pb
+            let chunk_pb_ref = chunk_pb.clone();
+            let chunks_downloaded = client.download_chunked_objects(&odb, &chunked_oids, move |current, _total, _msg| {
+                chunk_pb_ref.set_position(current as u64);
             }).await?;
 
             chunk_pb.finish_with_message("Download complete");
+            stats.objects_received += chunks_downloaded as u64;
 
             if self.verbose {
                 println!("  Downloaded {} chunks for {} large files", chunks_downloaded, chunked_oids.len());

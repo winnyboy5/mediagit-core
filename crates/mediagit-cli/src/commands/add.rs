@@ -5,17 +5,13 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
-use mediagit_storage::LocalBackend;
-use mediagit_versioning::{ChunkStrategy, Commit, Index, IndexEntry, ObjectDatabase, ObjectType, Oid, RefDatabase, StorageConfig, Tree};
-use super::super::repo::find_repo_root;
+use mediagit_versioning::{ChunkStrategy, Commit, Index, IndexEntry, ObjectDatabase, ObjectType, Oid, RefDatabase, Tree};
+use super::super::repo::{find_repo_root, create_storage_backend};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-
-// Cross-platform path canonicalization that handles Windows \\?\ prefix
-// On Windows: returns simplified paths without \\?\ prefix when possible
-// On Linux/macOS: compiles to std::fs::canonicalize()
 
 /// Add file contents to the staging area
 ///
@@ -34,6 +30,9 @@ use std::time::Duration;
 
     # Preview what would be staged
     mediagit add --dry-run *.psd
+
+    # Control parallelism
+    mediagit add -j 4 *.psd
 
 SEE ALSO:
     mediagit-status(1), mediagit-commit(1), mediagit-reset(1)")]
@@ -81,6 +80,23 @@ pub struct AddCmd {
     /// Disable delta compression (delta is enabled by default for suitable files)
     #[arg(long)]
     pub no_delta: bool,
+
+    /// Disable parallel file processing (process files sequentially)
+    #[arg(long)]
+    pub no_parallel: bool,
+
+    /// Number of parallel worker threads (default: number of CPU cores, max 8)
+    #[arg(short = 'j', long = "jobs")]
+    pub jobs: Option<usize>,
+}
+
+/// Result from processing a single file in parallel
+struct FileResult {
+    relative_path: PathBuf,
+    oid: Oid,
+    file_size: u64,
+    mode: u32,
+    mtime: Option<u64>,
 }
 
 impl AddCmd {
@@ -98,24 +114,19 @@ impl AddCmd {
             output::progress("Staging files...");
         }
 
-        // Initialize storage and ODB with smart compression
+        // Initialize storage backend from config (supports S3, Azure, GCS, filesystem)
         let storage_path = repo_root.join(".mediagit");
-        let storage: Arc<dyn mediagit_storage::StorageBackend> =
-            Arc::new(LocalBackend::new(&storage_path).await?);
+        let storage = create_storage_backend(&repo_root).await?;
 
-        // Check if optimizations are enabled
-        let _config = StorageConfig::from_env();
-        // Delta is enabled by default, can be disabled with --no-delta
         let delta_enabled = !self.no_delta;
 
-        // Create ODB with chunking always enabled (per-file decisions made by should_use_chunking)
         let odb = ObjectDatabase::with_optimizations(
             storage,
             1000,
             Some(ChunkStrategy::MediaAware),
             delta_enabled
         );
-        
+
         if !self.quiet && self.verbose {
             output::info("Auto-chunking enabled for large files");
         }
@@ -123,31 +134,39 @@ impl AddCmd {
         // Load the index
         let mut index = Index::load(&repo_root)?;
 
+        // Build index lookup for stat-cache change detection (size + mtime)
+        let index_files: Arc<HashMap<PathBuf, (u64, Option<u64>)>> = {
+            let mut map = HashMap::new();
+            for entry in index.entries() {
+                map.insert(entry.path.clone(), (entry.size, entry.mtime));
+            }
+            Arc::new(map)
+        };
+
         // Get HEAD commit tree to identify already-tracked files
-        // This allows us to skip files that haven't changed since the last commit
         let refdb = RefDatabase::new(&storage_path);
-        let mut head_files: HashMap<PathBuf, Oid> = HashMap::new();
-        
-        if let Ok(head_oid) = refdb.resolve("HEAD").await {
-            if let Ok(commit_data) = odb.read(&head_oid).await {
-                if let Ok(commit) = bincode::deserialize::<Commit>(&commit_data) {
-                    if let Ok(tree_data) = odb.read(&commit.tree).await {
-                        if let Ok(tree) = bincode::deserialize::<Tree>(&tree_data) {
-                            for entry in tree.iter() {
-                                head_files.insert(PathBuf::from(&entry.name), entry.oid);
+        let head_files: Arc<HashMap<PathBuf, Oid>> = {
+            let mut files = HashMap::new();
+            if let Ok(head_oid) = refdb.resolve("HEAD").await {
+                if let Ok(commit_data) = odb.read(&head_oid).await {
+                    if let Ok(commit) = bincode::deserialize::<Commit>(&commit_data) {
+                        if let Ok(tree_data) = odb.read(&commit.tree).await {
+                            if let Ok(tree) = bincode::deserialize::<Tree>(&tree_data) {
+                                for entry in tree.iter() {
+                                    files.insert(PathBuf::from(&entry.name), entry.oid);
+                                }
                             }
                         }
                     }
                 }
             }
-        }
+            Arc::new(files)
+        };
 
         // Expand paths (globs, directories) into file list
         let files_to_add = self.expand_paths(&repo_root)?;
 
-        // Note: Don't bail early if files_to_add is empty - we may still have deletions to stage
-
-        // Calculate total bytes for progress bar (only if not quiet and files exist)
+        // Calculate total bytes for progress bar
         let (total_files, total_bytes) = if !self.quiet && !files_to_add.is_empty() {
             let mut bytes = 0u64;
             for f in &files_to_add {
@@ -160,7 +179,7 @@ impl AddCmd {
             (files_to_add.len() as u64, 0)
         };
 
-        // Create progress bar for staging
+        // Create progress bar
         let progress_bar = if !self.quiet && !self.dry_run && total_files > 0 {
             let pb = ProgressBar::new(total_bytes);
             pb.set_style(
@@ -171,176 +190,194 @@ impl AddCmd {
             );
             pb.enable_steady_tick(Duration::from_millis(100));
             pb.set_message(format!("0/{} files", total_files));
-            Some(pb)
+            Some(Arc::new(pb))
         } else {
             None
         };
 
-        let mut added_count = 0;
-        let mut skipped_count = 0;
-        let mut processed_bytes = 0u64;
+        // Atomic counters for thread-safe progress
+        let progress_bytes = Arc::new(AtomicU64::new(0));
+        let progress_files = Arc::new(AtomicU64::new(0));
 
-        for file_path in &files_to_add {
-            if !self.dry_run {
-                // Get file metadata FIRST to check size
-                let metadata = tokio::fs::metadata(file_path)
-                    .await
-                    .context(format!("Failed to read file metadata: {}", file_path.display()))?;
-                
-                let file_size = metadata.len();
-                const STREAMING_THRESHOLD: u64 = 100 * 1024 * 1024; // 100MB
+        let use_parallel = !self.no_parallel && files_to_add.len() > 1;
 
-                // Get relative path early so we can check against HEAD
-                let relative_path = file_path.strip_prefix(&repo_root)
-                    .unwrap_or(file_path)
-                    .to_path_buf();
-                
-                // Get filename for type detection
-                let filename = file_path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("");
+        if use_parallel && !self.quiet && self.verbose {
+            let worker_count = self.jobs.unwrap_or_else(|| num_cpus::get().min(8));
+            output::info(&format!("Parallel mode: {} concurrent files", worker_count));
+        }
 
-                // Choose streaming vs in-memory based on file size
-                let (_content_oid, oid) = if file_size >= STREAMING_THRESHOLD {
-                    // STREAMING PATH: Files >= 100MB
-                    // Use streaming hash (constant memory)
-                    let content_oid = Oid::from_file_async(file_path).await
-                        .context(format!("Failed to hash file: {}", file_path.display()))?;
-                    
-                    // Check if file is unchanged from HEAD
-                    if let Some(head_oid) = head_files.get(&relative_path) {
-                        if *head_oid == content_oid {
-                            skipped_count += 1;
-                            if self.verbose {
-                                output::detail("skipped (unchanged)", &relative_path.display().to_string());
+        let mut added_count = 0u64;
+        let mut skipped_count = 0u64;
+
+        if !self.dry_run && !files_to_add.is_empty() {
+            if use_parallel {
+                // --- PARALLEL FILE PROCESSING ---
+                let max_concurrent = self.jobs.unwrap_or_else(|| num_cpus::get().min(8));
+                let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+
+                let mut file_tasks = tokio::task::JoinSet::new();
+                let skipped = Arc::new(AtomicU64::new(0));
+
+                for file_path in files_to_add.iter().cloned() {
+                    let sem = semaphore.clone();
+                    let odb = odb.clone();
+                    let head_files = head_files.clone();
+                    let index_files = index_files.clone();
+                    let repo_root = repo_root.clone();
+                    let progress_bytes = progress_bytes.clone();
+                    let progress_files = progress_files.clone();
+                    let progress_bar = progress_bar.clone();
+                    let total_files = total_files;
+                    let skipped = skipped.clone();
+                    let delta_enabled = delta_enabled;
+
+                    file_tasks.spawn(async move {
+                        let _permit = sem.acquire().await
+                            .map_err(|_| anyhow::anyhow!("Semaphore closed"))?;
+
+                        let result = Self::process_single_file(
+                            &file_path,
+                            &repo_root,
+                            &odb,
+                            &head_files,
+                            &index_files,
+                            delta_enabled,
+                        ).await;
+
+                        match result {
+                            Ok(Some(file_result)) => {
+                                // Update progress
+                                progress_bytes.fetch_add(file_result.file_size, Ordering::Relaxed);
+                                let done = progress_files.fetch_add(1, Ordering::Relaxed) + 1;
+                                if let Some(ref pb) = progress_bar {
+                                    pb.set_position(progress_bytes.load(Ordering::Relaxed));
+                                    pb.set_message(format!("{}/{} files", done, total_files));
+                                }
+                                Ok(Some(file_result))
                             }
-                            continue;
-                        }
-                    }
-                    
-                    if self.verbose {
-                        output::detail(
-                            "streaming",
-                            &format!("{} ({:.2} MB)", file_path.display(), file_size as f64 / 1_048_576.0)
-                        );
-                    }
-                    
-                    // Use streaming chunked write (constant memory)
-                    let oid = odb.write_chunked_from_file(file_path, filename)
-                        .await
-                        .context("Failed to write chunked object (streaming)")?;
-                    
-                    (content_oid, oid)
-                } else {
-                    // IN-MEMORY PATH: Files < 100MB (faster for small files)
-                    let content = tokio::fs::read(file_path)
-                        .await
-                        .context(format!("Failed to read file: {}", file_path.display()))?;
-                    
-                    let content_oid = Oid::hash(&content);
-                    
-                    // Check if file is unchanged from HEAD
-                    if let Some(head_oid) = head_files.get(&relative_path) {
-                        if *head_oid == content_oid {
-                            skipped_count += 1;
-                            if self.verbose {
-                                output::detail("skipped (unchanged)", &relative_path.display().to_string());
+                            Ok(None) => {
+                                // Skipped (unchanged)
+                                skipped.fetch_add(1, Ordering::Relaxed);
+                                let done = progress_files.fetch_add(1, Ordering::Relaxed) + 1;
+                                if let Some(ref pb) = progress_bar {
+                                    pb.set_message(format!("{}/{} files", done, total_files));
+                                }
+                                Ok(None)
                             }
-                            continue;
+                            Err(e) => Err(e),
                         }
-                    }
-                    
-                    // Intelligent feature selection based on file type and size
-                    let oid = if Self::should_use_chunking(content.len(), filename) {
-                        if self.verbose {
-                            output::detail(
-                                "chunking",
-                                &format!("{} ({:.2} MB)", file_path.display(), content.len() as f64 / 1_048_576.0)
-                            );
-                        }
-                        odb.write_chunked(ObjectType::Blob, &content, filename)
-                            .await
-                            .context("Failed to write chunked object")?
-                    } else if delta_enabled && Self::should_use_delta(filename, &content) {
-                        if self.verbose {
-                            output::detail(
-                                "delta",
-                                &format!("{} ({:.2} MB)", file_path.display(), content.len() as f64 / 1_048_576.0)
-                            );
-                        }
-                        odb.write_with_delta(ObjectType::Blob, &content, filename)
-                            .await
-                            .context("Failed to write object with delta")?
-                    } else {
-                        odb.write_with_path(ObjectType::Blob, &content, filename)
-                            .await
-                            .context("Failed to write object")?
-                    };
-                    
-                    (content_oid, oid)
-                };
-
-                let mode = if cfg!(unix) {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        metadata.permissions().mode()
-                    }
-                    #[cfg(not(unix))]
-                    0o100644
-                } else {
-                    0o100644
-                };
-
-                let entry = IndexEntry::new(
-                    relative_path.clone(),
-                    oid,
-                    mode,
-                    metadata.len()
-                );
-                index.add_entry(entry);
-
-                if self.verbose {
-                    output::detail("added", &format!("{} ({})", file_path.display(), oid));
+                    });
                 }
 
-                added_count += 1;
-
-                // Update progress bar
-                processed_bytes += file_size;
-                if let Some(ref pb) = progress_bar {
-                    pb.set_position(processed_bytes);
-                    pb.set_message(format!("{}/{} files", added_count + skipped_count, total_files));
+                // Collect results and update index
+                while let Some(result) = file_tasks.join_next().await {
+                    match result {
+                        Ok(Ok(Some(file_result))) => {
+                            let entry = IndexEntry::new(
+                                file_result.relative_path,
+                                file_result.oid,
+                                file_result.mode,
+                                file_result.file_size,
+                                file_result.mtime,
+                            );
+                            index.add_entry(entry);
+                            added_count += 1;
+                        }
+                        Ok(Ok(None)) => {
+                            // Skipped
+                        }
+                        Ok(Err(e)) => {
+                            if !self.force {
+                                return Err(e);
+                            }
+                            if !self.quiet {
+                                output::warning(&format!("Error staging file: {}", e));
+                            }
+                        }
+                        Err(e) => {
+                            if !self.force {
+                                return Err(anyhow::anyhow!("Task panicked: {}", e));
+                            }
+                        }
+                    }
                 }
+
+                skipped_count = skipped.load(Ordering::Relaxed);
             } else {
-                // Dry run - still count but don't actually add
-                added_count += 1;
+                // --- SEQUENTIAL FILE PROCESSING (fallback / --no-parallel) ---
+                for file_path in &files_to_add {
+                    let result = Self::process_single_file(
+                        file_path,
+                        &repo_root,
+                        &odb,
+                        &head_files,
+                        &index_files,
+                        delta_enabled,
+                    ).await;
+
+                    match result {
+                        Ok(Some(file_result)) => {
+                            if self.verbose {
+                                output::detail("added", &format!("{} ({})", file_path.display(), file_result.oid));
+                            }
+
+                            let entry = IndexEntry::new(
+                                file_result.relative_path,
+                                file_result.oid,
+                                file_result.mode,
+                                file_result.file_size,
+                                file_result.mtime,
+                            );
+                            index.add_entry(entry);
+                            added_count += 1;
+
+                            progress_bytes.fetch_add(file_result.file_size, Ordering::Relaxed);
+                            let done = progress_files.fetch_add(1, Ordering::Relaxed) + 1;
+                            if let Some(ref pb) = progress_bar {
+                                pb.set_position(progress_bytes.load(Ordering::Relaxed));
+                                pb.set_message(format!("{}/{} files", done, total_files));
+                            }
+                        }
+                        Ok(None) => {
+                            skipped_count += 1;
+                            if self.verbose {
+                                output::detail("skipped (unchanged)", &file_path.display().to_string());
+                            }
+                        }
+                        Err(e) => {
+                            if !self.force {
+                                return Err(e);
+                            }
+                            if !self.quiet {
+                                output::warning(&format!("Error staging file: {}", e));
+                            }
+                        }
+                    }
+                }
             }
+        } else if self.dry_run {
+            added_count = files_to_add.len() as u64;
         }
 
         // Detect deleted files: files in HEAD but not in working directory
         let mut deleted_count = 0;
-        
-        // Build a set of existing working directory files for fast lookup
+
         let working_files: std::collections::HashSet<PathBuf> = files_to_add
             .iter()
             .filter_map(|p| p.strip_prefix(&repo_root).ok())
             .map(|p| p.to_path_buf())
             .collect();
 
-        // Check each file in HEAD - if it doesn't exist in working dir, it's deleted
-        for (head_path, _head_oid) in &head_files {
-            // Normalize path separators for cross-platform comparison
+        for (head_path, _head_oid) in head_files.as_ref() {
             let head_path_normalized = PathBuf::from(
                 head_path.to_string_lossy().replace('\\', "/")
             );
-            
+
             let exists_in_working_dir = working_files.iter().any(|wp| {
                 wp.to_string_lossy().replace('\\', "/") == head_path_normalized.to_string_lossy()
             });
 
             if !exists_in_working_dir {
-                // Check if file actually doesn't exist on disk (not just filtered out)
                 let full_path = repo_root.join(head_path);
                 if !full_path.exists() {
                     if !self.dry_run {
@@ -379,7 +416,6 @@ impl AddCmd {
                 if skipped_count > 0 {
                     output::info("No new or modified files to stage");
                 } else if head_files.is_empty() && files_to_add.is_empty() {
-                    // If explicit paths were provided but nothing was staged, return an error
                     if !self.paths.is_empty() && !self.all {
                         anyhow::bail!("No files were staged");
                     }
@@ -391,12 +427,130 @@ impl AddCmd {
         Ok(())
     }
 
-    /// Check if path is outside .mediagit directory
+    /// Process a single file: hash, check HEAD, write to ODB
     ///
-    /// Returns true if the path is valid and not inside .mediagit.
-    /// Uses dunce::canonicalize for cross-platform compatibility:
-    /// - On Windows: returns paths without \\?\ prefix for reliable comparison
-    /// - On Linux/macOS: equivalent to std::fs::canonicalize
+    /// Returns `Ok(Some(FileResult))` if file was staged,
+    /// `Ok(None)` if file was skipped (unchanged from HEAD),
+    /// `Err` on failure.
+    async fn process_single_file(
+        file_path: &Path,
+        repo_root: &Path,
+        odb: &ObjectDatabase,
+        head_files: &HashMap<PathBuf, Oid>,
+        index_files: &HashMap<PathBuf, (u64, Option<u64>)>,
+        delta_enabled: bool,
+    ) -> Result<Option<FileResult>> {
+        let metadata = tokio::fs::metadata(file_path)
+            .await
+            .context(format!("Failed to read file metadata: {}", file_path.display()))?;
+
+        let file_size = metadata.len();
+        const STREAMING_THRESHOLD: u64 = 100 * 1024 * 1024; // 100MB
+
+        let relative_path = file_path.strip_prefix(repo_root)
+            .unwrap_or(file_path)
+            .to_path_buf();
+
+        // Stat-cache check: skip if file hasn't changed since last staging
+        let file_mtime = metadata.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+
+        if let Some(&(idx_size, Some(idx_mtime))) = index_files.get(&relative_path) {
+            if idx_size == file_size {
+                if let Some(current_mtime) = file_mtime {
+                    if idx_mtime == current_mtime {
+                        return Ok(None); // Unchanged since last staging
+                    }
+                }
+            }
+        }
+
+        let filename = file_path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+
+        // Seed similarity detector from previous version's manifest
+        if let Some(head_oid) = head_files.get(&relative_path) {
+            if let Ok(Some(old_manifest)) = odb.get_chunk_manifest(head_oid).await {
+                let _ = odb.seed_similarity_from_manifest(&old_manifest).await;
+            }
+        }
+
+        // Choose streaming vs in-memory based on file size
+        let (_content_oid, oid) = if file_size >= STREAMING_THRESHOLD {
+            // STREAMING PATH: Files >= 100MB (parallel internally)
+            let content_oid = Oid::from_file_async(file_path).await
+                .context(format!("Failed to hash file: {}", file_path.display()))?;
+
+            // Check if unchanged from HEAD
+            if let Some(head_oid) = head_files.get(&relative_path) {
+                if *head_oid == content_oid {
+                    return Ok(None);
+                }
+            }
+
+            let oid = odb.write_chunked_from_file(file_path, filename)
+                .await
+                .context("Failed to write chunked object (streaming)")?;
+
+            (content_oid, oid)
+        } else {
+            // IN-MEMORY PATH: Files < 100MB
+            let content = tokio::fs::read(file_path)
+                .await
+                .context(format!("Failed to read file: {}", file_path.display()))?;
+
+            let content_oid = Oid::hash(&content);
+
+            // Check if unchanged from HEAD
+            if let Some(head_oid) = head_files.get(&relative_path) {
+                if *head_oid == content_oid {
+                    return Ok(None);
+                }
+            }
+
+            // Use parallel chunking for large files, sequential for small
+            let oid = if Self::should_use_chunking(content.len(), filename) {
+                odb.write_chunked_parallel(ObjectType::Blob, &content, filename)
+                    .await
+                    .context("Failed to write chunked object")?
+            } else if delta_enabled && Self::should_use_delta(filename, &content) {
+                odb.write_with_delta(ObjectType::Blob, &content, filename)
+                    .await
+                    .context("Failed to write object with delta")?
+            } else {
+                odb.write_with_path(ObjectType::Blob, &content, filename)
+                    .await
+                    .context("Failed to write object")?
+            };
+
+            (content_oid, oid)
+        };
+
+        let mode = if cfg!(unix) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                metadata.permissions().mode()
+            }
+            #[cfg(not(unix))]
+            0o100644
+        } else {
+            0o100644
+        };
+
+        Ok(Some(FileResult {
+            relative_path,
+            oid,
+            file_size,
+            mode,
+            mtime: file_mtime,
+        }))
+    }
+
+    /// Check if path is outside .mediagit directory
     fn is_outside_mediagit(path: &Path, mediagit_dir: &Path) -> bool {
         if let Ok(abs_path) = dunce::canonicalize(path) {
             !abs_path.starts_with(mediagit_dir)
@@ -410,8 +564,6 @@ impl AddCmd {
         use crate::output;
 
         let mut files = Vec::new();
-        // Use dunce::canonicalize for cross-platform path comparison
-        // This handles Windows \\?\ prefix and works correctly on all platforms
         let mediagit_dir = dunce::canonicalize(repo_root.join(".mediagit"))
             .unwrap_or_else(|_| repo_root.join(".mediagit"));
 
@@ -446,7 +598,6 @@ impl AddCmd {
                 continue;
             }
 
-            // Check if path exists
             if !path.exists() {
                 if !self.force {
                     output::warning(&format!("Path does not exist: {}", path_str));
@@ -454,12 +605,9 @@ impl AddCmd {
                 continue;
             }
 
-            // Handle files
             if path.is_file() && Self::is_outside_mediagit(path, &mediagit_dir) {
                 files.push(path.to_path_buf());
-            }
-            // Handle directories - recurse
-            else if path.is_dir() {
+            } else if path.is_dir() {
                 self.collect_files_recursive(path, &mediagit_dir, &mut files)?;
             }
         }
@@ -474,7 +622,6 @@ impl AddCmd {
         mediagit_dir: &Path,
         files: &mut Vec<PathBuf>,
     ) -> Result<()> {
-        // Skip .mediagit directory using helper
         if !Self::is_outside_mediagit(dir, mediagit_dir) {
             return Ok(());
         }
@@ -486,14 +633,11 @@ impl AddCmd {
             let entry = entry?;
             let path = entry.path();
 
-            // Skip .mediagit directory and its contents
             if !Self::is_outside_mediagit(&path, mediagit_dir) {
                 continue;
             }
 
             if path.is_file() {
-                // Use dunce::canonicalize for cross-platform path normalization
-                // This avoids Windows \\?\ prefix issues while working on all platforms
                 if let Ok(abs_path) = dunce::canonicalize(&path) {
                     files.push(abs_path);
                 } else {
@@ -508,12 +652,6 @@ impl AddCmd {
     }
 
     /// Determine if file should use chunking based on size AND type
-    /// 
-    /// Auto-chunking thresholds:
-    /// - Text/CSV/ML Data: >5MB (excellent CDC dedup)
-    /// - Video/Audio: >5MB (structure-aware)
-    /// - PSD/3D Models: >5MB (Rolling CDC for dedup)
-    /// - Pre-compressed (JPG, ZIP): NEVER (no benefit)
     fn should_use_chunking(size: usize, filename: &str) -> bool {
         const MIN_SIZE_5MB: usize = 5 * 1024 * 1024;
         const MIN_SIZE_10MB: usize = 10 * 1024 * 1024;
@@ -530,25 +668,33 @@ impl AddCmd {
         match ext.to_lowercase().as_str() {
             // === TEXT/DATA: Excellent CDC dedup (5MB threshold) ===
             "csv" | "json" | "jsonl" | "txt" | "xml" | "yaml" | "yml" | "toml" => true,
-            
+
             // === ML DATA: Excellent dedup for incremental datasets (5MB) ===
             "parquet" | "arrow" | "feather" | "orc" | "avro" |
             "hdf5" | "h5" | "npy" | "npz" | "tfrecords" | "petastorm" => true,
-            
+
             // === ML MODELS: Good dedup for checkpoint files (5MB) ===
             "pt" | "pth" | "safetensors" | "ckpt" | "pb" | "onnx" |
             "gguf" | "ggml" | "tflite" | "keras" | "bin" => true,
-            
+
             // === VIDEO: Structure-aware chunking (5MB) ===
             "mp4" | "mov" | "avi" | "mkv" | "webm" | "flv" | "wmv" | "mpg" | "mpeg" | "m4v" | "3gp" => true,
-            
+
             // === UNCOMPRESSED IMAGES: Rolling CDC (5MB) ===
-            // PSD uses Rolling CDC for excellent layer-edit deduplication
             "psd" | "tif" | "tiff" | "bmp" | "exr" | "hdr" | "raw" => true,
-            
+
+            // === PDF-BASED CREATIVE FILES: CDC chunking (5MB) ===
+            "ai" | "ait" | "indd" | "idml" | "indt" | "eps" | "pdf" => true,
+
+            // === CREATIVE PROJECT FILES: CDC chunking (10MB) ===
+            "aep" | "prproj" | "drp" | "fcpbundle" => size > MIN_SIZE_10MB,
+
+            // === OFFICE DOCUMENTS: CDC chunking (5MB) ===
+            "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" => true,
+
             // === LOSSLESS AUDIO: Good dedup (10MB) ===
             "wav" | "flac" | "aiff" | "alac" => size > MIN_SIZE_10MB,
-            
+
             // === 3D MODELS: Good dedup (10MB) ===
             "glb" | "gltf" | "obj" | "fbx" | "blend" | "usd" | "usda" | "usdc" => size > MIN_SIZE_10MB,
 
@@ -559,7 +705,7 @@ impl AddCmd {
             "jpg" | "jpeg" | "png" | "webp" | "gif" | "avif" | "heic" |
             "mp3" | "aac" | "ogg" | "opus" |
             "zip" | "gz" | "bz2" | "xz" | "7z" | "rar" | "tar.gz" | "tgz" => false,
-            
+
             // === UNKNOWN: Conservative threshold (10MB) ===
             _ => size > MIN_SIZE_10MB,
         }

@@ -511,15 +511,7 @@ impl ProtocolClient {
             );
         }
 
-        // Create transaction for atomic writes
-        let storage = odb.storage().clone();
-        let temp_path = std::path::PathBuf::from(".mediagit/temp");
-        std::fs::create_dir_all(&temp_path)?;
-
-        let mut transaction = mediagit_versioning::PackTransaction::new(storage, &temp_path)
-            .context("Failed to create transaction")?;
-
-        // Stream response body and process pack
+        // Stream response body and write objects via ODB (ensures proper compression)
         use futures::stream::TryStreamExt;
         use tokio_util::io::StreamReader;
 
@@ -537,24 +529,18 @@ impl ProtocolClient {
 
         let mut object_count = 0;
         while let Some(result) = reader.next_object().await {
-            let (oid, obj_type, data) = result.context("Failed to read object from pack stream")?;
+            let (_oid, obj_type, data) = result.context("Failed to read object from pack stream")?;
 
-            transaction
-                .add_object(oid, obj_type, &data)
-                .await
-                .context("Failed to add object to transaction")?;
+            // Write through ODB to ensure proper compression and storage format.
+            // PackTransaction bypassed compression, causing read failures.
+            odb.write(obj_type, &data).await
+                .context("Failed to write object from pack")?;
 
             object_count += 1;
             if object_count % 100 == 0 {
                 tracing::debug!("Downloaded {} objects", object_count);
             }
         }
-
-        // Commit transaction
-        transaction
-            .commit()
-            .await
-            .context("Failed to commit transaction")?;
 
         tracing::info!("Successfully downloaded {} objects (streaming)", object_count);
 

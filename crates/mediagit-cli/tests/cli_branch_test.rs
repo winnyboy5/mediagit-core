@@ -348,8 +348,8 @@ fn test_branch_rename() {
     mediagit()
         .arg("branch")
         .arg("rename")
-        .arg("new-name")
         .arg("old-name")
+        .arg("new-name")
         .current_dir(temp_dir.path())
         .assert()
         .success();
