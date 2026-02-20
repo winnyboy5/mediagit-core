@@ -21,6 +21,10 @@ env:
   CARGO_TERM_COLOR: always
   RUST_VERSION: "1.91.0"
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # Plan the release - determines what needs to be built
   plan:
@@ -88,12 +92,6 @@ jobs:
             os: windows-2022
             archive-name: mediagit-${{ needs.plan.outputs.version }}-x86_64-windows.zip
 
-          # Windows ARM64
-          - target: aarch64-pc-windows-msvc
-            os: windows-2022
-            cross: true
-            archive-name: mediagit-${{ needs.plan.outputs.version }}-aarch64-windows.zip
-
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -104,34 +102,20 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           targets: ${{ matrix.target }}
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo build
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ matrix.target }}
 
       - name: Install cross (for ARM cross-compilation)
         if: matrix.cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
-      - name: Build release binary
+      - name: Build release binaries
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} --bin mediagit
+            cross build --release --target ${{ matrix.target }} --bin mediagit --bin mediagit-server
           else
-            cargo build --release --target ${{ matrix.target }} --bin mediagit
+            cargo build --release --target ${{ matrix.target }} --bin mediagit --bin mediagit-server
           fi
         shell: bash
 
@@ -139,7 +123,7 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../${{ matrix.archive-name }} mediagit
+          tar czf ../../../${{ matrix.archive-name }} mediagit mediagit-server
           cd ../../../
           shasum -a 256 ${{ matrix.archive-name }} > ${{ matrix.archive-name }}.sha256
 
@@ -147,7 +131,7 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          7z a ../../../${{ matrix.archive-name }} mediagit.exe
+          7z a ../../../${{ matrix.archive-name }} mediagit.exe mediagit-server.exe
           cd ../../../
           certUtil -hashfile ${{ matrix.archive-name }} SHA256 > ${{ matrix.archive-name }}.sha256
 
@@ -354,7 +338,6 @@ jobs:
           draft: false
           prerelease: ${{ needs.plan.outputs.is-prerelease }}
           fail_on_unmatched_files: true
-          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -372,20 +355,53 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
 
       - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          # Publish workspace crates in dependency order
-          cargo publish -p mediagit-config --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
-          cargo publish -p mediagit-security --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
-          cargo publish -p mediagit-observability --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
-          cargo publish -p mediagit-compression --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
-          cargo publish -p mediagit-storage --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
-          cargo publish -p mediagit-versioning --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
-          cargo publish -p mediagit-media --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
-          cargo publish -p mediagit-git --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
-          cargo publish -p mediagit-metrics --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
-          cargo publish -p mediagit-migration --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
-          cargo publish -p mediagit-cli --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
-        continue-on-error: true
+          # Helper: publish with retry (3 attempts, 60s pause between)
+          publish_crate() {
+            local crate="$1"
+            for i in 1 2 3; do
+              cargo publish -p "$crate" --token "$CARGO_REGISTRY_TOKEN" && return 0
+              echo "Attempt $i failed for $crate, retrying in 60s..."
+              sleep 60
+            done
+            echo "ERROR: Failed to publish $crate after 3 attempts"
+            return 1
+          }
+
+          # Tier 0 (no internal deps) — can publish in any order
+          publish_crate mediagit-config
+          sleep 30
+          publish_crate mediagit-security
+          sleep 30
+          publish_crate mediagit-observability
+          sleep 30
+          publish_crate mediagit-compression
+          sleep 30
+          publish_crate mediagit-storage
+          sleep 30
+          publish_crate mediagit-media
+          sleep 30
+          publish_crate mediagit-git
+          sleep 30
+
+          # Tier 1 (depends on Tier 0)
+          publish_crate mediagit-versioning
+          sleep 30
+          publish_crate mediagit-metrics
+          sleep 30
+          publish_crate mediagit-migration
+          sleep 30
+
+          # Tier 2 (depends on Tier 1)
+          publish_crate mediagit-protocol
+          sleep 30
+
+          # Tier 3 (depends on Tier 2)
+          publish_crate mediagit-server
+          sleep 30
+          publish_crate mediagit-cli
 
   # Build and publish Docker images
   docker:
@@ -424,6 +440,14 @@ jobs:
         with:
           pattern: binaries-*-linux-gnu
           path: docker-binaries
+
+      - name: Extract binaries from archives
+        run: |
+          mkdir -p docker-binaries/amd64 docker-binaries/arm64
+          tar xzf docker-binaries/binaries-x86_64-unknown-linux-gnu/mediagit-*-x86_64-linux.tar.gz \
+            -C docker-binaries/amd64/
+          tar xzf docker-binaries/binaries-aarch64-unknown-linux-gnu/mediagit-*-aarch64-linux.tar.gz \
+            -C docker-binaries/arm64/
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6

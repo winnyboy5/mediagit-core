@@ -35,7 +35,9 @@ jobs:
 
       - name: Install mdbook-mermaid
         run: |
-          cargo install mdbook-mermaid
+          MERMAID_VERSION="0.14.0"
+          curl -fsSL "https://github.com/badboy/mdbook-mermaid/releases/download/v${MERMAID_VERSION}/mdbook-mermaid-v${MERMAID_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar xz -C /usr/local/bin/
           mdbook-mermaid install book/
 
       - name: Build documentation
