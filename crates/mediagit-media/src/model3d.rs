@@ -93,6 +93,9 @@ pub enum Model3DFormat {
     Blend,
     Gltf,
     Glb,
+    Stl,
+    Usd,
+    Ply,
     Unknown,
 }
 
@@ -105,6 +108,9 @@ impl Model3DFormat {
             "blend" => Model3DFormat::Blend,
             "gltf" => Model3DFormat::Gltf,
             "glb" => Model3DFormat::Glb,
+            "stl" => Model3DFormat::Stl,
+            "usd" | "usda" | "usdc" | "usdz" => Model3DFormat::Usd,
+            "ply" => Model3DFormat::Ply,
             _ => Model3DFormat::Unknown,
         }
     }
@@ -206,6 +212,9 @@ impl Model3DParser {
             Model3DFormat::Fbx => self.parse_fbx(data).await,
             Model3DFormat::Blend => self.parse_blend(data).await,
             Model3DFormat::Gltf | Model3DFormat::Glb => self.parse_gltf(data).await,
+            Model3DFormat::Stl => self.parse_stl(data).await,
+            Model3DFormat::Usd => self.parse_usd(data, filename).await,
+            Model3DFormat::Ply => self.parse_ply(data).await,
             Model3DFormat::Unknown => Err(MediaError::UnsupportedFormat(
                 "Unknown 3D model format".to_string(),
             )),
@@ -482,6 +491,129 @@ impl Model3DParser {
         }
     }
 
+    /// Parse STL file (ASCII or binary)
+    #[instrument(skip(data))]
+    async fn parse_stl(&self, data: &[u8]) -> Result<Model3DInfo> {
+        debug!("Parsing STL file");
+
+        // Check if ASCII STL (starts with "solid")
+        let is_ascii = data.len() >= 5 && &data[0..5] == b"solid";
+
+        if is_ascii {
+            let content = String::from_utf8_lossy(data);
+            let face_count = content.matches("facet normal").count() as u64;
+            let vertex_count = face_count * 3; // Each facet has 3 vertices
+
+            Ok(Model3DInfo {
+                format: Model3DFormat::Stl,
+                vertex_count,
+                face_count,
+                object_count: 1,
+                materials: Vec::new(),
+                textures: Vec::new(),
+                bounding_box: None,
+                file_size: data.len() as u64,
+                has_animations: false,
+                has_rigging: false,
+            })
+        } else if data.len() >= 84 {
+            // Binary STL: 80-byte header + 4-byte triangle count
+            let face_count = u32::from_le_bytes([data[80], data[81], data[82], data[83]]) as u64;
+            let vertex_count = face_count * 3;
+
+            Ok(Model3DInfo {
+                format: Model3DFormat::Stl,
+                vertex_count,
+                face_count,
+                object_count: 1,
+                materials: Vec::new(),
+                textures: Vec::new(),
+                bounding_box: None,
+                file_size: data.len() as u64,
+                has_animations: false,
+                has_rigging: false,
+            })
+        } else {
+            Err(MediaError::InvalidStructure("File too small for STL".to_string()))
+        }
+    }
+
+    /// Parse USD/USDA/USDC/USDZ file
+    #[instrument(skip(data))]
+    async fn parse_usd(&self, data: &[u8], filename: &str) -> Result<Model3DInfo> {
+        debug!("Parsing USD file: {}", filename);
+
+        // USDZ is a zip archive; USDC is binary crate format; USDA is text
+        let ext = filename.split('.').last().unwrap_or("");
+        let is_usdz = ext.eq_ignore_ascii_case("usdz");
+        let is_usda = ext.eq_ignore_ascii_case("usda");
+
+        // Basic metadata extraction
+        let object_count = if is_usda {
+            let content = String::from_utf8_lossy(data);
+            content.matches("def Xform").count() as u32
+                + content.matches("def Mesh").count() as u32
+        } else {
+            1
+        };
+
+        Ok(Model3DInfo {
+            format: Model3DFormat::Usd,
+            vertex_count: 0,
+            face_count: 0,
+            object_count: object_count.max(1),
+            materials: Vec::new(),
+            textures: Vec::new(),
+            bounding_box: None,
+            file_size: data.len() as u64,
+            has_animations: !is_usdz, // USDZ is typically static
+            has_rigging: false,
+        })
+    }
+
+    /// Parse PLY file (ASCII or binary)
+    #[instrument(skip(data))]
+    async fn parse_ply(&self, data: &[u8]) -> Result<Model3DInfo> {
+        debug!("Parsing PLY file");
+
+        let header_end = data.windows(11)
+            .position(|w| w == b"end_header\n")
+            .or_else(|| data.windows(12).position(|w| w == b"end_header\r\n"));
+
+        if header_end.is_none() {
+            return Err(MediaError::InvalidStructure("No PLY header found".to_string()));
+        }
+
+        let header = String::from_utf8_lossy(&data[..header_end.unwrap()]);
+        let mut vertex_count = 0u64;
+        let mut face_count = 0u64;
+
+        for line in header.lines() {
+            if line.starts_with("element vertex ") {
+                vertex_count = line.split_whitespace().nth(2)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+            } else if line.starts_with("element face ") {
+                face_count = line.split_whitespace().nth(2)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+            }
+        }
+
+        Ok(Model3DInfo {
+            format: Model3DFormat::Ply,
+            vertex_count,
+            face_count,
+            object_count: 1,
+            materials: Vec::new(),
+            textures: Vec::new(),
+            bounding_box: None,
+            file_size: data.len() as u64,
+            has_animations: false,
+            has_rigging: false,
+        })
+    }
+
     /// Check if two 3D models can be auto-merged
     pub fn can_auto_merge(
         base: &Model3DInfo,
@@ -573,6 +705,12 @@ mod tests {
         assert_eq!(Model3DFormat::from_extension("blend"), Model3DFormat::Blend);
         assert_eq!(Model3DFormat::from_extension("gltf"), Model3DFormat::Gltf);
         assert_eq!(Model3DFormat::from_extension("glb"), Model3DFormat::Glb);
+        assert_eq!(Model3DFormat::from_extension("stl"), Model3DFormat::Stl);
+        assert_eq!(Model3DFormat::from_extension("usdz"), Model3DFormat::Usd);
+        assert_eq!(Model3DFormat::from_extension("usda"), Model3DFormat::Usd);
+        assert_eq!(Model3DFormat::from_extension("usdc"), Model3DFormat::Usd);
+        assert_eq!(Model3DFormat::from_extension("usd"), Model3DFormat::Usd);
+        assert_eq!(Model3DFormat::from_extension("ply"), Model3DFormat::Ply);
         assert_eq!(Model3DFormat::from_extension("unknown"), Model3DFormat::Unknown);
     }
 

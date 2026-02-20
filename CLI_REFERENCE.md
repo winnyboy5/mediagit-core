@@ -345,10 +345,12 @@ mediagit branch <SUBCOMMAND>
 
 **Examples:**
 ```bash
-mediagit branch list -a
+mediagit branch list -a              # List all local and remote branches
+mediagit branch list -r              # List remote-tracking branches only
 mediagit branch create feature/new-asset
 mediagit branch switch develop
 mediagit branch delete -D old-branch
+mediagit branch delete -r origin/stale-branch   # Delete local remote-tracking ref
 mediagit branch merge feature/complete --no-ff
 ```
 
@@ -474,7 +476,13 @@ mediagit push origin main         # Push specific branch
 mediagit push --all               # Push all branches
 mediagit push -u origin feature   # Set upstream
 mediagit push --force-with-lease  # Safe force push
+
+# Delete a remote branch (also removes local remote-tracking ref)
+mediagit push origin --delete feature/old-branch
 ```
+
+> **HEAD Protection**: You cannot delete the branch that is currently checked out on the remote
+> (typically `main` or `master`). The server will reject the deletion with a clear error message.
 
 ---
 
@@ -768,12 +776,21 @@ mediagit gc
 | `-q, --quiet` | Suppress output |
 | `-v, --verbose` | Detailed output |
 
+**GC performs three cleanup phases:**
+1. **Loose objects** — sweep unreachable objects not referenced by any branch, tag, or reflog
+2. **Chunk manifests** — remove manifests whose blob OID is no longer reachable
+3. **Chunks** — remove chunks not referenced by any surviving manifest (content-addressed, so shared chunks are preserved)
+
 **Examples:**
 ```bash
-mediagit gc
-mediagit gc --aggressive
-mediagit gc --prune=30 --dry-run
+mediagit gc                       # Standard garbage collection
+mediagit gc --aggressive          # Deep sweep + pack recompaction
+mediagit gc --prune=30 --dry-run  # Preview: prune objects older than 30 days
+mediagit gc --verbose             # Show each deleted object/chunk/manifest
 ```
+
+> **Branch cleanup workflow**: After deleting a remote branch with `push --delete`,
+> run `mediagit gc` to reclaim storage from orphaned chunks and manifests.
 
 ---
 

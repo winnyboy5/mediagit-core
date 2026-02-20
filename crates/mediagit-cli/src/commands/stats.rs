@@ -22,6 +22,21 @@ fn format_duration_ago(duration: Duration) -> String {
     }
 }
 
+/// Categorize a file extension into a broad media type group
+fn categorize_extension(ext: &str) -> &'static str {
+    match ext.to_lowercase().as_str() {
+        "mp4" | "mov" | "avi" | "mkv" | "webm" | "flv" | "wmv" | "m4v" | "mxf" | "r3d" => "video",
+        "wav" | "aiff" | "aif" | "mp3" | "flac" | "ogg" | "m4a" | "aac" | "opus" => "audio",
+        "jpg" | "jpeg" | "png" | "tif" | "tiff" | "bmp" | "webp" | "heic" | "raw" | "dng"
+        | "cr2" | "nef" | "arw" => "image",
+        "psd" | "psb" | "ai" | "ait" | "indd" | "idml" | "eps" | "pdf" | "xd" => "creative",
+        "glb" | "gltf" | "fbx" | "obj" | "blend" | "ma" | "mb" | "abc" | "usd"
+        | "usda" | "usdc" | "usdz" | "stl" | "ply" => "3d",
+        "docx" | "xlsx" | "pptx" | "doc" | "xls" | "ppt" | "odt" | "ods" | "odp" => "office",
+        _ => "other",
+    }
+}
+
 /// Show repository statistics
 #[derive(Parser, Debug)]
 pub struct StatsCmd {
@@ -79,7 +94,13 @@ struct StorageStats {
     pack_bytes: u64,
     chunk_count: u64,
     chunk_bytes: u64,
+    delta_count: u64,
+    delta_bytes: u64,
     manifest_count: u64,
+    /// Original (pre-compression) bytes summed from chunk manifests
+    original_bytes: u64,
+    /// Per file-category: (original_bytes, file_count)
+    category_stats: std::collections::HashMap<String, (u64, u64)>,
 }
 
 /// Commit history statistics
@@ -145,25 +166,41 @@ impl StatsCmd {
             let stats = self.compute_storage_stats(&storage_path).await?;
             println!("{}", style("Storage:").bold());
             
-            let total_objects = stats.loose_object_count + stats.chunk_count;
-            let total_bytes = stats.loose_bytes + stats.pack_bytes + stats.chunk_bytes;
+            let total_objects = stats.loose_object_count + stats.chunk_count + stats.delta_count;
+            let total_stored = stats.loose_bytes + stats.pack_bytes + stats.chunk_bytes + stats.delta_bytes;
             
-            println!("  Total objects: {} ({} loose, {} chunks)", 
-                total_objects, stats.loose_object_count, stats.chunk_count);
-            println!("  Total size: {} (loose: {}, packs: {}, chunks: {})",
-                HumanBytes(total_bytes),
-                HumanBytes(stats.loose_bytes),
-                HumanBytes(stats.pack_bytes),
-                HumanBytes(stats.chunk_bytes));
-            
-            if stats.pack_count > 0 {
-                println!("  Pack files: {}", stats.pack_count);
-            }
-            if stats.manifest_count > 0 {
-                println!("  Chunk manifests: {}", stats.manifest_count);
+            println!("  Total objects: {} ({} loose, {} chunks, {} deltas)", 
+                total_objects, stats.loose_object_count, stats.chunk_count, stats.delta_count);
+
+            // Show original size vs stored size
+            if stats.original_bytes > 0 {
+                println!("  Original size: {}", HumanBytes(stats.original_bytes));
+                println!("  Storage used:  {}", HumanBytes(total_stored));
+                let ratio = total_stored as f64 / stats.original_bytes as f64;
+                let saved_pct = if stats.original_bytes > total_stored {
+                    (1.0 - ratio) * 100.0
+                } else {
+                    0.0
+                };
+                println!("  Compression:   {:.1}x ratio ({:.1}% saved)",
+                    1.0 / ratio.max(0.001), saved_pct);
+            } else {
+                println!("  Storage used: {}", HumanBytes(total_stored));
             }
             
             if self.verbose {
+                println!("  Breakdown: loose: {}, packs: {}, chunks: {}, deltas: {}",
+                    HumanBytes(stats.loose_bytes),
+                    HumanBytes(stats.pack_bytes),
+                    HumanBytes(stats.chunk_bytes),
+                    HumanBytes(stats.delta_bytes));
+                if stats.pack_count > 0 {
+                    println!("  Pack files: {}", stats.pack_count);
+                }
+                if stats.manifest_count > 0 {
+                    println!("  Chunk manifests: {}", stats.manifest_count);
+                }
+
                 let metrics = odb.metrics().await;
                 println!("  Session writes: {}", metrics.total_writes);
                 println!("  Session bytes: {}", metrics.bytes_written);
@@ -274,12 +311,19 @@ impl StatsCmd {
     }
 
     /// Compute storage statistics by walking the .mediagit directory
+    ///
+    /// Chunks, manifests, and deltas are stored inside the sharded `objects/`
+    /// directory with encoded filenames (e.g. `chunks__abc...`, `manifests__abc...`,
+    /// `chunk-deltas__abc...`). This method distinguishes them by filename prefix.
     async fn compute_storage_stats(&self, storage_path: &Path) -> Result<StorageStats> {
         let mut stats = StorageStats::default();
         
-        // Count loose objects in objects/ directory
+        // Walk objects/ directory and classify files by their encoded name prefix
         let objects_dir = storage_path.join("objects");
         if objects_dir.exists() {
+            // Collect manifest file paths for a second pass
+            let mut manifest_paths: Vec<std::path::PathBuf> = Vec::new();
+
             for entry in walkdir::WalkDir::new(&objects_dir)
                 .into_iter()
                 .filter_map(|e| e.ok())
@@ -287,51 +331,59 @@ impl StatsCmd {
             {
                 let path = entry.path();
                 let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
                 
                 // Skip pack and index files
                 if filename.ends_with(".pack") || filename.ends_with(".idx") {
                     if filename.ends_with(".pack") {
                         stats.pack_count += 1;
-                        if let Ok(meta) = std::fs::metadata(path) {
-                            stats.pack_bytes += meta.len();
-                        }
+                        stats.pack_bytes += file_size;
                     }
+                } else if filename.starts_with("chunks__") {
+                    // Chunk file (stored as "chunks/{hex}" → encoded as "chunks__{hex}")
+                    stats.chunk_count += 1;
+                    stats.chunk_bytes += file_size;
+                } else if filename.starts_with("chunk-deltas__") {
+                    // Delta file or delta metadata
+                    if !filename.ends_with(".meta") {
+                        stats.delta_count += 1;
+                        stats.delta_bytes += file_size;
+                    }
+                } else if filename.starts_with("manifests__") {
+                    // Manifest file — collect for second pass
+                    stats.manifest_count += 1;
+                    manifest_paths.push(path.to_path_buf());
                 } else {
-                    // Loose object (64-char hex filename in sharded directory)
+                    // Regular loose object
                     stats.loose_object_count += 1;
-                    if let Ok(meta) = std::fs::metadata(path) {
-                        stats.loose_bytes += meta.len();
+                    stats.loose_bytes += file_size;
+                }
+            }
+
+            // Second pass: read manifests to extract original file sizes
+            for manifest_path in &manifest_paths {
+                if let Ok(data) = std::fs::read(manifest_path) {
+                    if let Ok(manifest) = bincode::deserialize::<mediagit_versioning::ChunkManifest>(&data) {
+                        stats.original_bytes += manifest.total_size;
+
+                        // Categorize by file extension
+                        let category = manifest.filename.as_deref()
+                            .and_then(|f| std::path::Path::new(f).extension())
+                            .and_then(|e| e.to_str())
+                            .map(|ext| categorize_extension(ext))
+                            .unwrap_or("other");
+                        let cat_entry = stats.category_stats.entry(category.to_string()).or_insert((0, 0));
+                        cat_entry.0 += manifest.total_size;
+                        cat_entry.1 += 1;
                     }
                 }
             }
         }
-        
-        // Count chunks
-        let chunks_dir = storage_path.join("chunks");
-        if chunks_dir.exists() {
-            for entry in walkdir::WalkDir::new(&chunks_dir)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-            {
-                stats.chunk_count += 1;
-                if let Ok(meta) = std::fs::metadata(entry.path()) {
-                    stats.chunk_bytes += meta.len();
-                }
-            }
-        }
-        
-        // Count manifests
-        let manifests_dir = storage_path.join("manifests");
-        if manifests_dir.exists() {
-            for _entry in walkdir::WalkDir::new(&manifests_dir)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-            {
-                stats.manifest_count += 1;
-            }
-        }
+
+        // Also add non-chunked (loose) original sizes — for loose objects we
+        // don't know the original uncompressed size without decompressing,
+        // so we only add original_bytes from manifests (chunked files).
+        // The loose_bytes already represents their on-disk (compressed) size.
         
         Ok(stats)
     }
@@ -539,25 +591,53 @@ impl StatsCmd {
     async fn show_compression_stats(&self, storage_path: &Path) -> Result<()> {
         println!("{}", style("Compression:").bold());
 
-        // Compute actual compression stats from storage
         let stats = self.compute_storage_stats(storage_path).await?;
-        
-        let total_stored = stats.loose_bytes + stats.pack_bytes + stats.chunk_bytes;
-        
-        if total_stored > 0 {
-            // Note: We can't compute true compression ratio without original sizes
-            // but we can show what's stored
-            println!("  Storage used: {}", HumanBytes(total_stored));
-            println!("  Algorithm: zstd/brotli (type-aware)");
-            
-            if stats.chunk_count > 0 {
-                println!("  Chunked objects: {} ({} total)", 
-                    stats.manifest_count, HumanBytes(stats.chunk_bytes));
-            }
-        } else {
+        let total_stored = stats.loose_bytes + stats.pack_bytes + stats.chunk_bytes + stats.delta_bytes;
+
+        if total_stored == 0 {
             println!("  No compressed data yet");
+            println!();
+            return Ok(());
         }
-        
+
+        println!("  Algorithm: zstd (type-aware, store for pre-compressed)");
+        println!("  Storage used: {}", HumanBytes(total_stored));
+
+        // Show chunked file compression ratios from manifest data
+        if stats.manifest_count > 0 && stats.original_bytes > 0 {
+            let ratio = stats.chunk_bytes as f64 / stats.original_bytes as f64;
+            let space_saved = if stats.original_bytes > stats.chunk_bytes {
+                (1.0 - ratio) * 100.0
+            } else {
+                0.0
+            };
+            println!(
+                "  Chunked files: {} manifests, {} original → {} stored ({:.1}x, {:.1}% saved)",
+                stats.manifest_count,
+                HumanBytes(stats.original_bytes),
+                HumanBytes(stats.chunk_bytes),
+                1.0 / ratio.max(0.001),
+                space_saved,
+            );
+
+            // Per-category breakdown (sorted by original size descending)
+            if !stats.category_stats.is_empty() {
+                println!("  By file type:");
+                let mut categories: Vec<(&String, &(u64, u64))> = stats.category_stats.iter().collect();
+                categories.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+                for (cat, (orig_bytes, file_count)) in &categories {
+                    println!(
+                        "    {:8}: {} files, {} original",
+                        cat,
+                        file_count,
+                        HumanBytes(*orig_bytes),
+                    );
+                }
+            }
+        } else if stats.manifest_count > 0 {
+            println!("  Chunked files: {} manifests, {} stored", stats.manifest_count, HumanBytes(stats.chunk_bytes));
+        }
+
         println!();
         Ok(())
     }
@@ -603,17 +683,20 @@ impl StatsCmd {
         let remote_branches = refdb.list("remotes").await.unwrap_or_default().len();
         let tags = refdb.list("tags").await.unwrap_or_default().len();
         
-        let total_bytes = storage_stats.loose_bytes + storage_stats.pack_bytes + storage_stats.chunk_bytes;
+        let total_bytes = storage_stats.loose_bytes + storage_stats.pack_bytes + storage_stats.chunk_bytes + storage_stats.delta_bytes;
         
         let json = serde_json::json!({
             "storage": {
                 "total_bytes": total_bytes,
+                "original_bytes": storage_stats.original_bytes,
                 "loose_bytes": storage_stats.loose_bytes,
                 "pack_bytes": storage_stats.pack_bytes,
                 "chunk_bytes": storage_stats.chunk_bytes,
+                "delta_bytes": storage_stats.delta_bytes,
                 "loose_objects": storage_stats.loose_object_count,
                 "pack_files": storage_stats.pack_count,
                 "chunks": storage_stats.chunk_count,
+                "deltas": storage_stats.delta_count,
                 "manifests": storage_stats.manifest_count
             },
             "commits": {

@@ -22,6 +22,23 @@ use std::sync::Arc;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub fn find_repo_root() -> Result<PathBuf> {
+    // Honor -C flag (stored as MEDIAGIT_REPO env var by main.rs)
+    if let Ok(repo_path) = std::env::var("MEDIAGIT_REPO") {
+        let path = PathBuf::from(&repo_path);
+        // Try as-is first
+        if path.join(".mediagit").exists() {
+            return Ok(path);
+        }
+        // Try canonicalized
+        if let Ok(canonical) = dunce::canonicalize(&path) {
+            if canonical.join(".mediagit").exists() {
+                return Ok(canonical);
+            }
+        }
+        // Walk up from the given path
+        return find_repo_root_from(&path);
+    }
+
     let mut current = std::env::current_dir()?;
 
     loop {
@@ -43,7 +60,6 @@ pub fn find_repo_root() -> Result<PathBuf> {
 /// # Returns
 /// - `Ok(PathBuf)` - Path to repository root
 /// - `Err` - If not inside a MediaGit repository
-#[allow(dead_code)] // Reserved for path-based command operations
 pub fn find_repo_root_from(start: &std::path::Path) -> Result<PathBuf> {
     let mut current = start.to_path_buf();
 

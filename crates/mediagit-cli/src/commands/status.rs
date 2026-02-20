@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Parser;
 use mediagit_versioning::{Index, ObjectDatabase, Oid, Ref, RefDatabase};
 use rayon::prelude::*;
@@ -86,29 +86,30 @@ impl StatusCmd {
         let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
 
-        // Read HEAD
-        let head = refdb
-            .read("HEAD")
-            .await
-            .context("Failed to read HEAD reference")?;
+        // Read HEAD (may not exist in empty repos with no commits)
+        let head = refdb.read("HEAD").await.ok();
 
         // Display current branch
         if self.branch || self.verbose {
             match &head {
-                Ref {
+                Some(Ref {
                     ref_type: mediagit_versioning::RefType::Symbolic,
                     target: Some(branch),
                     ..
-                } => {
+                }) => {
                     let branch_name = branch.strip_prefix("refs/heads/").unwrap_or(branch);
                     output::success(&format!("On branch: {}", branch_name));
                 }
-                Ref {
+                Some(Ref {
                     ref_type: mediagit_versioning::RefType::Direct,
                     oid: Some(oid),
                     ..
-                } => {
+                }) => {
                     output::info(&format!("HEAD detached at {}", oid));
+                }
+                None => {
+                    // Empty repo: HEAD doesn't exist yet, infer branch from init config
+                    output::info("On branch: main (no commits yet)");
                 }
                 _ => {
                     output::warning("HEAD reference is invalid");

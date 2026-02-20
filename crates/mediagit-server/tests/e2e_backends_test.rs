@@ -368,6 +368,7 @@ async fn test_local_backend_complete_flow() {
             name: "refs/heads/feature".to_string(),
             old_oid: None,
             new_oid: oid.to_hex(),
+            delete: false,
         }],
         force: false,
     };

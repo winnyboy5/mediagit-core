@@ -186,11 +186,32 @@ impl CommitCmd {
             .context("Failed to write tree object")?;
 
         // Create commit signature
-        let author_name = std::env::var("GIT_AUTHOR_NAME")
-            .or_else(|_| std::env::var("USER"))
-            .unwrap_or_else(|_| "Unknown".to_string());
-        let author_email = std::env::var("GIT_AUTHOR_EMAIL")
-            .unwrap_or_else(|_| "unknown@localhost".to_string());
+        // Priority: --author CLI flag > MEDIAGIT_AUTHOR_* env vars > config.toml [author] > $USER > defaults
+        let config = mediagit_config::Config::load(&repo_root).await.unwrap_or_default();
+
+        let (author_name, author_email) = if let Some(author_str) = &self.author {
+            // Parse "Name <email>" format from --author flag
+            if let (Some(lt), Some(gt)) = (author_str.rfind('<'), author_str.rfind('>')) {
+                let name = author_str[..lt].trim().to_string();
+                let email = author_str[lt + 1..gt].trim().to_string();
+                (name, email)
+            } else {
+                (author_str.clone(), "unknown@localhost".to_string())
+            }
+        } else {
+            let name = std::env::var("MEDIAGIT_AUTHOR_NAME")
+                .unwrap_or_else(|_| {
+                    // config.toml [author].name takes priority over generic $USER
+                    config.author.name.clone().unwrap_or_else(|| {
+                        std::env::var("USER").unwrap_or_else(|_| "Unknown".to_string())
+                    })
+                });
+            let email = std::env::var("MEDIAGIT_AUTHOR_EMAIL")
+                .unwrap_or_else(|_| {
+                    config.author.email.clone().unwrap_or_else(|| "unknown@localhost".to_string())
+                });
+            (name, email)
+        };
 
         let signature = Signature::now(author_name.clone(), author_email.clone());
 

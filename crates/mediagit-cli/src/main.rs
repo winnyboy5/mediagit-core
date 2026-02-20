@@ -159,9 +159,43 @@ enum Commands {
     },
 }
 
+/// Preprocess CLI arguments to support git-style -N shorthand for `log` command.
+/// Converts `mediagit log -5` → `mediagit log -n 5`.
+fn preprocess_args(args: Vec<String>) -> Vec<String> {
+    // Find the position of the 'log' subcommand (first non-flag arg after the binary name)
+    let log_pos = args
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, arg)| *arg == "log")
+        .map(|(i, _)| i);
+
+    if let Some(log_idx) = log_pos {
+        let mut result = Vec::with_capacity(args.len() + 2);
+        for (i, arg) in args.into_iter().enumerate() {
+            if i > log_idx {
+                // After 'log' subcommand: convert bare -N to -n N
+                if let Some(rest) = arg.strip_prefix('-') {
+                    if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+                        result.push("-n".to_string());
+                        result.push(rest.to_string());
+                        continue;
+                    }
+                }
+            }
+            result.push(arg);
+        }
+        result
+    } else {
+        args
+    }
+}
+
 fn main() {
+    // Preprocess args to support git-style -N shorthand (e.g., log -5 → log -n 5)
+    let args = preprocess_args(std::env::args().collect());
     // Parse CLI args on the main thread (lightweight, no async needed)
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(args);
 
     // Run async work on a thread with 8MB stack to handle deeply nested
     // async futures (merge engine → LCA finder → checkout → recursive tree).

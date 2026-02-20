@@ -1,6 +1,6 @@
 # MediaGit-Core Development Guide
 **Version**: 0.1.0
-**Last Updated**: December 30, 2025
+**Last Updated**: February 19, 2026
 
 Complete setup guide for MediaGit development - from beginner setup to production deployment.
 
@@ -223,7 +223,7 @@ cd /path/to/your/project
 ## Prerequisites
 
 ### System Requirements
-- **OS**: Linux, macOS, or WSL2 (Windows)
+- **OS**: Linux, macOS, Windows (native or WSL2)
 - **Rust**: 1.91.0+ (required - check with `rustc --version`)
 - **CPU**: 2+ cores
 - **RAM**: 4GB minimum, 8GB+ recommended
@@ -1228,6 +1228,35 @@ echo "auth_token = \"your-jwt-token\"" >> .mediagit/config.toml
 
 ---
 
+### Branch Lifecycle & Maintenance
+
+**Complete branch lifecycle**: create → push → merge → cleanup → gc
+
+```bash
+# 1. Create and push a feature branch
+mediagit branch create feature/new-asset
+mediagit push -u origin feature/new-asset
+
+# 2. Work on the branch, commit, push
+mediagit add *.psd
+mediagit commit -m "Add new assets"
+mediagit push
+
+# 3. After merge, delete the remote branch
+mediagit push origin --delete feature/new-asset
+
+# 4. Clean up local remote-tracking ref (if needed)
+mediagit branch delete -r origin/feature/new-asset
+
+# 5. Reclaim storage from orphaned chunks/manifests
+mediagit gc
+mediagit gc --dry-run --verbose  # Preview what would be cleaned
+```
+
+> **Note**: `push --delete` cannot delete the branch that is currently checked out on the remote (HEAD protection). Deleting `main` while it's the active branch will be rejected.
+
+---
+
 ## Complete Configuration Reference
 
 This section provides a comprehensive reference for all configuration files used by MediaGit.
@@ -1873,5 +1902,5 @@ find . -name "*.tmp" -o -name "*.log" -o -name "*~"
 ---
 
 **Version**: 0.1.0
-**Last Updated**: December 27, 2025
+**Last Updated**: February 19, 2026
 **Maintained by**: MediaGit Core Team
