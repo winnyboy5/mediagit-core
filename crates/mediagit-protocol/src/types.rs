@@ -46,6 +46,9 @@ pub struct RefUpdate {
     pub old_oid: Option<String>,
     /// New OID to set the reference to
     pub new_oid: String,
+    /// If true, delete the ref instead of updating it (new_oid is ignored)
+    #[serde(default)]
+    pub delete: bool,
 }
 
 /// Request for POST /refs/update
@@ -159,6 +162,7 @@ mod tests {
                 name: "refs/heads/main".to_string(),
                 old_oid: Some("old123".to_string()),
                 new_oid: "new456".to_string(),
+                delete: false,
             }],
             force: false,
         };

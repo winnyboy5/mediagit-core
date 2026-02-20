@@ -14,7 +14,7 @@ MediaGit employs intelligent compression based on file type and size to minimize
 - **Ratio**: 3-5x for binaries, 10-20x for text
 - **Use**: Text and code files when size matters more than speed
 
-### xdelta3 (Delta Encoding)
+### bsdiff (Delta Encoding)
 - **Speed**: 50-100 MB/s encoding/decoding
 - **Ratio**: 90%+ reduction for updated files
 - **Use**: Large files with small changes

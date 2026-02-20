@@ -949,13 +949,20 @@ impl ObjectDatabase {
                                                     .map_err(|e| anyhow::anyhow!("Compress delta: {}", e))?
                                             };
 
-                                            storage.put(&delta_key, &compressed_delta).await
-                                                .map_err(|e| anyhow::anyhow!("Store delta: {}", e))?;
+                                            // Tolerate concurrent writes: if put fails but chunk exists, treat as dedup
+                                            if let Err(e) = storage.put(&delta_key, &compressed_delta).await {
+                                                if !storage.exists(&delta_key).await.unwrap_or(false) {
+                                                    return Err(anyhow::anyhow!("Store delta: {}", e));
+                                                }
+                                            }
 
                                             let meta_key = format!("chunk-deltas/{}.meta", chunk.id.to_hex());
                                             let meta_data = format!("base:{}", base_id.to_hex());
-                                            storage.put(&meta_key, meta_data.as_bytes()).await
-                                                .map_err(|e| anyhow::anyhow!("Store delta meta: {}", e))?;
+                                            if let Err(e) = storage.put(&meta_key, meta_data.as_bytes()).await {
+                                                if !storage.exists(&meta_key).await.unwrap_or(false) {
+                                                    return Err(anyhow::anyhow!("Store delta meta: {}", e));
+                                                }
+                                            }
 
                                             debug!(
                                                 chunk_id = %chunk.id,
@@ -990,8 +997,12 @@ impl ObjectDatabase {
                                 .map_err(|e| anyhow::anyhow!("Compress chunk: {}", e))?
                         };
 
-                        storage.put(&chunk_key, &compressed).await
-                            .map_err(|e| anyhow::anyhow!("Store chunk: {}", e))?;
+                        // Tolerate concurrent writes: if put fails but chunk exists, treat as dedup
+                        if let Err(e) = storage.put(&chunk_key, &compressed).await {
+                            if !storage.exists(&chunk_key).await.unwrap_or(false) {
+                                return Err(anyhow::anyhow!("Store chunk: {}", e));
+                            }
+                        }
 
                         debug!(
                             chunk_id = %chunk.id,
@@ -1114,11 +1125,6 @@ impl ObjectDatabase {
         // Track progress
         let chunks_written = Arc::new(AtomicU64::new(0));
         let bytes_written = Arc::new(AtomicU64::new(0));
-
-        // Create chunker
-        let chunker = ContentChunker::new(
-            self.chunk_strategy.unwrap_or(ChunkStrategy::MediaAware)
-        );
 
         // Compute type-aware thresholds once
         let min_similarity = crate::similarity::get_similarity_threshold(Some(filename));
@@ -1276,21 +1282,32 @@ impl ObjectDatabase {
         // Drop our copy of rx so workers detect channel close
         drop(rx);
 
-        // Producer: streaming chunker sends chunks to the channel.
-        // Workers are already running and consuming from the other end.
+        // Producer: run synchronous FastCDC file I/O in a blocking thread pool task to avoid
+        // stalling the tokio executor.  FastCDC's StreamCDC iterator performs blocking reads;
+        // running it on a tokio async thread would starve other tasks during large-file ingestion.
+        //
+        // Bridge the sync/async boundary with a bounded tokio::sync::mpsc channel:
+        //   spawn_blocking → blocking_send → tokio_rx.recv() → async_channel tx → workers
         let seq_counter = Arc::new(AtomicU64::new(0));
-        let seq_counter_clone = seq_counter.clone();
+        let (blocking_tx, mut blocking_rx) = tokio::sync::mpsc::channel::<crate::chunking::ContentChunk>(32);
 
-        let _chunk_oids = chunker.chunk_file_streaming(path, |chunk| {
-            let tx = tx.clone();
-            let seq_counter = seq_counter_clone.clone();
-            async move {
-                let seq_id = seq_counter.fetch_add(1, Ordering::SeqCst) as usize;
-                tx.send((seq_id, chunk)).await
-                    .map_err(|_| anyhow::anyhow!("Worker channel closed unexpectedly"))?;
-                Ok(())
-            }
-        }).await?;
+        let path_owned = path.to_path_buf();
+        let chunk_strategy = self.chunk_strategy.unwrap_or(ChunkStrategy::MediaAware);
+        let file_producer = tokio::task::spawn_blocking(move || {
+            let chunker_inner = ContentChunker::new(chunk_strategy);
+            chunker_inner.collect_file_chunks_blocking(&path_owned, blocking_tx)
+        });
+
+        // Forward chunks from the blocking thread to the async worker channel
+        while let Some(chunk) = blocking_rx.recv().await {
+            let seq_id = seq_counter.fetch_add(1, Ordering::SeqCst) as usize;
+            tx.send((seq_id, chunk)).await
+                .map_err(|_| anyhow::anyhow!("Worker channel closed unexpectedly"))?;
+        }
+
+        // Propagate any error from the blocking producer
+        file_producer.await
+            .map_err(|e| anyhow::anyhow!("File chunker task panicked: {}", e))??;
 
         // Close sender so workers know no more chunks are coming
         drop(tx);
@@ -3306,4 +3323,5 @@ mod tests {
         let oid = Oid::from_hex(base_oid_hex).unwrap();
         assert_eq!(oid.to_hex(), test_oid);
     }
+
 }

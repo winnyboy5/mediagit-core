@@ -170,6 +170,10 @@ pub struct DeleteOpts {
     #[arg(short = 'd', long)]
     pub delete_merged: bool,
 
+    /// Delete remote tracking branches (e.g. origin/feature)
+    #[arg(short = 'r', long)]
+    pub remote: bool,
+
     /// Quiet mode
     #[arg(short, long)]
     pub quiet: bool,
@@ -532,72 +536,122 @@ impl BranchCmd {
     }
 
     async fn delete(&self, opts: &DeleteOpts) -> Result<()> {
-        use crate::output;
+    use crate::output;
 
-        let repo_root = find_repo_root()?;
-        let storage_path = repo_root.join(".mediagit");
-        let _storage = create_storage_backend(&repo_root).await?;
-        let refdb = RefDatabase::new(&storage_path);
+    let repo_root = find_repo_root()?;
+    let storage_path = repo_root.join(".mediagit");
+    let _storage = create_storage_backend(&repo_root).await?;
+    let refdb = RefDatabase::new(&storage_path);
 
-        // Load config to check branch protection
-        let config = mediagit_config::Config::load(&repo_root).await?;
+    let mut deleted_count = 0;
 
-        // Get current branch to prevent deletion
-        let head = refdb.read("HEAD").await?;
-        let current_branch = head.target;
-
-        let mut deleted_count = 0;
-
+    // Handle remote tracking branch deletion (e.g. origin/feature)
+    if opts.remote {
         for branch_name in &opts.branches {
-            let branch_ref_name = format!("refs/heads/{}", branch_name);
-
-            // Check if trying to delete current branch
-            if Some(&branch_ref_name) == current_branch.as_ref() {
-                if !opts.quiet {
-                    output::warning(&format!("Cannot delete current branch '{}'", branch_name));
-                }
-                continue;
-            }
-
-            // Check branch protection
-            if let Some(protection) = config.get_branch_protection(branch_name) {
-                if protection.prevent_deletion && !opts.force {
+            // Parse "remote/branch" by splitting on first '/'
+            let (remote_name, branch_part) = match branch_name.split_once('/') {
+                Some((r, b)) => (r, b),
+                None => {
                     if !opts.quiet {
                         output::warning(&format!(
-                            "Branch '{}' is protected (use --force to override)",
+                            "Invalid remote branch name '{}' (expected format: remote/branch)",
                             branch_name
                         ));
                     }
                     continue;
                 }
-            }
+            };
 
-            // Verify branch exists
-            match refdb.read(&branch_ref_name).await {
+            let remote_ref_name = format!("refs/remotes/{}/{}", remote_name, branch_part);
+
+            // Verify ref exists and delete
+            match refdb.read(&remote_ref_name).await {
                 Ok(_) => {
-                    // Delete the branch reference
-                    refdb.delete(&branch_ref_name).await?;
+                    refdb.delete(&remote_ref_name).await?;
                     deleted_count += 1;
 
                     if !opts.quiet {
-                        output::success(&format!("Deleted branch '{}'", branch_name));
+                        output::success(&format!(
+                            "Deleted remote-tracking branch '{}'",
+                            branch_name
+                        ));
                     }
                 }
                 Err(_) => {
                     if !opts.quiet {
-                        output::warning(&format!("Branch '{}' not found", branch_name));
+                        output::warning(&format!(
+                            "Remote-tracking branch '{}' not found",
+                            branch_name
+                        ));
                     }
                 }
             }
         }
 
         if !opts.quiet && deleted_count == 0 {
-            output::info("No branches were deleted");
+            output::info("No remote-tracking branches were deleted");
         }
 
-        Ok(())
+        return Ok(());
     }
 
+    // Local branch deletion
+    // Load config to check branch protection
+    let config = mediagit_config::Config::load(&repo_root).await?;
+
+    // Get current branch to prevent deletion
+    let head = refdb.read("HEAD").await?;
+    let current_branch = head.target;
+
+    for branch_name in &opts.branches {
+        let branch_ref_name = format!("refs/heads/{}", branch_name);
+
+        // Check if trying to delete current branch
+        if Some(&branch_ref_name) == current_branch.as_ref() {
+            if !opts.quiet {
+                output::warning(&format!("Cannot delete current branch '{}'", branch_name));
+            }
+            continue;
+        }
+
+        // Check branch protection
+        if let Some(protection) = config.get_branch_protection(branch_name) {
+            if protection.prevent_deletion && !opts.force {
+                if !opts.quiet {
+                    output::warning(&format!(
+                        "Branch '{}' is protected (use --force to override)",
+                        branch_name
+                    ));
+                }
+                continue;
+            }
+        }
+
+        // Verify branch exists
+        match refdb.read(&branch_ref_name).await {
+            Ok(_) => {
+                // Delete the branch reference
+                refdb.delete(&branch_ref_name).await?;
+                deleted_count += 1;
+
+                if !opts.quiet {
+                    output::success(&format!("Deleted branch '{}'", branch_name));
+                }
+            }
+            Err(_) => {
+                if !opts.quiet {
+                    output::warning(&format!("Branch '{}' not found", branch_name));
+                }
+            }
+        }
+    }
+
+    if !opts.quiet && deleted_count == 0 {
+        output::info("No branches were deleted");
+    }
+
+    Ok(())
+}
     async fn protect(&self, opts: &ProtectOpts) -> Result<()> {
         use crate::output;
         use mediagit_config::BranchProtection;

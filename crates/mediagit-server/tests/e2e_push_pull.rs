@@ -156,6 +156,7 @@ async fn test_e2e_push_workflow() {
         name: "refs/heads/main".to_string(),
         old_oid,
         new_oid: new_commit_oid.to_hex(),
+        delete: false,
     };
 
     let result = client.push(&odb, vec![update], false).await;
@@ -293,6 +294,7 @@ async fn test_e2e_push_then_pull_roundtrip() {
         name: "refs/heads/main".to_string(),
         old_oid,
         new_oid: unique_commit_oid.to_hex(),
+        delete: false,
     };
 
     let push_result = client1_protocol.push(&client1_odb, vec![update], false).await;
@@ -388,6 +390,7 @@ async fn test_force_push() {
         name: "refs/heads/main".to_string(),
         old_oid: None,  // Force push doesn't check old OID
         new_oid: client_divergent_oid.to_hex(),
+        delete: false,
     };
 
     let force_push = client.push(&client_odb, vec![update], true).await;

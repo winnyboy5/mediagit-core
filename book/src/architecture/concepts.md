@@ -86,7 +86,7 @@ graph LR
 
 ## Delta Encoding
 
-MediaGit uses delta encoding (via xdelta3) to store only differences between versions.
+MediaGit uses delta encoding (via bsdiff) to store only differences between versions.
 
 ### When Deltas Are Used
 - **Scenario**: Large file with small changes
@@ -114,7 +114,7 @@ MediaGit employs intelligent compression based on file type:
 ### Compression Algorithms
 1. **zstd** (default): Fastest, good ratio for all file types
 2. **brotli**: Better ratio for text/code, slower
-3. **xdelta3**: Delta encoding for large binary files with small changes
+3. **bsdiff**: Delta encoding for large binary files with small changes
 
 ### Automatic Selection
 ```

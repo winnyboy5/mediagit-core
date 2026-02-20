@@ -641,6 +641,90 @@ pub async fn update_refs(
     let mut all_success = true;
 
     for update in req.updates {
+        // Handle ref deletion
+        if update.delete {
+            // HEAD protection: prevent deleting the currently active branch
+            if let Ok(head) = refdb.read("HEAD").await {
+                if head.target.as_deref() == Some(&update.name) {
+                    tracing::warn!(
+                        "Refusing to delete '{}': it is the current HEAD",
+                        update.name
+                    );
+                    results.push(RefUpdateResult {
+                        ref_name: update.name.clone(),
+                        success: false,
+                        error: Some(format!(
+                            "refusing to delete the current branch: '{}'",
+                            update.name
+                        )),
+                    });
+                    all_success = false;
+                    continue;
+                }
+            }
+
+            // Safety check: verify old_oid matches (if provided)
+            if let Some(expected_old) = &update.old_oid {
+                if let Ok(current_ref) = refdb.read(&update.name).await {
+                    if let Some(current_oid) = &current_ref.oid {
+                        let current_oid_str = current_oid.to_hex();
+                        if &current_oid_str != expected_old && !req.force {
+                            tracing::warn!(
+                                "Ref delete rejected for '{}': expected {}, got {}",
+                                update.name,
+                                expected_old,
+                                current_oid_str
+                            );
+                            results.push(RefUpdateResult {
+                                ref_name: update.name.clone(),
+                                success: false,
+                                error: Some("ref changed since last fetch".to_string()),
+                            });
+                            all_success = false;
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // Verify ref exists before deleting
+            match refdb.read(&update.name).await {
+                Ok(_) => {}
+                Err(_) => {
+                    tracing::warn!("Ref '{}' does not exist, cannot delete", update.name);
+                    results.push(RefUpdateResult {
+                        ref_name: update.name.clone(),
+                        success: false,
+                        error: Some(format!("ref '{}' does not exist", update.name)),
+                    });
+                    all_success = false;
+                    continue;
+                }
+            }
+
+            // Delete the ref
+            match refdb.delete(&update.name).await {
+                Ok(_) => {
+                    tracing::info!("Deleted ref '{}'", update.name);
+                    results.push(RefUpdateResult {
+                        ref_name: update.name,
+                        success: true,
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("Failed to delete ref '{}': {}", update.name, e);
+                    results.push(RefUpdateResult {
+                        ref_name: update.name,
+                        success: false,
+                        error: Some(e.to_string()),
+                    });
+                    all_success = false;
+                }
+            }
+            continue;
+        }
+
         // Check if old_oid matches (if provided)
         if let Some(expected_old) = &update.old_oid {
             if let Ok(current_ref) = refdb.read(&update.name).await {

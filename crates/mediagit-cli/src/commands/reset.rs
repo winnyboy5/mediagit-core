@@ -155,6 +155,16 @@ impl ResetCmd {
                 .await?;
         }
 
+        // Step 1.5: For soft reset, populate index from OLD HEAD's tree
+        // Since MediaGit clears the index after commit, we need to explicitly
+        // stage the old commit's tree entries so they appear as staged changes.
+        if mode == ResetMode::Soft {
+            let old_commit = Commit::read(&odb, &old_oid)
+                .await
+                .with_context(|| "Failed to read old HEAD commit for soft reset")?;
+            self.reset_index(repo_root, &odb, &old_commit).await?;
+        }
+
         // Step 2: Reset index (mixed and hard)
         if mode == ResetMode::Mixed || mode == ResetMode::Hard {
             self.reset_index(repo_root, &odb, &target_commit).await?;

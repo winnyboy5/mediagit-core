@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -17,6 +18,10 @@ struct Args {
     /// Host address to bind to (overrides config file)
     #[arg(long)]
     host: Option<String>,
+
+    /// Directory for repository storage (overrides config file repos_dir)
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
 
     /// Path to config file
     #[arg(short, long, default_value = "mediagit-server.toml")]
@@ -37,8 +42,8 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Load configuration from file
-    let mut config = ServerConfig::load()?;
+    // Load configuration from file (use path from --config, default is "mediagit-server.toml")
+    let mut config = ServerConfig::load(&args.config)?;
     
     // Override config with CLI arguments if provided
     if let Some(port) = args.port {
@@ -48,6 +53,10 @@ async fn main() -> Result<()> {
     if let Some(host) = args.host {
         tracing::info!("Overriding host from CLI: {} -> {}", config.host, host);
         config.host = host;
+    }
+    if let Some(data_dir) = args.data_dir {
+        tracing::info!("Overriding repos_dir from CLI: {:?} -> {:?}", config.repos_dir, data_dir);
+        config.repos_dir = data_dir;
     }
     
     tracing::info!("Server configuration: {:?}", config);

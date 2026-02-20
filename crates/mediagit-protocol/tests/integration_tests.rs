@@ -75,6 +75,7 @@ fn test_ref_update() {
         name: "refs/heads/main".to_string(),
         old_oid: Some("abc123".to_string()),
         new_oid: "def456".to_string(),
+        delete: false,
     };
 
     let json = serde_json::to_string(&update).expect("Failed to serialize");
@@ -92,6 +93,7 @@ fn test_ref_update_request() {
             name: "refs/heads/main".to_string(),
             old_oid: None,
             new_oid: "abc123".to_string(),
+            delete: false,
         }],
         force: false,
     };
@@ -179,11 +181,13 @@ fn test_multiple_ref_updates() {
                 name: "refs/heads/main".to_string(),
                 old_oid: Some("abc123".to_string()),
                 new_oid: "def456".to_string(),
+                delete: false,
             },
             RefUpdate {
                 name: "refs/heads/feature".to_string(),
                 old_oid: None,
                 new_oid: "ghi789".to_string(),
+                delete: false,
             },
         ],
         force: false,
@@ -205,6 +209,7 @@ fn test_force_push() {
             name: "refs/heads/main".to_string(),
             old_oid: Some("abc123".to_string()),
             new_oid: "xyz999".to_string(),
+            delete: false,
         }],
         force: true,
     };

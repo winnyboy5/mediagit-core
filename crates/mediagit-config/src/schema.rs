@@ -1,6 +1,18 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Author identity configuration (used when creating commits)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct AuthorConfig {
+    /// Author display name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// Author email address
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+}
+
 /// Top-level configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -22,6 +34,10 @@ pub struct Config {
 
     /// Security settings
     pub security: SecurityConfig,
+
+    /// Author identity (used when creating commits)
+    #[serde(default)]
+    pub author: AuthorConfig,
 
     /// Remote repositories configuration
     #[serde(default)]
@@ -769,6 +785,7 @@ impl Default for Config {
             performance: PerformanceConfig::default(),
             observability: ObservabilityConfig::default(),
             security: SecurityConfig::default(),
+            author: AuthorConfig::default(),
             remotes: HashMap::new(),
             branches: HashMap::new(),
             protected_branches: HashMap::new(),
