@@ -132,14 +132,14 @@ impl CompressionMetrics {
         self.compressed_size = compressed.len();
 
         // Calculate compression ratio (original/compressed, higher is better)
-        self.compression_ratio = if compressed.len() == 0 {
+        self.compression_ratio = if compressed.is_empty() {
             f64::INFINITY
         } else {
             original.len() as f64 / compressed.len() as f64
         };
 
         self.space_saved = original.len().saturating_sub(compressed.len());
-        self.space_saved_percent = if original.len() == 0 {
+        self.space_saved_percent = if original.is_empty() {
             0.0
         } else {
             (self.space_saved as f64 / original.len() as f64) * 100.0

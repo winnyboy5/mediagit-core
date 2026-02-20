@@ -229,7 +229,7 @@ impl DeltaEncoder {
             }
         }
 
-        let compression_ratio = if target.len() > 0 {
+        let compression_ratio = if !target.is_empty() {
             let encoded_size = instructions
                 .iter()
                 .map(|instr| match instr {

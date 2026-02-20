@@ -305,7 +305,7 @@ impl FsckCmd {
                     warnings.len()
                 );
 
-                if report.repairable_issues().len() > 0 {
+                if !report.repairable_issues().is_empty() {
                     println!();
                     println!(
                         "{} {} issue(s) can be repaired with: {}",
