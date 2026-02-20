@@ -14,7 +14,7 @@ flate2.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-xdelta3 = "0.1"
+bsdiff = "0.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 blake3 = { workspace = true }

@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use console::style;
-use mediagit_versioning::{CheckoutManager, Commit, Index, ObjectDatabase, Oid, RefDatabase};
-use std::path::PathBuf;
+use mediagit_versioning::{CheckoutManager, Commit, Index, ObjectDatabase, ObjectType, Oid, RefDatabase, Tree};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use super::super::repo::{find_repo_root, create_storage_backend};
 
 /// Stash changes in working directory
@@ -145,21 +146,83 @@ impl StashCmd {
         let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
         let refdb = RefDatabase::new(&mediagit_dir);
 
-        // Check if there are changes to stash
+        // Load index (staged changes)
         let index = Index::load(&repo_root)?;
-        if index.is_empty() {
+
+        // Get current HEAD
+        let current_oid = refdb.resolve("HEAD").await
+            .context("Failed to resolve HEAD")?;
+
+        // Load HEAD commit tree to detect working-tree modifications
+        let head_data = odb.read(&current_oid).await
+            .context("Failed to read HEAD commit")?;
+        let head_commit = Commit::deserialize(&head_data)
+            .context("Failed to deserialize HEAD commit")?;
+        let tree_data = odb.read(&head_commit.tree).await
+            .context("Failed to read HEAD tree")?;
+        let head_tree = Tree::deserialize(&tree_data)
+            .context("Failed to deserialize HEAD tree")?;
+
+        // Build HEAD file map (path -> oid)
+        let mut head_files: HashMap<PathBuf, Oid> = HashMap::new();
+        for entry in head_tree.iter() {
+            head_files.insert(PathBuf::from(&entry.name), entry.oid);
+        }
+
+        // Scan working directory for modifications against HEAD
+        let working_files = self.scan_working_directory(&repo_root)?;
+        let mut working_tree_changes: Vec<(PathBuf, Oid)> = Vec::new();
+
+        for (path, head_oid) in &head_files {
+            if !working_files.contains(path) {
+                continue; // Deleted file — tracked by absence
+            }
+            let full_path = repo_root.join(path);
+            let working_oid = if let Ok(content) = std::fs::read(&full_path) {
+                Oid::hash(&content)
+            } else {
+                continue;
+            };
+            if working_oid != *head_oid {
+                working_tree_changes.push((path.clone(), working_oid));
+            }
+        }
+
+        // BUG-3 fix: Check BOTH index and working-tree changes
+        if index.is_empty() && working_tree_changes.is_empty() {
             if !opts.quiet {
                 println!("{} No changes to stash", style("ℹ").blue());
             }
             return Ok(());
         }
 
-        // Get current HEAD
-        let current_oid = refdb.resolve("HEAD").await
-            .context("Failed to resolve HEAD")?;
-
-        // Build tree from index
+        // Build stash tree: start from HEAD tree as base, then overlay modifications
         let mut tree = mediagit_versioning::Tree::new();
+
+        // 1. Start with all HEAD tree entries as base
+        for entry in head_tree.iter() {
+            tree.add_entry(mediagit_versioning::TreeEntry::new(
+                entry.name.clone(),
+                entry.mode,
+                entry.oid,
+            ));
+        }
+
+        // 2. Override with working-tree modifications (write blobs to ODB)
+        for (path, _working_oid) in &working_tree_changes {
+            let full_path = repo_root.join(path);
+            if let Ok(content) = std::fs::read(&full_path) {
+                let blob_oid = odb.write(ObjectType::Blob, &content).await
+                    .context(format!("Failed to write blob for {}", path.display()))?;
+                tree.add_entry(mediagit_versioning::TreeEntry::new(
+                    path.to_string_lossy().to_string(),
+                    mediagit_versioning::FileMode::Regular,
+                    blob_oid,
+                ));
+            }
+        }
+
+        // 3. Override with index entries (staged changes take priority)
         for entry in index.entries() {
             tree.add_entry(mediagit_versioning::TreeEntry::new(
                 entry.path.to_string_lossy().to_string(),
@@ -167,6 +230,7 @@ impl StashCmd {
                 entry.oid,
             ));
         }
+
         let tree_oid = tree.write(&odb).await?;
 
         // Create stash commit (-m flag takes priority over positional)
@@ -429,6 +493,34 @@ impl StashCmd {
         let stash_json = serde_json::to_string_pretty(stash_list)?;
         std::fs::write(&stash_path, stash_json)?;
 
+        Ok(())
+    }
+
+    /// Scan working directory for files (excluding .mediagit)
+    fn scan_working_directory(&self, repo_root: &Path) -> Result<HashSet<PathBuf>> {
+        let mut files = HashSet::new();
+        self.scan_directory_recursive(repo_root, repo_root, &mut files)?;
+        Ok(files)
+    }
+
+    fn scan_directory_recursive(&self, repo_root: &Path, current_dir: &Path, files: &mut HashSet<PathBuf>) -> Result<()> {
+        for entry in std::fs::read_dir(current_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            // Skip .mediagit directory
+            if path.file_name().and_then(|n| n.to_str()) == Some(".mediagit") {
+                continue;
+            }
+
+            if path.is_file() {
+                if let Ok(rel_path) = path.strip_prefix(repo_root) {
+                    files.insert(rel_path.to_path_buf());
+                }
+            } else if path.is_dir() {
+                self.scan_directory_recursive(repo_root, &path, files)?;
+            }
+        }
         Ok(())
     }
 

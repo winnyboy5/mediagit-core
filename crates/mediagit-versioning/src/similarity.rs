@@ -260,8 +260,8 @@ impl ObjectMetadata {
 
 /// Similarity detector for finding delta base candidates
 pub struct SimilarityDetector {
-    /// Recent objects for similarity matching
-    recent_objects: Vec<ObjectMetadata>,
+    /// Recent objects for similarity matching (VecDeque for O(1) front insertion)
+    recent_objects: std::collections::VecDeque<ObjectMetadata>,
 
     /// Maximum number of recent objects to track
     max_recent: usize,
@@ -271,19 +271,19 @@ impl SimilarityDetector {
     /// Create a new similarity detector
     pub fn new(max_recent: usize) -> Self {
         Self {
-            recent_objects: Vec::new(),
+            recent_objects: std::collections::VecDeque::new(),
             max_recent,
         }
     }
 
     /// Add an object to the recent objects list
     pub fn add_object(&mut self, metadata: ObjectMetadata) {
-        // Add to front of list
-        self.recent_objects.insert(0, metadata);
+        // Add to front of deque — O(1) vs the previous O(N) Vec::insert(0, …)
+        self.recent_objects.push_front(metadata);
 
-        // Trim to max size
+        // Trim oldest entry — O(1) vs the previous O(N) Vec::truncate()
         if self.recent_objects.len() > self.max_recent {
-            self.recent_objects.truncate(self.max_recent);
+            self.recent_objects.pop_back();
         }
     }
 
