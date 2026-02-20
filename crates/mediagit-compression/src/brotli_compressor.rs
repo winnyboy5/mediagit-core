@@ -128,6 +128,7 @@ impl Compressor for BrotliCompressor {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

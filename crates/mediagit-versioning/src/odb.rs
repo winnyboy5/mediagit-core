@@ -605,7 +605,7 @@ impl ObjectDatabase {
 
         // Skip chunking for small files (<1MB) to avoid overhead
         // Files 1-10MB benefit from chunking for delta encoding
-        const MIN_CHUNK_SIZE: usize = 1 * 1024 * 1024; // 1MB
+        const MIN_CHUNK_SIZE: usize = 1024 * 1024; // 1MB
         if data.len() < MIN_CHUNK_SIZE {
             debug!(
                 size = data.len(),
@@ -790,7 +790,7 @@ impl ObjectDatabase {
             return self.write_with_path(obj_type, data, filename).await;
         }
 
-        const MIN_CHUNK_SIZE: usize = 1 * 1024 * 1024; // 1MB
+        const MIN_CHUNK_SIZE: usize = 1024 * 1024; // 1MB
         if data.len() < MIN_CHUNK_SIZE {
             return self.write_with_path(obj_type, data, filename).await;
         }
@@ -1136,7 +1136,7 @@ impl ObjectDatabase {
         };
 
         // --- Parallel pipeline: spawn workers FIRST, then produce chunks ---
-        let num_workers = num_cpus::get().min(16).max(2);
+        let num_workers = num_cpus::get().clamp(2, 16);
         let (tx, rx) = async_channel::bounded::<(usize, crate::chunking::ContentChunk)>(64);
 
         // Spawn worker tasks BEFORE producing chunks to avoid deadlock.
@@ -1638,7 +1638,6 @@ impl ObjectDatabase {
     }
 
     /// List all pack files in the database
-
     ///
     /// Returns a list of pack file keys
     async fn list_pack_files(&self) -> anyhow::Result<Vec<String>> {

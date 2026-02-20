@@ -63,7 +63,7 @@ fn bench_cache_put(c: &mut Criterion) {
                 async move {
                     let idx = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let key = format!("key_{}", black_box(idx));
-                    black_box(cache.put(key, vec![0u8; 1024]).await)
+                    cache.put(black_box(key), black_box(vec![0u8; 1024])).await;
                 }
             });
         });
@@ -86,7 +86,7 @@ fn bench_cache_eviction(c: &mut Criterion) {
                 // This will trigger evictions after 100 entries
                 let idx = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let key = format!("key_{}", black_box(idx));
-                black_box(cache.put(key, vec![0u8; 1024]).await)
+                cache.put(black_box(key), black_box(vec![0u8; 1024])).await;
             }
         });
     });

@@ -24,10 +24,11 @@ use std::sync::Arc;
 use tracing::{debug, instrument, trace};
 
 /// Merge strategy to use when conflicts are detected
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MergeStrategy {
     /// Recursive 3-way merge (default)
     /// Automatically merges non-conflicting changes, reports conflicts
+    #[default]
     Recursive,
 
     /// Always take our version on conflict
@@ -35,12 +36,6 @@ pub enum MergeStrategy {
 
     /// Always take their version on conflict
     Theirs,
-}
-
-impl Default for MergeStrategy {
-    fn default() -> Self {
-        MergeStrategy::Recursive
-    }
 }
 
 /// Fast-forward merge information

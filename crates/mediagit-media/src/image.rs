@@ -119,7 +119,7 @@ impl PerceptualHash {
             &img_hash::ImageHash::from_base64(&other.hash_value).ok()?,
         );
 
-        let max_distance = (self.hash_size * self.hash_size) as u32;
+        let max_distance = self.hash_size * self.hash_size;
         Some(1.0 - (hamming_distance as f64 / max_distance as f64))
     }
 }

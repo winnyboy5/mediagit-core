@@ -234,7 +234,7 @@ pub async fn get_refs(
 
     // Initialize storage and refdb
     let _storage = create_storage_backend(&repo_path).await?;
-    let refdb = RefDatabase::new(&repo_path.join(".mediagit"));
+    let refdb = RefDatabase::new(repo_path.join(".mediagit"));
 
     // List all refs by scanning refs directory
     let refs_dir = repo_path.join(".mediagit/refs");
@@ -319,7 +319,7 @@ pub async fn upload_pack(
 
     let stream = body
         .into_data_stream()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+        .map_err(std::io::Error::other);
 
     let stream_reader = StreamReader::new(stream);
 
@@ -649,7 +649,7 @@ pub async fn update_refs(
 
     // Initialize storage and refdb
     let _storage = create_storage_backend(&repo_path).await?;
-    let refdb = RefDatabase::new(&repo_path.join(".mediagit"));
+    let refdb = RefDatabase::new(repo_path.join(".mediagit"));
 
     let mut results = Vec::new();
     let mut all_success = true;

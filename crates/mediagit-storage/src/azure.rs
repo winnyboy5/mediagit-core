@@ -695,7 +695,7 @@ impl AzureBackend {
     /// This is more efficient than uploading the entire file at once
     /// and allows for better handling of network interruptions.
     async fn put_chunked(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
-        let chunk_count = (data.len() + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        let chunk_count = data.len().div_ceil(CHUNK_SIZE);
         tracing::debug!(
             "Uploading {} bytes in {} chunks to {} in container {}",
             data.len(),
@@ -735,7 +735,7 @@ impl AzureBackend {
         let block_list = BlockList {
             blocks: block_ids
                 .into_iter()
-                .map(|id| BlobBlockType::new_uncommitted(id))
+                .map(BlobBlockType::new_uncommitted)
                 .collect(),
         };
 
@@ -891,7 +891,7 @@ mod tests {
     #[test]
     fn test_chunk_size_alignment() {
         // Verify chunk size is reasonable (between 1MB and 100MB)
-        assert!(CHUNK_SIZE >= 1024 * 1024);
-        assert!(CHUNK_SIZE <= 100 * 1024 * 1024);
+        const { assert!(CHUNK_SIZE >= 1024 * 1024) };
+        const { assert!(CHUNK_SIZE <= 100 * 1024 * 1024) };
     }
 }

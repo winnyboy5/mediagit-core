@@ -528,7 +528,7 @@ impl MinIOBackend {
                     .bucket(&bucket)
                     .key(&key)
                     .upload_id(&upload_id)
-                    .part_number(part_num as i32)
+                    .part_number(part_num)
                     .body(Bytes::from(chunk_data.clone()).into())
                     .send()
                     .await
@@ -572,7 +572,7 @@ impl MinIOBackend {
             .into_iter()
             .map(|(part_num, etag)| {
                 aws_sdk_s3::types::CompletedPart::builder()
-                    .part_number(part_num as i32)
+                    .part_number(part_num)
                     .e_tag(etag)
                     .build()
             })

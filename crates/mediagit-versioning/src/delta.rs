@@ -160,7 +160,7 @@ impl DeltaEncoder {
         let mut hash_table: HashMap<&[u8], Vec<usize>> = HashMap::new();
         for i in 0..base.len().saturating_sub(MIN_MATCH_LENGTH) {
             let seq = &base[i..cmp::min(i + MIN_MATCH_LENGTH, base.len())];
-            hash_table.entry(seq).or_insert_with(Vec::new).push(i);
+            hash_table.entry(seq).or_default().push(i);
         }
 
         while target_pos < target.len() {

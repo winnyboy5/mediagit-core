@@ -840,8 +840,7 @@ impl GcsBackend {
                 let chunk = chunk.to_vec();
 
                 async move {
-                    let mut object = Object::default();
-                    object.name = key.clone();
+                    let object = Object { name: key.clone(), ..Default::default() };
                     let req = UploadObjectRequest {
                         bucket: bucket.clone(),
                         ..Default::default()

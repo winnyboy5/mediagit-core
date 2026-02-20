@@ -83,11 +83,12 @@ fn bench_branch_create(c: &mut Criterion) {
             },
             |(branch_mgr, commit_oid)| async move {
                 let branch_name = format!("feature/{}", uuid::Uuid::new_v4());
+                let _: () = branch_mgr
+                .create(&branch_name, commit_oid)
+                .await
+                .unwrap();
                 black_box(
-                    branch_mgr
-                        .create(&branch_name, commit_oid)
-                        .await
-                        .unwrap(),
+                    (),
                 )
             },
         );
@@ -123,10 +124,12 @@ fn bench_branch_switch(c: &mut Criterion) {
             let counter = counter.clone();
             async move {
                 let idx = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if idx % 2 == 0 {
-                    black_box(branch_mgr.switch_to("feature").await.unwrap());
+                if idx.is_multiple_of(2) {
+                    let _: () = branch_mgr.switch_to("feature").await.unwrap();
+                    black_box(());
                 } else {
-                    black_box(branch_mgr.switch_to("main").await.unwrap());
+                    let _: () = branch_mgr.switch_to("main").await.unwrap();
+                    black_box(());
                 }
             }
         });
@@ -184,7 +187,8 @@ fn bench_branch_delete(c: &mut Criterion) {
                 (branch_mgr, branch_name)
             },
             |(branch_mgr, branch_name)| async move {
-                black_box(branch_mgr.delete(&branch_name).await.unwrap())
+                let _: () = branch_mgr.delete(&branch_name).await.unwrap();
+                black_box(())
             },
         );
     });
@@ -251,12 +255,13 @@ fn bench_branch_update(c: &mut Criterion) {
             let counter = counter.clone();
             async move {
                 let idx = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let commit = if idx % 2 == 0 { new_commit } else { initial_commit };
+                let commit = if idx.is_multiple_of(2) { new_commit } else { initial_commit };
+                let _: () = branch_mgr
+                .update_to("main", commit, false)
+                .await
+                .unwrap();
                 black_box(
-                    branch_mgr
-                        .update_to("main", commit, false)
-                        .await
-                        .unwrap(),
+                    (),
                 )
             }
         });

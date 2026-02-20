@@ -212,7 +212,7 @@ impl VideoParser {
 
             // Extract duration value from TrackScaledTime wrapper
             let duration = track.duration
-                .map(|d| d.0 as u64)
+                .map(|d| d.0)
                 .unwrap_or(0);
 
             let duration_seconds = duration as f64 / timescale as f64;

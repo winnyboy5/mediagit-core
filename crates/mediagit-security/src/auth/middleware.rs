@@ -192,6 +192,7 @@ pub fn require_permission(auth_user: &AuthUser, permission: &str) -> Result<(), 
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::clone_on_ref_ptr)]
 mod tests {
     use super::*;
     use axum::http::{HeaderMap, HeaderValue};

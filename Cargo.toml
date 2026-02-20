@@ -135,3 +135,6 @@ libssl-dev = '*'
 publish-prereleases = false
 # Create GitHub releases
 create = true
+
+[workspace.metadata.cargo-machete]
+ignored = ["prost"]

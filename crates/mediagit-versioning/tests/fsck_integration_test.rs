@@ -121,8 +121,7 @@ async fn test_fsck_detect_missing_object() {
 
     // Run FSCK with connectivity check
     let checker = FsckChecker::new(storage);
-    let mut options = FsckOptions::default();
-    options.check_connectivity = true;
+    let options = FsckOptions { check_connectivity: true, ..Default::default() };
     let report = checker.check(options).await.unwrap();
 
     // Should detect missing tree object
@@ -293,8 +292,7 @@ async fn test_fsck_connectivity_check() {
 
     // Run FSCK with connectivity check
     let checker = FsckChecker::new(storage);
-    let mut options = FsckOptions::default();
-    options.check_connectivity = true;
+    let options = FsckOptions { check_connectivity: true, ..Default::default() };
 
     let report = checker.check(options).await.unwrap();
 
@@ -315,8 +313,7 @@ async fn test_fsck_max_objects_limit() {
 
     // Run FSCK with max objects limit
     let checker = FsckChecker::new(storage);
-    let mut options = FsckOptions::default();
-    options.max_objects = 5;
+    let options = FsckOptions { max_objects: 5, ..Default::default() };
 
     let report = checker.check(options).await.unwrap();
 

@@ -361,6 +361,7 @@ impl<'a> CheckoutManager<'a> {
     ///
     /// This eliminates the redundant tree traversal (get_tree_files + checkout_tree).
     /// Returns (file_paths, files_updated) for cleanup and counting.
+    #[allow(clippy::type_complexity)]
     fn checkout_tree_optimized<'b>(
         &'b self,
         tree_oid: &'b Oid,
@@ -633,6 +634,7 @@ impl<'a> CheckoutManager<'a> {
     /// Get all files from a tree with their OIDs and modes
     ///
     /// Returns a map of path -> (OID, FileMode) for all files in the tree.
+    #[allow(clippy::type_complexity)]
     fn get_tree_files_with_oid<'b>(
         &'b self,
         tree_oid: &'b Oid,

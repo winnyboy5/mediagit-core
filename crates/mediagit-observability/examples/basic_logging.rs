@@ -25,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().collect();
     let format_str = args.get(1).map(|s| s.as_str()).unwrap_or("pretty");
 
-    let format = LogFormat::from_str(format_str).unwrap_or(LogFormat::Pretty);
+    let format = LogFormat::parse(format_str).unwrap_or(LogFormat::Pretty);
 
     println!("Initializing with format: {:?}", format);
     init_tracing(format, Some("debug"))?;

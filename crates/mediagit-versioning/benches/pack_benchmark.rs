@@ -89,8 +89,8 @@ fn benchmark_delta_encoding(c: &mut Criterion) {
             || {
                 let base = vec![0x42u8; 100 * 1024];
                 let mut target = base.clone();
-                for i in 50000..50100 {
-                    target[i] = 0x43;
+                for b in &mut target[50000..50100] {
+                    *b = 0x43;
                 }
                 (base, target)
             },
@@ -117,8 +117,8 @@ fn benchmark_delta_encoding(c: &mut Criterion) {
 fn benchmark_delta_application(c: &mut Criterion) {
     let base = vec![0x42u8; 100 * 1024];
     let mut target = base.clone();
-    for i in 50000..50100 {
-        target[i] = 0x43;
+    for b in &mut target[50000..50100] {
+        *b = 0x43;
     }
     let delta = DeltaEncoder::encode(&base, &target);
 
@@ -135,8 +135,8 @@ fn benchmark_pack_with_deltas(c: &mut Criterion) {
             || {
                 let base_data = vec![0x42u8; 100 * 1024];
                 let mut target = base_data.clone();
-                for i in 50000..50100 {
-                    target[i] = 0x43;
+                for b in &mut target[50000..50100] {
+                    *b = 0x43;
                 }
                 (base_data, target)
             },

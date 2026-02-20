@@ -174,7 +174,6 @@ impl AuditEvent {
 }
 
 /// Helper functions for common audit events
-
 /// Default IP address for unknown clients
 const UNKNOWN_IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0));
 
@@ -280,6 +279,7 @@ pub fn log_access_denied(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

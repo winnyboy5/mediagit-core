@@ -11,6 +11,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
 
+#![allow(clippy::unwrap_used)]
 //! Compression benchmarks comparing Zstd vs Brotli vs Adaptive
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};

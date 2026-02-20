@@ -331,8 +331,7 @@ impl UploadHandle {
     /// Execute the upload
     pub async fn execute(self) -> Result<()> {
         let mut file = File::open(&self.local_path).await?;
-        let total_chunks = (self.file_size as usize + self.uploader.config.chunk_size - 1)
-            / self.uploader.config.chunk_size;
+        let total_chunks = (self.file_size as usize).div_ceil(self.uploader.config.chunk_size);
 
         let semaphore = Arc::new(Semaphore::new(self.uploader.config.parallel_transfers));
         let mut tasks = Vec::new();
@@ -540,8 +539,7 @@ impl DownloadHandle {
     /// Execute the download
     pub async fn execute(self) -> Result<()> {
         let mut file = tokio::fs::File::create(&self.local_path).await?;
-        let total_chunks = (self.file_size as usize + self.downloader.config.chunk_size - 1)
-            / self.downloader.config.chunk_size;
+        let total_chunks = (self.file_size as usize).div_ceil(self.downloader.config.chunk_size);
 
         let semaphore = Arc::new(Semaphore::new(self.downloader.config.parallel_transfers));
         let mut tasks = Vec::new();

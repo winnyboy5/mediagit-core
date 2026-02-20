@@ -25,7 +25,7 @@ fn dedup_write_baseline(iterations: u64) -> Duration {
     let start = Instant::now();
 
     for i in 0..iterations {
-        let bytes = (i % 10_000) as u64;
+        let bytes = i % 10_000;
         let is_new = i % 2 == 0;
 
         // Simulate dedup logic without metrics
@@ -40,7 +40,7 @@ fn dedup_write_with_metrics(iterations: u64, registry: &MetricsRegistry) -> Dura
     let start = Instant::now();
 
     for i in 0..iterations {
-        let bytes = (i % 10_000) as u64;
+        let bytes = i % 10_000;
         let is_new = i % 2 == 0;
 
         // Record metrics
@@ -57,7 +57,7 @@ fn compression_baseline(iterations: u64) -> Duration {
     let start = Instant::now();
 
     for i in 0..iterations {
-        let original = (i % 10_000) as u64;
+        let original = i % 10_000;
         let compressed = (original * 6) / 10; // 60% compression ratio
 
         black_box((original, compressed));
@@ -71,7 +71,7 @@ fn compression_with_metrics(iterations: u64, registry: &MetricsRegistry) -> Dura
     let start = Instant::now();
 
     for i in 0..iterations {
-        let original = (i % 10_000) as u64;
+        let original = i % 10_000;
         let compressed = (original * 6) / 10;
 
         // Alternate between compression algorithms

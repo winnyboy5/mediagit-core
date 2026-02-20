@@ -225,7 +225,7 @@ impl Model3DParser {
     fn detect_format(filename: &str) -> Model3DFormat {
         filename
             .split('.')
-            .last()
+            .next_back()
             .map(Model3DFormat::from_extension)
             .unwrap_or(Model3DFormat::Unknown)
     }
@@ -544,7 +544,7 @@ impl Model3DParser {
         debug!("Parsing USD file: {}", filename);
 
         // USDZ is a zip archive; USDC is binary crate format; USDA is text
-        let ext = filename.split('.').last().unwrap_or("");
+        let ext = filename.split('.').next_back().unwrap_or("");
         let is_usdz = ext.eq_ignore_ascii_case("usdz");
         let is_usda = ext.eq_ignore_ascii_case("usda");
 

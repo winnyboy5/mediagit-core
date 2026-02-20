@@ -269,7 +269,7 @@ impl PsdParser {
             layer.name().to_string()
         };
 
-        let (x, y) = (layer.layer_left() as i32, layer.layer_top() as i32);
+        let (x, y) = (layer.layer_left(), layer.layer_top());
         let width = (layer.layer_right() - layer.layer_left()) as u32;
         let height = (layer.layer_bottom() - layer.layer_top()) as u32;
 

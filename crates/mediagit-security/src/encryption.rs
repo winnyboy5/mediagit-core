@@ -266,7 +266,7 @@ pub fn decrypt(key: &EncryptionKey, ciphertext: &[u8]) -> Result<Vec<u8>, Encryp
     let chunk_ciphertext_size = CHUNK_SIZE + TAG_SIZE;
     let could_be_stream = encrypted_data.len() > STREAM_THRESHOLD + TAG_SIZE
         || (encrypted_data.len() >= chunk_ciphertext_size
-            && encrypted_data.len() % chunk_ciphertext_size == 0
+            && encrypted_data.len().is_multiple_of(chunk_ciphertext_size)
             && encrypted_data.len() > TAG_SIZE);
 
     if could_be_stream {
@@ -315,7 +315,7 @@ pub fn decrypt(key: &EncryptionKey, ciphertext: &[u8]) -> Result<Vec<u8>, Encryp
 fn encrypt_stream(key: &EncryptionKey, plaintext: &[u8]) -> Result<Vec<u8>, EncryptionError> {
     debug!(
         size = plaintext.len(),
-        chunks = (plaintext.len() + CHUNK_SIZE - 1) / CHUNK_SIZE,
+        chunks = plaintext.len().div_ceil(CHUNK_SIZE),
         "Stream encrypting large object"
     );
 
@@ -399,6 +399,7 @@ fn decrypt_stream(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
