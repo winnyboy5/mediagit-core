@@ -426,9 +426,9 @@ impl DeltaEncoder {
         };
 
         // Calculate space savings
-        let space_savings = if target.len() > 0 && delta.len() < target.len() {
+        let space_savings = if !target.is_empty() && delta.len() < target.len() {
             (target.len() - delta.len()) as f64 / target.len() as f64
-        } else if target.len() > 0 && delta.len() >= target.len() {
+        } else if !target.is_empty() && delta.len() >= target.len() {
             // Delta is larger than target, negative savings
             -((delta.len() - target.len()) as f64 / target.len() as f64)
         } else {

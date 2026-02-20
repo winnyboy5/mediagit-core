@@ -1,3 +1,17 @@
+﻿// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! LCA (Lowest Common Ancestor) Algorithm Tests
 //!
 //! Tests for merge base detection covering:
@@ -171,7 +185,7 @@ async fn test_lca_criss_cross_merge() {
         .unwrap();
 
     // Should detect criss-cross scenario (multiple merge bases or complex history)
-    assert!(bases.len() >= 1);
+    assert!(!bases.is_empty());
 }
 
 /// Test performance requirement: <50ms for merge base finding

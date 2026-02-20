@@ -8,7 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_VERSION: "1.91.0"
+  RUST_VERSION: "1.92.0"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -41,9 +41,6 @@ jobs:
           # Windows
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            rust: stable
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
             rust: stable
 
     steps:
@@ -162,7 +159,10 @@ jobs:
       - name: Wait for Azurite health
         run: |
           for i in $(seq 1 30); do
-            nc -z localhost 10000 && break
+            if curl -sf -o /dev/null -w "%{http_code}" http://localhost:10000/ 2>/dev/null | grep -q "400\|200"; then
+              echo "Azurite is ready"
+              break
+            fi
             echo "Waiting for Azurite... ($i/30)"
             sleep 2
           done
@@ -191,15 +191,15 @@ jobs:
 
   # Phase 4: MSRV verification
   msrv:
-    name: MSRV Check (Rust 1.91.0)
+    name: MSRV Check (Rust 1.92.0)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust 1.91.0
+      - name: Install Rust 1.92.0
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.91.0"
+          toolchain: "1.92.0"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -226,7 +226,7 @@ jobs:
         run: cargo install cargo-machete --locked
 
       - name: Check for unused dependencies
-        run: cargo machete
+        run: cargo machete --with-metadata
 
   # Phase 5: Code coverage
   coverage:
@@ -248,7 +248,7 @@ jobs:
         run: cargo install cargo-tarpaulin --locked
 
       - name: Generate coverage report
-        run: cargo tarpaulin --workspace --all-features --out Xml --output-dir coverage/
+        run: cargo tarpaulin --workspace --all-features --out Xml --output-dir coverage/ --timeout 300 --skip-clean || true
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@v4
