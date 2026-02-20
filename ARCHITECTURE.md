@@ -9,13 +9,13 @@
 
 ```mermaid
 graph TD
-    subgraph CLI["mediagit-cli (31 commands)"]
+    subgraph CLI["mediagit-cli (32 commands)"]
         ADD["add"]
         COMMIT["commit"]
         PUSH["push"]
         PULL["pull"]
         CLONE["clone"]
-        OTHER["30+ more..."]
+        OTHER["27+ more..."]
     end
 
     subgraph Core["Core Libraries"]
@@ -53,11 +53,11 @@ graph TD
 
 ---
 
-## Workspace Crates (14)
+## Workspace Crates (14+)
 
 | Crate | Role | Key Modules |
 |-------|------|-------------|
-| **mediagit-cli** | CLI binary (31 commands) | `commands/`, main entry |
+| **mediagit-cli** | CLI binary (32 commands) | `commands/`, main entry |
 | **mediagit-versioning** | Core VCS engine | ODB, index, refs, tree, commit, chunking, delta, similarity, packs, streaming |
 | **mediagit-compression** | Smart compression | Zstd, Brotli, Zlib, Store; `SmartCompressor` with type+size awareness |
 | **mediagit-media** | Media parsing & merging | Image, PSD, Video, Audio, 3D, VFX parsers & merge strategies |
@@ -74,7 +74,7 @@ graph TD
 
 ---
 
-## CLI Commands (31)
+## CLI Commands (32)
 
 ### Core Workflow
 | Command | Description |
@@ -85,47 +85,52 @@ graph TD
 | `status` | Show working tree and index status |
 | `log` | Display commit history |
 | `diff` | Show differences between versions |
+| `show` | Show object contents |
 
 ### Branching & History
 | Command | Description |
 |---------|-------------|
-| `branch` | List, create, or delete branches |
-| `checkout` | Switch branches or restore files |
-| `merge` | Merge branches |
+| `branch` | List, create, switch, or delete branches (supports remote branches via `-r`) |
+| `merge` | Merge branches with media-aware strategies |
 | `rebase` | Reapply commits on top of another base |
 | `cherry-pick` | Apply specific commits to current branch |
 | `tag` | Create, list, or delete tags |
 | `stash` | Temporarily shelve changes |
 | `bisect` | Binary search for bug-introducing commit |
+| `reflog` | Show reference logs (when branch tips were updated) |
 
 ### Remote Operations
 | Command | Description |
 |---------|-------------|
 | `clone` | Clone a repository (all branches) |
-| `push` | Push commits and chunks to remote |
+| `push` | Push commits and chunks to remote; supports `--delete` to remove remote branches |
 | `pull` | Fetch and merge remote changes |
 | `fetch` | Fetch all remote refs without merging |
 | `remote` | Manage remote repositories |
 
-### File Operations
+### File & History Operations
 | Command | Description |
 |---------|-------------|
 | `reset` | Unstage files or reset to a commit |
 | `revert` | Create a new commit that undoes changes |
-| `rm` | Remove files from tracking |
-| `mv` | Move or rename tracked files |
-| `show` | Show object contents |
-| `cat-file` | Low-level object inspection |
 
 ### Administration
 | Command | Description |
 |---------|-------------|
-| `config` | Get/set configuration values |
-| `gc` | Garbage collection and pack optimization |
+| `gc` | Garbage collection: sweep unreachable objects, orphaned chunks & manifests |
 | `fsck` | Verify object database integrity |
-| `migrate` | Migrate from Git to MediaGit |
-| `server` | Start the MediaGit HTTP server |
-| `completion` | Generate shell completions |
+| `verify` | Quick commit and signature verification |
+| `stats` | Show repository statistics (storage, files, compression, dedup) |
+| `completions` | Generate shell completions |
+| `version` | Show version information |
+
+### Git Integration
+| Command | Description |
+|---------|-------------|
+| `install` | Install MediaGit filter driver for Git integration |
+| `filter` | Git filter driver operations (clean/smudge) |
+| `track` | Register file patterns for MediaGit tracking |
+| `untrack` | Remove file patterns from MediaGit tracking |
 
 ---
 
@@ -602,7 +607,7 @@ pub trait StorageBackend: Send + Sync + Debug {
 | Method | Path | Handler | Purpose |
 |--------|------|---------|---------|
 | GET | `/:repo/info/refs` | `get_refs` | List all refs |
-| POST | `/:repo/refs/update` | `update_refs` | Update refs |
+| POST | `/:repo/refs/update` | `update_refs` | Update or delete refs |
 | POST | `/:repo/objects/want` | `request_objects` | Request specific objects |
 | GET | `/:repo/objects/pack` | `download_pack` | Download pack file |
 | POST | `/:repo/objects/pack` | `upload_pack` | Upload pack file |
@@ -741,8 +746,14 @@ sequenceDiagram
         CLI->>Server: POST /:repo/objects/pack [pack data]
     end
 
-    CLI->>Server: POST /:repo/refs/update [ref updates]
-    Server-->>CLI: Update results
+    alt Branch deletion (--delete)
+        CLI->>Server: POST /:repo/refs/update [delete: true]
+        Server-->>CLI: Branch deleted
+        CLI->>CLI: Remove local remote-tracking ref
+    else Normal push
+        CLI->>Server: POST /:repo/refs/update [ref updates]
+        Server-->>CLI: Update results
+    end
 ```
 
 ### `mediagit clone`
@@ -780,6 +791,54 @@ sequenceDiagram
     CLI->>CLI: Create refs/remotes/origin/*
     CLI->>FS: Checkout default branch
 ```
+
+---
+
+## Garbage Collection (GC)
+
+**Crate**: `mediagit-cli` · **Key file**: `commands/gc.rs`
+
+GC uses a **mark-sweep** algorithm that handles three object types:
+
+### GC Algorithm
+
+```mermaid
+flowchart TD
+    A["Walk all refs → build reachable OID set"] --> B["Delete unreachable loose objects"]
+    B --> C["List all chunk manifests"]
+    C --> D{"Manifest blob OID in reachable set?"}
+    D -->|Yes| E["Read manifest → collect chunk IDs"]
+    D -->|No| F["Mark manifest as orphan"]
+    E --> G["Build reachable_chunks set"]
+    G --> H["List all stored chunks"]
+    H --> I{"Chunk ID in reachable_chunks?"}
+    I -->|Yes| J["Keep chunk"]
+    I -->|No| K["Mark chunk as orphan"]
+    F --> L["Delete orphan manifests"]
+    K --> M["Delete orphan chunks"]
+    L --> N["Report reclaimed storage"]
+    M --> N
+
+    style A fill:#4A90D9,color:#fff
+    style F fill:#e74c3c,color:#fff
+    style K fill:#e74c3c,color:#fff
+    style N fill:#27AE60,color:#fff
+```
+
+### GC Stats
+
+| Metric | Description |
+|--------|-------------|
+| `objects_deleted` | Unreachable loose objects swept |
+| `manifests_deleted` | Orphaned chunk manifests removed |
+| `chunks_deleted` | Orphaned chunks removed |
+| `bytes_reclaimed` | Total storage freed |
+
+### Safety
+
+- `--dry-run` mode reports what would be deleted without touching data
+- Chunks are **content-addressed** — a chunk stays alive if ANY reachable manifest references it
+- The `--aggressive` flag performs deeper sweeps and pack recompaction
 
 ---
 

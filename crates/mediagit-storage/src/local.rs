@@ -265,9 +265,11 @@ impl LocalBackend {
     /// * `Err` - If directory creation fails
     async fn ensure_parent_dir(&self, path: &Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                fs::create_dir_all(parent).await?;
-            }
+            // Always call create_dir_all — it's idempotent and race-safe.
+            // Previous code had a TOCTOU race: check exists() then create_dir_all().
+            // Per tokio docs, create_dir_all concurrently is guaranteed not to fail
+            // due to a race condition with itself.
+            fs::create_dir_all(parent).await?;
         }
         Ok(())
     }
@@ -413,24 +415,72 @@ impl StorageBackend for LocalBackend {
         }
 
         let path = self.object_path(key);
-        self.ensure_parent_dir(&path).await?;
 
-        // Write to a temporary file first
-        let temp_path = path.with_extension("tmp");
+        // On Windows, concurrent parallel writes to a freshly-created shard directory
+        // can transiently fail with "file not found" (os error 2) because directory
+        // creation may not have fully propagated or antivirus briefly locks the dir.
+        // Retry with backoff to handle this race condition.
+        const MAX_RETRIES: u32 = 3;
+        let mut last_error = None;
 
-        // Remove any stale temp file
-        let _ = fs::remove_file(&temp_path).await;
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                // Exponential backoff: 10ms, 50ms, 200ms
+                let delay_ms = 10 * (5u64.pow(attempt - 1));
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                // Re-ensure parent dir exists (may have been transiently invisible)
+                let _ = self.ensure_parent_dir(&path).await;
+            } else {
+                self.ensure_parent_dir(&path).await?;
+            }
 
-        // Create and write to temp file
-        let mut file = fs::File::create(&temp_path).await?;
-        file.write_all(data).await?;
-        file.sync_all().await?;
-        drop(file);
+            // Write to a temporary file first
+            let temp_path = path.with_extension("tmp");
 
-        // Atomically rename temp file to final location
-        fs::rename(&temp_path, &path).await?;
+            // Remove any stale temp file
+            let _ = fs::remove_file(&temp_path).await;
 
-        Ok(())
+            // Create and write to temp file
+            let file_result = fs::File::create(&temp_path).await;
+            let mut file = match file_result {
+                Ok(f) => f,
+                Err(e) if attempt < MAX_RETRIES && e.raw_os_error() == Some(2) => {
+                    last_error = Some(e);
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+
+            if let Err(e) = file.write_all(data).await {
+                let _ = fs::remove_file(&temp_path).await;
+                return Err(e.into());
+            }
+            if let Err(e) = file.sync_all().await {
+                let _ = fs::remove_file(&temp_path).await;
+                return Err(e.into());
+            }
+            drop(file);
+
+            // Atomically rename temp file to final location
+            match fs::rename(&temp_path, &path).await {
+                Ok(()) => return Ok(()),
+                Err(e) if attempt < MAX_RETRIES && e.raw_os_error() == Some(2) => {
+                    let _ = fs::remove_file(&temp_path).await;
+                    last_error = Some(e);
+                    continue;
+                }
+                Err(e) => {
+                    let _ = fs::remove_file(&temp_path).await;
+                    return Err(e.into());
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "Failed to write object after {} retries: {}",
+            MAX_RETRIES,
+            last_error.map(|e| e.to_string()).unwrap_or_default()
+        ))
     }
 
     /// Check if an object exists

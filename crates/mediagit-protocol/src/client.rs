@@ -574,7 +574,7 @@ impl ProtocolClient {
     }
 
     /// Update remote refs
-    async fn update_refs(&self, request: RefUpdateRequest) -> Result<RefUpdateResponse> {
+    pub async fn update_refs(&self, request: RefUpdateRequest) -> Result<RefUpdateResponse> {
         let url = format!("{}/refs/update", self.base_url);
         tracing::debug!("POST {}", url);
 

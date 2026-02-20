@@ -103,10 +103,9 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
-    /// Load configuration from file or use defaults
-    pub fn load() -> Result<Self> {
-        // Try to load from mediagit-server.toml in current directory
-        let config_path = PathBuf::from("mediagit-server.toml");
+    /// Load configuration from the given path, or use defaults if the file does not exist
+    pub fn load(config_path: &str) -> Result<Self> {
+        let config_path = PathBuf::from(config_path);
 
         if config_path.exists() {
             let content = std::fs::read_to_string(&config_path)

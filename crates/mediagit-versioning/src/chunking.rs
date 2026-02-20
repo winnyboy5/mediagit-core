@@ -318,6 +318,55 @@ impl ContentChunker {
         Ok(chunk_oids)
     }
 
+    /// Collect chunks from a file synchronously, sending each through a `tokio::sync::mpsc` channel.
+    ///
+    /// Designed for use inside `tokio::task::spawn_blocking` to avoid blocking the tokio
+    /// executor with synchronous FastCDC file I/O.  The caller should spawn a blocking task,
+    /// then receive from the corresponding `tokio::sync::mpsc::Receiver` in async context.
+    ///
+    /// # Errors
+    /// Returns an error if the file cannot be opened, read, or if the receiver has been dropped.
+    pub fn collect_file_chunks_blocking<P: AsRef<std::path::Path>>(
+        &self,
+        path: P,
+        sender: tokio::sync::mpsc::Sender<ContentChunk>,
+    ) -> anyhow::Result<()> {
+        let path = path.as_ref();
+        let file_size = std::fs::metadata(path)
+            .map_err(|e| anyhow::anyhow!("Failed to read file metadata '{}': {}", path.display(), e))?
+            .len();
+
+        if file_size == 0 {
+            return Ok(());
+        }
+
+        let (avg_size, min_size, max_size) = get_chunk_params(file_size);
+
+        let file = std::fs::File::open(path)
+            .map_err(|e| anyhow::anyhow!("Failed to open file '{}': {}", path.display(), e))?;
+
+        let stream_cdc = fastcdc::v2020::StreamCDC::new(
+            file, min_size as u32, avg_size as u32, max_size as u32,
+        );
+
+        for result in stream_cdc {
+            let entry = result.map_err(|e| anyhow::anyhow!("FastCDC streaming error: {}", e))?;
+            let id = Oid::hash(&entry.data);
+            let chunk = ContentChunk {
+                id,
+                data: entry.data,
+                offset: entry.offset as u64,
+                size: entry.length,
+                chunk_type: ChunkType::Generic,
+                perceptual_hash: None,
+            };
+            sender.blocking_send(chunk)
+                .map_err(|_| anyhow::anyhow!("Chunk worker channel closed unexpectedly"))?;
+        }
+
+        Ok(())
+    }
+
     /// Fixed-size chunking
     async fn chunk_fixed(&self, data: &[u8], chunk_size: usize) -> Result<Vec<ContentChunk>> {
         let mut chunks = Vec::new();
@@ -398,7 +447,12 @@ impl ContentChunker {
 
         match extension.to_lowercase().as_str() {
             // Media - Structure-aware chunking
-            "avi" | "riff" | "wav" => self.chunk_avi(data).await,
+            "avi" | "riff" => self.chunk_avi(data).await,
+            // WAV is RIFF-based audio but not interleaved A/V — use rolling CDC
+            "wav" => {
+                let (avg, min, max) = get_chunk_params(data.len() as u64);
+                self.chunk_fastcdc(data, avg, min, max).await
+            }
             "mp4" | "mov" | "m4v" | "m4a" | "3gp" => self.chunk_mp4(data).await,
             "mkv" | "webm" | "mka" | "mk3d" => self.chunk_matroska(data).await,
             "mpg" | "mpeg" | "vob" | "mts" | "m2ts" => {

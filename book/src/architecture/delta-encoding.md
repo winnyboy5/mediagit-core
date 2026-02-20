@@ -20,9 +20,9 @@ Version 3: 3 MB (delta from v2)
 Total: 108 MB (64% reduction!)
 ```
 
-## xdelta3 Algorithm
+## bsdiff Algorithm
 
-MediaGit uses xdelta3 for binary delta compression:
+MediaGit uses bsdiff for binary delta compression:
 - **Efficiency**: 90%+ reduction for typical media workflows
 - **Speed**: Fast reconstruction (50-100 MB/s)
 - **Streaming**: No need to load full file into memory
@@ -185,18 +185,17 @@ The similarity checking process:
 ### Process
 1. Read base version from ODB
 2. Read new version from working directory
-3. Generate delta using xdelta3
+3. Generate delta using bsdiff
 4. If delta smaller than full object, store delta
 5. If delta larger, store full object (no benefit)
 
 ### Example
 ```rust
-use xdelta3::encode;
-
 let base = odb.read(base_oid)?;
 let new_content = std::fs::read("large-file.psd")?;
 
-let delta = encode(&base, &new_content)?;
+let mut delta = Vec::new();
+bsdiff::diff(&base, &new_content, &mut delta)?;
 
 if delta.len() < new_content.len() {
     odb.write_delta(base_oid, &delta)?;
@@ -222,7 +221,9 @@ fn reconstruct(odb: &Odb, target_oid: Oid) -> Result<Vec<u8>> {
 
     for delta_oid in chain.deltas {
         let delta = odb.read(delta_oid)?;
-        content = xdelta3::decode(&content, &delta)?;
+        let mut reconstructed = Vec::new();
+        bsdiff::patch(&content, &mut delta.as_ref(), &mut reconstructed)?;
+        content = reconstructed;
     }
 
     // Verify

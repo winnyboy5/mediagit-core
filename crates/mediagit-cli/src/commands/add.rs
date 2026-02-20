@@ -38,7 +38,7 @@ SEE ALSO:
     mediagit-status(1), mediagit-commit(1), mediagit-reset(1)")]
 pub struct AddCmd {
     /// Files or patterns to add
-    #[arg(value_name = "PATHS", required = true)]
+    #[arg(value_name = "PATHS")]
     pub paths: Vec<String>,
 
     /// Add all changes
@@ -102,6 +102,11 @@ struct FileResult {
 impl AddCmd {
     pub async fn execute(&self) -> Result<()> {
         use crate::output;
+
+        // Validate: either --all or paths must be provided
+        if !self.all && self.paths.is_empty() {
+            anyhow::bail!("Nothing specified, nothing added.\nUse 'mediagit add <file>...' or 'mediagit add --all' to stage files.");
+        }
 
         // Find repository root
         let repo_root = find_repo_root()?;
@@ -566,6 +571,12 @@ impl AddCmd {
         let mut files = Vec::new();
         let mediagit_dir = dunce::canonicalize(repo_root.join(".mediagit"))
             .unwrap_or_else(|_| repo_root.join(".mediagit"));
+
+        // If --all is set and no paths given, add entire repo root
+        if self.all && self.paths.is_empty() {
+            self.collect_files_recursive(repo_root, &mediagit_dir, &mut files)?;
+            return Ok(files);
+        }
 
         for path_str in &self.paths {
             let path = Path::new(path_str);

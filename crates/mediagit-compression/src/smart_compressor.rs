@@ -113,6 +113,9 @@ pub enum ObjectType {
     FinalCutPro,       // .fcpbundle, .fcpxml
     AvidMediaComposer, // .avb
 
+    // 3D interchange/exchange formats (mesh/scene data)
+    Model3D,           // .stl, .obj, .fbx, .glb, .gltf, .ply, .dae, .abc, .3ds, .usd, .usda, .usdc
+
     // Creative project files - 3D/DCC
     Blender,           // .blend
     Maya,              // .ma, .mb
@@ -258,6 +261,13 @@ impl ObjectType {
             "drp" | "drp_proxies" => ObjectType::DavinciResolve,
             "fcpbundle" | "fcpxml" | "fcpxmld" => ObjectType::FinalCutPro,
             "avb" | "avp" | "avs" => ObjectType::AvidMediaComposer,
+
+            // 3D interchange/exchange formats (mesh/scene data)
+            // Note: usdz is a ZIP container → maps to Zip (Store strategy)
+            "stl" | "obj" | "fbx" | "glb" | "gltf" |
+            "ply" | "dae" | "abc" | "3ds" |
+            "usd" | "usda" | "usdc" => ObjectType::Model3D,
+            "usdz" => ObjectType::Zip,
 
             // Creative projects - 3D/DCC
             "blend" | "blend1" => ObjectType::Blender,
@@ -433,6 +443,9 @@ impl ObjectType {
             // ML specialized (training vs inference)
             ObjectType::MlCheckpoint | ObjectType::MlInference => ObjectCategory::MlSpecialized,
 
+            // 3D interchange/exchange formats
+            ObjectType::Model3D => ObjectCategory::CreativeProject,
+
             // Creative project files
             ObjectType::AdobePhotoshop | ObjectType::AdobeIllustrator | ObjectType::AdobeIndesign |
             ObjectType::AdobeAfterEffects | ObjectType::AdobePremiere |
@@ -576,6 +589,11 @@ impl CompressionStrategy {
             ObjectType::MlInference | ObjectType::MlDeployment => {
                 CompressionStrategy::Zstd(CompressionLevel::Default)
             }
+
+            // 3D interchange formats: Zstd best (mesh/geometry data compresses well)
+            // STL/OBJ/PLY: raw float triangles → 60-70% compression typical
+            // GLB/FBX/DAE: binary mesh with metadata → 30-50% compression typical
+            ObjectType::Model3D => CompressionStrategy::Zstd(CompressionLevel::Best),
 
             // PDF-based creative containers: store without recompression
             // AI/InDesign files are PDF containers with embedded compressed streams

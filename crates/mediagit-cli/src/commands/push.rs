@@ -187,6 +187,129 @@ impl PushCmd {
         let odb =
             mediagit_versioning::ObjectDatabase::with_smart_compression(Arc::clone(&storage), 1000);
 
+        // ===== Handle push --delete: delete remote refs without uploading objects =====
+        if self.delete {
+            if self.refspec.is_empty() {
+                anyhow::bail!("push --delete requires at least one branch name");
+            }
+
+            if !self.quiet {
+                println!(
+                    "{} Deleting remote branch(es): {}",
+                    style("🗑️").red().bold(),
+                    self.refspec.join(", ")
+                );
+            }
+
+            // Get remote refs to find current OIDs for safety
+            let remote_refs = client.get_refs().await?;
+
+            let mut updates = Vec::new();
+            for ref_name in &self.refspec {
+                let full_ref = mediagit_versioning::normalize_ref_name(ref_name);
+                validate_ref_name(&full_ref)?;
+
+                // Get current remote OID for safety check
+                let remote_oid = remote_refs
+                    .refs
+                    .iter()
+                    .find(|r| r.name == full_ref)
+                    .map(|r| r.oid.clone());
+
+                if remote_oid.is_none() {
+                    if !self.quiet {
+                        println!(
+                            "  {} Branch '{}' does not exist on remote",
+                            style("⚠").yellow(),
+                            ref_name
+                        );
+                    }
+                    continue;
+                }
+
+                updates.push(mediagit_protocol::RefUpdate {
+                    name: full_ref,
+                    old_oid: remote_oid,
+                    new_oid: String::new(), // ignored for delete
+                    delete: true,
+                });
+            }
+
+            if updates.is_empty() {
+                if !self.quiet {
+                    println!("{} No branches to delete", style("ℹ").blue());
+                }
+                return Ok(());
+            }
+
+            // Send delete request directly (no packing/uploading)
+            let request = mediagit_protocol::RefUpdateRequest {
+                updates: updates.clone(),
+                force: self.force,
+            };
+
+            let response = client.update_refs(request).await?;
+
+            // Report results
+            for result in &response.results {
+                if result.success {
+                    if !self.quiet {
+                        let display_name = result.ref_name
+                            .strip_prefix("refs/heads/")
+                            .unwrap_or(&result.ref_name);
+                        println!(
+                            "  {} Deleted remote branch '{}'",
+                            style("✓").green(),
+                            display_name
+                        );
+                    }
+
+                    // Clean up local remote-tracking ref
+                    let tracking_ref = result.ref_name
+                        .replace("refs/heads/", &format!("refs/remotes/{}/", remote));
+                    if refdb.read(&tracking_ref).await.is_ok() {
+                        if let Err(e) = refdb.delete(&tracking_ref).await {
+                            tracing::warn!("Failed to delete local tracking ref {}: {}", tracking_ref, e);
+                        } else if self.verbose {
+                            println!("  Cleaned up local tracking ref: {}", tracking_ref);
+                        }
+                    }
+                } else {
+                    if !self.quiet {
+                        let display_name = result.ref_name
+                            .strip_prefix("refs/heads/")
+                            .unwrap_or(&result.ref_name);
+                        let error_msg = result.error.as_deref().unwrap_or("unknown error");
+                        println!(
+                            "  {} Failed to delete '{}': {}",
+                            style("✗").red(),
+                            display_name,
+                            error_msg
+                        );
+                    }
+                }
+            }
+
+            if !response.success {
+                anyhow::bail!("Some branch deletions failed");
+            }
+
+            // Hint about garbage collection
+            if !self.quiet {
+                println!(
+                    "\n{} To reclaim storage, run: mediagit gc",
+                    style("hint:").cyan()
+                );
+            }
+
+            stats.duration_ms = start_time.elapsed().as_millis() as u64;
+            if let Err(e) = stats.save(&storage_path) {
+                tracing::warn!("Failed to save operation stats: {}", e);
+            }
+
+            return Ok(());
+        }
+
         // Determine which refs to push
         let refs_to_push: Vec<String> = if self.all {
             // Push all local branches
@@ -251,6 +374,7 @@ impl PushCmd {
                 name: ref_to_push.clone(),
                 old_oid: remote_oid,
                 new_oid: local_oid_str,
+                delete: false,
             });
         }
 

@@ -11,14 +11,14 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
 
-//! Delta encoding implementation using XDelta3
+//! Delta encoding implementation using bsdiff
 //!
 //! This module provides delta compression for incremental changes to large media files,
 //! achieving up to 95% space savings when files are similar.
 //!
 //! # Features
 //!
-//! - XDelta3-based binary diff/patch operations
+//! - bsdiff-based binary diff/patch operations
 //! - Intelligent delta vs full compression decision logic
 //! - Base reference tracking with chain depth limits
 //! - Fast delta application with chain resolution (<100ms)
@@ -309,7 +309,7 @@ impl Default for DeltaChainTracker {
     }
 }
 
-/// Delta encoder using XDelta3
+/// Delta encoder using bsdiff
 ///
 /// Provides delta compression and decompression with intelligent decision logic,
 /// with optional media-aware configuration.
@@ -409,12 +409,19 @@ impl DeltaEncoder {
             return Ok((target.to_vec(), false));
         }
 
-        // Create delta using xdelta3
-        let delta = match xdelta3::encode(base, target) {
-            Some(d) => d,
-            None => {
-                warn!("XDelta3 encoding failed, falling back to full");
-                return Ok((target.to_vec(), false));
+        // Create delta using bsdiff, then compress with zstd
+        // (bsdiff v0.2 does not compress internally; raw patches are mostly zeros for
+        // similar files, so zstd compresses them extremely well)
+        let delta = {
+            let mut raw_patch = Vec::new();
+            match bsdiff::diff(base, target, &mut raw_patch) {
+                Ok(()) => {
+                    zstd::bulk::compress(&raw_patch, 3).unwrap_or_else(|_| raw_patch)
+                }
+                Err(e) => {
+                    warn!("bsdiff encoding failed: {}, falling back to full", e);
+                    return Ok((target.to_vec(), false));
+                }
             }
         };
 
@@ -463,9 +470,19 @@ impl DeltaEncoder {
     pub fn decode(&self, base: &[u8], delta: &[u8]) -> CompressionResult<Vec<u8>> {
         let start = Instant::now();
 
-        let result = xdelta3::decode(base, delta).ok_or_else(|| {
-            CompressionError::decompression_failed("XDelta3 decoding failed".to_string())
-        })?;
+        let result = {
+            // Decompress zstd wrapper, then apply bsdiff patch
+            let raw_patch = zstd::bulk::decompress(delta, 128 * 1024 * 1024)
+                .map_err(|e| CompressionError::decompression_failed(
+                    format!("bsdiff zstd decompression failed: {}", e)
+                ))?;
+            let mut output = Vec::new();
+            bsdiff::patch(base, &mut raw_patch.as_slice(), &mut output)
+                .map_err(|e| CompressionError::decompression_failed(
+                    format!("bsdiff patch failed: {}", e)
+                ))?;
+            output
+        };
 
         let elapsed = start.elapsed();
         if elapsed.as_millis() > MAX_RECONSTRUCTION_TIME_MS as u128 {
@@ -754,19 +771,10 @@ mod tests {
         // For highly similar data, delta encoding should be beneficial
         if should_use_delta {
             assert!(data.len() < target.len() / 2, "Delta should be much smaller");
-            // Try to decode - if it fails, the delta is malformed (xdelta3 issue)
-            match encoder.decode(&base, &data) {
-                Ok(reconstructed) => {
-                    assert_eq!(target, reconstructed);
-                }
-                Err(_) => {
-                    // xdelta3 can sometimes create deltas that fail to decode
-                    // This is a known limitation of the xdelta3 crate
-                    // In production, the encode() would return should_use_delta=false
-                }
-            }
+            let reconstructed = encoder.decode(&base, &data).unwrap();
+            assert_eq!(target, reconstructed);
         } else {
-            // If xdelta3 failed, should return full data
+            // If delta encoding wasn't beneficial, should return full data
             assert_eq!(data, target);
         }
     }
@@ -795,7 +803,7 @@ mod tests {
 
         let (data, should_use_delta) = encoder.encode(base, target).unwrap();
 
-        // For very small identical data, xdelta3 may not generate a delta
+        // For very small identical data, bsdiff may not generate a delta
         // The system should fall back to returning the full data
         if should_use_delta {
             // If delta was used, verify it can be decoded
@@ -959,9 +967,14 @@ mod tests {
         assert_eq!(encoder.max_chain_depth(), 100);
 
         // Verify it actually enforces the limit
-        let base = vec![0x42u8; 1000];
+        // Use structured data (repeating text pattern) that bsdiff can compress well
+        let pattern = b"The quick brown fox jumps over the lazy dog. ";
+        let base: Vec<u8> = pattern.iter().cycle().take(100_000).copied().collect();
         let mut target = base.clone();
-        target[500] = 0x43; // Small change
+        // Modify a small region
+        for i in 50_000..50_100 {
+            target[i] = b'X';
+        }
 
         // At depth 99, should create delta
         let (_, should_use99) = encoder.encode_with_depth(&base, &target, 99).unwrap();
