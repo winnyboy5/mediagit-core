@@ -84,6 +84,19 @@ aws-sdk-s3 = { version = "1.66", default-features = false, features = ["behavior
 indicatif = { version = "0.17", features = ["rayon", "futures"] }
 console = "0.15"
 
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+unused_imports = "deny"
+dead_code = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+unwrap_used = "warn"
+clone_on_ref_ptr = "warn"
+large_futures = "warn"
+needless_pass_by_value = "warn"
+
 [profile.release]
 opt-level = 3
 lto = true

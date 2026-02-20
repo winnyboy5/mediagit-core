@@ -86,3 +86,6 @@ proptest.workspace = true
 [[bench]]
 name = "encryption_benchmark"
 harness = false
+
+[lints]
+workspace = true
