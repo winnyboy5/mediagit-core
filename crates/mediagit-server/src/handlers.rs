@@ -1,3 +1,17 @@
+﻿// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use axum::{
     extract::{Path, State},
     http::{StatusCode, HeaderMap},
@@ -220,7 +234,7 @@ pub async fn get_refs(
 
     // Initialize storage and refdb
     let _storage = create_storage_backend(&repo_path).await?;
-    let refdb = RefDatabase::new(&repo_path.join(".mediagit"));
+    let refdb = RefDatabase::new(repo_path.join(".mediagit"));
 
     // List all refs by scanning refs directory
     let refs_dir = repo_path.join(".mediagit/refs");
@@ -305,7 +319,7 @@ pub async fn upload_pack(
 
     let stream = body
         .into_data_stream()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+        .map_err(std::io::Error::other);
 
     let stream_reader = StreamReader::new(stream);
 
@@ -635,7 +649,7 @@ pub async fn update_refs(
 
     // Initialize storage and refdb
     let _storage = create_storage_backend(&repo_path).await?;
-    let refdb = RefDatabase::new(&repo_path.join(".mediagit"));
+    let refdb = RefDatabase::new(repo_path.join(".mediagit"));
 
     let mut results = Vec::new();
     let mut all_success = true;

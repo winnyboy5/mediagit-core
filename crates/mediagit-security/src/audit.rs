@@ -1,3 +1,17 @@
+﻿// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! Audit logging for security events
 //!
 //! Provides structured logging for security-critical events including:
@@ -160,7 +174,6 @@ impl AuditEvent {
 }
 
 /// Helper functions for common audit events
-
 /// Default IP address for unknown clients
 const UNKNOWN_IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0));
 
@@ -266,6 +279,7 @@ pub fn log_access_denied(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

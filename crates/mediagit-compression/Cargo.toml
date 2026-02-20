@@ -26,3 +26,6 @@ proptest.workspace = true
 [[bench]]
 name = "compression_bench"
 harness = false
+
+[lints]
+workspace = true

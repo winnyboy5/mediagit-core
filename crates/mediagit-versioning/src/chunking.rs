@@ -1,3 +1,17 @@
+﻿// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! Content-based chunking for efficient media storage
 //!
 //! This module provides content-aware chunking strategies for media files,
@@ -40,20 +54,15 @@ use tracing::{debug, info, warn};
 pub type ChunkId = Oid;
 
 /// Chunking strategy selection
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChunkStrategy {
     /// Fixed-size chunks (simple, predictable)
     Fixed { size: usize },
     /// Rolling hash chunking (content-defined boundaries)
     Rolling { avg_size: usize, min_size: usize, max_size: usize },
     /// Media-aware chunking (parse structure, separate streams)
+    #[default]
     MediaAware,
-}
-
-impl Default for ChunkStrategy {
-    fn default() -> Self {
-        ChunkStrategy::MediaAware
-    }
 }
 
 /// Content chunk with metadata
@@ -155,10 +164,10 @@ const CRC32_ID: u32 = 0xBF;             // CRC-32 (skip)
 fn get_chunk_params(file_size: u64) -> (usize, usize, usize) {
     const MB: usize = 1024 * 1024;
     match file_size {
-        0..=100_000_000 => (1 * MB, 512 * 1024, 4 * MB),           // < 100MB: 1MB avg
-        100_000_001..=10_000_000_000 => (2 * MB, 1 * MB, 8 * MB),  // 100MB-10GB: 2MB avg
-        10_000_000_001..=100_000_000_000 => (4 * MB, 1 * MB, 16 * MB), // 10GB-100GB: 4MB avg
-        _ => (8 * MB, 1 * MB, 32 * MB),                           // > 100GB: 8MB avg
+        0..=100_000_000 => (MB, 512 * 1024, 4 * MB),           // < 100MB: 1MB avg
+        100_000_001..=10_000_000_000 => (2 * MB, MB, 8 * MB),  // 100MB-10GB: 2MB avg
+        10_000_000_001..=100_000_000_000 => (4 * MB, MB, 16 * MB), // 10GB-100GB: 4MB avg
+        _ => (8 * MB, MB, 32 * MB),                           // > 100GB: 8MB avg
     }
 }
 
@@ -304,7 +313,7 @@ impl ContentChunker {
             let chunk = ContentChunk {
                 id,
                 data: entry.data,
-                offset: entry.offset as u64,
+                offset: entry.offset,
                 size: entry.length,
                 chunk_type: ChunkType::Generic,
                 perceptual_hash: None,
@@ -355,7 +364,7 @@ impl ContentChunker {
             let chunk = ContentChunk {
                 id,
                 data: entry.data,
-                offset: entry.offset as u64,
+                offset: entry.offset,
                 size: entry.length,
                 chunk_type: ChunkType::Generic,
                 perceptual_hash: None,
@@ -601,7 +610,7 @@ impl ContentChunker {
 
             // Calculate chunk end, including padding byte if needed for RIFF alignment
             let data_end = (pos + 8 + chunk_size).min(data.len());
-            let needs_padding = chunk_size % 2 != 0 && data_end < data.len();
+            let needs_padding = !chunk_size.is_multiple_of(2) && data_end < data.len();
             let chunk_end = if needs_padding { data_end + 1 } else { data_end };
             let chunk_end = chunk_end.min(data.len());
             
@@ -777,8 +786,8 @@ impl ContentChunker {
 
                         let sub_chunks = self.chunk_fastcdc(
                             mdat_content,
-                            1 * 1024 * 1024,  // 1MB average
-                            512 * 1024,       // 512KB minimum
+                            1024 * 1024,  // 1MB average
+                            512 * 1024,  // 512KB minimum
                             4 * 1024 * 1024,  // 4MB maximum
                         ).await?;
 
@@ -1120,7 +1129,7 @@ impl ContentChunker {
     /// - PLY: header vs data sections
     async fn chunk_3d_text(&self, data: &[u8]) -> Result<Vec<ContentChunk>> {
         // Check if data is valid UTF-8 text
-        if !data.iter().take(1024).all(|&b| b < 128 || b >= 0xC0) {
+        if !data.iter().take(1024).all(|&b| (..128).contains(&b) || b >= 0xC0) {
             // Binary format - use rolling CDC
             let (avg, min, max) = get_chunk_params(data.len() as u64);
             return self.chunk_fastcdc(data, avg, min, max).await;
@@ -1291,7 +1300,7 @@ fn parse_mp4_atoms(data: &[u8]) -> Vec<Mp4Atom> {
 
         // Validate atom type (should be printable ASCII or known types)
         let is_valid_type = atom_type.iter().all(|&b| {
-            (b >= 0x20 && b <= 0x7E) || b == 0x00
+            (0x20..=0x7E).contains(&b) || b == 0x00
         });
         if !is_valid_type {
             // Invalid atom type, stop parsing

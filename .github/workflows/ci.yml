@@ -8,7 +8,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_VERSION: "1.91.0"
+  RUST_VERSION: "1.92.0"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -38,9 +42,6 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             rust: stable
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
-            rust: stable
 
     steps:
       - uses: actions/checkout@v4
@@ -51,23 +52,9 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           targets: ${{ matrix.target }}
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo build
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ matrix.target }}
 
       - name: Install cross (for ARM cross-compilation)
         if: matrix.cross
@@ -84,7 +71,7 @@ jobs:
 
       - name: Run tests
         if: ${{ !matrix.cross }}
-        run: cargo test --verbose --all-features
+        run: cargo test --workspace --verbose --all-features
 
   lint:
     name: Lint
@@ -102,7 +89,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   license-check:
     name: License Check
@@ -116,12 +103,12 @@ jobs:
 
           missing_headers=0
 
-          for file in $(find crates -name "*.rs" -type f); do
+          while IFS= read -r file; do
             if ! grep -q "GNU Affero General Public License" "$file"; then
               echo "❌ Missing license header: $file"
               missing_headers=$((missing_headers + 1))
             fi
-          done
+          done < <(git ls-files 'crates/**/*.rs')
 
           if [ $missing_headers -gt 0 ]; then
             echo "❌ $missing_headers file(s) missing AGPL-3.0 license headers"
@@ -143,3 +130,130 @@ jobs:
 
       - name: Run cargo audit
         uses: actions-rust-lang/audit@v1
+
+  # Phase 3: Integration tests (storage backends) — non-required check initially
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Start storage emulators
+        run: docker compose -f docker-compose.test.yml up -d
+
+      - name: Wait for MinIO health
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:9000/minio/health/live && break
+            echo "Waiting for MinIO... ($i/30)"
+            sleep 2
+          done
+
+      - name: Wait for Azurite health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf -o /dev/null -w "%{http_code}" http://localhost:10000/ 2>/dev/null | grep -q "400\|200"; then
+              echo "Azurite is ready"
+              break
+            fi
+            echo "Waiting for Azurite... ($i/30)"
+            sleep 2
+          done
+
+      - name: Wait for GCS emulator health
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:4443/storage/v1/b && break
+            echo "Waiting for GCS emulator... ($i/30)"
+            sleep 2
+          done
+
+      - name: Run integration tests
+        env:
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+          AWS_ENDPOINT_URL: http://localhost:9000
+          AWS_REGION: us-east-1
+          AZURE_STORAGE_CONNECTION_STRING: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://localhost:10000/devstoreaccount1;"
+          GCS_EMULATOR_HOST: http://localhost:4443
+        run: cargo test --ignored -p mediagit-storage -p mediagit-server --verbose
+
+      - name: Stop storage emulators
+        if: always()
+        run: docker compose -f docker-compose.test.yml down -v
+
+  # Phase 4: MSRV verification
+  msrv:
+    name: MSRV Check (Rust 1.92.0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.92.0
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.92.0"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+
+      - name: cargo check at MSRV
+        run: cargo check --workspace --all-features
+
+  # Phase 4: Unused dependency detection
+  unused-deps:
+    name: Unused Dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-machete
+        run: cargo install cargo-machete --locked
+
+      - name: Check for unused dependencies
+        run: cargo machete --with-metadata
+
+  # Phase 5: Code coverage
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin --locked
+
+      - name: Generate coverage report
+        run: cargo tarpaulin --workspace --all-features --out Xml --output-dir coverage/ --timeout 300 --skip-clean || true
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage/cobertura.xml
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

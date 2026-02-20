@@ -1,3 +1,17 @@
+﻿// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use crate::error::{ConfigError, ConfigResult};
 use crate::schema::*;
 use std::path::Path;
@@ -245,7 +259,7 @@ impl Validator for CompressionConfig {
             if let Some(level) = algo_config.level {
                 match algo_name.as_str() {
                     "zstd" => {
-                        if level < 1 || level > 22 {
+                        if !(1..=22).contains(&level) {
                             return Err(ConfigError::invalid_value(
                                 format!("compression.algorithms.{}.level", algo_name),
                                 "zstd level must be between 1 and 22",
@@ -515,7 +529,7 @@ impl Validator for RateLimitConfig {
 /// Helper function to validate octal string format
 fn is_valid_octal(s: &str) -> bool {
     if s.starts_with('0') && s.len() == 4 {
-        s[1..].chars().all(|c| c >= '0' && c <= '7')
+        s[1..].chars().all(|c| ('0'..='7').contains(&c))
     } else {
         false
     }

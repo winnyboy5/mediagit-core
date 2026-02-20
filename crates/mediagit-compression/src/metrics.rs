@@ -132,14 +132,14 @@ impl CompressionMetrics {
         self.compressed_size = compressed.len();
 
         // Calculate compression ratio (original/compressed, higher is better)
-        self.compression_ratio = if compressed.len() == 0 {
+        self.compression_ratio = if compressed.is_empty() {
             f64::INFINITY
         } else {
             original.len() as f64 / compressed.len() as f64
         };
 
         self.space_saved = original.len().saturating_sub(compressed.len());
-        self.space_saved_percent = if original.len() == 0 {
+        self.space_saved_percent = if original.is_empty() {
             0.0
         } else {
             (self.space_saved as f64 / original.len() as f64) * 100.0
@@ -344,6 +344,7 @@ impl CompressionTimer {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -539,8 +540,8 @@ mod tests {
         for _ in 0..iterations {
             let mut metrics = CompressionMetrics::new();
             metrics.record_compression(
-                &vec![0u8; 100],
-                &vec![0u8; 50],
+                &[0u8; 100],
+                &[0u8; 50],
                 Duration::from_micros(1),
                 CompressionAlgorithm::Zstd,
                 CompressionLevel::Fast,
@@ -778,6 +779,7 @@ impl Default for MetricsAggregator {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod aggregator_tests {
     use super::*;
 

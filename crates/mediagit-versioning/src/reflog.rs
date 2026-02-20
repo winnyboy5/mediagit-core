@@ -139,7 +139,7 @@ impl ReflogEntry {
         // Parse timestamp and timezone after email
         let after_email = header_rest[email_end + 1..].trim();
         let time_parts: Vec<&str> = after_email.split_whitespace().collect();
-        if time_parts.len() < 1 {
+        if time_parts.is_empty() {
             anyhow::bail!("Invalid timestamp in reflog");
         }
         
@@ -358,6 +358,7 @@ impl Reflog {
     }
 
     /// Recursively walk refs directory to find all reflogs
+    #[allow(clippy::only_used_in_recursion)]
     fn walk_refs_dir<'a>(
         &'a self,
         dir: &'a PathBuf,

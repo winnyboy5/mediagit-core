@@ -1,3 +1,17 @@
+﻿// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use chrono::{DateTime, Utc};
 use indicatif::{
     HumanBytes, HumanCount, HumanDuration, MultiProgress, ProgressBar, ProgressDrawTarget,
@@ -307,7 +321,7 @@ impl OperationStats {
             .collect();
 
         // Sort by filename (which includes timestamp) in descending order
-        entries.sort_by(|a, b| b.path().cmp(&a.path()));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.path()));
 
         let mut stats = Vec::new();
         for entry in entries.into_iter().take(limit) {
@@ -341,7 +355,7 @@ impl OperationStats {
         }
 
         // Sort by filename (newest first)
-        entries.sort_by(|a, b| b.path().cmp(&a.path()));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.path()));
 
         // Remove oldest files
         for entry in entries.into_iter().skip(keep_count) {

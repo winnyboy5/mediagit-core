@@ -98,7 +98,7 @@ impl Compressor for ZlibCompressor {
         let is_zlib = data.len() >= 2 && data[0] == 0x78 && {
             let cmf = data[0] as u16;
             let flg = data[1] as u16;
-            (cmf * 256 + flg) % 31 == 0
+            (cmf * 256 + flg).is_multiple_of(31)
         };
 
         if is_zlib {
@@ -122,6 +122,7 @@ impl Compressor for ZlibCompressor {
 
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

@@ -94,7 +94,7 @@ impl<R: AsyncRead + Unpin> StreamingPackReader<R> {
         // Read object header: type (1 byte) + size (4 bytes)
         let mut header_buf = [0u8; 5];
         self.reader.read_exact(&mut header_buf).await?;
-        self.hasher.update(&header_buf);
+        self.hasher.update(header_buf);
 
         let type_byte = header_buf[0];
         let size = u32::from_le_bytes([
@@ -307,7 +307,7 @@ impl<W: AsyncWrite + Unpin> StreamingPackWriter<W> {
         // Write index offset (the position where the index starts in the pack file)
         let index_offset_bytes = index_offset.to_le_bytes();
         self.writer.write_all(&index_offset_bytes).await?;
-        self.hasher.update(&index_offset_bytes);
+        self.hasher.update(index_offset_bytes);
 
         // Write final checksum
         let checksum = self.hasher.finalize();

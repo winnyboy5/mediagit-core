@@ -180,7 +180,7 @@ impl Ref {
     pub fn branch_name(&self) -> String {
         self.name
             .split('/')
-            .last()
+            .next_back()
             .unwrap_or(&self.name)
             .to_string()
     }
@@ -488,7 +488,7 @@ impl RefDatabase {
 
         debug!(namespace = %namespace, "Listing references");
 
-        if !fs::metadata(&dir_path).await.is_ok() {
+        if fs::metadata(&dir_path).await.is_err() {
             return Ok(Vec::new());
         }
 

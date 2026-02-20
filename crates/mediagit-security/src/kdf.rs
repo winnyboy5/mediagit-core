@@ -221,7 +221,7 @@ pub fn derive_key(
         .hash_password_into(
             password.expose_secret().as_bytes(),
             salt.as_bytes(),
-            &mut *key_bytes,
+            &mut key_bytes,
         )
         .map_err(|e| KdfError::DerivationFailed(e.to_string()))?;
 
@@ -373,6 +373,7 @@ pub struct CacheStats {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

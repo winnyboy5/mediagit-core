@@ -1,3 +1,19 @@
+﻿// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#![allow(clippy::unwrap_used)]
+
 use mediagit_config::{ConfigFormat, ConfigLoader, Config, Validator};
 use std::fs;
 use tempfile::TempDir;
@@ -311,17 +327,19 @@ fn test_validation_s3_bucket_name_too_short() {
     use mediagit_config::StorageConfig;
     use mediagit_config::S3Storage;
 
-    let mut config = Config::default();
-    config.storage = StorageConfig::S3(S3Storage {
-        bucket: "ab".to_string(),
-        region: "us-east-1".to_string(),
-        access_key_id: None,
-        secret_access_key: None,
-        endpoint: None,
-        prefix: String::new(),
-        encryption: false,
-        encryption_algorithm: "AES256".to_string(),
-    });
+    let config = Config {
+        storage: StorageConfig::S3(S3Storage {
+            bucket: "ab".to_string(),
+            region: "us-east-1".to_string(),
+            access_key_id: None,
+            secret_access_key: None,
+            endpoint: None,
+            prefix: String::new(),
+            encryption: false,
+            encryption_algorithm: "AES256".to_string(),
+        }),
+        ..Default::default()
+    };
 
     assert!(config.validate().is_err());
 }

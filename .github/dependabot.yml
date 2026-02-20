@@ -1,0 +1,30 @@
+version: 2
+
+updates:
+  # Rust / Cargo dependencies
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      aws-sdk:
+        patterns:
+          - "aws-*"
+      testing:
+        patterns:
+          - "criterion"
+          - "proptest"
+          - "tempfile"
+          - "tokio-test"
+          - "assert_cmd"
+          - "predicates"
+
+  # GitHub Actions
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
