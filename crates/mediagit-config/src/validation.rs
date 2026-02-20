@@ -259,7 +259,7 @@ impl Validator for CompressionConfig {
             if let Some(level) = algo_config.level {
                 match algo_name.as_str() {
                     "zstd" => {
-                        if level < 1 || level > 22 {
+                        if !(1..=22).contains(&level) {
                             return Err(ConfigError::invalid_value(
                                 format!("compression.algorithms.{}.level", algo_name),
                                 "zstd level must be between 1 and 22",
@@ -529,7 +529,7 @@ impl Validator for RateLimitConfig {
 /// Helper function to validate octal string format
 fn is_valid_octal(s: &str) -> bool {
     if s.starts_with('0') && s.len() == 4 {
-        s[1..].chars().all(|c| c >= '0' && c <= '7')
+        s[1..].chars().all(|c| ('0'..='7').contains(&c))
     } else {
         false
     }

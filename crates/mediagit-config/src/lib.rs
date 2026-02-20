@@ -60,6 +60,7 @@ pub use schema::*;
 pub use validation::Validator;
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

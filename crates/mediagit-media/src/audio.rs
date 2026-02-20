@@ -167,7 +167,7 @@ impl AudioParser {
 
         // Create format hint
         let mut hint = Hint::new();
-        if let Some(ext) = filename.split('.').last() {
+        if let Some(ext) = filename.split('.').next_back() {
             hint.with_extension(ext);
         }
 
@@ -251,7 +251,7 @@ impl AudioParser {
     fn detect_format(filename: &str) -> AudioFormat {
         filename
             .split('.')
-            .last()
+            .next_back()
             .map(AudioFormat::from_extension)
             .unwrap_or(AudioFormat::Unknown)
     }

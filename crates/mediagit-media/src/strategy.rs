@@ -170,11 +170,11 @@ impl MergeStrategy {
     pub fn for_media_type(media_type: MediaType) -> Self {
         match media_type {
             MediaType::Image => MergeStrategy::Image(ImageStrategy::default()),
-            MediaType::Psd => MergeStrategy::Psd(PsdStrategy::default()),
-            MediaType::Video => MergeStrategy::Video(VideoStrategy::default()),
-            MediaType::Audio => MergeStrategy::Audio(AudioStrategy::default()),
-            MediaType::Model3D => MergeStrategy::Model3D(Model3DStrategy::default()),
-            MediaType::Vfx => MergeStrategy::Vfx(VfxStrategy::default()),
+            MediaType::Psd => MergeStrategy::Psd(PsdStrategy),
+            MediaType::Video => MergeStrategy::Video(VideoStrategy),
+            MediaType::Audio => MergeStrategy::Audio(AudioStrategy),
+            MediaType::Model3D => MergeStrategy::Model3D(Model3DStrategy),
+            MediaType::Vfx => MergeStrategy::Vfx(VfxStrategy),
             MediaType::Unknown => MergeStrategy::Generic,
         }
     }

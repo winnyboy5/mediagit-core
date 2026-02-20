@@ -99,7 +99,7 @@ fn default_pack_window() -> usize {
 }
 
 /// Chunking strategy configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChunkingStrategyConfig {
     /// Fixed-size chunks
@@ -111,13 +111,8 @@ pub enum ChunkingStrategyConfig {
         max_size: usize,
     },
     /// Media-aware chunking (parse structure, separate streams)
+    #[default]
     MediaAware,
-}
-
-impl Default for ChunkingStrategyConfig {
-    fn default() -> Self {
-        ChunkingStrategyConfig::MediaAware
-    }
 }
 
 impl From<ChunkingStrategyConfig> for ChunkStrategy {

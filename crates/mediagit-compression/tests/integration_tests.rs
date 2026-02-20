@@ -11,6 +11,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
 
+#![allow(clippy::unwrap_used, clippy::expect_fun_call)]
 //! Integration tests for compression module
 
 use mediagit_compression::{

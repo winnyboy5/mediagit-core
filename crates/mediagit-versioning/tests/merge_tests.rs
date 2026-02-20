@@ -81,10 +81,10 @@ async fn test_fast_forward_merge() {
     let commit_a = create_commit_with_tree(&odb, "A", tree_a, vec![]).await;
 
     let tree_b = create_test_tree(&odb, vec![("file.txt", b"content B")]).await;
-    let commit_b = create_commit_with_tree(&odb, "B", tree_b, vec![commit_a.clone()]).await;
+    let commit_b = create_commit_with_tree(&odb, "B", tree_b, vec![commit_a]).await;
 
     let tree_c = create_test_tree(&odb, vec![("file.txt", b"content C")]).await;
-    let commit_c = create_commit_with_tree(&odb, "C", tree_c, vec![commit_b.clone()]).await;
+    let commit_c = create_commit_with_tree(&odb, "C", tree_c, vec![commit_b]).await;
 
     // Merge B into C (should be fast-forward)
     let result = merge_engine
@@ -121,7 +121,7 @@ async fn test_recursive_merge_no_conflict() {
         vec![("file1.txt", b"modified in B"), ("file2.txt", b"base2")],
     )
     .await;
-    let commit_b = create_commit_with_tree(&odb, "B", tree_b, vec![commit_a.clone()]).await;
+    let commit_b = create_commit_with_tree(&odb, "B", tree_b, vec![commit_a]).await;
 
     // Branch C modifies file2
     let tree_c = create_test_tree(
@@ -129,7 +129,7 @@ async fn test_recursive_merge_no_conflict() {
         vec![("file1.txt", b"base1"), ("file2.txt", b"modified in C")],
     )
     .await;
-    let commit_c = create_commit_with_tree(&odb, "C", tree_c, vec![commit_a.clone()]).await;
+    let commit_c = create_commit_with_tree(&odb, "C", tree_c, vec![commit_a]).await;
 
     // Merge B and C - should succeed without conflicts
     let result = merge_engine
@@ -157,11 +157,11 @@ async fn test_recursive_merge_with_conflict() {
 
     // Branch B modifies file
     let tree_b = create_test_tree(&odb, vec![("file.txt", b"content from B")]).await;
-    let commit_b = create_commit_with_tree(&odb, "B", tree_b, vec![commit_a.clone()]).await;
+    let commit_b = create_commit_with_tree(&odb, "B", tree_b, vec![commit_a]).await;
 
     // Branch C modifies same file differently
     let tree_c = create_test_tree(&odb, vec![("file.txt", b"content from C")]).await;
-    let commit_c = create_commit_with_tree(&odb, "C", tree_c, vec![commit_a.clone()]).await;
+    let commit_c = create_commit_with_tree(&odb, "C", tree_c, vec![commit_a]).await;
 
     // Merge should detect conflict
     let result = merge_engine
@@ -190,10 +190,10 @@ async fn test_merge_strategy_ours() {
     let commit_a = create_commit_with_tree(&odb, "A", tree_a, vec![]).await;
 
     let tree_b = create_test_tree(&odb, vec![("file.txt", b"ours")]).await;
-    let commit_b = create_commit_with_tree(&odb, "B", tree_b, vec![commit_a.clone()]).await;
+    let commit_b = create_commit_with_tree(&odb, "B", tree_b, vec![commit_a]).await;
 
     let tree_c = create_test_tree(&odb, vec![("file.txt", b"theirs")]).await;
-    let commit_c = create_commit_with_tree(&odb, "C", tree_c, vec![commit_a.clone()]).await;
+    let commit_c = create_commit_with_tree(&odb, "C", tree_c, vec![commit_a]).await;
 
     // Merge with "Ours" strategy
     let result = merge_engine
@@ -222,10 +222,10 @@ async fn test_merge_strategy_theirs() {
     let commit_a = create_commit_with_tree(&odb, "A", tree_a, vec![]).await;
 
     let tree_b = create_test_tree(&odb, vec![("file.txt", b"ours")]).await;
-    let commit_b = create_commit_with_tree(&odb, "B", tree_b, vec![commit_a.clone()]).await;
+    let commit_b = create_commit_with_tree(&odb, "B", tree_b, vec![commit_a]).await;
 
     let tree_c = create_test_tree(&odb, vec![("file.txt", b"theirs")]).await;
-    let commit_c = create_commit_with_tree(&odb, "C", tree_c, vec![commit_a.clone()]).await;
+    let commit_c = create_commit_with_tree(&odb, "C", tree_c, vec![commit_a]).await;
 
     // Merge with "Theirs" strategy
     let result = merge_engine
@@ -256,10 +256,10 @@ async fn test_merge_with_file_addition() {
         vec![("existing.txt", b"content"), ("new.txt", b"new content")],
     )
     .await;
-    let commit_b = create_commit_with_tree(&odb, "B", tree_b, vec![commit_a.clone()]).await;
+    let commit_b = create_commit_with_tree(&odb, "B", tree_b, vec![commit_a]).await;
 
     // Branch C keeps original
-    let commit_c = commit_a.clone();
+    let commit_c = commit_a;
 
     let result = merge_engine
         .merge(&commit_b, &commit_c, MergeStrategy::Recursive)
@@ -285,10 +285,10 @@ async fn test_merge_with_file_deletion() {
 
     // Branch B deletes file2
     let tree_b = create_test_tree(&odb, vec![("file1.txt", b"content1")]).await;
-    let commit_b = create_commit_with_tree(&odb, "B", tree_b, vec![commit_a.clone()]).await;
+    let commit_b = create_commit_with_tree(&odb, "B", tree_b, vec![commit_a]).await;
 
     // Branch C keeps both files
-    let commit_c = commit_a.clone();
+    let commit_c = commit_a;
 
     let result = merge_engine
         .merge(&commit_b, &commit_c, MergeStrategy::Recursive)
@@ -313,11 +313,11 @@ async fn test_delete_modify_conflict() {
 
     // Branch B deletes file
     let tree_b = create_test_tree(&odb, vec![]).await;
-    let commit_b = create_commit_with_tree(&odb, "B", tree_b, vec![commit_a.clone()]).await;
+    let commit_b = create_commit_with_tree(&odb, "B", tree_b, vec![commit_a]).await;
 
     // Branch C modifies file
     let tree_c = create_test_tree(&odb, vec![("file.txt", b"modified")]).await;
-    let commit_c = create_commit_with_tree(&odb, "C", tree_c, vec![commit_a.clone()]).await;
+    let commit_c = create_commit_with_tree(&odb, "C", tree_c, vec![commit_a]).await;
 
     let result = merge_engine
         .merge(&commit_b, &commit_c, MergeStrategy::Recursive)
@@ -344,10 +344,10 @@ async fn test_binary_file_conflict() {
     let commit_a = create_commit_with_tree(&odb, "A", tree_a, vec![]).await;
 
     let tree_b = create_test_tree(&odb, vec![("binary.bin", &binary_ours)]).await;
-    let commit_b = create_commit_with_tree(&odb, "B", tree_b, vec![commit_a.clone()]).await;
+    let commit_b = create_commit_with_tree(&odb, "B", tree_b, vec![commit_a]).await;
 
     let tree_c = create_test_tree(&odb, vec![("binary.bin", &binary_theirs)]).await;
-    let commit_c = create_commit_with_tree(&odb, "C", tree_c, vec![commit_a.clone()]).await;
+    let commit_c = create_commit_with_tree(&odb, "C", tree_c, vec![commit_a]).await;
 
     let result = merge_engine
         .merge(&commit_b, &commit_c, MergeStrategy::Recursive)
@@ -389,7 +389,7 @@ async fn test_merge_performance() {
         .collect();
 
     let tree_b = create_test_tree(&odb, entries_b_ref).await;
-    let commit_b = create_commit_with_tree(&odb, "B", tree_b, vec![commit_a.clone()]).await;
+    let commit_b = create_commit_with_tree(&odb, "B", tree_b, vec![commit_a]).await;
 
     let mut entries_c = entries.clone();
     entries_c[25].1 = "modified in C".to_string();
@@ -399,7 +399,7 @@ async fn test_merge_performance() {
         .collect();
 
     let tree_c = create_test_tree(&odb, entries_c_ref).await;
-    let commit_c = create_commit_with_tree(&odb, "C", tree_c, vec![commit_a.clone()]).await;
+    let commit_c = create_commit_with_tree(&odb, "C", tree_c, vec![commit_a]).await;
 
     let start = std::time::Instant::now();
     let result = merge_engine

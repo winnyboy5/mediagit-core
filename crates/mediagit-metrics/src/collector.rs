@@ -59,11 +59,8 @@ impl Collector for MediaGitCollector {
         let gatherer = self.registry.registry();
 
         // Gather metrics from the Prometheus registry
-        match gatherer.gather() {
-            metrics => {
-                families.extend(metrics);
-            }
-        }
+        let metrics = gatherer.gather();
+        families.extend(metrics);
 
         families
     }

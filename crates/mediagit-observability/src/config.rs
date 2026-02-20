@@ -35,9 +35,10 @@ pub enum LogError {
 }
 
 /// Output format for logs
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LogFormat {
     /// Pretty-printed logs with colors and human-readable formatting
+    #[default]
     Pretty,
 
     /// Compact single-line format
@@ -47,15 +48,9 @@ pub enum LogFormat {
     Json,
 }
 
-impl Default for LogFormat {
-    fn default() -> Self {
-        LogFormat::Pretty
-    }
-}
-
 impl LogFormat {
     /// Parse a format string into a LogFormat
-    pub fn from_str(s: &str) -> Result<Self, LogError> {
+    pub fn parse(s: &str) -> Result<Self, LogError> {
         match s.to_lowercase().as_str() {
             "pretty" => Ok(LogFormat::Pretty),
             "compact" => Ok(LogFormat::Compact),
@@ -181,16 +176,16 @@ mod tests {
 
     #[test]
     fn test_log_format_parsing() {
-        assert_eq!(LogFormat::from_str("pretty").unwrap(), LogFormat::Pretty);
-        assert_eq!(LogFormat::from_str("compact").unwrap(), LogFormat::Compact);
-        assert_eq!(LogFormat::from_str("json").unwrap(), LogFormat::Json);
-        assert!(LogFormat::from_str("invalid").is_err());
+        assert_eq!(LogFormat::parse("pretty").unwrap(), LogFormat::Pretty);
+        assert_eq!(LogFormat::parse("compact").unwrap(), LogFormat::Compact);
+        assert_eq!(LogFormat::parse("json").unwrap(), LogFormat::Json);
+        assert!(LogFormat::parse("invalid").is_err());
     }
 
     #[test]
     fn test_log_format_case_insensitive() {
-        assert_eq!(LogFormat::from_str("PRETTY").unwrap(), LogFormat::Pretty);
-        assert_eq!(LogFormat::from_str("JSON").unwrap(), LogFormat::Json);
+        assert_eq!(LogFormat::parse("PRETTY").unwrap(), LogFormat::Pretty);
+        assert_eq!(LogFormat::parse("JSON").unwrap(), LogFormat::Json);
     }
 
     #[test]

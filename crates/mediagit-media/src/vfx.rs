@@ -155,7 +155,7 @@ impl VfxParser {
         // First try extension
         let ext_format = filename
             .split('.')
-            .last()
+            .next_back()
             .map(VfxFormat::from_extension)
             .unwrap_or(VfxFormat::Unknown);
 

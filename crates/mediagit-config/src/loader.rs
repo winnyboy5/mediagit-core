@@ -314,6 +314,7 @@ fn parse_bool(value: &str) -> ConfigResult<bool> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

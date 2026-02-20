@@ -19,7 +19,6 @@ use mediagit_protocol::{
     RefInfo, RefUpdate, RefUpdateRequest, RefUpdateResponse, RefUpdateResult, RefsResponse,
     WantRequest,
 };
-use serde_json;
 
 #[test]
 fn test_ref_info_serialization() {
@@ -117,7 +116,7 @@ fn test_ref_update_request() {
         serde_json::from_str(&json).expect("Failed to deserialize");
 
     assert_eq!(deserialized.updates.len(), 1);
-    assert_eq!(deserialized.force, false);
+    assert!(!deserialized.force);
 }
 
 #[test]
@@ -135,9 +134,9 @@ fn test_ref_update_response() {
     let deserialized: RefUpdateResponse =
         serde_json::from_str(&json).expect("Failed to deserialize");
 
-    assert_eq!(deserialized.success, true);
+    assert!(deserialized.success);
     assert_eq!(deserialized.results.len(), 1);
-    assert_eq!(deserialized.results[0].success, true);
+    assert!(deserialized.results[0].success);
     assert_eq!(deserialized.results[0].error, None);
 }
 
@@ -156,8 +155,8 @@ fn test_ref_update_response_with_error() {
     let deserialized: RefUpdateResponse =
         serde_json::from_str(&json).expect("Failed to deserialize");
 
-    assert_eq!(deserialized.success, false);
-    assert_eq!(deserialized.results[0].success, false);
+    assert!(!deserialized.success);
+    assert!(!deserialized.results[0].success);
     assert_eq!(
         deserialized.results[0].error,
         Some("not fast-forward".to_string())
@@ -232,5 +231,5 @@ fn test_force_push() {
     let deserialized: RefUpdateRequest =
         serde_json::from_str(&json).expect("Failed to deserialize");
 
-    assert_eq!(deserialized.force, true);
+    assert!(deserialized.force);
 }

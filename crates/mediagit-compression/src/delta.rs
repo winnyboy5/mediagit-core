@@ -416,7 +416,7 @@ impl DeltaEncoder {
             let mut raw_patch = Vec::new();
             match bsdiff::diff(base, target, &mut raw_patch) {
                 Ok(()) => {
-                    zstd::bulk::compress(&raw_patch, 3).unwrap_or_else(|_| raw_patch)
+                    zstd::bulk::compress(&raw_patch, 3).unwrap_or(raw_patch)
                 }
                 Err(e) => {
                     warn!("bsdiff encoding failed: {}, falling back to full", e);
@@ -653,6 +653,7 @@ impl Default for DeltaEncoder {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -972,8 +973,8 @@ mod tests {
         let base: Vec<u8> = pattern.iter().cycle().take(100_000).copied().collect();
         let mut target = base.clone();
         // Modify a small region
-        for i in 50_000..50_100 {
-            target[i] = b'X';
+        for b in &mut target[50_000..50_100] {
+            *b = b'X';
         }
 
         // At depth 99, should create delta

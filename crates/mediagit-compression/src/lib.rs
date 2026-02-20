@@ -202,7 +202,7 @@ impl CompressionAlgorithm {
             let flg = data[1] as u16;
             let header_check = cmf * 256 + flg;
             // Valid zlib headers: 0x789C (default), 0x78DA (best), 0x7801 (no compression)
-            if header_check % 31 == 0 {
+            if header_check.is_multiple_of(31) {
                 return CompressionAlgorithm::Zlib;
             }
         }

@@ -58,8 +58,8 @@ async fn test_lca_linear_history() {
 
     // Create linear history: A <- B <- C
     let commit_a = create_test_commit(&odb, "A", vec![]).await;
-    let commit_b = create_test_commit(&odb, "B", vec![commit_a.clone()]).await;
-    let commit_c = create_test_commit(&odb, "C", vec![commit_b.clone()]).await;
+    let commit_b = create_test_commit(&odb, "B", vec![commit_a]).await;
+    let commit_c = create_test_commit(&odb, "C", vec![commit_b]).await;
 
     // LCA of B and C should be B
     let bases = lca_finder
@@ -86,8 +86,8 @@ async fn test_lca_divergent_branches() {
 
     // Create divergent history
     let commit_a = create_test_commit(&odb, "A", vec![]).await;
-    let commit_c = create_test_commit(&odb, "C", vec![commit_a.clone()]).await;
-    let commit_d = create_test_commit(&odb, "D", vec![commit_a.clone()]).await;
+    let commit_c = create_test_commit(&odb, "C", vec![commit_a]).await;
+    let commit_d = create_test_commit(&odb, "D", vec![commit_a]).await;
 
     // LCA of C and D should be A
     let bases = lca_finder
@@ -111,8 +111,8 @@ async fn test_lca_diamond_merge() {
     let lca_finder = LcaFinder::new(odb.clone());
 
     let commit_a = create_test_commit(&odb, "A", vec![]).await;
-    let commit_b = create_test_commit(&odb, "B", vec![commit_a.clone()]).await;
-    let commit_c = create_test_commit(&odb, "C", vec![commit_a.clone()]).await;
+    let commit_b = create_test_commit(&odb, "B", vec![commit_a]).await;
+    let commit_c = create_test_commit(&odb, "C", vec![commit_a]).await;
 
     let bases = lca_finder
         .find_merge_base(&commit_b, &commit_c)
@@ -138,10 +138,10 @@ async fn test_lca_with_merge_commits() {
     let lca_finder = LcaFinder::new(odb.clone());
 
     let commit_a = create_test_commit(&odb, "A", vec![]).await;
-    let commit_b = create_test_commit(&odb, "B", vec![commit_a.clone()]).await;
-    let commit_c = create_test_commit(&odb, "C", vec![commit_b.clone()]).await;
-    let commit_d = create_test_commit(&odb, "D", vec![commit_b.clone()]).await;
-    let _commit_e = create_test_commit(&odb, "E", vec![commit_c.clone(), commit_d.clone()]).await;
+    let commit_b = create_test_commit(&odb, "B", vec![commit_a]).await;
+    let commit_c = create_test_commit(&odb, "C", vec![commit_b]).await;
+    let commit_d = create_test_commit(&odb, "D", vec![commit_b]).await;
+    let _commit_e = create_test_commit(&odb, "E", vec![commit_c, commit_d]).await;
 
     // LCA of C and D should be B
     let bases = lca_finder
@@ -169,15 +169,15 @@ async fn test_lca_criss_cross_merge() {
 
     // Create criss-cross scenario
     let commit_o = create_test_commit(&odb, "O", vec![]).await;
-    let commit_a = create_test_commit(&odb, "A", vec![commit_o.clone()]).await;
-    let commit_b = create_test_commit(&odb, "B", vec![commit_o.clone()]).await;
+    let commit_a = create_test_commit(&odb, "A", vec![commit_o]).await;
+    let commit_b = create_test_commit(&odb, "B", vec![commit_o]).await;
 
     // M merges A and B
-    let commit_m = create_test_commit(&odb, "M", vec![commit_a.clone(), commit_b.clone()]).await;
+    let commit_m = create_test_commit(&odb, "M", vec![commit_a, commit_b]).await;
 
     // X and Y each merge with M
-    let commit_x = create_test_commit(&odb, "X", vec![commit_a.clone(), commit_m.clone()]).await;
-    let commit_y = create_test_commit(&odb, "Y", vec![commit_b.clone(), commit_m.clone()]).await;
+    let commit_x = create_test_commit(&odb, "X", vec![commit_a, commit_m]).await;
+    let commit_y = create_test_commit(&odb, "Y", vec![commit_b, commit_m]).await;
 
     let bases = lca_finder
         .find_merge_base(&commit_x, &commit_y)
@@ -200,14 +200,14 @@ async fn test_lca_performance() {
     commits.push(create_test_commit(&odb, "commit_0", vec![]).await);
 
     for i in 1..20 {
-        let parent = commits[i - 1].clone();
+        let parent = commits[i - 1];
         let commit = create_test_commit(&odb, &format!("commit_{}", i), vec![parent]).await;
         commits.push(commit);
     }
 
     // Create two divergent branches
-    let branch_a = create_test_commit(&odb, "branch_a", vec![commits[10].clone()]).await;
-    let branch_b = create_test_commit(&odb, "branch_b", vec![commits[10].clone()]).await;
+    let branch_a = create_test_commit(&odb, "branch_a", vec![commits[10]]).await;
+    let branch_b = create_test_commit(&odb, "branch_b", vec![commits[10]]).await;
 
     // Measure LCA performance
     let start = Instant::now();
@@ -273,14 +273,14 @@ async fn test_lca_deep_history() {
     commits.push(create_test_commit(&odb, "commit_0", vec![]).await);
 
     for i in 1..100 {
-        let parent = commits[i - 1].clone();
+        let parent = commits[i - 1];
         let commit = create_test_commit(&odb, &format!("commit_{}", i), vec![parent]).await;
         commits.push(commit);
     }
 
     // Create branches at different depths
-    let branch_a = create_test_commit(&odb, "branch_a", vec![commits[80].clone()]).await;
-    let branch_b = create_test_commit(&odb, "branch_b", vec![commits[80].clone()]).await;
+    let branch_a = create_test_commit(&odb, "branch_a", vec![commits[80]]).await;
+    let branch_b = create_test_commit(&odb, "branch_b", vec![commits[80]]).await;
 
     let start = Instant::now();
     let bases = lca_finder

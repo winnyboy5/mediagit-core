@@ -23,10 +23,10 @@ pub const CONFIG_VERSION: u32 = 1;
 /// Migration trait for handling config upgrades
 pub trait ConfigMigration {
     /// Get the source version this migration handles
-    fn from_version(&self) -> u32;
+    fn source_version(&self) -> u32;
 
     /// Get the target version after migration
-    fn to_version(&self) -> u32;
+    fn target_version(&self) -> u32;
 
     /// Execute the migration
     fn migrate(&self, config: Value) -> ConfigResult<Value>;
@@ -50,7 +50,7 @@ impl MigrationManager {
 
     /// Register a migration
     pub fn register(&mut self, migration: Box<dyn ConfigMigration>) {
-        let key = (migration.from_version(), migration.to_version());
+        let key = (migration.source_version(), migration.target_version());
         self.migrations.insert(key, migration);
     }
 
@@ -107,8 +107,8 @@ impl MigrationManager {
             .map(|m| {
                 format!(
                     "v{} -> v{}: {}",
-                    m.from_version(),
-                    m.to_version(),
+                    m.source_version(),
+                    m.target_version(),
                     m.description()
                 )
             })
@@ -128,11 +128,11 @@ impl Default for MigrationManager {
 pub struct MigrationV0ToV1;
 
 impl ConfigMigration for MigrationV0ToV1 {
-    fn from_version(&self) -> u32 {
+    fn source_version(&self) -> u32 {
         0
     }
 
-    fn to_version(&self) -> u32 {
+    fn target_version(&self) -> u32 {
         1
     }
 
@@ -161,6 +161,7 @@ impl ConfigMigration for MigrationV0ToV1 {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

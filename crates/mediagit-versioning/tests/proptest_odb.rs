@@ -128,7 +128,7 @@ fn proptest_cache_consistency() {
 
                 // Retrieve all data (some from cache, some from storage)
                 for (oid, expected_data) in &oids {
-                    let retrieved = odb.read(&oid).await.unwrap();
+                    let retrieved = odb.read(oid).await.unwrap();
                     prop_assert_eq!(expected_data, &retrieved);
                 }
 

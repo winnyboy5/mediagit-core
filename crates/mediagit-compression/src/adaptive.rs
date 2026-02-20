@@ -121,7 +121,7 @@ impl PatternClass {
                 b == b'\n'
                     || b == b'\r'
                     || b == b'\t'
-                    || (b >= 0x20 && b < 0x7F)
+                    || (0x20..0x7F).contains(&b)
                     || b >= 0x80
             })
             .count();
@@ -527,6 +527,7 @@ impl Compressor for AdaptiveCompressor {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

@@ -321,7 +321,7 @@ impl OperationStats {
             .collect();
 
         // Sort by filename (which includes timestamp) in descending order
-        entries.sort_by(|a, b| b.path().cmp(&a.path()));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.path()));
 
         let mut stats = Vec::new();
         for entry in entries.into_iter().take(limit) {
@@ -355,7 +355,7 @@ impl OperationStats {
         }
 
         // Sort by filename (newest first)
-        entries.sort_by(|a, b| b.path().cmp(&a.path()));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.path()));
 
         // Remove oldest files
         for entry in entries.into_iter().skip(keep_count) {

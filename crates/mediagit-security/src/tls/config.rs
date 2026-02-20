@@ -278,6 +278,7 @@ impl Default for TlsConfigBuilder {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

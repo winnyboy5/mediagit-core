@@ -103,7 +103,7 @@ impl StreamingPackIndex {
         self.bytes_written += 44;
 
         // Flush periodically to avoid buffering too much
-        if self.entry_count % 10000 == 0 {
+        if self.entry_count.is_multiple_of(10000) {
             self.temp_file.flush().await?;
             debug!(
                 entry_count = self.entry_count,

@@ -344,6 +344,7 @@ impl CompressionTimer {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -539,8 +540,8 @@ mod tests {
         for _ in 0..iterations {
             let mut metrics = CompressionMetrics::new();
             metrics.record_compression(
-                &vec![0u8; 100],
-                &vec![0u8; 50],
+                &[0u8; 100],
+                &[0u8; 50],
                 Duration::from_micros(1),
                 CompressionAlgorithm::Zstd,
                 CompressionLevel::Fast,
@@ -778,6 +779,7 @@ impl Default for MetricsAggregator {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod aggregator_tests {
     use super::*;
 

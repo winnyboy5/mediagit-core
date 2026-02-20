@@ -353,6 +353,7 @@ pub fn auth_error_to_response(error: AuthError) -> (StatusCode, Json<ErrorRespon
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

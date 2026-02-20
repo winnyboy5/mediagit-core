@@ -106,10 +106,10 @@ impl Certificate {
         key_path: P,
     ) -> TlsResult<()> {
         std::fs::write(cert_path.as_ref(), &self.cert_pem)
-            .map_err(|e| TlsError::Io(e))?;
+            .map_err(TlsError::Io)?;
 
         std::fs::write(key_path.as_ref(), &self.key_pem)
-            .map_err(|e| TlsError::Io(e))?;
+            .map_err(TlsError::Io)?;
 
         Ok(())
     }
@@ -194,6 +194,7 @@ impl CertificateBuilder {
 
     /// Generate self-signed certificate
     #[cfg(feature = "tls")]
+    #[allow(clippy::unwrap_used)]
     pub fn generate_self_signed(self) -> TlsResult<Certificate> {
         // Create certificate parameters
         let mut params = CertificateParams::default();
@@ -255,6 +256,7 @@ impl CertificateBuilder {
 }
 
 #[cfg(all(test, feature = "tls"))]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

@@ -836,8 +836,8 @@ mod tests {
         let oid1 = Oid::hash(b"obj1");
         let oid2 = Oid::hash(b"obj2");
 
-        writer.add_object(oid1, ObjectType::Blob, &vec![0u8; 100]);
-        writer.add_object(oid2, ObjectType::Blob, &vec![0u8; 200]);
+        writer.add_object(oid1, ObjectType::Blob, &[0u8; 100]);
+        writer.add_object(oid2, ObjectType::Blob, &[0u8; 200]);
         let pack_data = writer.finalize();
 
         let reader = PackReader::new(pack_data).unwrap();
