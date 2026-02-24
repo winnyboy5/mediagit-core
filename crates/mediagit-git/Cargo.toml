@@ -10,10 +10,6 @@ homepage.workspace = true
 documentation.workspace = true
 
 [dependencies]
-# Async runtime
-tokio.workspace = true
-async-trait.workspace = true
-
 # Git library (with vendored openssl to avoid system dependencies)
 git2 = { version = "0.20.1", default-features = false, features = ["vendored-libgit2", "vendored-openssl"] }
 
@@ -29,16 +25,11 @@ sha2.workspace = true
 hex.workspace = true
 
 # Error handling
-anyhow.workspace = true
 thiserror.workspace = true
 
 # Observability
 tracing.workspace = true
 
-# Time
-chrono.workspace = true
-
 # Testing
 [dev-dependencies]
-tokio-test.workspace = true
 tempfile.workspace = true

@@ -122,10 +122,11 @@ impl VerifyCmd {
         let mut options = if self.quick {
             FsckOptions::quick()
         } else {
-            let mut opts = FsckOptions::default();
-            opts.check_connectivity = false; // Verify skips connectivity
-            opts.check_dangling = false; // Verify doesn't check dangling
-            opts
+            FsckOptions {
+                check_connectivity: false,
+                check_dangling: false,
+                ..Default::default()
+            }
         };
 
         options.verbose = self.verbose || self.detailed;

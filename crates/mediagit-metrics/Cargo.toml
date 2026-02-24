@@ -8,16 +8,10 @@ authors.workspace = true
 description = "Prometheus metrics and performance monitoring for MediaGit"
 
 [dependencies]
-# Workspace crates
-mediagit-observability = { path = "../mediagit-observability" }
-
 # Workspace dependencies
 tokio = { workspace = true, features = ["full"] }
-async-trait.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 anyhow.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
 
 # Prometheus metrics
@@ -25,13 +19,9 @@ prometheus = { workspace = true, features = ["process"] }
 
 # HTTP server for metrics endpoint
 axum = "0.7"
-tower = "0.5"
-hyper = "1.5"
 
 [dev-dependencies]
-tokio-test.workspace = true
 criterion.workspace = true
-tempfile.workspace = true
 reqwest = "0.12"
 
 [[bench]]

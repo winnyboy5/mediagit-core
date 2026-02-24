@@ -237,6 +237,7 @@ impl AddCmd {
                 let mut file_tasks = tokio::task::JoinSet::new();
                 let skipped = Arc::new(AtomicU64::new(0));
 
+                #[allow(clippy::unnecessary_to_owned)]
                 for file_path in files_to_add.iter().cloned() {
                     let sem = semaphore.clone();
                     let odb = odb.clone();
@@ -246,9 +247,7 @@ impl AddCmd {
                     let progress_bytes = progress_bytes.clone();
                     let progress_files = progress_files.clone();
                     let progress_bar = progress_bar.clone();
-                    let total_files = total_files;
                     let skipped = skipped.clone();
-                    let delta_enabled = delta_enabled;
 
                     file_tasks.spawn(async move {
                         let _permit = sem.acquire().await
@@ -387,7 +386,7 @@ impl AddCmd {
             .map(|p| p.to_path_buf())
             .collect();
 
-        for (head_path, _head_oid) in head_files.as_ref() {
+        for head_path in head_files.as_ref().keys() {
             let head_path_normalized = PathBuf::from(
                 head_path.to_string_lossy().replace('\\', "/")
             );
@@ -641,6 +640,7 @@ impl AddCmd {
     }
 
     /// Recursively collect all files from a directory
+    #[allow(clippy::only_used_in_recursion)]
     fn collect_files_recursive(
         &self,
         dir: &Path,

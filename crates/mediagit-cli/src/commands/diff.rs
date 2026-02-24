@@ -327,6 +327,7 @@ impl DiffCmd {
         Ok(files)
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn scan_directory_recursive(&self, repo_root: &Path, current_dir: &Path, files: &mut HashSet<PathBuf>) -> Result<()> {
         for entry in std::fs::read_dir(current_dir)? {
             let entry = entry?;

@@ -169,15 +169,16 @@ impl InitCmd {
     fn create_default_config(&self, repo_path: &Path, _initial_branch: &str) -> Result<()> {
         info!("Creating default configuration");
 
-        let mut config = Config::default();
-
         // Configure filesystem storage
-        config.storage = StorageConfig::FileSystem(FileSystemStorage {
-            base_path: repo_path.join(".mediagit/objects").display().to_string(),
-            create_dirs: true,
-            sync: false,
-            file_permissions: "0644".to_string(),
-        });
+        let config = Config {
+            storage: StorageConfig::FileSystem(FileSystemStorage {
+                base_path: repo_path.join(".mediagit/objects").display().to_string(),
+                create_dirs: true,
+                sync: false,
+                file_permissions: "0644".to_string(),
+            }),
+            ..Config::default()
+        };
 
         let config_path = repo_path.join(".mediagit/config.toml");
         let config_content = toml::to_string_pretty(&config)

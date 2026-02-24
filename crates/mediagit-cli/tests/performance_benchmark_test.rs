@@ -108,7 +108,7 @@ fn benchmark_add_small_files() {
     let total_size: u64 = fs::read_dir(temp_dir.path())
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "txt"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "txt"))
         .filter_map(|e| e.metadata().ok())
         .map(|m| m.len())
         .sum();

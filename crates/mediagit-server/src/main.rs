@@ -189,7 +189,7 @@ fn build_axum_rustls_config(
 
     // Parse private key PEM
     let key_pem = certificate.key_pem.as_bytes();
-    let mut key_reader = &key_pem[..];
+    let mut key_reader = key_pem;
 
     // Try to read as PKCS#8 first, then RSA
     let private_key = if let Ok(key) = rustls_pemfile::pkcs8_private_keys(&mut key_reader)
@@ -199,7 +199,7 @@ fn build_axum_rustls_config(
             PrivateKeyDer::Pkcs8(key)
         } else {
             // Reset reader and try RSA
-            key_reader = &key_pem[..];
+            key_reader = key_pem;
             let rsa_keys = rustls_pemfile::rsa_private_keys(&mut key_reader)
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| anyhow::anyhow!("Failed to parse private key: {}", e))?;

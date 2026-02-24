@@ -7,7 +7,6 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-tokio.workspace = true
 zstd.workspace = true
 brotli.workspace = true
 flate2.workspace = true

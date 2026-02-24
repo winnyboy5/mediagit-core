@@ -335,18 +335,16 @@ impl BranchCmd {
 
                     if opts.verbose {
                         let branch_ref = refdb.read(&branch_name).await.ok();
-                        let oid_display = branch_ref.and_then(|r| r.oid).map(|o| format!("{}", &o.to_string()[..8])).unwrap_or_else(|| "unknown".to_string());
+                        let oid_display = branch_ref.and_then(|r| r.oid).map(|o| o.to_string()[..8].to_string()).unwrap_or_else(|| "unknown".to_string());
                         if is_current {
                             println!("{}{} -> {}", style(prefix).green(), style(display_name).green().bold(), oid_display);
                         } else {
                             println!("{}{} -> {}", prefix, display_name, oid_display);
                         }
+                    } else if is_current {
+                        println!("{}{}", style(prefix).green(), style(display_name).green().bold());
                     } else {
-                        if is_current {
-                            println!("{}{}", style(prefix).green(), style(display_name).green().bold());
-                        } else {
-                            println!("{}{}", prefix, display_name);
-                        }
+                        println!("{}{}", prefix, display_name);
                     }
                 }
             }
@@ -373,7 +371,7 @@ impl BranchCmd {
 
                     if opts.verbose {
                         let branch_ref = refdb.read(&branch_name).await.ok();
-                        let oid_display = branch_ref.and_then(|r| r.oid).map(|o| format!("{}", &o.to_string()[..8])).unwrap_or_else(|| "unknown".to_string());
+                        let oid_display = branch_ref.and_then(|r| r.oid).map(|o| o.to_string()[..8].to_string()).unwrap_or_else(|| "unknown".to_string());
                         println!("  {} -> {}", style(display_name).red(), oid_display);
                     } else {
                         println!("  {}", style(display_name).red());
@@ -382,15 +380,14 @@ impl BranchCmd {
             }
         }
 
-        if !any_branches_found {
-            if !opts.quiet {
+        if !any_branches_found
+            && !opts.quiet {
                 if opts.remote {
                     output::info("No remote branches found");
                 } else {
                     output::info("No branches found");
                 }
             }
-        }
 
         Ok(())
     }
@@ -516,7 +513,7 @@ impl BranchCmd {
 
         // Record reflog entry for branch switch
         let reflog = Reflog::new(&storage_path);
-        let old_oid = current_commit_oid.clone().unwrap_or_else(|| Oid::from_bytes([0u8; 32]));
+        let old_oid = current_commit_oid.unwrap_or_else(|| Oid::from_bytes([0u8; 32]));
         let reflog_msg = format!("checkout: moving from {} to {}",
             old_oid.to_hex().get(..8).unwrap_or("00000000"), branch_name);
         let entry = ReflogEntry::now(old_oid, target_commit_oid, "user", "user@mediagit", &reflog_msg);

@@ -280,7 +280,7 @@ impl GarbageCollector {
             };
 
             // Mark all entries as reachable and traverse subtrees
-            for (_name, entry) in &tree.entries {
+            for entry in tree.entries.values() {
                 if entry.mode == FileMode::Directory {
                     // Recursively traverse subtrees
                     self.traverse_tree(&entry.oid, reachable).await?;

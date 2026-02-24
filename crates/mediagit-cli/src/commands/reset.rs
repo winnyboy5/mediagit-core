@@ -134,16 +134,16 @@ impl ResetCmd {
 
         // Step 1: Move HEAD
         if let Some(ref branch) = current_branch {
-            refs.update(&format!("refs/heads/{}", branch), target_oid.clone(), true)
+            refs.update(&format!("refs/heads/{}", branch), target_oid, true)
                 .await?;
         } else {
-            refs.update("HEAD", target_oid.clone(), true).await?;
+            refs.update("HEAD", target_oid, true).await?;
         }
 
         // Record to reflog
         let reflog_entry = ReflogEntry::now(
             old_oid,
-            target_oid.clone(),
+            target_oid,
             "MediaGit",
             "mediagit@local",
             &format!("reset: moving to {}", &target_oid.to_hex()[..7]),
@@ -262,6 +262,7 @@ impl ResetCmd {
         Ok(())
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn add_tree_to_index<'a>(
         &'a self,
         odb: &'a ObjectDatabase,
@@ -281,7 +282,7 @@ impl ResetCmd {
                     let subtree = Tree::read(odb, &entry.oid).await?;
                     self.add_tree_to_index(odb, &subtree, path, index).await?;
                 } else {
-                    let idx_entry = IndexEntry::new(path, entry.oid.clone(), entry.mode.as_u32(), 0, None);
+                    let idx_entry = IndexEntry::new(path, entry.oid, entry.mode.as_u32(), 0, None);
                     index.add_entry(idx_entry);
                 }
             }

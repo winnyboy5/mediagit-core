@@ -443,7 +443,7 @@ impl MergeCmd {
 
         // Record reflog
         let reflog = Reflog::new(&mediagit_dir);
-        let reflog_msg = format!("merge: continue (resolved conflicts)");
+        let reflog_msg = "merge: continue (resolved conflicts)".to_string();
         let entry = ReflogEntry::now(current_oid, commit_oid, "user", "user@mediagit", &reflog_msg);
         let _ = reflog.append("HEAD", &entry).await;
 

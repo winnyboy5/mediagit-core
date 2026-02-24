@@ -155,7 +155,7 @@ async fn read_test_file(filename: &str) -> Vec<u8> {
         .join(filename);
 
     if local_path.exists() {
-        return fs::read(&local_path).await.expect(&format!("Failed to read test file: {}", filename));
+        return fs::read(&local_path).await.unwrap_or_else(|_| panic!("Failed to read test file: {}", filename));
     }
 
     // Generate synthetic test data based on filename extension
@@ -309,7 +309,7 @@ async fn test_local_backend_complete_flow() {
     let storage = LocalBackend::new(&repo_path).await.unwrap();
     let storage_arc: Arc<dyn StorageBackend> = Arc::new(storage);
     let odb = ObjectDatabase::new(Arc::clone(&storage_arc), 1000);
-    let refdb = RefDatabase::new(&repo_path.join(".mediagit"));
+    let refdb = RefDatabase::new(repo_path.join(".mediagit"));
 
     // 2. Upload a small test image
     let test_data = read_test_file("freepik__talk__71826.jpeg").await;
@@ -321,7 +321,7 @@ async fn test_local_backend_complete_flow() {
 
     // 4. Test GET /repo/info/refs
     let resp = client
-        .get(&server.url(&format!("/{}/info/refs", repo)))
+        .get(server.url(&format!("/{}/info/refs", repo)))
         .send()
         .await
         .unwrap();
@@ -341,7 +341,7 @@ async fn test_local_backend_complete_flow() {
     let pack_data = pack_writer.finalize();
 
     let resp = client
-        .post(&server.url(&format!("/{}/objects/pack", repo)))
+        .post(server.url(&format!("/{}/objects/pack", repo)))
         .header("content-type", "application/octet-stream")
         .body(pack_data.clone())
         .send()
@@ -356,7 +356,7 @@ async fn test_local_backend_complete_flow() {
     };
 
     let resp = client
-        .post(&server.url(&format!("/{}/objects/want", repo)))
+        .post(server.url(&format!("/{}/objects/want", repo)))
         .json(&want_request)
         .send()
         .await
@@ -367,7 +367,7 @@ async fn test_local_backend_complete_flow() {
     let want_response: mediagit_protocol::WantResponse = resp.json().await.unwrap();
 
     let resp = client
-        .get(&server.url(&format!("/{}/objects/pack", repo)))
+        .get(server.url(&format!("/{}/objects/pack", repo)))
         .header("X-Request-ID", &want_response.request_id)
         .send()
         .await
@@ -388,7 +388,7 @@ async fn test_local_backend_complete_flow() {
     };
 
     let resp = client
-        .post(&server.url(&format!("/{}/refs/update", repo)))
+        .post(server.url(&format!("/{}/refs/update", repo)))
         .json(&update_request)
         .send()
         .await
@@ -723,7 +723,7 @@ async fn test_path_validation() {
 
     for repo in malicious_repos {
         let resp = client
-            .get(&server.url(&format!("/{}/info/refs", repo)))
+            .get(server.url(&format!("/{}/info/refs", repo)))
             .send()
             .await
             .unwrap();

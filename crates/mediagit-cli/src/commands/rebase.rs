@@ -249,7 +249,7 @@ impl RebaseCmd {
     ) -> Result<Oid> {
         let mut new_parent = state.new_parent;
 
-        for (_i, original_commit) in commits.iter().enumerate() {
+        for original_commit in commits.iter() {
             // Update state for current commit
             if !state.commits_remaining.is_empty() {
                 state.advance();
@@ -415,7 +415,7 @@ impl RebaseCmd {
         }
 
         let storage_path = repo_root.join(".mediagit");
-        let storage = create_storage_backend(&repo_root).await?;
+        let storage = create_storage_backend(repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
         let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
 

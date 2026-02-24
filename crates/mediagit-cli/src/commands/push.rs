@@ -153,11 +153,10 @@ impl PushCmd {
         let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
 
-        if self.dry_run {
-            if !self.quiet {
+        if self.dry_run
+            && !self.quiet {
                 println!("{} Running in dry-run mode", style("ℹ").blue());
             }
-        }
 
         if !self.quiet {
             println!(
@@ -288,19 +287,17 @@ impl PushCmd {
                             println!("  Cleaned up local tracking ref: {}", tracking_ref);
                         }
                     }
-                } else {
-                    if !self.quiet {
-                        let display_name = result.ref_name
-                            .strip_prefix("refs/heads/")
-                            .unwrap_or(&result.ref_name);
-                        let error_msg = result.error.as_deref().unwrap_or("unknown error");
-                        println!(
-                            "  {} Failed to delete '{}': {}",
-                            style("✗").red(),
-                            display_name,
-                            error_msg
-                        );
-                    }
+                } else if !self.quiet {
+                    let display_name = result.ref_name
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(&result.ref_name);
+                    let error_msg = result.error.as_deref().unwrap_or("unknown error");
+                    println!(
+                        "  {} Failed to delete '{}': {}",
+                        style("✗").red(),
+                        display_name,
+                        error_msg
+                    );
                 }
             }
 
@@ -449,7 +446,7 @@ impl PushCmd {
                         let (percent, msg) = match progress.phase {
                             PushPhase::Collecting => {
                                 if progress.total > 0 {
-                                    let pct = (progress.current * 100 / progress.total) as u64;
+                                    let pct = progress.current * 100 / progress.total;
                                     (pct.min(30), format!("Collecting... {}/{} objects", progress.current, progress.total))
                                 } else {
                                     (10, "Collecting objects...".to_string())
@@ -457,7 +454,7 @@ impl PushCmd {
                             }
                             PushPhase::Packing => {
                                 if progress.total > 0 {
-                                    let pct = 30 + (progress.current * 40 / progress.total) as u64;
+                                    let pct = 30 + (progress.current * 40 / progress.total);
                                     (pct.min(70), format!("Packing... {}/{} objects", progress.current, progress.total))
                                 } else {
                                     (50, "Packing...".to_string())
@@ -465,7 +462,7 @@ impl PushCmd {
                             }
                             PushPhase::Uploading => {
                                 if progress.total > 0 {
-                                    let pct = 70 + (progress.current * 30 / progress.total) as u64;
+                                    let pct = 70 + (progress.current * 30 / progress.total);
                                     let bytes_str = if progress.total > 1024 * 1024 {
                                         format!("{:.1} MiB", progress.total as f64 / (1024.0 * 1024.0))
                                     } else if progress.total > 1024 {
@@ -623,33 +620,31 @@ impl PushCmd {
                     config.save(&repo_root)?;
                 }
             }
-        } else {
-            if !self.quiet {
-                println!("{} Would push {} refs:", style("ℹ").blue(), updates.len());
-                for update in &updates {
-                    if let Some(ref old) = update.old_oid {
-                        println!(
-                            "  {} {} → {}",
-                            update.name,
-                            &old[..8],
-                            &update.new_oid[..8]
-                        );
-                    } else {
-                        println!(
-                            "  {} (new) → {}",
-                            update.name,
-                            &update.new_oid[..8]
-                        );
-                    }
+        } else if !self.quiet {
+            println!("{} Would push {} refs:", style("ℹ").blue(), updates.len());
+            for update in &updates {
+                if let Some(ref old) = update.old_oid {
+                    println!(
+                        "  {} {} → {}",
+                        update.name,
+                        &old[..8],
+                        &update.new_oid[..8]
+                    );
+                } else {
+                    println!(
+                        "  {} (new) → {}",
+                        update.name,
+                        &update.new_oid[..8]
+                    );
                 }
-                if skipped_uptodate > 0 {
-                    println!("  {} {} refs already up to date", style("ℹ").blue(), skipped_uptodate);
-                }
-                println!(
-                    "{} Dry run complete (no changes made)",
-                    style("ℹ").blue()
-                );
             }
+            if skipped_uptodate > 0 {
+                println!("  {} {} refs already up to date", style("ℹ").blue(), skipped_uptodate);
+            }
+            println!(
+                "{} Dry run complete (no changes made)",
+                style("ℹ").blue()
+            );
         }
 
         // Print operation summary

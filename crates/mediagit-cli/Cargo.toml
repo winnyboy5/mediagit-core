@@ -11,8 +11,6 @@ authors.workspace = true
 mediagit-config = { path = "../mediagit-config" }
 mediagit-storage = { path = "../mediagit-storage" }
 mediagit-versioning = { path = "../mediagit-versioning" }
-mediagit-compression = { path = "../mediagit-compression" }
-mediagit-media = { path = "../mediagit-media" }
 mediagit-git = { path = "../mediagit-git" }
 mediagit-observability = { path = "../mediagit-observability" }
 mediagit-protocol = { path = "../mediagit-protocol" }
@@ -25,9 +23,7 @@ serde.workspace = true
 serde_json.workspace = true
 bincode.workspace = true
 anyhow.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 indicatif.workspace = true
 console.workspace = true
 toml.workspace = true

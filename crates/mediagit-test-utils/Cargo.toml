@@ -17,9 +17,6 @@ tempfile.workspace = true
 # Path handling
 dunce = "1.0"
 
-# Async support for server tests
-tokio.workspace = true
-
 [lib]
 name = "mediagit_test_utils"
 path = "src/lib.rs"

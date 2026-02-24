@@ -396,26 +396,26 @@ fn e2e_branch_create_and_switch() {
     fs::write(repo_path.join("file.txt"), "main branch\n").unwrap();
     mediagit()
         .current_dir(repo_path)
-        .args(&["add", "file.txt"])
+        .args(["add", "file.txt"])
         .assert()
         .success();
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Initial"])
+        .args(["commit", "-m", "Initial"])
         .assert()
         .success();
 
     // Create branch
     mediagit()
         .current_dir(repo_path)
-        .args(&["branch", "create", "feature"])
+        .args(["branch", "create", "feature"])
         .assert()
         .success();
 
     // List branches
     mediagit()
         .current_dir(repo_path)
-        .args(&["branch", "list"])
+        .args(["branch", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("feature"));
@@ -423,14 +423,14 @@ fn e2e_branch_create_and_switch() {
     // Switch to branch
     mediagit()
         .current_dir(repo_path)
-        .args(&["branch", "switch", "feature"])
+        .args(["branch", "switch", "feature"])
         .assert()
         .success();
 
     // Verify we're on feature branch
     mediagit()
         .current_dir(repo_path)
-        .args(&["branch", "list"])
+        .args(["branch", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("* feature"));
@@ -447,24 +447,24 @@ fn e2e_branch_with_media_files() {
     copy_test_file("freepik__talk__71826.jpeg", repo_path, "main_image.jpg");
     mediagit()
         .current_dir(repo_path)
-        .args(&["add", "main_image.jpg"])
+        .args(["add", "main_image.jpg"])
         .assert()
         .success();
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Add main image"])
+        .args(["commit", "-m", "Add main image"])
         .assert()
         .success();
 
     // Create and switch to feature branch
     mediagit()
         .current_dir(repo_path)
-        .args(&["branch", "create", "feature"])
+        .args(["branch", "create", "feature"])
         .assert()
         .success();
     mediagit()
         .current_dir(repo_path)
-        .args(&["branch", "switch", "feature"])
+        .args(["branch", "switch", "feature"])
         .assert()
         .success();
 
@@ -472,12 +472,12 @@ fn e2e_branch_with_media_files() {
     copy_test_file("freepik__talk__72772.jpeg", repo_path, "feature_image.jpg");
     mediagit()
         .current_dir(repo_path)
-        .args(&["add", "feature_image.jpg"])
+        .args(["add", "feature_image.jpg"])
         .assert()
         .success();
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Add feature image"])
+        .args(["commit", "-m", "Add feature image"])
         .assert()
         .success();
 
@@ -488,7 +488,7 @@ fn e2e_branch_with_media_files() {
     // Switch back to main
     mediagit()
         .current_dir(repo_path)
-        .args(&["branch", "switch", "refs/heads/main"])
+        .args(["branch", "switch", "refs/heads/main"])
         .assert()
         .success();
 
@@ -524,7 +524,7 @@ fn e2e_multiple_files_batch_add() {
     // Commit
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Add 10 files"])
+        .args(["commit", "-m", "Add 10 files"])
         .assert()
         .success();
 
@@ -568,7 +568,7 @@ fn e2e_directory_structure() {
     // Commit
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Add project structure"])
+        .args(["commit", "-m", "Add project structure"])
         .assert()
         .success();
 }
@@ -588,12 +588,12 @@ fn e2e_file_modification() {
     fs::write(repo_path.join("file.txt"), "Version 1\n").unwrap();
     mediagit()
         .current_dir(repo_path)
-        .args(&["add", "file.txt"])
+        .args(["add", "file.txt"])
         .assert()
         .success();
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Version 1"])
+        .args(["commit", "-m", "Version 1"])
         .assert()
         .success();
 
@@ -611,12 +611,12 @@ fn e2e_file_modification() {
     // Add and commit modification
     mediagit()
         .current_dir(repo_path)
-        .args(&["add", "file.txt"])
+        .args(["add", "file.txt"])
         .assert()
         .success();
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Version 2"])
+        .args(["commit", "-m", "Version 2"])
         .assert()
         .success();
 }
@@ -632,12 +632,12 @@ fn e2e_media_file_replacement() {
     copy_test_file("freepik__talk__71826.jpeg", repo_path, "image.jpg");
     mediagit()
         .current_dir(repo_path)
-        .args(&["add", "image.jpg"])
+        .args(["add", "image.jpg"])
         .assert()
         .success();
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Add image v1"])
+        .args(["commit", "-m", "Add image v1"])
         .assert()
         .success();
 
@@ -655,12 +655,12 @@ fn e2e_media_file_replacement() {
     // Commit replacement
     mediagit()
         .current_dir(repo_path)
-        .args(&["add", "image.jpg"])
+        .args(["add", "image.jpg"])
         .assert()
         .success();
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Replace image"])
+        .args(["commit", "-m", "Replace image"])
         .assert()
         .success();
 }
@@ -680,12 +680,12 @@ fn e2e_stats_command() {
     fs::write(repo_path.join("file.txt"), "Test content\n").unwrap();
     mediagit()
         .current_dir(repo_path)
-        .args(&["add", "file.txt"])
+        .args(["add", "file.txt"])
         .assert()
         .success();
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Test commit"])
+        .args(["commit", "-m", "Test commit"])
         .assert()
         .success();
 
@@ -700,13 +700,13 @@ fn e2e_stats_command() {
     // Run stats with different flags
     mediagit()
         .current_dir(repo_path)
-        .args(&["stats", "--storage"])
+        .args(["stats", "--storage"])
         .assert()
         .success();
 
     mediagit()
         .current_dir(repo_path)
-        .args(&["stats", "--branches"])
+        .args(["stats", "--branches"])
         .assert()
         .success();
 }
@@ -724,7 +724,7 @@ fn e2e_add_nonexistent_file() {
 
     mediagit()
         .current_dir(repo_path)
-        .args(&["add", "nonexistent.txt"])
+        .args(["add", "nonexistent.txt"])
         .assert()
         .failure();
 }
@@ -738,7 +738,7 @@ fn e2e_commit_without_add() {
 
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Empty commit"])
+        .args(["commit", "-m", "Empty commit"])
         .assert()
         .failure();
 }
@@ -753,7 +753,7 @@ fn e2e_branch_nonexistent() {
     // Try to switch to nonexistent branch
     mediagit()
         .current_dir(repo_path)
-        .args(&["branch", "switch", "nonexistent"])
+        .args(["branch", "switch", "nonexistent"])
         .assert()
         .failure();
 }
@@ -774,7 +774,7 @@ fn e2e_verify_progress_quiet_mode() {
     // Add with quiet mode - should not show progress
     mediagit()
         .current_dir(repo_path)
-        .args(&["add", "--quiet", "image.jpg"])
+        .args(["add", "--quiet", "image.jpg"])
         .assert()
         .success()
         .stdout(predicate::str::is_empty());
@@ -791,13 +791,13 @@ fn e2e_verify_stats_displayed() {
 
     mediagit()
         .current_dir(repo_path)
-        .args(&["add", "image.jpg"])
+        .args(["add", "image.jpg"])
         .assert()
         .success();
 
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Add image"])
+        .args(["commit", "-m", "Add image"])
         .assert()
         .success();
 }

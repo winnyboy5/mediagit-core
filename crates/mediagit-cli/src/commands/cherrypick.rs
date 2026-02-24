@@ -202,7 +202,7 @@ impl CherryPickCmd {
         &self,
         odb: &ObjectDatabase,
         refdb: &RefDatabase,
-        repo_root: &PathBuf,
+        repo_root: &std::path::Path,
         original_oid: &Oid,
     ) -> Result<()> {
         // Load original commit for message
@@ -403,7 +403,7 @@ impl CherryPickCmd {
 
     async fn save_cherrypick_state(
         &self,
-        repo_root: &PathBuf,
+        repo_root: &std::path::Path,
         all_commits: &[String],
         picked_commits: &[Oid],
     ) -> Result<()> {
@@ -412,7 +412,7 @@ impl CherryPickCmd {
 
         let original_head = refdb.resolve("HEAD").await?.to_hex();
 
-        let current_commit = all_commits.get(picked_commits.len()).map(|s| s.clone());
+        let current_commit = all_commits.get(picked_commits.len()).cloned();
         let remaining_commits = all_commits[picked_commits.len() + 1..].to_vec();
 
         let state = CherryPickState {
@@ -427,7 +427,7 @@ impl CherryPickCmd {
         Ok(())
     }
 
-    fn write_conflicts(&self, repo_root: &PathBuf, merge_result: &mediagit_versioning::MergeResult) -> Result<()> {
+    fn write_conflicts(&self, repo_root: &std::path::Path, merge_result: &mediagit_versioning::MergeResult) -> Result<()> {
         // Write conflict markers to files
         for conflict in &merge_result.conflicts {
             let file_path = repo_root.join(&conflict.path);
