@@ -385,7 +385,7 @@ fn test_tag_delete_nonexistent() {
     add_and_commit(temp_dir.path(), "file.txt", "Content", "Initial commit");
 
     // Deleting nonexistent tag - behavior may vary
-    mediagit()
+    let _ = mediagit()
         .arg("tag")
         .arg("delete")
         .arg("nonexistent")

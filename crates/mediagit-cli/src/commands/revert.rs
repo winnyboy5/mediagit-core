@@ -75,16 +75,19 @@ struct RevertState {
     original_head: Oid,
 }
 
-impl RevertState {
-    fn to_string(&self) -> String {
-        format!(
+impl std::fmt::Display for RevertState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
             "{}\n{}\n{}",
             self.original_head.to_hex(),
             self.current_index,
             self.commits.join("\n")
         )
     }
+}
 
+impl RevertState {
     fn from_string(s: &str) -> Result<Self> {
         let lines: Vec<&str> = s.lines().collect();
         if lines.len() < 3 {
@@ -150,7 +153,7 @@ impl RevertCmd {
                     let state = RevertState {
                         commits: resolved_commits.iter().map(|o| o.to_hex()).collect(),
                         current_index: i,
-                        original_head: original_head.clone(),
+                        original_head,
                     };
                     fs::write(&state_file, state.to_string()).await?;
 
@@ -234,8 +237,8 @@ impl RevertCmd {
             });
 
             let revert_commit = Commit::with_parents(
-                new_tree_oid.clone(),
-                vec![head_oid.clone()],
+                new_tree_oid,
+                vec![head_oid],
                 Signature::now("MediaGit".to_string(), "mediagit@local".to_string()),
                 Signature::now("MediaGit".to_string(), "mediagit@local".to_string()),
                 message,
@@ -248,19 +251,19 @@ impl RevertCmd {
             if let Some(ref branch) = current_branch {
                 refs.update(
                     &format!("refs/heads/{}", branch),
-                    new_commit_oid.clone(),
+                    new_commit_oid,
                     true,
                 )
                 .await?;
             } else {
-                refs.update("HEAD", new_commit_oid.clone(), true).await?;
+                refs.update("HEAD", new_commit_oid, true).await?;
             }
 
             // Reflog
             let reflog = Reflog::new(storage_path);
             let entry = ReflogEntry::now(
-                head_oid.clone(),
-                new_commit_oid.clone(),
+                head_oid,
+                new_commit_oid,
                 "MediaGit",
                 "mediagit@local",
                 &format!("revert: {}", &commit_oid.to_hex()[..7]),
@@ -301,7 +304,7 @@ impl RevertCmd {
             if !entry.is_tree() {
                 let idx_entry = IndexEntry::new(
                     PathBuf::from(&entry.name),
-                    entry.oid.clone(),
+                    entry.oid,
                     entry.mode.as_u32(),
                     0,
                     None,
@@ -345,7 +348,7 @@ impl RevertCmd {
 
         let new_commit = Commit::with_parents(
             tree_oid,
-            vec![head_oid.clone()],
+            vec![head_oid],
             Signature::now("MediaGit".to_string(), "mediagit@local".to_string()),
             Signature::now("MediaGit".to_string(), "mediagit@local".to_string()),
             message,
@@ -355,10 +358,10 @@ impl RevertCmd {
 
         let current_branch = self.get_current_branch(storage_path).await?;
         if let Some(ref branch) = current_branch {
-            refs.update(&format!("refs/heads/{}", branch), new_commit_oid.clone(), true)
+            refs.update(&format!("refs/heads/{}", branch), new_commit_oid, true)
                 .await?;
         } else {
-            refs.update("HEAD", new_commit_oid.clone(), true).await?;
+            refs.update("HEAD", new_commit_oid, true).await?;
         }
 
         println!(
@@ -384,12 +387,12 @@ impl RevertCmd {
         if let Some(ref branch) = current_branch {
             refs.update(
                 &format!("refs/heads/{}", branch),
-                state.original_head.clone(),
+                state.original_head,
                 true,
             )
             .await?;
         } else {
-            refs.update("HEAD", state.original_head.clone(), true).await?;
+            refs.update("HEAD", state.original_head, true).await?;
         }
 
         fs::remove_file(&state_file).await?;
@@ -439,7 +442,7 @@ impl RevertCmd {
                 entry.path.to_string_lossy().to_string(),
                 mediagit_versioning::FileMode::from_u32(entry.mode)
                     .unwrap_or(mediagit_versioning::FileMode::Regular),
-                entry.oid.clone(),
+                entry.oid,
             ));
         }
         tree

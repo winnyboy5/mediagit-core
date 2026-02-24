@@ -203,7 +203,7 @@ impl FetchCmd {
                 let objects = pack_reader.list_objects();
                 stats.objects_received += objects.len() as u64;
 
-                for oid in objects.iter() {
+                for oid in &objects {
                     let (obj_type, obj_data) = pack_reader.get_object_with_type(oid)?;
                     odb.write(obj_type, &obj_data).await?;
                 }

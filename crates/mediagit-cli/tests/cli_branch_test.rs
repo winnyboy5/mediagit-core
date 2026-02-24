@@ -332,7 +332,7 @@ fn test_branch_delete_current_fails() {
     add_and_commit(temp_dir.path(), "file.txt", "Content", "Initial commit");
 
     // Try to delete current branch - behavior may vary
-    mediagit()
+    let _ = mediagit()
         .arg("branch")
         .arg("delete")
         .arg("main")

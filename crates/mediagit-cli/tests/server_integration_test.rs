@@ -116,7 +116,7 @@ fn test_remote_add_origin() {
         .arg("remote")
         .arg("add")
         .arg("origin")
-        .arg(&server_url("test-repo"))
+        .arg(server_url("test-repo"))
         .current_dir(temp_dir.path())
         .assert()
         .success();
@@ -130,7 +130,7 @@ fn test_remote_add_origin() {
         .assert()
         .success()
         .stdout(predicate::str::contains("origin"))
-        .stdout(predicate::str::contains(&server_url("test-repo")));
+        .stdout(predicate::str::contains(server_url("test-repo")));
 }
 
 // ============================================================================
@@ -173,7 +173,7 @@ fn test_push_dry_run() {
         .arg("remote")
         .arg("add")
         .arg("origin")
-        .arg(&server_url("test-repo"))
+        .arg(server_url("test-repo"))
         .current_dir(temp_dir.path())
         .assert()
         .success();

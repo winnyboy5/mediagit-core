@@ -475,13 +475,13 @@ impl StashCmd {
         }))
     }
 
-    fn save_stash_entry(&self, mediagit_dir: &PathBuf, entry: StashEntry) -> Result<()> {
+    fn save_stash_entry(&self, mediagit_dir: &Path, entry: StashEntry) -> Result<()> {
         let mut stash_list = self.load_all_stashes(mediagit_dir)?;
         stash_list.insert(0, entry); // Add to front
         self.save_all_stashes(mediagit_dir, &stash_list)
     }
 
-    fn load_stash_entry(&self, mediagit_dir: &PathBuf, index: usize) -> Result<StashEntry> {
+    fn load_stash_entry(&self, mediagit_dir: &std::path::Path, index: usize) -> Result<StashEntry> {
         let stash_list = self.load_all_stashes(mediagit_dir)?;
 
         stash_list.get(index)
@@ -489,7 +489,7 @@ impl StashCmd {
             .ok_or_else(|| anyhow::anyhow!("Stash entry {} not found", index))
     }
 
-    fn load_all_stashes(&self, mediagit_dir: &PathBuf) -> Result<Vec<StashEntry>> {
+    fn load_all_stashes(&self, mediagit_dir: &std::path::Path) -> Result<Vec<StashEntry>> {
         let stash_path = mediagit_dir.join("STASH_LIST");
 
         if !stash_path.exists() {
@@ -502,7 +502,7 @@ impl StashCmd {
         Ok(stash_list)
     }
 
-    fn save_all_stashes(&self, mediagit_dir: &PathBuf, stash_list: &[StashEntry]) -> Result<()> {
+    fn save_all_stashes(&self, mediagit_dir: &std::path::Path, stash_list: &[StashEntry]) -> Result<()> {
         let stash_path = mediagit_dir.join("STASH_LIST");
         let stash_json = serde_json::to_string_pretty(stash_list)?;
         std::fs::write(&stash_path, stash_json)?;
@@ -517,6 +517,7 @@ impl StashCmd {
         Ok(files)
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn scan_directory_recursive(&self, repo_root: &Path, current_dir: &Path, files: &mut HashSet<PathBuf>) -> Result<()> {
         for entry in std::fs::read_dir(current_dir)? {
             let entry = entry?;

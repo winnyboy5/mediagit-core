@@ -58,7 +58,7 @@ fn copy_test_file(test_file: &str, repo_dir: &Path, dest_name: &str) -> PathBuf 
     }
 
     if source.exists() {
-        fs::copy(&source, &dest).expect(&format!("Failed to copy {} to {:?}", test_file, dest));
+        fs::copy(&source, &dest).unwrap_or_else(|_| panic!("Failed to copy {} to {:?}", test_file, dest));
     }
 
     dest

@@ -94,7 +94,7 @@ async fn test_rate_limit_allows_requests_within_limit() {
     // Send 10 requests within burst limit - all should succeed
     for i in 0..10 {
         let resp = client
-            .get(&server.url("/test-repo/info/refs"))
+            .get(server.url("/test-repo/info/refs"))
             .send()
             .await
             .unwrap();
@@ -120,7 +120,7 @@ async fn test_rate_limit_blocks_requests_exceeding_burst() {
     // First 2 requests should succeed (within burst)
     for i in 0..2 {
         let resp = client
-            .get(&server.url("/test-repo/info/refs"))
+            .get(server.url("/test-repo/info/refs"))
             .send()
             .await
             .unwrap();
@@ -135,7 +135,7 @@ async fn test_rate_limit_blocks_requests_exceeding_burst() {
 
     // Third request should be rate limited
     let resp = client
-        .get(&server.url("/test-repo/info/refs"))
+        .get(server.url("/test-repo/info/refs"))
         .send()
         .await
         .unwrap();
@@ -155,7 +155,7 @@ async fn test_rate_limit_headers_present() {
     let client = Client::new();
 
     let resp = client
-        .get(&server.url("/test-repo/info/refs"))
+        .get(server.url("/test-repo/info/refs"))
         .send()
         .await
         .unwrap();
@@ -184,7 +184,7 @@ async fn test_rate_limit_replenishment() {
     // Use up the burst (2 requests)
     for _ in 0..2 {
         client
-            .get(&server.url("/test-repo/info/refs"))
+            .get(server.url("/test-repo/info/refs"))
             .send()
             .await
             .unwrap();
@@ -192,7 +192,7 @@ async fn test_rate_limit_replenishment() {
 
     // Third request should be rate limited
     let resp = client
-        .get(&server.url("/test-repo/info/refs"))
+        .get(server.url("/test-repo/info/refs"))
         .send()
         .await
         .unwrap();
@@ -203,7 +203,7 @@ async fn test_rate_limit_replenishment() {
 
     // Request should now succeed (replenished)
     let resp = client
-        .get(&server.url("/test-repo/info/refs"))
+        .get(server.url("/test-repo/info/refs"))
         .send()
         .await
         .unwrap();
@@ -228,7 +228,7 @@ async fn test_rate_limit_per_ip_isolation() {
 
     // Client 1: use up its quota
     let resp1 = client1
-        .get(&server.url("/test-repo/info/refs"))
+        .get(server.url("/test-repo/info/refs"))
         .send()
         .await
         .unwrap();
@@ -236,7 +236,7 @@ async fn test_rate_limit_per_ip_isolation() {
 
     // Client 1: second request should be rate limited
     let resp1_second = client1
-        .get(&server.url("/test-repo/info/refs"))
+        .get(server.url("/test-repo/info/refs"))
         .send()
         .await
         .unwrap();
@@ -246,7 +246,7 @@ async fn test_rate_limit_per_ip_isolation() {
     // Note: This may not work as expected because both clients appear from 127.0.0.1
     // In real deployment with reverse proxy, x-forwarded-for would differentiate
     let resp2 = client2
-        .get(&server.url("/test-repo/info/refs"))
+        .get(server.url("/test-repo/info/refs"))
         .send()
         .await
         .unwrap();

@@ -618,26 +618,26 @@ fn test_workflow_branch_create_switch() {
     std::fs::write(repo.path().join("main.txt"), b"main content").unwrap();
     mediagit_cmd()
         .current_dir(&repo)
-        .args(&["add", "main.txt"])
+        .args(["add", "main.txt"])
         .assert()
         .success();
     mediagit_cmd()
         .current_dir(&repo)
-        .args(&["commit", "-m", "Initial commit"])
+        .args(["commit", "-m", "Initial commit"])
         .assert()
         .success();
 
     // Create feature branch
     mediagit_cmd()
         .current_dir(&repo)
-        .args(&["branch", "create", "feature"])
+        .args(["branch", "create", "feature"])
         .assert()
         .success();
 
     // Switch to feature branch
     mediagit_cmd()
         .current_dir(&repo)
-        .args(&["branch", "switch", "feature"])
+        .args(["branch", "switch", "feature"])
         .assert()
         .success();
 
@@ -645,12 +645,12 @@ fn test_workflow_branch_create_switch() {
     std::fs::write(repo.path().join("feature.txt"), b"feature content").unwrap();
     mediagit_cmd()
         .current_dir(&repo)
-        .args(&["add", "feature.txt"])
+        .args(["add", "feature.txt"])
         .assert()
         .success();
     mediagit_cmd()
         .current_dir(&repo)
-        .args(&["commit", "-m", "Add feature"])
+        .args(["commit", "-m", "Add feature"])
         .assert()
         .success();
 }

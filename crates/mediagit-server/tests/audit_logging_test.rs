@@ -95,7 +95,7 @@ async fn test_audit_path_traversal_attempt() {
 
     // Attempt path traversal - should trigger audit log
     let resp = client
-        .get(&server.url("/../etc/passwd/info/refs"))
+        .get(server.url("/../etc/passwd/info/refs"))
         .send()
         .await
         .unwrap();
@@ -118,7 +118,7 @@ async fn test_audit_absolute_path_attempt() {
 
     // Attempt absolute path - should trigger audit log
     let resp = client
-        .get(&server.url("/etc/passwd/info/refs"))
+        .get(server.url("/etc/passwd/info/refs"))
         .send()
         .await
         .unwrap();
@@ -139,7 +139,7 @@ async fn test_audit_invalid_characters() {
 
     // Repository name with invalid characters - should trigger audit log
     let resp = client
-        .get(&server.url("/repo$test/info/refs"))
+        .get(server.url("/repo$test/info/refs"))
         .send()
         .await
         .unwrap();
@@ -208,7 +208,7 @@ async fn test_audit_oversized_request() {
     let oversized_content_length = "3000000000"; // 3GB, exceeds 2GB limit
 
     let resp = client
-        .post(&server.url("/test-repo/objects/pack"))
+        .post(server.url("/test-repo/objects/pack"))
         .header("content-length", oversized_content_length)
         .body("dummy")
         .send()
@@ -229,7 +229,7 @@ async fn test_audit_normal_request_no_log() {
     // Normal request to non-existent repo - should NOT trigger security audit logs
     // (only NOT_FOUND, no security violation)
     let resp = client
-        .get(&server.url("/valid-repo/info/refs"))
+        .get(server.url("/valid-repo/info/refs"))
         .send()
         .await
         .unwrap();
@@ -254,7 +254,7 @@ async fn test_audit_multiple_violations() {
 
     for violation_path in violations {
         let resp = client
-            .get(&server.url(violation_path))
+            .get(server.url(violation_path))
             .send()
             .await
             .unwrap();

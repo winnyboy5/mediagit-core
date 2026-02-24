@@ -77,7 +77,7 @@ async fn init_test_repo(repo_path: &std::path::Path) -> anyhow::Result<Oid> {
     let commit_oid = commit.write(&odb).await?;
 
     // Create initial ref pointing to commit (not blob)
-    let refdb = RefDatabase::new(&repo_path.join(".mediagit"));
+    let refdb = RefDatabase::new(repo_path.join(".mediagit"));
     let main_ref = Ref::new_direct("refs/heads/main".to_string(), commit_oid);
     refdb.write(&main_ref).await?;
 
@@ -152,12 +152,12 @@ async fn test_e2e_push_workflow() {
     ).await.unwrap();
 
     // Update client's main ref to point to new commit
-    let refdb = RefDatabase::new(&client_repo.join(".mediagit"));
+    let refdb = RefDatabase::new(client_repo.join(".mediagit"));
     let updated_ref = Ref::new_direct("refs/heads/main".to_string(), new_commit_oid);
     refdb.write(&updated_ref).await.unwrap();
 
     // Create protocol client
-    let client = ProtocolClient::new(&format!("{}/test-repo", base_url));
+    let client = ProtocolClient::new(format!("{}/test-repo", base_url));
 
     // Get current server state
     let refs_response = client.get_refs().await.unwrap();
@@ -184,7 +184,7 @@ async fn test_e2e_push_workflow() {
     assert_eq!(response.results[0].ref_name, "refs/heads/main");
 
     // Verify server repository was updated
-    let server_refdb = RefDatabase::new(&server_repo.join(".mediagit"));
+    let server_refdb = RefDatabase::new(server_repo.join(".mediagit"));
     let server_main = server_refdb.read("refs/heads/main").await.unwrap();
 
     if let Some(target_oid) = &server_main.oid {
@@ -220,7 +220,7 @@ async fn test_e2e_pull_workflow() {
     ).await.unwrap();
 
     // Update server's main ref to new commit
-    let server_refdb = RefDatabase::new(&server_repo.join(".mediagit"));
+    let server_refdb = RefDatabase::new(server_repo.join(".mediagit"));
     let server_ref = Ref::new_direct("refs/heads/main".to_string(), server_commit_oid);
     server_refdb.write(&server_ref).await.unwrap();
 
@@ -238,7 +238,7 @@ async fn test_e2e_pull_workflow() {
     let client_odb = ObjectDatabase::new(Arc::clone(&client_storage), 1000);
 
     // Create protocol client
-    let client = ProtocolClient::new(&format!("{}/test-repo", base_url));
+    let client = ProtocolClient::new(format!("{}/test-repo", base_url));
 
     // Perform pull
     let result = client.pull(&client_odb, "refs/heads/main").await;
@@ -293,12 +293,12 @@ async fn test_e2e_push_then_pull_roundtrip() {
     ).await.unwrap();
 
     // Update client1's main ref
-    let client1_refdb = RefDatabase::new(&client1_repo.join(".mediagit"));
+    let client1_refdb = RefDatabase::new(client1_repo.join(".mediagit"));
     let client1_ref = Ref::new_direct("refs/heads/main".to_string(), unique_commit_oid);
     client1_refdb.write(&client1_ref).await.unwrap();
 
     // Push from client1
-    let client1_protocol = ProtocolClient::new(&format!("{}/test-repo", base_url));
+    let client1_protocol = ProtocolClient::new(format!("{}/test-repo", base_url));
     let refs_response = client1_protocol.get_refs().await.unwrap();
     let old_oid = refs_response.refs.iter()
         .find(|r| r.name == "refs/heads/main")
@@ -325,7 +325,7 @@ async fn test_e2e_push_then_pull_roundtrip() {
     let client2_odb = ObjectDatabase::new(Arc::clone(&client2_storage), 1000);
 
     // Pull to client2
-    let client2_protocol = ProtocolClient::new(&format!("{}/test-repo", base_url));
+    let client2_protocol = ProtocolClient::new(format!("{}/test-repo", base_url));
     let pull_result = client2_protocol.pull(&client2_odb, "refs/heads/main").await;
     assert!(pull_result.is_ok(), "Client2 pull failed: {:?}", pull_result.err());
     let (pack_data, _oids) = pull_result.unwrap();
@@ -367,7 +367,7 @@ async fn test_force_push() {
         Some(server_initial_oid),
     ).await.unwrap();
 
-    let server_refdb = RefDatabase::new(&server_repo.join(".mediagit"));
+    let server_refdb = RefDatabase::new(server_repo.join(".mediagit"));
     let server_ref = Ref::new_direct("refs/heads/main".to_string(), server_divergent_oid);
     server_refdb.write(&server_ref).await.unwrap();
 
@@ -391,12 +391,12 @@ async fn test_force_push() {
         Some(client_initial),  // Use client's own initial commit as parent
     ).await.unwrap();
 
-    let client_refdb = RefDatabase::new(&client_repo.join(".mediagit"));
+    let client_refdb = RefDatabase::new(client_repo.join(".mediagit"));
     let client_ref = Ref::new_direct("refs/heads/main".to_string(), client_divergent_oid);
     client_refdb.write(&client_ref).await.unwrap();
 
     // Create protocol client
-    let client = ProtocolClient::new(&format!("{}/test-repo", base_url));
+    let client = ProtocolClient::new(format!("{}/test-repo", base_url));
 
     // Force push (should succeed since we're forcing)
     // Note: We pass None for old_oid since we're forcing a complete overwrite
@@ -414,7 +414,7 @@ async fn test_force_push() {
     assert!(response.success, "Force push should succeed");
 
     // Verify server was updated to client's version
-    let server_refdb = RefDatabase::new(&server_repo.join(".mediagit"));
+    let server_refdb = RefDatabase::new(server_repo.join(".mediagit"));
     let updated_ref = server_refdb.read("refs/heads/main").await.unwrap();
 
     if let Some(oid) = &updated_ref.oid {
@@ -437,7 +437,7 @@ async fn test_list_refs() {
     let (base_url, _server_handle) = start_test_server(server_repos.clone()).await;
 
     // Create client
-    let client = ProtocolClient::new(&format!("{}/test-repo", base_url));
+    let client = ProtocolClient::new(format!("{}/test-repo", base_url));
 
     // List refs
     let result = client.get_refs().await;

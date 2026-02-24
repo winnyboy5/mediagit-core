@@ -9,16 +9,10 @@ description = "Storage backend migration tool for MediaGit"
 [dependencies]
 # Core dependencies
 anyhow = "1.0"
-thiserror = "2.0"
 tokio = { version = "1.0", features = ["full"] }
-async-trait = "0.1"
 
 # MediaGit dependencies
 mediagit-storage = { path = "../mediagit-storage" }
-
-# Progress tracking
-indicatif = "0.17"
-console = "0.15"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -32,13 +26,8 @@ hex = "0.4"
 # Logging
 tracing = "0.1"
 
-# Async utilities
-futures = "0.3"
-tokio-stream = "0.1"
-
 [dev-dependencies]
 tempfile = "3.0"
-tokio-test = "0.4"
 
 [features]
 default = []

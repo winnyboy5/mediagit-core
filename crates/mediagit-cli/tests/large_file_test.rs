@@ -46,7 +46,7 @@ fn copy_test_file(test_file: &str, repo_dir: &Path, dest_name: &str) -> PathBuf 
     let dest = repo_dir.join(dest_name);
 
     if source.exists() {
-        fs::copy(&source, &dest).expect(&format!("Failed to copy {}", test_file));
+        fs::copy(&source, &dest).unwrap_or_else(|_| panic!("Failed to copy {}", test_file));
     }
 
     dest
@@ -114,7 +114,7 @@ fn test_large_file(file_name: &str, dest_name: &str) -> Option<TestMetrics> {
     mediagit()
         .arg("commit")
         .arg("-m")
-        .arg(&format!("Add {}", dest_name))
+        .arg(format!("Add {}", dest_name))
         .current_dir(temp_dir.path())
         .assert()
         .success();

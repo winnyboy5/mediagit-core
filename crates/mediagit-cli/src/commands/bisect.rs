@@ -424,7 +424,7 @@ impl BisectCmd {
                 // Skip if already marked
                 if bad_set.contains(&commit_hex) || good_set.contains(&commit_hex) || skip_set.contains(&commit_hex) {
                     // Move to parent
-                    if let Ok(commit) = mediagit_versioning::Commit::read(&odb, &current_oid).await {
+                    if let Ok(commit) = mediagit_versioning::Commit::read(odb, &current_oid).await {
                         if let Some(parent) = commit.parents.first() {
                             current_oid = *parent;
                             continue;
@@ -436,7 +436,7 @@ impl BisectCmd {
                 candidates.push(current_oid);
 
                 // Move to parent
-                if let Ok(commit) = mediagit_versioning::Commit::read(&odb, &current_oid).await {
+                if let Ok(commit) = mediagit_versioning::Commit::read(odb, &current_oid).await {
                     if let Some(parent) = commit.parents.first() {
                         current_oid = *parent;
                     } else {
@@ -462,7 +462,7 @@ impl BisectCmd {
         !state.bad_commits.is_empty() && !state.good_commits.is_empty() && state.current.is_some()
     }
 
-    async fn complete_bisect(&self, repo_root: &PathBuf, state: &BisectState) -> Result<()> {
+    async fn complete_bisect(&self, repo_root: &std::path::Path, state: &BisectState) -> Result<()> {
         let mediagit_dir = repo_root.join(".mediagit");
 
         println!();
@@ -497,7 +497,7 @@ impl BisectCmd {
         (potential as f64).log2().ceil() as usize
     }
 
-    fn load_bisect_state(&self, mediagit_dir: &PathBuf) -> Result<BisectState> {
+    fn load_bisect_state(&self, mediagit_dir: &std::path::Path) -> Result<BisectState> {
         let state_path = mediagit_dir.join("BISECT_STATE");
 
         if !state_path.exists() {
@@ -510,7 +510,7 @@ impl BisectCmd {
         Ok(state)
     }
 
-    fn save_bisect_state(&self, mediagit_dir: &PathBuf, state: &BisectState) -> Result<()> {
+    fn save_bisect_state(&self, mediagit_dir: &std::path::Path, state: &BisectState) -> Result<()> {
         let state_path = mediagit_dir.join("BISECT_STATE");
         let state_json = serde_json::to_string_pretty(state)?;
         std::fs::write(&state_path, state_json)?;

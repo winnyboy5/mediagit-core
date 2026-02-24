@@ -66,7 +66,7 @@ impl InstallCmd {
         // Check if already installed
         if !self.force {
             let check = Command::new("git")
-                .args(&["config", "--get", "filter.mediagit.clean"])
+                .args(["config", "--get", "filter.mediagit.clean"])
                 .current_dir(&repo_path)
                 .output();
 
@@ -191,7 +191,7 @@ impl InstallCmd {
 
     fn run_git_config(&self, repo_path: &PathBuf, key: &str, value: &str) -> Result<()> {
         let output = Command::new("git")
-            .args(&["config", key, value])
+            .args(["config", key, value])
             .current_dir(repo_path)
             .output()
             .context(format!("Failed to run: git config {} {}", key, value))?;
@@ -206,7 +206,7 @@ impl InstallCmd {
 
     fn run_git_config_global(&self, key: &str, value: &str) -> Result<()> {
         let output = Command::new("git")
-            .args(&["config", "--global", key, value])
+            .args(["config", "--global", key, value])
             .output()
             .context(format!("Failed to run: git config --global {} {}", key, value))?;
 

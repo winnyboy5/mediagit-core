@@ -208,9 +208,11 @@ impl FsckCmd {
             }
             opts
         } else {
-            let mut opts = FsckOptions::default();
-            opts.verbose = self.verbose;
-            opts.check_dangling = self.lost_found || (!self.no_dangling && self.full);
+            let mut opts = FsckOptions {
+                verbose: self.verbose,
+                check_dangling: self.lost_found || (!self.no_dangling && self.full),
+                ..FsckOptions::default()
+            };
             if self.max_objects > 0 {
                 opts.max_objects = self.max_objects;
             }

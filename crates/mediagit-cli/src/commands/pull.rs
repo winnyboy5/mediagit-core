@@ -106,11 +106,10 @@ impl PullCmd {
         let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
 
-        if self.dry_run {
-            if !self.quiet {
+        if self.dry_run
+            && !self.quiet {
                 println!("{} Running in dry-run mode", style("ℹ").blue());
             }
-        }
 
         if !self.quiet {
             println!(
@@ -531,13 +530,11 @@ impl PullCmd {
                     }
                 }
             }
-        } else {
-            if !self.quiet {
-                println!(
-                    "{} Dry run complete (no changes made)",
-                    style("ℹ").blue()
-                );
-            }
+        } else if !self.quiet {
+            println!(
+                "{} Dry run complete (no changes made)",
+                style("ℹ").blue()
+            );
         }
 
         // Print operation summary

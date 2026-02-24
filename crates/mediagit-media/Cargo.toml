@@ -9,7 +9,6 @@ authors.workspace = true
 [dependencies]
 tokio.workspace = true
 serde.workspace = true
-anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
@@ -30,10 +29,6 @@ symphonia = { version = "0.5", features = ["all"] }
 # PSD parsing
 psd = "0.3.5"
 
-# Hashing
-sha2.workspace = true
-blake3.workspace = true
-
 # Serialization for metadata
 serde_json.workspace = true
 
@@ -41,6 +36,3 @@ serde_json.workspace = true
 regex-lite = "0.1"
 
 [dev-dependencies]
-tokio-test.workspace = true
-tempfile.workspace = true
-criterion.workspace = true

@@ -14,7 +14,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use mediagit_versioning::{Oid, Ref, RefDatabase};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Manage tags
 #[derive(Parser, Debug)]
@@ -519,7 +519,7 @@ struct TagMetadata {
 }
 
 // Helper to get ref path
-fn get_ref_path(mediagit_dir: &PathBuf, ref_name: &str) -> PathBuf {
+fn get_ref_path(mediagit_dir: &Path, ref_name: &str) -> PathBuf {
     mediagit_dir.join(ref_name)
 }
 

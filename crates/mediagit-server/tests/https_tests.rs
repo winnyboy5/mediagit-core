@@ -50,7 +50,7 @@ mod https_tests {
             .unwrap();
 
         let key_pem = certificate.key_pem.as_bytes();
-        let mut key_reader = &key_pem[..];
+        let mut key_reader = key_pem;
         let private_keys = rustls_pemfile::pkcs8_private_keys(&mut key_reader)
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
