@@ -168,8 +168,11 @@ impl ConflictDetector {
             base.entries.iter().map(|(k, v)| (k.as_str(), v)).collect();
         let ours_map: HashMap<&str, &TreeEntry> =
             ours.entries.iter().map(|(k, v)| (k.as_str(), v)).collect();
-        let theirs_map: HashMap<&str, &TreeEntry> =
-            theirs.entries.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        let theirs_map: HashMap<&str, &TreeEntry> = theirs
+            .entries
+            .iter()
+            .map(|(k, v)| (k.as_str(), v))
+            .collect();
 
         // Collect all paths that appear in any tree
         let mut all_paths = HashSet::new();
@@ -276,7 +279,9 @@ impl ConflictDetector {
 
                 // Should never happen (no entry in any tree)
                 (None, None, None) => {
-                    return Err(anyhow!("Impossible state: path exists in none of the trees"));
+                    return Err(anyhow!(
+                        "Impossible state: path exists in none of the trees"
+                    ));
                 }
             }
         }
@@ -409,7 +414,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(conflicts.len(), 0, "Identical trees should have no conflicts");
+        assert_eq!(
+            conflicts.len(),
+            0,
+            "Identical trees should have no conflicts"
+        );
     }
 
     #[tokio::test]
@@ -424,7 +433,10 @@ mod tests {
         let ours = create_tree(vec![("file.txt", ours_content)]);
         let theirs = create_tree(vec![("file.txt", base_content)]);
 
-        let conflicts = detector.detect_conflicts(&base, &ours, &theirs).await.unwrap();
+        let conflicts = detector
+            .detect_conflicts(&base, &ours, &theirs)
+            .await
+            .unwrap();
 
         assert_eq!(conflicts.len(), 0, "One-sided change should auto-merge");
     }
@@ -442,7 +454,10 @@ mod tests {
         let ours = create_tree(vec![("file.txt", ours_content)]);
         let theirs = create_tree(vec![("file.txt", theirs_content)]);
 
-        let conflicts = detector.detect_conflicts(&base, &ours, &theirs).await.unwrap();
+        let conflicts = detector
+            .detect_conflicts(&base, &ours, &theirs)
+            .await
+            .unwrap();
 
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].conflict_type, ConflictType::ModifyModify);
@@ -461,7 +476,10 @@ mod tests {
         let ours = create_tree(vec![("file.txt", modified_content)]);
         let theirs = create_tree(vec![("file.txt", modified_content)]);
 
-        let conflicts = detector.detect_conflicts(&base, &ours, &theirs).await.unwrap();
+        let conflicts = detector
+            .detect_conflicts(&base, &ours, &theirs)
+            .await
+            .unwrap();
 
         assert_eq!(conflicts.len(), 0, "Same modification should auto-merge");
     }
@@ -478,7 +496,10 @@ mod tests {
         let ours = create_tree(vec![("file.txt", ours_content)]);
         let theirs = create_tree(vec![("file.txt", theirs_content)]);
 
-        let conflicts = detector.detect_conflicts(&base, &ours, &theirs).await.unwrap();
+        let conflicts = detector
+            .detect_conflicts(&base, &ours, &theirs)
+            .await
+            .unwrap();
 
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].conflict_type, ConflictType::AddAdd);
@@ -496,7 +517,10 @@ mod tests {
         let ours = create_tree(vec![("file.txt", content)]);
         let theirs = create_tree(vec![("file.txt", content)]);
 
-        let conflicts = detector.detect_conflicts(&base, &ours, &theirs).await.unwrap();
+        let conflicts = detector
+            .detect_conflicts(&base, &ours, &theirs)
+            .await
+            .unwrap();
 
         assert_eq!(conflicts.len(), 0, "Same addition should auto-merge");
     }
@@ -513,7 +537,10 @@ mod tests {
         let ours = create_tree(vec![]); // We deleted
         let theirs = create_tree(vec![("file.txt", theirs_content)]);
 
-        let conflicts = detector.detect_conflicts(&base, &ours, &theirs).await.unwrap();
+        let conflicts = detector
+            .detect_conflicts(&base, &ours, &theirs)
+            .await
+            .unwrap();
 
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].conflict_type, ConflictType::DeleteModify);
@@ -532,7 +559,10 @@ mod tests {
         let ours = create_tree(vec![("file.txt", ours_content)]);
         let theirs = create_tree(vec![]); // They deleted
 
-        let conflicts = detector.detect_conflicts(&base, &ours, &theirs).await.unwrap();
+        let conflicts = detector
+            .detect_conflicts(&base, &ours, &theirs)
+            .await
+            .unwrap();
 
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].conflict_type, ConflictType::ModifyDelete);
@@ -550,7 +580,10 @@ mod tests {
         let ours = create_tree(vec![]);
         let theirs = create_tree(vec![]);
 
-        let conflicts = detector.detect_conflicts(&base, &ours, &theirs).await.unwrap();
+        let conflicts = detector
+            .detect_conflicts(&base, &ours, &theirs)
+            .await
+            .unwrap();
 
         assert_eq!(conflicts.len(), 0, "Both deleted should auto-merge");
     }
@@ -566,9 +599,16 @@ mod tests {
         let ours = create_tree(vec![]); // We deleted
         let theirs = create_tree(vec![("file.txt", content)]); // They kept unchanged
 
-        let conflicts = detector.detect_conflicts(&base, &ours, &theirs).await.unwrap();
+        let conflicts = detector
+            .detect_conflicts(&base, &ours, &theirs)
+            .await
+            .unwrap();
 
-        assert_eq!(conflicts.len(), 0, "Delete of unchanged file should auto-merge");
+        assert_eq!(
+            conflicts.len(),
+            0,
+            "Delete of unchanged file should auto-merge"
+        );
     }
 
     #[tokio::test]
@@ -593,21 +633,24 @@ mod tests {
         ]);
 
         let ours = create_tree(vec![
-            ("conflict.txt", ours1),         // Modified differently
+            ("conflict.txt", ours1),            // Modified differently
             ("same_change.txt", same_modified), // Same modification
             // delete_modify.txt - we deleted it but they modified
-            ("add_both.txt", added_both),    // Same addition
-            ("add_ours.txt", added_ours),    // We added
+            ("add_both.txt", added_both), // Same addition
+            ("add_ours.txt", added_ours), // We added
         ]);
 
         let theirs = create_tree(vec![
-            ("conflict.txt", theirs1),       // Modified differently
+            ("conflict.txt", theirs1),          // Modified differently
             ("same_change.txt", same_modified), // Same modification
-            ("delete_modify.txt", theirs1),  // They modified
-            ("add_both.txt", added_both),    // Same addition
+            ("delete_modify.txt", theirs1),     // They modified
+            ("add_both.txt", added_both),       // Same addition
         ]);
 
-        let conflicts = detector.detect_conflicts(&base, &ours, &theirs).await.unwrap();
+        let conflicts = detector
+            .detect_conflicts(&base, &ours, &theirs)
+            .await
+            .unwrap();
 
         // Should have 2 conflicts: conflict.txt (ModifyModify), delete_modify.txt (DeleteModify)
         assert_eq!(conflicts.len(), 2);

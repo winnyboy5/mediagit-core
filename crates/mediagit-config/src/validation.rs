@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -54,10 +54,7 @@ impl Validator for AppConfig {
         if !valid_environments.contains(&self.environment.as_str()) {
             return Err(ConfigError::invalid_value(
                 "app.environment",
-                format!(
-                    "must be one of: {}",
-                    valid_environments.join(", ")
-                ),
+                format!("must be one of: {}", valid_environments.join(", ")),
             ));
         }
 
@@ -104,9 +101,7 @@ impl Validator for S3Storage {
         }
 
         if self.region.is_empty() {
-            return Err(ConfigError::MissingRequired(
-                "storage.region".to_string(),
-            ));
+            return Err(ConfigError::MissingRequired("storage.region".to_string()));
         }
 
         // S3 bucket names must be 3-63 characters long
@@ -196,15 +191,11 @@ impl Validator for GCSStorage {
 impl Validator for MultiBackendStorage {
     fn validate(&self) -> ConfigResult<()> {
         if self.primary.is_empty() {
-            return Err(ConfigError::MissingRequired(
-                "storage.primary".to_string(),
-            ));
+            return Err(ConfigError::MissingRequired("storage.primary".to_string()));
         }
 
         if self.backends.is_empty() {
-            return Err(ConfigError::MissingRequired(
-                "storage.backends".to_string(),
-            ));
+            return Err(ConfigError::MissingRequired("storage.backends".to_string()));
         }
 
         if !self.backends.contains_key(&self.primary) {
@@ -432,9 +423,7 @@ impl Validator for MetricsConfig {
             }
 
             if self.endpoint.is_empty() {
-                return Err(ConfigError::MissingRequired(
-                    "metrics.endpoint".to_string(),
-                ));
+                return Err(ConfigError::MissingRequired("metrics.endpoint".to_string()));
             }
 
             if !self.endpoint.starts_with('/') {

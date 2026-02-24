@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -12,13 +12,15 @@
 //
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
+use super::super::repo::{create_storage_backend, find_repo_root};
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
-use mediagit_versioning::{resolve_revision, Commit, Index, ObjectDatabase, Oid, RefDatabase, Tree};
+use mediagit_versioning::{
+    resolve_revision, Commit, Index, ObjectDatabase, Oid, RefDatabase, Tree,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use super::super::repo::{find_repo_root, create_storage_backend};
 
 /// Show changes between commits
 ///
@@ -120,8 +122,16 @@ impl DiffCmd {
 
         // Display diff header
         println!("{} Comparing commits:", style("📊").cyan().bold());
-        println!("  From: {} ({})", from_oid, from_commit.message.lines().next().unwrap_or(""));
-        println!("  To:   {} ({})", to_oid, to_commit.message.lines().next().unwrap_or(""));
+        println!(
+            "  From: {} ({})",
+            from_oid,
+            from_commit.message.lines().next().unwrap_or("")
+        );
+        println!(
+            "  To:   {} ({})",
+            to_oid,
+            to_commit.message.lines().next().unwrap_or("")
+        );
         println!();
 
         // Basic tree comparison
@@ -132,27 +142,38 @@ impl DiffCmd {
             println!("  From tree: {}", from_commit.tree);
             println!("  To tree:   {}", to_commit.tree);
             println!();
-            println!("{}", style("Full diff functionality requires tree traversal and comparison").dim());
-            println!("{}", style("This feature will be enhanced in a future release").dim());
+            println!(
+                "{}",
+                style("Full diff functionality requires tree traversal and comparison").dim()
+            );
+            println!(
+                "{}",
+                style("This feature will be enhanced in a future release").dim()
+            );
         }
 
         Ok(())
     }
 
     /// Compare working tree against HEAD commit
-    async fn diff_working_tree(&self, repo_root: &Path, refdb: &RefDatabase, odb: &ObjectDatabase) -> Result<()> {
+    async fn diff_working_tree(
+        &self,
+        repo_root: &Path,
+        refdb: &RefDatabase,
+        odb: &ObjectDatabase,
+    ) -> Result<()> {
         // Resolve HEAD
-        let head_oid = resolve_revision("HEAD", refdb, odb).await
+        let head_oid = resolve_revision("HEAD", refdb, odb)
+            .await
             .context("No commits yet — nothing to diff")?;
 
         // Read HEAD commit and its tree
         let head_data = odb.read(&head_oid).await?;
-        let head_commit = Commit::deserialize(&head_data)
-            .context("Failed to deserialize HEAD commit")?;
+        let head_commit =
+            Commit::deserialize(&head_data).context("Failed to deserialize HEAD commit")?;
 
         let tree_data = odb.read(&head_commit.tree).await?;
-        let tree = Tree::deserialize(&tree_data)
-            .context("Failed to deserialize HEAD tree")?;
+        let tree = Tree::deserialize(&tree_data).context("Failed to deserialize HEAD tree")?;
 
         // Build HEAD file map
         let mut head_files: HashMap<PathBuf, Oid> = HashMap::new();
@@ -195,7 +216,11 @@ impl DiffCmd {
 
         // Display results
         let short_head = &head_oid.to_hex()[..7];
-        println!("{} Diff: working tree vs HEAD ({})", style("📊").cyan().bold(), style(short_head).yellow());
+        println!(
+            "{} Diff: working tree vs HEAD ({})",
+            style("📊").cyan().bold(),
+            style(short_head).yellow()
+        );
         println!();
 
         if modified.is_empty() && deleted.is_empty() && added.is_empty() {
@@ -237,19 +262,24 @@ impl DiffCmd {
     }
 
     /// Compare index (staged changes) against HEAD
-    async fn diff_cached(&self, repo_root: &Path, refdb: &RefDatabase, odb: &ObjectDatabase) -> Result<()> {
+    async fn diff_cached(
+        &self,
+        repo_root: &Path,
+        refdb: &RefDatabase,
+        odb: &ObjectDatabase,
+    ) -> Result<()> {
         // Resolve HEAD
-        let head_oid = resolve_revision("HEAD", refdb, odb).await
+        let head_oid = resolve_revision("HEAD", refdb, odb)
+            .await
             .context("No commits yet — nothing to diff")?;
 
         // Read HEAD commit and its tree
         let head_data = odb.read(&head_oid).await?;
-        let head_commit = Commit::deserialize(&head_data)
-            .context("Failed to deserialize HEAD commit")?;
+        let head_commit =
+            Commit::deserialize(&head_data).context("Failed to deserialize HEAD commit")?;
 
         let tree_data = odb.read(&head_commit.tree).await?;
-        let tree = Tree::deserialize(&tree_data)
-            .context("Failed to deserialize HEAD tree")?;
+        let tree = Tree::deserialize(&tree_data).context("Failed to deserialize HEAD tree")?;
 
         // Build HEAD file map
         let mut head_files: HashMap<PathBuf, Oid> = HashMap::new();
@@ -266,7 +296,11 @@ impl DiffCmd {
         }
 
         let short_head = &head_oid.to_hex()[..7];
-        println!("{} Diff: index vs HEAD ({})", style("📊").cyan().bold(), style(short_head).yellow());
+        println!(
+            "{} Diff: index vs HEAD ({})",
+            style("📊").cyan().bold(),
+            style(short_head).yellow()
+        );
         println!();
 
         let mut staged_new = Vec::new();
@@ -298,22 +332,30 @@ impl DiffCmd {
         Ok(())
     }
 
-    async fn resolve_commits(&self, refdb: &RefDatabase, odb: &ObjectDatabase) -> Result<(Oid, Oid)> {
+    async fn resolve_commits(
+        &self,
+        refdb: &RefDatabase,
+        odb: &ObjectDatabase,
+    ) -> Result<(Oid, Oid)> {
         let from_oid = if let Some(from) = &self.from {
-            resolve_revision(from, refdb, odb).await
+            resolve_revision(from, refdb, odb)
+                .await
                 .context(format!("Cannot resolve from revision: {}", from))?
         } else {
             // Default: Use HEAD
-            resolve_revision("HEAD", refdb, odb).await
+            resolve_revision("HEAD", refdb, odb)
+                .await
                 .context("No commits yet")?
         };
 
         let to_oid = if let Some(to) = &self.to {
-            resolve_revision(to, refdb, odb).await
+            resolve_revision(to, refdb, odb)
+                .await
                 .context(format!("Cannot resolve to revision: {}", to))?
         } else {
             // Default: Use HEAD
-            resolve_revision("HEAD", refdb, odb).await
+            resolve_revision("HEAD", refdb, odb)
+                .await
                 .context("No commits yet")?
         };
 
@@ -328,7 +370,12 @@ impl DiffCmd {
     }
 
     #[allow(clippy::only_used_in_recursion)]
-    fn scan_directory_recursive(&self, repo_root: &Path, current_dir: &Path, files: &mut HashSet<PathBuf>) -> Result<()> {
+    fn scan_directory_recursive(
+        &self,
+        repo_root: &Path,
+        current_dir: &Path,
+        files: &mut HashSet<PathBuf>,
+    ) -> Result<()> {
         for entry in std::fs::read_dir(current_dir)? {
             let entry = entry?;
             let path = entry.path();

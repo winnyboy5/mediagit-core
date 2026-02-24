@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -224,15 +224,17 @@ fn test_filter_driver_with_custom_config() {
 
     let driver = FilterDriver::new(config).expect("Failed to create filter driver");
     assert_eq!(driver.config().min_file_size, 5 * 1024 * 1024);
-    assert_eq!(driver.config().storage_path, Some("/custom/path".to_string()));
+    assert_eq!(
+        driver.config().storage_path,
+        Some("/custom/path".to_string())
+    );
     assert!(driver.config().skip_binary_check);
 }
 
 #[test]
 fn test_pointer_file_size_limits() {
     // Test that very large "pointer" files are rejected
-    let large_content = "version https://mediagit.dev/spec/v1\n".to_string()
-        + &"x".repeat(1000);
+    let large_content = "version https://mediagit.dev/spec/v1\n".to_string() + &"x".repeat(1000);
 
     assert!(!PointerFile::is_pointer(&large_content));
 

@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -21,12 +21,12 @@
 //! - Empty data handling
 //! - Large data handling
 
-use mediagit_compression::{BrotliCompressor, Compressor, CompressionLevel, ZstdCompressor};
+use mediagit_compression::{BrotliCompressor, CompressionLevel, Compressor, ZstdCompressor};
 use proptest::prelude::*;
 
 /// Generate random binary data for testing
 fn arb_binary_data() -> impl Strategy<Value = Vec<u8>> {
-    prop::collection::vec(any::<u8>(), 0..10000)  // Reduced from 50KB to 10KB for memory efficiency
+    prop::collection::vec(any::<u8>(), 0..10000) // Reduced from 50KB to 10KB for memory efficiency
 }
 
 /// Generate small binary data
@@ -36,7 +36,10 @@ fn arb_small_data() -> impl Strategy<Value = Vec<u8>> {
 
 /// Generate text-like data (compressible)
 fn arb_text_data() -> impl Strategy<Value = Vec<u8>> {
-    prop::collection::vec(prop::char::range('a', 'z').prop_map(|c| c as u8), 100..10000)
+    prop::collection::vec(
+        prop::char::range('a', 'z').prop_map(|c| c as u8),
+        100..10000,
+    )
 }
 
 // ============================================================================

@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -534,4 +534,3 @@ mod tests {
         assert_eq!(stats.max_object_size, 50 * 1024 * 1024);
     }
 }
-

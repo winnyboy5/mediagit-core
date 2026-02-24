@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -98,10 +98,7 @@ mod tests {
         assert!(!families.is_empty());
 
         // Verify we have expected metric names
-        let metric_names: Vec<String> = families
-            .iter()
-            .map(|f| f.name().to_string())
-            .collect();
+        let metric_names: Vec<String> = families.iter().map(|f| f.name().to_string()).collect();
 
         // Check for key metrics
         assert!(metric_names.iter().any(|n| n.contains("dedup")));
@@ -128,11 +125,7 @@ mod tests {
         }
 
         for _ in 0..5 {
-            registry.record_backend_latency(
-                StorageBackend::S3,
-                OperationType::Retrieve,
-                0.1,
-            );
+            registry.record_backend_latency(StorageBackend::S3, OperationType::Retrieve, 0.1);
         }
 
         let collector = MediaGitCollector::new(registry);
@@ -142,10 +135,7 @@ mod tests {
         assert!(!families.is_empty());
 
         // Check for operation and backend metrics
-        let metric_names: Vec<String> = families
-            .iter()
-            .map(|f| f.name().to_string())
-            .collect();
+        let metric_names: Vec<String> = families.iter().map(|f| f.name().to_string()).collect();
 
         assert!(metric_names.iter().any(|n| n.contains("operation")));
         assert!(metric_names.iter().any(|n| n.contains("backend")));

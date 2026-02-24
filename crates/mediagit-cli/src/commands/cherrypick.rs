@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -12,13 +12,15 @@
 //
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
+use super::super::repo::{create_storage_backend, find_repo_root};
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
-use mediagit_versioning::{CheckoutManager, Commit, Index, MergeEngine, ObjectDatabase, Oid, Ref, RefDatabase, Tree};
+use mediagit_versioning::{
+    CheckoutManager, Commit, Index, MergeEngine, ObjectDatabase, Oid, Ref, RefDatabase, Tree,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
-use super::super::repo::{find_repo_root, create_storage_backend};
 
 /// Apply changes from existing commits
 #[derive(Parser, Debug)]
@@ -80,11 +82,16 @@ impl CherryPickCmd {
     async fn start_cherrypick(&self, repo_root: &PathBuf) -> Result<()> {
         let mediagit_dir = repo_root.join(".mediagit");
         let storage = create_storage_backend(repo_root).await?;
-        let odb = Arc::new(ObjectDatabase::with_smart_compression(storage.clone(), 1000));
+        let odb = Arc::new(ObjectDatabase::with_smart_compression(
+            storage.clone(),
+            1000,
+        ));
         let refdb = RefDatabase::new(&mediagit_dir);
 
         // Get current HEAD
-        let current_oid = refdb.resolve("HEAD").await
+        let current_oid = refdb
+            .resolve("HEAD")
+            .await
             .context("Failed to resolve HEAD")?;
 
         if !self.quiet {
@@ -98,7 +105,9 @@ impl CherryPickCmd {
         // Process each commit to cherry-pick
         let mut picked_commits = Vec::new();
         for commit_ref in &self.commits {
-            let commit_oid = self.resolve_commit(&refdb, commit_ref).await
+            let commit_oid = self
+                .resolve_commit(&refdb, commit_ref)
+                .await
                 .context(format!("Failed to resolve commit: {}", commit_ref))?;
 
             if !self.quiet {
@@ -109,29 +118,45 @@ impl CherryPickCmd {
                 );
             }
 
-            match self.apply_commit(&odb, &refdb, repo_root, &commit_oid).await {
+            match self
+                .apply_commit(&odb, &refdb, repo_root, &commit_oid)
+                .await
+            {
                 Ok(()) => {
                     picked_commits.push(commit_oid);
 
                     if !self.no_commit {
                         // Create commit automatically
-                        self.create_cherry_pick_commit(odb.as_ref(), &refdb, repo_root, &commit_oid).await?;
+                        self.create_cherry_pick_commit(
+                            odb.as_ref(),
+                            &refdb,
+                            repo_root,
+                            &commit_oid,
+                        )
+                        .await?;
                     }
                 }
                 Err(e) => {
                     // Save cherry-pick state for continuation
-                    self.save_cherrypick_state(repo_root, &self.commits, &picked_commits).await?;
+                    self.save_cherrypick_state(repo_root, &self.commits, &picked_commits)
+                        .await?;
 
-                    println!(
-                        "{} Cherry-pick failed with conflicts",
-                        style("✗").red()
-                    );
+                    println!("{} Cherry-pick failed with conflicts", style("✗").red());
                     println!("{} {}", style("Error:").red(), e);
                     println!();
                     println!("Resolve conflicts, then run:");
-                    println!("  {} to continue", style("mediagit cherry-pick --continue").yellow());
-                    println!("  {} to abort", style("mediagit cherry-pick --abort").yellow());
-                    println!("  {} to skip this commit", style("mediagit cherry-pick --skip").yellow());
+                    println!(
+                        "  {} to continue",
+                        style("mediagit cherry-pick --continue").yellow()
+                    );
+                    println!(
+                        "  {} to abort",
+                        style("mediagit cherry-pick --abort").yellow()
+                    );
+                    println!(
+                        "  {} to skip this commit",
+                        style("mediagit cherry-pick --skip").yellow()
+                    );
 
                     return Err(e);
                 }
@@ -157,7 +182,8 @@ impl CherryPickCmd {
         commit_oid: &Oid,
     ) -> Result<()> {
         // Load the commit
-        let commit = Commit::read(odb.as_ref(), commit_oid).await
+        let commit = Commit::read(odb.as_ref(), commit_oid)
+            .await
             .context("Failed to read commit")?;
 
         // Verify parent exists
@@ -171,7 +197,11 @@ impl CherryPickCmd {
         // Perform three-way merge: current HEAD vs commit being cherry-picked
         let merger = MergeEngine::new(odb.clone());
         let merge_result = merger
-            .merge(&current_oid, commit_oid, mediagit_versioning::MergeStrategy::Recursive)
+            .merge(
+                &current_oid,
+                commit_oid,
+                mediagit_versioning::MergeStrategy::Recursive,
+            )
             .await?;
 
         if !merge_result.conflicts.is_empty() {
@@ -211,7 +241,10 @@ impl CherryPickCmd {
         // Build commit message
         let mut message = original_commit.message.clone();
         if self.append_message {
-            message.push_str(&format!("\n\n(cherry picked from commit {})", original_oid.to_hex()));
+            message.push_str(&format!(
+                "\n\n(cherry picked from commit {})",
+                original_oid.to_hex()
+            ));
         }
 
         // Build tree from index
@@ -283,7 +316,8 @@ impl CherryPickCmd {
 
         if let Some(current) = &state.current_commit {
             let current_oid = Oid::from_hex(current)?;
-            self.create_cherry_pick_commit(&odb, &refdb, repo_root, &current_oid).await?;
+            self.create_cherry_pick_commit(&odb, &refdb, repo_root, &current_oid)
+                .await?;
         }
 
         // Continue with remaining commits
@@ -299,7 +333,7 @@ impl CherryPickCmd {
 
         // Process remaining commits
         let remaining: Vec<String> = state.remaining_commits.clone();
-        drop(state);  // Release state before recursive call
+        drop(state); // Release state before recursive call
 
         let cmd = Self {
             commits: remaining,
@@ -427,23 +461,30 @@ impl CherryPickCmd {
         Ok(())
     }
 
-    fn write_conflicts(&self, repo_root: &std::path::Path, merge_result: &mediagit_versioning::MergeResult) -> Result<()> {
+    fn write_conflicts(
+        &self,
+        repo_root: &std::path::Path,
+        merge_result: &mediagit_versioning::MergeResult,
+    ) -> Result<()> {
         // Write conflict markers to files
         for conflict in &merge_result.conflicts {
             let file_path = repo_root.join(&conflict.path);
 
             // Build conflict marker content
-            let ours_content = conflict.ours.as_ref()
+            let ours_content = conflict
+                .ours
+                .as_ref()
                 .map(|s| format!("{:?}", s.oid))
                 .unwrap_or_else(|| "(deleted)".to_string());
-            let theirs_content = conflict.theirs.as_ref()
+            let theirs_content = conflict
+                .theirs
+                .as_ref()
                 .map(|s| format!("{:?}", s.oid))
                 .unwrap_or_else(|| "(deleted)".to_string());
 
             let conflict_content = format!(
                 "<<<<<<< HEAD\n{}\n=======\n{}\n>>>>>>> cherry-pick\n",
-                ours_content,
-                theirs_content
+                ours_content, theirs_content
             );
             std::fs::write(&file_path, conflict_content)?;
         }
@@ -469,10 +510,11 @@ impl CherryPickCmd {
         }
 
         // Try resolving directly
-        refdb.resolve(commit_ref).await
+        refdb
+            .resolve(commit_ref)
+            .await
             .context(format!("Cannot resolve commit reference: {}", commit_ref))
     }
-
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]

@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -179,10 +179,7 @@ pub async fn create_storage_backend(repo_root: &Path) -> Result<Arc<dyn StorageB
             Ok(Arc::new(storage))
         }
         mediagit_config::StorageConfig::GCS(gcs_config) => {
-            let credentials_path = gcs_config
-                .credentials_path
-                .as_deref()
-                .unwrap_or("");
+            let credentials_path = gcs_config.credentials_path.as_deref().unwrap_or("");
 
             let storage = if credentials_path.is_empty() {
                 mediagit_storage::GcsBackend::with_default_credentials(

@@ -13,11 +13,11 @@
 
 //! File System Check (FSCK) command - Repository integrity verification
 
+use crate::repo::create_storage_backend;
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_versioning::{FsckChecker, FsckOptions, FsckRepair, IssueSeverity};
-use crate::repo::create_storage_backend;
 
 /// Check repository integrity with comprehensive verification
 ///
@@ -118,7 +118,8 @@ impl FsckCmd {
         }
 
         // Create storage backend
-        let storage = create_storage_backend(&repo_path).await
+        let storage = create_storage_backend(&repo_path)
+            .await
             .context("Failed to open repository. Is this a MediaGit repository?")?;
 
         // Create FSCK checker
@@ -191,7 +192,10 @@ impl FsckCmd {
                     style("⚠").red().bold()
                 );
             }
-            anyhow::bail!("Integrity check failed with {} error(s)", report.issues_by_severity(IssueSeverity::Error).len());
+            anyhow::bail!(
+                "Integrity check failed with {} error(s)",
+                report.issues_by_severity(IssueSeverity::Error).len()
+            );
         }
 
         Ok(())

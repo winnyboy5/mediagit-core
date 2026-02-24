@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -112,7 +112,7 @@ impl Config {
     /// Save config to repository root
     pub fn save(&self, repo_root: impl AsRef<std::path::Path>) -> anyhow::Result<()> {
         let config_path = repo_root.as_ref().join(".mediagit/config.toml");
-        
+
         // Create .mediagit directory if it doesn't exist
         if let Some(parent) = config_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -126,12 +126,20 @@ impl Config {
     /// Get upstream tracking for a branch
     /// Returns (remote_name, remote_branch) if tracked
     pub fn get_branch_upstream(&self, branch: &str) -> Option<(&str, &str)> {
-        self.branches.get(branch).map(|bc| (bc.remote.as_str(), bc.merge.as_str()))
+        self.branches
+            .get(branch)
+            .map(|bc| (bc.remote.as_str(), bc.merge.as_str()))
     }
 
     /// Set upstream tracking for a branch
-    pub fn set_branch_upstream(&mut self, branch: impl Into<String>, remote: impl Into<String>, merge: impl Into<String>) {
-        self.branches.insert(branch.into(), BranchConfig::new(remote, merge));
+    pub fn set_branch_upstream(
+        &mut self,
+        branch: impl Into<String>,
+        remote: impl Into<String>,
+        merge: impl Into<String>,
+    ) {
+        self.branches
+            .insert(branch.into(), BranchConfig::new(remote, merge));
     }
 
     /// Remove upstream tracking for a branch
@@ -151,7 +159,8 @@ impl Config {
 
     /// Protect a branch with default rules
     pub fn protect_branch(&mut self, branch: impl Into<String>) {
-        self.protected_branches.insert(branch.into(), BranchProtection::default_protection());
+        self.protected_branches
+            .insert(branch.into(), BranchProtection::default_protection());
     }
 
     /// Protect a branch with custom rules

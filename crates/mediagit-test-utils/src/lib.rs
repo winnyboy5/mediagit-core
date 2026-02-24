@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -24,15 +24,15 @@
 //! - Test fixtures and data management
 //! - Custom assertions for common test patterns
 
-pub mod cli;
-pub mod repo;
-pub mod platform;
-pub mod fixtures;
 pub mod assertions;
+pub mod cli;
+pub mod fixtures;
+pub mod platform;
+pub mod repo;
 
 // Re-export commonly used items at crate root
-pub use cli::{mediagit, MediagitCommand};
-pub use repo::TestRepo;
-pub use platform::TestPaths;
-pub use fixtures::TestFixtures;
 pub use assertions::*;
+pub use cli::{mediagit, MediagitCommand};
+pub use fixtures::TestFixtures;
+pub use platform::TestPaths;
+pub use repo::TestRepo;

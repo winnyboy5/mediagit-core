@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -14,7 +14,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #![allow(clippy::unwrap_used)]
 
-use mediagit_config::{ConfigFormat, ConfigLoader, Config, Validator};
+use mediagit_config::{Config, ConfigFormat, ConfigLoader, Validator};
 use std::fs;
 use tempfile::TempDir;
 
@@ -324,8 +324,8 @@ fn test_validation_log_level() {
 
 #[test]
 fn test_validation_s3_bucket_name_too_short() {
-    use mediagit_config::StorageConfig;
     use mediagit_config::S3Storage;
+    use mediagit_config::StorageConfig;
 
     let config = Config {
         storage: StorageConfig::S3(S3Storage {

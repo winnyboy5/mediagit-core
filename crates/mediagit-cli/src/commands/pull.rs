@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -12,6 +12,9 @@
 //
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
+use super::super::repo::{create_storage_backend, find_repo_root};
+use super::rebase::RebaseCmd;
+use crate::progress::{OperationStats, ProgressTracker};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Parser;
@@ -19,9 +22,6 @@ use console::style;
 use mediagit_versioning::{CheckoutManager, Commit, MergeStrategy, RefDatabase, Signature};
 use std::sync::Arc;
 use std::time::Instant;
-use crate::progress::{ProgressTracker, OperationStats};
-use super::rebase::RebaseCmd;
-use super::super::repo::{find_repo_root, create_storage_backend};
 
 /// Fetch and integrate remote changes
 ///
@@ -106,10 +106,9 @@ impl PullCmd {
         let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
 
-        if self.dry_run
-            && !self.quiet {
-                println!("{} Running in dry-run mode", style("ℹ").blue());
-            }
+        if self.dry_run && !self.quiet {
+            println!("{} Running in dry-run mode", style("ℹ").blue());
+        }
 
         if !self.quiet {
             println!(
@@ -148,9 +147,10 @@ impl PullCmd {
         let client = mediagit_protocol::ProtocolClient::new(remote_url);
 
         // Initialize ODB with smart compression for consistent read/write
-        let odb = Arc::new(
-            mediagit_versioning::ObjectDatabase::with_smart_compression(Arc::clone(&storage), 1000)
-        );
+        let odb = Arc::new(mediagit_versioning::ObjectDatabase::with_smart_compression(
+            Arc::clone(&storage),
+            1000,
+        ));
 
         // Determine remote ref to pull
         // Clone head.target early since we need it later for branch comparison
@@ -160,9 +160,9 @@ impl PullCmd {
             mediagit_versioning::normalize_ref_name(branch)
         } else {
             // Default: pull tracking branch for current HEAD (reuse head from above)
-            current_head_target.clone().ok_or_else(|| {
-                anyhow::anyhow!("HEAD is detached, please specify a branch")
-            })?
+            current_head_target
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("HEAD is detached, please specify a branch"))?
         };
 
         if self.verbose {
@@ -179,7 +179,9 @@ impl PullCmd {
         // always see new remote branches even when current branch is synced
         // ================================================================
         let all_remote_refs = client.get_refs().await?;
-        let remote_branches: Vec<_> = all_remote_refs.refs.iter()
+        let remote_branches: Vec<_> = all_remote_refs
+            .refs
+            .iter()
             .filter(|r| r.name.starts_with("refs/heads/"))
             .collect();
 
@@ -197,24 +199,36 @@ impl PullCmd {
 
             let mut tracking_refs_updated = 0;
             for branch_ref in &remote_branches {
-                let branch_name = branch_ref.name.strip_prefix("refs/heads/")
+                let branch_name = branch_ref
+                    .name
+                    .strip_prefix("refs/heads/")
                     .unwrap_or(&branch_ref.name);
                 let tracking_ref_name = format!("refs/remotes/{}/{}", remote, branch_name);
 
                 // Parse remote OID and update tracking ref
                 if let Ok(branch_oid) = mediagit_versioning::Oid::from_hex(&branch_ref.oid) {
                     // Create parent directories for nested branches (e.g., feature/auth)
-                    let tracking_path = storage_path.join("refs").join("remotes").join(remote).join(branch_name);
+                    let tracking_path = storage_path
+                        .join("refs")
+                        .join("remotes")
+                        .join(remote)
+                        .join(branch_name);
                     if let Some(parent) = tracking_path.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
 
-                    let tracking_ref = mediagit_versioning::Ref::new_direct(tracking_ref_name.clone(), branch_oid);
+                    let tracking_ref =
+                        mediagit_versioning::Ref::new_direct(tracking_ref_name.clone(), branch_oid);
                     refdb.write(&tracking_ref).await?;
                     tracking_refs_updated += 1;
 
                     if self.verbose {
-                        println!("  {} {} -> {}", style("→").cyan(), tracking_ref_name, &branch_ref.oid[..8.min(branch_ref.oid.len())]);
+                        println!(
+                            "  {} {} -> {}",
+                            style("→").cyan(),
+                            tracking_ref_name,
+                            &branch_ref.oid[..8.min(branch_ref.oid.len())]
+                        );
                     }
                 }
             }
@@ -229,7 +243,10 @@ impl PullCmd {
         }
 
         // Check if current branch is already synchronized (avoid redundant object download)
-        if let (Some(local), Some(remote)) = (local_ref.as_ref().and_then(|r| r.oid.as_ref()), remote_oid_check.as_ref()) {
+        if let (Some(local), Some(remote)) = (
+            local_ref.as_ref().and_then(|r| r.oid.as_ref()),
+            remote_oid_check.as_ref(),
+        ) {
             let local_oid_str = local.to_hex();
             if &local_oid_str == remote {
                 if !self.quiet {
@@ -276,12 +293,15 @@ impl PullCmd {
 
             // Download chunked objects (large files)
             if !chunked_oids.is_empty() {
-                let chunk_pb = progress.object_bar("Downloading large files", chunked_oids.len() as u64);
+                let chunk_pb =
+                    progress.object_bar("Downloading large files", chunked_oids.len() as u64);
 
                 let chunk_pb_ref = chunk_pb.clone();
-                let chunks_downloaded = client.download_chunked_objects(&odb, &chunked_oids, move |current, _total, _msg| {
-                    chunk_pb_ref.set_position(current as u64);
-                }).await?;
+                let chunks_downloaded = client
+                    .download_chunked_objects(&odb, &chunked_oids, move |current, _total, _msg| {
+                        chunk_pb_ref.set_position(current as u64);
+                    })
+                    .await?;
 
                 chunk_pb.finish_with_message("Download complete");
 
@@ -314,25 +334,33 @@ impl PullCmd {
             // Update remote tracking ref first (refs/remotes/<remote>/<branch>)
             if remote_ref.starts_with("refs/heads/") {
                 // Safe: we just checked for the prefix above
-                let branch_name = remote_ref.strip_prefix("refs/heads/")
+                let branch_name = remote_ref
+                    .strip_prefix("refs/heads/")
                     .unwrap_or(&remote_ref);
                 let tracking_ref_name = format!("refs/remotes/{}/{}", remote, branch_name);
-                
+
                 // Create remotes directory if needed
                 let remotes_dir = storage_path.join("refs").join("remotes").join(remote);
                 std::fs::create_dir_all(&remotes_dir)?;
-                
-                let tracking_ref = mediagit_versioning::Ref::new_direct(tracking_ref_name.clone(), remote_oid_parsed);
+
+                let tracking_ref = mediagit_versioning::Ref::new_direct(
+                    tracking_ref_name.clone(),
+                    remote_oid_parsed,
+                );
                 refdb.write(&tracking_ref).await?;
-                
+
                 if self.verbose {
-                    println!("  Updated tracking ref: {} -> {}", tracking_ref_name, &remote_oid[..8]);
+                    println!(
+                        "  Updated tracking ref: {} -> {}",
+                        tracking_ref_name,
+                        &remote_oid[..8]
+                    );
                 }
             }
 
-            let ref_update = mediagit_versioning::Ref::new_direct(remote_ref.clone(), remote_oid_parsed);
+            let ref_update =
+                mediagit_versioning::Ref::new_direct(remote_ref.clone(), remote_oid_parsed);
             refdb.write(&ref_update).await?;
-
 
             if !self.quiet {
                 println!(
@@ -352,7 +380,8 @@ impl PullCmd {
 
             if !is_pulling_current_branch {
                 // Pulled a different branch - just update refs, don't merge into current
-                let branch_short = remote_ref.strip_prefix("refs/heads/")
+                let branch_short = remote_ref
+                    .strip_prefix("refs/heads/")
                     .unwrap_or(&remote_ref);
                 if !self.quiet {
                     println!(
@@ -369,7 +398,8 @@ impl PullCmd {
                     // Get upstream ref name (e.g., "origin/main" or just "main")
                     let upstream_name = if remote_ref.starts_with("refs/heads/") {
                         // Use remote tracking ref as upstream
-                        let branch_name = remote_ref.strip_prefix("refs/heads/")
+                        let branch_name = remote_ref
+                            .strip_prefix("refs/heads/")
                             .unwrap_or(&remote_ref);
                         format!("{}/{}", remote, branch_name)
                     } else {
@@ -399,10 +429,7 @@ impl PullCmd {
                     rebase_cmd.execute().await?;
 
                     if !self.quiet {
-                        println!(
-                            "{} Rebased successfully",
-                            style("✓").green().bold()
-                        );
+                        println!("{} Rebased successfully", style("✓").green().bold());
                     }
                 } else {
                     // No local commits, just update HEAD (fast-forward)
@@ -410,10 +437,14 @@ impl PullCmd {
                         .map_err(|e| anyhow::anyhow!("Invalid remote OID: {}", e))?;
 
                     if let Some(target) = &head.target {
-                        let target_ref = mediagit_versioning::Ref::new_direct(target.clone(), remote_oid_parsed);
+                        let target_ref =
+                            mediagit_versioning::Ref::new_direct(target.clone(), remote_oid_parsed);
                         refdb.write(&target_ref).await?;
                     } else {
-                        let head_ref = mediagit_versioning::Ref::new_direct("HEAD".to_string(), remote_oid_parsed);
+                        let head_ref = mediagit_versioning::Ref::new_direct(
+                            "HEAD".to_string(),
+                            remote_oid_parsed,
+                        );
                         refdb.write(&head_ref).await?;
                     }
 
@@ -436,8 +467,7 @@ impl PullCmd {
                 // Merge integration - only for CURRENT branch
                 let head = refdb.read("HEAD").await?;
                 if let Some(head_oid) = head.oid {
-                    let merge_engine =
-                        mediagit_versioning::MergeEngine::new(Arc::clone(&odb));
+                    let merge_engine = mediagit_versioning::MergeEngine::new(Arc::clone(&odb));
 
                     if self.verbose {
                         let head_hex = head_oid.to_hex();
@@ -473,11 +503,15 @@ impl PullCmd {
                         // Update HEAD to merge commit
                         if let Some(target) = &head.target {
                             // HEAD is symbolic, update the target branch
-                            let target_ref = mediagit_versioning::Ref::new_direct(target.clone(), commit_oid);
+                            let target_ref =
+                                mediagit_versioning::Ref::new_direct(target.clone(), commit_oid);
                             refdb.write(&target_ref).await?;
                         } else {
                             // HEAD is detached, update HEAD directly
-                            let head_ref = mediagit_versioning::Ref::new_direct("HEAD".to_string(), commit_oid);
+                            let head_ref = mediagit_versioning::Ref::new_direct(
+                                "HEAD".to_string(),
+                                commit_oid,
+                            );
                             refdb.write(&head_ref).await?;
                         }
 
@@ -506,11 +540,15 @@ impl PullCmd {
 
                     if let Some(target) = &head.target {
                         // HEAD is symbolic, update the target branch
-                        let target_ref = mediagit_versioning::Ref::new_direct(target.clone(), remote_oid_parsed);
+                        let target_ref =
+                            mediagit_versioning::Ref::new_direct(target.clone(), remote_oid_parsed);
                         refdb.write(&target_ref).await?;
                     } else {
                         // HEAD is detached, update HEAD directly
-                        let head_ref = mediagit_versioning::Ref::new_direct("HEAD".to_string(), remote_oid_parsed);
+                        let head_ref = mediagit_versioning::Ref::new_direct(
+                            "HEAD".to_string(),
+                            remote_oid_parsed,
+                        );
                         refdb.write(&head_ref).await?;
                     }
 
@@ -531,10 +569,7 @@ impl PullCmd {
                 }
             }
         } else if !self.quiet {
-            println!(
-                "{} Dry run complete (no changes made)",
-                style("ℹ").blue()
-            );
+            println!("{} Dry run complete (no changes made)", style("ℹ").blue());
         }
 
         // Print operation summary
@@ -542,7 +577,7 @@ impl PullCmd {
         if !self.quiet && !self.dry_run {
             println!("\n{} {}", style("📊").cyan(), stats.summary());
         }
-        
+
         // Save stats for later retrieval by stats command
         if !self.dry_run {
             if let Err(e) = stats.save(&storage_path) {
@@ -552,5 +587,4 @@ impl PullCmd {
 
         Ok(())
     }
-
 }

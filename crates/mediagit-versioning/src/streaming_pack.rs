@@ -16,9 +16,9 @@
 //! This module provides streaming pack reader/writer that process objects
 //! incrementally without loading entire packs into memory.
 
-use crate::{ObjectType, Oid};
 use crate::pack::PackHeader;
 use crate::streaming_index::StreamingPackIndex;
+use crate::{ObjectType, Oid};
 use sha2::{Digest, Sha256};
 use std::io;
 use std::path::Path;
@@ -97,12 +97,8 @@ impl<R: AsyncRead + Unpin> StreamingPackReader<R> {
         self.hasher.update(header_buf);
 
         let type_byte = header_buf[0];
-        let size = u32::from_le_bytes([
-            header_buf[1],
-            header_buf[2],
-            header_buf[3],
-            header_buf[4],
-        ]) as usize;
+        let size = u32::from_le_bytes([header_buf[1], header_buf[2], header_buf[3], header_buf[4]])
+            as usize;
 
         // Read object data
         let mut obj_data = vec![0u8; size];
@@ -346,7 +342,9 @@ mod tests {
             eprintln!("Creating file: {:?}", pack_path);
             let file = File::create(&pack_path).await.unwrap();
             eprintln!("Creating writer");
-            let writer = StreamingPackWriter::new(file, 0, temp_dir.path()).await.unwrap();
+            let writer = StreamingPackWriter::new(file, 0, temp_dir.path())
+                .await
+                .unwrap();
             eprintln!("Finalizing");
             match writer.finalize().await {
                 Ok(_) => eprintln!("Finalize succeeded"),
@@ -363,9 +361,7 @@ mod tests {
 
         // Read back from file
         let file = File::open(&pack_path).await.unwrap();
-        let mut reader = StreamingPackReader::new(file)
-            .await
-            .unwrap();
+        let mut reader = StreamingPackReader::new(file).await.unwrap();
 
         assert_eq!(reader.objects_processed(), 0);
         assert!(reader.next_object().await.is_none());
@@ -378,7 +374,9 @@ mod tests {
 
         {
             let file = File::create(&pack_path).await.unwrap();
-            let mut writer = StreamingPackWriter::new(file, 1, temp_dir.path()).await.unwrap();
+            let mut writer = StreamingPackWriter::new(file, 1, temp_dir.path())
+                .await
+                .unwrap();
 
             let test_data = b"Hello, streaming world!";
             let oid = Oid::hash(test_data);
@@ -392,9 +390,7 @@ mod tests {
 
         // Read back from file
         let file = File::open(&pack_path).await.unwrap();
-        let mut reader = StreamingPackReader::new(file)
-            .await
-            .unwrap();
+        let mut reader = StreamingPackReader::new(file).await.unwrap();
 
         let (read_oid, read_type, read_data) = reader.next_object().await.unwrap().unwrap();
         let test_data = b"Hello, streaming world!";

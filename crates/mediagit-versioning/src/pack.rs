@@ -31,8 +31,8 @@
 //!   - SHA-256 of pack content
 //! ```
 
-use crate::{ObjectType, Oid};
 use crate::delta::{Delta, DeltaDecoder};
+use crate::{ObjectType, Oid};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::BTreeMap;
@@ -209,8 +209,14 @@ impl PackIndex {
             pos += 32;
 
             let offset = u64::from_le_bytes([
-                data[pos], data[pos + 1], data[pos + 2], data[pos + 3],
-                data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7],
+                data[pos],
+                data[pos + 1],
+                data[pos + 2],
+                data[pos + 3],
+                data[pos + 4],
+                data[pos + 5],
+                data[pos + 6],
+                data[pos + 7],
             ]);
             pos += 8;
 
@@ -271,8 +277,8 @@ fn should_pack_object(size: usize, object_type: ObjectType, filename: Option<&st
                     // Compressed video: Pack only if very large
                     "mp4" | "mkv" | "flv" | "wmv" => size > 100 * 1024, // 100KB
                     // Text/code: Always pack (excellent delta opportunity)
-                    "txt" | "md" | "json" | "xml" | "html" | "css" | "js" | "ts" |
-                    "py" | "rs" | "go" | "java" | "c" | "cpp" | "h" | "hpp" => true,
+                    "txt" | "md" | "json" | "xml" | "html" | "css" | "js" | "ts" | "py" | "rs"
+                    | "go" | "java" | "c" | "cpp" | "h" | "hpp" => true,
                     // Archives: Don't pack (already compressed, no delta benefit)
                     "zip" | "gz" | "bz2" | "7z" | "rar" => false,
                     // Unknown: Pack if above minimum size
@@ -319,12 +325,7 @@ impl PackWriter {
     /// # Returns
     ///
     /// Offset of the object in the pack
-    pub fn add_object(
-        &mut self,
-        oid: Oid,
-        object_type: ObjectType,
-        object_data: &[u8],
-    ) -> u64 {
+    pub fn add_object(&mut self, oid: Oid, object_type: ObjectType, object_data: &[u8]) -> u64 {
         let offset = self.data.len() as u64;
 
         // Write simple header: 1 byte type + 4 bytes size
@@ -334,7 +335,8 @@ impl PackWriter {
             ObjectType::Commit => 3u8,
         };
         self.data.push(type_byte);
-        self.data.extend_from_slice(&(object_data.len() as u32).to_le_bytes());
+        self.data
+            .extend_from_slice(&(object_data.len() as u32).to_le_bytes());
 
         // Write object data
         let size = object_data.len() as u32;
@@ -468,7 +470,6 @@ impl PackWriter {
 
         pack_data
     }
-
 }
 
 impl Default for PackWriter {
@@ -515,8 +516,12 @@ impl PackReader {
 
         // Read index offset (located right before index offset marker and checksum)
         let index_offset_pos = data.len() - CHECKSUM_SIZE - 4;
-        let index_offset =
-            u32::from_le_bytes([data[index_offset_pos], data[index_offset_pos + 1], data[index_offset_pos + 2], data[index_offset_pos + 3]]) as usize;
+        let index_offset = u32::from_le_bytes([
+            data[index_offset_pos],
+            data[index_offset_pos + 1],
+            data[index_offset_pos + 2],
+            data[index_offset_pos + 3],
+        ]) as usize;
 
         if index_offset < 12 {
             return Err(io::Error::new(
@@ -528,10 +533,7 @@ impl PackReader {
         // Parse index
         let index = PackIndex::from_bytes(&data[index_offset..index_offset_pos])?;
 
-        info!(
-            object_count = index.len(),
-            "Pack file loaded successfully"
-        );
+        info!(object_count = index.len(), "Pack file loaded successfully");
 
         Ok(Self {
             data,
@@ -563,7 +565,11 @@ impl PackReader {
     }
 
     /// Internal method with depth tracking to prevent infinite recursion in delta chains
-    fn get_object_with_type_depth(&self, oid: &Oid, depth: usize) -> io::Result<(ObjectType, Vec<u8>)> {
+    fn get_object_with_type_depth(
+        &self,
+        oid: &Oid,
+        depth: usize,
+    ) -> io::Result<(ObjectType, Vec<u8>)> {
         const MAX_DELTA_CHAIN_DEPTH: usize = 10;
 
         if depth > MAX_DELTA_CHAIN_DEPTH {
@@ -589,7 +595,9 @@ impl PackReader {
         }
 
         // Check if this is a delta-encoded object (starts with "DELTA" magic)
-        if total_size >= DELTA_MAGIC.len() && &self.data[offset..offset + DELTA_MAGIC.len()] == DELTA_MAGIC {
+        if total_size >= DELTA_MAGIC.len()
+            && &self.data[offset..offset + DELTA_MAGIC.len()] == DELTA_MAGIC
+        {
             return self.read_delta_object(oid, offset, total_size, depth);
         }
 
@@ -614,7 +622,13 @@ impl PackReader {
     }
 
     /// Read and reconstruct a delta-encoded object from the pack
-    fn read_delta_object(&self, oid: &Oid, offset: usize, total_size: usize, depth: usize) -> io::Result<(ObjectType, Vec<u8>)> {
+    fn read_delta_object(
+        &self,
+        oid: &Oid,
+        offset: usize,
+        total_size: usize,
+        depth: usize,
+    ) -> io::Result<(ObjectType, Vec<u8>)> {
         // Delta format: "DELTA" (5 bytes) + base_oid (32 bytes) + delta_data
         const BASE_OID_SIZE: usize = 32;
         let min_delta_size = DELTA_MAGIC.len() + BASE_OID_SIZE;
@@ -647,11 +661,19 @@ impl PackReader {
         let (base_type, base_data) = self.get_object_with_type_depth(&base_oid, depth + 1)?;
 
         // Parse and apply delta
-        let delta = Delta::from_bytes(delta_data)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to parse delta: {}", e)))?;
+        let delta = Delta::from_bytes(delta_data).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to parse delta: {}", e),
+            )
+        })?;
 
-        let reconstructed = DeltaDecoder::apply(&base_data, &delta)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to apply delta: {}", e)))?;
+        let reconstructed = DeltaDecoder::apply(&base_data, &delta).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to apply delta: {}", e),
+            )
+        })?;
 
         debug!(
             oid = %oid,
@@ -678,11 +700,7 @@ impl PackReader {
     pub fn stats(&self) -> PackMetadata {
         let object_count = self.index.len() as u32;
         let total_size = self.data.len() as u64;
-        let uncompressed_size = self
-            .index
-            .iter()
-            .map(|(_, (_, size))| *size as u64)
-            .sum();
+        let uncompressed_size = self.index.iter().map(|(_, (_, size))| *size as u64).sum();
 
         let compression_ratio = if uncompressed_size > 0 {
             total_size as f64 / uncompressed_size as f64
@@ -713,7 +731,6 @@ impl PackReader {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

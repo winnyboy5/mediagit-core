@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -122,7 +122,10 @@ async fn metrics_handler(State(registry): State<Arc<MetricsRegistry>>) -> Respon
 
     match encoder.encode(&metric_families, &mut buffer) {
         Ok(_) => {
-            debug!("Successfully encoded {} metric families", metric_families.len());
+            debug!(
+                "Successfully encoded {} metric families",
+                metric_families.len()
+            );
             (
                 StatusCode::OK,
                 [("content-type", encoder.format_type())],
@@ -184,11 +187,7 @@ mod tests {
         registry.record_dedup_write(1000, true);
         registry.record_compression(CompressionAlgorithm::Zstd, 1000, 600);
         registry.record_cache_hit();
-        registry.record_operation_duration(
-            OperationType::Store,
-            StorageBackend::Filesystem,
-            0.05,
-        );
+        registry.record_operation_duration(OperationType::Store, StorageBackend::Filesystem, 0.05);
 
         // Start server on random high port
         let server = MetricsServer::new(registry, 19090);

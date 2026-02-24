@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -63,7 +63,7 @@ pub mod types;
 pub use collector::MediaGitCollector;
 pub use registry::MetricsRegistry;
 pub use server::MetricsServer;
-pub use types::{MetricsConfig, StorageBackend, CompressionAlgorithm};
+pub use types::{CompressionAlgorithm, MetricsConfig, StorageBackend};
 
 // Re-export prometheus types for convenience
 pub use prometheus::{Encoder, TextEncoder};

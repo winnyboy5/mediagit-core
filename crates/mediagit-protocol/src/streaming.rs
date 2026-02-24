@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -459,7 +459,10 @@ impl StreamingDownloader {
                 .header("Range", format!("bytes={}-{}", start, end));
 
             match request.send().await {
-                Ok(response) if response.status().is_success() || response.status() == StatusCode::PARTIAL_CONTENT => {
+                Ok(response)
+                    if response.status().is_success()
+                        || response.status() == StatusCode::PARTIAL_CONTENT =>
+                {
                     let data = response.bytes().await?.to_vec();
                     debug!(
                         start = start,
@@ -548,7 +551,8 @@ impl DownloadHandle {
 
         for chunk_index in 0..total_chunks {
             let start = (chunk_index * self.downloader.config.chunk_size) as u64;
-            let end = (start + self.downloader.config.chunk_size as u64 - 1).min(self.file_size - 1);
+            let end =
+                (start + self.downloader.config.chunk_size as u64 - 1).min(self.file_size - 1);
 
             let downloader = self.downloader.clone();
             let remote_path = self.remote_path.clone();

@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -12,11 +12,11 @@
 //
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
+use super::super::repo::{create_storage_backend, find_repo_root};
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_versioning::{resolve_revision, Commit, ObjectDatabase, RefDatabase};
-use super::super::repo::{find_repo_root, create_storage_backend};
 
 /// Show object information
 #[derive(Parser, Debug)]
@@ -64,17 +64,24 @@ impl ShowCmd {
 
         // Resolve object ID using revision parser (supports HEAD~N)
         let object_str = self.object.as_deref().unwrap_or("HEAD");
-        let oid = resolve_revision(object_str, &refdb, &odb).await
+        let oid = resolve_revision(object_str, &refdb, &odb)
+            .await
             .context(format!("Cannot resolve object: {}", object_str))?;
 
         // Read object
-        let data = odb.read(&oid).await
+        let data = odb
+            .read(&oid)
+            .await
             .context(format!("Failed to read object {}", oid))?;
 
         // Try to deserialize as commit
         match Commit::deserialize(&data) {
             Ok(commit) => {
-                println!("{} {}", style("commit").yellow().bold(), style(&oid).yellow());
+                println!(
+                    "{} {}",
+                    style("commit").yellow().bold(),
+                    style(&oid).yellow()
+                );
                 println!("Author: {} <{}>", commit.author.name, commit.author.email);
                 println!("Date:   {}", commit.author.timestamp);
                 println!();
@@ -118,6 +125,4 @@ impl ShowCmd {
 
         Ok(())
     }
-
-
 }

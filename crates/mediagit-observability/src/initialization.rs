@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -89,9 +89,13 @@ pub fn init_tracing_with_config(config: LogConfig) -> Result<(), LogError> {
                 .pretty();
 
             if config.use_timestamps && config.use_color {
-                registry.with(layer.with_timer(fmt::time::SystemTime).with_ansi(true)).init();
+                registry
+                    .with(layer.with_timer(fmt::time::SystemTime).with_ansi(true))
+                    .init();
             } else if config.use_timestamps {
-                registry.with(layer.with_timer(fmt::time::SystemTime).with_ansi(false)).init();
+                registry
+                    .with(layer.with_timer(fmt::time::SystemTime).with_ansi(false))
+                    .init();
             } else if config.use_color {
                 registry.with(layer.without_time().with_ansi(true)).init();
             } else {
@@ -108,9 +112,13 @@ pub fn init_tracing_with_config(config: LogConfig) -> Result<(), LogError> {
                 .compact();
 
             if config.use_timestamps && config.use_color {
-                registry.with(layer.with_timer(fmt::time::SystemTime).with_ansi(true)).init();
+                registry
+                    .with(layer.with_timer(fmt::time::SystemTime).with_ansi(true))
+                    .init();
             } else if config.use_timestamps {
-                registry.with(layer.with_timer(fmt::time::SystemTime).with_ansi(false)).init();
+                registry
+                    .with(layer.with_timer(fmt::time::SystemTime).with_ansi(false))
+                    .init();
             } else if config.use_color {
                 registry.with(layer.without_time().with_ansi(true)).init();
             } else {
@@ -127,7 +135,9 @@ pub fn init_tracing_with_config(config: LogConfig) -> Result<(), LogError> {
                 .with_span_events(FmtSpan::FULL);
 
             if config.use_timestamps {
-                registry.with(layer.with_timer(fmt::time::SystemTime)).init();
+                registry
+                    .with(layer.with_timer(fmt::time::SystemTime))
+                    .init();
             } else {
                 registry.with(layer.without_time()).init();
             }

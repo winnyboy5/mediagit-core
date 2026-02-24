@@ -13,8 +13,8 @@
 //! - Direct OID references
 //! - Branch names and refs
 
-use anyhow::{Context, Result};
 use crate::{Commit, ObjectDatabase, Oid, RefDatabase};
+use anyhow::{Context, Result};
 
 /// Parse and resolve a revision specifier to an OID
 ///
@@ -35,8 +35,7 @@ pub async fn resolve_revision(
 
         // Resolve base reference
         let base_oid = if base == "HEAD" {
-            refdb.resolve("HEAD").await
-                .context("Cannot resolve HEAD")?
+            refdb.resolve("HEAD").await.context("Cannot resolve HEAD")?
         } else {
             // Try direct OID first
             if let Ok(oid) = Oid::from_hex(&base) {
@@ -48,7 +47,9 @@ pub async fn resolve_revision(
                     Err(_) => {
                         // Try with refs/heads prefix
                         let with_prefix = format!("refs/heads/{}", base);
-                        refdb.resolve(&with_prefix).await
+                        refdb
+                            .resolve(&with_prefix)
+                            .await
                             .context(format!("Cannot resolve base revision: {}", base))?
                     }
                 }
@@ -87,8 +88,10 @@ fn parse_parent_notation(revision: &str) -> Result<Option<(String, usize)>> {
         let count_str = &revision[tilde_pos + 1..];
 
         // Parse the count
-        let count: usize = count_str.parse()
-            .context(format!("Invalid parent count in '{}': must be a number", revision))?;
+        let count: usize = count_str.parse().context(format!(
+            "Invalid parent count in '{}': must be a number",
+            revision
+        ))?;
 
         if count == 0 {
             anyhow::bail!("Parent count must be positive in '{}'", revision);
@@ -106,8 +109,10 @@ async fn walk_parents(start_oid: Oid, count: usize, odb: &ObjectDatabase) -> Res
 
     for i in 0..count {
         // Read commit
-        let data = odb.read(&current_oid).await
-            .context(format!("Failed to read commit {} (parent {})", current_oid, i))?;
+        let data = odb.read(&current_oid).await.context(format!(
+            "Failed to read commit {} (parent {})",
+            current_oid, i
+        ))?;
 
         // Deserialize as commit
         let commit = Commit::deserialize(&data)

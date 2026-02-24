@@ -415,9 +415,7 @@ impl AzureBackend {
             let host = url
                 .host_str()
                 .ok_or_else(|| anyhow::anyhow!("Invalid BlobEndpoint: missing host"))?;
-            let port = url
-                .port()
-                .unwrap_or(10000); // Default Azurite port
+            let port = url.port().unwrap_or(10000); // Default Azurite port
 
             // Use emulator CloudLocation for custom endpoints
             let cloud_location = CloudLocation::Emulator {
@@ -490,7 +488,7 @@ impl AzureBackend {
                         "Failed to create container {}: {}",
                         self.container_name,
                         e
-                    ))
+                    )),
                 }
             }
             Ok(_) => {
@@ -499,7 +497,10 @@ impl AzureBackend {
             }
             Err(e) => {
                 // If we can't check existence, try to create anyway
-                tracing::warn!("Could not check container existence: {}, attempting to create", e);
+                tracing::warn!(
+                    "Could not check container existence: {}, attempting to create",
+                    e
+                );
                 match self.client.create().await {
                     Ok(_) => {
                         tracing::info!("Successfully created container: {}", self.container_name);
@@ -577,7 +578,10 @@ impl StorageBackend for AzureBackend {
     async fn exists(&self, key: &str) -> anyhow::Result<bool> {
         Self::validate_key(key)?;
 
-        tracing::debug!("Checking existence of object in Azure Blob Storage: {}", key);
+        tracing::debug!(
+            "Checking existence of object in Azure Blob Storage: {}",
+            key
+        );
 
         let blob_client = self.client.blob_client(key);
 
@@ -645,9 +649,11 @@ impl StorageBackend for AzureBackend {
         };
 
         let mut results = Vec::new();
-        while let Some(blob_list) = stream.try_next().await.map_err(|e| {
-            Self::map_error(e, &format!("listing with prefix '{}'", prefix))
-        })? {
+        while let Some(blob_list) = stream
+            .try_next()
+            .await
+            .map_err(|e| Self::map_error(e, &format!("listing with prefix '{}'", prefix)))?
+        {
             // Extract blob names from the response
             for blob in blob_list.blobs.blobs() {
                 results.push(blob.name.clone());
@@ -820,63 +826,38 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_account_name_fails() {
-        let result = AzureBackend::with_sas_token(
-            "",
-            "testcontainer",
-            "token",
-        )
-        .await;
+        let result = AzureBackend::with_sas_token("", "testcontainer", "token").await;
 
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_empty_container_name_fails() {
-        let result = AzureBackend::with_account_key(
-            "testaccount",
-            "",
-            "key",
-        )
-        .await;
+        let result = AzureBackend::with_account_key("testaccount", "", "key").await;
 
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_empty_sas_token_fails() {
-        let result = AzureBackend::with_sas_token(
-            "testaccount",
-            "testcontainer",
-            "",
-        )
-        .await;
+        let result = AzureBackend::with_sas_token("testaccount", "testcontainer", "").await;
 
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_empty_account_key_fails() {
-        let result = AzureBackend::with_account_key(
-            "testaccount",
-            "testcontainer",
-            "",
-        )
-        .await;
+        let result = AzureBackend::with_account_key("testaccount", "testcontainer", "").await;
 
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_empty_connection_string_fails() {
-        let result = AzureBackend::with_connection_string(
-            "testcontainer",
-            "",
-        )
-        .await;
+        let result = AzureBackend::with_connection_string("testcontainer", "").await;
 
         assert!(result.is_err());
     }
-
 
     #[test]
     fn test_chunk_size_constant() {

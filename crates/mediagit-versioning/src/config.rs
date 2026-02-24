@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -49,10 +49,10 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             smart_compression: true,
-            chunking_enabled: true,  // Enable chunk-level deduplication
+            chunking_enabled: true, // Enable chunk-level deduplication
             chunking_strategy: ChunkingStrategyConfig::default(), // MediaAware
-            delta_enabled: true,     // Enable delta encoding for similar files
-            pack_enabled: true,      // Enable pack file generation
+            delta_enabled: true,    // Enable delta encoding for similar files
+            pack_enabled: true,     // Enable pack file generation
             pack_window: 10,
         }
     }
@@ -60,7 +60,7 @@ impl Default for StorageConfig {
 
 impl StorageConfig {
     /// Create a minimal configuration with only basic features
-    /// 
+    ///
     /// Use this for simple repositories or when performance is critical.
     /// Only smart compression is enabled.
     pub fn minimal() -> Self {
@@ -75,7 +75,7 @@ impl StorageConfig {
     }
 
     /// Create a configuration optimized for large media files
-    /// 
+    ///
     /// Enables all optimization features with larger pack window
     /// for better delta compression of similar video files.
     pub fn for_large_media() -> Self {
@@ -85,7 +85,7 @@ impl StorageConfig {
             chunking_strategy: ChunkingStrategyConfig::MediaAware,
             delta_enabled: true,
             pack_enabled: true,
-            pack_window: 50,  // Larger window for better delta matches
+            pack_window: 50, // Larger window for better delta matches
         }
     }
 }
@@ -183,9 +183,9 @@ mod tests {
     fn test_default_config() {
         let config = StorageConfig::default();
         assert!(config.smart_compression);
-        assert!(config.chunking_enabled);  // Now enabled by default
-        assert!(config.delta_enabled);     // Now enabled by default
-        assert!(config.pack_enabled);      // Now enabled by default
+        assert!(config.chunking_enabled); // Now enabled by default
+        assert!(config.delta_enabled); // Now enabled by default
+        assert!(config.pack_enabled); // Now enabled by default
     }
 
     #[test]

@@ -26,7 +26,7 @@
 //! - Binary with patterns → Zstd for balanced performance
 
 use crate::{
-    BrotliCompressor, Compressor, CompressionAlgorithm, CompressionLevel, CompressionResult,
+    BrotliCompressor, CompressionAlgorithm, CompressionLevel, CompressionResult, Compressor,
     ZlibCompressor, ZstdCompressor,
 };
 use std::collections::HashMap;
@@ -118,11 +118,7 @@ impl PatternClass {
             .iter()
             .take(4096)
             .filter(|&&b| {
-                b == b'\n'
-                    || b == b'\r'
-                    || b == b'\t'
-                    || (0x20..0x7F).contains(&b)
-                    || b >= 0x80
+                b == b'\n' || b == b'\r' || b == b'\t' || (0x20..0x7F).contains(&b) || b >= 0x80
             })
             .count();
 
@@ -286,14 +282,12 @@ impl CompressionStrategy {
             }
 
             // Small binary with low entropy → Brotli(Default)
-            (
-                SizeClass::Small,
-                EntropyClass::VeryLow | EntropyClass::Low,
-                PatternClass::Binary,
-            ) => CompressionStrategy {
-                algorithm: Brotli,
-                level: Default,
-            },
+            (SizeClass::Small, EntropyClass::VeryLow | EntropyClass::Low, PatternClass::Binary) => {
+                CompressionStrategy {
+                    algorithm: Brotli,
+                    level: Default,
+                }
+            }
 
             // Medium files with very low entropy → Brotli for compression
             (SizeClass::Medium, EntropyClass::VeryLow, _) => CompressionStrategy {
@@ -356,20 +350,12 @@ impl StrategyCache {
     fn insert(&mut self, profile: FileProfile, strategy: CompressionStrategy) {
         // Evict least used if at capacity
         if self.cache.len() >= self.max_size {
-            if let Some((&least_used, _)) =
-                self.cache.iter().min_by_key(|(_, entry)| entry.hits)
-            {
+            if let Some((&least_used, _)) = self.cache.iter().min_by_key(|(_, entry)| entry.hits) {
                 self.cache.remove(&least_used);
             }
         }
 
-        self.cache.insert(
-            profile,
-            CacheEntry {
-                strategy,
-                hits: 1,
-            },
-        );
+        self.cache.insert(profile, CacheEntry { strategy, hits: 1 });
     }
 }
 
@@ -464,7 +450,11 @@ impl AdaptiveCompressor {
 
     /// Get performance statistics
     pub fn stats(&self) -> PerformanceStats {
-        self.stats.lock().ok().map(|s| s.clone()).unwrap_or_default()
+        self.stats
+            .lock()
+            .ok()
+            .map(|s| s.clone())
+            .unwrap_or_default()
     }
 
     /// Reset statistics
@@ -588,22 +578,13 @@ mod tests {
     #[test]
     fn test_pattern_detection_compressed() {
         let gzip = b"\x1f\x8b\x08\x00\x00\x00\x00\x00";
-        assert_eq!(
-            PatternClass::detect(gzip),
-            PatternClass::AlreadyCompressed
-        );
+        assert_eq!(PatternClass::detect(gzip), PatternClass::AlreadyCompressed);
 
         let zip = b"\x50\x4b\x03\x04\x00\x00\x00\x00";
-        assert_eq!(
-            PatternClass::detect(zip),
-            PatternClass::AlreadyCompressed
-        );
+        assert_eq!(PatternClass::detect(zip), PatternClass::AlreadyCompressed);
 
         let zstd = b"\x28\xb5\x2f\xfd\x00\x00\x00\x00";
-        assert_eq!(
-            PatternClass::detect(zstd),
-            PatternClass::AlreadyCompressed
-        );
+        assert_eq!(PatternClass::detect(zstd), PatternClass::AlreadyCompressed);
     }
 
     #[test]

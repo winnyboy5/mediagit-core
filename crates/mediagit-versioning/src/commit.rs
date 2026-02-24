@@ -179,12 +179,7 @@ impl Commit {
     /// assert_eq!(commit.message, "Initial commit");
     /// assert_eq!(commit.parents.len(), 0);
     /// ```
-    pub fn new(
-        tree: Oid,
-        author: Signature,
-        committer: Signature,
-        message: String,
-    ) -> Self {
+    pub fn new(tree: Oid, author: Signature, committer: Signature, message: String) -> Self {
         Self {
             tree,
             parents: Vec::new(),
@@ -247,8 +242,7 @@ impl Commit {
     ///
     /// Uses bincode for efficient serialization.
     pub fn serialize(&self) -> anyhow::Result<Vec<u8>> {
-        bincode::serialize(self)
-            .map_err(|e| anyhow::anyhow!("Commit serialization failed: {}", e))
+        bincode::serialize(self).map_err(|e| anyhow::anyhow!("Commit serialization failed: {}", e))
     }
 
     /// Deserialize commit from bytes
@@ -266,10 +260,7 @@ impl Commit {
     /// # Returns
     ///
     /// The OID of the written commit
-    pub async fn write(
-        &self,
-        odb: &crate::ObjectDatabase,
-    ) -> anyhow::Result<Oid> {
+    pub async fn write(&self, odb: &crate::ObjectDatabase) -> anyhow::Result<Oid> {
         let data = self.serialize()?;
         odb.write(ObjectType::Commit, &data).await
     }
@@ -284,10 +275,7 @@ impl Commit {
     /// # Returns
     ///
     /// The deserialized commit object
-    pub async fn read(
-        odb: &crate::ObjectDatabase,
-        oid: &Oid,
-    ) -> anyhow::Result<Self> {
+    pub async fn read(odb: &crate::ObjectDatabase, oid: &Oid) -> anyhow::Result<Self> {
         let data = odb.read(oid).await?;
         Self::deserialize(&data)
     }
@@ -356,12 +344,7 @@ mod tests {
     fn test_commit_creation() {
         let tree = Oid::hash(b"tree");
         let sig = Signature::now("Alice".to_string(), "alice@example.com".to_string());
-        let commit = Commit::new(
-            tree,
-            sig.clone(),
-            sig,
-            "Initial commit".to_string(),
-        );
+        let commit = Commit::new(tree, sig.clone(), sig, "Initial commit".to_string());
 
         assert_eq!(commit.tree, tree);
         assert_eq!(commit.message, "Initial commit");
@@ -526,12 +509,7 @@ mod tests {
 
         // Create second commit with first as parent
         let tree2 = Oid::hash(b"tree2");
-        let mut commit2 = Commit::new(
-            tree2,
-            sig.clone(),
-            sig.clone(),
-            "Second commit".to_string(),
-        );
+        let mut commit2 = Commit::new(tree2, sig.clone(), sig.clone(), "Second commit".to_string());
         commit2.add_parent(commit1_oid);
         let commit2_oid = commit2.write(&odb).await.unwrap();
 
@@ -556,21 +534,11 @@ mod tests {
 
         // Create two parent commits
         let tree1 = Oid::hash(b"tree1");
-        let commit1 = Commit::new(
-            tree1,
-            sig.clone(),
-            sig.clone(),
-            "Feature A".to_string(),
-        );
+        let commit1 = Commit::new(tree1, sig.clone(), sig.clone(), "Feature A".to_string());
         let commit1_oid = commit1.write(&odb).await.unwrap();
 
         let tree2 = Oid::hash(b"tree2");
-        let commit2 = Commit::new(
-            tree2,
-            sig.clone(),
-            sig.clone(),
-            "Feature B".to_string(),
-        );
+        let commit2 = Commit::new(tree2, sig.clone(), sig.clone(), "Feature B".to_string());
         let commit2_oid = commit2.write(&odb).await.unwrap();
 
         // Create merge commit

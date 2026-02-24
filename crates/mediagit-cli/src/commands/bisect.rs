@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -12,13 +12,13 @@
 //
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
+use super::super::repo::{create_storage_backend, find_repo_root};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use console::style;
 use mediagit_versioning::{CheckoutManager, ObjectDatabase, Oid, RefDatabase};
-use std::path::PathBuf;
 use std::collections::HashSet;
-use super::super::repo::{find_repo_root, create_storage_backend};
+use std::path::PathBuf;
 
 /// Find commit that introduced a bug using binary search
 #[derive(Parser, Debug)]
@@ -153,7 +153,11 @@ impl BisectCmd {
         if let Some(ref good_ref) = opts.good {
             let good_oid = self.resolve_commit(&refdb, good_ref).await?;
             state.good_commits.push(good_oid.to_hex());
-            state.log_entry(format!("start: bad={}, good={}", bad_oid.to_hex(), good_oid.to_hex()));
+            state.log_entry(format!(
+                "start: bad={}, good={}",
+                bad_oid.to_hex(),
+                good_oid.to_hex()
+            ));
 
             // Find midpoint and checkout
             self.find_next_commit(&repo_root, &mut state).await?;
@@ -166,9 +170,15 @@ impl BisectCmd {
 
         println!("{} Bisect session started", style("→").cyan());
         if opts.good.is_some() {
-            println!("  {} commits to check", style(self.estimate_remaining(&state)).yellow());
+            println!(
+                "  {} commits to check",
+                style(self.estimate_remaining(&state)).yellow()
+            );
         } else {
-            println!("  Mark a good commit with: {}", style("mediagit bisect good <commit>").yellow());
+            println!(
+                "  Mark a good commit with: {}",
+                style("mediagit bisect good <commit>").yellow()
+            );
         }
 
         Ok(())
@@ -342,8 +352,8 @@ impl BisectCmd {
     }
 
     async fn replay(&self, opts: &ReplayOpts) -> Result<()> {
-        let logfile_content = std::fs::read_to_string(&opts.logfile)
-            .context("Failed to read log file")?;
+        let logfile_content =
+            std::fs::read_to_string(&opts.logfile).context("Failed to read log file")?;
 
         println!("{} Replaying bisect log...", style("→").cyan());
 
@@ -395,14 +405,24 @@ impl BisectCmd {
         println!("  Current commit: {}", style(next_oid.to_hex()).yellow());
         println!();
         println!("After testing, mark the commit:");
-        println!("  {} if commit is good", style("mediagit bisect good").green());
+        println!(
+            "  {} if commit is good",
+            style("mediagit bisect good").green()
+        );
         println!("  {} if commit is bad", style("mediagit bisect bad").red());
-        println!("  {} if commit cannot be tested", style("mediagit bisect skip").yellow());
+        println!(
+            "  {} if commit cannot be tested",
+            style("mediagit bisect skip").yellow()
+        );
 
         Ok(())
     }
 
-    async fn find_candidate_commits(&self, odb: &ObjectDatabase, state: &BisectState) -> Result<Vec<Oid>> {
+    async fn find_candidate_commits(
+        &self,
+        odb: &ObjectDatabase,
+        state: &BisectState,
+    ) -> Result<Vec<Oid>> {
         // Build sets of marked commits
         let bad_set: HashSet<String> = state.bad_commits.iter().cloned().collect();
         let good_set: HashSet<String> = state.good_commits.iter().cloned().collect();
@@ -418,11 +438,15 @@ impl BisectCmd {
             let mut current_oid = bad_oid;
 
             // Walk back through history
-            for _ in 0..100 {  // Limit traversal depth
+            for _ in 0..100 {
+                // Limit traversal depth
                 let commit_hex = current_oid.to_hex();
 
                 // Skip if already marked
-                if bad_set.contains(&commit_hex) || good_set.contains(&commit_hex) || skip_set.contains(&commit_hex) {
+                if bad_set.contains(&commit_hex)
+                    || good_set.contains(&commit_hex)
+                    || skip_set.contains(&commit_hex)
+                {
                     // Move to parent
                     if let Ok(commit) = mediagit_versioning::Commit::read(odb, &current_oid).await {
                         if let Some(parent) = commit.parents.first() {
@@ -462,7 +486,11 @@ impl BisectCmd {
         !state.bad_commits.is_empty() && !state.good_commits.is_empty() && state.current.is_some()
     }
 
-    async fn complete_bisect(&self, repo_root: &std::path::Path, state: &BisectState) -> Result<()> {
+    async fn complete_bisect(
+        &self,
+        repo_root: &std::path::Path,
+        state: &BisectState,
+    ) -> Result<()> {
         let mediagit_dir = repo_root.join(".mediagit");
 
         println!();
@@ -471,10 +499,7 @@ impl BisectCmd {
 
         // Find first bad commit
         if let Some(first_bad) = state.bad_commits.first() {
-            println!(
-                "{} is the first bad commit",
-                style(first_bad).red().bold()
-            );
+            println!("{} is the first bad commit", style(first_bad).red().bold());
         }
 
         // Show bisect log
@@ -537,10 +562,11 @@ impl BisectCmd {
         }
 
         // Try resolving directly
-        refdb.resolve(commit_ref).await
+        refdb
+            .resolve(commit_ref)
+            .await
             .context(format!("Cannot resolve commit reference: {}", commit_ref))
     }
-
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -555,6 +581,10 @@ struct BisectState {
 
 impl BisectState {
     fn log_entry(&mut self, entry: String) {
-        self.log.push(format!("{}: {}", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S"), entry));
+        self.log.push(format!(
+            "{}: {}",
+            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S"),
+            entry
+        ));
     }
 }

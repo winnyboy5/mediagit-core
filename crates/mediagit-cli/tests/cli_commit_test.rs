@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -87,7 +87,11 @@ fn test_commit_multiple_files() {
     init_repo(temp_dir.path());
 
     for i in 1..=5 {
-        add_file(temp_dir.path(), &format!("file{}.txt", i), &format!("Content {}", i));
+        add_file(
+            temp_dir.path(),
+            &format!("file{}.txt", i),
+            &format!("Content {}", i),
+        );
     }
 
     mediagit()
@@ -354,7 +358,8 @@ fn test_commit_many_files_performance() {
         fs::write(
             temp_dir.path().join(format!("file_{:02}.txt", i)),
             format!("Content {}", i),
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     // Add all

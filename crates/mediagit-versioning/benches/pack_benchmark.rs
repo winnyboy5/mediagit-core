@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -13,9 +13,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use mediagit_versioning::{
-    DeltaDecoder, DeltaEncoder, ObjectType, Oid, PackReader, PackWriter,
-};
+use mediagit_versioning::{DeltaDecoder, DeltaEncoder, ObjectType, Oid, PackReader, PackWriter};
 
 fn benchmark_pack_write(c: &mut Criterion) {
     c.bench_function("pack_write_single_1mb", |b| {
@@ -78,9 +76,7 @@ fn benchmark_delta_encoding(c: &mut Criterion) {
                 target[5000] = 0x43;
                 (base, target)
             },
-            |(base, target)| {
-                DeltaEncoder::encode(&base, &target)
-            },
+            |(base, target)| DeltaEncoder::encode(&base, &target),
         );
     });
 
@@ -94,9 +90,7 @@ fn benchmark_delta_encoding(c: &mut Criterion) {
                 }
                 (base, target)
             },
-            |(base, target)| {
-                DeltaEncoder::encode(&base, &target)
-            },
+            |(base, target)| DeltaEncoder::encode(&base, &target),
         );
     });
 
@@ -107,9 +101,7 @@ fn benchmark_delta_encoding(c: &mut Criterion) {
                 let target = vec![0xFFu8; 10 * 1024];
                 (base, target)
             },
-            |(base, target)| {
-                DeltaEncoder::encode(&base, &target)
-            },
+            |(base, target)| DeltaEncoder::encode(&base, &target),
         );
     });
 }

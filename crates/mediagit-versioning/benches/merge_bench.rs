@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -33,7 +33,11 @@ use tempfile::TempDir;
 /// Setup merge engine with temporary storage (async version)
 async fn setup_merge_engine_async() -> (MergeEngine, ObjectDatabase, TempDir) {
     let temp_dir = TempDir::new().unwrap();
-    let storage = Arc::new(LocalBackend::new(temp_dir.path().to_str().unwrap()).await.unwrap());
+    let storage = Arc::new(
+        LocalBackend::new(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap(),
+    );
     let odb_for_merge = Arc::new(ObjectDatabase::new(storage.clone(), 1000));
     let merge_engine = MergeEngine::new(odb_for_merge);
     let odb = ObjectDatabase::new(storage, 1000);
@@ -77,11 +81,14 @@ async fn create_tree(odb: &ObjectDatabase, num_files: usize) -> Oid {
         let content = format!("Content of file {}", i).into_bytes();
         let blob_oid = odb.write(ObjectType::Blob, &content).await.unwrap();
 
-        entries.insert(filename.clone(), TreeEntry {
-            mode: FileMode::Regular,
-            name: filename,
-            oid: blob_oid,
-        });
+        entries.insert(
+            filename.clone(),
+            TreeEntry {
+                mode: FileMode::Regular,
+                name: filename,
+                oid: blob_oid,
+            },
+        );
     }
 
     let tree = Tree { entries };
@@ -90,17 +97,18 @@ async fn create_tree(odb: &ObjectDatabase, num_files: usize) -> Oid {
 }
 
 /// Create a modified tree with some changed files
-async fn create_modified_tree(
-    odb: &ObjectDatabase,
-    base_tree_oid: Oid,
-    num_changes: usize,
-) -> Oid {
+async fn create_modified_tree(odb: &ObjectDatabase, base_tree_oid: Oid, num_changes: usize) -> Oid {
     // Read base tree
     let base_tree_data = odb.read(&base_tree_oid).await.unwrap();
     let mut base_tree: Tree = bincode::deserialize(&base_tree_data).unwrap();
 
     // Modify some entries
-    let keys: Vec<String> = base_tree.entries.keys().take(num_changes).cloned().collect();
+    let keys: Vec<String> = base_tree
+        .entries
+        .keys()
+        .take(num_changes)
+        .cloned()
+        .collect();
     for key in keys {
         if let Some(entry) = base_tree.entries.get_mut(&key) {
             let new_content = format!("Modified content for {}", key).into_bytes();
@@ -169,7 +177,12 @@ fn bench_merge_no_conflict(c: &mut Criterion) {
                     let mut their_tree: Tree = bincode::deserialize(&base_tree_data).unwrap();
 
                     // Modify first half in our branch
-                    let our_keys: Vec<String> = our_tree.entries.keys().take(num_files / 2).cloned().collect();
+                    let our_keys: Vec<String> = our_tree
+                        .entries
+                        .keys()
+                        .take(num_files / 2)
+                        .cloned()
+                        .collect();
                     for key in our_keys {
                         if let Some(entry) = our_tree.entries.get_mut(&key) {
                             let content = format!("Our change for {}", key).into_bytes();
@@ -179,7 +192,12 @@ fn bench_merge_no_conflict(c: &mut Criterion) {
                     }
 
                     // Modify second half in their branch
-                    let their_keys: Vec<String> = their_tree.entries.keys().skip(num_files / 2).cloned().collect();
+                    let their_keys: Vec<String> = their_tree
+                        .entries
+                        .keys()
+                        .skip(num_files / 2)
+                        .cloned()
+                        .collect();
                     for key in their_keys {
                         if let Some(entry) = their_tree.entries.get_mut(&key) {
                             let content = format!("Their change for {}", key).into_bytes();
@@ -199,13 +217,9 @@ fn bench_merge_no_conflict(c: &mut Criterion) {
 
                     let our_commit =
                         create_commit(&odb, our_tree_oid, vec![base_commit], "Our changes").await;
-                    let their_commit = create_commit(
-                        &odb,
-                        their_tree_oid,
-                        vec![base_commit],
-                        "Their changes",
-                    )
-                    .await;
+                    let their_commit =
+                        create_commit(&odb, their_tree_oid, vec![base_commit], "Their changes")
+                            .await;
 
                     (our_commit, their_commit)
                 });
@@ -298,7 +312,13 @@ fn bench_merge_strategies(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("merge_strategies");
 
-    for strategy in [MergeStrategy::Recursive, MergeStrategy::Ours, MergeStrategy::Theirs].iter() {
+    for strategy in [
+        MergeStrategy::Recursive,
+        MergeStrategy::Ours,
+        MergeStrategy::Theirs,
+    ]
+    .iter()
+    {
         let strategy_name = format!("{:?}", strategy);
 
         group.bench_with_input(
@@ -326,11 +346,7 @@ fn bench_merge_strategies(c: &mut Criterion) {
                 b.to_async(&rt).iter(|| async {
                     black_box(
                         merge_engine
-                            .merge(
-                                &black_box(our_commit),
-                                &black_box(their_commit),
-                                strategy,
-                            )
+                            .merge(&black_box(our_commit), &black_box(their_commit), strategy)
                             .await
                             .unwrap(),
                     )

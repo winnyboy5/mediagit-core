@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -64,7 +64,10 @@ async fn test_backward_compatibility_with_uncompressed_data() {
     // Verify it's stored uncompressed
     let key = oid.to_hex();
     let stored_data = storage.get(&key).await.unwrap();
-    assert_eq!(stored_data, data, "Old version should store data uncompressed");
+    assert_eq!(
+        stored_data, data,
+        "Old version should store data uncompressed"
+    );
 
     // Now read with compression-enabled ODB (simulating new version)
     let odb_new = ObjectDatabase::new(storage, 100);

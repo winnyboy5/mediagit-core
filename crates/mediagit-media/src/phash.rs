@@ -152,8 +152,8 @@ impl PerceptualHasher {
         let start = Instant::now();
 
         // Load image
-        let img = image::load_from_memory(data)
-            .map_err(|e| MediaError::ImageError(e.to_string()))?;
+        let img =
+            image::load_from_memory(data).map_err(|e| MediaError::ImageError(e.to_string()))?;
 
         let (width, height) = img.dimensions();
         trace!("Loaded image: {}x{}", width, height);
@@ -326,7 +326,7 @@ mod tests {
         };
 
         let hash2 = PerceptualHash {
-            hash: vec![0b11110001, 0b10101010],  // 1 bit different
+            hash: vec![0b11110001, 0b10101010], // 1 bit different
             algorithm: HashAlgorithm::Difference,
             hash_size: 16,
             image_width: 100,
@@ -347,7 +347,7 @@ mod tests {
         };
 
         let hash2 = PerceptualHash {
-            hash: vec![0b11111111],  // Identical
+            hash: vec![0b11111111], // Identical
             algorithm: HashAlgorithm::Difference,
             hash_size: 8,
             image_width: 100,
@@ -376,7 +376,7 @@ mod tests {
 
         let hash2 = PerceptualHash {
             hash: vec![0b11111111],
-            algorithm: HashAlgorithm::Difference,  // Different algorithm
+            algorithm: HashAlgorithm::Difference, // Different algorithm
             hash_size: 8,
             image_width: 100,
             image_height: 100,

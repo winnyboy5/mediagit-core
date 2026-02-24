@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -247,17 +247,13 @@ async fn test_audit_multiple_violations() {
 
     // Multiple different security violations
     let violations = vec![
-        "/../etc/passwd/info/refs",       // Path traversal
-        "/repo$bad/info/refs",             // Invalid characters
-        "/repo\0null/info/refs",           // Null byte (URL encoded)
+        "/../etc/passwd/info/refs", // Path traversal
+        "/repo$bad/info/refs",      // Invalid characters
+        "/repo\0null/info/refs",    // Null byte (URL encoded)
     ];
 
     for violation_path in violations {
-        let resp = client
-            .get(server.url(violation_path))
-            .send()
-            .await
-            .unwrap();
+        let resp = client.get(server.url(violation_path)).send().await.unwrap();
 
         // All should be rejected
         assert!(
@@ -294,7 +290,10 @@ async fn test_audit_event_serialization() {
 
     // Verify we can deserialize
     let deserialized: AuditEvent = serde_json::from_str(&json).unwrap();
-    assert_eq!(deserialized.event_type, AuditEventType::PathTraversalAttempt);
+    assert_eq!(
+        deserialized.event_type,
+        AuditEventType::PathTraversalAttempt
+    );
     assert_eq!(deserialized.client_ip, Some(ip));
 }
 
@@ -309,24 +308,14 @@ async fn test_audit_helper_functions() {
     audit::log_authentication_failed(Some(ip), Some("user123".to_string()), "invalid password");
     audit::log_authentication_success(ip, "user123".to_string());
     audit::log_rate_limit_exceeded(ip, "/test".to_string(), "GET".to_string());
-    audit::log_path_traversal_attempt(
-        ip,
-        "repo".to_string(),
-        "/../etc".to_string(),
-        "contains ..",
-    );
+    audit::log_path_traversal_attempt(ip, "repo".to_string(), "/../etc".to_string(), "contains ..");
     audit::log_invalid_request(
         ip,
         "/test".to_string(),
         "POST".to_string(),
         "oversized content",
     );
-    audit::log_suspicious_pattern(
-        ip,
-        "/test".to_string(),
-        "GET".to_string(),
-        "rapid requests",
-    );
+    audit::log_suspicious_pattern(ip, "/test".to_string(), "GET".to_string(), "rapid requests");
     audit::log_access_denied(
         ip,
         Some("user123".to_string()),

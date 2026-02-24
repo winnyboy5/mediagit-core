@@ -109,7 +109,11 @@ impl ReflogCmd {
         let reflog = Reflog::new(&storage_path);
 
         match &self.action {
-            Some(ReflogAction::Show { reference, count, all }) => {
+            Some(ReflogAction::Show {
+                reference,
+                count,
+                all,
+            }) => {
                 if *all {
                     self.show_all(&reflog).await
                 } else {
@@ -121,7 +125,8 @@ impl ReflogCmd {
                 self.delete_reflog(&reflog, reference).await
             }
             Some(ReflogAction::Expire { reference, keep }) => {
-                self.expire_reflog(&reflog, reference.as_deref(), *keep).await
+                self.expire_reflog(&reflog, reference.as_deref(), *keep)
+                    .await
             }
             None => {
                 // Default action: show reflog
@@ -131,7 +136,12 @@ impl ReflogCmd {
         }
     }
 
-    async fn show_reflog(&self, reflog: &Reflog, ref_name: &str, limit: Option<usize>) -> Result<()> {
+    async fn show_reflog(
+        &self,
+        reflog: &Reflog,
+        ref_name: &str,
+        limit: Option<usize>,
+    ) -> Result<()> {
         let entries = reflog.read(ref_name, limit).await?;
 
         if entries.is_empty() {
@@ -142,7 +152,11 @@ impl ReflogCmd {
         }
 
         if !self.quiet {
-            println!("{} Reflog for {}", style("📋").cyan().bold(), style(ref_name).yellow());
+            println!(
+                "{} Reflog for {}",
+                style("📋").cyan().bold(),
+                style(ref_name).yellow()
+            );
             println!();
         }
 
@@ -152,7 +166,7 @@ impl ReflogCmd {
             } else {
                 let short_oid = &entry.new_oid.to_hex()[..7];
                 let timestamp = entry.committer.timestamp.format("%Y-%m-%d %H:%M:%S");
-                
+
                 println!(
                     "{} {} {}: {}",
                     style(format!("{}@{{{}}}", ref_name, i)).yellow(),
@@ -174,27 +188,34 @@ impl ReflogCmd {
             return Ok(());
         }
 
-        println!("{} Found {} refs with reflogs", style("📋").cyan().bold(), refs.len());
+        println!(
+            "{} Found {} refs with reflogs",
+            style("📋").cyan().bold(),
+            refs.len()
+        );
         println!();
 
         for ref_name in refs {
             let entries = reflog.read(&ref_name, Some(5)).await?;
             if !entries.is_empty() {
-                println!("{} {} ({} entries)", 
+                println!(
+                    "{} {} ({} entries)",
                     style("→").cyan(),
                     style(&ref_name).yellow(),
                     entries.len()
                 );
-                
+
                 for (i, entry) in entries.iter().enumerate().take(3) {
                     let short_oid = &entry.new_oid.to_hex()[..7];
-                    println!("    {}@{{{}}}: {} - {}", 
-                        ref_name, i, 
+                    println!(
+                        "    {}@{{{}}}: {} - {}",
+                        ref_name,
+                        i,
                         style(short_oid).green(),
                         entry.message
                     );
                 }
-                
+
                 if entries.len() > 3 {
                     println!("    {} more entries...", entries.len() - 3);
                 }
@@ -214,7 +235,12 @@ impl ReflogCmd {
         Ok(())
     }
 
-    async fn expire_reflog(&self, reflog: &Reflog, ref_name: Option<&str>, keep: usize) -> Result<()> {
+    async fn expire_reflog(
+        &self,
+        reflog: &Reflog,
+        ref_name: Option<&str>,
+        keep: usize,
+    ) -> Result<()> {
         if let Some(ref_name) = ref_name {
             let expired = reflog.expire(ref_name, keep).await?;
             if expired > 0 {
@@ -226,7 +252,11 @@ impl ReflogCmd {
                     keep
                 );
             } else {
-                println!("{} No entries to expire for {}", style("ℹ").cyan(), ref_name);
+                println!(
+                    "{} No entries to expire for {}",
+                    style("ℹ").cyan(),
+                    ref_name
+                );
             }
         } else {
             // Expire all refs

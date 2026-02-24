@@ -243,8 +243,8 @@ impl ImageMetadataParser {
         debug!("Detected format: {:?}", format);
 
         // Parse basic image information
-        let img = image::load_from_memory(data)
-            .map_err(|e| MediaError::ImageError(e.to_string()))?;
+        let img =
+            image::load_from_memory(data).map_err(|e| MediaError::ImageError(e.to_string()))?;
 
         let (width, height) = img.dimensions();
         let file_size = data.len() as u64;
@@ -252,8 +252,10 @@ impl ImageMetadataParser {
         // Calculate perceptual hash
         info!("Calculating perceptual hash for {}", filename);
         let perceptual_hash = Self::calculate_perceptual_hash(&img)?;
-        debug!("Perceptual hash calculated: {} (algorithm: {:?})",
-               perceptual_hash.hash_value, perceptual_hash.algorithm);
+        debug!(
+            "Perceptual hash calculated: {} (algorithm: {:?})",
+            perceptual_hash.hash_value, perceptual_hash.algorithm
+        );
 
         // Extract EXIF if present
         let exif = Self::extract_exif(data).await.ok();
@@ -307,16 +309,14 @@ impl ImageMetadataParser {
     fn detect_format(data: &[u8], filename: &str) -> Result<SupportedImageFormat> {
         // Try extension first
         if let Some(ext) = Path::new(filename).extension() {
-            if let Some(format) = SupportedImageFormat::from_extension(
-                ext.to_str().unwrap_or("")
-            ) {
+            if let Some(format) = SupportedImageFormat::from_extension(ext.to_str().unwrap_or("")) {
                 return Ok(format);
             }
         }
 
         // Detect from magic bytes
-        let format = image::guess_format(data)
-            .map_err(|e| MediaError::ImageError(e.to_string()))?;
+        let format =
+            image::guess_format(data).map_err(|e| MediaError::ImageError(e.to_string()))?;
 
         match format {
             ImageFormat::Png => Ok(SupportedImageFormat::Png),
@@ -380,15 +380,15 @@ impl ImageMetadataParser {
                 exif::Tag::Software => metadata.software = Some(value),
                 _ => {
                     // Store other fields
-                    metadata.raw_fields.insert(
-                        format!("{:?}", tag),
-                        value,
-                    );
+                    metadata.raw_fields.insert(format!("{:?}", tag), value);
                 }
             }
         }
 
-        debug!("Extracted EXIF metadata with {} raw fields", metadata.raw_fields.len());
+        debug!(
+            "Extracted EXIF metadata with {} raw fields",
+            metadata.raw_fields.len()
+        );
         Ok(metadata)
     }
 
@@ -432,14 +432,14 @@ impl ImageMetadataParser {
                     // Record 2 contains application records
                     if record == 2 {
                         match dataset {
-                            25 => metadata.keywords.push(value), // Keywords
-                            120 => metadata.caption = Some(value), // Caption
+                            25 => metadata.keywords.push(value),     // Keywords
+                            120 => metadata.caption = Some(value),   // Caption
                             116 => metadata.copyright = Some(value), // Copyright
-                            80 => metadata.creator = Some(value), // By-line (creator)
-                            110 => metadata.credit = Some(value), // Credit
-                            115 => metadata.source = Some(value), // Source
-                            90 => metadata.city = Some(value), // City
-                            101 => metadata.country = Some(value), // Country
+                            80 => metadata.creator = Some(value),    // By-line (creator)
+                            110 => metadata.credit = Some(value),    // Credit
+                            115 => metadata.source = Some(value),    // Source
+                            90 => metadata.city = Some(value),       // City
+                            101 => metadata.country = Some(value),   // Country
                             _ => {}
                         }
                     }
@@ -450,7 +450,10 @@ impl ImageMetadataParser {
         }
 
         if !metadata.keywords.is_empty() || metadata.caption.is_some() {
-            debug!("Extracted IPTC metadata with {} keywords", metadata.keywords.len());
+            debug!(
+                "Extracted IPTC metadata with {} keywords",
+                metadata.keywords.len()
+            );
         }
 
         Ok(metadata)
@@ -521,7 +524,8 @@ impl ImageMetadataParser {
                             }
 
                             // Parse history entries (stEvt:action in xmpMM:History)
-                            let history_re = regex_lite::Regex::new(r#"stEvt:action="([^"]+)""#).ok();
+                            let history_re =
+                                regex_lite::Regex::new(r#"stEvt:action="([^"]+)""#).ok();
                             if let Some(re) = history_re {
                                 for cap in re.captures_iter(xmp_str) {
                                     if let Some(action) = cap.get(1) {
@@ -531,7 +535,12 @@ impl ImageMetadataParser {
                             }
 
                             // Extract other common fields
-                            for field in &["dc:creator", "dc:title", "dc:description", "photoshop:Credit"] {
+                            for field in &[
+                                "dc:creator",
+                                "dc:title",
+                                "dc:description",
+                                "photoshop:Credit",
+                            ] {
                                 if let Some(value) = Self::extract_xmp_field(xmp_str, field) {
                                     metadata.raw_fields.insert(field.to_string(), value);
                                 }
@@ -544,7 +553,10 @@ impl ImageMetadataParser {
         }
 
         if metadata.rating.is_some() || !metadata.history.is_empty() {
-            debug!("Extracted XMP metadata with {} history entries", metadata.history.len());
+            debug!(
+                "Extracted XMP metadata with {} history entries",
+                metadata.history.len()
+            );
         }
 
         Ok(metadata)
@@ -587,9 +599,7 @@ impl ImageMetadataParser {
             format_changed: ours.format != base.format || theirs.format != base.format,
             size_delta_ours: ours.file_size as i64 - base.file_size as i64,
             size_delta_theirs: theirs.file_size as i64 - base.file_size as i64,
-            both_modified_exif: base.exif.is_some()
-                && ours.exif.is_some()
-                && theirs.exif.is_some(),
+            both_modified_exif: base.exif.is_some() && ours.exif.is_some() && theirs.exif.is_some(),
         }
     }
 
@@ -614,7 +624,7 @@ impl ImageMetadataParser {
         {
             warn!("Image dimensions changed - manual review required");
             return MergeDecision::ManualReview(vec![
-                "Image dimensions changed - dimensions must match for auto-merge".to_string()
+                "Image dimensions changed - dimensions must match for auto-merge".to_string(),
             ]);
         }
 
@@ -636,9 +646,7 @@ impl ImageMetadataParser {
         );
 
         // If both versions are visually similar to base (only metadata changed)
-        if ours_similarity >= SIMILARITY_THRESHOLD
-            && theirs_similarity >= SIMILARITY_THRESHOLD
-        {
+        if ours_similarity >= SIMILARITY_THRESHOLD && theirs_similarity >= SIMILARITY_THRESHOLD {
             // Check if the visual content is the same in both versions
             let ours_theirs_similarity = ours
                 .perceptual_hash
@@ -691,9 +699,7 @@ impl ImageMetadataParser {
         let mut merged = ours.clone();
 
         // Merge EXIF metadata intelligently
-        if let (Some(ours_exif), Some(theirs_exif)) =
-            (&ours.exif, &theirs.exif)
-        {
+        if let (Some(ours_exif), Some(theirs_exif)) = (&ours.exif, &theirs.exif) {
             let mut merged_exif = ours_exif.clone();
 
             // Prefer non-None values from theirs if ours is None
@@ -712,7 +718,10 @@ impl ImageMetadataParser {
 
             // Merge raw_fields - combine both
             for (key, value) in &theirs_exif.raw_fields {
-                merged_exif.raw_fields.entry(key.clone()).or_insert_with(|| value.clone());
+                merged_exif
+                    .raw_fields
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
             }
 
             merged.exif = Some(merged_exif);
@@ -768,7 +777,10 @@ impl ImageMetadataParser {
 
             // Merge raw_fields
             for (key, value) in &theirs_xmp.raw_fields {
-                merged_xmp.raw_fields.entry(key.clone()).or_insert_with(|| value.clone());
+                merged_xmp
+                    .raw_fields
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
             }
 
             merged.xmp = Some(merged_xmp);

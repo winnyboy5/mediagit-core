@@ -116,21 +116,24 @@ impl MigrationState {
 
     /// Get the number of objects remaining
     pub fn remaining(&self) -> usize {
-        self.total_objects.saturating_sub(self.migrated_objects.len())
+        self.total_objects
+            .saturating_sub(self.migrated_objects.len())
     }
 
     /// Save state to file
     pub async fn save(&self, path: &Path) -> Result<()> {
-        let json = serde_json::to_string_pretty(self)
-            .context("Failed to serialize migration state")?;
+        let json =
+            serde_json::to_string_pretty(self).context("Failed to serialize migration state")?;
 
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).await
+            fs::create_dir_all(parent)
+                .await
                 .context("Failed to create state directory")?;
         }
 
-        fs::write(path, json).await
+        fs::write(path, json)
+            .await
             .context("Failed to write migration state")?;
 
         Ok(())
@@ -138,11 +141,12 @@ impl MigrationState {
 
     /// Load state from file
     pub async fn load(path: &Path) -> Result<Self> {
-        let json = fs::read_to_string(path).await
+        let json = fs::read_to_string(path)
+            .await
             .context("Failed to read migration state")?;
 
-        let state: Self = serde_json::from_str(&json)
-            .context("Failed to deserialize migration state")?;
+        let state: Self =
+            serde_json::from_str(&json).context("Failed to deserialize migration state")?;
 
         Ok(state)
     }
@@ -155,7 +159,8 @@ impl MigrationState {
     /// Delete state file
     pub async fn delete(path: &Path) -> Result<()> {
         if Self::exists(path).await {
-            fs::remove_file(path).await
+            fs::remove_file(path)
+                .await
                 .context("Failed to delete migration state")?;
         }
         Ok(())
@@ -181,7 +186,8 @@ impl StateManager {
 
     /// Get the path to a backup state file
     pub fn backup_state_path(&self, timestamp: &str) -> PathBuf {
-        self.base_dir.join(format!("state-backup-{}.json", timestamp))
+        self.base_dir
+            .join(format!("state-backup-{}.json", timestamp))
     }
 
     /// Create a backup of the current state
@@ -194,7 +200,8 @@ impl StateManager {
         let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
         let backup = self.backup_state_path(&timestamp);
 
-        fs::copy(&current, &backup).await
+        fs::copy(&current, &backup)
+            .await
             .context("Failed to backup migration state")?;
 
         tracing::info!("Created migration state backup at: {}", backup.display());
@@ -203,7 +210,8 @@ impl StateManager {
 
     /// Ensure the migration directory exists
     pub async fn ensure_dir(&self) -> Result<()> {
-        fs::create_dir_all(&self.base_dir).await
+        fs::create_dir_all(&self.base_dir)
+            .await
             .context("Failed to create migration directory")?;
         Ok(())
     }

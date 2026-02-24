@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -16,15 +16,17 @@
 //!
 //! The `add` command stages changes to files for inclusion in the next commit.
 
+use super::super::repo::{create_storage_backend, find_repo_root};
 use anyhow::{Context, Result};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
-use mediagit_versioning::{ChunkStrategy, Commit, Index, IndexEntry, ObjectDatabase, ObjectType, Oid, RefDatabase, Tree};
-use super::super::repo::{find_repo_root, create_storage_backend};
+use mediagit_versioning::{
+    ChunkStrategy, Commit, Index, IndexEntry, ObjectDatabase, ObjectType, Oid, RefDatabase, Tree,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Add file contents to the staging area
@@ -143,7 +145,7 @@ impl AddCmd {
             storage,
             1000,
             Some(ChunkStrategy::MediaAware),
-            delta_enabled
+            delta_enabled,
         );
 
         if !self.quiet && self.verbose {
@@ -250,7 +252,9 @@ impl AddCmd {
                     let skipped = skipped.clone();
 
                     file_tasks.spawn(async move {
-                        let _permit = sem.acquire().await
+                        let _permit = sem
+                            .acquire()
+                            .await
                             .map_err(|_| anyhow::anyhow!("Semaphore closed"))?;
 
                         let result = Self::process_single_file(
@@ -260,7 +264,8 @@ impl AddCmd {
                             &head_files,
                             &index_files,
                             delta_enabled,
-                        ).await;
+                        )
+                        .await;
 
                         match result {
                             Ok(Some(file_result)) => {
@@ -331,12 +336,16 @@ impl AddCmd {
                         &head_files,
                         &index_files,
                         delta_enabled,
-                    ).await;
+                    )
+                    .await;
 
                     match result {
                         Ok(Some(file_result)) => {
                             if self.verbose {
-                                output::detail("added", &format!("{} ({})", file_path.display(), file_result.oid));
+                                output::detail(
+                                    "added",
+                                    &format!("{} ({})", file_path.display(), file_result.oid),
+                                );
                             }
 
                             let entry = IndexEntry::new(
@@ -359,7 +368,10 @@ impl AddCmd {
                         Ok(None) => {
                             skipped_count += 1;
                             if self.verbose {
-                                output::detail("skipped (unchanged)", &file_path.display().to_string());
+                                output::detail(
+                                    "skipped (unchanged)",
+                                    &file_path.display().to_string(),
+                                );
                             }
                         }
                         Err(e) => {
@@ -387,9 +399,8 @@ impl AddCmd {
             .collect();
 
         for head_path in head_files.as_ref().keys() {
-            let head_path_normalized = PathBuf::from(
-                head_path.to_string_lossy().replace('\\', "/")
-            );
+            let head_path_normalized =
+                PathBuf::from(head_path.to_string_lossy().replace('\\', "/"));
 
             let exists_in_working_dir = working_files.iter().any(|wp| {
                 wp.to_string_lossy().replace('\\', "/") == head_path_normalized.to_string_lossy()
@@ -416,8 +427,7 @@ impl AddCmd {
 
         // Save the index
         if !self.dry_run {
-            index.save(&repo_root)
-                .context("Failed to save index")?;
+            index.save(&repo_root).context("Failed to save index")?;
         }
 
         if !self.quiet {
@@ -458,19 +468,22 @@ impl AddCmd {
         index_files: &HashMap<PathBuf, (u64, Option<u64>)>,
         delta_enabled: bool,
     ) -> Result<Option<FileResult>> {
-        let metadata = tokio::fs::metadata(file_path)
-            .await
-            .context(format!("Failed to read file metadata: {}", file_path.display()))?;
+        let metadata = tokio::fs::metadata(file_path).await.context(format!(
+            "Failed to read file metadata: {}",
+            file_path.display()
+        ))?;
 
         let file_size = metadata.len();
         const STREAMING_THRESHOLD: u64 = 100 * 1024 * 1024; // 100MB
 
-        let relative_path = file_path.strip_prefix(repo_root)
+        let relative_path = file_path
+            .strip_prefix(repo_root)
             .unwrap_or(file_path)
             .to_path_buf();
 
         // Stat-cache check: skip if file hasn't changed since last staging
-        let file_mtime = metadata.modified()
+        let file_mtime = metadata
+            .modified()
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs());
@@ -485,9 +498,7 @@ impl AddCmd {
             }
         }
 
-        let filename = file_path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         // Seed similarity detector from previous version's manifest
         if let Some(head_oid) = head_files.get(&relative_path) {
@@ -499,7 +510,8 @@ impl AddCmd {
         // Choose streaming vs in-memory based on file size
         let (_content_oid, oid) = if file_size >= STREAMING_THRESHOLD {
             // STREAMING PATH: Files >= 100MB (parallel internally)
-            let content_oid = Oid::from_file_async(file_path).await
+            let content_oid = Oid::from_file_async(file_path)
+                .await
                 .context(format!("Failed to hash file: {}", file_path.display()))?;
 
             // Check if unchanged from HEAD
@@ -509,7 +521,8 @@ impl AddCmd {
                 }
             }
 
-            let oid = odb.write_chunked_from_file(file_path, filename)
+            let oid = odb
+                .write_chunked_from_file(file_path, filename)
                 .await
                 .context("Failed to write chunked object (streaming)")?;
 
@@ -695,15 +708,16 @@ impl AddCmd {
             "csv" | "json" | "jsonl" | "txt" | "xml" | "yaml" | "yml" | "toml" => true,
 
             // === ML DATA: Excellent dedup for incremental datasets (5MB) ===
-            "parquet" | "arrow" | "feather" | "orc" | "avro" |
-            "hdf5" | "h5" | "npy" | "npz" | "tfrecords" | "petastorm" => true,
+            "parquet" | "arrow" | "feather" | "orc" | "avro" | "hdf5" | "h5" | "npy" | "npz"
+            | "tfrecords" | "petastorm" => true,
 
             // === ML MODELS: Good dedup for checkpoint files (5MB) ===
-            "pt" | "pth" | "safetensors" | "ckpt" | "pb" | "onnx" |
-            "gguf" | "ggml" | "tflite" | "keras" | "bin" => true,
+            "pt" | "pth" | "safetensors" | "ckpt" | "pb" | "onnx" | "gguf" | "ggml" | "tflite"
+            | "keras" | "bin" => true,
 
             // === VIDEO: Structure-aware chunking (5MB) ===
-            "mp4" | "mov" | "avi" | "mkv" | "webm" | "flv" | "wmv" | "mpg" | "mpeg" | "m4v" | "3gp" => true,
+            "mp4" | "mov" | "avi" | "mkv" | "webm" | "flv" | "wmv" | "mpg" | "mpeg" | "m4v"
+            | "3gp" => true,
 
             // === UNCOMPRESSED IMAGES: Rolling CDC (5MB) ===
             "psd" | "tif" | "tiff" | "bmp" | "exr" | "hdr" | "raw" => true,
@@ -721,15 +735,16 @@ impl AddCmd {
             "wav" | "flac" | "aiff" | "alac" => size > MIN_SIZE_10MB,
 
             // === 3D MODELS: Good dedup (10MB) ===
-            "glb" | "gltf" | "obj" | "fbx" | "blend" | "usd" | "usda" | "usdc" => size > MIN_SIZE_10MB,
+            "glb" | "gltf" | "obj" | "fbx" | "blend" | "usd" | "usda" | "usdc" => {
+                size > MIN_SIZE_10MB
+            }
 
             // === ARCHIVES: Uncompressed archives benefit from chunking (5MB) ===
             "tar" | "cpio" | "iso" | "dmg" => true,
 
             // === PRE-COMPRESSED: Never chunk (no benefit) ===
-            "jpg" | "jpeg" | "png" | "webp" | "gif" | "avif" | "heic" |
-            "mp3" | "aac" | "ogg" | "opus" |
-            "zip" | "gz" | "bz2" | "xz" | "7z" | "rar" | "tar.gz" | "tgz" => false,
+            "jpg" | "jpeg" | "png" | "webp" | "gif" | "avif" | "heic" | "mp3" | "aac" | "ogg"
+            | "opus" | "zip" | "gz" | "bz2" | "xz" | "7z" | "rar" | "tar.gz" | "tgz" => false,
 
             // === UNKNOWN: Conservative threshold (10MB) ===
             _ => size > MIN_SIZE_10MB,
@@ -745,8 +760,8 @@ impl AddCmd {
 
         match ext.to_lowercase().as_str() {
             // Text-based formats: Excellent delta candidates
-            "txt" | "md" | "json" | "xml" | "html" | "css" | "js" | "ts" |
-            "py" | "rs" | "go" | "java" | "c" | "cpp" | "h" | "hpp" => true,
+            "txt" | "md" | "json" | "xml" | "html" | "css" | "js" | "ts" | "py" | "rs" | "go"
+            | "java" | "c" | "cpp" | "h" | "hpp" => true,
             // Uncompressed formats: Good delta candidates
             "psd" | "tif" | "tiff" | "bmp" | "wav" | "aiff" => true,
             // Video (raw/uncompressed): Good delta candidates

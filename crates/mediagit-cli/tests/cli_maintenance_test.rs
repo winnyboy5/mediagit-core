@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -32,13 +32,29 @@ fn mediagit() -> Command {
 }
 
 fn init_repo(dir: &Path) {
-    mediagit().arg("init").arg("-q").current_dir(dir).assert().success();
+    mediagit()
+        .arg("init")
+        .arg("-q")
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 fn add_and_commit(dir: &Path, name: &str, content: &str, message: &str) {
     fs::write(dir.join(name), content).unwrap();
-    mediagit().arg("add").arg(name).current_dir(dir).assert().success();
-    mediagit().arg("commit").arg("-m").arg(message).current_dir(dir).assert().success();
+    mediagit()
+        .arg("add")
+        .arg(name)
+        .current_dir(dir)
+        .assert()
+        .success();
+    mediagit()
+        .arg("commit")
+        .arg("-m")
+        .arg(message)
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 // ============================================================================
@@ -52,7 +68,12 @@ fn test_gc_basic() {
 
     // Create some commits to have objects to GC
     for i in 1..=5 {
-        add_and_commit(temp_dir.path(), &format!("file{}.txt", i), &format!("Content {}", i), &format!("Commit {}", i));
+        add_and_commit(
+            temp_dir.path(),
+            &format!("file{}.txt", i),
+            &format!("Content {}", i),
+            &format!("Commit {}", i),
+        );
     }
 
     let start = Instant::now();
@@ -71,7 +92,12 @@ fn test_gc_aggressive() {
     init_repo(temp_dir.path());
 
     for i in 1..=3 {
-        add_and_commit(temp_dir.path(), &format!("file{}.txt", i), &format!("Content {}", i), &format!("Commit {}", i));
+        add_and_commit(
+            temp_dir.path(),
+            &format!("file{}.txt", i),
+            &format!("Content {}", i),
+            &format!("Commit {}", i),
+        );
     }
 
     mediagit()
@@ -185,7 +211,12 @@ fn test_fsck_full() {
     init_repo(temp_dir.path());
 
     for i in 1..=3 {
-        add_and_commit(temp_dir.path(), &format!("file{}.txt", i), &format!("Content {}", i), &format!("Commit {}", i));
+        add_and_commit(
+            temp_dir.path(),
+            &format!("file{}.txt", i),
+            &format!("Content {}", i),
+            &format!("Commit {}", i),
+        );
     }
 
     mediagit()
@@ -336,7 +367,9 @@ fn test_stats_basic() {
         .current_dir(temp_dir.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains("Repository Statistics").or(predicate::str::contains("Stats")));
+        .stdout(
+            predicate::str::contains("Repository Statistics").or(predicate::str::contains("Stats")),
+        );
 }
 
 #[test]
@@ -345,7 +378,12 @@ fn test_stats_all() {
     init_repo(temp_dir.path());
 
     for i in 1..=5 {
-        add_and_commit(temp_dir.path(), &format!("file{}.txt", i), &format!("Content with longer text for commit {}", i), &format!("Commit {}", i));
+        add_and_commit(
+            temp_dir.path(),
+            &format!("file{}.txt", i),
+            &format!("Content with longer text for commit {}", i),
+            &format!("Commit {}", i),
+        );
     }
 
     mediagit()
@@ -377,7 +415,14 @@ fn test_stats_compression() {
     init_repo(temp_dir.path());
 
     // Add some content that can be compressed
-    add_and_commit(temp_dir.path(), "text.txt", "This is some text that should compress well. ".repeat(100).as_str(), "Add text");
+    add_and_commit(
+        temp_dir.path(),
+        "text.txt",
+        "This is some text that should compress well. "
+            .repeat(100)
+            .as_str(),
+        "Add text",
+    );
 
     mediagit()
         .arg("stats")
@@ -395,8 +440,20 @@ fn test_stats_branches() {
     add_and_commit(temp_dir.path(), "file.txt", "Content", "Initial commit");
 
     // Create some branches
-    mediagit().arg("branch").arg("create").arg("feature-1").current_dir(temp_dir.path()).assert().success();
-    mediagit().arg("branch").arg("create").arg("feature-2").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("branch")
+        .arg("create")
+        .arg("feature-1")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("branch")
+        .arg("create")
+        .arg("feature-2")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     mediagit()
         .arg("stats")
@@ -504,21 +561,41 @@ fn test_maintenance_benchmark() {
 
     // Benchmark fsck
     let start = Instant::now();
-    mediagit().arg("fsck").arg("-q").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("fsck")
+        .arg("-q")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
     println!("FSCK (10 commits): {:?}", start.elapsed());
 
     // Benchmark verify
     let start = Instant::now();
-    mediagit().arg("verify").arg("-q").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("verify")
+        .arg("-q")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
     println!("Verify (10 commits): {:?}", start.elapsed());
 
     // Benchmark gc
     let start = Instant::now();
-    mediagit().arg("gc").arg("-q").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("gc")
+        .arg("-q")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
     println!("GC (10 commits): {:?}", start.elapsed());
 
     // Benchmark stats
     let start = Instant::now();
-    mediagit().arg("stats").arg("-q").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("stats")
+        .arg("-q")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
     println!("Stats (10 commits): {:?}", start.elapsed());
 }

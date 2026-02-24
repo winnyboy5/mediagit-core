@@ -108,11 +108,7 @@ impl TreeDiffer {
     /// # Returns
     ///
     /// TreeDiff with categorized changes
-    pub async fn diff_trees(
-        &self,
-        source_oid: &Oid,
-        target_oid: &Oid,
-    ) -> anyhow::Result<TreeDiff> {
+    pub async fn diff_trees(&self, source_oid: &Oid, target_oid: &Oid) -> anyhow::Result<TreeDiff> {
         debug!(source = %source_oid, target = %target_oid, "Diffing trees");
 
         // Same tree = no changes
@@ -308,8 +304,16 @@ impl TreeDiffer {
         }
 
         // Handle deletions
-        let ours_deleted: Vec<String> = ours_changes.deleted.iter().map(|e| e.name.clone()).collect();
-        let theirs_deleted: Vec<String> = theirs_changes.deleted.iter().map(|e| e.name.clone()).collect();
+        let ours_deleted: Vec<String> = ours_changes
+            .deleted
+            .iter()
+            .map(|e| e.name.clone())
+            .collect();
+        let theirs_deleted: Vec<String> = theirs_changes
+            .deleted
+            .iter()
+            .map(|e| e.name.clone())
+            .collect();
 
         for name in &ours_deleted {
             if theirs_deleted.contains(name) {
@@ -451,8 +455,16 @@ mod tests {
         let differ = TreeDiffer::new(odb.clone());
 
         let base = create_tree(&odb, vec![("file.txt", b"base")]).await;
-        let ours = create_tree(&odb, vec![("file.txt", b"base"), ("ours.txt", b"our change")]).await;
-        let theirs = create_tree(&odb, vec![("file.txt", b"base"), ("theirs.txt", b"their change")]).await;
+        let ours = create_tree(
+            &odb,
+            vec![("file.txt", b"base"), ("ours.txt", b"our change")],
+        )
+        .await;
+        let theirs = create_tree(
+            &odb,
+            vec![("file.txt", b"base"), ("theirs.txt", b"their change")],
+        )
+        .await;
 
         let diff = differ.three_way_diff(&base, &ours, &theirs).await.unwrap();
 
@@ -563,8 +575,8 @@ mod tests {
         let ours = create_tree(
             &odb,
             vec![
-                ("file1.txt", b"modified1"),  // Modified by us
-                ("file2.txt", b"original2"),  // Unchanged
+                ("file1.txt", b"modified1"),   // Modified by us
+                ("file2.txt", b"original2"),   // Unchanged
                 ("ours_new.txt", b"new file"), // Added by us
             ],
         )
@@ -573,8 +585,8 @@ mod tests {
         let theirs = create_tree(
             &odb,
             vec![
-                ("file1.txt", b"their_mod1"),    // Modified differently
-                ("file3.txt", b"original3"),    // Unchanged
+                ("file1.txt", b"their_mod1"),     // Modified differently
+                ("file3.txt", b"original3"),      // Unchanged
                 ("theirs_new.txt", b"their new"), // Added by them
             ],
         )

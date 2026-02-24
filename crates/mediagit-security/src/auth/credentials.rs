@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -114,7 +114,8 @@ impl CredentialsStore {
             let email_index = self.email_index.read().await;
             if email_index.contains_key(&user.email) {
                 return Err(AuthError::Internal(anyhow::anyhow!(
-                    "Email already registered: {}", user.email
+                    "Email already registered: {}",
+                    user.email
                 )));
             }
         }
@@ -124,7 +125,8 @@ impl CredentialsStore {
             let username_index = self.username_index.read().await;
             if username_index.contains_key(&user.username) {
                 return Err(AuthError::Internal(anyhow::anyhow!(
-                    "Username already taken: {}", user.username
+                    "Username already taken: {}",
+                    user.username
                 )));
             }
         }
@@ -166,15 +168,14 @@ impl CredentialsStore {
             }
         };
 
-        let user_id = user_id.ok_or_else(|| {
-            AuthError::Unauthorized("Invalid credentials".to_string())
-        })?;
+        let user_id =
+            user_id.ok_or_else(|| AuthError::Unauthorized("Invalid credentials".to_string()))?;
 
         // Get credentials and verify password
         let credentials = self.credentials.read().await;
-        let creds = credentials.get(&user_id).ok_or_else(|| {
-            AuthError::UserNotFound(user_id.clone())
-        })?;
+        let creds = credentials
+            .get(&user_id)
+            .ok_or_else(|| AuthError::UserNotFound(user_id.clone()))?;
 
         if creds.verify_password(password) {
             let mut user = creds.user.clone();
@@ -219,9 +220,9 @@ impl CredentialsStore {
     pub async fn update_password(&self, user_id: &str, new_password: &str) -> AuthResult<()> {
         let mut credentials = self.credentials.write().await;
 
-        let creds = credentials.get_mut(user_id).ok_or_else(|| {
-            AuthError::UserNotFound(user_id.to_string())
-        })?;
+        let creds = credentials
+            .get_mut(user_id)
+            .ok_or_else(|| AuthError::UserNotFound(user_id.to_string()))?;
 
         creds.update_password(new_password)
     }
@@ -229,9 +230,9 @@ impl CredentialsStore {
     /// Delete user
     pub async fn delete_user(&self, user_id: &str) -> AuthResult<()> {
         let mut credentials = self.credentials.write().await;
-        let creds = credentials.remove(user_id).ok_or_else(|| {
-            AuthError::UserNotFound(user_id.to_string())
-        })?;
+        let creds = credentials
+            .remove(user_id)
+            .ok_or_else(|| AuthError::UserNotFound(user_id.to_string()))?;
 
         // Remove from indices
         let mut email_index = self.email_index.write().await;
@@ -306,7 +307,9 @@ mod tests {
         store.register_user(user, "password123").await.unwrap();
 
         // Try wrong password
-        let result = store.authenticate("test@example.com", "wrongpassword").await;
+        let result = store
+            .authenticate("test@example.com", "wrongpassword")
+            .await;
         assert!(result.is_err());
     }
 

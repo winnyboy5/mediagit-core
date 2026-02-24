@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -187,9 +187,9 @@ impl ProgressTracker {
             return ProgressBar::hidden();
         }
 
-        let pb = self.multi.add(
-            ProgressBar::new_spinner().with_finish(ProgressFinish::AndClear),
-        );
+        let pb = self
+            .multi
+            .add(ProgressBar::new_spinner().with_finish(ProgressFinish::AndClear));
         pb.set_style(
             ProgressStyle::default_spinner()
                 .template("{spinner:.cyan} {msg}")
@@ -316,7 +316,10 @@ impl OperationStats {
         let mut entries: Vec<_> = std::fs::read_dir(&stats_dir)?
             .filter_map(|e| e.ok())
             .filter(|e| {
-                e.path().extension().map(|ext| ext == "json").unwrap_or(false)
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "json")
+                    .unwrap_or(false)
             })
             .collect();
 
@@ -336,9 +339,14 @@ impl OperationStats {
     }
 
     /// Load the most recent stats for a specific operation type
-    pub fn load_last_by_type(storage_path: &Path, operation_name: &str) -> anyhow::Result<Option<OperationStats>> {
+    pub fn load_last_by_type(
+        storage_path: &Path,
+        operation_name: &str,
+    ) -> anyhow::Result<Option<OperationStats>> {
         let all_stats = Self::load_recent(storage_path, 50)?;
-        Ok(all_stats.into_iter().find(|s| s.operation_name == operation_name))
+        Ok(all_stats
+            .into_iter()
+            .find(|s| s.operation_name == operation_name))
     }
 
     /// Cleanup old stats files, keeping only the most recent `keep_count`
@@ -346,7 +354,10 @@ impl OperationStats {
         let mut entries: Vec<_> = std::fs::read_dir(stats_dir)?
             .filter_map(|e| e.ok())
             .filter(|e| {
-                e.path().extension().map(|ext| ext == "json").unwrap_or(false)
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "json")
+                    .unwrap_or(false)
             })
             .collect();
 
@@ -376,13 +387,25 @@ mod tests {
         println!("500 B = '{}'", OperationStats::format_bytes(500));
         println!("1 KiB = '{}'", OperationStats::format_bytes(1024));
         println!("1 MiB = '{}'", OperationStats::format_bytes(1024 * 1024));
-        println!("1 GiB = '{}'", OperationStats::format_bytes(1024 * 1024 * 1024));
-        
+        println!(
+            "1 GiB = '{}'",
+            OperationStats::format_bytes(1024 * 1024 * 1024)
+        );
+
         // HumanBytes uses "B", "KiB", "MiB", "GiB" format
         assert!(OperationStats::format_bytes(500).contains("B"));
-        assert!(OperationStats::format_bytes(1024).contains("KiB") || OperationStats::format_bytes(1024).contains("KB"));
-        assert!(OperationStats::format_bytes(1024 * 1024).contains("MiB") || OperationStats::format_bytes(1024 * 1024).contains("MB"));
-        assert!(OperationStats::format_bytes(1024 * 1024 * 1024).contains("GiB") || OperationStats::format_bytes(1024 * 1024 * 1024).contains("GB"));
+        assert!(
+            OperationStats::format_bytes(1024).contains("KiB")
+                || OperationStats::format_bytes(1024).contains("KB")
+        );
+        assert!(
+            OperationStats::format_bytes(1024 * 1024).contains("MiB")
+                || OperationStats::format_bytes(1024 * 1024).contains("MB")
+        );
+        assert!(
+            OperationStats::format_bytes(1024 * 1024 * 1024).contains("GiB")
+                || OperationStats::format_bytes(1024 * 1024 * 1024).contains("GB")
+        );
     }
 
     #[test]
@@ -396,7 +419,11 @@ mod tests {
         println!("DEBUG summary: '{}'", summary);
         // HumanBytes uses "MiB" format
         assert!(summary.contains("MiB"), "Expected MiB, got: {}", summary);
-        assert!(summary.contains("42 objects"), "Expected 42 objects, got: {}", summary);
+        assert!(
+            summary.contains("42 objects"),
+            "Expected 42 objects, got: {}",
+            summary
+        );
         // HumanDuration formats durations in human readable format
         assert!(summary.contains("in "), "Expected 'in ', got: {}", summary);
     }

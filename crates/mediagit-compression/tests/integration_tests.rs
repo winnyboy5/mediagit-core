@@ -15,7 +15,7 @@
 //! Integration tests for compression module
 
 use mediagit_compression::{
-    BrotliCompressor, Compressor, CompressionAlgorithm, CompressionLevel, ZstdCompressor,
+    BrotliCompressor, CompressionAlgorithm, CompressionLevel, Compressor, ZstdCompressor,
 };
 
 #[test]
@@ -30,8 +30,12 @@ fn test_zstd_roundtrip_various_sizes() {
     ];
 
     for (name, data) in test_cases {
-        let compressed = compressor.compress(&data).expect(&format!("compress {}", name));
-        let decompressed = compressor.decompress(&compressed).expect(&format!("decompress {}", name));
+        let compressed = compressor
+            .compress(&data)
+            .expect(&format!("compress {}", name));
+        let decompressed = compressor
+            .decompress(&compressed)
+            .expect(&format!("decompress {}", name));
 
         assert_eq!(data, decompressed, "Failed roundtrip for {}", name);
     }
@@ -49,8 +53,12 @@ fn test_brotli_roundtrip_various_sizes() {
     ];
 
     for (name, data) in test_cases {
-        let compressed = compressor.compress(&data).expect(&format!("compress {}", name));
-        let decompressed = compressor.decompress(&compressed).expect(&format!("decompress {}", name));
+        let compressed = compressor
+            .compress(&data)
+            .expect(&format!("compress {}", name));
+        let decompressed = compressor
+            .decompress(&compressed)
+            .expect(&format!("decompress {}", name));
 
         assert_eq!(data, decompressed, "Failed roundtrip for {}", name);
     }
@@ -100,19 +108,37 @@ fn test_compression_ratios_comparison() {
     let brotli_ratio = brotli_compressed.len() as f64 / test_data.len() as f64;
 
     println!("Original: {} bytes", test_data.len());
-    println!("Zstd: {} bytes ({:.2}% of original)", zstd_compressed.len(), zstd_ratio * 100.0);
-    println!("Brotli: {} bytes ({:.2}% of original)", brotli_compressed.len(), brotli_ratio * 100.0);
+    println!(
+        "Zstd: {} bytes ({:.2}% of original)",
+        zstd_compressed.len(),
+        zstd_ratio * 100.0
+    );
+    println!(
+        "Brotli: {} bytes ({:.2}% of original)",
+        brotli_compressed.len(),
+        brotli_ratio * 100.0
+    );
 
     // Both should achieve reasonable compression on repetitive data
-    assert!(zstd_ratio < 0.5, "Zstd should compress repetitive data well");
-    assert!(brotli_ratio < 0.5, "Brotli should compress repetitive data well");
+    assert!(
+        zstd_ratio < 0.5,
+        "Zstd should compress repetitive data well"
+    );
+    assert!(
+        brotli_ratio < 0.5,
+        "Brotli should compress repetitive data well"
+    );
 }
 
 #[test]
 fn test_all_compression_levels() {
     let data = b"Compression level test data. ".repeat(50);
 
-    for level in &[CompressionLevel::Fast, CompressionLevel::Default, CompressionLevel::Best] {
+    for level in &[
+        CompressionLevel::Fast,
+        CompressionLevel::Default,
+        CompressionLevel::Best,
+    ] {
         let zstd = ZstdCompressor::new(*level);
         let zstd_compressed = zstd.compress(&data).unwrap();
 
@@ -123,16 +149,32 @@ fn test_all_compression_levels() {
         let zstd_decompressed = zstd.decompress(&zstd_compressed).unwrap();
         let brotli_decompressed = brotli.decompress(&brotli_compressed).unwrap();
 
-        assert_eq!(&data[..], &zstd_decompressed[..], "Zstd decompress failed for {:?}", level);
-        assert_eq!(&data[..], &brotli_decompressed[..], "Brotli decompress failed for {:?}", level);
+        assert_eq!(
+            &data[..],
+            &zstd_decompressed[..],
+            "Zstd decompress failed for {:?}",
+            level
+        );
+        assert_eq!(
+            &data[..],
+            &brotli_decompressed[..],
+            "Brotli decompress failed for {:?}",
+            level
+        );
     }
 }
 
 #[test]
 fn test_different_data_types() {
     let test_cases = vec![
-        ("ascii_text", b"The quick brown fox jumps over the lazy dog. ".to_vec()),
-        ("utf8_text", "Hello, World! こんにちは 世界".as_bytes().to_vec()),
+        (
+            "ascii_text",
+            b"The quick brown fox jumps over the lazy dog. ".to_vec(),
+        ),
+        (
+            "utf8_text",
+            "Hello, World! こんにちは 世界".as_bytes().to_vec(),
+        ),
         ("json", b"{\"key\": \"value\", \"number\": 123}".to_vec()),
         ("binary", vec![0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA]),
     ];
@@ -141,13 +183,29 @@ fn test_different_data_types() {
     let brotli = BrotliCompressor::new(CompressionLevel::Default);
 
     for (name, data) in test_cases {
-        let zstd_compressed = zstd.compress(&data).expect(&format!("zstd compress {}", name));
-        let zstd_decompressed = zstd.decompress(&zstd_compressed).expect(&format!("zstd decompress {}", name));
-        assert_eq!(data, zstd_decompressed, "Zstd roundtrip failed for {}", name);
+        let zstd_compressed = zstd
+            .compress(&data)
+            .expect(&format!("zstd compress {}", name));
+        let zstd_decompressed = zstd
+            .decompress(&zstd_compressed)
+            .expect(&format!("zstd decompress {}", name));
+        assert_eq!(
+            data, zstd_decompressed,
+            "Zstd roundtrip failed for {}",
+            name
+        );
 
-        let brotli_compressed = brotli.compress(&data).expect(&format!("brotli compress {}", name));
-        let brotli_decompressed = brotli.decompress(&brotli_compressed).expect(&format!("brotli decompress {}", name));
-        assert_eq!(data, brotli_decompressed, "Brotli roundtrip failed for {}", name);
+        let brotli_compressed = brotli
+            .compress(&data)
+            .expect(&format!("brotli compress {}", name));
+        let brotli_decompressed = brotli
+            .decompress(&brotli_compressed)
+            .expect(&format!("brotli decompress {}", name));
+        assert_eq!(
+            data, brotli_decompressed,
+            "Brotli roundtrip failed for {}",
+            name
+        );
     }
 }
 
@@ -187,9 +245,18 @@ fn test_large_file_simulation() {
     assert_eq!(large_data, zstd_decompressed);
     assert_eq!(large_data, brotli_decompressed);
 
-    println!("Large file ({}MB) compression:", large_data.len() / 1_000_000);
-    println!("  Zstd: {:.2}% of original", (zstd_compressed.len() as f64 / large_data.len() as f64) * 100.0);
-    println!("  Brotli: {:.2}% of original", (brotli_compressed.len() as f64 / large_data.len() as f64) * 100.0);
+    println!(
+        "Large file ({}MB) compression:",
+        large_data.len() / 1_000_000
+    );
+    println!(
+        "  Zstd: {:.2}% of original",
+        (zstd_compressed.len() as f64 / large_data.len() as f64) * 100.0
+    );
+    println!(
+        "  Brotli: {:.2}% of original",
+        (brotli_compressed.len() as f64 / large_data.len() as f64) * 100.0
+    );
 }
 
 // NOTE: This test is disabled due to enum type conflicts between modules.

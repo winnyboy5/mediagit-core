@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -59,7 +59,11 @@ pub enum ChunkStrategy {
     /// Fixed-size chunks (simple, predictable)
     Fixed { size: usize },
     /// Rolling hash chunking (content-defined boundaries)
-    Rolling { avg_size: usize, min_size: usize, max_size: usize },
+    Rolling {
+        avg_size: usize,
+        min_size: usize,
+        max_size: usize,
+    },
     /// Media-aware chunking (parse structure, separate streams)
     #[default]
     MediaAware,
@@ -132,18 +136,18 @@ struct EbmlElement {
 }
 
 // Matroska Element IDs (with VINT marker included)
-const EBML_ID: u32 = 0x1A45DFA3;        // EBML Header
-const SEGMENT_ID: u32 = 0x18538067;     // Segment container
-const SEEKHEAD_ID: u32 = 0x114D9B74;    // SeekHead (index)
-const INFO_ID: u32 = 0x1549A966;        // Segment Info
-const TRACKS_ID: u32 = 0x1654AE6B;      // Track definitions
-const CLUSTER_ID: u32 = 0x1F43B675;     // Cluster (media data)
-const CUES_ID: u32 = 0x1C53BB6B;        // Cues (seek index)
-const CHAPTERS_ID: u32 = 0x1043A770;    // Chapters
-const TAGS_ID: u32 = 0x1254C367;        // Tags (metadata)
+const EBML_ID: u32 = 0x1A45DFA3; // EBML Header
+const SEGMENT_ID: u32 = 0x18538067; // Segment container
+const SEEKHEAD_ID: u32 = 0x114D9B74; // SeekHead (index)
+const INFO_ID: u32 = 0x1549A966; // Segment Info
+const TRACKS_ID: u32 = 0x1654AE6B; // Track definitions
+const CLUSTER_ID: u32 = 0x1F43B675; // Cluster (media data)
+const CUES_ID: u32 = 0x1C53BB6B; // Cues (seek index)
+const CHAPTERS_ID: u32 = 0x1043A770; // Chapters
+const TAGS_ID: u32 = 0x1254C367; // Tags (metadata)
 const ATTACHMENTS_ID: u32 = 0x1941A469; // Attachments
-const VOID_ID: u32 = 0xEC;              // Void (padding, skip)
-const CRC32_ID: u32 = 0xBF;             // CRC-32 (skip)
+const VOID_ID: u32 = 0xEC; // Void (padding, skip)
+const CRC32_ID: u32 = 0xBF; // CRC-32 (skip)
 /// Get optimal chunk parameters based on file size
 ///
 /// Returns (avg_size, min_size, max_size) tuned for the file size.
@@ -164,10 +168,10 @@ const CRC32_ID: u32 = 0xBF;             // CRC-32 (skip)
 fn get_chunk_params(file_size: u64) -> (usize, usize, usize) {
     const MB: usize = 1024 * 1024;
     match file_size {
-        0..=100_000_000 => (MB, 512 * 1024, 4 * MB),           // < 100MB: 1MB avg
-        100_000_001..=10_000_000_000 => (2 * MB, MB, 8 * MB),  // 100MB-10GB: 2MB avg
+        0..=100_000_000 => (MB, 512 * 1024, 4 * MB), // < 100MB: 1MB avg
+        100_000_001..=10_000_000_000 => (2 * MB, MB, 8 * MB), // 100MB-10GB: 2MB avg
         10_000_000_001..=100_000_000_000 => (4 * MB, MB, 16 * MB), // 10GB-100GB: 4MB avg
-        _ => (8 * MB, MB, 32 * MB),                           // > 100GB: 8MB avg
+        _ => (8 * MB, MB, 32 * MB),                  // > 100GB: 8MB avg
     }
 }
 
@@ -186,9 +190,11 @@ impl ContentChunker {
     pub async fn chunk(&self, data: &[u8], filename: &str) -> Result<Vec<ContentChunk>> {
         match self.strategy {
             ChunkStrategy::Fixed { size } => self.chunk_fixed(data, size).await,
-            ChunkStrategy::Rolling { avg_size, min_size, max_size } => {
-                self.chunk_fastcdc(data, avg_size, min_size, max_size).await
-            }
+            ChunkStrategy::Rolling {
+                avg_size,
+                min_size,
+                max_size,
+            } => self.chunk_fastcdc(data, avg_size, min_size, max_size).await,
             ChunkStrategy::MediaAware => self.chunk_media_aware(data, filename).await,
         }
     }
@@ -246,26 +252,28 @@ impl ContentChunker {
         let file_size = std::fs::metadata(path)
             .map_err(|e| anyhow::anyhow!("Failed to get file metadata: {}", e))?
             .len();
-        
+
         let mut chunk_oids = Vec::new();
-        
+
         // Tier 1: Small files (< 10MB): Load into memory for fastest processing
         if file_size < 10 * 1024 * 1024 {
-            let data = tokio::fs::read(path).await
+            let data = tokio::fs::read(path)
+                .await
                 .map_err(|e| anyhow::anyhow!("Failed to read file: {}", e))?;
-            let filename = path.file_name()
+            let filename = path
+                .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("unknown");
-            
+
             let chunks = self.chunk(&data, filename).await?;
             for chunk in chunks {
                 let oid = chunk.id;
-                on_chunk(chunk).await?;  // Process immediately
-                chunk_oids.push(oid);    // Only store the OID
+                on_chunk(chunk).await?; // Process immediately
+                chunk_oids.push(oid); // Only store the OID
             }
             return Ok(chunk_oids);
         }
-        
+
         // Tier 2: Medium files (10-100MB): Load into memory but process with streaming callback
         // Still loads file, but processes chunks immediately to reduce peak memory
         if file_size < 100 * 1024 * 1024 {
@@ -273,22 +281,24 @@ impl ContentChunker {
                 size = file_size,
                 "Medium file: loading then streaming chunks"
             );
-            let data = tokio::fs::read(path).await
+            let data = tokio::fs::read(path)
+                .await
                 .map_err(|e| anyhow::anyhow!("Failed to read file: {}", e))?;
-            let filename = path.file_name()
+            let filename = path
+                .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("unknown");
-            
+
             // Use MediaAware chunking for better boundaries
             let chunks = self.chunk(&data, filename).await?;
             for chunk in chunks {
                 let oid = chunk.id;
-                on_chunk(chunk).await?;  // Process immediately (allows GC of chunk data)
+                on_chunk(chunk).await?; // Process immediately (allows GC of chunk data)
                 chunk_oids.push(oid);
             }
             return Ok(chunk_oids);
         }
-        
+
         // Large files: Stream with FastCDC content-defined chunking
         // FastCDC's StreamCDC uses gear table for O(1) boundary detection - fast enough for streaming
         let (avg_size, min_size, max_size) = get_chunk_params(file_size);
@@ -297,19 +307,20 @@ impl ContentChunker {
             file_size,
             avg_size / 1024
         );
-        
+
         // Read file into memory for FastCDC (required by current API)
         // Note: FastCDC StreamCDC requires Read trait, but for truly streaming
         // we need to buffer chunks. Memory usage is bounded by max_chunk_size.
-        let file = std::fs::File::open(path)
-            .map_err(|e| anyhow::anyhow!("Failed to open file: {}", e))?;
-        
-        let chunker = fastcdc::v2020::StreamCDC::new(file, min_size as u32, avg_size as u32, max_size as u32);
-        
+        let file =
+            std::fs::File::open(path).map_err(|e| anyhow::anyhow!("Failed to open file: {}", e))?;
+
+        let chunker =
+            fastcdc::v2020::StreamCDC::new(file, min_size as u32, avg_size as u32, max_size as u32);
+
         for result in chunker {
             let entry = result.map_err(|e| anyhow::anyhow!("FastCDC stream error: {}", e))?;
             let id = Oid::hash(&entry.data);
-            
+
             let chunk = ContentChunk {
                 id,
                 data: entry.data,
@@ -318,12 +329,15 @@ impl ContentChunker {
                 chunk_type: ChunkType::Generic,
                 perceptual_hash: None,
             };
-            
+
             on_chunk(chunk).await?;
             chunk_oids.push(id);
         }
-        
-        info!("FastCDC streaming complete: {} chunks created", chunk_oids.len());
+
+        info!(
+            "FastCDC streaming complete: {} chunks created",
+            chunk_oids.len()
+        );
         Ok(chunk_oids)
     }
 
@@ -342,7 +356,9 @@ impl ContentChunker {
     ) -> anyhow::Result<()> {
         let path = path.as_ref();
         let file_size = std::fs::metadata(path)
-            .map_err(|e| anyhow::anyhow!("Failed to read file metadata '{}': {}", path.display(), e))?
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to read file metadata '{}': {}", path.display(), e)
+            })?
             .len();
 
         if file_size == 0 {
@@ -354,9 +370,8 @@ impl ContentChunker {
         let file = std::fs::File::open(path)
             .map_err(|e| anyhow::anyhow!("Failed to open file '{}': {}", path.display(), e))?;
 
-        let stream_cdc = fastcdc::v2020::StreamCDC::new(
-            file, min_size as u32, avg_size as u32, max_size as u32,
-        );
+        let stream_cdc =
+            fastcdc::v2020::StreamCDC::new(file, min_size as u32, avg_size as u32, max_size as u32);
 
         for result in stream_cdc {
             let entry = result.map_err(|e| anyhow::anyhow!("FastCDC streaming error: {}", e))?;
@@ -369,7 +384,8 @@ impl ContentChunker {
                 chunk_type: ChunkType::Generic,
                 perceptual_hash: None,
             };
-            sender.blocking_send(chunk)
+            sender
+                .blocking_send(chunk)
                 .map_err(|_| anyhow::anyhow!("Chunk worker channel closed unexpectedly"))?;
         }
 
@@ -407,7 +423,7 @@ impl ContentChunker {
     }
 
     /// Content-defined chunking using FastCDC algorithm
-    /// 
+    ///
     /// Uses gear table-based hashing for O(1) boundary detection per byte,
     /// approximately 10x faster than traditional rolling hash implementations.
     async fn chunk_fastcdc(
@@ -418,14 +434,14 @@ impl ContentChunker {
         max_size: usize,
     ) -> Result<Vec<ContentChunk>> {
         use fastcdc::v2020::FastCDC;
-        
+
         let chunker = FastCDC::new(data, min_size as u32, avg_size as u32, max_size as u32);
         let mut chunks = Vec::new();
-        
+
         for entry in chunker {
             let chunk_data = &data[entry.offset..entry.offset + entry.length];
             let id = Oid::hash(chunk_data);
-            
+
             chunks.push(ContentChunk {
                 id,
                 data: chunk_data.to_vec(),
@@ -435,14 +451,14 @@ impl ContentChunker {
                 perceptual_hash: None,
             });
         }
-        
+
         debug!(
             chunks = chunks.len(),
             avg_size = avg_size,
             total_size = data.len(),
             "FastCDC chunking complete"
         );
-        
+
         Ok(chunks)
     }
 
@@ -491,35 +507,33 @@ impl ContentChunker {
             }
 
             // Text/Code - Rolling CDC for incremental dedup (Brotli compression)
-            "csv" | "tsv" | "json" | "xml" | "html" | "txt" | "md" | "rst" |
-            "rs" | "py" | "js" | "ts" | "go" | "java" | "c" | "cpp" | "h" |
-            "yaml" | "yml" | "toml" | "ini" | "cfg" |
-            "sql" | "graphql" | "proto" => {
+            "csv" | "tsv" | "json" | "xml" | "html" | "txt" | "md" | "rst" | "rs" | "py" | "js"
+            | "ts" | "go" | "java" | "c" | "cpp" | "h" | "yaml" | "yml" | "toml" | "ini"
+            | "cfg" | "sql" | "graphql" | "proto" => {
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
                 self.chunk_fastcdc(data, avg, min, max).await
             }
-            
+
             // ML Data formats - Rolling CDC for dataset versioning
-            "parquet" | "arrow" | "feather" | "orc" | "avro" |
-            "hdf5" | "h5" | "nc" | "netcdf" | "npy" | "npz" | "tfrecords" | "petastorm" => {
+            "parquet" | "arrow" | "feather" | "orc" | "avro" | "hdf5" | "h5" | "nc" | "netcdf"
+            | "npy" | "npz" | "tfrecords" | "petastorm" => {
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
                 self.chunk_fastcdc(data, avg, min, max).await
             }
-            
+
             // ML Models - Rolling CDC for fine-tuning dedup
-            "pt" | "pth" | "ckpt" | "pb" | "safetensors" | "bin" |
-            "pkl" | "joblib" => {
+            "pt" | "pth" | "ckpt" | "pb" | "safetensors" | "bin" | "pkl" | "joblib" => {
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
                 self.chunk_fastcdc(data, avg, min, max).await
             }
-            
+
             // ML Deployment - Rolling CDC for model versioning
-            "onnx" | "gguf" | "ggml" | "tflite" | "mlmodel" | "coreml" |
-            "keras" | "pte" | "mleap" | "pmml" | "llamafile" => {
+            "onnx" | "gguf" | "ggml" | "tflite" | "mlmodel" | "coreml" | "keras" | "pte"
+            | "mleap" | "pmml" | "llamafile" => {
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
                 self.chunk_fastcdc(data, avg, min, max).await
             }
-            
+
             // Documents - Rolling CDC
             "pdf" | "svg" | "eps" | "ai" => {
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
@@ -531,23 +545,25 @@ impl ContentChunker {
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
                 self.chunk_fastcdc(data, avg, min, max).await
             }
-            
+
             // Lossless audio - Rolling CDC
             "flac" | "aiff" | "alac" => {
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
                 self.chunk_fastcdc(data, avg, min, max).await
             }
-            
+
             // Compressed formats - Fixed chunking (already compressed, replaced entirely)
-            "jpg" | "jpeg" | "png" | "gif" | "webp" | "avif" | "heic" |
-            "mp3" | "aac" | "ogg" | "opus" |
-            "zip" | "7z" | "rar" | "gz" | "xz" | "bz2" => {
+            "jpg" | "jpeg" | "png" | "gif" | "webp" | "avif" | "heic" | "mp3" | "aac" | "ogg"
+            | "opus" | "zip" | "7z" | "rar" | "gz" | "xz" | "bz2" => {
                 self.chunk_fixed(data, 4 * 1024 * 1024).await
             }
-            
+
             // Unknown - Rolling CDC as safe default for dedup
             _ => {
-                debug!(extension = extension, "Unknown type, using rolling (CDC) chunking for dedup");
+                debug!(
+                    extension = extension,
+                    "Unknown type, using rolling (CDC) chunking for dedup"
+                );
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
                 self.chunk_fastcdc(data, avg, min, max).await
             }
@@ -601,19 +617,20 @@ impl ContentChunker {
             }
 
             let fourcc = &data[pos..pos + 4];
-            let chunk_size = u32::from_le_bytes([
-                data[pos + 4],
-                data[pos + 5],
-                data[pos + 6],
-                data[pos + 7],
-            ]) as usize;
+            let chunk_size =
+                u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+                    as usize;
 
             // Calculate chunk end, including padding byte if needed for RIFF alignment
             let data_end = (pos + 8 + chunk_size).min(data.len());
             let needs_padding = !chunk_size.is_multiple_of(2) && data_end < data.len();
-            let chunk_end = if needs_padding { data_end + 1 } else { data_end };
+            let chunk_end = if needs_padding {
+                data_end + 1
+            } else {
+                data_end
+            };
             let chunk_end = chunk_end.min(data.len());
-            
+
             // Include the padding byte in the chunk data for correct reconstruction
             let chunk_data = &data[pos..chunk_end];
 
@@ -650,8 +667,14 @@ impl ContentChunker {
 
         info!(
             chunks = chunks.len(),
-            video_chunks = chunks.iter().filter(|c| c.chunk_type == ChunkType::VideoStream).count(),
-            audio_chunks = chunks.iter().filter(|c| c.chunk_type == ChunkType::AudioStream).count(),
+            video_chunks = chunks
+                .iter()
+                .filter(|c| c.chunk_type == ChunkType::VideoStream)
+                .count(),
+            audio_chunks = chunks
+                .iter()
+                .filter(|c| c.chunk_type == ChunkType::AudioStream)
+                .count(),
             "AVI chunking complete"
         );
 
@@ -659,7 +682,7 @@ impl ContentChunker {
     }
 
     /// MP4/ISO BMFF chunking based on atom structure
-    /// 
+    ///
     /// Parses MP4 atoms (ftyp, moov, mdat, etc.) and creates chunks at atom boundaries.
     /// For large mdat atoms, uses CDC sub-chunking. For moov, parses nested atoms.
     async fn chunk_mp4(&self, data: &[u8]) -> Result<Vec<ContentChunk>> {
@@ -709,7 +732,7 @@ impl ContentChunker {
                     // Movie metadata container - parse nested atoms for finer deduplication
                     if atom.size > 8 {
                         let nested = parse_mp4_atoms(&atom_data[8..]); // Skip moov header
-                        
+
                         if nested.is_empty() {
                             // Fallback: keep as single chunk
                             chunks.push(ContentChunk {
@@ -731,14 +754,15 @@ impl ContentChunker {
                                 chunk_type: ChunkType::Metadata,
                                 perceptual_hash: None,
                             });
-                            
+
                             // Emit each nested atom as separate chunk
                             for nested_atom in &nested {
                                 let nested_start = 8 + nested_atom.offset as usize;
                                 let nested_end = nested_start + nested_atom.size as usize;
                                 if nested_end <= atom_data.len() {
                                     let nested_data = &atom_data[nested_start..nested_end];
-                                    let nested_type = String::from_utf8_lossy(&nested_atom.atom_type);
+                                    let nested_type =
+                                        String::from_utf8_lossy(&nested_atom.atom_type);
                                     chunks.push(ContentChunk {
                                         id: Oid::hash(nested_data),
                                         data: nested_data.to_vec(),
@@ -784,12 +808,14 @@ impl ContentChunker {
                         let mdat_content = &atom_data[atom.header_size as usize..];
                         let base_offset = atom.offset + atom.header_size as u64;
 
-                        let sub_chunks = self.chunk_fastcdc(
-                            mdat_content,
-                            1024 * 1024,  // 1MB average
-                            512 * 1024,  // 512KB minimum
-                            4 * 1024 * 1024,  // 4MB maximum
-                        ).await?;
+                        let sub_chunks = self
+                            .chunk_fastcdc(
+                                mdat_content,
+                                1024 * 1024,     // 1MB average
+                                512 * 1024,      // 512KB minimum
+                                4 * 1024 * 1024, // 4MB maximum
+                            )
+                            .await?;
 
                         // Adjust offsets for sub-chunks
                         for mut sub in sub_chunks {
@@ -857,8 +883,14 @@ impl ContentChunker {
 
         info!(
             chunks = chunks.len(),
-            metadata_chunks = chunks.iter().filter(|c| c.chunk_type == ChunkType::Metadata).count(),
-            video_chunks = chunks.iter().filter(|c| c.chunk_type == ChunkType::VideoStream).count(),
+            metadata_chunks = chunks
+                .iter()
+                .filter(|c| c.chunk_type == ChunkType::Metadata)
+                .count(),
+            video_chunks = chunks
+                .iter()
+                .filter(|c| c.chunk_type == ChunkType::VideoStream)
+                .count(),
             total_size = data.len(),
             "MP4 atom-based chunking complete"
         );
@@ -867,7 +899,7 @@ impl ContentChunker {
     }
 
     /// Matroska/WebM chunking
-    /// 
+    ///
     /// Parses EBML elements and creates content-aware chunks:
     /// - Metadata (EBML, Info, Tracks, SeekHead, Cues, etc.) grouped together
     /// - Each Cluster (media data) becomes a separate VideoStream chunk
@@ -875,32 +907,34 @@ impl ContentChunker {
     async fn chunk_matroska(&self, data: &[u8]) -> Result<Vec<ContentChunk>> {
         // LEVEL 1: Parse EBML elements
         let elements = parse_ebml_elements(data);
-        
+
         if elements.is_empty() {
             warn!("No valid EBML elements found, falling back to fixed chunking");
             return self.chunk_fixed(data, 4 * 1024 * 1024).await;
         }
-        
+
         // LEVEL 2: Validate EBML header exists
         if !elements.iter().any(|e| e.id == EBML_ID) {
             warn!("EBML header not found, not a valid Matroska file");
             return self.chunk_fixed(data, 4 * 1024 * 1024).await;
         }
-        
+
         let mut chunks = Vec::new();
         let mut metadata_start: Option<usize> = None;
         let mut metadata_end: usize = 0;
-        
+
         for element in &elements {
             let elem_start = element.offset as usize;
             let elem_size = if element.data_size == u64::MAX {
                 // Unknown size: extends to end of data
-                data.len().saturating_sub(elem_start).saturating_sub(element.header_size as usize)
+                data.len()
+                    .saturating_sub(elem_start)
+                    .saturating_sub(element.header_size as usize)
             } else {
                 element.header_size as usize + element.data_size as usize
             };
             let elem_end = (elem_start + elem_size).min(data.len());
-            
+
             match element.id {
                 CLUSTER_ID => {
                     // Flush accumulated metadata before Cluster
@@ -918,7 +952,7 @@ impl ContentChunker {
                         }
                         metadata_start = None;
                     }
-                    
+
                     // Create Cluster chunk (VideoStream)
                     if elem_end > elem_start {
                         let cluster_data = &data[elem_start..elem_end];
@@ -948,7 +982,7 @@ impl ContentChunker {
                         }
                         metadata_start = None;
                     }
-                    
+
                     // Attachments as separate Generic chunk
                     if elem_end > elem_start {
                         let attach_data = &data[elem_start..elem_end];
@@ -962,8 +996,8 @@ impl ContentChunker {
                         });
                     }
                 }
-                EBML_ID | SEGMENT_ID | SEEKHEAD_ID | INFO_ID | TRACKS_ID |
-                CUES_ID | CHAPTERS_ID | TAGS_ID => {
+                EBML_ID | SEGMENT_ID | SEEKHEAD_ID | INFO_ID | TRACKS_ID | CUES_ID
+                | CHAPTERS_ID | TAGS_ID => {
                     // Accumulate metadata elements
                     if metadata_start.is_none() {
                         metadata_start = Some(elem_start);
@@ -979,7 +1013,7 @@ impl ContentChunker {
                 }
             }
         }
-        
+
         // Final metadata chunk (for trailing Cues, Tags, etc.)
         if let Some(start) = metadata_start {
             if metadata_end > start {
@@ -994,52 +1028,58 @@ impl ContentChunker {
                 });
             }
         }
-        
+
         // LEVEL 3: Ensure we produced chunks
         if chunks.is_empty() {
             warn!("No chunks created from Matroska parsing, falling back");
             return self.chunk_fixed(data, 4 * 1024 * 1024).await;
         }
-        
+
         info!(
             chunks = chunks.len(),
-            metadata = chunks.iter().filter(|c| c.chunk_type == ChunkType::Metadata).count(),
-            clusters = chunks.iter().filter(|c| c.chunk_type == ChunkType::VideoStream).count(),
+            metadata = chunks
+                .iter()
+                .filter(|c| c.chunk_type == ChunkType::Metadata)
+                .count(),
+            clusters = chunks
+                .iter()
+                .filter(|c| c.chunk_type == ChunkType::VideoStream)
+                .count(),
             total_size = data.len(),
             "Matroska EBML chunking complete"
         );
-        
+
         Ok(chunks)
     }
 
     /// GLB (binary glTF) format chunking
-    /// 
+    ///
     /// GLB structure:
     /// - 12-byte header: magic (4) + version (4) + total length (4)
     /// - JSON chunk: length (4) + type "JSON" (4) + JSON data
     /// - Binary chunk: length (4) + type "BIN\0" (4) + binary data
     async fn chunk_glb(&self, data: &[u8]) -> Result<Vec<ContentChunk>> {
         let mut chunks = Vec::new();
-        
+
         // GLB magic: "glTF" (0x46546C67)
         const GLB_MAGIC: &[u8] = b"glTF";
         const JSON_CHUNK_TYPE: u32 = 0x4E4F534A; // "JSON"
-        const BIN_CHUNK_TYPE: u32 = 0x004E4942;  // "BIN\0"
-        
+        const BIN_CHUNK_TYPE: u32 = 0x004E4942; // "BIN\0"
+
         // Validate GLB header
         if data.len() < 12 || &data[0..4] != GLB_MAGIC {
             debug!("Not a valid GLB file, using fixed chunking");
             return self.chunk_fixed(data, 4 * 1024 * 1024).await;
         }
-        
+
         let version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
         let _total_length = u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize;
-        
+
         if version != 2 {
             debug!(version, "Unsupported GLB version, using fixed chunking");
             return self.chunk_fixed(data, 4 * 1024 * 1024).await;
         }
-        
+
         // Header chunk (12 bytes)
         let header_data = &data[0..12];
         chunks.push(ContentChunk {
@@ -1050,28 +1090,27 @@ impl ContentChunker {
             chunk_type: ChunkType::Metadata,
             perceptual_hash: None,
         });
-        
+
         let mut pos = 12;
-        
+
         // Parse JSON and BIN chunks
         while pos + 8 <= data.len() {
-            let chunk_length = u32::from_le_bytes([
-                data[pos], data[pos + 1], data[pos + 2], data[pos + 3]
-            ]) as usize;
-            let chunk_type = u32::from_le_bytes([
-                data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]
-            ]);
-            
+            let chunk_length =
+                u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                    as usize;
+            let chunk_type =
+                u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]]);
+
             let chunk_start = pos;
             let chunk_data_start = pos + 8;
             let chunk_end = (chunk_data_start + chunk_length).min(data.len());
-            
+
             let (ct, label) = match chunk_type {
                 JSON_CHUNK_TYPE => (ChunkType::Metadata, "JSON"),
                 BIN_CHUNK_TYPE => (ChunkType::Generic, "BIN"),
                 _ => (ChunkType::Generic, "Unknown"),
             };
-            
+
             // Include chunk header + data as single chunk
             let full_chunk_data = &data[chunk_start..chunk_end];
             chunks.push(ContentChunk {
@@ -1082,17 +1121,17 @@ impl ContentChunker {
                 chunk_type: ct,
                 perceptual_hash: None,
             });
-            
+
             debug!(
                 chunk_type = label,
                 offset = chunk_start,
                 size = full_chunk_data.len(),
                 "GLB chunk"
             );
-            
+
             pos = chunk_end;
         }
-        
+
         // Handle remaining data if any
         if pos < data.len() {
             let remaining = &data[pos..];
@@ -1105,12 +1144,12 @@ impl ContentChunker {
                 perceptual_hash: None,
             });
         }
-        
+
         if chunks.is_empty() {
             warn!("No chunks created from GLB parsing, falling back");
             return self.chunk_fixed(data, 4 * 1024 * 1024).await;
         }
-        
+
         info!(
             chunks = chunks.len(),
             total_size = data.len(),
@@ -1129,7 +1168,11 @@ impl ContentChunker {
     /// - PLY: header vs data sections
     async fn chunk_3d_text(&self, data: &[u8]) -> Result<Vec<ContentChunk>> {
         // Check if data is valid UTF-8 text
-        if !data.iter().take(1024).all(|&b| (..128).contains(&b) || b >= 0xC0) {
+        if !data
+            .iter()
+            .take(1024)
+            .all(|&b| (..128).contains(&b) || b >= 0xC0)
+        {
             // Binary format - use rolling CDC
             let (avg, min, max) = get_chunk_params(data.len() as u64);
             return self.chunk_fastcdc(data, avg, min, max).await;
@@ -1137,8 +1180,8 @@ impl ContentChunker {
 
         let mut chunks = Vec::new();
         let mut chunk_start = 0;
-        let min_chunk_size = 256 * 1024;  // 256KB minimum chunk
-        let max_chunk_size = 4 * 1024 * 1024;  // 4MB maximum
+        let min_chunk_size = 256 * 1024; // 256KB minimum chunk
+        let max_chunk_size = 4 * 1024 * 1024; // 4MB maximum
 
         // Parse as text, split at logical boundaries
         let text = String::from_utf8_lossy(data);
@@ -1274,7 +1317,7 @@ impl ContentChunker {
 }
 
 /// Parse MP4 atoms from data
-/// 
+///
 /// Returns a vector of Mp4Atom headers describing the atom structure.
 /// Handles standard 4-byte size, extended 8-byte size (size == 1),
 /// and size == 0 (extends to end of data).
@@ -1299,9 +1342,9 @@ fn parse_mp4_atoms(data: &[u8]) -> Vec<Mp4Atom> {
         atom_type.copy_from_slice(&data[offset + 4..offset + 8]);
 
         // Validate atom type (should be printable ASCII or known types)
-        let is_valid_type = atom_type.iter().all(|&b| {
-            (0x20..=0x7E).contains(&b) || b == 0x00
-        });
+        let is_valid_type = atom_type
+            .iter()
+            .all(|&b| (0x20..=0x7E).contains(&b) || b == 0x00);
         if !is_valid_type {
             // Invalid atom type, stop parsing
             break;
@@ -1358,73 +1401,73 @@ fn parse_mp4_atoms(data: &[u8]) -> Vec<Mp4Atom> {
 }
 
 /// Read EBML VINT for Element ID (marker bit KEPT in value)
-/// 
+///
 /// Returns (id, bytes_consumed) or None if invalid.
 /// Element IDs include the VINT marker bit as part of the value.
 fn read_ebml_id(data: &[u8], pos: usize) -> Option<(u32, u8)> {
     if pos >= data.len() {
         return None;
     }
-    
+
     let first = data[pos];
     if first == 0 {
         return None; // Invalid: leading zeros not allowed in shortest form
     }
-    
+
     // Count leading zeros to determine byte count
     let len = (first.leading_zeros() + 1) as usize;
     if len > 4 || pos + len > data.len() {
         return None; // Matroska limits IDs to 4 bytes
     }
-    
+
     // Build ID value (marker bit is kept)
     let mut id = first as u32;
     for i in 1..len {
         id = (id << 8) | data[pos + i] as u32;
     }
-    
+
     Some((id, len as u8))
 }
 
 /// Read EBML VINT for Element Size (marker bit REMOVED from value)
-/// 
+///
 /// Returns (size, bytes_consumed) or None if invalid.
 /// Size u64::MAX indicates "unknown size" (all data bits = 1).
 fn read_ebml_size(data: &[u8], pos: usize) -> Option<(u64, u8)> {
     if pos >= data.len() {
         return None;
     }
-    
+
     let first = data[pos];
     if first == 0 {
         return None; // Invalid: all zeros
     }
-    
+
     // Count leading zeros to determine byte count
     let len = (first.leading_zeros() + 1) as usize;
     if len > 8 || pos + len > data.len() {
         return None;
     }
-    
+
     // Clear marker bit and build size value
     let mask = 0xFFu8 >> len;
     let mut size = (first & mask) as u64;
     for i in 1..len {
         size = (size << 8) | data[pos + i] as u64;
     }
-    
+
     // Check for "unknown size" (all data bits = 1)
     // For 1-byte: 0x7F, 2-byte: 0x3FFF, etc.
     let unknown_marker = (1u64 << (7 * len)) - 1;
     if size == unknown_marker {
         return Some((u64::MAX, len as u8));
     }
-    
+
     Some((size, len as u8))
 }
 
 /// Parse EBML elements from Matroska/WebM data
-/// 
+///
 /// Returns a vector of EbmlElement headers. Enters Segment containers
 /// to parse their children (Clusters, Info, Tracks, etc.).
 /// Stops on unknown size elements or parse errors.
@@ -1432,22 +1475,22 @@ fn parse_ebml_elements(data: &[u8]) -> Vec<EbmlElement> {
     let mut elements = Vec::new();
     let mut pos = 0usize;
     let data_len = data.len();
-    
+
     while pos + 2 <= data_len {
         // Read Element ID
         let (id, id_len) = match read_ebml_id(data, pos) {
             Some(v) => v,
             None => break,
         };
-        
+
         // Read Element Size
         let (size, size_len) = match read_ebml_size(data, pos + id_len as usize) {
             Some(v) => v,
             None => break,
         };
-        
+
         let header_size = id_len + size_len;
-        
+
         // Skip Void and CRC-32 elements (padding/checksum)
         if id == VOID_ID || id == CRC32_ID {
             if size != u64::MAX {
@@ -1457,7 +1500,7 @@ fn parse_ebml_elements(data: &[u8]) -> Vec<EbmlElement> {
             }
             continue;
         }
-        
+
         let element = EbmlElement {
             id,
             offset: pos as u64,
@@ -1465,7 +1508,7 @@ fn parse_ebml_elements(data: &[u8]) -> Vec<EbmlElement> {
             data_size: size,
         };
         elements.push(element);
-        
+
         // Handle Segment: parse its children, don't skip over it
         if id == SEGMENT_ID {
             pos += header_size as usize; // Enter Segment
@@ -1481,7 +1524,7 @@ fn parse_ebml_elements(data: &[u8]) -> Vec<EbmlElement> {
             pos = next_pos;
         }
     }
-    
+
     elements
 }
 
@@ -1516,11 +1559,13 @@ impl ChunkStore {
     pub fn add_chunk(&mut self, chunk: &ContentChunk) {
         *self.ref_counts.entry(chunk.id).or_insert(0) += 1;
 
-        self.chunk_metadata.entry(chunk.id).or_insert_with(|| ChunkMetadata {
-            size: chunk.size,
-            chunk_type: chunk.chunk_type,
-            first_seen: std::time::SystemTime::now(),
-        });
+        self.chunk_metadata
+            .entry(chunk.id)
+            .or_insert_with(|| ChunkMetadata {
+                size: chunk.size,
+                chunk_type: chunk.chunk_type,
+                first_seen: std::time::SystemTime::now(),
+            });
     }
 
     /// Remove a chunk reference (decrement reference count)
@@ -1696,35 +1741,44 @@ mod tests {
     async fn test_fastcdc_deterministic() {
         // FastCDC should produce the same chunk boundaries for the same data
         let data = (0..50_000).map(|i| (i % 256) as u8).collect::<Vec<u8>>();
-        
+
         // Use Rolling strategy with appropriate chunk sizes for test data
-        let chunker = ContentChunker::new(ChunkStrategy::Rolling { 
-            avg_size: 8192, 
-            min_size: 4096, 
-            max_size: 16384 
+        let chunker = ContentChunker::new(ChunkStrategy::Rolling {
+            avg_size: 8192,
+            min_size: 4096,
+            max_size: 16384,
         });
-        
+
         // Chunk the same data twice
         let chunks1 = chunker.chunk(&data, "test.bin").await.unwrap();
         let chunks2 = chunker.chunk(&data, "test.bin").await.unwrap();
-        
+
         // Should produce identical chunks
-        assert_eq!(chunks1.len(), chunks2.len(), "FastCDC should be deterministic");
+        assert_eq!(
+            chunks1.len(),
+            chunks2.len(),
+            "FastCDC should be deterministic"
+        );
         for (c1, c2) in chunks1.iter().zip(chunks2.iter()) {
             assert_eq!(c1.id, c2.id, "Chunk IDs should match for same content");
         }
-        
+
         // Different data should produce different chunks
-        let different = (0..50_000).map(|i| ((i + 1) % 256) as u8).collect::<Vec<u8>>();
+        let different = (0..50_000)
+            .map(|i| ((i + 1) % 256) as u8)
+            .collect::<Vec<u8>>();
         let chunks3 = chunker.chunk(&different, "test.bin").await.unwrap();
-        assert_ne!(chunks1[0].id, chunks3[0].id, "Different content should produce different chunks");
+        assert_ne!(
+            chunks1[0].id, chunks3[0].id,
+            "Different content should produce different chunks"
+        );
     }
 
     #[test]
     fn test_parse_mp4_atoms() {
         // Create minimal MP4 structure
         let mut mp4 = Vec::new();
-        
+
         // ftyp atom (20 bytes)
         mp4.extend_from_slice(&[0, 0, 0, 20]); // size = 20
         mp4.extend_from_slice(b"ftyp"); // type
@@ -1739,13 +1793,13 @@ mod tests {
         mp4.extend_from_slice(b"mvhd"); // mvhd type
 
         let atoms = parse_mp4_atoms(&mp4);
-        
+
         assert_eq!(atoms.len(), 2);
         assert_eq!(&atoms[0].atom_type, b"ftyp");
         assert_eq!(atoms[0].size, 20);
         assert_eq!(atoms[0].offset, 0);
         assert_eq!(atoms[0].header_size, 8);
-        
+
         assert_eq!(&atoms[1].atom_type, b"moov");
         assert_eq!(atoms[1].size, 16);
         assert_eq!(atoms[1].offset, 20);
@@ -1761,7 +1815,7 @@ mod tests {
         mp4.extend_from_slice(&[0; 8]); // 8 bytes of data
 
         let atoms = parse_mp4_atoms(&mp4);
-        
+
         assert_eq!(atoms.len(), 1);
         assert_eq!(&atoms[0].atom_type, b"mdat");
         assert_eq!(atoms[0].size, 24);
@@ -1772,21 +1826,21 @@ mod tests {
     fn test_parse_mp4_nested_moov() {
         // Create moov with nested atoms
         let mut moov_content = Vec::new();
-        
+
         // mvhd (8 bytes header only for test)
         moov_content.extend_from_slice(&[0, 0, 0, 8]);
         moov_content.extend_from_slice(b"mvhd");
-        
+
         // trak (8 bytes header only)
         moov_content.extend_from_slice(&[0, 0, 0, 8]);
         moov_content.extend_from_slice(b"trak");
-        
+
         // udta (8 bytes header only)
         moov_content.extend_from_slice(&[0, 0, 0, 8]);
         moov_content.extend_from_slice(b"udta");
 
         let nested = parse_mp4_atoms(&moov_content);
-        
+
         assert_eq!(nested.len(), 3);
         assert_eq!(&nested[0].atom_type, b"mvhd");
         assert_eq!(&nested[1].atom_type, b"trak");
@@ -1796,33 +1850,33 @@ mod tests {
     #[tokio::test]
     async fn test_chunk_mp4_basic() {
         let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
-        
+
         // Create minimal valid MP4
         let mut mp4 = Vec::new();
-        
+
         // ftyp (20 bytes)
         mp4.extend_from_slice(&[0, 0, 0, 20]);
         mp4.extend_from_slice(b"ftyp");
         mp4.extend_from_slice(b"isom");
         mp4.extend_from_slice(&[0, 0, 0, 1]);
         mp4.extend_from_slice(b"isom");
-        
+
         // moov (16 bytes with mvhd)
         mp4.extend_from_slice(&[0, 0, 0, 16]);
         mp4.extend_from_slice(b"moov");
         mp4.extend_from_slice(&[0, 0, 0, 8]);
         mp4.extend_from_slice(b"mvhd");
-        
+
         // small mdat (20 bytes)
         mp4.extend_from_slice(&[0, 0, 0, 20]);
         mp4.extend_from_slice(b"mdat");
         mp4.extend_from_slice(&[0; 12]); // data
-        
+
         let chunks = chunker.chunk(&mp4, "test.mp4").await.unwrap();
-        
+
         // Should have: ftyp(1) + moov header(1) + mvhd(1) + mdat(1) = 4 chunks
         assert!(chunks.len() >= 3);
-        
+
         // First chunk should be ftyp
         assert_eq!(chunks[0].chunk_type, ChunkType::Metadata);
         assert_eq!(chunks[0].size, 20);
@@ -1837,34 +1891,53 @@ mod tests {
             eprintln!("Skipping test: MP4 file not found at {:?}", mp4_path);
             return;
         }
-        
+
         let data = std::fs::read(mp4_path).expect("Failed to read MP4 file");
         println!("Read {} bytes from MP4 file", data.len());
-        
+
         let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
         let chunks = chunker.chunk(&data, "101394-video-720.mp4").await.unwrap();
-        
+
         println!("Parsed into {} chunks", chunks.len());
-        
+
         // Count by type
-        let metadata = chunks.iter().filter(|c| c.chunk_type == ChunkType::Metadata).count();
-        let video = chunks.iter().filter(|c| c.chunk_type == ChunkType::VideoStream).count();
-        let generic = chunks.iter().filter(|c| c.chunk_type == ChunkType::Generic).count();
-        
-        println!("Chunk breakdown: Metadata={}, VideoStream={}, Generic={}", metadata, video, generic);
-        
+        let metadata = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Metadata)
+            .count();
+        let video = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::VideoStream)
+            .count();
+        let generic = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Generic)
+            .count();
+
+        println!(
+            "Chunk breakdown: Metadata={}, VideoStream={}, Generic={}",
+            metadata, video, generic
+        );
+
         // Verify first chunk is ftyp (Metadata)
         assert_eq!(chunks[0].chunk_type, ChunkType::Metadata);
         assert!(chunks[0].size <= 100, "ftyp should be small");
-        
+
         // Should have at least ftyp + moov parts + mdat parts
         assert!(chunks.len() >= 3, "Expected at least 3 chunks");
-        assert!(metadata >= 2, "Expected at least 2 metadata chunks (ftyp, moov header)");
-        
+        assert!(
+            metadata >= 2,
+            "Expected at least 2 metadata chunks (ftyp, moov header)"
+        );
+
         // Verify total size matches file size
         let total_size: usize = chunks.iter().map(|c| c.size).sum();
-        assert_eq!(total_size, data.len(), "Chunk sizes should sum to file size");
-        
+        assert_eq!(
+            total_size,
+            data.len(),
+            "Chunk sizes should sum to file size"
+        );
+
         println!("✓ Real MP4 file test passed!");
     }
 
@@ -1881,11 +1954,20 @@ mod tests {
     #[test]
     fn test_read_ebml_id_4byte() {
         // 4-byte ID: EBML header (0x1A45DFA3)
-        assert_eq!(read_ebml_id(&[0x1A, 0x45, 0xDF, 0xA3], 0), Some((0x1A45DFA3, 4)));
+        assert_eq!(
+            read_ebml_id(&[0x1A, 0x45, 0xDF, 0xA3], 0),
+            Some((0x1A45DFA3, 4))
+        );
         // 4-byte ID: Segment (0x18538067)
-        assert_eq!(read_ebml_id(&[0x18, 0x53, 0x80, 0x67], 0), Some((0x18538067, 4)));
+        assert_eq!(
+            read_ebml_id(&[0x18, 0x53, 0x80, 0x67], 0),
+            Some((0x18538067, 4))
+        );
         // 4-byte ID: Cluster (0x1F43B675)
-        assert_eq!(read_ebml_id(&[0x1F, 0x43, 0xB6, 0x75], 0), Some((0x1F43B675, 4)));
+        assert_eq!(
+            read_ebml_id(&[0x1F, 0x43, 0xB6, 0x75], 0),
+            Some((0x1F43B675, 4))
+        );
     }
 
     #[test]
@@ -1935,7 +2017,7 @@ mod tests {
         // EBML header (0x1A45DFA3) + size 3 (0x83) + 3 bytes data
         let data = [0x1A, 0x45, 0xDF, 0xA3, 0x83, 0x00, 0x00, 0x00];
         let elements = parse_ebml_elements(&data);
-        
+
         assert_eq!(elements.len(), 1);
         assert_eq!(elements[0].id, EBML_ID);
         assert_eq!(elements[0].offset, 0);
@@ -1952,9 +2034,9 @@ mod tests {
         data.extend_from_slice(&[0x1A, 0x45, 0xDF, 0xA3, 0x80]);
         // Void + size 2 + 2 bytes padding
         data.extend_from_slice(&[0xEC, 0x82, 0x00, 0x00]);
-        
+
         let elements = parse_ebml_elements(&data);
-        
+
         // Should have 1 element (EBML), Void is skipped
         assert_eq!(elements.len(), 1);
         assert_eq!(elements[0].id, EBML_ID);
@@ -1963,10 +2045,13 @@ mod tests {
     #[tokio::test]
     async fn test_chunk_matroska_fallback_on_invalid() {
         let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
-        
+
         // Invalid data (not EBML)
-        let chunks = chunker.chunk(&[0x00, 0x01, 0x02, 0x03], "test.mkv").await.unwrap();
-        
+        let chunks = chunker
+            .chunk(&[0x00, 0x01, 0x02, 0x03], "test.mkv")
+            .await
+            .unwrap();
+
         // Should fall back to fixed chunking (1 chunk for small data)
         assert!(!chunks.is_empty());
     }
@@ -1974,34 +2059,44 @@ mod tests {
     #[tokio::test]
     async fn test_chunk_matroska_basic() {
         let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
-        
+
         // Create minimal valid Matroska
         let mut mkv = vec![];
-        
+
         // EBML header (0x1A45DFA3) + size 0
         mkv.extend_from_slice(&[0x1A, 0x45, 0xDF, 0xA3, 0x80]);
-        
+
         // Segment (0x18538067) + unknown size (0xFF)
         mkv.extend_from_slice(&[0x18, 0x53, 0x80, 0x67, 0xFF]);
-        
+
         // Info (0x1549A966) + size 0
         mkv.extend_from_slice(&[0x15, 0x49, 0xA9, 0x66, 0x80]);
-        
+
         // Cluster (0x1F43B675) + size 4 + 4 bytes data
         mkv.extend_from_slice(&[0x1F, 0x43, 0xB6, 0x75, 0x84, 0x00, 0x00, 0x00, 0x00]);
-        
+
         let chunks = chunker.chunk(&mkv, "test.mkv").await.unwrap();
-        
+
         println!("Created {} chunks", chunks.len());
         for (i, chunk) in chunks.iter().enumerate() {
-            println!("  Chunk {}: type={:?}, size={}", i, chunk.chunk_type, chunk.size);
+            println!(
+                "  Chunk {}: type={:?}, size={}",
+                i, chunk.chunk_type, chunk.size
+            );
         }
-        
+
         // Should have at least 2 chunks: Metadata + VideoStream (Cluster)
-        assert!(chunks.len() >= 2, "Expected at least 2 chunks, got {}", chunks.len());
-        
+        assert!(
+            chunks.len() >= 2,
+            "Expected at least 2 chunks, got {}",
+            chunks.len()
+        );
+
         // Should have at least one VideoStream chunk (Cluster)
-        let video_count = chunks.iter().filter(|c| c.chunk_type == ChunkType::VideoStream).count();
+        let video_count = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::VideoStream)
+            .count();
         assert!(video_count >= 1, "Expected at least 1 VideoStream chunk");
     }
 }

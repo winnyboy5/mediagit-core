@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -45,10 +45,10 @@ fn bench_encryption(c: &mut Criterion) {
         (64, "64B"),
         (1024, "1KB"),
         (16 * 1024, "16KB"),
-        (64 * 1024, "64KB"),          // Stream threshold
-        (128 * 1024, "128KB"),        // Stream encryption
-        (1024 * 1024, "1MB"),         // Typical image
-        (10 * 1024 * 1024, "10MB"),   // Large media file
+        (64 * 1024, "64KB"),        // Stream threshold
+        (128 * 1024, "128KB"),      // Stream encryption
+        (1024 * 1024, "1MB"),       // Typical image
+        (10 * 1024 * 1024, "10MB"), // Large media file
     ];
 
     for (size, label) in sizes {
@@ -100,22 +100,22 @@ fn bench_round_trip(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("round_trip");
 
-    let sizes: &[(usize, &str)] = &[
-        (1024, "1KB"),
-        (64 * 1024, "64KB"),
-        (1024 * 1024, "1MB"),
-    ];
+    let sizes: &[(usize, &str)] = &[(1024, "1KB"), (64 * 1024, "64KB"), (1024 * 1024, "1MB")];
 
     for (size, label) in sizes {
         let data = vec![0xABu8; *size];
 
         group.throughput(Throughput::Bytes(*size as u64));
-        group.bench_with_input(BenchmarkId::new("encrypt_decrypt", label), &data, |b, data| {
-            b.iter(|| {
-                let ct = encrypt(&key, black_box(data)).unwrap();
-                black_box(decrypt(&key, &ct).unwrap())
-            })
-        });
+        group.bench_with_input(
+            BenchmarkId::new("encrypt_decrypt", label),
+            &data,
+            |b, data| {
+                b.iter(|| {
+                    let ct = encrypt(&key, black_box(data)).unwrap();
+                    black_box(decrypt(&key, &ct).unwrap())
+                })
+            },
+        );
     }
 
     group.finish();
@@ -164,7 +164,7 @@ fn bench_stream_boundary(c: &mut Criterion) {
 
     // Test just below and above the stream threshold (64KB)
     let below_threshold = vec![0xABu8; 64 * 1024 - 1]; // 64KB - 1
-    let at_threshold = vec![0xABu8; 64 * 1024];        // 64KB exactly
+    let at_threshold = vec![0xABu8; 64 * 1024]; // 64KB exactly
     let above_threshold = vec![0xABu8; 64 * 1024 + 1]; // 64KB + 1
 
     group.throughput(Throughput::Bytes((64 * 1024 - 1) as u64));

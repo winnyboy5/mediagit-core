@@ -69,7 +69,6 @@ mod conflict;
 mod delta;
 mod diff;
 pub mod fsck;
-mod similarity;
 mod index;
 mod lca;
 mod merge;
@@ -81,6 +80,7 @@ mod pack;
 mod reflog;
 mod refs;
 mod revision;
+mod similarity;
 mod streaming_index;
 mod streaming_pack;
 mod transaction;
@@ -98,7 +98,6 @@ pub use conflict::{Conflict, ConflictDetector, ConflictSide, ConflictStats, Conf
 pub use delta::{Delta, DeltaDecoder, DeltaEncoder, DeltaInstruction};
 pub use diff::{ModifiedEntry, ThreeWayDiff, TreeDiff, TreeDiffer};
 pub use index::{Index, IndexEntry};
-pub use similarity::{ObjectMetadata, SimilarityDetector, SimilarityScore};
 pub use lca::{LcaFinder, LcaResult};
 pub use merge::{FastForwardInfo, MergeEngine, MergeResult, MergeStrategy};
 pub use metrics::OdbMetrics;
@@ -108,10 +107,11 @@ pub use oid::Oid;
 pub use pack::{PackHeader, PackIndex, PackMetadata, PackObjectEntry, PackReader, PackWriter};
 pub use reflog::{Reflog, ReflogEntry};
 pub use refs::{normalize_ref_name, Ref, RefDatabase, RefType};
+pub use revision::resolve_revision;
+pub use similarity::{ObjectMetadata, SimilarityDetector, SimilarityScore};
 pub use streaming_index::StreamingPackIndex;
 pub use streaming_pack::{StreamingPackReader, StreamingPackWriter};
-pub use transaction::{PackTransaction, RecoveryReport, recover_incomplete_transactions};
-pub use revision::resolve_revision;
+pub use transaction::{recover_incomplete_transactions, PackTransaction, RecoveryReport};
 pub use tree::{FileMode, Tree, TreeEntry};
 
 // Re-export fsck module

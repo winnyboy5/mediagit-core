@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -241,12 +241,7 @@ pub fn log_invalid_request(client_ip: IpAddr, path: String, method: String, reas
 }
 
 /// Log a suspicious pattern
-pub fn log_suspicious_pattern(
-    client_ip: IpAddr,
-    path: String,
-    method: String,
-    description: &str,
-) {
+pub fn log_suspicious_pattern(client_ip: IpAddr, path: String, method: String, description: &str) {
     AuditEvent::new(
         AuditEventType::SuspiciousPattern,
         format!("Suspicious pattern: {}", description),
@@ -356,14 +351,19 @@ mod tests {
         log_authentication_failed(Some(ip), Some("user123".to_string()), "invalid password");
         log_authentication_success(ip, "user123".to_string());
         log_rate_limit_exceeded(ip, "/test".to_string(), "GET".to_string());
-        log_path_traversal_attempt(
+        log_path_traversal_attempt(ip, "repo".to_string(), "/../etc".to_string(), "contains ..");
+        log_invalid_request(
             ip,
-            "repo".to_string(),
-            "/../etc".to_string(),
-            "contains ..",
+            "/test".to_string(),
+            "POST".to_string(),
+            "invalid content",
         );
-        log_invalid_request(ip, "/test".to_string(), "POST".to_string(), "invalid content");
         log_suspicious_pattern(ip, "/test".to_string(), "GET".to_string(), "rapid requests");
-        log_access_denied(ip, Some("user123".to_string()), "private-repo".to_string(), "not authorized");
+        log_access_denied(
+            ip,
+            Some("user123".to_string()),
+            "private-repo".to_string(),
+            "not authorized",
+        );
     }
 }

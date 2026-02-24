@@ -91,7 +91,11 @@ fn test_timeline_segment_overlap_detection() {
     };
 
     assert!(seg1.overlaps(&seg2), "Segments should overlap");
-    assert_eq!(seg1.overlap_duration(&seg2), 5.0, "Overlap should be 5 seconds");
+    assert_eq!(
+        seg1.overlap_duration(&seg2),
+        5.0,
+        "Overlap should be 5 seconds"
+    );
 }
 
 #[test]
@@ -162,7 +166,11 @@ fn test_timeline_segment_partial_overlap() {
     };
 
     assert!(seg1.overlaps(&seg2));
-    assert_eq!(seg1.overlap_duration(&seg2), 2.0, "Overlap should be 2 seconds");
+    assert_eq!(
+        seg1.overlap_duration(&seg2),
+        2.0,
+        "Overlap should be 2 seconds"
+    );
 }
 
 #[test]
@@ -199,19 +207,16 @@ fn test_timeline_segment_complete_overlap() {
 #[test]
 fn test_video_auto_merge_no_conflicts() {
     // Test auto-merge decision when no conflicts exist
-    let base_info = create_test_video_info(vec![
-        (1, 0.0, 10.0, "video"),
-        (2, 0.0, 10.0, "audio"),
-    ]);
+    let base_info = create_test_video_info(vec![(1, 0.0, 10.0, "video"), (2, 0.0, 10.0, "audio")]);
 
     let ours_info = create_test_video_info(vec![
-        (1, 0.0, 10.0, "video"),    // Same as base
-        (2, 0.0, 15.0, "audio"),    // Extended audio
+        (1, 0.0, 10.0, "video"), // Same as base
+        (2, 0.0, 15.0, "audio"), // Extended audio
     ]);
 
     let theirs_info = create_test_video_info(vec![
-        (1, 0.0, 12.0, "video"),    // Extended video
-        (2, 0.0, 10.0, "audio"),    // Same as base
+        (1, 0.0, 12.0, "video"), // Extended video
+        (2, 0.0, 10.0, "audio"), // Same as base
     ]);
 
     let decision = VideoParser::can_auto_merge(&base_info, &ours_info, &theirs_info);
@@ -225,16 +230,14 @@ fn test_video_auto_merge_no_conflicts() {
 #[test]
 fn test_video_merge_conflict_detection() {
     // Test conflict detection when both sides modify same track
-    let base_info = create_test_video_info(vec![
-        (1, 0.0, 10.0, "video"),
-    ]);
+    let base_info = create_test_video_info(vec![(1, 0.0, 10.0, "video")]);
 
     let ours_info = create_test_video_info(vec![
-        (1, 0.0, 15.0, "video"),    // Extended to 15s
+        (1, 0.0, 15.0, "video"), // Extended to 15s
     ]);
 
     let theirs_info = create_test_video_info(vec![
-        (1, 0.0, 20.0, "video"),    // Extended to 20s
+        (1, 0.0, 20.0, "video"), // Extended to 20s
     ]);
 
     let decision = VideoParser::can_auto_merge(&base_info, &ours_info, &theirs_info);
@@ -253,21 +256,18 @@ fn test_video_merge_conflict_detection() {
 #[test]
 fn test_video_merge_multi_track_no_conflict() {
     // Test that edits to different tracks don't conflict
-    let base_info = create_test_video_info(vec![
-        (1, 0.0, 10.0, "video"),
-        (2, 0.0, 10.0, "audio"),
-    ]);
+    let base_info = create_test_video_info(vec![(1, 0.0, 10.0, "video"), (2, 0.0, 10.0, "audio")]);
 
     // Ours: Edit only video track
     let ours_info = create_test_video_info(vec![
-        (1, 0.0, 12.0, "video"),    // Modified
-        (2, 0.0, 10.0, "audio"),    // Unchanged
+        (1, 0.0, 12.0, "video"), // Modified
+        (2, 0.0, 10.0, "audio"), // Unchanged
     ]);
 
     // Theirs: Edit only audio track
     let theirs_info = create_test_video_info(vec![
-        (1, 0.0, 10.0, "video"),    // Unchanged
-        (2, 0.0, 15.0, "audio"),    // Modified
+        (1, 0.0, 10.0, "video"), // Unchanged
+        (2, 0.0, 15.0, "audio"), // Modified
     ]);
 
     let decision = VideoParser::can_auto_merge(&base_info, &ours_info, &theirs_info);
@@ -281,18 +281,16 @@ fn test_video_merge_multi_track_no_conflict() {
 #[test]
 fn test_video_merge_same_track_different_regions() {
     // Test that edits to different time regions of same track can auto-merge
-    let base_info = create_test_video_info(vec![
-        (1, 0.0, 30.0, "video"),
-    ]);
+    let base_info = create_test_video_info(vec![(1, 0.0, 30.0, "video")]);
 
     // Ours: Edit start of video (0-10s)
     let ours_info = create_test_video_info(vec![
-        (1, 0.0, 30.0, "video"),    // Duration unchanged, but content modified at start
+        (1, 0.0, 30.0, "video"), // Duration unchanged, but content modified at start
     ]);
 
     // Theirs: Edit end of video (20-30s)
     let theirs_info = create_test_video_info(vec![
-        (1, 0.0, 30.0, "video"),    // Duration unchanged, but content modified at end
+        (1, 0.0, 30.0, "video"), // Duration unchanged, but content modified at end
     ]);
 
     // Note: This is simplified - in real implementation we'd track sub-segments
@@ -322,24 +320,37 @@ fn test_merge_result_types() {
 // Helper function to create test video info
 fn create_test_video_info(segments: Vec<(u32, f64, f64, &str)>) -> VideoInfo {
     VideoInfo {
-        duration_seconds: segments.iter().map(|(_, _, end, _)| *end).fold(0.0, f64::max),
+        duration_seconds: segments
+            .iter()
+            .map(|(_, _, end, _)| *end)
+            .fold(0.0, f64::max),
         tracks: segments
             .iter()
-            .map(|(id, start, end, seg_type)| mediagit_media::video::TrackInfo {
-                id: *id,
-                track_type: seg_type.to_string(),
-                duration_seconds: end - start,
-                codec: "test_codec".to_string(),
-                timescale: 1000,
-                width: if *seg_type == "video" { Some(1920) } else { None },
-                height: if *seg_type == "video" { Some(1080) } else { None },
-                sample_rate: if *seg_type == "audio" {
-                    Some(48000)
-                } else {
-                    None
+            .map(
+                |(id, start, end, seg_type)| mediagit_media::video::TrackInfo {
+                    id: *id,
+                    track_type: seg_type.to_string(),
+                    duration_seconds: end - start,
+                    codec: "test_codec".to_string(),
+                    timescale: 1000,
+                    width: if *seg_type == "video" {
+                        Some(1920)
+                    } else {
+                        None
+                    },
+                    height: if *seg_type == "video" {
+                        Some(1080)
+                    } else {
+                        None
+                    },
+                    sample_rate: if *seg_type == "audio" {
+                        Some(48000)
+                    } else {
+                        None
+                    },
+                    channels: if *seg_type == "audio" { Some(2) } else { None },
                 },
-                channels: if *seg_type == "audio" { Some(2) } else { None },
-            })
+            )
             .collect(),
         video_codec: Some("h264".to_string()),
         audio_codec: Some("aac".to_string()),
@@ -360,10 +371,7 @@ fn create_test_video_info(segments: Vec<(u32, f64, f64, &str)>) -> VideoInfo {
 #[test]
 fn test_video_info_helper() {
     // Test our helper function creates valid VideoInfo
-    let info = create_test_video_info(vec![
-        (1, 0.0, 10.0, "video"),
-        (2, 0.0, 10.0, "audio"),
-    ]);
+    let info = create_test_video_info(vec![(1, 0.0, 10.0, "video"), (2, 0.0, 10.0, "audio")]);
 
     assert_eq!(info.tracks.len(), 2);
     assert_eq!(info.segments.len(), 2);
@@ -427,7 +435,7 @@ mod week4_milestone_tests {
         // Should detect changes but evaluate merge possibility
         assert!(
             matches!(decision, MergeDecision::AutoMerge)
-            || matches!(decision, MergeDecision::ManualReview(_))
+                || matches!(decision, MergeDecision::ManualReview(_))
         );
     }
 
@@ -437,7 +445,7 @@ mod week4_milestone_tests {
         let info = create_test_video_info(vec![
             (1, 0.0, 10.0, "video"),
             (2, 0.0, 10.0, "audio"),
-            (3, 0.0, 10.0, "audio"),  // Second audio track
+            (3, 0.0, 10.0, "audio"), // Second audio track
         ]);
 
         assert_eq!(info.tracks.len(), 3);
@@ -476,7 +484,7 @@ mod edge_cases {
 
         let seg2 = TimelineSegment {
             track_id: 1,
-            start_time: 10.0,  // Starts exactly where seg1 ends
+            start_time: 10.0, // Starts exactly where seg1 ends
             end_time: 20.0,
             duration: 10.0,
             segment_type: "video".to_string(),

@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -284,9 +284,7 @@ async fn test_rate_limit_with_high_throughput() {
     for _ in 0..50 {
         let client = client.clone();
         let url = server.url("/test-repo/info/refs");
-        let task = tokio::spawn(async move {
-            client.get(&url).send().await.unwrap().status()
-        });
+        let task = tokio::spawn(async move { client.get(&url).send().await.unwrap().status() });
         tasks.push(task);
     }
 

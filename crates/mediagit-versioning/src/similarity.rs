@@ -54,7 +54,8 @@ pub fn get_similarity_threshold(filename: Option<&str>) -> f64 {
             "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" => 0.20,
 
             // Text/code: High similarity threshold (small changes matter)
-            "txt" | "md" | "py" | "rs" | "js" | "ts" | "go" | "java" | "c" | "cpp" | "h" | "hpp" => 0.85,
+            "txt" | "md" | "py" | "rs" | "js" | "ts" | "go" | "java" | "c" | "cpp" | "h"
+            | "hpp" => 0.85,
 
             // Configuration: Very high threshold (exact matches preferred)
             "json" | "yaml" | "toml" | "xml" => 0.95,
@@ -394,7 +395,10 @@ impl SimilarityDetector {
 
         // Count matching samples
         let mut matches = 0;
-        let total_samples = target.sample_hashes.len().min(candidate.sample_hashes.len());
+        let total_samples = target
+            .sample_hashes
+            .len()
+            .min(candidate.sample_hashes.len());
 
         // Create hash map for fast lookup
         let candidate_hashes: HashMap<u64, usize> = candidate
@@ -437,12 +441,8 @@ mod tests {
     #[test]
     fn test_sample_generation() {
         let data = vec![0u8; 10240]; // 10 KB of zeros
-        let mut metadata = ObjectMetadata::new(
-            Oid::hash(&data),
-            data.len(),
-            ObjectType::Blob,
-            None,
-        );
+        let mut metadata =
+            ObjectMetadata::new(Oid::hash(&data), data.len(), ObjectType::Blob, None);
 
         metadata.generate_samples(&data);
         assert_eq!(metadata.sample_hashes.len(), SAMPLE_COUNT);
@@ -452,20 +452,11 @@ mod tests {
     fn test_identical_objects() {
         let data = vec![42u8; 10240];
 
-        let mut target = ObjectMetadata::new(
-            Oid::hash(&data),
-            data.len(),
-            ObjectType::Blob,
-            None,
-        );
+        let mut target = ObjectMetadata::new(Oid::hash(&data), data.len(), ObjectType::Blob, None);
         target.generate_samples(&data);
 
-        let mut candidate = ObjectMetadata::new(
-            Oid::hash(&data),
-            data.len(),
-            ObjectType::Blob,
-            None,
-        );
+        let mut candidate =
+            ObjectMetadata::new(Oid::hash(&data), data.len(), ObjectType::Blob, None);
         candidate.generate_samples(&data);
 
         let detector = SimilarityDetector::new(50);
@@ -482,20 +473,12 @@ mod tests {
         let data1 = vec![1u8; 10240];
         let data2 = vec![2u8; 10240];
 
-        let mut target = ObjectMetadata::new(
-            Oid::hash(&data1),
-            data1.len(),
-            ObjectType::Blob,
-            None,
-        );
+        let mut target =
+            ObjectMetadata::new(Oid::hash(&data1), data1.len(), ObjectType::Blob, None);
         target.generate_samples(&data1);
 
-        let mut candidate = ObjectMetadata::new(
-            Oid::hash(&data2),
-            data2.len(),
-            ObjectType::Blob,
-            None,
-        );
+        let mut candidate =
+            ObjectMetadata::new(Oid::hash(&data2), data2.len(), ObjectType::Blob, None);
         candidate.generate_samples(&data2);
 
         let detector = SimilarityDetector::new(50);

@@ -103,16 +103,13 @@ pub mod zstd_compressor;
 use std::fmt::Debug;
 
 pub use adaptive::{
-    AdaptiveCompressor, CompressionStrategy as AdaptiveStrategy,
-    EntropyClass, FileProfile, PatternClass, PerformanceStats,
-    SizeClass, calculate_entropy,
+    calculate_entropy, AdaptiveCompressor, CompressionStrategy as AdaptiveStrategy, EntropyClass,
+    FileProfile, PatternClass, PerformanceStats, SizeClass,
 };
 pub use brotli_compressor::BrotliCompressor;
 pub use error::{CompressionError, CompressionResult};
 pub use metrics::{AggregatedStats, CompressionMetrics, MetricsAggregator};
-pub use per_type_compressor::{
-    CompressionProfile, PerObjectTypeCompressor, PerTypeStats,
-};
+pub use per_type_compressor::{CompressionProfile, PerObjectTypeCompressor, PerTypeStats};
 pub use smart_compressor::{
     CompressionStrategy, ObjectCategory, ObjectType, SmartCompressor, TypeAwareCompressor,
 };
@@ -171,9 +168,9 @@ impl CompressionAlgorithm {
     pub fn magic_bytes(self) -> &'static [u8] {
         match self {
             CompressionAlgorithm::None => b"",
-            CompressionAlgorithm::Zlib => b"\x78",              // Zlib header
+            CompressionAlgorithm::Zlib => b"\x78", // Zlib header
             CompressionAlgorithm::Zstd => b"\x28\xb5\x2f\xfd", // Zstd frame magic
-            CompressionAlgorithm::Brotli => b"BRT\x01",         // Custom marker for brotli
+            CompressionAlgorithm::Brotli => b"BRT\x01", // Custom marker for brotli
         }
     }
 

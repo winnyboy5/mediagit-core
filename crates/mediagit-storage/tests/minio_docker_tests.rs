@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -387,7 +387,10 @@ mod minio_docker_tests {
 
         // MinIO uses path-style by default: http://endpoint/bucket/key
         // This should work correctly
-        backend.put("path/style/test.txt", b"path style").await.unwrap();
+        backend
+            .put("path/style/test.txt", b"path style")
+            .await
+            .unwrap();
         assert_eq!(
             backend.get("path/style/test.txt").await.unwrap(),
             b"path style"

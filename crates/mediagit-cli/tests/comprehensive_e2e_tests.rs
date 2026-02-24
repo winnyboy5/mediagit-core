@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -39,11 +39,7 @@ fn mediagit() -> Command {
 
 /// Helper to initialize repository
 fn init_repo(dir: &Path) {
-    mediagit()
-        .current_dir(dir)
-        .arg("init")
-        .assert()
-        .success();
+    mediagit().current_dir(dir).arg("init").assert().success();
 }
 
 /// Copy test file to repository
@@ -176,7 +172,11 @@ fn e2e_large_file_video_264mb() {
     init_repo(repo_path);
 
     // Copy 264MB video file
-    copy_test_file("bbb_sunflower_1080p_30fps_normal.mp4", repo_path, "video.mp4");
+    copy_test_file(
+        "bbb_sunflower_1080p_30fps_normal.mp4",
+        repo_path,
+        "video.mp4",
+    );
 
     // Add large file
     mediagit()
@@ -240,7 +240,11 @@ fn e2e_very_large_file_2gb() {
     init_repo(repo_path);
 
     // Copy 2GB file
-    copy_test_file("bbb_sunflower_1080p_30fps_stereo_abl.mp4", repo_path, "huge_video.mp4");
+    copy_test_file(
+        "bbb_sunflower_1080p_30fps_stereo_abl.mp4",
+        repo_path,
+        "huge_video.mp4",
+    );
 
     mediagit()
         .current_dir(repo_path)
@@ -296,7 +300,11 @@ fn e2e_media_audio_flac() {
     init_repo(repo_path);
 
     // 38MB FLAC audio
-    copy_test_file("_Amir_Tangsiri__Dokhtare_Koli.flac", repo_path, "audio.flac");
+    copy_test_file(
+        "_Amir_Tangsiri__Dokhtare_Koli.flac",
+        repo_path,
+        "audio.flac",
+    );
 
     mediagit()
         .current_dir(repo_path)
@@ -322,7 +330,11 @@ fn e2e_media_audio_wav() {
     init_repo(repo_path);
 
     // 55MB WAV audio
-    copy_test_file("_Quando_le_sere_al_placido__(Ferruccio_Giannini).wav", repo_path, "audio.wav");
+    copy_test_file(
+        "_Quando_le_sere_al_placido__(Ferruccio_Giannini).wav",
+        repo_path,
+        "audio.wav",
+    );
 
     mediagit()
         .current_dir(repo_path)
@@ -510,7 +522,11 @@ fn e2e_multiple_files_batch_add() {
 
     // Create multiple files
     for i in 1..=10 {
-        fs::write(repo_path.join(format!("file{}.txt", i)), format!("Content {}\n", i)).unwrap();
+        fs::write(
+            repo_path.join(format!("file{}.txt", i)),
+            format!("Content {}\n", i),
+        )
+        .unwrap();
     }
 
     // Add all files
@@ -550,12 +566,20 @@ fn e2e_directory_structure() {
     fs::create_dir_all(repo_path.join("docs")).unwrap();
 
     // Add files
-    fs::write(repo_path.join("src/components/App.js"), "// App component\n").unwrap();
+    fs::write(
+        repo_path.join("src/components/App.js"),
+        "// App component\n",
+    )
+    .unwrap();
     fs::write(repo_path.join("src/utils/helper.js"), "// Helper utils\n").unwrap();
     fs::write(repo_path.join("docs/README.md"), "# Documentation\n").unwrap();
 
     // Copy media into structure
-    copy_test_file("freepik__talk__71826.jpeg", repo_path, "docs/screenshot.jpg");
+    copy_test_file(
+        "freepik__talk__71826.jpeg",
+        repo_path,
+        "docs/screenshot.jpg",
+    );
 
     // Add all
     mediagit()

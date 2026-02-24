@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -217,11 +217,7 @@ mod tests {
         let api_key_auth = ApiKeyAuth::new();
 
         let (plaintext_key, api_key) = api_key_auth
-            .generate_key(
-                "user123".to_string(),
-                "Test Key".to_string(),
-                vec![],
-            )
+            .generate_key("user123".to_string(), "Test Key".to_string(), vec![])
             .await
             .unwrap();
 

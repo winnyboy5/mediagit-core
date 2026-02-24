@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -29,24 +29,21 @@ pub mod tls;
 
 // Re-export commonly used types
 pub use audit::{
-    AuditEvent, AuditEventType,
-    log_access_denied, log_authentication_failed, log_authentication_success,
-    log_invalid_request, log_path_traversal_attempt, log_rate_limit_exceeded,
-    log_suspicious_pattern,
+    log_access_denied, log_authentication_failed, log_authentication_success, log_invalid_request,
+    log_path_traversal_attempt, log_rate_limit_exceeded, log_suspicious_pattern, AuditEvent,
+    AuditEventType,
 };
 
 #[cfg(feature = "auth")]
 pub use auth::{
-    ApiKey, ApiKeyAuth, AuthError, AuthLayer, AuthResult, AuthUser, Claims, JwtAuth,
-    TokenPair, User, UserId, UserCredentials, CredentialsStore,
-    AuthService, RegisterRequest, LoginRequest, RefreshRequest, AuthResponse, UserInfo, ErrorResponse,
-    register_handler, login_handler, refresh_handler, me_handler, logout_handler,
-    user::Role,
+    login_handler, logout_handler, me_handler, refresh_handler, register_handler, user::Role,
+    ApiKey, ApiKeyAuth, AuthError, AuthLayer, AuthResponse, AuthResult, AuthService, AuthUser,
+    Claims, CredentialsStore, ErrorResponse, JwtAuth, LoginRequest, RefreshRequest,
+    RegisterRequest, TokenPair, User, UserCredentials, UserId, UserInfo,
 };
 
 #[cfg(feature = "tls")]
 pub use tls::{
-    Certificate, CertificateBuilder, CertificateError,
-    TlsConfig, TlsConfigBuilder, TlsError, TlsResult,
-    config::TlsVersion,
+    config::TlsVersion, Certificate, CertificateBuilder, CertificateError, TlsConfig,
+    TlsConfigBuilder, TlsError, TlsResult,
 };

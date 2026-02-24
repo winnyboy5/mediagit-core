@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -45,7 +45,7 @@ impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
             requests_per_second: 100, // 100 req/s
-            burst_size: 200,           // Allow burst of 200
+            burst_size: 200,          // Allow burst of 200
         }
     }
 }
@@ -155,10 +155,7 @@ pub async fn security_headers_middleware(
     );
 
     // X-Frame-Options: Prevent clickjacking
-    headers.insert(
-        "X-Frame-Options",
-        HeaderValue::from_static("DENY"),
-    );
+    headers.insert("X-Frame-Options", HeaderValue::from_static("DENY"));
 
     // X-Content-Type-Options: Prevent MIME sniffing
     headers.insert(
@@ -226,7 +223,10 @@ pub async fn request_validation_middleware(
                         client_ip,
                         path,
                         method,
-                        &format!("Content length {} exceeds maximum {}", length, MAX_CONTENT_LENGTH),
+                        &format!(
+                            "Content length {} exceeds maximum {}",
+                            length, MAX_CONTENT_LENGTH
+                        ),
                     );
 
                     return Err(StatusCode::PAYLOAD_TOO_LARGE);
@@ -250,9 +250,9 @@ pub async fn request_validation_middleware(
                 "multipart/form-data",
             ];
 
-            let is_allowed = allowed_types.iter().any(|&allowed| {
-                content_type_str.starts_with(allowed)
-            });
+            let is_allowed = allowed_types
+                .iter()
+                .any(|&allowed| content_type_str.starts_with(allowed));
 
             if !is_allowed && !content_type_str.is_empty() {
                 tracing::warn!("Unsupported content type: {}", content_type_str);
@@ -272,10 +272,7 @@ pub async fn request_validation_middleware(
 /// This middleware intercepts requests and responses to log security events:
 /// - Path traversal attempts in the repository path
 /// - Rate limit violations (429 responses)
-pub async fn audit_middleware(
-    request: Request,
-    next: Next,
-) -> Result<Response, StatusCode> {
+pub async fn audit_middleware(request: Request, next: Next) -> Result<Response, StatusCode> {
     let client_ip = extract_client_ip(&request);
     let path = request.uri().path().to_string();
     let method = request.method().to_string();
@@ -364,9 +361,9 @@ pub fn validate_repo_name(repo: &str) -> Result<(), &'static str> {
     }
 
     // Must contain only safe characters
-    let is_safe = repo.chars().all(|c| {
-        c.is_alphanumeric() || c == '-' || c == '_' || c == '/' || c == '.'
-    });
+    let is_safe = repo
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '/' || c == '.');
 
     if !is_safe {
         return Err("Repository name contains invalid characters");

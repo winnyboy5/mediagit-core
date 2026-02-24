@@ -48,7 +48,7 @@
 //! ```
 
 use crate::error::{CompressionError, CompressionResult};
-use crate::smart_compressor::{ObjectType, ObjectCategory};
+use crate::smart_compressor::{ObjectCategory, ObjectType};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -379,15 +379,19 @@ impl DeltaEncoder {
     /// When the chain depth exceeds `max_chain_depth`, the encoder will return
     /// the full object instead of creating another delta. This prevents
     /// excessively long delta chains that can hurt decompression performance.
-    pub fn encode_with_depth(&self, base: &[u8], target: &[u8], current_chain_depth: u32) -> CompressionResult<(Vec<u8>, bool)> {
+    pub fn encode_with_depth(
+        &self,
+        base: &[u8],
+        target: &[u8],
+        current_chain_depth: u32,
+    ) -> CompressionResult<(Vec<u8>, bool)> {
         let start = Instant::now();
 
         // Check chain depth limit
         if current_chain_depth >= self.max_chain_depth {
             debug!(
                 "Chain depth {} reached max depth {}, using full compression",
-                current_chain_depth,
-                self.max_chain_depth
+                current_chain_depth, self.max_chain_depth
             );
             return Ok((target.to_vec(), false));
         }
@@ -415,9 +419,7 @@ impl DeltaEncoder {
         let delta = {
             let mut raw_patch = Vec::new();
             match bsdiff::diff(base, target, &mut raw_patch) {
-                Ok(()) => {
-                    zstd::bulk::compress(&raw_patch, 3).unwrap_or(raw_patch)
-                }
+                Ok(()) => zstd::bulk::compress(&raw_patch, 3).unwrap_or(raw_patch),
                 Err(e) => {
                     warn!("bsdiff encoding failed: {}, falling back to full", e);
                     return Ok((target.to_vec(), false));
@@ -472,15 +474,16 @@ impl DeltaEncoder {
 
         let result = {
             // Decompress zstd wrapper, then apply bsdiff patch
-            let raw_patch = zstd::bulk::decompress(delta, 128 * 1024 * 1024)
-                .map_err(|e| CompressionError::decompression_failed(
-                    format!("bsdiff zstd decompression failed: {}", e)
-                ))?;
+            let raw_patch = zstd::bulk::decompress(delta, 128 * 1024 * 1024).map_err(|e| {
+                CompressionError::decompression_failed(format!(
+                    "bsdiff zstd decompression failed: {}",
+                    e
+                ))
+            })?;
             let mut output = Vec::new();
-            bsdiff::patch(base, &mut raw_patch.as_slice(), &mut output)
-                .map_err(|e| CompressionError::decompression_failed(
-                    format!("bsdiff patch failed: {}", e)
-                ))?;
+            bsdiff::patch(base, &mut raw_patch.as_slice(), &mut output).map_err(|e| {
+                CompressionError::decompression_failed(format!("bsdiff patch failed: {}", e))
+            })?;
             output
         };
 
@@ -771,7 +774,10 @@ mod tests {
 
         // For highly similar data, delta encoding should be beneficial
         if should_use_delta {
-            assert!(data.len() < target.len() / 2, "Delta should be much smaller");
+            assert!(
+                data.len() < target.len() / 2,
+                "Delta should be much smaller"
+            );
             let reconstructed = encoder.decode(&base, &data).unwrap();
             assert_eq!(target, reconstructed);
         } else {
@@ -904,7 +910,10 @@ mod tests {
 
         // For large data with small changes, delta should be beneficial
         if should_use_delta {
-            assert!(data.len() < target.len() / 2, "Delta should be much smaller than target");
+            assert!(
+                data.len() < target.len() / 2,
+                "Delta should be much smaller than target"
+            );
             let reconstructed = encoder.decode(&base, &data).unwrap();
             assert_eq!(target, reconstructed);
         } else {
@@ -926,13 +935,19 @@ mod tests {
         // Depth 0 - should create delta
         let (data0, should_use0) = encoder.encode_with_depth(&base, &target, 0).unwrap();
         if should_use0 {
-            assert!(data0.len() < target.len(), "Delta should be smaller than full data");
+            assert!(
+                data0.len() < target.len(),
+                "Delta should be smaller than full data"
+            );
         }
 
         // Depth 2 - should still create delta
         let (_data2, should_use2) = encoder.encode_with_depth(&base, &target, 2).unwrap();
         // Should use delta as long as we're below max depth
-        assert_eq!(should_use2, should_use0, "Should make same decision at depth 2");
+        assert_eq!(
+            should_use2, should_use0,
+            "Should make same decision at depth 2"
+        );
 
         // Depth 3 - should NOT create delta (at max depth)
         let (data3, should_use3) = encoder.encode_with_depth(&base, &target, 3).unwrap();
@@ -1003,37 +1018,82 @@ mod tests {
 
     #[test]
     fn test_new_category_delta_configurations() {
-        use crate::smart_compressor::{ObjectType, ObjectCategory};
+        use crate::smart_compressor::{ObjectCategory, ObjectType};
 
         // Test Creative Project configuration
         let creative_config = DeltaConfig::for_object_type(ObjectType::AdobePhotoshop);
-        assert_eq!(creative_config.similarity_threshold, 0.70, "Creative projects should have 70% threshold");
-        assert_eq!(creative_config.max_chain_depth, 10, "Creative projects should allow depth 10");
-        assert_eq!(creative_config.min_space_savings, 0.10, "Creative projects should require 10% savings");
+        assert_eq!(
+            creative_config.similarity_threshold, 0.70,
+            "Creative projects should have 70% threshold"
+        );
+        assert_eq!(
+            creative_config.max_chain_depth, 10,
+            "Creative projects should allow depth 10"
+        );
+        assert_eq!(
+            creative_config.min_space_savings, 0.10,
+            "Creative projects should require 10% savings"
+        );
 
         // Verify all creative project types use same config
-        assert_eq!(ObjectType::AdobePhotoshop.category(), ObjectCategory::CreativeProject);
-        assert_eq!(ObjectType::Blender.category(), ObjectCategory::CreativeProject);
-        assert_eq!(ObjectType::DavinciResolve.category(), ObjectCategory::CreativeProject);
+        assert_eq!(
+            ObjectType::AdobePhotoshop.category(),
+            ObjectCategory::CreativeProject
+        );
+        assert_eq!(
+            ObjectType::Blender.category(),
+            ObjectCategory::CreativeProject
+        );
+        assert_eq!(
+            ObjectType::DavinciResolve.category(),
+            ObjectCategory::CreativeProject
+        );
 
         // Test Office configuration
         let office_config = DeltaConfig::for_object_type(ObjectType::WordDocument);
-        assert_eq!(office_config.similarity_threshold, 0.75, "Office docs should have 75% threshold");
-        assert_eq!(office_config.max_chain_depth, 10, "Office docs should allow depth 10");
+        assert_eq!(
+            office_config.similarity_threshold, 0.75,
+            "Office docs should have 75% threshold"
+        );
+        assert_eq!(
+            office_config.max_chain_depth, 10,
+            "Office docs should allow depth 10"
+        );
         assert_eq!(ObjectType::WordDocument.category(), ObjectCategory::Office);
 
         // Test ML Specialized configuration
         let ml_config = DeltaConfig::for_object_type(ObjectType::MlCheckpoint);
-        assert_eq!(ml_config.similarity_threshold, 0.75, "ML models should have 75% threshold");
-        assert_eq!(ml_config.max_chain_depth, 8, "ML models should allow depth 8");
-        assert_eq!(ObjectType::MlCheckpoint.category(), ObjectCategory::MlSpecialized);
-        assert_eq!(ObjectType::MlInference.category(), ObjectCategory::MlSpecialized);
+        assert_eq!(
+            ml_config.similarity_threshold, 0.75,
+            "ML models should have 75% threshold"
+        );
+        assert_eq!(
+            ml_config.max_chain_depth, 8,
+            "ML models should allow depth 8"
+        );
+        assert_eq!(
+            ObjectType::MlCheckpoint.category(),
+            ObjectCategory::MlSpecialized
+        );
+        assert_eq!(
+            ObjectType::MlInference.category(),
+            ObjectCategory::MlSpecialized
+        );
 
         // Test Database configuration
         let db_config = DeltaConfig::for_object_type(ObjectType::SqliteDatabase);
-        assert_eq!(db_config.similarity_threshold, 0.80, "Databases should have 80% threshold");
-        assert_eq!(db_config.max_chain_depth, 5, "Databases should allow depth 5");
-        assert_eq!(ObjectType::SqliteDatabase.category(), ObjectCategory::Database);
+        assert_eq!(
+            db_config.similarity_threshold, 0.80,
+            "Databases should have 80% threshold"
+        );
+        assert_eq!(
+            db_config.max_chain_depth, 5,
+            "Databases should allow depth 5"
+        );
+        assert_eq!(
+            ObjectType::SqliteDatabase.category(),
+            ObjectCategory::Database
+        );
     }
 
     #[test]
@@ -1100,7 +1160,10 @@ mod tests {
         );
 
         // Test that config is correctly applied
-        assert_eq!(config.max_chain_depth, 10, "Creative projects should allow depth 10");
+        assert_eq!(
+            config.max_chain_depth, 10,
+            "Creative projects should allow depth 10"
+        );
         assert_eq!(
             config.similarity_threshold, 0.70,
             "Creative projects should have 70% threshold"

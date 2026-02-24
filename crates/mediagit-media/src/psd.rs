@@ -240,11 +240,11 @@ impl PsdParser {
         use psd::ColorMode;
         match color_mode {
             ColorMode::Bitmap | ColorMode::Grayscale | ColorMode::Duotone => 1,
-            ColorMode::Indexed => 1,  // Indexed color uses color table
-            ColorMode::Rgb => 3,  // Red, Green, Blue
-            ColorMode::Cmyk => 4,  // Cyan, Magenta, Yellow, Black
-            ColorMode::Lab => 3,  // L, a, b
-            ColorMode::Multichannel => 3,  // Typically 3+ channels
+            ColorMode::Indexed => 1,      // Indexed color uses color table
+            ColorMode::Rgb => 3,          // Red, Green, Blue
+            ColorMode::Cmyk => 4,         // Cyan, Magenta, Yellow, Black
+            ColorMode::Lab => 3,          // L, a, b
+            ColorMode::Multichannel => 3, // Typically 3+ channels
         }
     }
 
@@ -286,7 +286,7 @@ impl PsdParser {
 
         Ok(LayerInfo {
             name,
-            id: None,  // PSD crate may not expose layer ID
+            id: None, // PSD crate may not expose layer ID
             x,
             y,
             width,
@@ -294,7 +294,7 @@ impl PsdParser {
             opacity,
             blend_mode,
             visible,
-            parent_group: None,  // Would need layer tree analysis
+            parent_group: None, // Would need layer tree analysis
             layer_type,
         })
     }
@@ -345,8 +345,8 @@ impl PsdParser {
         let theirs_layers: Vec<&LayerInfo> = theirs.layers.iter().collect();
 
         // Check if layers were added/removed
-        let layers_changed = base_layers.len() != ours_layers.len()
-            || base_layers.len() != theirs_layers.len();
+        let layers_changed =
+            base_layers.len() != ours_layers.len() || base_layers.len() != theirs_layers.len();
 
         if layers_changed {
             debug!("Layer count changed, checking for conflicts");
@@ -360,7 +360,8 @@ impl PsdParser {
         let mut all_conflicts = Vec::new();
 
         // Check for overlapping spatial modifications
-        let spatial_conflicts = Self::find_overlapping_modifications(&ours_modified, &theirs_modified);
+        let spatial_conflicts =
+            Self::find_overlapping_modifications(&ours_modified, &theirs_modified);
         all_conflicts.extend(spatial_conflicts);
 
         // Check for blend mode conflicts
@@ -379,7 +380,10 @@ impl PsdParser {
             info!("No overlapping layer modifications detected - can auto-merge");
             MergeDecision::AutoMerge
         } else {
-            warn!("Found {} total conflicts across all detection strategies", all_conflicts.len());
+            warn!(
+                "Found {} total conflicts across all detection strategies",
+                all_conflicts.len()
+            );
             MergeDecision::ManualReview(all_conflicts)
         }
     }
@@ -418,16 +422,14 @@ impl PsdParser {
     }
 
     /// Detect blend mode conflicts between layers
-    fn detect_blend_conflicts(
-        ours: &[&LayerInfo],
-        theirs: &[&LayerInfo],
-    ) -> Vec<String> {
+    fn detect_blend_conflicts(ours: &[&LayerInfo], theirs: &[&LayerInfo]) -> Vec<String> {
         let mut conflicts = Vec::new();
 
         for our_layer in ours {
             for their_layer in theirs {
                 if our_layer.name == their_layer.name
-                    && our_layer.blend_mode != their_layer.blend_mode {
+                    && our_layer.blend_mode != their_layer.blend_mode
+                {
                     conflicts.push(format!(
                         "Layer '{}': blend mode changed from '{}' to '{}' in different branches",
                         our_layer.name, our_layer.blend_mode, their_layer.blend_mode
@@ -440,11 +442,7 @@ impl PsdParser {
     }
 
     /// Check for layer group hierarchy conflicts
-    fn detect_group_conflicts(
-        base: &PsdInfo,
-        ours: &PsdInfo,
-        theirs: &PsdInfo,
-    ) -> Vec<String> {
+    fn detect_group_conflicts(base: &PsdInfo, ours: &PsdInfo, theirs: &PsdInfo) -> Vec<String> {
         let mut conflicts = Vec::new();
 
         // Check if same layer moved to different groups
@@ -455,7 +453,8 @@ impl PsdParser {
             if let (Some(ours), Some(theirs)) = (ours_layer, theirs_layer) {
                 if ours.parent_group != theirs.parent_group
                     && (ours.parent_group != base_layer.parent_group
-                        || theirs.parent_group != base_layer.parent_group) {
+                        || theirs.parent_group != base_layer.parent_group)
+                {
                     conflicts.push(format!(
                         "Layer '{}' moved to different groups: {:?} vs {:?}",
                         base_layer.name, ours.parent_group, theirs.parent_group
@@ -468,17 +467,15 @@ impl PsdParser {
     }
 
     /// Detect smart object conflicts
-    fn detect_smart_object_conflicts(
-        ours: &[&LayerInfo],
-        theirs: &[&LayerInfo],
-    ) -> Vec<String> {
+    fn detect_smart_object_conflicts(ours: &[&LayerInfo], theirs: &[&LayerInfo]) -> Vec<String> {
         let mut conflicts = Vec::new();
 
         for our_layer in ours {
             if our_layer.layer_type == LayerType::SmartObject {
                 for their_layer in theirs {
                     if their_layer.name == our_layer.name
-                        && their_layer.layer_type == LayerType::SmartObject {
+                        && their_layer.layer_type == LayerType::SmartObject
+                    {
                         conflicts.push(format!(
                             "Smart Object '{}' modified in both branches (may contain different embedded content)",
                             our_layer.name
@@ -499,11 +496,7 @@ impl PsdParser {
     /// - Layers from base that weren't modified
     ///
     /// Returns merged PsdInfo structure (not actual PSD binary - that requires rebuild)
-    pub fn merge_layers(
-        base: &PsdInfo,
-        ours: &PsdInfo,
-        theirs: &PsdInfo,
-    ) -> Result<PsdInfo> {
+    pub fn merge_layers(base: &PsdInfo, ours: &PsdInfo, theirs: &PsdInfo) -> Result<PsdInfo> {
         info!("Executing PSD layer merge");
 
         // Start with base document properties
@@ -535,7 +528,8 @@ impl PsdParser {
         // Add new layers from 'theirs' that don't exist in 'ours'
         for layer in &theirs.layers {
             if !ours.layers.iter().any(|o| o.name == layer.name)
-                && !base.layers.iter().any(|b| b.name == layer.name) {
+                && !base.layers.iter().any(|b| b.name == layer.name)
+            {
                 // New layer in 'theirs' only
                 debug!("Adding new layer from 'theirs': {}", layer.name);
                 merged_layers.push(layer.clone());
@@ -559,17 +553,17 @@ impl PsdParser {
     }
 
     /// Find overlapping modifications between two sets of layers
-    fn find_overlapping_modifications(
-        ours: &[&LayerInfo],
-        theirs: &[&LayerInfo],
-    ) -> Vec<String> {
+    fn find_overlapping_modifications(ours: &[&LayerInfo], theirs: &[&LayerInfo]) -> Vec<String> {
         let mut conflicts = Vec::new();
 
         for our_layer in ours {
             for their_layer in theirs {
                 // Same layer name modified in both branches
                 if our_layer.name == their_layer.name {
-                    conflicts.push(format!("Layer '{}' modified in both branches", our_layer.name));
+                    conflicts.push(format!(
+                        "Layer '{}' modified in both branches",
+                        our_layer.name
+                    ));
                     continue;
                 }
 

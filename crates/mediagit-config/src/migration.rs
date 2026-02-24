@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -55,15 +55,21 @@ impl MigrationManager {
     }
 
     /// Migrate configuration from one version to another
-    pub fn migrate(&self, mut config: Value, from_version: u32, to_version: u32) -> ConfigResult<Value> {
+    pub fn migrate(
+        &self,
+        mut config: Value,
+        from_version: u32,
+        to_version: u32,
+    ) -> ConfigResult<Value> {
         if from_version == to_version {
             return Ok(config);
         }
 
         if from_version > to_version {
-            return Err(ConfigError::migration_error(
-                format!("Cannot migrate from version {} to lower version {}", from_version, to_version),
-            ));
+            return Err(ConfigError::migration_error(format!(
+                "Cannot migrate from version {} to lower version {}",
+                from_version, to_version
+            )));
         }
 
         let mut current_version = from_version;
@@ -78,7 +84,8 @@ impl MigrationManager {
                 Some(migration) => {
                     debug!(
                         "Applying migration from v{} to v{}: {}",
-                        current_version, next_version,
+                        current_version,
+                        next_version,
                         migration.description()
                     );
                     config = migration.migrate(config)?;
@@ -89,9 +96,10 @@ impl MigrationManager {
                     current_version = next_version;
                 }
                 None => {
-                    return Err(ConfigError::migration_error(
-                        format!("No migration found from v{} to v{}", current_version, next_version),
-                    ));
+                    return Err(ConfigError::migration_error(format!(
+                        "No migration found from v{} to v{}",
+                        current_version, next_version
+                    )));
                 }
             }
         }
@@ -178,7 +186,9 @@ mod tests {
         assert!(result.is_ok());
 
         let migrated = result.unwrap();
-        assert!(migrated["observability"]["metrics"]["enabled"].as_bool().unwrap());
+        assert!(migrated["observability"]["metrics"]["enabled"]
+            .as_bool()
+            .unwrap());
     }
 
     #[test]
@@ -221,7 +231,10 @@ mod tests {
         assert!(result.is_ok());
 
         let migrated = result.unwrap();
-        assert_eq!(migrated["observability"]["metrics"]["port"].as_u64(), Some(9090));
+        assert_eq!(
+            migrated["observability"]["metrics"]["port"].as_u64(),
+            Some(9090)
+        );
         assert_eq!(
             migrated["observability"]["metrics"]["endpoint"].as_str(),
             Some("/metrics")
