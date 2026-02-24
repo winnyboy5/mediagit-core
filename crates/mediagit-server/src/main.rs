@@ -158,7 +158,7 @@ async fn main() -> Result<()> {
 
         // Spawn HTTPS server task
         let https_server = tokio::spawn(async move {
-            let addr = https_bind_addr
+            let addr: std::net::SocketAddr = https_bind_addr
                 .parse()
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
             axum_server::bind_rustls(addr, rustls_config)
@@ -193,44 +193,19 @@ fn build_axum_rustls_config(
     certificate: &mediagit_security::Certificate,
 ) -> Result<axum_server::tls_rustls::RustlsConfig> {
     use axum_server::tls_rustls::RustlsConfig;
-
-    // axum-server 0.7 requires rustls 0.23
-    // Build rustls ServerConfig first
+    use rustls::pki_types::pem::PemObject;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
     // Parse certificate PEM
     let cert_pem = certificate.cert_pem.as_bytes();
-    let certs: Vec<CertificateDer> = rustls_pemfile::certs(&mut &cert_pem[..])
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| anyhow::anyhow!("Failed to parse certificate: {}", e))?;
 
-    // Parse private key PEM
+    // Parse private key PEM (handles PKCS#8, RSA PKCS#1, and EC SEC1 automatically)
     let key_pem = certificate.key_pem.as_bytes();
-    let mut key_reader = key_pem;
-
-    // Try to read as PKCS#8 first, then RSA
-    let private_key = if let Ok(key) =
-        rustls_pemfile::pkcs8_private_keys(&mut key_reader).collect::<Result<Vec<_>, _>>()
-    {
-        if let Some(key) = key.into_iter().next() {
-            PrivateKeyDer::Pkcs8(key)
-        } else {
-            // Reset reader and try RSA
-            key_reader = key_pem;
-            let rsa_keys = rustls_pemfile::rsa_private_keys(&mut key_reader)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| anyhow::anyhow!("Failed to parse private key: {}", e))?;
-
-            PrivateKeyDer::Pkcs1(
-                rsa_keys
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("No private key found in PEM"))?,
-            )
-        }
-    } else {
-        anyhow::bail!("Failed to parse private key");
-    };
+    let private_key: PrivateKeyDer<'static> = PrivateKeyDer::from_pem_slice(key_pem)
+        .map_err(|e| anyhow::anyhow!("Failed to parse private key: {}", e))?;
 
     // Build rustls ServerConfig
     let rustls_config = rustls::ServerConfig::builder()

@@ -22,7 +22,7 @@
 
 use crate::error::{MediaError, Result};
 use image::{GenericImageView, ImageFormat};
-use img_hash::{HashAlg, HasherConfig};
+use image_hasher::{HashAlg, HasherConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -113,11 +113,10 @@ impl PerceptualHash {
             return None;
         }
 
-        // img_hash uses base64 encoding, calculate Hamming distance
-        let hamming_distance = img_hash::ImageHash::<Vec<u8>>::dist(
-            &img_hash::ImageHash::from_base64(&self.hash_value).ok()?,
-            &img_hash::ImageHash::from_base64(&other.hash_value).ok()?,
-        );
+        // image_hasher uses base64 encoding, calculate Hamming distance
+        let hash_a = image_hasher::ImageHash::<Vec<u8>>::from_base64(&self.hash_value).ok()?;
+        let hash_b = image_hasher::ImageHash::<Vec<u8>>::from_base64(&other.hash_value).ok()?;
+        let hamming_distance = hash_a.dist(&hash_b);
 
         let max_distance = self.hash_size * self.hash_size;
         Some(1.0 - (hamming_distance as f64 / max_distance as f64))
