@@ -2,4 +2,6 @@
 ignore = [
     # rsa: Marvin attack (timing side-channel) — no fix available, transitive dep via sqlx-mysql
     "RUSTSEC-2023-0071",
+    # instant: unmaintained — no fix available, transitive dep via criterion (benchmarks only)
+    "RUSTSEC-2024-0384",
 ]
