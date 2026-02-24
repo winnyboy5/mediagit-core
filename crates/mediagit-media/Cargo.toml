@@ -13,12 +13,12 @@ thiserror.workspace = true
 tracing.workspace = true
 
 # Image processing and metadata
-# Note: img_hash 3.2 has transpose 0.1.0 vulnerability (RUSTSEC-2023-0080)
-# Latest img_hash is 3.2.0 - no fix available yet
-# Using img_hash with image 0.23 for compatibility
-image = { version = "0.23", default-features = false, features = ["png", "jpeg", "tiff", "webp"] }
+# Migrated from img_hash 3.2 to image-hasher 1 (maintained fork) to fix:
+# - RUSTSEC-2023-0080: transpose 0.1.0 buffer overflow vulnerability
+# - RUSTSEC-2025-0056: adler 1.0.2 unmaintained
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff", "webp"] }
 kamadak-exif = "0.6"
-img_hash = "3.2"
+image_hasher = "3"
 
 # Video processing
 mp4parse = "0.17"

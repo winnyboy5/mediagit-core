@@ -31,7 +31,7 @@ jobs:
             cross: true
 
           # macOS
-          - os: macos-13
+          - os: macos-latest
             target: x86_64-apple-darwin
             rust: stable
           - os: macos-latest
@@ -145,8 +145,35 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Start storage emulators and wait for health
-        run: docker compose -f docker-compose.test.yml up -d --wait --wait-timeout 120
+      - name: Start storage emulators
+        run: docker compose -f docker-compose.test.yml up -d
+
+      - name: Wait for MinIO health
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:9000/minio/health/live && break
+            echo "Waiting for MinIO... ($i/30)"
+            sleep 2
+          done
+
+      - name: Wait for Azurite health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf -o /dev/null -w "%{http_code}" http://localhost:10000/ 2>/dev/null | grep -q "400\|200"; then
+              echo "Azurite is ready"
+              break
+            fi
+            echo "Waiting for Azurite... ($i/30)"
+            sleep 2
+          done
+
+      - name: Wait for GCS emulator health
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:4443/storage/v1/b && break
+            echo "Waiting for GCS emulator... ($i/30)"
+            sleep 2
+          done
 
       - name: Run integration tests
         env:
