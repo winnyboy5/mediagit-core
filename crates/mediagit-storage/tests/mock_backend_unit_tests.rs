@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -479,7 +479,10 @@ async fn test_utf8_data() {
 
     let retrieved = backend.get("utf8_key").await.unwrap();
     assert_eq!(retrieved, utf8_data);
-    assert_eq!(String::from_utf8(retrieved).unwrap(), "Hello, 世界! Привет! مرحبا!");
+    assert_eq!(
+        String::from_utf8(retrieved).unwrap(),
+        "Hello, 世界! Привет! مرحبا!"
+    );
 }
 
 /// Test storage trait object usage

@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -34,7 +34,11 @@ fn test_operation_stats_summary() {
     let summary = stats.summary();
     // HumanBytes uses MiB (binary) format, not MB (decimal)
     assert!(summary.contains("MiB"), "Expected MiB, got: {}", summary);
-    assert!(summary.contains("42 objects"), "Expected 42 objects, got: {}", summary);
+    assert!(
+        summary.contains("42 objects"),
+        "Expected 42 objects, got: {}",
+        summary
+    );
     // HumanDuration formats durations in human readable format
     assert!(summary.contains("in "), "Expected 'in ', got: {}", summary);
 }
@@ -44,14 +48,14 @@ fn test_progress_tracker_quiet_mode() {
     let tracker = ProgressTracker::new(true);
     let pb = tracker.download_bar("Test");
     assert!(pb.is_hidden());
-    
+
     // All bar types should be hidden in quiet mode
     let verify_pb = tracker.verify_bar("Test", 100);
     assert!(verify_pb.is_hidden());
-    
+
     let merge_pb = tracker.merge_bar("Test", 100);
     assert!(merge_pb.is_hidden());
-    
+
     let io_pb = tracker.io_bar("Test", 1024);
     assert!(io_pb.is_hidden());
 }
@@ -78,12 +82,12 @@ fn test_progress_tracker_creates_bars() {
 #[test]
 fn test_new_bar_types() {
     let tracker = ProgressTracker::new(false);
-    
+
     // Test new bar types from Phase 0b
     let verify_pb = tracker.verify_bar("Testing verification", 100);
     let merge_pb = tracker.merge_bar("Testing merge", 50);
     let io_pb = tracker.io_bar("Testing I/O", 1024 * 1024);
-    
+
     // Verify they're created successfully
     drop(verify_pb);
     drop(merge_pb);
@@ -94,7 +98,7 @@ fn test_new_bar_types() {
 fn test_is_quiet_method() {
     let quiet_tracker = ProgressTracker::new(true);
     assert!(quiet_tracker.is_quiet());
-    
+
     let normal_tracker = ProgressTracker::new(false);
     assert!(!normal_tracker.is_quiet());
 }
@@ -106,4 +110,3 @@ fn test_format_count() {
     // HumanCount adds thousands separators
     assert!(!formatted.is_empty());
 }
-

@@ -170,7 +170,9 @@ pub struct RecoveryReport {
 }
 
 /// Recover incomplete transactions on ODB initialization
-pub async fn recover_incomplete_transactions(storage_path: &Path) -> anyhow::Result<RecoveryReport> {
+pub async fn recover_incomplete_transactions(
+    storage_path: &Path,
+) -> anyhow::Result<RecoveryReport> {
     let mut report = RecoveryReport::default();
 
     let temp_root = storage_path.join("temp");
@@ -286,7 +288,11 @@ mod tests {
         }
 
         // Verify the transaction directory and marker exist before recovery
-        assert!(tx_dir.exists(), "Transaction dir should exist: {:?}", tx_dir);
+        assert!(
+            tx_dir.exists(),
+            "Transaction dir should exist: {:?}",
+            tx_dir
+        );
         assert!(
             tx_dir.join(".transaction_marker").exists(),
             "Marker should exist"

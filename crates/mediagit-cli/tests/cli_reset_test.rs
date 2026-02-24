@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -33,13 +33,29 @@ fn mediagit() -> Command {
 }
 
 fn init_repo(dir: &Path) {
-    mediagit().arg("init").arg("-q").current_dir(dir).assert().success();
+    mediagit()
+        .arg("init")
+        .arg("-q")
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 fn add_and_commit(dir: &Path, name: &str, content: &str, message: &str) {
     fs::write(dir.join(name), content).unwrap();
-    mediagit().arg("add").arg(name).current_dir(dir).assert().success();
-    mediagit().arg("commit").arg("-m").arg(message).current_dir(dir).assert().success();
+    mediagit()
+        .arg("add")
+        .arg(name)
+        .current_dir(dir)
+        .assert()
+        .success();
+    mediagit()
+        .arg("commit")
+        .arg("-m")
+        .arg(message)
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 // ============================================================================
@@ -151,7 +167,12 @@ fn test_reset_path_unstage() {
 
     // Add a new file to staging
     fs::write(temp_dir.path().join("file2.txt"), "new file").unwrap();
-    mediagit().arg("add").arg("file2.txt").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("add")
+        .arg("file2.txt")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     // Unstage file2.txt
     mediagit()
@@ -177,7 +198,12 @@ fn test_reset_all_paths() {
     // Add multiple files
     fs::write(temp_dir.path().join("a.txt"), "a").unwrap();
     fs::write(temp_dir.path().join("b.txt"), "b").unwrap();
-    mediagit().arg("add").arg(".").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("add")
+        .arg(".")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     // Unstage all with reset .
     mediagit()

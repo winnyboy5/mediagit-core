@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -38,7 +38,12 @@ fn mediagit() -> Command {
 }
 
 fn init_repo(dir: &Path) {
-    mediagit().arg("init").arg("-q").current_dir(dir).assert().success();
+    mediagit()
+        .arg("init")
+        .arg("-q")
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 fn copy_test_file(test_file: &str, repo_dir: &Path, dest_name: &str) -> PathBuf {
@@ -54,7 +59,9 @@ fn copy_test_file(test_file: &str, repo_dir: &Path, dest_name: &str) -> PathBuf 
 
 fn file_size_mb(path: &Path) -> f64 {
     if path.exists() {
-        fs::metadata(path).map(|m| m.len() as f64 / 1024.0 / 1024.0).unwrap_or(0.0)
+        fs::metadata(path)
+            .map(|m| m.len() as f64 / 1024.0 / 1024.0)
+            .unwrap_or(0.0)
     } else {
         0.0
     }
@@ -183,7 +190,10 @@ fn test_medium_flac_39mb() {
 #[test]
 #[ignore]
 fn test_large_wav_57mb() {
-    test_large_file("_Quando_le_sere_al_placido__(Ferruccio_Giannini).wav", "audio.wav");
+    test_large_file(
+        "_Quando_le_sere_al_placido__(Ferruccio_Giannini).wav",
+        "audio.wav",
+    );
 }
 
 #[test]
@@ -229,11 +239,15 @@ fn test_extreme_archive_10gb() {
 
     let size = file_size_mb(&source);
     println!("\n=== EXTREME SCALE TEST ===");
-    println!("Testing 10GB+ archive: {:.2} MB ({:.2} GB)", size, size / 1024.0);
+    println!(
+        "Testing 10GB+ archive: {:.2} MB ({:.2} GB)",
+        size,
+        size / 1024.0
+    );
 
     // For 10GB+ files, we need to use streaming/chunked approach
     // This test verifies the system can handle extreme scale
-    
+
     println!("Copying file to temp repository...");
     let copy_start = Instant::now();
     let dest = temp_dir.path().join("large_archive.zip");
@@ -287,8 +301,19 @@ fn test_chunking_verification() {
 
     let original_size = file_size_bytes(&dest);
 
-    mediagit().arg("add").arg("video.mov").current_dir(temp_dir.path()).assert().success();
-    mediagit().arg("commit").arg("-m").arg("Add video").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("add")
+        .arg("video.mov")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("commit")
+        .arg("-m")
+        .arg("Add video")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     // Check storage statistics
     let _output = mediagit()
@@ -298,7 +323,11 @@ fn test_chunking_verification() {
         .assert()
         .success();
 
-    println!("Original file size: {} bytes ({:.2} MB)", original_size, original_size as f64 / 1024.0 / 1024.0);
+    println!(
+        "Original file size: {} bytes ({:.2} MB)",
+        original_size,
+        original_size as f64 / 1024.0 / 1024.0
+    );
 }
 
 // ============================================================================
@@ -309,7 +338,7 @@ fn test_chunking_verification() {
 #[ignore]
 fn test_video_formats() {
     println!("\n=== VIDEO FORMAT TESTS ===");
-    
+
     // MP4
     if let Some(m) = test_large_file("101394-video-720.mp4", "video.mp4") {
         assert!(m.throughput_mbps > 0.0, "MP4 throughput should be positive");
@@ -325,29 +354,32 @@ fn test_video_formats() {
 #[ignore]
 fn test_audio_formats() {
     println!("\n=== AUDIO FORMAT TESTS ===");
-    
+
     // OGG
     test_large_file("_Into_the_Oceans_and_the_Air_.ogg", "audio.ogg");
-    
+
     // FLAC
     test_large_file("_Amir_Tangsiri__Dokhtare_Koli.flac", "audio.flac");
-    
+
     // WAV
-    test_large_file("_Quando_le_sere_al_placido__(Ferruccio_Giannini).wav", "audio.wav");
+    test_large_file(
+        "_Quando_le_sere_al_placido__(Ferruccio_Giannini).wav",
+        "audio.wav",
+    );
 }
 
 #[test]
 #[ignore]
 fn test_3d_model_formats() {
     println!("\n=== 3D MODEL FORMAT TESTS ===");
-    
+
     // GLB
     test_large_file("1965_ac_shelby_427_cobra_sc.glb", "car.glb");
     test_large_file("sci-fi_buildings_pack.glb", "buildings.glb");
-    
+
     // STL
     test_large_file("1900s_telephone.stl", "phone.stl");
-    
+
     // USDZ
     test_large_file("1965_AC_Shelby_427_Cobra_SC.usdz", "car.usdz");
 }
@@ -356,15 +388,18 @@ fn test_3d_model_formats() {
 #[ignore]
 fn test_document_formats() {
     println!("\n=== DOCUMENT FORMAT TESTS ===");
-    
+
     // AI
     test_large_file("12690118_5053480.ai", "design.ai");
-    
+
     // EPS
     test_large_file("12690118_5053481.eps", "design.eps");
-    
+
     // SVG
-    test_large_file("3D_Model_of_the_Main_Gallery_in_Skednena_jama_Cave.svg", "cave.svg");
+    test_large_file(
+        "3D_Model_of_the_Main_Gallery_in_Skednena_jama_Cave.svg",
+        "cave.svg",
+    );
 }
 
 // ============================================================================
@@ -385,7 +420,10 @@ fn test_performance_summary() {
         ("101394-video-720.mp4", "video_5mb.mp4"),
         ("1965_ac_shelby_427_cobra_sc.glb", "model_13mb.glb"),
         ("_Amir_Tangsiri__Dokhtare_Koli.flac", "audio_39mb.flac"),
-        ("_Quando_le_sere_al_placido__(Ferruccio_Giannini).wav", "audio_57mb.wav"),
+        (
+            "_Quando_le_sere_al_placido__(Ferruccio_Giannini).wav",
+            "audio_57mb.wav",
+        ),
     ];
 
     for (src, dst) in test_files {
@@ -398,11 +436,15 @@ fn test_performance_summary() {
         println!("\n========================================");
         println!("SUMMARY TABLE");
         println!("========================================");
-        println!("{:<40} {:>10} {:>12} {:>10}", "File", "Size (MB)", "Add (ms)", "MB/s");
+        println!(
+            "{:<40} {:>10} {:>12} {:>10}",
+            "File", "Size (MB)", "Add (ms)", "MB/s"
+        );
         println!("{}", "-".repeat(74));
-        
+
         for m in &all_metrics {
-            println!("{:<40} {:>10.2} {:>12} {:>10.2}", 
+            println!(
+                "{:<40} {:>10.2} {:>12} {:>10.2}",
                 m.file_name.chars().take(40).collect::<String>(),
                 m.file_size_mb,
                 m.add_duration_ms,
@@ -413,8 +455,11 @@ fn test_performance_summary() {
         let total_size: f64 = all_metrics.iter().map(|m| m.file_size_mb).sum();
         let total_time: u128 = all_metrics.iter().map(|m| m.add_duration_ms).sum();
         let avg_throughput = total_size / (total_time as f64 / 1000.0);
-        
+
         println!("{}", "-".repeat(74));
-        println!("TOTAL: {:.2} MB in {} ms = {:.2} MB/s avg", total_size, total_time, avg_throughput);
+        println!(
+            "TOTAL: {:.2} MB in {} ms = {:.2} MB/s avg",
+            total_size, total_time, avg_throughput
+        );
     }
 }

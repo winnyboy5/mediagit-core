@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -16,10 +16,13 @@
 //!
 //! The `commit` command creates a new commit containing the currently staged changes.
 
+use super::super::repo::{create_storage_backend, find_repo_root};
 use anyhow::{Context, Result};
 use clap::Parser;
-use mediagit_versioning::{Commit, Index, ObjectDatabase, Oid, Ref, RefDatabase, Reflog, ReflogEntry, Signature, Tree, TreeEntry, FileMode};
-use super::super::repo::{find_repo_root, create_storage_backend};
+use mediagit_versioning::{
+    Commit, FileMode, Index, ObjectDatabase, Oid, Ref, RefDatabase, Reflog, ReflogEntry, Signature,
+    Tree, TreeEntry,
+};
 
 /// Record changes to the repository
 ///
@@ -201,7 +204,9 @@ impl CommitCmd {
 
         // Create commit signature
         // Priority: --author CLI flag > MEDIAGIT_AUTHOR_* env vars > config.toml [author] > $USER > defaults
-        let config = mediagit_config::Config::load(&repo_root).await.unwrap_or_default();
+        let config = mediagit_config::Config::load(&repo_root)
+            .await
+            .unwrap_or_default();
 
         let (author_name, author_email) = if let Some(author_str) = &self.author {
             // Parse "Name <email>" format from --author flag
@@ -213,17 +218,19 @@ impl CommitCmd {
                 (author_str.clone(), "unknown@localhost".to_string())
             }
         } else {
-            let name = std::env::var("MEDIAGIT_AUTHOR_NAME")
-                .unwrap_or_else(|_| {
-                    // config.toml [author].name takes priority over generic $USER
-                    config.author.name.clone().unwrap_or_else(|| {
-                        std::env::var("USER").unwrap_or_else(|_| "Unknown".to_string())
-                    })
-                });
-            let email = std::env::var("MEDIAGIT_AUTHOR_EMAIL")
-                .unwrap_or_else(|_| {
-                    config.author.email.clone().unwrap_or_else(|| "unknown@localhost".to_string())
-                });
+            let name = std::env::var("MEDIAGIT_AUTHOR_NAME").unwrap_or_else(|_| {
+                // config.toml [author].name takes priority over generic $USER
+                config.author.name.clone().unwrap_or_else(|| {
+                    std::env::var("USER").unwrap_or_else(|_| "Unknown".to_string())
+                })
+            });
+            let email = std::env::var("MEDIAGIT_AUTHOR_EMAIL").unwrap_or_else(|_| {
+                config
+                    .author
+                    .email
+                    .clone()
+                    .unwrap_or_else(|| "unknown@localhost".to_string())
+            });
             (name, email)
         };
 
@@ -255,8 +262,7 @@ impl CommitCmd {
         let mut index = Index::load(&repo_root)?;
         let index_backup = index.clone();
         index.clear();
-        index.save(&repo_root)
-            .context("Failed to clear index")?;
+        index.save(&repo_root).context("Failed to clear index")?;
 
         // Update HEAD reference
         let head_ref = refdb.read("HEAD").await?;
@@ -284,16 +290,17 @@ impl CommitCmd {
                     .await
                     .context("Failed to update HEAD in detached state")
             }
-            _ => {
-                Err(anyhow::anyhow!("HEAD is in an invalid state"))
-            }
+            _ => Err(anyhow::anyhow!("HEAD is in an invalid state")),
         };
 
         // If ref update failed, restore the index backup
         if let Err(e) = ref_update_result {
             // Attempt to restore index - log but don't fail on restore error
             if let Err(restore_err) = index_backup.save(&repo_root) {
-                tracing::error!("Failed to restore index after ref update failure: {}", restore_err);
+                tracing::error!(
+                    "Failed to restore index after ref update failure: {}",
+                    restore_err
+                );
             }
             return Err(e);
         }
@@ -302,7 +309,13 @@ impl CommitCmd {
         let reflog = Reflog::new(&storage_path);
         let old_oid = parent_oid.unwrap_or_else(|| Oid::from_bytes([0u8; 32]));
         let reflog_msg = format!("commit: {}", message);
-        let entry = ReflogEntry::now(old_oid, commit_oid, &author_name, &author_email, &reflog_msg);
+        let entry = ReflogEntry::now(
+            old_oid,
+            commit_oid,
+            &author_name,
+            &author_email,
+            &reflog_msg,
+        );
         // Best-effort: don't fail the commit if reflog write fails
         let _ = reflog.append("HEAD", &entry).await;
         if let Ok(head_ref) = refdb.read("HEAD").await {
@@ -321,5 +334,4 @@ impl CommitCmd {
 
         Ok(())
     }
-
 }

@@ -46,8 +46,8 @@
 //! }
 //! ```
 
-use crate::{Commit, Oid, Ref, RefType};
 use crate::odb::ObjectDatabase;
+use crate::{Commit, Oid, Ref, RefType};
 use mediagit_storage::StorageBackend;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -108,11 +108,7 @@ pub struct FsckIssue {
 
 impl FsckIssue {
     /// Create a new FSCK issue
-    pub fn new(
-        severity: IssueSeverity,
-        category: IssueCategory,
-        message: String,
-    ) -> Self {
+    pub fn new(severity: IssueSeverity, category: IssueCategory, message: String) -> Self {
         Self {
             severity,
             category,
@@ -208,12 +204,17 @@ impl FsckReport {
 
     /// Check if there are any critical errors
     pub fn has_errors(&self) -> bool {
-        self.issues.iter().any(|i| i.severity == IssueSeverity::Error)
+        self.issues
+            .iter()
+            .any(|i| i.severity == IssueSeverity::Error)
     }
 
     /// Get issues by severity
     pub fn issues_by_severity(&self, severity: IssueSeverity) -> Vec<&FsckIssue> {
-        self.issues.iter().filter(|i| i.severity == severity).collect()
+        self.issues
+            .iter()
+            .filter(|i| i.severity == severity)
+            .collect()
     }
 
     /// Get repairable issues
@@ -474,7 +475,10 @@ impl FsckChecker {
                                 FsckIssue::new(
                                     IssueSeverity::Error,
                                     IssueCategory::BrokenReference,
-                                    format!("Reference {} points to missing commit {}", r.name, oid),
+                                    format!(
+                                        "Reference {} points to missing commit {}",
+                                        r.name, oid
+                                    ),
                                 )
                                 .with_ref(r.name.clone())
                                 .with_oid(oid)
@@ -500,7 +504,10 @@ impl FsckChecker {
                                 FsckIssue::new(
                                     IssueSeverity::Warning,
                                     IssueCategory::BrokenReference,
-                                    format!("Symbolic reference {} points to missing ref {}", r.name, target),
+                                    format!(
+                                        "Symbolic reference {} points to missing ref {}",
+                                        r.name, target
+                                    ),
                                 )
                                 .with_ref(r.name.clone())
                                 .repairable(),
@@ -534,13 +541,8 @@ impl FsckChecker {
         // Traverse from all branch heads
         for r in refs {
             if let Some(oid) = r.oid {
-                self.traverse_commit(
-                    &oid,
-                    &mut visited,
-                    &mut referenced_objects,
-                    report,
-                )
-                .await?;
+                self.traverse_commit(&oid, &mut visited, &mut referenced_objects, report)
+                    .await?;
             }
         }
 
@@ -562,68 +564,68 @@ impl FsckChecker {
         report: &'a mut FsckReport,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + 'a>> {
         Box::pin(async move {
-        // Detect circular references
-        if visited.contains(oid) {
-            return Ok(());
-        }
-        visited.insert(*oid);
-        referenced_objects.insert(*oid);
+            // Detect circular references
+            if visited.contains(oid) {
+                return Ok(());
+            }
+            visited.insert(*oid);
+            referenced_objects.insert(*oid);
 
-        // Try to read commit
-        // Use oid.to_hex() - LocalBackend handles "objects/" prefix and sharding
-        let key = oid.to_hex();
-        let data = match self.storage.get(&key).await {
-            Ok(d) => d,
-            Err(_) => {
+            // Try to read commit
+            // Use oid.to_hex() - LocalBackend handles "objects/" prefix and sharding
+            let key = oid.to_hex();
+            let data = match self.storage.get(&key).await {
+                Ok(d) => d,
+                Err(_) => {
+                    report.add_issue(
+                        FsckIssue::new(
+                            IssueSeverity::Error,
+                            IssueCategory::MissingObject,
+                            format!("Commit {} is missing", oid),
+                        )
+                        .with_oid(*oid),
+                    );
+                    return Ok(());
+                }
+            };
+
+            // Deserialize commit
+            let commit: Commit = match bincode::deserialize(&data) {
+                Ok(c) => c,
+                Err(e) => {
+                    report.add_issue(
+                        FsckIssue::new(
+                            IssueSeverity::Error,
+                            IssueCategory::InvalidFormat,
+                            format!("Failed to deserialize commit {}: {}", oid, e),
+                        )
+                        .with_oid(*oid),
+                    );
+                    return Ok(());
+                }
+            };
+
+            // Check tree exists
+            referenced_objects.insert(commit.tree);
+            if !self.object_exists(&commit.tree).await? {
                 report.add_issue(
                     FsckIssue::new(
                         IssueSeverity::Error,
                         IssueCategory::MissingObject,
-                        format!("Commit {} is missing", oid),
+                        format!("Commit {} references missing tree {}", oid, commit.tree),
                     )
                     .with_oid(*oid),
                 );
-                return Ok(());
             }
-        };
 
-        // Deserialize commit
-        let commit: Commit = match bincode::deserialize(&data) {
-            Ok(c) => c,
-            Err(e) => {
-                report.add_issue(
-                    FsckIssue::new(
-                        IssueSeverity::Error,
-                        IssueCategory::InvalidFormat,
-                        format!("Failed to deserialize commit {}: {}", oid, e),
-                    )
-                    .with_oid(*oid),
-                );
-                return Ok(());
+            // Traverse parent commits
+            for parent in &commit.parents {
+                referenced_objects.insert(*parent);
+                self.traverse_commit(parent, visited, referenced_objects, report)
+                    .await?;
             }
-        };
 
-        // Check tree exists
-        referenced_objects.insert(commit.tree);
-        if !self.object_exists(&commit.tree).await? {
-            report.add_issue(
-                FsckIssue::new(
-                    IssueSeverity::Error,
-                    IssueCategory::MissingObject,
-                    format!("Commit {} references missing tree {}", oid, commit.tree),
-                )
-                .with_oid(*oid),
-            );
-        }
-
-        // Traverse parent commits
-        for parent in &commit.parents {
-            referenced_objects.insert(*parent);
-            self.traverse_commit(parent, visited, referenced_objects, report)
-                .await?;
-        }
-
-        Ok(())
+            Ok(())
         })
     }
 
@@ -672,25 +674,25 @@ impl FsckChecker {
         referenced: &'a mut HashSet<Oid>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + 'a>> {
         Box::pin(async move {
-        if visited.contains(oid) {
-            return Ok(());
-        }
-        visited.insert(*oid);
-        referenced.insert(*oid);
+            if visited.contains(oid) {
+                return Ok(());
+            }
+            visited.insert(*oid);
+            referenced.insert(*oid);
 
-        // Use oid.to_hex() - LocalBackend handles "objects/" prefix and sharding
-        let key = oid.to_hex();
-        if let Ok(data) = self.storage.get(&key).await {
-            if let Ok(commit) = bincode::deserialize::<Commit>(&data) {
-                referenced.insert(commit.tree);
-                for parent in commit.parents {
-                    self.collect_referenced_objects(&parent, visited, referenced)
-                        .await?;
+            // Use oid.to_hex() - LocalBackend handles "objects/" prefix and sharding
+            let key = oid.to_hex();
+            if let Ok(data) = self.storage.get(&key).await {
+                if let Ok(commit) = bincode::deserialize::<Commit>(&data) {
+                    referenced.insert(commit.tree);
+                    for parent in commit.parents {
+                        self.collect_referenced_objects(&parent, visited, referenced)
+                            .await?;
+                    }
                 }
             }
-        }
 
-        Ok(())
+            Ok(())
         })
     }
 

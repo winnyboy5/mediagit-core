@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -38,17 +38,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn multiple async tasks with automatic span inheritance
     let handle1 = tokio::spawn(
-        async {
-            process_batch("batch-1", 3).await
-        }
-        .instrument(tracing::info_span!("batch_processor", batch_id = "batch-1")),
+        async { process_batch("batch-1", 3).await }
+            .instrument(tracing::info_span!("batch_processor", batch_id = "batch-1")),
     );
 
     let handle2 = tokio::spawn(
-        async {
-            process_batch("batch-2", 2).await
-        }
-        .instrument(tracing::info_span!("batch_processor", batch_id = "batch-2")),
+        async { process_batch("batch-2", 2).await }
+            .instrument(tracing::info_span!("batch_processor", batch_id = "batch-2")),
     );
 
     // Wait for both to complete

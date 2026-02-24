@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -12,12 +12,12 @@
 //
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
+use super::super::repo::{create_storage_backend, find_repo_root};
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_versioning::{Commit, ObjectDatabase, Oid, RefDatabase};
 use std::collections::HashSet;
-use super::super::repo::{find_repo_root, create_storage_backend};
 
 /// Show commit history
 ///
@@ -126,7 +126,9 @@ impl LogCmd {
             // Try to resolve revision as a reference
             let ref_result = refdb.read(revision).await;
             match ref_result {
-                Ok(r) => r.oid.ok_or_else(|| anyhow::anyhow!("Revision {} has no commit", revision))?,
+                Ok(r) => r
+                    .oid
+                    .ok_or_else(|| anyhow::anyhow!("Revision {} has no commit", revision))?,
                 Err(_) => {
                     // Try to parse as OID
                     Oid::from_hex(revision)
@@ -143,15 +145,13 @@ impl LogCmd {
                             // HEAD might be symbolic, resolve it
                             if let Some(target) = head.target {
                                 match refdb.read(&target).await {
-                                    Ok(target_ref) => {
-                                        match target_ref.oid {
-                                            Some(oid) => oid,
-                                            None => {
-                                                println!("{}", style("No commits yet").dim());
-                                                return Ok(());
-                                            }
+                                    Ok(target_ref) => match target_ref.oid {
+                                        Some(oid) => oid,
+                                        None => {
+                                            println!("{}", style("No commits yet").dim());
+                                            return Ok(());
                                         }
-                                    }
+                                    },
                                     Err(_) => {
                                         // Branch doesn't exist yet (e.g., refs/heads/main on fresh repo)
                                         println!("{}", style("No commits yet").dim());
@@ -256,7 +256,11 @@ impl LogCmd {
                 println!("{} {}", style(short_oid).yellow(), short_msg);
             } else {
                 // Full format
-                println!("{} {}", style("commit").yellow().bold(), style(oid).yellow());
+                println!(
+                    "{} {}",
+                    style("commit").yellow().bold(),
+                    style(oid).yellow()
+                );
                 println!("Author: {} <{}>", commit.author.name, commit.author.email);
                 println!("Date:   {}", commit.author.timestamp);
                 println!();
@@ -269,5 +273,4 @@ impl LogCmd {
 
         Ok(())
     }
-
 }

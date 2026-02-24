@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -12,13 +12,15 @@
 //
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
+use super::super::repo::{create_storage_backend, find_repo_root};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use console::style;
-use mediagit_versioning::{CheckoutManager, Commit, Index, ObjectDatabase, ObjectType, Oid, RefDatabase, Tree};
+use mediagit_versioning::{
+    CheckoutManager, Commit, Index, ObjectDatabase, ObjectType, Oid, RefDatabase, Tree,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use super::super::repo::{find_repo_root, create_storage_backend};
 
 /// Stash changes in working directory
 #[derive(Parser, Debug)]
@@ -164,18 +166,23 @@ impl StashCmd {
         let index = Index::load(&repo_root)?;
 
         // Get current HEAD
-        let current_oid = refdb.resolve("HEAD").await
+        let current_oid = refdb
+            .resolve("HEAD")
+            .await
             .context("Failed to resolve HEAD")?;
 
         // Load HEAD commit tree to detect working-tree modifications
-        let head_data = odb.read(&current_oid).await
+        let head_data = odb
+            .read(&current_oid)
+            .await
             .context("Failed to read HEAD commit")?;
-        let head_commit = Commit::deserialize(&head_data)
-            .context("Failed to deserialize HEAD commit")?;
-        let tree_data = odb.read(&head_commit.tree).await
+        let head_commit =
+            Commit::deserialize(&head_data).context("Failed to deserialize HEAD commit")?;
+        let tree_data = odb
+            .read(&head_commit.tree)
+            .await
             .context("Failed to read HEAD tree")?;
-        let head_tree = Tree::deserialize(&tree_data)
-            .context("Failed to deserialize HEAD tree")?;
+        let head_tree = Tree::deserialize(&tree_data).context("Failed to deserialize HEAD tree")?;
 
         // Build HEAD file map (path -> oid)
         let mut head_files: HashMap<PathBuf, Oid> = HashMap::new();
@@ -226,7 +233,9 @@ impl StashCmd {
         for (path, _working_oid) in &working_tree_changes {
             let full_path = repo_root.join(path);
             if let Ok(content) = std::fs::read(&full_path) {
-                let blob_oid = odb.write(ObjectType::Blob, &content).await
+                let blob_oid = odb
+                    .write(ObjectType::Blob, &content)
+                    .await
                     .context(format!("Failed to write blob for {}", path.display()))?;
                 tree.add_entry(mediagit_versioning::TreeEntry::new(
                     path.to_string_lossy().to_string(),
@@ -248,7 +257,9 @@ impl StashCmd {
         let tree_oid = tree.write(&odb).await?;
 
         // Create stash commit (-m flag takes priority over positional)
-        let message = opts.message_flag.as_deref()
+        let message = opts
+            .message_flag
+            .as_deref()
             .or(opts.message_positional.as_deref())
             .unwrap_or("WIP on branch")
             .to_string();
@@ -317,11 +328,7 @@ impl StashCmd {
         let files_updated = checkout_mgr.apply_tree_overlay(&stash_oid).await?;
 
         if !opts.quiet {
-            println!(
-                "{} Applied stash entry {}",
-                style("✓").green(),
-                stash_index
-            );
+            println!("{} Applied stash entry {}", style("✓").green(), stash_index);
             if files_updated > 0 {
                 println!("  Updated {} file(s)", files_updated);
             }
@@ -371,9 +378,15 @@ impl StashCmd {
         let stash_index = opts.stash.unwrap_or(0);
         let stash_entry = self.load_stash_entry(&mediagit_dir, stash_index)?;
 
-        println!("{}", style(format!("stash@{{{}}}", stash_index)).yellow().bold());
+        println!(
+            "{}",
+            style(format!("stash@{{{}}}", stash_index)).yellow().bold()
+        );
         println!("Message:  {}", stash_entry.message);
-        println!("Branch:   {}", stash_entry.branch.as_deref().unwrap_or("unknown"));
+        println!(
+            "Branch:   {}",
+            stash_entry.branch.as_deref().unwrap_or("unknown")
+        );
         println!("Commit:   {}", stash_entry.commit_oid);
         println!("Date:     {}", stash_entry.timestamp);
 
@@ -468,11 +481,9 @@ impl StashCmd {
 
     async fn get_current_branch(&self, refdb: &RefDatabase) -> Result<Option<String>> {
         let head = refdb.read("HEAD").await?;
-        Ok(head.target.map(|t| {
-            t.strip_prefix("refs/heads/")
-                .unwrap_or(&t)
-                .to_string()
-        }))
+        Ok(head
+            .target
+            .map(|t| t.strip_prefix("refs/heads/").unwrap_or(&t).to_string()))
     }
 
     fn save_stash_entry(&self, mediagit_dir: &Path, entry: StashEntry) -> Result<()> {
@@ -484,7 +495,8 @@ impl StashCmd {
     fn load_stash_entry(&self, mediagit_dir: &std::path::Path, index: usize) -> Result<StashEntry> {
         let stash_list = self.load_all_stashes(mediagit_dir)?;
 
-        stash_list.get(index)
+        stash_list
+            .get(index)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Stash entry {} not found", index))
     }
@@ -502,7 +514,11 @@ impl StashCmd {
         Ok(stash_list)
     }
 
-    fn save_all_stashes(&self, mediagit_dir: &std::path::Path, stash_list: &[StashEntry]) -> Result<()> {
+    fn save_all_stashes(
+        &self,
+        mediagit_dir: &std::path::Path,
+        stash_list: &[StashEntry],
+    ) -> Result<()> {
         let stash_path = mediagit_dir.join("STASH_LIST");
         let stash_json = serde_json::to_string_pretty(stash_list)?;
         std::fs::write(&stash_path, stash_json)?;
@@ -518,7 +534,12 @@ impl StashCmd {
     }
 
     #[allow(clippy::only_used_in_recursion)]
-    fn scan_directory_recursive(&self, repo_root: &Path, current_dir: &Path, files: &mut HashSet<PathBuf>) -> Result<()> {
+    fn scan_directory_recursive(
+        &self,
+        repo_root: &Path,
+        current_dir: &Path,
+        files: &mut HashSet<PathBuf>,
+    ) -> Result<()> {
         for entry in std::fs::read_dir(current_dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -538,7 +559,6 @@ impl StashCmd {
         }
         Ok(())
     }
-
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

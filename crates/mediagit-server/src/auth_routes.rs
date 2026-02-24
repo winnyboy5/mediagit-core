@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -24,8 +24,8 @@ use axum::{
 use std::sync::Arc;
 
 use mediagit_security::auth::{
-    auth_middleware, login_handler, logout_handler, me_handler, refresh_handler,
-    register_handler, ApiKeyAuth, AuthLayer, AuthService,
+    auth_middleware, login_handler, logout_handler, me_handler, refresh_handler, register_handler,
+    ApiKeyAuth, AuthLayer, AuthService,
 };
 
 /// Create authentication router with all auth endpoints

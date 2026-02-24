@@ -224,7 +224,9 @@ impl VfxParser {
             return Ok(VfxFormat::Premiere);
         }
 
-        Err(MediaError::UnsupportedFormat("Unknown VFX format".to_string()))
+        Err(MediaError::UnsupportedFormat(
+            "Unknown VFX format".to_string(),
+        ))
     }
 
     /// Parse Adobe InDesign file
@@ -247,7 +249,7 @@ impl VfxParser {
 
         Ok(VfxInfo {
             format: VfxFormat::InDesign,
-            version: None, // Would require OLE2 parsing
+            version: None,    // Would require OLE2 parsing
             page_count: None, // Would require full document parsing
             duration_seconds: None,
             dimensions: None,
@@ -364,8 +366,8 @@ impl VfxParser {
             version: None, // Would require RIFF chunk parsing
             page_count: None,
             duration_seconds: None, // Would need composition analysis
-            dimensions: None,        // Would need composition analysis
-            layer_count: None,       // Would need composition analysis
+            dimensions: None,       // Would need composition analysis
+            layer_count: None,      // Would need composition analysis
             linked_assets: Vec::new(),
             fonts: Vec::new(),
             color_mode: Some("RGB".to_string()),
@@ -413,7 +415,11 @@ impl VfxParser {
             }
         }
 
-        debug!("Parsed Premiere: sequences={}, assets={}", sequence_count, linked_assets.len());
+        debug!(
+            "Parsed Premiere: sequences={}, assets={}",
+            sequence_count,
+            linked_assets.len()
+        );
 
         Ok(VfxInfo {
             format: VfxFormat::Premiere,
@@ -438,7 +444,7 @@ impl VfxParser {
         if ours.format != base.format || theirs.format != base.format {
             warn!("VFX format changed between versions");
             return MergeDecision::ManualReview(vec![
-                "VFX file format changed - manual review required".to_string()
+                "VFX file format changed - manual review required".to_string(),
             ]);
         }
 
@@ -469,9 +475,11 @@ impl VfxParser {
         }
 
         // Check for duration changes (video/animation files)
-        if let (Some(base_dur), Some(ours_dur), Some(theirs_dur)) =
-            (base.duration_seconds, ours.duration_seconds, theirs.duration_seconds)
-        {
+        if let (Some(base_dur), Some(ours_dur), Some(theirs_dur)) = (
+            base.duration_seconds,
+            ours.duration_seconds,
+            theirs.duration_seconds,
+        ) {
             let ours_changed = (ours_dur - base_dur).abs() > 0.1;
             let theirs_changed = (theirs_dur - base_dur).abs() > 0.1;
 
@@ -552,21 +560,30 @@ mod tests {
     fn test_magic_bytes_illustrator_pdf() {
         let mut data = b"%PDF-1.4\n".to_vec();
         data.extend_from_slice(&[0; 7]); // Pad to 16 bytes
-        assert!(VfxParser::validate_magic_bytes(&data, VfxFormat::Illustrator));
+        assert!(VfxParser::validate_magic_bytes(
+            &data,
+            VfxFormat::Illustrator
+        ));
     }
 
     #[test]
     fn test_magic_bytes_illustrator_ps() {
         let mut data = b"%!PS-Adobe-3.0\n".to_vec();
         data.push(0); // Pad to 16 bytes
-        assert!(VfxParser::validate_magic_bytes(&data, VfxFormat::Illustrator));
+        assert!(VfxParser::validate_magic_bytes(
+            &data,
+            VfxFormat::Illustrator
+        ));
     }
 
     #[test]
     fn test_magic_bytes_after_effects() {
         let mut data = b"RIFX".to_vec();
         data.extend_from_slice(&[0; 12]); // Pad to 16 bytes
-        assert!(VfxParser::validate_magic_bytes(&data, VfxFormat::AfterEffects));
+        assert!(VfxParser::validate_magic_bytes(
+            &data,
+            VfxFormat::AfterEffects
+        ));
     }
 
     #[test]

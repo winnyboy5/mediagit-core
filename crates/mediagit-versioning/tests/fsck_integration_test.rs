@@ -24,7 +24,11 @@ use tempfile::TempDir;
 /// Create a test repository with some objects
 async fn setup_test_repo() -> (TempDir, Arc<LocalBackend>, ObjectDatabase) {
     let temp_dir = TempDir::new().unwrap();
-    let storage = Arc::new(LocalBackend::new(temp_dir.path().to_str().unwrap()).await.unwrap());
+    let storage = Arc::new(
+        LocalBackend::new(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap(),
+    );
     let odb = ObjectDatabase::new(storage.clone(), 100);
 
     (temp_dir, storage, odb)
@@ -37,9 +41,18 @@ async fn test_fsck_clean_repository() {
     let (_temp_dir, storage, odb) = setup_test_repo().await;
 
     // Write some valid objects
-    let blob1 = odb.write(ObjectType::Blob, b"test content 1").await.unwrap();
-    let _blob2 = odb.write(ObjectType::Blob, b"test content 2").await.unwrap();
-    let _blob3 = odb.write(ObjectType::Blob, b"test content 3").await.unwrap();
+    let blob1 = odb
+        .write(ObjectType::Blob, b"test content 1")
+        .await
+        .unwrap();
+    let _blob2 = odb
+        .write(ObjectType::Blob, b"test content 2")
+        .await
+        .unwrap();
+    let _blob3 = odb
+        .write(ObjectType::Blob, b"test content 3")
+        .await
+        .unwrap();
 
     // Create a commit
     let commit = Commit::new(
@@ -77,7 +90,10 @@ async fn test_fsck_detect_corrupted_object() {
 
     // Corrupt the object by writing different content at the same location
     let corrupted_key = format!("objects/{}", valid_oid.to_path());
-    storage.put(&corrupted_key, b"corrupted data").await.unwrap();
+    storage
+        .put(&corrupted_key, b"corrupted data")
+        .await
+        .unwrap();
 
     // Run FSCK
     let checker = FsckChecker::new(storage);
@@ -89,7 +105,9 @@ async fn test_fsck_detect_corrupted_object() {
 
     let errors = report.issues_by_severity(IssueSeverity::Error);
     assert!(!errors.is_empty());
-    assert!(errors.iter().any(|e| matches!(e.category, IssueCategory::ChecksumMismatch)));
+    assert!(errors
+        .iter()
+        .any(|e| matches!(e.category, IssueCategory::ChecksumMismatch)));
 }
 
 #[tokio::test]
@@ -121,7 +139,10 @@ async fn test_fsck_detect_missing_object() {
 
     // Run FSCK with connectivity check
     let checker = FsckChecker::new(storage);
-    let options = FsckOptions { check_connectivity: true, ..Default::default() };
+    let options = FsckOptions {
+        check_connectivity: true,
+        ..Default::default()
+    };
     let report = checker.check(options).await.unwrap();
 
     // Should detect missing tree object
@@ -130,7 +151,9 @@ async fn test_fsck_detect_missing_object() {
 
     let errors = report.issues_by_severity(IssueSeverity::Error);
     assert!(!errors.is_empty());
-    assert!(errors.iter().any(|e| matches!(e.category, IssueCategory::MissingObject)));
+    assert!(errors
+        .iter()
+        .any(|e| matches!(e.category, IssueCategory::MissingObject)));
 }
 
 #[tokio::test]
@@ -153,7 +176,9 @@ async fn test_fsck_detect_broken_reference() {
 
     let errors = report.issues_by_severity(IssueSeverity::Error);
     assert!(!errors.is_empty());
-    assert!(errors.iter().any(|e| matches!(e.category, IssueCategory::BrokenReference)));
+    assert!(errors
+        .iter()
+        .any(|e| matches!(e.category, IssueCategory::BrokenReference)));
 }
 
 #[tokio::test]
@@ -202,9 +227,9 @@ async fn test_fsck_full_mode() {
 
     // blob2 is dangling (not referenced by any commit)
     let info_issues = report.issues_by_severity(IssueSeverity::Info);
-    assert!(info_issues.iter().any(|e| {
-        matches!(e.category, IssueCategory::DanglingObject) && e.oid == Some(blob2)
-    }));
+    assert!(info_issues
+        .iter()
+        .any(|e| { matches!(e.category, IssueCategory::DanglingObject) && e.oid == Some(blob2) }));
 }
 
 #[tokio::test]
@@ -292,7 +317,10 @@ async fn test_fsck_connectivity_check() {
 
     // Run FSCK with connectivity check
     let checker = FsckChecker::new(storage);
-    let options = FsckOptions { check_connectivity: true, ..Default::default() };
+    let options = FsckOptions {
+        check_connectivity: true,
+        ..Default::default()
+    };
 
     let report = checker.check(options).await.unwrap();
 
@@ -308,12 +336,17 @@ async fn test_fsck_max_objects_limit() {
     // Create multiple objects
     for i in 0..10 {
         let content = format!("content {}", i);
-        odb.write(ObjectType::Blob, content.as_bytes()).await.unwrap();
+        odb.write(ObjectType::Blob, content.as_bytes())
+            .await
+            .unwrap();
     }
 
     // Run FSCK with max objects limit
     let checker = FsckChecker::new(storage);
-    let options = FsckOptions { max_objects: 5, ..Default::default() };
+    let options = FsckOptions {
+        max_objects: 5,
+        ..Default::default()
+    };
 
     let report = checker.check(options).await.unwrap();
 

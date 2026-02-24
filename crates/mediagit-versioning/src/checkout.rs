@@ -62,7 +62,9 @@ impl<'a> CheckoutManager<'a> {
 
         // Optimized: Single-pass checkout that collects files and writes them
         // This eliminates the redundant tree traversal
-        let (target_files, files_updated) = self.checkout_tree_optimized(&commit.tree, Path::new("")).await?;
+        let (target_files, files_updated) = self
+            .checkout_tree_optimized(&commit.tree, Path::new(""))
+            .await?;
         debug!("Target files: {} entries", target_files.len());
 
         // Clean working directory (remove files not in target)
@@ -120,14 +122,15 @@ impl<'a> CheckoutManager<'a> {
         for file in existing_files {
             // Normalize existing file path for comparison
             let file_normalized = file.to_string_lossy().replace('\\', "/");
-            
+
             if !normalized_target.contains(&file_normalized) {
                 let file_path = self.repo_root.join(&file);
                 debug!("Removing file not in target: {}", file.display());
 
                 if file_path.exists() {
-                    fs::remove_file(&file_path)
-                        .with_context(|| format!("Failed to remove file: {}", file_path.display()))?;
+                    fs::remove_file(&file_path).with_context(|| {
+                        format!("Failed to remove file: {}", file_path.display())
+                    })?;
                 }
             }
         }
@@ -162,7 +165,8 @@ impl<'a> CheckoutManager<'a> {
 
             if path.is_file() {
                 // Store relative path from repo root
-                let rel_path = path.strip_prefix(&self.repo_root)
+                let rel_path = path
+                    .strip_prefix(&self.repo_root)
                     .context("Failed to compute relative path")?;
                 files.push(rel_path.to_path_buf());
             } else if path.is_dir() {
@@ -198,7 +202,7 @@ impl<'a> CheckoutManager<'a> {
         if !dir.exists() || !dir.is_dir() {
             return Ok(false); // Directory doesn't exist
         }
-        
+
         // Don't try to remove the repo root
         if dir == self.repo_root {
             // But still process its contents
@@ -221,10 +225,8 @@ impl<'a> CheckoutManager<'a> {
         let mut has_contents = false;
 
         // First pass: recursively process subdirectories
-        let entries: Vec<_> = fs::read_dir(dir)?
-            .filter_map(|e| e.ok())
-            .collect();
-        
+        let entries: Vec<_> = fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
+
         for entry in &entries {
             let path = entry.path();
 
@@ -250,7 +252,7 @@ impl<'a> CheckoutManager<'a> {
             // Retry a few times with small delays
             let mut attempts = 0;
             const MAX_ATTEMPTS: u32 = 3;
-            
+
             loop {
                 match fs::remove_dir(dir) {
                     Ok(_) => {
@@ -262,8 +264,12 @@ impl<'a> CheckoutManager<'a> {
                         attempts += 1;
                         if attempts >= MAX_ATTEMPTS {
                             // Log but don't fail (might be permission issue or file locks)
-                            debug!("Failed to remove empty directory {} after {} attempts: {}", 
-                                   dir.display(), attempts, e);
+                            debug!(
+                                "Failed to remove empty directory {} after {} attempts: {}",
+                                dir.display(),
+                                attempts,
+                                e
+                            );
                             return Ok(true); // Still has directory (couldn't remove)
                         }
                         // Small delay before retry (Windows file handle release)
@@ -295,14 +301,19 @@ impl<'a> CheckoutManager<'a> {
                     FileMode::Regular | FileMode::Executable => {
                         // Ensure parent directory exists
                         if let Some(parent) = full_path.parent() {
-                            fs::create_dir_all(parent)
-                                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+                            fs::create_dir_all(parent).with_context(|| {
+                                format!("Failed to create directory: {}", parent.display())
+                            })?;
                         }
 
                         // Use streaming write for checkout (constant memory)
                         // This method handles both chunked and non-chunked objects
-                        self.odb.read_to_file(&entry.oid, &full_path).await
-                            .with_context(|| format!("Failed to checkout file: {}", full_path.display()))?;
+                        self.odb
+                            .read_to_file(&entry.oid, &full_path)
+                            .await
+                            .with_context(|| {
+                                format!("Failed to checkout file: {}", full_path.display())
+                            })?;
 
                         // Set executable permission if needed
                         #[cfg(unix)]
@@ -334,13 +345,17 @@ impl<'a> CheckoutManager<'a> {
                             use std::os::unix::fs::symlink;
                             // Remove existing file/link if present
                             let _ = fs::remove_file(&full_path);
-                            symlink(&target, &full_path)
-                                .with_context(|| format!("Failed to create symlink: {}", full_path.display()))?;
+                            symlink(&target, &full_path).with_context(|| {
+                                format!("Failed to create symlink: {}", full_path.display())
+                            })?;
                         }
 
                         #[cfg(not(unix))]
                         {
-                            debug!("Symlinks not supported on this platform, skipping: {}", entry_path.display());
+                            debug!(
+                                "Symlinks not supported on this platform, skipping: {}",
+                                entry_path.display()
+                            );
                         }
 
                         files_updated += 1;
@@ -366,7 +381,8 @@ impl<'a> CheckoutManager<'a> {
         &'b self,
         tree_oid: &'b Oid,
         prefix: &'b Path,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(HashSet<PathBuf>, usize)>> + 'b>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(HashSet<PathBuf>, usize)>> + 'b>>
+    {
         Box::pin(async move {
             let tree = Tree::read(self.odb, tree_oid).await?;
 
@@ -388,7 +404,9 @@ impl<'a> CheckoutManager<'a> {
                         if full_path.exists() {
                             // Quick check: Compare file size first (cheap operation)
                             if let Ok(metadata) = fs::metadata(&full_path) {
-                                if let Ok(expected_size) = self.odb.get_object_size(&entry.oid).await {
+                                if let Ok(expected_size) =
+                                    self.odb.get_object_size(&entry.oid).await
+                                {
                                     if metadata.len() == expected_size as u64 {
                                         // Size matches - perform full hash comparison
                                         if let Ok(file_data) = fs::read(&full_path) {
@@ -396,7 +414,10 @@ impl<'a> CheckoutManager<'a> {
                                             if file_oid == entry.oid {
                                                 // File is unchanged - skip write operation
                                                 skip_write = true;
-                                                debug!("Skipped unchanged file: {}", entry_path.display());
+                                                debug!(
+                                                    "Skipped unchanged file: {}",
+                                                    entry_path.display()
+                                                );
                                             }
                                         }
                                     }
@@ -407,13 +428,18 @@ impl<'a> CheckoutManager<'a> {
                         if !skip_write {
                             // Ensure parent directory exists
                             if let Some(parent) = full_path.parent() {
-                                fs::create_dir_all(parent)
-                                    .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+                                fs::create_dir_all(parent).with_context(|| {
+                                    format!("Failed to create directory: {}", parent.display())
+                                })?;
                             }
 
                             // Use streaming write for checkout (constant memory)
-                            self.odb.read_to_file(&entry.oid, &full_path).await
-                                .with_context(|| format!("Failed to checkout file: {}", full_path.display()))?;
+                            self.odb
+                                .read_to_file(&entry.oid, &full_path)
+                                .await
+                                .with_context(|| {
+                                    format!("Failed to checkout file: {}", full_path.display())
+                                })?;
 
                             // Set executable permission if needed
                             #[cfg(unix)]
@@ -450,15 +476,17 @@ impl<'a> CheckoutManager<'a> {
                             if full_path.exists() || full_path.symlink_metadata().is_ok() {
                                 let _ = fs::remove_file(&full_path);
                             }
-                            symlink(&target, &full_path)
-                                .with_context(|| format!("Failed to create symlink: {}", full_path.display()))?;
+                            symlink(&target, &full_path).with_context(|| {
+                                format!("Failed to create symlink: {}", full_path.display())
+                            })?;
                         }
 
                         #[cfg(not(unix))]
                         {
                             // On non-Unix, write symlink target as a regular file
-                            fs::write(&full_path, target.as_bytes())
-                                .with_context(|| format!("Failed to write symlink file: {}", full_path.display()))?;
+                            fs::write(&full_path, target.as_bytes()).with_context(|| {
+                                format!("Failed to write symlink file: {}", full_path.display())
+                            })?;
                         }
 
                         debug!("Checked out symlink: {}", entry_path.display());
@@ -466,7 +494,9 @@ impl<'a> CheckoutManager<'a> {
                     }
                     FileMode::Directory => {
                         // Recursively checkout subdirectory
-                        let (subdir_paths, subdir_count) = self.checkout_tree_optimized(&entry.oid, &entry_path).await?;
+                        let (subdir_paths, subdir_count) = self
+                            .checkout_tree_optimized(&entry.oid, &entry_path)
+                            .await?;
                         file_paths.extend(subdir_paths);
                         files_updated += subdir_count;
                     }
@@ -639,8 +669,9 @@ impl<'a> CheckoutManager<'a> {
         &'b self,
         tree_oid: &'b Oid,
         prefix: &'b Path,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<HashMap<PathBuf, (Oid, FileMode)>>> + 'b>>
-    {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<HashMap<PathBuf, (Oid, FileMode)>>> + 'b>,
+    > {
         Box::pin(async move {
             let tree = Tree::read(self.odb, tree_oid).await?;
             let mut files = HashMap::new();
@@ -702,15 +733,16 @@ impl<'a> CheckoutManager<'a> {
                 }
             }
             FileMode::Symlink => {
-                let target = String::from_utf8(blob_data)
-                    .context("Symlink target is not valid UTF-8")?;
+                let target =
+                    String::from_utf8(blob_data).context("Symlink target is not valid UTF-8")?;
 
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::symlink;
                     let _ = fs::remove_file(full_path);
-                    symlink(&target, full_path)
-                        .with_context(|| format!("Failed to create symlink: {}", full_path.display()))?;
+                    symlink(&target, full_path).with_context(|| {
+                        format!("Failed to create symlink: {}", full_path.display())
+                    })?;
                 }
 
                 #[cfg(not(unix))]
@@ -824,7 +856,11 @@ mod tests {
         // Create a commit
         let blob_oid = odb.write(ObjectType::Blob, b"content").await?;
         let mut tree = Tree::new();
-        tree.add_entry(TreeEntry::new("file.txt".to_string(), FileMode::Regular, blob_oid));
+        tree.add_entry(TreeEntry::new(
+            "file.txt".to_string(),
+            FileMode::Regular,
+            blob_oid,
+        ));
         let tree_oid = tree.write(&odb).await?;
 
         let commit = Commit::new(
@@ -861,8 +897,16 @@ mod tests {
         let blob2 = odb.write(ObjectType::Blob, b"will change").await?;
 
         let mut tree1 = Tree::new();
-        tree1.add_entry(TreeEntry::new("unchanged.txt".to_string(), FileMode::Regular, blob1));
-        tree1.add_entry(TreeEntry::new("changed.txt".to_string(), FileMode::Regular, blob2));
+        tree1.add_entry(TreeEntry::new(
+            "unchanged.txt".to_string(),
+            FileMode::Regular,
+            blob1,
+        ));
+        tree1.add_entry(TreeEntry::new(
+            "changed.txt".to_string(),
+            FileMode::Regular,
+            blob2,
+        ));
         let tree1_oid = tree1.write(&odb).await?;
 
         let commit1 = Commit::new(
@@ -877,8 +921,16 @@ mod tests {
         let blob3 = odb.write(ObjectType::Blob, b"new content").await?;
 
         let mut tree2 = Tree::new();
-        tree2.add_entry(TreeEntry::new("unchanged.txt".to_string(), FileMode::Regular, blob1)); // Same OID
-        tree2.add_entry(TreeEntry::new("changed.txt".to_string(), FileMode::Regular, blob3)); // Different OID
+        tree2.add_entry(TreeEntry::new(
+            "unchanged.txt".to_string(),
+            FileMode::Regular,
+            blob1,
+        )); // Same OID
+        tree2.add_entry(TreeEntry::new(
+            "changed.txt".to_string(),
+            FileMode::Regular,
+            blob3,
+        )); // Different OID
         let tree2_oid = tree2.write(&odb).await?;
 
         let mut commit2 = Commit::new(
@@ -895,7 +947,9 @@ mod tests {
         checkout_mgr.checkout_commit(&commit1_oid).await?;
 
         // Differential checkout to commit2
-        let stats = checkout_mgr.checkout_diff(&commit1_oid, &commit2_oid).await?;
+        let stats = checkout_mgr
+            .checkout_diff(&commit1_oid, &commit2_oid)
+            .await?;
 
         // Only one file should have been modified
         assert_eq!(stats.files_unchanged, 1);
@@ -926,7 +980,11 @@ mod tests {
         // Create first commit with file A
         let blob_a = odb.write(ObjectType::Blob, b"file A").await?;
         let mut tree1 = Tree::new();
-        tree1.add_entry(TreeEntry::new("a.txt".to_string(), FileMode::Regular, blob_a));
+        tree1.add_entry(TreeEntry::new(
+            "a.txt".to_string(),
+            FileMode::Regular,
+            blob_a,
+        ));
         let tree1_oid = tree1.write(&odb).await?;
 
         let commit1 = Commit::new(
@@ -940,7 +998,11 @@ mod tests {
         // Create second commit with file B (no file A)
         let blob_b = odb.write(ObjectType::Blob, b"file B").await?;
         let mut tree2 = Tree::new();
-        tree2.add_entry(TreeEntry::new("b.txt".to_string(), FileMode::Regular, blob_b));
+        tree2.add_entry(TreeEntry::new(
+            "b.txt".to_string(),
+            FileMode::Regular,
+            blob_b,
+        ));
         let tree2_oid = tree2.write(&odb).await?;
 
         let commit2 = Commit::new(
@@ -957,9 +1019,11 @@ mod tests {
         assert!(repo_root.join("a.txt").exists());
 
         // Differential checkout to commit2
-        let stats = checkout_mgr.checkout_diff(&commit1_oid, &commit2_oid).await?;
+        let stats = checkout_mgr
+            .checkout_diff(&commit1_oid, &commit2_oid)
+            .await?;
 
-        assert_eq!(stats.files_added, 1);   // b.txt added
+        assert_eq!(stats.files_added, 1); // b.txt added
         assert_eq!(stats.files_deleted, 1); // a.txt deleted
         assert_eq!(stats.files_modified, 0);
         assert_eq!(stats.files_unchanged, 0);
@@ -988,4 +1052,3 @@ mod tests {
         Ok(())
     }
 }
-

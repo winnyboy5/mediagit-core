@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -177,10 +177,7 @@ impl MetricsRegistry {
         registry.register(Box::new(operation_duration.clone()))?;
 
         let operation_total = CounterVec::new(
-            Opts::new(
-                "mediagit_operation_total",
-                "Total number of operations",
-            ),
+            Opts::new("mediagit_operation_total", "Total number of operations"),
             &["operation", "backend", "status"],
         )?;
         registry.register(Box::new(operation_total.clone()))?;
@@ -554,17 +551,9 @@ mod tests {
     fn test_operation_metrics() {
         let registry = MetricsRegistry::new().unwrap();
 
-        registry.record_operation_duration(
-            OperationType::Store,
-            StorageBackend::Filesystem,
-            0.5,
-        );
+        registry.record_operation_duration(OperationType::Store, StorageBackend::Filesystem, 0.5);
 
-        registry.record_operation_complete(
-            OperationType::Store,
-            StorageBackend::Filesystem,
-            true,
-        );
+        registry.record_operation_complete(OperationType::Store, StorageBackend::Filesystem, true);
 
         let count = registry
             .inner

@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -233,16 +233,17 @@ mod tests {
         // Generate API key
         let permissions = vec!["repo:write".to_string()];
         let (plaintext_key, _) = api_key_auth
-            .generate_key("user123".to_string(), "Test Key".to_string(), permissions.clone())
+            .generate_key(
+                "user123".to_string(),
+                "Test Key".to_string(),
+                permissions.clone(),
+            )
             .await
             .unwrap();
 
         // Create headers with API key
         let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-api-key",
-            HeaderValue::from_str(&plaintext_key).unwrap(),
-        );
+        headers.insert("x-api-key", HeaderValue::from_str(&plaintext_key).unwrap());
 
         // Authenticate
         let auth_user = auth_layer.authenticate(&headers).await.unwrap();

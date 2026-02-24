@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -98,11 +98,7 @@ impl JwtAuth {
     ///
     /// # Returns
     /// JWT token string
-    pub fn generate_token(
-        &self,
-        user_id: &str,
-        permissions: Vec<String>,
-    ) -> AuthResult<String> {
+    pub fn generate_token(&self, user_id: &str, permissions: Vec<String>) -> AuthResult<String> {
         let now = Utc::now();
         let claims = Claims {
             sub: user_id.to_string(),
@@ -172,11 +168,9 @@ impl JwtAuth {
     ///
     /// Expects format: "Bearer <token>"
     pub fn extract_from_header(auth_header: &str) -> AuthResult<&str> {
-        auth_header
-            .strip_prefix("Bearer ")
-            .ok_or_else(|| {
-                AuthError::InvalidToken("Invalid Authorization header format".to_string())
-            })
+        auth_header.strip_prefix("Bearer ").ok_or_else(|| {
+            AuthError::InvalidToken("Invalid Authorization header format".to_string())
+        })
     }
 }
 

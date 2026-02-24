@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -12,6 +12,8 @@
 //
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
+use super::super::repo::{create_storage_backend, find_repo_root};
+use crate::progress::{OperationStats, ProgressTracker};
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
@@ -19,8 +21,6 @@ use mediagit_protocol::PushPhase;
 use mediagit_versioning::RefDatabase;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use crate::progress::{OperationStats, ProgressTracker};
-use super::super::repo::{find_repo_root, create_storage_backend};
 
 /// Validate a ref name for safety
 /// Ref names must not contain special characters that could cause filesystem issues
@@ -153,10 +153,9 @@ impl PushCmd {
         let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
 
-        if self.dry_run
-            && !self.quiet {
-                println!("{} Running in dry-run mode", style("ℹ").blue());
-            }
+        if self.dry_run && !self.quiet {
+            println!("{} Running in dry-run mode", style("ℹ").blue());
+        }
 
         if !self.quiet {
             println!(
@@ -267,7 +266,8 @@ impl PushCmd {
             for result in &response.results {
                 if result.success {
                     if !self.quiet {
-                        let display_name = result.ref_name
+                        let display_name = result
+                            .ref_name
                             .strip_prefix("refs/heads/")
                             .unwrap_or(&result.ref_name);
                         println!(
@@ -278,17 +278,23 @@ impl PushCmd {
                     }
 
                     // Clean up local remote-tracking ref
-                    let tracking_ref = result.ref_name
+                    let tracking_ref = result
+                        .ref_name
                         .replace("refs/heads/", &format!("refs/remotes/{}/", remote));
                     if refdb.read(&tracking_ref).await.is_ok() {
                         if let Err(e) = refdb.delete(&tracking_ref).await {
-                            tracing::warn!("Failed to delete local tracking ref {}: {}", tracking_ref, e);
+                            tracing::warn!(
+                                "Failed to delete local tracking ref {}: {}",
+                                tracking_ref,
+                                e
+                            );
                         } else if self.verbose {
                             println!("  Cleaned up local tracking ref: {}", tracking_ref);
                         }
                     }
                 } else if !self.quiet {
-                    let display_name = result.ref_name
+                    let display_name = result
+                        .ref_name
                         .strip_prefix("refs/heads/")
                         .unwrap_or(&result.ref_name);
                     let error_msg = result.error.as_deref().unwrap_or("unknown error");
@@ -334,13 +340,14 @@ impl PushCmd {
             branches
         } else if self.refspec.is_empty() {
             // Default: push current branch (reuse head from above)
-            let ref_name = head.target.ok_or_else(|| {
-                anyhow::anyhow!("HEAD is detached, please specify a refspec")
-            })?;
+            let ref_name = head
+                .target
+                .ok_or_else(|| anyhow::anyhow!("HEAD is detached, please specify a refspec"))?;
             vec![ref_name]
         } else {
             // Use refspecs - normalize to handle both short and full ref names
-            self.refspec.iter()
+            self.refspec
+                .iter()
                 .map(|r| mediagit_versioning::normalize_ref_name(r))
                 .collect()
         };
@@ -395,22 +402,26 @@ impl PushCmd {
             for update in &updates {
                 // Only check new branches (no old_oid means it doesn't exist on remote)
                 if update.old_oid.is_none() && update.name.starts_with("refs/heads/") {
-                    let branch_name = update.name.strip_prefix("refs/heads/")
+                    let branch_name = update
+                        .name
+                        .strip_prefix("refs/heads/")
                         .unwrap_or(&update.name);
-                    
+
                     // Default branches (main/master) are allowed without -u
                     let is_default_branch = branch_name == "main" || branch_name == "master";
-                    
+
                     // Check if upstream is already configured
                     let has_upstream = config.get_branch_upstream(branch_name).is_some();
-                    
+
                     // Block if: new branch + not default + no upstream configured
                     if !is_default_branch && !has_upstream {
                         anyhow::bail!(
                             "The current branch '{}' has no upstream branch.\n\
                             To push the current branch and set the remote as upstream, use:\n\n\
                             \x20   mediagit push -u {} {}\n",
-                            branch_name, remote, branch_name
+                            branch_name,
+                            remote,
+                            branch_name
                         );
                     }
                 }
@@ -420,7 +431,11 @@ impl PushCmd {
         // If all refs are up-to-date, exit early
         if updates.is_empty() {
             if !self.quiet {
-                println!("{} All {} refs already up to date", style("✓").green(), skipped_uptodate);
+                println!(
+                    "{} All {} refs already up to date",
+                    style("✓").green(),
+                    skipped_uptodate
+                );
             }
             return Ok(());
         }
@@ -437,17 +452,20 @@ impl PushCmd {
             };
 
             // Push all refs with progress callback
-            let (result, push_stats) = client.push_with_progress(
-                &odb,
-                updates.clone(),
-                self.force,
-                |progress| {
+            let (result, push_stats) = client
+                .push_with_progress(&odb, updates.clone(), self.force, |progress| {
                     if let Some(ref pb) = pb {
                         let (percent, msg) = match progress.phase {
                             PushPhase::Collecting => {
                                 if progress.total > 0 {
                                     let pct = progress.current * 100 / progress.total;
-                                    (pct.min(30), format!("Collecting... {}/{} objects", progress.current, progress.total))
+                                    (
+                                        pct.min(30),
+                                        format!(
+                                            "Collecting... {}/{} objects",
+                                            progress.current, progress.total
+                                        ),
+                                    )
                                 } else {
                                     (10, "Collecting objects...".to_string())
                                 }
@@ -455,7 +473,13 @@ impl PushCmd {
                             PushPhase::Packing => {
                                 if progress.total > 0 {
                                     let pct = 30 + (progress.current * 40 / progress.total);
-                                    (pct.min(70), format!("Packing... {}/{} objects", progress.current, progress.total))
+                                    (
+                                        pct.min(70),
+                                        format!(
+                                            "Packing... {}/{} objects",
+                                            progress.current, progress.total
+                                        ),
+                                    )
                                 } else {
                                     (50, "Packing...".to_string())
                                 }
@@ -464,7 +488,10 @@ impl PushCmd {
                                 if progress.total > 0 {
                                     let pct = 70 + (progress.current * 30 / progress.total);
                                     let bytes_str = if progress.total > 1024 * 1024 {
-                                        format!("{:.1} MiB", progress.total as f64 / (1024.0 * 1024.0))
+                                        format!(
+                                            "{:.1} MiB",
+                                            progress.total as f64 / (1024.0 * 1024.0)
+                                        )
                                     } else if progress.total > 1024 {
                                         format!("{:.1} KiB", progress.total as f64 / 1024.0)
                                     } else {
@@ -479,8 +506,8 @@ impl PushCmd {
                         pb.set_position(percent);
                         pb.set_message(msg);
                     }
-                },
-            ).await?;
+                })
+                .await?;
 
             // Finish progress bar
             if let Some(pb) = pb {
@@ -506,7 +533,7 @@ impl PushCmd {
 
             if !self.quiet {
                 println!("{} Push successful!", style("✓").green().bold());
-                
+
                 for res in result.results {
                     if res.success {
                         // Find the corresponding update to show old->new
@@ -522,7 +549,9 @@ impl PushCmd {
                             } else {
                                 // Track new branches for auto-upstream
                                 if res.ref_name.starts_with("refs/heads/") {
-                                    let branch_name = res.ref_name.strip_prefix("refs/heads/")
+                                    let branch_name = res
+                                        .ref_name
+                                        .strip_prefix("refs/heads/")
                                         .unwrap_or(&res.ref_name);
                                     new_branches.push(branch_name.to_string());
                                 }
@@ -539,13 +568,19 @@ impl PushCmd {
                     }
                 }
                 if skipped_uptodate > 0 {
-                    println!("  {} {} refs already up to date", style("ℹ").blue(), skipped_uptodate);
+                    println!(
+                        "  {} {} refs already up to date",
+                        style("ℹ").blue(),
+                        skipped_uptodate
+                    );
                 }
             } else {
                 // Even in quiet mode, we need to track new branches for upstream
                 for update in &updates {
                     if update.old_oid.is_none() && update.name.starts_with("refs/heads/") {
-                        let branch_name = update.name.strip_prefix("refs/heads/")
+                        let branch_name = update
+                            .name
+                            .strip_prefix("refs/heads/")
                             .unwrap_or(&update.name);
                         new_branches.push(branch_name.to_string());
                     }
@@ -556,18 +591,21 @@ impl PushCmd {
             // This ensures `branch list -r` shows pushed branches in the original repo
             for update in &updates {
                 if update.name.starts_with("refs/heads/") {
-                    let branch_name = update.name.strip_prefix("refs/heads/")
+                    let branch_name = update
+                        .name
+                        .strip_prefix("refs/heads/")
                         .unwrap_or(&update.name);
                     let tracking_ref_name = format!("refs/remotes/{}/{}", remote, branch_name);
-                    
+
                     if let Ok(oid) = mediagit_versioning::Oid::from_hex(&update.new_oid) {
-                        let tracking_ref = mediagit_versioning::Ref::new_direct(
-                            tracking_ref_name.clone(),
-                            oid,
-                        );
+                        let tracking_ref =
+                            mediagit_versioning::Ref::new_direct(tracking_ref_name.clone(), oid);
                         if let Err(e) = refdb.write(&tracking_ref).await {
                             if self.verbose {
-                                println!("  Warning: Failed to update tracking ref {}: {}", tracking_ref_name, e);
+                                println!(
+                                    "  Warning: Failed to update tracking ref {}: {}",
+                                    tracking_ref_name, e
+                                );
                             }
                         } else if self.verbose {
                             println!("  Updated tracking ref: {}", tracking_ref_name);
@@ -579,30 +617,31 @@ impl PushCmd {
             // Auto-setup upstream tracking for default branches, or when -u is explicitly used
             // Non-default branches without -u are blocked before push, so they won't reach here
             let should_process_upstream = self.set_upstream || !new_branches.is_empty();
-            
+
             if should_process_upstream && !refs_to_push.is_empty() {
                 let mut config = config; // Make mutable
                 let mut any_upstream_set = false;
-                
+
                 for ref_to_push in &refs_to_push {
                     // Extract branch name from full ref (e.g., "refs/heads/main" -> "main")
-                    let branch_name = ref_to_push.strip_prefix("refs/heads/")
+                    let branch_name = ref_to_push
+                        .strip_prefix("refs/heads/")
                         .unwrap_or(ref_to_push);
-                    
+
                     // Check if this is a new branch
                     let is_new_branch = new_branches.contains(&branch_name.to_string());
                     let has_upstream = config.get_branch_upstream(branch_name).is_some();
-                    
+
                     // Determine if this is a default branch (main or master)
                     let is_default_branch = branch_name == "main" || branch_name == "master";
-                    
+
                     // Set upstream if:
                     // 1. -u flag explicitly requested, OR
                     // 2. New DEFAULT branch (main/master) without existing upstream
                     if self.set_upstream || (is_new_branch && !has_upstream && is_default_branch) {
                         config.set_branch_upstream(branch_name, remote, ref_to_push.clone());
                         any_upstream_set = true;
-                        
+
                         if !self.quiet {
                             println!(
                                 "{} Branch '{}' set up to track '{}/{}'",
@@ -614,7 +653,7 @@ impl PushCmd {
                         }
                     }
                 }
-                
+
                 // Save the updated config only if we made changes
                 if any_upstream_set {
                     config.save(&repo_root)?;
@@ -624,27 +663,19 @@ impl PushCmd {
             println!("{} Would push {} refs:", style("ℹ").blue(), updates.len());
             for update in &updates {
                 if let Some(ref old) = update.old_oid {
-                    println!(
-                        "  {} {} → {}",
-                        update.name,
-                        &old[..8],
-                        &update.new_oid[..8]
-                    );
+                    println!("  {} {} → {}", update.name, &old[..8], &update.new_oid[..8]);
                 } else {
-                    println!(
-                        "  {} (new) → {}",
-                        update.name,
-                        &update.new_oid[..8]
-                    );
+                    println!("  {} (new) → {}", update.name, &update.new_oid[..8]);
                 }
             }
             if skipped_uptodate > 0 {
-                println!("  {} {} refs already up to date", style("ℹ").blue(), skipped_uptodate);
+                println!(
+                    "  {} {} refs already up to date",
+                    style("ℹ").blue(),
+                    skipped_uptodate
+                );
             }
-            println!(
-                "{} Dry run complete (no changes made)",
-                style("ℹ").blue()
-            );
+            println!("{} Dry run complete (no changes made)", style("ℹ").blue());
         }
 
         // Print operation summary
@@ -662,5 +693,4 @@ impl PushCmd {
 
         Ok(())
     }
-
 }

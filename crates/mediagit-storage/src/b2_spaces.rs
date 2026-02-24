@@ -506,11 +506,7 @@ impl StorageBackend for B2SpacesBackend {
         );
 
         self.inner.get(key).await.map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to get object from {}: {}",
-                self.provider.name(),
-                e
-            )
+            anyhow::anyhow!("Failed to get object from {}: {}", self.provider.name(), e)
         })
     }
 
@@ -527,13 +523,10 @@ impl StorageBackend for B2SpacesBackend {
             "Putting object to B2/Spaces"
         );
 
-        self.inner.put(key, data).await.map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to put object to {}: {}",
-                self.provider.name(),
-                e
-            )
-        })
+        self.inner
+            .put(key, data)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to put object to {}: {}", self.provider.name(), e))
     }
 
     /// Check if an object exists in B2/Spaces
@@ -586,11 +579,7 @@ impl StorageBackend for B2SpacesBackend {
         );
 
         self.inner.list_objects(prefix).await.map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to list objects in {}: {}",
-                self.provider.name(),
-                e
-            )
+            anyhow::anyhow!("Failed to list objects in {}: {}", self.provider.name(), e)
         })
     }
 }
@@ -619,10 +608,7 @@ mod tests {
         let provider = Provider::DigitalOceanSpaces {
             region: "nyc3".to_string(),
         };
-        assert_eq!(
-            provider.endpoint(),
-            "https://nyc3.digitaloceanspaces.com"
-        );
+        assert_eq!(provider.endpoint(), "https://nyc3.digitaloceanspaces.com");
     }
 
     #[test]
@@ -711,7 +697,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires valid B2 credentials - run with B2_APPLICATION_KEY_ID and B2_APPLICATION_KEY"]
     async fn test_new_b2_backend() {
-        let key_id = std::env::var("B2_APPLICATION_KEY_ID").expect("B2_APPLICATION_KEY_ID required");
+        let key_id =
+            std::env::var("B2_APPLICATION_KEY_ID").expect("B2_APPLICATION_KEY_ID required");
         let key = std::env::var("B2_APPLICATION_KEY").expect("B2_APPLICATION_KEY required");
         let bucket = std::env::var("B2_TEST_BUCKET").unwrap_or_else(|_| "test-bucket".to_string());
 
@@ -725,13 +712,14 @@ mod tests {
         )
         .await;
 
-        assert!(backend.is_ok(), "Failed to create B2 backend: {:?}", backend.err());
+        assert!(
+            backend.is_ok(),
+            "Failed to create B2 backend: {:?}",
+            backend.err()
+        );
         let backend = backend.unwrap();
         assert_eq!(backend.bucket(), bucket);
-        assert_eq!(
-            backend.endpoint(),
-            "https://s3.us-west-002.backblazeb2.com"
-        );
+        assert_eq!(backend.endpoint(), "https://s3.us-west-002.backblazeb2.com");
     }
 
     #[tokio::test]
@@ -751,7 +739,11 @@ mod tests {
         )
         .await;
 
-        assert!(backend.is_ok(), "Failed to create DO Spaces backend: {:?}", backend.err());
+        assert!(
+            backend.is_ok(),
+            "Failed to create DO Spaces backend: {:?}",
+            backend.err()
+        );
         let backend = backend.unwrap();
         assert_eq!(backend.bucket(), space);
         assert_eq!(backend.endpoint(), "https://nyc3.digitaloceanspaces.com");
@@ -760,7 +752,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires valid B2 credentials for all regions"]
     async fn test_new_all_b2_regions() {
-        let key_id = std::env::var("B2_APPLICATION_KEY_ID").expect("B2_APPLICATION_KEY_ID required");
+        let key_id =
+            std::env::var("B2_APPLICATION_KEY_ID").expect("B2_APPLICATION_KEY_ID required");
         let key = std::env::var("B2_APPLICATION_KEY").expect("B2_APPLICATION_KEY required");
         let bucket = std::env::var("B2_TEST_BUCKET").unwrap_or_else(|_| "test-bucket".to_string());
         let regions = vec!["us-west-002", "eu-central-001", "ap-northeast-001"];
@@ -915,7 +908,8 @@ mod tests {
                 name
             );
             assert!(
-                name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                name.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
                 "Bucket name '{}' should contain only lowercase letters, numbers, and hyphens",
                 name
             );
@@ -970,7 +964,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires valid B2 credentials"]
     async fn test_debug_impl() {
-        let key_id = std::env::var("B2_APPLICATION_KEY_ID").expect("B2_APPLICATION_KEY_ID required");
+        let key_id =
+            std::env::var("B2_APPLICATION_KEY_ID").expect("B2_APPLICATION_KEY_ID required");
         let key = std::env::var("B2_APPLICATION_KEY").expect("B2_APPLICATION_KEY required");
         let bucket = std::env::var("B2_TEST_BUCKET").unwrap_or_else(|_| "test-bucket".to_string());
 
@@ -999,7 +994,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires valid B2 credentials"]
     async fn test_clone() {
-        let key_id = std::env::var("B2_APPLICATION_KEY_ID").expect("B2_APPLICATION_KEY_ID required");
+        let key_id =
+            std::env::var("B2_APPLICATION_KEY_ID").expect("B2_APPLICATION_KEY_ID required");
         let key = std::env::var("B2_APPLICATION_KEY").expect("B2_APPLICATION_KEY required");
         let bucket = std::env::var("B2_TEST_BUCKET").unwrap_or_else(|_| "test-bucket".to_string());
 
@@ -1037,10 +1033,7 @@ mod tests {
 
         let backend = result.unwrap();
         assert_eq!(backend.bucket(), "test-bucket");
-        assert_eq!(
-            backend.endpoint(),
-            "https://s3.us-west-002.backblazeb2.com"
-        );
+        assert_eq!(backend.endpoint(), "https://s3.us-west-002.backblazeb2.com");
 
         // Clean up
         std::env::remove_var("B2_SPACES_PROVIDER");
@@ -1135,7 +1128,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires valid B2 credentials"]
     async fn test_get_empty_key() {
-        let key_id = std::env::var("B2_APPLICATION_KEY_ID").expect("B2_APPLICATION_KEY_ID required");
+        let key_id =
+            std::env::var("B2_APPLICATION_KEY_ID").expect("B2_APPLICATION_KEY_ID required");
         let key = std::env::var("B2_APPLICATION_KEY").expect("B2_APPLICATION_KEY required");
         let bucket = std::env::var("B2_TEST_BUCKET").unwrap_or_else(|_| "test-bucket".to_string());
 
@@ -1158,7 +1152,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires valid B2 credentials"]
     async fn test_put_empty_key() {
-        let key_id = std::env::var("B2_APPLICATION_KEY_ID").expect("B2_APPLICATION_KEY_ID required");
+        let key_id =
+            std::env::var("B2_APPLICATION_KEY_ID").expect("B2_APPLICATION_KEY_ID required");
         let key = std::env::var("B2_APPLICATION_KEY").expect("B2_APPLICATION_KEY required");
         let bucket = std::env::var("B2_TEST_BUCKET").unwrap_or_else(|_| "test-bucket".to_string());
 
@@ -1181,7 +1176,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires valid B2 credentials"]
     async fn test_exists_empty_key() {
-        let key_id = std::env::var("B2_APPLICATION_KEY_ID").expect("B2_APPLICATION_KEY_ID required");
+        let key_id =
+            std::env::var("B2_APPLICATION_KEY_ID").expect("B2_APPLICATION_KEY_ID required");
         let key = std::env::var("B2_APPLICATION_KEY").expect("B2_APPLICATION_KEY required");
         let bucket = std::env::var("B2_TEST_BUCKET").unwrap_or_else(|_| "test-bucket".to_string());
 
@@ -1204,7 +1200,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires valid B2 credentials"]
     async fn test_delete_empty_key() {
-        let key_id = std::env::var("B2_APPLICATION_KEY_ID").expect("B2_APPLICATION_KEY_ID required");
+        let key_id =
+            std::env::var("B2_APPLICATION_KEY_ID").expect("B2_APPLICATION_KEY_ID required");
         let key = std::env::var("B2_APPLICATION_KEY").expect("B2_APPLICATION_KEY required");
         let bucket = std::env::var("B2_TEST_BUCKET").unwrap_or_else(|_| "test-bucket".to_string());
 
@@ -1231,9 +1228,11 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires valid B2 credentials"]
     async fn test_crud_operations() {
-        let key_id = std::env::var("B2_APPLICATION_KEY_ID").expect("B2_APPLICATION_KEY_ID required");
+        let key_id =
+            std::env::var("B2_APPLICATION_KEY_ID").expect("B2_APPLICATION_KEY_ID required");
         let key = std::env::var("B2_APPLICATION_KEY").expect("B2_APPLICATION_KEY required");
-        let bucket = std::env::var("B2_TEST_BUCKET").expect("B2_TEST_BUCKET required for CRUD tests");
+        let bucket =
+            std::env::var("B2_TEST_BUCKET").expect("B2_TEST_BUCKET required for CRUD tests");
 
         let backend = B2SpacesBackend::new(
             Provider::B2 {
@@ -1246,17 +1245,26 @@ mod tests {
         .await
         .expect("Failed to create B2 backend");
 
-        let test_key = format!("mediagit-test/test-{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos());
+        let test_key = format!(
+            "mediagit-test/test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
         let test_data = b"Hello, MediaGit B2 Backend!";
 
         // Test put
-        backend.put(&test_key, test_data).await.expect("Failed to put object");
+        backend
+            .put(&test_key, test_data)
+            .await
+            .expect("Failed to put object");
 
         // Test exists
-        let exists = backend.exists(&test_key).await.expect("Failed to check existence");
+        let exists = backend
+            .exists(&test_key)
+            .await
+            .expect("Failed to check existence");
         assert!(exists, "Object should exist after put");
 
         // Test get
@@ -1264,14 +1272,26 @@ mod tests {
         assert_eq!(retrieved, test_data, "Retrieved data should match original");
 
         // Test list_objects
-        let objects = backend.list_objects("mediagit-test/").await.expect("Failed to list objects");
-        assert!(objects.contains(&test_key), "Listed objects should contain our test key");
+        let objects = backend
+            .list_objects("mediagit-test/")
+            .await
+            .expect("Failed to list objects");
+        assert!(
+            objects.contains(&test_key),
+            "Listed objects should contain our test key"
+        );
 
         // Test delete
-        backend.delete(&test_key).await.expect("Failed to delete object");
+        backend
+            .delete(&test_key)
+            .await
+            .expect("Failed to delete object");
 
         // Verify deletion
-        let exists_after = backend.exists(&test_key).await.expect("Failed to check existence after delete");
+        let exists_after = backend
+            .exists(&test_key)
+            .await
+            .expect("Failed to check existence after delete");
         assert!(!exists_after, "Object should not exist after delete");
     }
 
@@ -1293,17 +1313,26 @@ mod tests {
         .await
         .expect("Failed to create DO Spaces backend");
 
-        let test_key = format!("mediagit-test/test-{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos());
+        let test_key = format!(
+            "mediagit-test/test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
         let test_data = b"Hello, MediaGit DO Spaces Backend!";
 
         // Test put
-        backend.put(&test_key, test_data).await.expect("Failed to put object");
+        backend
+            .put(&test_key, test_data)
+            .await
+            .expect("Failed to put object");
 
         // Test exists
-        let exists = backend.exists(&test_key).await.expect("Failed to check existence");
+        let exists = backend
+            .exists(&test_key)
+            .await
+            .expect("Failed to check existence");
         assert!(exists, "Object should exist after put");
 
         // Test get
@@ -1311,6 +1340,9 @@ mod tests {
         assert_eq!(retrieved, test_data, "Retrieved data should match original");
 
         // Test delete
-        backend.delete(&test_key).await.expect("Failed to delete object");
+        backend
+            .delete(&test_key)
+            .await
+            .expect("Failed to delete object");
     }
 }

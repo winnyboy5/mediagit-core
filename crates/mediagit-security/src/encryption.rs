@@ -366,7 +366,10 @@ fn decrypt_stream(
     nonce_bytes: &[u8],
     encrypted_data: &[u8],
 ) -> Result<Vec<u8>, EncryptionError> {
-    debug!(size = encrypted_data.len(), "Stream decrypting large object");
+    debug!(
+        size = encrypted_data.len(),
+        "Stream decrypting large object"
+    );
 
     let cipher = Aes256Gcm::new_from_slice(key.expose_key())
         .map_err(|e| EncryptionError::DecryptionFailed(e.to_string()))?;

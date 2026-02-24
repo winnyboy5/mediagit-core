@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -190,9 +190,7 @@ mod https_tests {
             let url = format!("{}/test{}/info/refs", https_url, i);
             let client = client.clone();
 
-            handles.push(tokio::spawn(async move {
-                client.get(&url).send().await
-            }));
+            handles.push(tokio::spawn(async move { client.get(&url).send().await }));
         }
 
         // Wait for all requests

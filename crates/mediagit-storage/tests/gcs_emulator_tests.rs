@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -82,8 +82,8 @@ mod gcs_emulator_tests {
             "token_uri": "https://oauth2.googleapis.com/token"
         }"#;
 
-        let mut file = fs::File::create(&creds_path)
-            .expect("Failed to create temporary credentials file");
+        let mut file =
+            fs::File::create(&creds_path).expect("Failed to create temporary credentials file");
         file.write_all(creds_content.as_bytes())
             .expect("Failed to write credentials");
 
@@ -470,8 +470,7 @@ mod gcs_emulator_tests {
 
         let temp_creds = create_temp_credentials();
 
-        let config = GcsConfig::new("test-project", "test-bucket")
-            .with_max_retries(5); // Increase retries for testing
+        let config = GcsConfig::new("test-project", "test-bucket").with_max_retries(5); // Increase retries for testing
 
         let backend = GcsBackend::with_config(config, &temp_creds)
             .await

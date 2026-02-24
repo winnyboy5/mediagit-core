@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -53,7 +53,10 @@ fn create_test_state_with_auth() -> (Arc<AppState>, String, String) {
 
     // Generate a test JWT token for user with write permissions
     let write_token = jwt_auth
-        .generate_token("test-user-write", vec!["repo:read".to_string(), "repo:write".to_string()])
+        .generate_token(
+            "test-user-write",
+            vec!["repo:read".to_string(), "repo:write".to_string()],
+        )
         .unwrap();
 
     (state, read_token, write_token)

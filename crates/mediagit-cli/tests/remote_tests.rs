@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -134,7 +134,9 @@ async fn test_rename_remote() -> Result<()> {
     // Rename remote
     let mut loaded_config = Config::load(&repo_path).await?;
     let old_remote = loaded_config.remove_remote("old-name").unwrap();
-    loaded_config.remotes.insert("new-name".to_string(), old_remote);
+    loaded_config
+        .remotes
+        .insert("new-name".to_string(), old_remote);
     loaded_config.save(&repo_path)?;
 
     // Verify rename

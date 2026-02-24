@@ -330,9 +330,7 @@ impl BranchManager {
             Ok(head) => {
                 if head.ref_type == RefType::Symbolic {
                     Ok(head.target.and_then(|target| {
-                        target
-                            .strip_prefix("refs/heads/")
-                            .map(|s| s.to_string())
+                        target.strip_prefix("refs/heads/").map(|s| s.to_string())
                     }))
                 } else {
                     Ok(None) // Detached HEAD
@@ -457,11 +455,7 @@ impl BranchManager {
         let tag_paths = self.refdb.list_tags().await?;
         Ok(tag_paths
             .into_iter()
-            .map(|path| {
-                path.strip_prefix("refs/tags/")
-                    .unwrap_or(&path)
-                    .to_string()
-            })
+            .map(|path| path.strip_prefix("refs/tags/").unwrap_or(&path).to_string())
             .collect())
     }
 

@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -53,17 +53,18 @@ impl FilterCmd {
         };
 
         // Create filter driver
-        let driver = FilterDriver::new(config)
-            .context("Failed to create filter driver")?;
+        let driver = FilterDriver::new(config).context("Failed to create filter driver")?;
 
         match self {
             FilterCmd::Clean { file_path } => {
-                driver.clean(file_path.as_deref())
+                driver
+                    .clean(file_path.as_deref())
                     .context("Clean filter operation failed")?;
                 Ok(())
             }
             FilterCmd::Smudge { file_path } => {
-                driver.smudge(file_path.as_deref())
+                driver
+                    .smudge(file_path.as_deref())
                     .context("Smudge filter operation failed")?;
                 Ok(())
             }

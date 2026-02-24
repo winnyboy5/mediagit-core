@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -33,13 +33,29 @@ fn mediagit() -> Command {
 }
 
 fn init_repo(dir: &Path) {
-    mediagit().arg("init").arg("-q").current_dir(dir).assert().success();
+    mediagit()
+        .arg("init")
+        .arg("-q")
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 fn add_and_commit(dir: &Path, name: &str, content: &str, message: &str) {
     fs::write(dir.join(name), content).unwrap();
-    mediagit().arg("add").arg(name).current_dir(dir).assert().success();
-    mediagit().arg("commit").arg("-m").arg(message).current_dir(dir).assert().success();
+    mediagit()
+        .arg("add")
+        .arg(name)
+        .current_dir(dir)
+        .assert()
+        .success();
+    mediagit()
+        .arg("commit")
+        .arg("-m")
+        .arg(message)
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 // ============================================================================
@@ -105,7 +121,12 @@ fn test_reflog_show_limit() {
     init_repo(temp_dir.path());
 
     for i in 1..=5 {
-        add_and_commit(temp_dir.path(), "file.txt", &format!("v{}", i), &format!("Commit {}", i));
+        add_and_commit(
+            temp_dir.path(),
+            "file.txt",
+            &format!("v{}", i),
+            &format!("Commit {}", i),
+        );
     }
 
     // Show only last 2 entries
@@ -119,7 +140,7 @@ fn test_reflog_show_limit() {
 }
 
 #[test]
-#[ignore] // Requires reflog population 
+#[ignore] // Requires reflog population
 fn test_reflog_show_all() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
@@ -229,7 +250,12 @@ fn test_reflog_expire() {
     init_repo(temp_dir.path());
 
     for i in 1..=10 {
-        add_and_commit(temp_dir.path(), "file.txt", &format!("v{}", i), &format!("Commit {}", i));
+        add_and_commit(
+            temp_dir.path(),
+            "file.txt",
+            &format!("v{}", i),
+            &format!("Commit {}", i),
+        );
     }
 
     // Expire keeping only 5 entries

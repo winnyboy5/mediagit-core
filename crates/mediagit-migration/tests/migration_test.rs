@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -20,7 +20,7 @@
 //! Tests the public API of the migration module including state management,
 //! progress tracking, and integrity verification.
 
-use mediagit_migration::{MigrationState, IntegrityVerifier};
+use mediagit_migration::{IntegrityVerifier, MigrationState};
 use mediagit_storage::mock::MockBackend;
 use mediagit_storage::StorageBackend;
 use std::sync::Arc;
@@ -167,7 +167,10 @@ async fn test_integrity_verifier_checksum_mismatch() {
     );
     let result = verifier.verify_object(key).await.unwrap();
 
-    assert!(!result.passed, "Verification should fail for mismatched data");
+    assert!(
+        !result.passed,
+        "Verification should fail for mismatched data"
+    );
     assert!(result.error.is_some());
 }
 
@@ -187,7 +190,10 @@ async fn test_integrity_verifier_missing_object() {
     );
     let result = verifier.verify_object(key).await.unwrap();
 
-    assert!(!result.passed, "Verification should fail for missing target object");
+    assert!(
+        !result.passed,
+        "Verification should fail for missing target object"
+    );
 }
 
 #[tokio::test]

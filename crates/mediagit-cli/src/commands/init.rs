@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -74,15 +74,15 @@ impl InitCmd {
         let repo_path = self.get_repo_path()?;
 
         if !self.quiet {
-            output::header(&format!("Initializing MediaGit repository in {}", repo_path.display()));
+            output::header(&format!(
+                "Initializing MediaGit repository in {}",
+                repo_path.display()
+            ));
         }
 
         // Check if already initialized
         if repo_path.join(".mediagit").exists() {
-            anyhow::bail!(
-                "Repository already initialized at {}",
-                repo_path.display()
-            );
+            anyhow::bail!("Repository already initialized at {}", repo_path.display());
         }
 
         // Create repository structure
@@ -92,7 +92,8 @@ impl InitCmd {
         // Initialize storage backend (local for now)
         // LocalBackend will create the "objects" directory automatically
         let storage_path = repo_path.join(".mediagit");
-        let storage: Arc<dyn mediagit_storage::StorageBackend> = Arc::new(LocalBackend::new(&storage_path).await?);
+        let storage: Arc<dyn mediagit_storage::StorageBackend> =
+            Arc::new(LocalBackend::new(&storage_path).await?);
 
         // Initialize object database
         let _odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
@@ -135,8 +136,7 @@ impl InitCmd {
             .context(format!("Failed to create directory: {}", path.display()))?;
         // Use dunce::canonicalize for cross-platform compatibility
         // This avoids Windows \\?\ prefix in display paths
-        dunce::canonicalize(&path)
-            .context("Failed to canonicalize path")
+        dunce::canonicalize(&path).context("Failed to canonicalize path")
     }
 
     fn create_directory_structure(&self, repo_path: &Path) -> Result<()> {
@@ -145,14 +145,12 @@ impl InitCmd {
         let mediagit_dir = repo_path.join(".mediagit");
 
         // Create main directories
-        fs::create_dir(&mediagit_dir)
-            .context("Failed to create .mediagit directory")?;
+        fs::create_dir(&mediagit_dir).context("Failed to create .mediagit directory")?;
 
         fs::create_dir(mediagit_dir.join("objects"))
             .context("Failed to create objects directory")?;
 
-        fs::create_dir(mediagit_dir.join("refs"))
-            .context("Failed to create refs directory")?;
+        fs::create_dir(mediagit_dir.join("refs")).context("Failed to create refs directory")?;
 
         fs::create_dir(mediagit_dir.join("refs/heads"))
             .context("Failed to create refs/heads directory")?;
@@ -181,11 +179,10 @@ impl InitCmd {
         };
 
         let config_path = repo_path.join(".mediagit/config.toml");
-        let config_content = toml::to_string_pretty(&config)
-            .context("Failed to serialize config")?;
+        let config_content =
+            toml::to_string_pretty(&config).context("Failed to serialize config")?;
 
-        fs::write(&config_path, config_content)
-            .context("Failed to write config file")?;
+        fs::write(&config_path, config_content).context("Failed to write config file")?;
 
         Ok(())
     }

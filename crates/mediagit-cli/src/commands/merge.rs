@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -12,12 +12,15 @@
 //
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
+use super::super::repo::{create_storage_backend, find_repo_root};
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
-use mediagit_versioning::{CheckoutManager, Commit, MergeEngine, MergeStrategy, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Reflog, ReflogEntry, Signature};
+use mediagit_versioning::{
+    CheckoutManager, Commit, MergeEngine, MergeStrategy, ObjectDatabase, ObjectType, Oid, Ref,
+    RefDatabase, Reflog, ReflogEntry, Signature,
+};
 use std::sync::Arc;
-use super::super::repo::{find_repo_root, create_storage_backend};
 
 /// Merge branches
 ///
@@ -185,13 +188,16 @@ impl MergeCmd {
 
                     // Update working directory to match the merged commit (ISS-008 fix)
                     let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
-                    checkout_mgr.checkout_commit(&their_oid).await
+                    checkout_mgr
+                        .checkout_commit(&their_oid)
+                        .await
                         .context("Failed to update working directory after fast-forward merge")?;
 
                     // Record reflog entry
                     let reflog = Reflog::new(&storage_path);
                     let reflog_msg = format!("merge {}: fast-forward", self.branch);
-                    let entry = ReflogEntry::now(our_oid, their_oid, "user", "user@mediagit", &reflog_msg);
+                    let entry =
+                        ReflogEntry::now(our_oid, their_oid, "user", "user@mediagit", &reflog_msg);
                     let _ = reflog.append("HEAD", &entry).await;
 
                     return Ok(());
@@ -225,30 +231,39 @@ impl MergeCmd {
 
             // Create commit signature
             // Priority: MEDIAGIT_AUTHOR_* env vars > config.toml [author] > $USER > defaults
-            let config = mediagit_config::Config::load(&repo_root).await.unwrap_or_default();
-            let author_name = std::env::var("MEDIAGIT_AUTHOR_NAME")
-                .unwrap_or_else(|_| {
-                    config.author.name.clone().unwrap_or_else(|| {
-                        std::env::var("USER").unwrap_or_else(|_| "Unknown".to_string())
-                    })
-                });
-            let author_email = std::env::var("MEDIAGIT_AUTHOR_EMAIL")
-                .unwrap_or_else(|_| {
-                    config.author.email.clone().unwrap_or_else(|| "unknown@localhost".to_string())
-                });
+            let config = mediagit_config::Config::load(&repo_root)
+                .await
+                .unwrap_or_default();
+            let author_name = std::env::var("MEDIAGIT_AUTHOR_NAME").unwrap_or_else(|_| {
+                config.author.name.clone().unwrap_or_else(|| {
+                    std::env::var("USER").unwrap_or_else(|_| "Unknown".to_string())
+                })
+            });
+            let author_email = std::env::var("MEDIAGIT_AUTHOR_EMAIL").unwrap_or_else(|_| {
+                config
+                    .author
+                    .email
+                    .clone()
+                    .unwrap_or_else(|| "unknown@localhost".to_string())
+            });
 
             let signature = Signature::now(author_name, author_email);
 
-            let message = self.message.clone().unwrap_or_else(|| {
-                format!("Merge branch '{}' into HEAD", self.branch)
-            });
+            let message = self
+                .message
+                .clone()
+                .unwrap_or_else(|| format!("Merge branch '{}' into HEAD", self.branch));
 
             // Verify both parent commits exist in the object database
             // This prevents creating merge commits with invalid parent references
-            odb.read(&our_oid).await
-                .context(format!("Parent commit {} (ours) not found in object database", our_oid))?;
-            odb.read(&their_oid).await
-                .context(format!("Parent commit {} (theirs) not found in object database", their_oid))?;
+            odb.read(&our_oid).await.context(format!(
+                "Parent commit {} (ours) not found in object database",
+                our_oid
+            ))?;
+            odb.read(&their_oid).await.context(format!(
+                "Parent commit {} (theirs) not found in object database",
+                their_oid
+            ))?;
 
             let merge_commit = Commit {
                 tree: tree_oid,
@@ -272,7 +287,9 @@ impl MergeCmd {
 
             // Update working directory to match the merged commit (ISS-008 fix)
             let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
-            checkout_mgr.checkout_commit(&commit_oid).await
+            checkout_mgr
+                .checkout_commit(&commit_oid)
+                .await
                 .context("Failed to update working directory after merge commit")?;
 
             // Record reflog entry
@@ -337,20 +354,17 @@ impl MergeCmd {
         let mut cleaned = 0;
 
         if merge_head.exists() {
-            std::fs::remove_file(&merge_head)
-                .context("Failed to remove MERGE_HEAD")?;
+            std::fs::remove_file(&merge_head).context("Failed to remove MERGE_HEAD")?;
             cleaned += 1;
         }
 
         if merge_msg.exists() {
-            std::fs::remove_file(&merge_msg)
-                .context("Failed to remove MERGE_MSG")?;
+            std::fs::remove_file(&merge_msg).context("Failed to remove MERGE_MSG")?;
             cleaned += 1;
         }
 
         if merge_mode.exists() {
-            std::fs::remove_file(&merge_mode)
-                .context("Failed to remove MERGE_MODE")?;
+            std::fs::remove_file(&merge_mode).context("Failed to remove MERGE_MODE")?;
             cleaned += 1;
         }
 
@@ -380,15 +394,14 @@ impl MergeCmd {
         }
 
         // Read MERGE_HEAD to get the OID being merged
-        let merge_head_content = std::fs::read_to_string(&merge_head_path)
-            .context("Failed to read MERGE_HEAD")?;
+        let merge_head_content =
+            std::fs::read_to_string(&merge_head_path).context("Failed to read MERGE_HEAD")?;
         let merge_oid = mediagit_versioning::Oid::from_hex(merge_head_content.trim())?;
 
         // Read MERGE_MSG if it exists
         let merge_msg_path = mediagit_dir.join("MERGE_MSG");
         let message = if merge_msg_path.exists() {
-            std::fs::read_to_string(&merge_msg_path)
-                .context("Failed to read MERGE_MSG")?
+            std::fs::read_to_string(&merge_msg_path).context("Failed to read MERGE_MSG")?
         } else {
             format!("Merge commit {}", merge_oid.to_hex())
         };
@@ -444,7 +457,13 @@ impl MergeCmd {
         // Record reflog
         let reflog = Reflog::new(&mediagit_dir);
         let reflog_msg = "merge: continue (resolved conflicts)".to_string();
-        let entry = ReflogEntry::now(current_oid, commit_oid, "user", "user@mediagit", &reflog_msg);
+        let entry = ReflogEntry::now(
+            current_oid,
+            commit_oid,
+            "user",
+            "user@mediagit",
+            &reflog_msg,
+        );
         let _ = reflog.append("HEAD", &entry).await;
 
         // Clean up merge state after successful commit
@@ -466,5 +485,4 @@ impl MergeCmd {
 
         Ok(())
     }
-
 }

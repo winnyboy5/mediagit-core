@@ -82,11 +82,11 @@ impl Oid {
     /// ```
     pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> anyhow::Result<Self> {
         use std::io::Read;
-        
+
         let mut file = std::fs::File::open(path.as_ref())?;
         let mut hasher = Sha256::new();
         let mut buffer = [0u8; 64 * 1024]; // 64KB buffer - stack allocated
-        
+
         loop {
             let bytes_read = file.read(&mut buffer)?;
             if bytes_read == 0 {
@@ -94,7 +94,7 @@ impl Oid {
             }
             hasher.update(&buffer[..bytes_read]);
         }
-        
+
         let result = hasher.finalize();
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(&result);
@@ -124,11 +124,11 @@ impl Oid {
     /// ```
     pub async fn from_file_async<P: AsRef<std::path::Path>>(path: P) -> anyhow::Result<Self> {
         use tokio::io::AsyncReadExt;
-        
+
         let mut file = tokio::fs::File::open(path.as_ref()).await?;
         let mut hasher = Sha256::new();
         let mut buffer = vec![0u8; 64 * 1024]; // 64KB buffer - heap for async
-        
+
         loop {
             let bytes_read = file.read(&mut buffer).await?;
             if bytes_read == 0 {
@@ -136,7 +136,7 @@ impl Oid {
             }
             hasher.update(&buffer[..bytes_read]);
         }
-        
+
         let result = hasher.finalize();
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(&result);
@@ -280,7 +280,10 @@ mod tests {
     fn test_hash_different_content() {
         let oid1 = Oid::hash(b"content1");
         let oid2 = Oid::hash(b"content2");
-        assert_ne!(oid1, oid2, "Different content should produce different OIDs");
+        assert_ne!(
+            oid1, oid2,
+            "Different content should produce different OIDs"
+        );
     }
 
     #[test]
@@ -329,16 +332,19 @@ mod tests {
         let test_path = temp_dir.join("mediagit_test_oid_streaming.bin");
         let test_data = b"Hello, World! This is test content for streaming hash.";
         std::fs::write(&test_path, test_data).expect("Failed to write test file");
-        
+
         // Compute both hashes
         let memory_oid = Oid::hash(test_data);
         let file_oid = Oid::from_file(&test_path).expect("Failed to hash file");
-        
+
         // Cleanup
         let _ = std::fs::remove_file(&test_path);
-        
+
         // Verify they match
-        assert_eq!(memory_oid, file_oid, "Streaming hash should match in-memory hash");
+        assert_eq!(
+            memory_oid, file_oid,
+            "Streaming hash should match in-memory hash"
+        );
     }
 
     #[test]
@@ -347,13 +353,16 @@ mod tests {
         let temp_dir = std::env::temp_dir();
         let test_path = temp_dir.join("mediagit_test_oid_empty.bin");
         std::fs::write(&test_path, b"").expect("Failed to write empty test file");
-        
+
         let memory_oid = Oid::hash(b"");
         let file_oid = Oid::from_file(&test_path).expect("Failed to hash empty file");
-        
+
         let _ = std::fs::remove_file(&test_path);
-        
-        assert_eq!(memory_oid, file_oid, "Empty file hash should match empty slice hash");
+
+        assert_eq!(
+            memory_oid, file_oid,
+            "Empty file hash should match empty slice hash"
+        );
     }
 
     #[tokio::test]
@@ -361,14 +370,21 @@ mod tests {
         let temp_dir = std::env::temp_dir();
         let test_path = temp_dir.join("mediagit_test_oid_async.bin");
         let test_data = b"Async streaming hash test content with more data to ensure buffer works.";
-        tokio::fs::write(&test_path, test_data).await.expect("Failed to write test file");
-        
+        tokio::fs::write(&test_path, test_data)
+            .await
+            .expect("Failed to write test file");
+
         let memory_oid = Oid::hash(test_data);
-        let file_oid = Oid::from_file_async(&test_path).await.expect("Failed to hash file async");
-        
+        let file_oid = Oid::from_file_async(&test_path)
+            .await
+            .expect("Failed to hash file async");
+
         let _ = tokio::fs::remove_file(&test_path).await;
-        
-        assert_eq!(memory_oid, file_oid, "Async streaming hash should match in-memory hash");
+
+        assert_eq!(
+            memory_oid, file_oid,
+            "Async streaming hash should match in-memory hash"
+        );
     }
 
     #[test]
@@ -378,12 +394,15 @@ mod tests {
         let test_path = temp_dir.join("mediagit_test_oid_large.bin");
         let test_data: Vec<u8> = (0..100_000).map(|i| (i % 256) as u8).collect();
         std::fs::write(&test_path, &test_data).expect("Failed to write large test file");
-        
+
         let memory_oid = Oid::hash(&test_data);
         let file_oid = Oid::from_file(&test_path).expect("Failed to hash large file");
-        
+
         let _ = std::fs::remove_file(&test_path);
-        
-        assert_eq!(memory_oid, file_oid, "Large file streaming hash should match in-memory hash");
+
+        assert_eq!(
+            memory_oid, file_oid,
+            "Large file streaming hash should match in-memory hash"
+        );
     }
 }

@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -26,24 +26,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 /// Helper to create test commits with specified parents
-async fn create_test_commit(
-    odb: &Arc<ObjectDatabase>,
-    message: &str,
-    parents: Vec<Oid>,
-) -> Oid {
+async fn create_test_commit(odb: &Arc<ObjectDatabase>, message: &str, parents: Vec<Oid>) -> Oid {
     let tree = Oid::hash(b"tree");
-    let sig = Signature::now(
-        "Test Author".to_string(),
-        "test@example.com".to_string(),
-    );
+    let sig = Signature::now("Test Author".to_string(), "test@example.com".to_string());
 
-    let commit = Commit::with_parents(
-        tree,
-        parents,
-        sig.clone(),
-        sig,
-        message.to_string(),
-    );
+    let commit = Commit::with_parents(tree, parents, sig.clone(), sig, message.to_string());
 
     commit.write(odb).await.unwrap()
 }

@@ -19,11 +19,11 @@ use console::style;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
+use super::super::repo::create_storage_backend;
 use mediagit_versioning::{
     CheckoutManager, Commit, Index, IndexEntry, ObjectDatabase, Oid, RefDatabase, Reflog,
     ReflogEntry, Tree,
 };
-use super::super::repo::create_storage_backend;
 
 use super::super::output;
 use super::super::repo::find_repo_root;
@@ -172,7 +172,8 @@ impl ResetCmd {
 
         // Step 3: Reset working tree (hard only)
         if mode == ResetMode::Hard {
-            self.reset_working_tree(repo_root, &odb, &target_oid).await?;
+            self.reset_working_tree(repo_root, &odb, &target_oid)
+                .await?;
         }
 
         if !self.quiet {
@@ -364,11 +365,7 @@ impl ResetCmd {
             };
 
             let commit = Commit::read(odb, &base_oid).await?;
-            return commit
-                .parents
-                .first()
-                .cloned()
-                .context("No parent commit");
+            return commit.parents.first().cloned().context("No parent commit");
         }
 
         // Try as ref

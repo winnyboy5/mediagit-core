@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -49,9 +49,7 @@ pub struct MediagitCommand {
 impl MediagitCommand {
     /// Create a new MediagitCommand.
     pub fn new() -> Self {
-        Self {
-            cmd: mediagit(),
-        }
+        Self { cmd: mediagit() }
     }
 
     /// Set the working directory for the command.
@@ -142,10 +140,7 @@ impl MediagitCommand {
 
     /// Get repository status.
     pub fn status(dir: &Path) -> assert_cmd::assert::Assert {
-        mediagit()
-            .arg("status")
-            .current_dir(dir)
-            .assert()
+        mediagit().arg("status").current_dir(dir).assert()
     }
 }
 

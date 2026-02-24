@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -106,20 +106,14 @@ impl ConfigLoader {
     }
 
     /// Load configuration with environment variable overrides
-    pub async fn load_with_overrides<P: AsRef<Path>>(
-        &self,
-        path: P,
-    ) -> ConfigResult<Config> {
+    pub async fn load_with_overrides<P: AsRef<Path>>(&self, path: P) -> ConfigResult<Config> {
         let mut config = self.load_file(path).await?;
         self.apply_env_overrides(&mut config)?;
         Ok(config)
     }
 
     /// Merge multiple configuration files
-    pub async fn load_and_merge<P: AsRef<Path>>(
-        &self,
-        paths: &[P],
-    ) -> ConfigResult<Config> {
+    pub async fn load_and_merge<P: AsRef<Path>>(&self, paths: &[P]) -> ConfigResult<Config> {
         if paths.is_empty() {
             return Err(ConfigError::ValidationError(
                 "at least one configuration file must be provided".to_string(),
@@ -280,10 +274,14 @@ impl ConfigLoader {
         if overlay.security.https_enabled {
             base.security.https_enabled = true;
             if overlay.security.tls_cert_path.is_some() {
-                base.security.tls_cert_path.clone_from(&overlay.security.tls_cert_path);
+                base.security
+                    .tls_cert_path
+                    .clone_from(&overlay.security.tls_cert_path);
             }
             if overlay.security.tls_key_path.is_some() {
-                base.security.tls_key_path.clone_from(&overlay.security.tls_key_path);
+                base.security
+                    .tls_key_path
+                    .clone_from(&overlay.security.tls_key_path);
             }
         }
 
@@ -320,10 +318,22 @@ mod tests {
 
     #[test]
     fn test_format_detection() {
-        assert_eq!(ConfigFormat::from_path("config.toml").unwrap(), ConfigFormat::Toml);
-        assert_eq!(ConfigFormat::from_path("config.yaml").unwrap(), ConfigFormat::Yaml);
-        assert_eq!(ConfigFormat::from_path("config.yml").unwrap(), ConfigFormat::Yaml);
-        assert_eq!(ConfigFormat::from_path("config.json").unwrap(), ConfigFormat::Json);
+        assert_eq!(
+            ConfigFormat::from_path("config.toml").unwrap(),
+            ConfigFormat::Toml
+        );
+        assert_eq!(
+            ConfigFormat::from_path("config.yaml").unwrap(),
+            ConfigFormat::Yaml
+        );
+        assert_eq!(
+            ConfigFormat::from_path("config.yml").unwrap(),
+            ConfigFormat::Yaml
+        );
+        assert_eq!(
+            ConfigFormat::from_path("config.json").unwrap(),
+            ConfigFormat::Json
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -15,14 +15,17 @@
 // End-to-end integration tests for push/pull workflow
 // These tests start an actual server and test the complete client-server interaction
 
-use std::sync::Arc;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 
-use mediagit_storage::{LocalBackend, StorageBackend};
-use mediagit_versioning::{ObjectDatabase, RefDatabase, ObjectType, Ref, PackReader, Commit, Tree, TreeEntry, FileMode, Signature, Oid};
 use mediagit_protocol::{ProtocolClient, RefUpdate};
+use mediagit_storage::{LocalBackend, StorageBackend};
+use mediagit_versioning::{
+    Commit, FileMode, ObjectDatabase, ObjectType, Oid, PackReader, Ref, RefDatabase, Signature,
+    Tree, TreeEntry,
+};
 
 // Helper to create test server on random port
 async fn start_test_server(repos_dir: PathBuf) -> (String, tokio::task::JoinHandle<()>) {
@@ -73,7 +76,12 @@ async fn init_test_repo(repo_path: &std::path::Path) -> anyhow::Result<Oid> {
 
     // Create initial commit
     let author = Signature::now("Test User".to_string(), "test@example.com".to_string());
-    let commit = Commit::new(tree_oid, author.clone(), author, "Initial commit".to_string());
+    let commit = Commit::new(
+        tree_oid,
+        author.clone(),
+        author,
+        "Initial commit".to_string(),
+    );
     let commit_oid = commit.write(&odb).await?;
 
     // Create initial ref pointing to commit (not blob)
@@ -141,7 +149,11 @@ async fn test_e2e_push_workflow() {
     let _client_initial_oid = init_test_repo(&client_repo).await.unwrap();
 
     // Create new commit on client (use .mediagit to match init_test_repo)
-    let storage: Arc<dyn StorageBackend> = Arc::new(LocalBackend::new(client_repo.join(".mediagit")).await.unwrap());
+    let storage: Arc<dyn StorageBackend> = Arc::new(
+        LocalBackend::new(client_repo.join(".mediagit"))
+            .await
+            .unwrap(),
+    );
     let odb = ObjectDatabase::new(Arc::clone(&storage), 1000);
     let new_commit_oid = create_commit(
         &odb,
@@ -149,7 +161,9 @@ async fn test_e2e_push_workflow() {
         "new_file.txt",
         "Add new file for push test",
         Some(server_initial_oid),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     // Update client's main ref to point to new commit
     let refdb = RefDatabase::new(client_repo.join(".mediagit"));
@@ -161,7 +175,9 @@ async fn test_e2e_push_workflow() {
 
     // Get current server state
     let refs_response = client.get_refs().await.unwrap();
-    let old_oid = refs_response.refs.iter()
+    let old_oid = refs_response
+        .refs
+        .iter()
         .find(|r| r.name == "refs/heads/main")
         .map(|r| r.oid.clone());
 
@@ -188,7 +204,11 @@ async fn test_e2e_push_workflow() {
     let server_main = server_refdb.read("refs/heads/main").await.unwrap();
 
     if let Some(target_oid) = &server_main.oid {
-        assert_eq!(target_oid.to_hex(), new_commit_oid.to_hex(), "Server ref not updated correctly");
+        assert_eq!(
+            target_oid.to_hex(),
+            new_commit_oid.to_hex(),
+            "Server ref not updated correctly"
+        );
     } else {
         panic!("Server ref should be direct, not symbolic");
     }
@@ -209,7 +229,11 @@ async fn test_e2e_pull_workflow() {
     let _initial_oid = init_test_repo(&server_repo).await.unwrap();
 
     // Add additional commit to server (use .mediagit path to match server's storage location)
-    let server_storage: Arc<dyn StorageBackend> = Arc::new(LocalBackend::new(server_repo.join(".mediagit")).await.unwrap());
+    let server_storage: Arc<dyn StorageBackend> = Arc::new(
+        LocalBackend::new(server_repo.join(".mediagit"))
+            .await
+            .unwrap(),
+    );
     let server_odb = ObjectDatabase::new(Arc::clone(&server_storage), 1000);
     let server_commit_oid = create_commit(
         &server_odb,
@@ -217,7 +241,9 @@ async fn test_e2e_pull_workflow() {
         "server_file.txt",
         "Server commit for pull test",
         Some(_initial_oid),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     // Update server's main ref to new commit
     let server_refdb = RefDatabase::new(server_repo.join(".mediagit"));
@@ -231,10 +257,15 @@ async fn test_e2e_pull_workflow() {
     let client_repo = client_temp.path().to_path_buf();
     let mediagit_dir = client_repo.join(".mediagit");
     tokio::fs::create_dir_all(&mediagit_dir).await.unwrap();
-    tokio::fs::create_dir_all(mediagit_dir.join("objects")).await.unwrap();
-    tokio::fs::create_dir_all(mediagit_dir.join("refs/heads")).await.unwrap();
+    tokio::fs::create_dir_all(mediagit_dir.join("objects"))
+        .await
+        .unwrap();
+    tokio::fs::create_dir_all(mediagit_dir.join("refs/heads"))
+        .await
+        .unwrap();
 
-    let client_storage: Arc<dyn StorageBackend> = Arc::new(LocalBackend::new(mediagit_dir.clone()).await.unwrap());
+    let client_storage: Arc<dyn StorageBackend> =
+        Arc::new(LocalBackend::new(mediagit_dir.clone()).await.unwrap());
     let client_odb = ObjectDatabase::new(Arc::clone(&client_storage), 1000);
 
     // Create protocol client
@@ -256,7 +287,10 @@ async fn test_e2e_pull_workflow() {
 
     // Verify commit was downloaded
     let downloaded_commit = client_odb.read(&server_commit_oid).await;
-    assert!(downloaded_commit.is_ok(), "Downloaded commit not found in client ODB");
+    assert!(
+        downloaded_commit.is_ok(),
+        "Downloaded commit not found in client ODB"
+    );
 }
 
 /// Test push-then-pull roundtrip with proper commit objects
@@ -282,15 +316,21 @@ async fn test_e2e_push_then_pull_roundtrip() {
     let client1_initial = init_test_repo(&client1_repo).await.unwrap();
 
     // Create unique commit on client1 (use .mediagit and client's own initial commit)
-    let client1_storage: Arc<dyn StorageBackend> = Arc::new(LocalBackend::new(client1_repo.join(".mediagit")).await.unwrap());
+    let client1_storage: Arc<dyn StorageBackend> = Arc::new(
+        LocalBackend::new(client1_repo.join(".mediagit"))
+            .await
+            .unwrap(),
+    );
     let client1_odb = ObjectDatabase::new(Arc::clone(&client1_storage), 1000);
     let unique_commit_oid = create_commit(
         &client1_odb,
         b"unique content from client1",
         "client1_file.txt",
         "Unique commit from client1",
-        Some(client1_initial),  // Use client's own initial commit
-    ).await.unwrap();
+        Some(client1_initial), // Use client's own initial commit
+    )
+    .await
+    .unwrap();
 
     // Update client1's main ref
     let client1_refdb = RefDatabase::new(client1_repo.join(".mediagit"));
@@ -300,7 +340,9 @@ async fn test_e2e_push_then_pull_roundtrip() {
     // Push from client1
     let client1_protocol = ProtocolClient::new(format!("{}/test-repo", base_url));
     let refs_response = client1_protocol.get_refs().await.unwrap();
-    let old_oid = refs_response.refs.iter()
+    let old_oid = refs_response
+        .refs
+        .iter()
         .find(|r| r.name == "refs/heads/main")
         .map(|r| r.oid.clone());
 
@@ -311,23 +353,36 @@ async fn test_e2e_push_then_pull_roundtrip() {
         delete: false,
     };
 
-    let push_result = client1_protocol.push(&client1_odb, vec![update], false).await;
-    assert!(push_result.is_ok(), "Client1 push failed: {:?}", push_result.err());
+    let push_result = client1_protocol
+        .push(&client1_odb, vec![update], false)
+        .await;
+    assert!(
+        push_result.is_ok(),
+        "Client1 push failed: {:?}",
+        push_result.err()
+    );
     assert!(push_result.unwrap().0.success);
 
     // === Client 2: Pull ===
     let client2_repo = client2_temp.path().to_path_buf();
     let mediagit_dir = client2_repo.join(".mediagit");
     tokio::fs::create_dir_all(&mediagit_dir).await.unwrap();
-    tokio::fs::create_dir_all(mediagit_dir.join("objects")).await.unwrap();
+    tokio::fs::create_dir_all(mediagit_dir.join("objects"))
+        .await
+        .unwrap();
 
-    let client2_storage: Arc<dyn StorageBackend> = Arc::new(LocalBackend::new(mediagit_dir.clone()).await.unwrap());
+    let client2_storage: Arc<dyn StorageBackend> =
+        Arc::new(LocalBackend::new(mediagit_dir.clone()).await.unwrap());
     let client2_odb = ObjectDatabase::new(Arc::clone(&client2_storage), 1000);
 
     // Pull to client2
     let client2_protocol = ProtocolClient::new(format!("{}/test-repo", base_url));
     let pull_result = client2_protocol.pull(&client2_odb, "refs/heads/main").await;
-    assert!(pull_result.is_ok(), "Client2 pull failed: {:?}", pull_result.err());
+    assert!(
+        pull_result.is_ok(),
+        "Client2 pull failed: {:?}",
+        pull_result.err()
+    );
     let (pack_data, _oids) = pull_result.unwrap();
 
     // Unpack received objects into client2's ODB
@@ -339,7 +394,10 @@ async fn test_e2e_push_then_pull_roundtrip() {
 
     // Verify client2 received client1's commit
     let client2_commit = client2_odb.read(&unique_commit_oid).await;
-    assert!(client2_commit.is_ok(), "Client2 should have client1's commit");
+    assert!(
+        client2_commit.is_ok(),
+        "Client2 should have client1's commit"
+    );
 }
 
 /// Test force push with divergent histories using proper commit objects
@@ -357,7 +415,11 @@ async fn test_force_push() {
     let server_initial_oid = init_test_repo(&server_repo).await.unwrap();
 
     // Add divergent commit to server (simulating divergent history)
-    let server_storage: Arc<dyn StorageBackend> = Arc::new(LocalBackend::new(server_repo.join(".mediagit")).await.unwrap());
+    let server_storage: Arc<dyn StorageBackend> = Arc::new(
+        LocalBackend::new(server_repo.join(".mediagit"))
+            .await
+            .unwrap(),
+    );
     let server_odb = ObjectDatabase::new(Arc::clone(&server_storage), 1000);
     let server_divergent_oid = create_commit(
         &server_odb,
@@ -365,7 +427,9 @@ async fn test_force_push() {
         "server_divergent.txt",
         "Server divergent commit",
         Some(server_initial_oid),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     let server_refdb = RefDatabase::new(server_repo.join(".mediagit"));
     let server_ref = Ref::new_direct("refs/heads/main".to_string(), server_divergent_oid);
@@ -379,7 +443,11 @@ async fn test_force_push() {
     let client_repo = client_temp.path().to_path_buf();
     let client_initial = init_test_repo(&client_repo).await.unwrap();
 
-    let client_storage: Arc<dyn StorageBackend> = Arc::new(LocalBackend::new(client_repo.join(".mediagit")).await.unwrap());
+    let client_storage: Arc<dyn StorageBackend> = Arc::new(
+        LocalBackend::new(client_repo.join(".mediagit"))
+            .await
+            .unwrap(),
+    );
     let client_odb = ObjectDatabase::new(Arc::clone(&client_storage), 1000);
 
     // Create client's divergent commit based on its own initial commit
@@ -388,8 +456,10 @@ async fn test_force_push() {
         b"client different content",
         "client_divergent.txt",
         "Client divergent commit",
-        Some(client_initial),  // Use client's own initial commit as parent
-    ).await.unwrap();
+        Some(client_initial), // Use client's own initial commit as parent
+    )
+    .await
+    .unwrap();
 
     let client_refdb = RefDatabase::new(client_repo.join(".mediagit"));
     let client_ref = Ref::new_direct("refs/heads/main".to_string(), client_divergent_oid);
@@ -402,13 +472,17 @@ async fn test_force_push() {
     // Note: We pass None for old_oid since we're forcing a complete overwrite
     let update = RefUpdate {
         name: "refs/heads/main".to_string(),
-        old_oid: None,  // Force push doesn't check old OID
+        old_oid: None, // Force push doesn't check old OID
         new_oid: client_divergent_oid.to_hex(),
         delete: false,
     };
 
     let force_push = client.push(&client_odb, vec![update], true).await;
-    assert!(force_push.is_ok(), "Force push failed: {:?}", force_push.err());
+    assert!(
+        force_push.is_ok(),
+        "Force push failed: {:?}",
+        force_push.err()
+    );
 
     let (response, _stats) = force_push.unwrap();
     assert!(response.success, "Force push should succeed");
@@ -418,7 +492,11 @@ async fn test_force_push() {
     let updated_ref = server_refdb.read("refs/heads/main").await.unwrap();
 
     if let Some(oid) = &updated_ref.oid {
-        assert_eq!(oid.to_hex(), client_divergent_oid.to_hex(), "Server should have client's OID after force push");
+        assert_eq!(
+            oid.to_hex(),
+            client_divergent_oid.to_hex(),
+            "Server should have client's OID after force push"
+        );
     }
 }
 

@@ -194,10 +194,7 @@ impl AudioParser {
             .sample_rate
             .ok_or_else(|| MediaError::AudioError("No sample rate found".to_string()))?;
 
-        let channels = codec_params
-            .channels
-            .map(|c| c.count() as u16)
-            .unwrap_or(2);
+        let channels = codec_params.channels.map(|c| c.count() as u16).unwrap_or(2);
 
         let bit_depth = codec_params.bits_per_sample.map(|b| b as u16);
 
@@ -206,9 +203,7 @@ impl AudioParser {
         // Calculate bitrate from available parameters
         // Bitrate (bits/sec) = sample_rate * bits_per_sample * channels
         let bitrate = match (codec_params.bits_per_sample, codec_params.channels) {
-            (Some(bits), Some(channels)) => {
-                Some(sample_rate * bits * channels.count() as u32)
-            }
+            (Some(bits), Some(channels)) => Some(sample_rate * bits * channels.count() as u32),
             _ => None,
         };
 
@@ -386,14 +381,20 @@ impl AudioParser {
         // Add new tracks from 'theirs' not in 'ours'
         for track in &theirs.tracks {
             if track_ids.insert(track.id) {
-                debug!("Adding new track from 'theirs': {} ({:?})", track.id, track.track_type);
+                debug!(
+                    "Adding new track from 'theirs': {} ({:?})",
+                    track.id, track.track_type
+                );
                 merged_tracks.push(track.clone());
             }
         }
 
         merged_audio.tracks = merged_tracks;
 
-        info!("Audio track merge complete: {} tracks", merged_audio.tracks.len());
+        info!(
+            "Audio track merge complete: {} tracks",
+            merged_audio.tracks.len()
+        );
 
         Ok(merged_audio)
     }
@@ -449,7 +450,7 @@ mod tests {
             id: 1,
             name: None,
             track_type: TrackType::Music,
-            duration_seconds: 10.5,  // Different duration
+            duration_seconds: 10.5, // Different duration
             sample_rate: 44100,
             channels: 2,
             start_time: 0.0,

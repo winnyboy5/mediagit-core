@@ -87,12 +87,12 @@ use crate::StorageBackend;
 use async_trait::async_trait;
 use google_cloud_auth::credentials::CredentialsFile;
 use google_cloud_storage::client::{Client as GcsClient, ClientConfig};
+use google_cloud_storage::http::objects::delete::DeleteObjectRequest;
 use google_cloud_storage::http::objects::download::Range;
 use google_cloud_storage::http::objects::get::GetObjectRequest;
+use google_cloud_storage::http::objects::list::ListObjectsRequest;
 use google_cloud_storage::http::objects::upload::{Media, UploadObjectRequest, UploadType};
 use google_cloud_storage::http::objects::Object;
-use google_cloud_storage::http::objects::delete::DeleteObjectRequest;
-use google_cloud_storage::http::objects::list::ListObjectsRequest;
 use std::fmt;
 use std::sync::Arc;
 use tracing::{debug, warn};
@@ -121,7 +121,7 @@ impl Default for GcsConfig {
         GcsConfig {
             project_id: String::new(),
             bucket_name: String::new(),
-            chunk_size: 256 * 1024,         // 256KB
+            chunk_size: 256 * 1024,               // 256KB
             resumable_threshold: 5 * 1024 * 1024, // 5MB
             max_retries: 3,
         }
@@ -351,13 +351,19 @@ impl GcsBackend {
     pub async fn from_env() -> anyhow::Result<Self> {
         let project_id = std::env::var("GCS_PROJECT_ID")
             .or_else(|_| std::env::var("GOOGLE_CLOUD_PROJECT"))
-            .map_err(|_| anyhow::anyhow!("GCS_PROJECT_ID or GOOGLE_CLOUD_PROJECT environment variable not set"))?;
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "GCS_PROJECT_ID or GOOGLE_CLOUD_PROJECT environment variable not set"
+                )
+            })?;
 
         let bucket_name = std::env::var("GCS_BUCKET_NAME")
             .map_err(|_| anyhow::anyhow!("GCS_BUCKET_NAME environment variable not set"))?;
 
-        let service_account_path = std::env::var("GOOGLE_APPLICATION_CREDENTIALS")
-            .map_err(|_| anyhow::anyhow!("GOOGLE_APPLICATION_CREDENTIALS environment variable not set"))?;
+        let service_account_path =
+            std::env::var("GOOGLE_APPLICATION_CREDENTIALS").map_err(|_| {
+                anyhow::anyhow!("GOOGLE_APPLICATION_CREDENTIALS environment variable not set")
+            })?;
 
         Self::new(project_id, bucket_name, service_account_path).await
     }
@@ -739,7 +745,11 @@ impl StorageBackend for GcsBackend {
                 loop {
                     let req = ListObjectsRequest {
                         bucket: bucket.clone(),
-                        prefix: if prefix.is_empty() { None } else { Some(prefix.clone()) },
+                        prefix: if prefix.is_empty() {
+                            None
+                        } else {
+                            Some(prefix.clone())
+                        },
                         page_token: page_token.clone(),
                         ..Default::default()
                     };
@@ -762,10 +772,7 @@ impl StorageBackend for GcsBackend {
                 }
 
                 results.sort();
-                debug!(
-                    count = results.len(),
-                    "Listed objects from GCS"
-                );
+                debug!(count = results.len(), "Listed objects from GCS");
                 Ok(results)
             }
         })
@@ -795,7 +802,10 @@ impl GcsBackend {
                     ..Default::default()
                 };
 
-                match client.upload_object(&req, data, &UploadType::Simple(media)).await {
+                match client
+                    .upload_object(&req, data, &UploadType::Simple(media))
+                    .await
+                {
                     Ok(_) => {
                         debug!(key = %key, "Successfully uploaded object to GCS");
                         Ok(())
@@ -840,14 +850,20 @@ impl GcsBackend {
                 let chunk = chunk.to_vec();
 
                 async move {
-                    let object = Object { name: key.clone(), ..Default::default() };
+                    let object = Object {
+                        name: key.clone(),
+                        ..Default::default()
+                    };
                     let req = UploadObjectRequest {
                         bucket: bucket.clone(),
                         ..Default::default()
                     };
 
                     let chunk_len = chunk.len(); // Store length before move
-                    match client.upload_object(&req, chunk, &UploadType::Multipart(Box::new(object))).await {
+                    match client
+                        .upload_object(&req, chunk, &UploadType::Multipart(Box::new(object)))
+                        .await
+                    {
                         Ok(_) => {
                             debug!(
                                 key = %key,

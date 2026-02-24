@@ -313,10 +313,7 @@ impl MinIOBackend {
                 config.bucket
             ))?;
 
-        debug!(
-            "Successfully connected to MinIO bucket: {}",
-            config.bucket
-        );
+        debug!("Successfully connected to MinIO bucket: {}", config.bucket);
 
         Ok(MinIOBackend {
             client,
@@ -352,9 +349,7 @@ impl MinIOBackend {
     /// Perform operation with exponential backoff retry logic
     async fn with_retry<F, T>(&self, mut operation: F) -> Result<T>
     where
-        F: FnMut() -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<T>> + Send>,
-        >,
+        F: FnMut() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send>>,
     {
         let mut retry_count = 0;
         let mut delay_ms = self.config.initial_retry_delay_ms;
@@ -365,10 +360,8 @@ impl MinIOBackend {
                 Err(e) => {
                     retry_count += 1;
                     if retry_count >= self.config.max_retries {
-                        return Err(e).context(format!(
-                            "Failed after {} retries",
-                            self.config.max_retries
-                        ));
+                        return Err(e)
+                            .context(format!("Failed after {} retries", self.config.max_retries));
                     }
 
                     warn!(
@@ -451,7 +444,11 @@ impl MinIOBackend {
             let body = body.clone();
 
             Box::pin(async move {
-                debug!("Putting object to MinIO (simple): {} ({} bytes)", key, body.len());
+                debug!(
+                    "Putting object to MinIO (simple): {} ({} bytes)",
+                    key,
+                    body.len()
+                );
 
                 client
                     .put_object()
@@ -462,7 +459,9 @@ impl MinIOBackend {
                     .await
                     .map_err(|e| anyhow!("Failed to put object: {}", e))?;
 
-                stats.total_bytes_uploaded.fetch_add(body.len() as u64, Ordering::Relaxed);
+                stats
+                    .total_bytes_uploaded
+                    .fetch_add(body.len() as u64, Ordering::Relaxed);
 
                 Ok(())
             })
@@ -539,7 +538,9 @@ impl MinIOBackend {
                     .ok_or_else(|| anyhow!("No ETag returned for part {}", part_num))?
                     .to_string();
 
-                stats.total_bytes_uploaded.fetch_add(chunk_data.len() as u64, Ordering::Relaxed);
+                stats
+                    .total_bytes_uploaded
+                    .fetch_add(chunk_data.len() as u64, Ordering::Relaxed);
 
                 Ok::<_, anyhow::Error>((part_num, etag))
             });
@@ -643,7 +644,9 @@ impl StorageBackend for MinIOBackend {
                     .map_err(|e| anyhow!("Failed to read object body: {}", e))?;
 
                 let data = body.into_bytes().to_vec();
-                stats.total_bytes_downloaded.fetch_add(data.len() as u64, Ordering::Relaxed);
+                stats
+                    .total_bytes_downloaded
+                    .fetch_add(data.len() as u64, Ordering::Relaxed);
 
                 Ok(data)
             })
@@ -680,13 +683,7 @@ impl StorageBackend for MinIOBackend {
             Box::pin(async move {
                 debug!("Checking if object exists in MinIO: {}", key);
 
-                match client
-                    .head_object()
-                    .bucket(&bucket)
-                    .key(&key)
-                    .send()
-                    .await
-                {
+                match client.head_object().bucket(&bucket).key(&key).send().await {
                     Ok(_) => {
                         debug!("Object exists: {}", key);
                         Ok(true)
@@ -767,9 +764,7 @@ impl StorageBackend for MinIOBackend {
                 let mut continuation_token: Option<String> = None;
 
                 loop {
-                    let mut request = client
-                        .list_objects_v2()
-                        .bucket(&bucket);
+                    let mut request = client.list_objects_v2().bucket(&bucket);
 
                     if !prefix.is_empty() {
                         request = request.prefix(&prefix);
@@ -793,7 +788,8 @@ impl StorageBackend for MinIOBackend {
 
                     // Check if there are more results
                     if response.is_truncated() == Some(true) {
-                        continuation_token = response.next_continuation_token().map(|t| t.to_string());
+                        continuation_token =
+                            response.next_continuation_token().map(|t| t.to_string());
                     } else {
                         break;
                     }
@@ -850,13 +846,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires MinIO server"]
     async fn test_new_removes_trailing_slash() {
-        let backend = MinIOBackend::new(
-            "http://localhost:9000/",
-            "bucket",
-            "key",
-            "secret",
-        )
-        .await;
+        let backend = MinIOBackend::new("http://localhost:9000/", "bucket", "key", "secret").await;
 
         assert!(backend.is_ok());
         let backend = backend.unwrap();
@@ -897,13 +887,8 @@ mod tests {
     #[tokio::test]
     async fn test_bucket_name_too_long() {
         let long_bucket = "a".repeat(64);
-        let result = MinIOBackend::new(
-            "http://localhost:9000",
-            &long_bucket,
-            "key",
-            "secret",
-        )
-        .await;
+        let result =
+            MinIOBackend::new("http://localhost:9000", &long_bucket, "key", "secret").await;
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("63 characters"));
@@ -928,26 +913,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_bucket_name_starts_with_hyphen() {
-        let result = MinIOBackend::new(
-            "http://localhost:9000",
-            "-invalid",
-            "key",
-            "secret",
-        )
-        .await;
+        let result = MinIOBackend::new("http://localhost:9000", "-invalid", "key", "secret").await;
 
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_bucket_name_ends_with_hyphen() {
-        let result = MinIOBackend::new(
-            "http://localhost:9000",
-            "invalid-",
-            "key",
-            "secret",
-        )
-        .await;
+        let result = MinIOBackend::new("http://localhost:9000", "invalid-", "key", "secret").await;
 
         assert!(result.is_err());
     }
@@ -983,14 +956,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires MinIO server"]
     async fn test_debug_impl() {
-        let backend = MinIOBackend::new(
-            "http://localhost:9000",
-            "bucket",
-            "key",
-            "secret",
-        )
-        .await
-        .unwrap();
+        let backend = MinIOBackend::new("http://localhost:9000", "bucket", "key", "secret")
+            .await
+            .unwrap();
 
         let debug_str = format!("{:?}", backend);
         assert!(debug_str.contains("MinIOBackend"));
@@ -1002,14 +970,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires MinIO server"]
     async fn test_clone() {
-        let backend1 = MinIOBackend::new(
-            "http://localhost:9000",
-            "bucket",
-            "key",
-            "secret",
-        )
-        .await
-        .unwrap();
+        let backend1 = MinIOBackend::new("http://localhost:9000", "bucket", "key", "secret")
+            .await
+            .unwrap();
 
         let backend2 = backend1.clone();
         assert_eq!(backend2.endpoint(), backend1.endpoint());
@@ -1019,28 +982,12 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires MinIO server"]
     async fn test_valid_bucket_names() {
-        let valid_names = vec![
-            "my-bucket",
-            "bucket123",
-            "a",
-            "my-bucket-123",
-            "1234567890",
-        ];
+        let valid_names = vec!["my-bucket", "bucket123", "a", "my-bucket-123", "1234567890"];
 
         for name in valid_names {
-            let result = MinIOBackend::new(
-                "http://localhost:9000",
-                name,
-                "key",
-                "secret",
-            )
-            .await;
+            let result = MinIOBackend::new("http://localhost:9000", name, "key", "secret").await;
 
-            assert!(
-                result.is_ok(),
-                "Bucket name '{}' should be valid",
-                name
-            );
+            assert!(result.is_ok(), "Bucket name '{}' should be valid", name);
         }
     }
 

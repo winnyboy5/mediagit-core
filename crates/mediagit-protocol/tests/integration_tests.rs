@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -74,8 +74,7 @@ fn test_refs_response() {
     };
 
     let json = serde_json::to_string(&refs_response).expect("Failed to serialize");
-    let deserialized: RefsResponse =
-        serde_json::from_str(&json).expect("Failed to deserialize");
+    let deserialized: RefsResponse = serde_json::from_str(&json).expect("Failed to deserialize");
 
     assert_eq!(deserialized.refs.len(), 2);
     assert_eq!(deserialized.capabilities.len(), 1);

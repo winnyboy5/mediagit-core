@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -62,11 +62,7 @@ fn test_init_with_path() {
     let temp_dir = TempDir::new().unwrap();
     let repo_path = temp_dir.path().join("new-repo");
 
-    mediagit()
-        .arg("init")
-        .arg(&repo_path)
-        .assert()
-        .success();
+    mediagit().arg("init").arg(&repo_path).assert().success();
 
     assert!(repo_path.join(".mediagit").exists());
 }
@@ -191,9 +187,15 @@ fn test_init_directory_structure() {
 
     // Check core directories exist
     assert!(mediagit_dir.exists(), ".mediagit should exist");
-    assert!(mediagit_dir.join("objects").exists(), "objects dir should exist");
+    assert!(
+        mediagit_dir.join("objects").exists(),
+        "objects dir should exist"
+    );
     assert!(mediagit_dir.join("refs").exists(), "refs dir should exist");
-    assert!(mediagit_dir.join("refs/heads").exists(), "refs/heads should exist");
+    assert!(
+        mediagit_dir.join("refs/heads").exists(),
+        "refs/heads should exist"
+    );
 
     // Check HEAD file exists
     assert!(mediagit_dir.join("HEAD").exists(), "HEAD file should exist");

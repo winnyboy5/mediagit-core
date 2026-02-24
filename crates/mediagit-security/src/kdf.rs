@@ -33,10 +33,7 @@
 //! - **Key caching**: Optional in-memory cache to avoid re-derivation
 
 use crate::encryption::{EncryptionKey, KEY_SIZE};
-use argon2::{
-    password_hash::SaltString,
-    Algorithm, Argon2, ParamsBuilder, Version,
-};
+use argon2::{password_hash::SaltString, Algorithm, Argon2, ParamsBuilder, Version};
 use rand::thread_rng;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -161,8 +158,8 @@ impl Salt {
 
     /// Parse from hex string
     pub fn from_hex(hex_str: &str) -> Result<Self, KdfError> {
-        let bytes =
-            hex::decode(hex_str).map_err(|e| KdfError::InvalidSalt(format!("Invalid hex: {}", e)))?;
+        let bytes = hex::decode(hex_str)
+            .map_err(|e| KdfError::InvalidSalt(format!("Invalid hex: {}", e)))?;
         Self::from_bytes(bytes)
     }
 }
@@ -236,7 +233,7 @@ pub fn derive_key(
 ///
 /// Stores derived keys in memory to avoid expensive re-computation.
 /// Keys are indexed by (password_hash, salt_hex) for security.
-/// 
+///
 /// The cache has a configurable maximum size (default 10,000 entries).
 /// When full, the oldest entry is evicted to make room for new ones.
 #[derive(Clone)]
@@ -318,7 +315,7 @@ impl KeyCache {
         // Store in cache with eviction if needed
         {
             let mut cache = self.cache.write().await;
-            
+
             // Evict oldest entry if at capacity
             if cache.entries.len() >= cache.max_entries {
                 // Find the entry with the lowest insertion_counter (oldest)
@@ -332,7 +329,7 @@ impl KeyCache {
                     debug!("Evicted oldest key from cache");
                 }
             }
-            
+
             cache.insertion_counter += 1;
             let order = cache.insertion_counter;
             cache.entries.insert(key, (derived_key.clone(), order));

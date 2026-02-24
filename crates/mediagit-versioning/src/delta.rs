@@ -169,15 +169,13 @@ impl DeltaEncoder {
 
             // Try to find a match in the base
             if target_pos + MIN_MATCH_LENGTH <= target.len() {
-                let target_seq = &target[target_pos..cmp::min(target_pos + MIN_MATCH_LENGTH, target.len())];
+                let target_seq =
+                    &target[target_pos..cmp::min(target_pos + MIN_MATCH_LENGTH, target.len())];
 
                 if let Some(positions) = hash_table.get(target_seq) {
                     for &base_pos in positions {
                         let max_len = cmp::min(
-                            cmp::min(
-                                base.len() - base_pos,
-                                target.len() - target_pos,
-                            ),
+                            cmp::min(base.len() - base_pos, target.len() - target_pos),
                             WINDOW_SIZE,
                         );
 
@@ -216,7 +214,8 @@ impl DeltaEncoder {
 
                     // Check if we can start a match
                     if target_pos + MIN_MATCH_LENGTH <= target.len() {
-                        let target_seq = &target[target_pos..cmp::min(target_pos + MIN_MATCH_LENGTH, target.len())];
+                        let target_seq = &target
+                            [target_pos..cmp::min(target_pos + MIN_MATCH_LENGTH, target.len())];
                         if hash_table.contains_key(target_seq) {
                             break;
                         }
@@ -404,7 +403,10 @@ mod tests {
 
         // The compression ratio should be reasonable (may not always be < 1 for small objects)
         // For this test, we just verify it produces a valid delta
-        assert!(!delta.instructions.is_empty(), "Delta should have instructions");
+        assert!(
+            !delta.instructions.is_empty(),
+            "Delta should have instructions"
+        );
     }
 
     #[test]

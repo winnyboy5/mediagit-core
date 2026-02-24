@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -35,13 +35,29 @@ fn mediagit() -> Command {
 }
 
 fn init_repo(dir: &Path) {
-    mediagit().arg("init").arg("-q").current_dir(dir).assert().success();
+    mediagit()
+        .arg("init")
+        .arg("-q")
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 fn add_and_commit(dir: &Path, name: &str, content: &str, message: &str) {
     fs::write(dir.join(name), content).unwrap();
-    mediagit().arg("add").arg(name).current_dir(dir).assert().success();
-    mediagit().arg("commit").arg("-m").arg(message).current_dir(dir).assert().success();
+    mediagit()
+        .arg("add")
+        .arg(name)
+        .current_dir(dir)
+        .assert()
+        .success();
+    mediagit()
+        .arg("commit")
+        .arg("-m")
+        .arg(message)
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 // ============================================================================
@@ -54,7 +70,12 @@ fn test_stash_save() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
 
-    add_and_commit(temp_dir.path(), "file.txt", "Initial content", "Initial commit");
+    add_and_commit(
+        temp_dir.path(),
+        "file.txt",
+        "Initial content",
+        "Initial commit",
+    );
 
     fs::write(temp_dir.path().join("file.txt"), "Modified content").unwrap();
 
@@ -75,7 +96,12 @@ fn test_stash_save_with_message() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
 
-    add_and_commit(temp_dir.path(), "file.txt", "Initial content", "Initial commit");
+    add_and_commit(
+        temp_dir.path(),
+        "file.txt",
+        "Initial content",
+        "Initial commit",
+    );
 
     fs::write(temp_dir.path().join("file.txt"), "Modified content").unwrap();
 
@@ -102,7 +128,12 @@ fn test_stash_list() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
 
-    add_and_commit(temp_dir.path(), "file.txt", "Initial content", "Initial commit");
+    add_and_commit(
+        temp_dir.path(),
+        "file.txt",
+        "Initial content",
+        "Initial commit",
+    );
 
     mediagit()
         .arg("stash")
@@ -118,10 +149,20 @@ fn test_stash_pop() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
 
-    add_and_commit(temp_dir.path(), "file.txt", "Initial content", "Initial commit");
+    add_and_commit(
+        temp_dir.path(),
+        "file.txt",
+        "Initial content",
+        "Initial commit",
+    );
 
     fs::write(temp_dir.path().join("file.txt"), "Stashed content").unwrap();
-    mediagit().arg("stash").arg("save").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("stash")
+        .arg("save")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     mediagit()
         .arg("stash")
@@ -140,10 +181,20 @@ fn test_stash_apply() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
 
-    add_and_commit(temp_dir.path(), "file.txt", "Initial content", "Initial commit");
+    add_and_commit(
+        temp_dir.path(),
+        "file.txt",
+        "Initial content",
+        "Initial commit",
+    );
 
     fs::write(temp_dir.path().join("file.txt"), "Stashed content").unwrap();
-    mediagit().arg("stash").arg("save").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("stash")
+        .arg("save")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     mediagit()
         .arg("stash")
@@ -162,10 +213,20 @@ fn test_stash_drop() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
 
-    add_and_commit(temp_dir.path(), "file.txt", "Initial content", "Initial commit");
+    add_and_commit(
+        temp_dir.path(),
+        "file.txt",
+        "Initial content",
+        "Initial commit",
+    );
 
     fs::write(temp_dir.path().join("file.txt"), "Stashed content").unwrap();
-    mediagit().arg("stash").arg("save").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("stash")
+        .arg("save")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     mediagit()
         .arg("stash")
@@ -181,11 +242,21 @@ fn test_stash_clear() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
 
-    add_and_commit(temp_dir.path(), "file.txt", "Initial content", "Initial commit");
+    add_and_commit(
+        temp_dir.path(),
+        "file.txt",
+        "Initial content",
+        "Initial commit",
+    );
 
     for i in 1..=3 {
         fs::write(temp_dir.path().join("file.txt"), format!("Content {}", i)).unwrap();
-        mediagit().arg("stash").arg("save").current_dir(temp_dir.path()).assert().success();
+        mediagit()
+            .arg("stash")
+            .arg("save")
+            .current_dir(temp_dir.path())
+            .assert()
+            .success();
     }
 
     mediagit()

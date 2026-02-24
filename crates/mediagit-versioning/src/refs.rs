@@ -246,11 +246,16 @@ impl Ref {
     pub fn serialize(&self) -> anyhow::Result<Vec<u8>> {
         let content = match self.ref_type {
             RefType::Direct => {
-                let oid = self.oid.ok_or_else(|| anyhow::anyhow!("Direct ref missing OID"))?;
+                let oid = self
+                    .oid
+                    .ok_or_else(|| anyhow::anyhow!("Direct ref missing OID"))?;
                 format!("{}\n", oid.to_hex())
             }
             RefType::Symbolic => {
-                let target = self.target.as_ref().ok_or_else(|| anyhow::anyhow!("Symbolic ref missing target"))?;
+                let target = self
+                    .target
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Symbolic ref missing target"))?;
                 format!("ref: {}\n", target)
             }
         };
@@ -655,7 +660,6 @@ pub fn normalize_ref_name(input: &str) -> String {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -794,7 +798,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_refdb_write_and_read() {
-
         let temp_dir = tempfile::tempdir().unwrap();
         let refdb = RefDatabase::new(temp_dir.path());
 
@@ -809,7 +812,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_refdb_symbolic_ref() {
-
         let temp_dir = tempfile::tempdir().unwrap();
         let refdb = RefDatabase::new(temp_dir.path());
 
@@ -827,7 +829,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_refdb_resolve() {
-
         let temp_dir = tempfile::tempdir().unwrap();
         let refdb = RefDatabase::new(temp_dir.path());
 
@@ -844,7 +845,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_refdb_delete() {
-
         let temp_dir = tempfile::tempdir().unwrap();
         let refdb = RefDatabase::new(temp_dir.path());
 
@@ -861,7 +861,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_refdb_exists() {
-
         let temp_dir = tempfile::tempdir().unwrap();
         let refdb = RefDatabase::new(temp_dir.path());
 
@@ -876,7 +875,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_refdb_update() {
-
         let temp_dir = tempfile::tempdir().unwrap();
         let refdb = RefDatabase::new(temp_dir.path());
 
@@ -894,7 +892,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_refdb_update_symbolic() {
-
         let temp_dir = tempfile::tempdir().unwrap();
         let refdb = RefDatabase::new(temp_dir.path());
 
@@ -909,7 +906,10 @@ mod tests {
         let develop = Ref::new_direct("refs/heads/develop".to_string(), oid);
         refdb.write(&develop).await.unwrap();
 
-        refdb.update_symbolic("HEAD", "refs/heads/develop").await.unwrap();
+        refdb
+            .update_symbolic("HEAD", "refs/heads/develop")
+            .await
+            .unwrap();
 
         let updated_head = refdb.read("HEAD").await.unwrap();
         assert_eq!(updated_head.target, Some("refs/heads/develop".to_string()));
@@ -917,7 +917,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_refdb_list_branches() {
-
         let temp_dir = tempfile::tempdir().unwrap();
         let refdb = RefDatabase::new(temp_dir.path());
 
@@ -937,7 +936,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_refdb_list_tags() {
-
         let temp_dir = tempfile::tempdir().unwrap();
         let refdb = RefDatabase::new(temp_dir.path());
 
@@ -957,7 +955,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_refdb_circular_reference_detection() {
-
         let temp_dir = tempfile::tempdir().unwrap();
         let refdb = RefDatabase::new(temp_dir.path());
 
@@ -965,7 +962,10 @@ mod tests {
         let head = Ref::new_symbolic("HEAD".to_string(), "refs/heads/main".to_string());
         refdb.write(&head).await.unwrap();
 
-        let main = Ref::new_symbolic("refs/heads/main".to_string(), "refs/heads/develop".to_string());
+        let main = Ref::new_symbolic(
+            "refs/heads/main".to_string(),
+            "refs/heads/develop".to_string(),
+        );
         refdb.write(&main).await.unwrap();
 
         let develop = Ref::new_symbolic("refs/heads/develop".to_string(), "HEAD".to_string());

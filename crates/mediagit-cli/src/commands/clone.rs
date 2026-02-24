@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -16,14 +16,12 @@
 //!
 //! The `clone` command creates a copy of an existing remote repository.
 
+use crate::progress::{OperationStats, ProgressTracker};
+use crate::repo::create_storage_backend;
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
-use crate::progress::{ProgressTracker, OperationStats};
-use crate::repo::create_storage_backend;
-use mediagit_versioning::{
-    CheckoutManager, ObjectDatabase, RefDatabase,
-};
+use mediagit_versioning::{CheckoutManager, ObjectDatabase, RefDatabase};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -85,10 +83,7 @@ impl CloneCmd {
 
         // Check if directory already exists
         if target_dir.exists() {
-            anyhow::bail!(
-                "Destination path '{}' already exists",
-                target_dir.display()
-            );
+            anyhow::bail!("Destination path '{}' already exists", target_dir.display());
         }
 
         // Create progress tracker and stats (matching pull.rs pattern)
@@ -97,8 +92,7 @@ impl CloneCmd {
 
         // Step 1: Create directory
         let init_spinner = progress.spinner("Creating directory...");
-        std::fs::create_dir_all(&target_dir)
-            .context("Failed to create target directory")?;
+        std::fs::create_dir_all(&target_dir).context("Failed to create target directory")?;
 
         // Step 2: Initialize repository
         init_spinner.set_message("Initializing repository...");
@@ -108,7 +102,6 @@ impl CloneCmd {
         std::fs::create_dir_all(storage_path.join("refs").join("heads"))?;
         std::fs::create_dir_all(storage_path.join("refs").join("tags"))?;
         std::fs::create_dir_all(storage_path.join("refs").join("remotes").join("origin"))?;
-
 
         // Create HEAD pointing to main branch
         let head_content = format!("ref: refs/heads/{}\n", branch);
@@ -148,33 +141,49 @@ url = "{}"
             .ok_or_else(|| anyhow::anyhow!("Remote branch '{}' not found", branch))?;
 
         if self.verbose {
-            println!("  Remote ref: {} -> {}", remote_ref.name, &remote_ref.oid[..8]);
+            println!(
+                "  Remote ref: {} -> {}",
+                remote_ref.name,
+                &remote_ref.oid[..8]
+            );
         }
 
         // Step 6: Pull objects using streaming (memory-efficient)
         let download_pb = progress.download_bar("Receiving objects");
         // Use streaming pull to avoid OOM with large files
-        let chunked_oids = client.pull_streaming(&odb, &remote_ref_name, vec![]).await?;
+        let chunked_oids = client
+            .pull_streaming(&odb, &remote_ref_name, vec![])
+            .await?;
         download_pb.finish_with_message("Download complete");
 
         if self.verbose {
-            println!("  Received objects via streaming, {} chunked objects", chunked_oids.len());
+            println!(
+                "  Received objects via streaming, {} chunked objects",
+                chunked_oids.len()
+            );
         }
 
         // Step 7: Download chunked objects (large files)
         if !chunked_oids.is_empty() {
-            let chunk_pb = progress.object_bar("Downloading large files", chunked_oids.len() as u64);
+            let chunk_pb =
+                progress.object_bar("Downloading large files", chunked_oids.len() as u64);
 
             let chunk_pb_ref = chunk_pb.clone();
-            let chunks_downloaded = client.download_chunked_objects(&odb, &chunked_oids, move |current, _total, _msg| {
-                chunk_pb_ref.set_position(current as u64);
-            }).await?;
+            let chunks_downloaded = client
+                .download_chunked_objects(&odb, &chunked_oids, move |current, _total, _msg| {
+                    chunk_pb_ref.set_position(current as u64);
+                })
+                .await?;
 
             chunk_pb.finish_with_message("Download complete");
             stats.objects_received += chunks_downloaded as u64;
 
             if self.verbose {
-                println!("  Downloaded {} chunks for {} large files", chunks_downloaded, chunked_oids.len());
+                println!(
+                    "  Downloaded {} chunks for {} large files",
+                    chunks_downloaded,
+                    chunked_oids.len()
+                );
             }
         }
 
@@ -190,7 +199,9 @@ url = "{}"
         let mut other_branches = Vec::new();
         for ref_info in &remote_refs.refs {
             if ref_info.name.starts_with("refs/heads/") {
-                let branch_name = ref_info.name.strip_prefix("refs/heads/")
+                let branch_name = ref_info
+                    .name
+                    .strip_prefix("refs/heads/")
                     .unwrap_or(&ref_info.name);
                 let tracking_ref_name = format!("refs/remotes/origin/{}", branch_name);
 
@@ -203,9 +214,13 @@ url = "{}"
                     refdb.write(&tracking_ref).await?;
 
                     if self.verbose {
-                        println!("  Created tracking ref: {} -> {}", tracking_ref_name, &ref_info.oid[..8]);
+                        println!(
+                            "  Created tracking ref: {} -> {}",
+                            tracking_ref_name,
+                            &ref_info.oid[..8]
+                        );
                     }
-                    
+
                     // Track other branches for summary
                     if ref_info.name != remote_ref_name {
                         other_branches.push(branch_name.to_string());
@@ -213,7 +228,7 @@ url = "{}"
                 }
             }
         }
-        
+
         // Show available branches to user
         if !other_branches.is_empty() && !self.quiet {
             println!(
@@ -224,7 +239,6 @@ url = "{}"
             );
             println!("  Use 'mediagit pull origin <branch>' then 'mediagit branch switch <branch>' to access");
         }
-
 
         // Step 9: Checkout working directory
         let checkout_pb = progress.file_bar("Checking out", 0);

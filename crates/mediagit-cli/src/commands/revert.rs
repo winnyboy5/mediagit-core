@@ -26,7 +26,7 @@ use mediagit_versioning::{
 };
 
 use super::super::output;
-use super::super::repo::{find_repo_root, create_storage_backend};
+use super::super::repo::{create_storage_backend, find_repo_root};
 
 /// Revert commits by creating inverse commits
 #[derive(Parser, Debug)]
@@ -249,12 +249,8 @@ impl RevertCmd {
             // Update refs
             let current_branch = self.get_current_branch(storage_path).await?;
             if let Some(ref branch) = current_branch {
-                refs.update(
-                    &format!("refs/heads/{}", branch),
-                    new_commit_oid,
-                    true,
-                )
-                .await?;
+                refs.update(&format!("refs/heads/{}", branch), new_commit_oid, true)
+                    .await?;
             } else {
                 refs.update("HEAD", new_commit_oid, true).await?;
             }
@@ -385,12 +381,8 @@ impl RevertCmd {
         let refs = RefDatabase::new(storage_path);
         let current_branch = self.get_current_branch(storage_path).await?;
         if let Some(ref branch) = current_branch {
-            refs.update(
-                &format!("refs/heads/{}", branch),
-                state.original_head,
-                true,
-            )
-            .await?;
+            refs.update(&format!("refs/heads/{}", branch), state.original_head, true)
+                .await?;
         } else {
             refs.update("HEAD", state.original_head, true).await?;
         }
@@ -486,11 +478,7 @@ impl RevertCmd {
             let mut current = base_oid;
             for _ in 0..count {
                 let commit = Commit::read(odb, &current).await?;
-                current = commit
-                    .parents
-                    .first()
-                    .cloned()
-                    .context("No parent")?;
+                current = commit.parents.first().cloned().context("No parent")?;
             }
             return Ok(current);
         }

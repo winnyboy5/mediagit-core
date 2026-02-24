@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -101,10 +101,9 @@ mod tests {
     #[test]
     fn test_custom_settings() {
         let mut config = Config::default();
-        config.custom.insert(
-            "custom_key".to_string(),
-            serde_json::json!("custom_value"),
-        );
+        config
+            .custom
+            .insert("custom_key".to_string(), serde_json::json!("custom_value"));
 
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("custom_key"));

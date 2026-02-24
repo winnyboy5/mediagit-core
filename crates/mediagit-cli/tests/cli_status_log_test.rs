@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -31,13 +31,29 @@ fn mediagit() -> Command {
 }
 
 fn init_repo(dir: &Path) {
-    mediagit().arg("init").arg("-q").current_dir(dir).assert().success();
+    mediagit()
+        .arg("init")
+        .arg("-q")
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 fn add_and_commit(dir: &Path, name: &str, content: &str, message: &str) {
     fs::write(dir.join(name), content).unwrap();
-    mediagit().arg("add").arg(name).current_dir(dir).assert().success();
-    mediagit().arg("commit").arg("-m").arg(message).current_dir(dir).assert().success();
+    mediagit()
+        .arg("add")
+        .arg(name)
+        .current_dir(dir)
+        .assert()
+        .success();
+    mediagit()
+        .arg("commit")
+        .arg("-m")
+        .arg(message)
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 // ============================================================================
@@ -56,7 +72,9 @@ fn test_status_clean() {
         .current_dir(temp_dir.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains("clean").or(predicate::str::contains("nothing to commit")));
+        .stdout(
+            predicate::str::contains("clean").or(predicate::str::contains("nothing to commit")),
+        );
 }
 
 #[test]
@@ -80,7 +98,12 @@ fn test_status_staged() {
     init_repo(temp_dir.path());
 
     fs::write(temp_dir.path().join("staged.txt"), "Staged content").unwrap();
-    mediagit().arg("add").arg("staged.txt").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("add")
+        .arg("staged.txt")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     mediagit()
         .arg("status")
@@ -229,7 +252,12 @@ fn test_log_limit() {
     init_repo(temp_dir.path());
 
     for i in 1..=5 {
-        add_and_commit(temp_dir.path(), &format!("file{}.txt", i), &format!("Content {}", i), &format!("Commit {}", i));
+        add_and_commit(
+            temp_dir.path(),
+            &format!("file{}.txt", i),
+            &format!("Content {}", i),
+            &format!("Commit {}", i),
+        );
     }
 
     mediagit()
@@ -293,11 +321,8 @@ fn test_log_empty_repo() {
     init_repo(temp_dir.path());
 
     // Empty repo log might fail or show nothing - both are acceptable
-    let _result = mediagit()
-        .arg("log")
-        .current_dir(temp_dir.path())
-        .assert();
-    
+    let _result = mediagit().arg("log").current_dir(temp_dir.path()).assert();
+
     // Accept either success with no output or failure
     // MediaGit behavior may vary
 }
@@ -314,7 +339,11 @@ fn test_diff_working_vs_staged() {
     add_and_commit(temp_dir.path(), "file.txt", "Line 1\nLine 2\n", "Initial");
 
     // Modify file
-    fs::write(temp_dir.path().join("file.txt"), "Line 1\nLine 2 modified\nLine 3\n").unwrap();
+    fs::write(
+        temp_dir.path().join("file.txt"),
+        "Line 1\nLine 2 modified\nLine 3\n",
+    )
+    .unwrap();
 
     mediagit()
         .arg("diff")
@@ -332,7 +361,12 @@ fn test_diff_cached() {
 
     // Modify and stage
     fs::write(temp_dir.path().join("file.txt"), "Modified").unwrap();
-    mediagit().arg("add").arg("file.txt").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("add")
+        .arg("file.txt")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     mediagit()
         .arg("diff")
@@ -383,7 +417,12 @@ fn test_show_head() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
 
-    add_and_commit(temp_dir.path(), "file.txt", "Content", "Test commit message");
+    add_and_commit(
+        temp_dir.path(),
+        "file.txt",
+        "Content",
+        "Test commit message",
+    );
 
     mediagit()
         .arg("show")

@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -254,7 +254,10 @@ mod tests {
         let count = 1_000_000u64;
         for i in 0..count {
             let oid = Oid::hash(&i.to_le_bytes());
-            index.add_entry(oid, i * 1000, (i % 10000) as u32).await.unwrap();
+            index
+                .add_entry(oid, i * 1000, (i % 10000) as u32)
+                .await
+                .unwrap();
         }
 
         assert_eq!(index.entry_count(), count);
@@ -263,6 +266,9 @@ mod tests {
         let data = index.finalize().await.unwrap();
         // 4 bytes count + count * 44 bytes entries
         assert_eq!(data.len(), 4 + (count * 44) as usize);
-        assert_eq!(u32::from_le_bytes(data[0..4].try_into().unwrap()), count as u32);
+        assert_eq!(
+            u32::from_le_bytes(data[0..4].try_into().unwrap()),
+            count as u32
+        );
     }
 }

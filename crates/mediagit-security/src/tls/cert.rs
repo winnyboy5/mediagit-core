@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -77,10 +77,7 @@ impl Certificate {
 
     /// Load certificate from PEM files
     #[cfg(feature = "tls")]
-    pub fn from_pem_files<P: AsRef<Path>>(
-        cert_path: P,
-        key_path: P,
-    ) -> TlsResult<Self> {
+    pub fn from_pem_files<P: AsRef<Path>>(cert_path: P, key_path: P) -> TlsResult<Self> {
         let cert_pem = std::fs::read_to_string(cert_path.as_ref())
             .map_err(|e| TlsError::CertificateLoading(e.to_string()))?;
 
@@ -100,16 +97,10 @@ impl Certificate {
     }
 
     /// Save certificate to PEM files
-    pub fn save_to_files<P: AsRef<Path>>(
-        &self,
-        cert_path: P,
-        key_path: P,
-    ) -> TlsResult<()> {
-        std::fs::write(cert_path.as_ref(), &self.cert_pem)
-            .map_err(TlsError::Io)?;
+    pub fn save_to_files<P: AsRef<Path>>(&self, cert_path: P, key_path: P) -> TlsResult<()> {
+        std::fs::write(cert_path.as_ref(), &self.cert_pem).map_err(TlsError::Io)?;
 
-        std::fs::write(key_path.as_ref(), &self.key_pem)
-            .map_err(TlsError::Io)?;
+        std::fs::write(key_path.as_ref(), &self.key_pem).map_err(TlsError::Io)?;
 
         Ok(())
     }
@@ -130,9 +121,7 @@ impl Certificate {
         }
 
         if !self.key_pem.contains("-----BEGIN") {
-            return Err(TlsError::InvalidPemFormat(
-                "Missing key header".to_string(),
-            ));
+            return Err(TlsError::InvalidPemFormat("Missing key header".to_string()));
         }
 
         Ok(())
@@ -200,7 +189,9 @@ impl CertificateBuilder {
         let mut params = CertificateParams::default();
 
         // Set subject alt names
-        params.subject_alt_names = self.san_dns_names.iter()
+        params.subject_alt_names = self
+            .san_dns_names
+            .iter()
             .map(|name| rcgen::SanType::DnsName(name.clone().try_into().unwrap()))
             .collect();
 
@@ -232,7 +223,8 @@ impl CertificateBuilder {
         let key_pem = key_pair.serialize_pem();
 
         // Generate certificate
-        let cert = params.self_signed(&key_pair)
+        let cert = params
+            .self_signed(&key_pair)
             .map_err(|e| TlsError::CertificateGeneration(e.to_string()))?;
 
         let cert_pem = cert.pem();
@@ -289,11 +281,7 @@ mod tests {
 
     #[test]
     fn test_invalid_certificate() {
-        let cert = Certificate::new(
-            String::new(),
-            String::new(),
-            "invalid".to_string(),
-        );
+        let cert = Certificate::new(String::new(), String::new(), "invalid".to_string());
 
         assert!(cert.validate().is_err());
     }

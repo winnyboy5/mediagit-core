@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -39,10 +39,7 @@ pub fn assert_repo_initialized(path: &Path) {
         mediagit_dir.join("refs").exists(),
         "refs directory should exist"
     );
-    assert!(
-        mediagit_dir.join("HEAD").exists(),
-        "HEAD file should exist"
-    );
+    assert!(mediagit_dir.join("HEAD").exists(), "HEAD file should exist");
 }
 
 /// Assert that a file is tracked in the repository.

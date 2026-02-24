@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -252,7 +252,9 @@ fn test_status_clean_repo() {
         .arg("status")
         .assert()
         .success()
-        .stdout(predicate::str::contains("clean").or(predicate::str::contains("nothing to commit")));
+        .stdout(
+            predicate::str::contains("clean").or(predicate::str::contains("nothing to commit")),
+        );
 }
 
 #[test]
@@ -308,7 +310,10 @@ fn test_commit_nothing_to_commit() {
         .arg("test")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("nothing to commit").or(predicate::str::contains("no changes")));
+        .stderr(
+            predicate::str::contains("nothing to commit")
+                .or(predicate::str::contains("no changes")),
+        );
 }
 
 #[test]
@@ -533,7 +538,9 @@ fn test_invalid_flag() {
         .arg("--invalid-flag")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("unexpected").or(predicate::str::contains("unrecognized")));
+        .stderr(
+            predicate::str::contains("unexpected").or(predicate::str::contains("unrecognized")),
+        );
 }
 
 // ============================================================================

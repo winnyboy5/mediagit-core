@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -15,17 +15,17 @@
 // Library exports for mediagit-server
 // This allows integration tests to use server components
 
+pub mod auth_routes;
 pub mod config;
 pub mod handlers;
 pub mod security;
 pub mod state;
-pub mod auth_routes;
 
+pub use auth_routes::create_auth_router;
 pub use config::ServerConfig;
 pub use security::validate_repo_name;
 pub use security::RateLimitConfig;
 pub use state::AppState;
-pub use auth_routes::create_auth_router;
 
 use axum::{
     extract::DefaultBodyLimit,

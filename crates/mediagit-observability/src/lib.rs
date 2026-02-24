@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -42,8 +42,8 @@ pub mod config;
 pub mod initialization;
 pub mod macros;
 
-pub use config::{LogFormat, LogConfig, LogOutput};
+pub use config::{LogConfig, LogFormat, LogOutput};
 pub use initialization::{init_tracing, init_tracing_with_config};
 
 /// Tracing re-exports for convenience
-pub use tracing::{debug, error, info, warn, trace, span, Level};
+pub use tracing::{debug, error, info, span, trace, warn, Level};

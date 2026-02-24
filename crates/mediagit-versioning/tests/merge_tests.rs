@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -22,8 +22,8 @@
 
 use mediagit_storage::mock::MockBackend;
 use mediagit_versioning::{
-    Commit, FileMode, MergeEngine, MergeStrategy, ObjectDatabase, ObjectType, Oid, Signature,
-    Tree, TreeEntry,
+    Commit, FileMode, MergeEngine, MergeStrategy, ObjectDatabase, ObjectType, Oid, Signature, Tree,
+    TreeEntry,
 };
 use std::sync::Arc;
 
@@ -50,18 +50,9 @@ async fn create_commit_with_tree(
     tree_oid: Oid,
     parents: Vec<Oid>,
 ) -> Oid {
-    let sig = Signature::now(
-        "Test Author".to_string(),
-        "test@example.com".to_string(),
-    );
+    let sig = Signature::now("Test Author".to_string(), "test@example.com".to_string());
 
-    let commit = Commit::with_parents(
-        tree_oid,
-        parents,
-        sig.clone(),
-        sig,
-        message.to_string(),
-    );
+    let commit = Commit::with_parents(tree_oid, parents, sig.clone(), sig, message.to_string());
 
     commit.write(odb).await.unwrap()
 }
@@ -111,8 +102,8 @@ async fn test_recursive_merge_no_conflict() {
     let merge_engine = MergeEngine::new(odb.clone());
 
     // Base commit A
-    let tree_a = create_test_tree(&odb, vec![("file1.txt", b"base1"), ("file2.txt", b"base2")])
-        .await;
+    let tree_a =
+        create_test_tree(&odb, vec![("file1.txt", b"base1"), ("file2.txt", b"base2")]).await;
     let commit_a = create_commit_with_tree(&odb, "A", tree_a, vec![]).await;
 
     // Branch B modifies file1
@@ -279,8 +270,11 @@ async fn test_merge_with_file_deletion() {
     let odb = Arc::new(ObjectDatabase::new(storage, 100));
     let merge_engine = MergeEngine::new(odb.clone());
 
-    let tree_a = create_test_tree(&odb, vec![("file1.txt", b"content1"), ("file2.txt", b"content2")])
-        .await;
+    let tree_a = create_test_tree(
+        &odb,
+        vec![("file1.txt", b"content1"), ("file2.txt", b"content2")],
+    )
+    .await;
     let commit_a = create_commit_with_tree(&odb, "A", tree_a, vec![]).await;
 
     // Branch B deletes file2

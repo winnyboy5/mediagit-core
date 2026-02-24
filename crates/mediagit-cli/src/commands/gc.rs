@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -12,19 +12,21 @@
 //
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
+use crate::progress::ProgressTracker;
+use crate::repo::create_storage_backend;
 use anyhow::Result;
 use clap::Parser;
 use console::style;
 use dialoguer::Confirm;
 use mediagit_storage::StorageBackend;
-use mediagit_versioning::{BranchManager, ChunkManifest, Commit, Oid, RefDatabase, RefType, Tree, FileMode};
+use mediagit_versioning::{
+    BranchManager, ChunkManifest, Commit, FileMode, Oid, RefDatabase, RefType, Tree,
+};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info, warn};
-use crate::progress::ProgressTracker;
-use crate::repo::create_storage_backend;
 
 /// Clean up repository and optimize storage
 #[derive(Parser, Debug)]
@@ -125,22 +127,61 @@ impl GcStats {
         }
 
         println!("\n{}", style("=== GC Statistics ===").bold().cyan());
-        println!("{:<25} {}", "Objects scanned:", style(self.objects_scanned).yellow());
-        println!("{:<25} {}", "Reachable objects:", style(self.reachable_objects).green());
-        println!("{:<25} {}", "Unreachable objects:", style(self.unreachable_objects).red());
-        println!("{:<25} {}", "Objects deleted:", style(self.objects_deleted).red().bold());
-        println!("{:<25} {}", "Space reclaimed:", style(Self::format_bytes(self.bytes_reclaimed)).yellow().bold());
+        println!(
+            "{:<25} {}",
+            "Objects scanned:",
+            style(self.objects_scanned).yellow()
+        );
+        println!(
+            "{:<25} {}",
+            "Reachable objects:",
+            style(self.reachable_objects).green()
+        );
+        println!(
+            "{:<25} {}",
+            "Unreachable objects:",
+            style(self.unreachable_objects).red()
+        );
+        println!(
+            "{:<25} {}",
+            "Objects deleted:",
+            style(self.objects_deleted).red().bold()
+        );
+        println!(
+            "{:<25} {}",
+            "Space reclaimed:",
+            style(Self::format_bytes(self.bytes_reclaimed))
+                .yellow()
+                .bold()
+        );
 
         if self.manifests_deleted > 0 || self.chunks_deleted > 0 {
-            println!("{:<25} {}", "Manifests deleted:", style(self.manifests_deleted).red());
-            println!("{:<25} {}", "Chunks deleted:", style(self.chunks_deleted).red());
-            println!("{:<25} {}", "Chunk space reclaimed:", style(Self::format_bytes(self.chunk_bytes_reclaimed)).yellow().bold());
+            println!(
+                "{:<25} {}",
+                "Manifests deleted:",
+                style(self.manifests_deleted).red()
+            );
+            println!(
+                "{:<25} {}",
+                "Chunks deleted:",
+                style(self.chunks_deleted).red()
+            );
+            println!(
+                "{:<25} {}",
+                "Chunk space reclaimed:",
+                style(Self::format_bytes(self.chunk_bytes_reclaimed))
+                    .yellow()
+                    .bold()
+            );
         }
 
         println!("{:<25} {:.2}s", "Time taken:", self.duration_secs);
 
         if !self.errors.is_empty() {
-            println!("\n{}", style(format!("⚠ {} errors encountered", self.errors.len())).yellow());
+            println!(
+                "\n{}",
+                style(format!("⚠ {} errors encountered", self.errors.len())).yellow()
+            );
         }
     }
 }
@@ -156,7 +197,8 @@ struct GarbageCollector {
 impl GarbageCollector {
     fn new(storage: Arc<dyn StorageBackend>, root_path: &Path) -> Self {
         // Create ODB for reading objects (including from pack files)
-        let odb = mediagit_versioning::ObjectDatabase::with_smart_compression(storage.clone(), 1000);
+        let odb =
+            mediagit_versioning::ObjectDatabase::with_smart_compression(storage.clone(), 1000);
 
         Self {
             storage: storage.clone(),
@@ -189,7 +231,8 @@ impl GarbageCollector {
 
         // Traverse from all branch refs
         for branch in branches {
-            self.traverse_commit_chain(&branch.oid, &mut reachable).await?;
+            self.traverse_commit_chain(&branch.oid, &mut reachable)
+                .await?;
         }
 
         // Get all tags
@@ -204,7 +247,10 @@ impl GarbageCollector {
             }
         }
 
-        info!("Reachability analysis complete: {} objects reachable", reachable.len());
+        info!(
+            "Reachability analysis complete: {} objects reachable",
+            reachable.len()
+        );
         Ok(reachable)
     }
 
@@ -478,26 +524,27 @@ impl GarbageCollector {
         for oid in &reachable_manifest_oids {
             let manifest_key = format!("manifests/{}", oid.to_hex());
             match self.storage.get(&manifest_key).await {
-                Ok(data) => {
-                    match bincode::deserialize::<ChunkManifest>(&data) {
-                        Ok(manifest) => {
-                            for chunk_ref in &manifest.chunks {
-                                let chunk_key = format!("chunks/{}", chunk_ref.id.to_hex());
-                                reachable_chunk_keys.insert(chunk_key);
-                            }
-                        }
-                        Err(e) => {
-                            debug!("Failed to deserialize manifest {}: {}", oid, e);
+                Ok(data) => match bincode::deserialize::<ChunkManifest>(&data) {
+                    Ok(manifest) => {
+                        for chunk_ref in &manifest.chunks {
+                            let chunk_key = format!("chunks/{}", chunk_ref.id.to_hex());
+                            reachable_chunk_keys.insert(chunk_key);
                         }
                     }
-                }
+                    Err(e) => {
+                        debug!("Failed to deserialize manifest {}: {}", oid, e);
+                    }
+                },
                 Err(e) => {
                     debug!("Failed to read manifest {}: {}", oid, e);
                 }
             }
         }
 
-        debug!("Found {} reachable chunk references", reachable_chunk_keys.len());
+        debug!(
+            "Found {} reachable chunk references",
+            reachable_chunk_keys.len()
+        );
 
         // Step 3: Find orphan chunks
         let all_chunks = self.list_all_chunks().await?;
@@ -611,7 +658,10 @@ impl GcCmd {
         }
 
         if self.dry_run && !self.quiet {
-            println!("{} Running in dry-run mode (no changes will be made)", style("ℹ").blue());
+            println!(
+                "{} Running in dry-run mode (no changes will be made)",
+                style("ℹ").blue()
+            );
         }
 
         // Load storage backend
@@ -623,7 +673,10 @@ impl GcCmd {
 
         // Step 1: Build reachability graph
         if !self.quiet {
-            println!("{} Building reachability graph from refs...", style("→").cyan());
+            println!(
+                "{} Building reachability graph from refs...",
+                style("→").cyan()
+            );
         }
         let reachable = gc.build_reachability_set().await?;
         stats.reachable_objects = reachable.len() as u64;
@@ -722,14 +775,21 @@ impl GcCmd {
 
         // Step 5: Chunk & manifest garbage collection
         if !self.quiet {
-            println!("\n{} Scanning for orphaned chunks and manifests...", style("→").cyan());
+            println!(
+                "\n{} Scanning for orphaned chunks and manifests...",
+                style("→").cyan()
+            );
         }
 
-        let (orphan_manifests, orphan_chunks) = gc.find_orphan_chunks_and_manifests(&reachable).await?;
+        let (orphan_manifests, orphan_chunks) =
+            gc.find_orphan_chunks_and_manifests(&reachable).await?;
 
         if orphan_manifests.is_empty() && orphan_chunks.is_empty() {
             if !self.quiet {
-                println!("{} No orphaned chunks or manifests found.", style("✓").green());
+                println!(
+                    "{} No orphaned chunks or manifests found.",
+                    style("✓").green()
+                );
             }
         } else {
             let chunk_total_size: u64 = orphan_chunks.iter().map(|(_, size)| size).sum();
@@ -757,12 +817,14 @@ impl GcCmd {
                 stats.chunks_deleted = orphan_chunks.len() as u64;
                 stats.chunk_bytes_reclaimed = chunk_total_size;
             } else {
-                let chunk_stats = gc.delete_chunks_and_manifests(
-                    &orphan_manifests,
-                    &orphan_chunks,
-                    false,
-                    self.verbose,
-                ).await?;
+                let chunk_stats = gc
+                    .delete_chunks_and_manifests(
+                        &orphan_manifests,
+                        &orphan_chunks,
+                        false,
+                        self.verbose,
+                    )
+                    .await?;
 
                 stats.manifests_deleted = chunk_stats.manifests_deleted;
                 stats.chunks_deleted = chunk_stats.chunks_deleted;
@@ -782,7 +844,10 @@ impl GcCmd {
         }
 
         if !has_unreachable_objects && orphan_manifests.is_empty() && orphan_chunks.is_empty() {
-            println!("{} Repository is clean — no unreachable data found.", style("✓").green());
+            println!(
+                "{} Repository is clean — no unreachable data found.",
+                style("✓").green()
+            );
         }
 
         // Step 5: Repack loose objects if requested

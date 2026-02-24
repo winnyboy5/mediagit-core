@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -61,5 +61,5 @@ pub mod filter;
 pub mod pointer;
 
 pub use error::{GitError, GitResult};
-pub use filter::{FilterDriver, FilterConfig};
+pub use filter::{FilterConfig, FilterDriver};
 pub use pointer::PointerFile;

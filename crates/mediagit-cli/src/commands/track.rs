@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -17,12 +17,12 @@
 
 //! Track/untrack file patterns with MediaGit
 
+use super::super::repo::find_repo_root;
 use anyhow::{Context, Result};
 use clap::Args;
 use console::style;
 use std::fs;
 use std::path::PathBuf;
-use super::super::repo::find_repo_root;
 
 #[derive(Debug, Args)]
 pub struct TrackCmd {
@@ -45,7 +45,7 @@ impl TrackCmd {
         }
 
         let pattern = self.pattern.clone().context(
-            "Pattern required. Use --list to see tracked patterns or provide a pattern to track."
+            "Pattern required. Use --list to see tracked patterns or provide a pattern to track.",
         )?;
 
         self.add_tracked_pattern(&gitattributes_path, &pattern)
@@ -58,8 +58,8 @@ impl TrackCmd {
             return Ok(());
         }
 
-        let content = fs::read_to_string(gitattributes_path)
-            .context("Failed to read .gitattributes")?;
+        let content =
+            fs::read_to_string(gitattributes_path).context("Failed to read .gitattributes")?;
 
         let tracked: Vec<&str> = content
             .lines()
@@ -84,16 +84,16 @@ impl TrackCmd {
     fn add_tracked_pattern(&self, gitattributes_path: &PathBuf, pattern: &str) -> Result<()> {
         // Read existing content
         let mut content = if gitattributes_path.exists() {
-            fs::read_to_string(gitattributes_path)
-                .context("Failed to read .gitattributes")?
+            fs::read_to_string(gitattributes_path).context("Failed to read .gitattributes")?
         } else {
             String::new()
         };
 
         // Check if pattern already tracked
-        if content.lines().any(|line| {
-            line.starts_with(pattern) && line.contains("filter=mediagit")
-        }) {
+        if content
+            .lines()
+            .any(|line| line.starts_with(pattern) && line.contains("filter=mediagit"))
+        {
             println!(
                 "{} Pattern already tracked: {}",
                 style("ℹ").blue(),
@@ -112,8 +112,7 @@ impl TrackCmd {
         ));
 
         // Write updated content
-        fs::write(gitattributes_path, content)
-            .context("Failed to write .gitattributes")?;
+        fs::write(gitattributes_path, content).context("Failed to write .gitattributes")?;
 
         println!(
             "{} Now tracking: {}",
@@ -126,7 +125,6 @@ impl TrackCmd {
 
         Ok(())
     }
-
 }
 
 #[derive(Debug, Args)]
@@ -146,15 +144,13 @@ impl UntrackCmd {
             return Ok(());
         }
 
-        let content = fs::read_to_string(&gitattributes_path)
-            .context("Failed to read .gitattributes")?;
+        let content =
+            fs::read_to_string(&gitattributes_path).context("Failed to read .gitattributes")?;
 
         let original_lines: Vec<&str> = content.lines().collect();
         let filtered: Vec<&str> = original_lines
             .iter()
-            .filter(|line| {
-                !line.starts_with(&self.pattern) || !line.contains("filter=mediagit")
-            })
+            .filter(|line| !line.starts_with(&self.pattern) || !line.contains("filter=mediagit"))
             .copied()
             .collect();
 
@@ -175,8 +171,7 @@ impl UntrackCmd {
             new_content
         };
 
-        fs::write(&gitattributes_path, final_content)
-            .context("Failed to write .gitattributes")?;
+        fs::write(&gitattributes_path, final_content).context("Failed to write .gitattributes")?;
 
         println!(
             "{} No longer tracking: {}",
@@ -186,5 +181,4 @@ impl UntrackCmd {
 
         Ok(())
     }
-
 }

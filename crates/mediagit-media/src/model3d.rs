@@ -311,7 +311,7 @@ impl Model3DParser {
             bounding_box: Some(bounding_box),
             file_size: data.len() as u64,
             has_animations: false, // OBJ doesn't support animations
-            has_rigging: false,     // OBJ doesn't support rigging
+            has_rigging: false,    // OBJ doesn't support rigging
         })
     }
 
@@ -323,14 +323,18 @@ impl Model3DParser {
         // FBX is a complex binary format - for MVP we'll extract basic metadata
         // Check FBX magic bytes: "Kaydara FBX Binary"
         if data.len() < 23 {
-            return Err(MediaError::InvalidStructure("File too small for FBX".to_string()));
+            return Err(MediaError::InvalidStructure(
+                "File too small for FBX".to_string(),
+            ));
         }
 
         let magic = &data[0..18];
         if magic != b"Kaydara FBX Binary" {
             // Try ASCII FBX
             if data.len() < 20 || !data[0..20].starts_with(b"; FBX") {
-                return Err(MediaError::InvalidStructure("Not a valid FBX file".to_string()));
+                return Err(MediaError::InvalidStructure(
+                    "Not a valid FBX file".to_string(),
+                ));
             }
             return self.parse_fbx_ascii(data).await;
         }
@@ -342,14 +346,14 @@ impl Model3DParser {
         Ok(Model3DInfo {
             format: Model3DFormat::Fbx,
             vertex_count: 0, // Would require full parsing
-            face_count: 0,    // Would require full parsing
+            face_count: 0,   // Would require full parsing
             object_count: 1,
             materials: Vec::new(),
             textures: Vec::new(),
             bounding_box: None,
             file_size: data.len() as u64,
             has_animations: true, // FBX typically has animations
-            has_rigging: true,     // FBX typically has rigging
+            has_rigging: true,    // FBX typically has rigging
         })
     }
 
@@ -389,7 +393,10 @@ impl Model3DParser {
             })
             .collect();
 
-        debug!("Parsed ASCII FBX: vertices~{}, objects={}", vertex_count, object_count);
+        debug!(
+            "Parsed ASCII FBX: vertices~{}, objects={}",
+            vertex_count, object_count
+        );
 
         Ok(Model3DInfo {
             format: Model3DFormat::Fbx,
@@ -419,7 +426,9 @@ impl Model3DParser {
         }
 
         if &data[0..7] != b"BLENDER" {
-            return Err(MediaError::InvalidStructure("Not a valid Blender file".to_string()));
+            return Err(MediaError::InvalidStructure(
+                "Not a valid Blender file".to_string(),
+            ));
         }
 
         // Extract version from header (e.g., "v280" for Blender 2.80)
@@ -429,14 +438,14 @@ impl Model3DParser {
         Ok(Model3DInfo {
             format: Model3DFormat::Blend,
             vertex_count: 0, // Would require full parsing
-            face_count: 0,    // Would require full parsing
+            face_count: 0,   // Would require full parsing
             object_count: 1,
             materials: Vec::new(),
             textures: Vec::new(),
             bounding_box: None,
             file_size: data.len() as u64,
             has_animations: true, // Blender files typically have animations
-            has_rigging: true,     // Blender files typically have rigging
+            has_rigging: true,    // Blender files typically have rigging
         })
     }
 
@@ -474,7 +483,10 @@ impl Model3DParser {
             let mesh_count = content.matches("\"meshes\"").count() as u32;
             let material_count = content.matches("\"materials\"").count() as u32;
 
-            debug!("Parsed GLTF: meshes={}, materials={}", mesh_count, material_count);
+            debug!(
+                "Parsed GLTF: meshes={}, materials={}",
+                mesh_count, material_count
+            );
 
             Ok(Model3DInfo {
                 format: Model3DFormat::Gltf,
@@ -534,7 +546,9 @@ impl Model3DParser {
                 has_rigging: false,
             })
         } else {
-            Err(MediaError::InvalidStructure("File too small for STL".to_string()))
+            Err(MediaError::InvalidStructure(
+                "File too small for STL".to_string(),
+            ))
         }
     }
 
@@ -551,8 +565,7 @@ impl Model3DParser {
         // Basic metadata extraction
         let object_count = if is_usda {
             let content = String::from_utf8_lossy(data);
-            content.matches("def Xform").count() as u32
-                + content.matches("def Mesh").count() as u32
+            content.matches("def Xform").count() as u32 + content.matches("def Mesh").count() as u32
         } else {
             1
         };
@@ -576,12 +589,15 @@ impl Model3DParser {
     async fn parse_ply(&self, data: &[u8]) -> Result<Model3DInfo> {
         debug!("Parsing PLY file");
 
-        let header_end = data.windows(11)
+        let header_end = data
+            .windows(11)
             .position(|w| w == b"end_header\n")
             .or_else(|| data.windows(12).position(|w| w == b"end_header\r\n"));
 
         if header_end.is_none() {
-            return Err(MediaError::InvalidStructure("No PLY header found".to_string()));
+            return Err(MediaError::InvalidStructure(
+                "No PLY header found".to_string(),
+            ));
         }
 
         let header = String::from_utf8_lossy(&data[..header_end.unwrap()]);
@@ -590,11 +606,15 @@ impl Model3DParser {
 
         for line in header.lines() {
             if line.starts_with("element vertex ") {
-                vertex_count = line.split_whitespace().nth(2)
+                vertex_count = line
+                    .split_whitespace()
+                    .nth(2)
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
             } else if line.starts_with("element face ") {
-                face_count = line.split_whitespace().nth(2)
+                face_count = line
+                    .split_whitespace()
+                    .nth(2)
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
             }
@@ -626,7 +646,7 @@ impl Model3DParser {
         if ours.format != base.format || theirs.format != base.format {
             warn!("Model format changed between versions");
             return MergeDecision::ManualReview(vec![
-                "3D model format changed - manual review required".to_string()
+                "3D model format changed - manual review required".to_string(),
             ]);
         }
 
@@ -662,9 +682,8 @@ impl Model3DParser {
                 let theirs_changed = their_bbox.volume() != base_bbox.volume();
 
                 if ours_changed && theirs_changed && our_bbox.overlaps(their_bbox) {
-                    conflicts.push(
-                        "Both branches modified overlapping spatial regions".to_string()
-                    );
+                    conflicts
+                        .push("Both branches modified overlapping spatial regions".to_string());
                 }
             }
         }
@@ -711,7 +730,10 @@ mod tests {
         assert_eq!(Model3DFormat::from_extension("usdc"), Model3DFormat::Usd);
         assert_eq!(Model3DFormat::from_extension("usd"), Model3DFormat::Usd);
         assert_eq!(Model3DFormat::from_extension("ply"), Model3DFormat::Ply);
-        assert_eq!(Model3DFormat::from_extension("unknown"), Model3DFormat::Unknown);
+        assert_eq!(
+            Model3DFormat::from_extension("unknown"),
+            Model3DFormat::Unknown
+        );
     }
 
     #[test]

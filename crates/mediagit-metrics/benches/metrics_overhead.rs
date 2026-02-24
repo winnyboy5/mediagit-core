@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026  winnyboy5
+// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -16,8 +16,11 @@
 //!
 //! Measures the performance overhead of metrics collection to ensure it stays below 1%
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use mediagit_metrics::{MetricsRegistry, types::{CompressionAlgorithm, OperationType, StorageBackend}};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use mediagit_metrics::{
+    types::{CompressionAlgorithm, OperationType, StorageBackend},
+    MetricsRegistry,
+};
 use std::time::{Duration, Instant};
 
 /// Benchmark deduplication write without metrics
