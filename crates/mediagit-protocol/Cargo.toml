@@ -16,7 +16,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-postcard = { workspace = true }
 
 # Protocol-specific dependencies
 reqwest = { version = "0.12", features = ["json", "stream"] }
@@ -27,3 +26,4 @@ futures = "0.3"
 mediagit-versioning = { path = "../mediagit-versioning" }
 
 [dev-dependencies]
+postcard = { workspace = true }

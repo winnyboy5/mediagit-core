@@ -640,7 +640,7 @@ impl AddCmd {
             }
 
             if !path.exists() {
-                if !self.force {
+                if !self.force && !self.quiet {
                     output::warning(&format!("Path does not exist: {}", path_str));
                 }
                 continue;
