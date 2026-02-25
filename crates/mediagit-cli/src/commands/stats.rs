@@ -395,8 +395,9 @@ impl StatsCmd {
             // Second pass: read manifests to extract original file sizes
             for manifest_path in &manifest_paths {
                 if let Ok(data) = std::fs::read(manifest_path) {
-                    if let Ok(manifest) =
-                        bincode::deserialize::<mediagit_versioning::ChunkManifest>(&data)
+                    if let Ok(manifest) = mediagit_versioning::format::deserialize::<
+                        mediagit_versioning::ChunkManifest,
+                    >(&data)
                     {
                         stats.original_bytes += manifest.total_size;
 

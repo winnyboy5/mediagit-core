@@ -29,31 +29,53 @@ pub use state::AppState;
 
 use axum::{
     extract::DefaultBodyLimit,
+    http::StatusCode,
     middleware,
-    routing::{get, post, put},
-    Router,
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
 };
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 
 use mediagit_security::auth::auth_middleware;
 
+/// Health check handler — always returns 200 OK with version info.
+/// This route is intentionally placed **outside** auth/rate-limit middleware
+/// so that container orchestrators (k8s, Docker Compose, AWS ELB) can probe
+/// the server without needing credentials.
+async fn health_handler() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ok",
+            "version": env!("CARGO_PKG_VERSION"),
+            "service": "mediagit-server"
+        })),
+    )
+}
+
 /// Create the axum router with all endpoints
 pub fn create_router(state: Arc<AppState>) -> Router {
     // Create Git protocol routes
     let mut git_router = Router::new()
-        .route("/:repo/info/refs", get(handlers::get_refs))
-        .route("/:repo/refs/update", post(handlers::update_refs))
-        .route("/:repo/objects/want", post(handlers::request_objects))
-        .route("/:repo/objects/pack", get(handlers::download_pack))
-        .route("/:repo/objects/pack", post(handlers::upload_pack))
-        // Chunk transfer endpoints for large files (push)
-        .route("/:repo/chunks/check", post(handlers::check_chunks_exist))
-        .route("/:repo/chunks/:chunk_id", put(handlers::upload_chunk))
-        .route("/:repo/manifests/:oid", put(handlers::upload_manifest))
-        // Chunk download endpoints for large files (pull/clone)
-        .route("/:repo/chunks/:chunk_id", get(handlers::download_chunk))
-        .route("/:repo/manifests/:oid", get(handlers::download_manifest))
+        .route("/{repo}/info/refs", get(handlers::get_refs))
+        .route("/{repo}/refs/update", post(handlers::update_refs))
+        .route("/{repo}/objects/want", post(handlers::request_objects))
+        .route(
+            "/{repo}/objects/pack",
+            get(handlers::download_pack).post(handlers::upload_pack),
+        )
+        // Chunk transfer endpoints for large files (push and pull/clone)
+        .route("/{repo}/chunks/check", post(handlers::check_chunks_exist))
+        .route(
+            "/{repo}/chunks/{chunk_id}",
+            get(handlers::download_chunk).put(handlers::upload_chunk),
+        )
+        .route(
+            "/{repo}/manifests/{oid}",
+            get(handlers::download_manifest).put(handlers::upload_manifest),
+        )
         .with_state(Arc::clone(&state));
 
     // Apply authentication middleware to Git routes if enabled
@@ -84,6 +106,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     // Path validation middleware must be applied as the outermost layer
     // to intercept requests before routing
     router = router.layer(middleware::from_fn(security::path_validation_middleware));
+
+    // Health check is merged AFTER all middleware so it bypasses auth + rate-limiting
+    router = router.merge(Router::new().route("/healthz", get(health_handler)));
 
     router
 }
@@ -154,18 +179,23 @@ pub fn create_router_with_rate_limit(
     };
 
     let mut router = Router::new()
-        .route("/:repo/info/refs", get(handlers::get_refs))
-        .route("/:repo/refs/update", post(handlers::update_refs))
-        .route("/:repo/objects/want", post(handlers::request_objects))
-        .route("/:repo/objects/pack", get(handlers::download_pack))
-        .route("/:repo/objects/pack", post(handlers::upload_pack))
-        // Chunk transfer endpoints for large files (push)
-        .route("/:repo/chunks/check", post(handlers::check_chunks_exist))
-        .route("/:repo/chunks/:chunk_id", put(handlers::upload_chunk))
-        .route("/:repo/manifests/:oid", put(handlers::upload_manifest))
-        // Chunk download endpoints for large files (pull/clone)
-        .route("/:repo/chunks/:chunk_id", get(handlers::download_chunk))
-        .route("/:repo/manifests/:oid", get(handlers::download_manifest))
+        .route("/{repo}/info/refs", get(handlers::get_refs))
+        .route("/{repo}/refs/update", post(handlers::update_refs))
+        .route("/{repo}/objects/want", post(handlers::request_objects))
+        .route(
+            "/{repo}/objects/pack",
+            get(handlers::download_pack).post(handlers::upload_pack),
+        )
+        // Chunk transfer endpoints for large files (push and pull/clone)
+        .route("/{repo}/chunks/check", post(handlers::check_chunks_exist))
+        .route(
+            "/{repo}/chunks/{chunk_id}",
+            get(handlers::download_chunk).put(handlers::upload_chunk),
+        )
+        .route(
+            "/{repo}/manifests/{oid}",
+            get(handlers::download_manifest).put(handlers::upload_manifest),
+        )
         .with_state(Arc::clone(&state));
 
     // Apply middleware layers
@@ -173,9 +203,7 @@ pub fn create_router_with_rate_limit(
         // Body size limit (2GB for large media files)
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024))
         // Rate limiting (applied first, before other middleware)
-        .layer(GovernorLayer {
-            config: governor_config,
-        })
+        .layer(GovernorLayer::new(governor_config))
         // Security middleware
         .layer(middleware::from_fn(security::audit_middleware))
         .layer(middleware::from_fn(security::security_headers_middleware))
@@ -193,6 +221,9 @@ pub fn create_router_with_rate_limit(
     // Path validation middleware must be applied as the outermost layer
     // to intercept requests before routing
     router = router.layer(middleware::from_fn(security::path_validation_middleware));
+
+    // Health check is merged AFTER all middleware so it bypasses auth + rate-limiting
+    router = router.merge(Router::new().route("/healthz", get(health_handler)));
 
     (router, cleanup_task)
 }

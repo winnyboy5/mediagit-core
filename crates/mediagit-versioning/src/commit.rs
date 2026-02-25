@@ -239,15 +239,14 @@ impl Commit {
     }
 
     /// Serialize commit to bytes
-    ///
-    /// Uses bincode for efficient serialization.
     pub fn serialize(&self) -> anyhow::Result<Vec<u8>> {
-        bincode::serialize(self).map_err(|e| anyhow::anyhow!("Commit serialization failed: {}", e))
+        crate::format::serialize(self)
+            .map_err(|e| anyhow::anyhow!("Commit serialization failed: {}", e))
     }
 
     /// Deserialize commit from bytes
     pub fn deserialize(data: &[u8]) -> anyhow::Result<Self> {
-        bincode::deserialize(data)
+        crate::format::deserialize(data)
             .map_err(|e| anyhow::anyhow!("Commit deserialization failed: {}", e))
     }
 

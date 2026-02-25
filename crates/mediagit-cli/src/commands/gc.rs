@@ -278,7 +278,7 @@ impl GarbageCollector {
             };
 
             // Try to deserialize as commit
-            if let Ok(commit) = bincode::deserialize::<Commit>(&data) {
+            if let Ok(commit) = mediagit_versioning::format::deserialize::<Commit>(&data) {
                 // Traverse tree to mark tree + all blobs as reachable
                 self.traverse_tree(&commit.tree, reachable).await?;
 
@@ -317,7 +317,7 @@ impl GarbageCollector {
             };
 
             // Deserialize tree
-            let tree = match bincode::deserialize::<Tree>(&data) {
+            let tree = match mediagit_versioning::format::deserialize::<Tree>(&data) {
                 Ok(t) => t,
                 Err(e) => {
                     debug!("Failed to deserialize tree {}: {}", tree_oid, e);
@@ -524,17 +524,19 @@ impl GarbageCollector {
         for oid in &reachable_manifest_oids {
             let manifest_key = format!("manifests/{}", oid.to_hex());
             match self.storage.get(&manifest_key).await {
-                Ok(data) => match bincode::deserialize::<ChunkManifest>(&data) {
-                    Ok(manifest) => {
-                        for chunk_ref in &manifest.chunks {
-                            let chunk_key = format!("chunks/{}", chunk_ref.id.to_hex());
-                            reachable_chunk_keys.insert(chunk_key);
+                Ok(data) => {
+                    match mediagit_versioning::format::deserialize::<ChunkManifest>(&data) {
+                        Ok(manifest) => {
+                            for chunk_ref in &manifest.chunks {
+                                let chunk_key = format!("chunks/{}", chunk_ref.id.to_hex());
+                                reachable_chunk_keys.insert(chunk_key);
+                            }
+                        }
+                        Err(e) => {
+                            debug!("Failed to deserialize manifest {}: {}", oid, e);
                         }
                     }
-                    Err(e) => {
-                        debug!("Failed to deserialize manifest {}: {}", oid, e);
-                    }
-                },
+                }
                 Err(e) => {
                     debug!("Failed to read manifest {}: {}", oid, e);
                 }

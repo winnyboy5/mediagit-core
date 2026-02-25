@@ -779,7 +779,7 @@ impl ObjectDatabase {
 
         // Store manifest (use to_hex() for consistent storage paths)
         let manifest_key = format!("manifests/{}", oid.to_hex());
-        let manifest_data = bincode::serialize(&manifest).map_err(|e| {
+        let manifest_data = crate::format::serialize(&manifest).map_err(|e| {
             anyhow::anyhow!("Failed to serialize chunk manifest for {}: {}", oid, e)
         })?;
         self.storage
@@ -1132,7 +1132,7 @@ impl ObjectDatabase {
         };
 
         let manifest_key = format!("manifests/{}", oid.to_hex());
-        let manifest_data = bincode::serialize(&manifest)
+        let manifest_data = crate::format::serialize(&manifest)
             .map_err(|e| anyhow::anyhow!("Failed to serialize manifest: {}", e))?;
         self.storage
             .put(&manifest_key, &manifest_data)
@@ -1454,7 +1454,7 @@ impl ObjectDatabase {
             filename: Some(filename.to_string()),
         };
 
-        let manifest_data = bincode::serialize(&manifest)?;
+        let manifest_data = crate::format::serialize(&manifest)?;
         let manifest_key = format!("manifests/{}", file_oid.to_hex());
         self.storage.put(&manifest_key, &manifest_data).await?;
 
@@ -1922,7 +1922,7 @@ impl ObjectDatabase {
         // Load chunk manifest (use to_hex() for consistent storage paths)
         let manifest_key = format!("manifests/{}", oid.to_hex());
         let manifest_data = self.storage.get(&manifest_key).await?;
-        let manifest: ChunkManifest = bincode::deserialize(&manifest_data)
+        let manifest: ChunkManifest = crate::format::deserialize(&manifest_data)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
 
         debug!(
@@ -2286,7 +2286,7 @@ impl ObjectDatabase {
             info!(oid = %oid, "Streaming chunked object to file");
 
             let manifest_data = self.storage.get(&manifest_key).await?;
-            let manifest: ChunkManifest = bincode::deserialize(&manifest_data)
+            let manifest: ChunkManifest = crate::format::deserialize(&manifest_data)
                 .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
 
             // Ensure parent directory exists
@@ -2560,8 +2560,9 @@ impl ObjectDatabase {
         }
 
         let manifest_data = self.storage.get(&manifest_key).await?;
-        let manifest: crate::chunking::ChunkManifest = bincode::deserialize(&manifest_data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
+        let manifest: crate::chunking::ChunkManifest =
+            crate::format::deserialize(&manifest_data)
+                .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
 
         Ok(Some(manifest))
     }
@@ -2756,7 +2757,7 @@ impl ObjectDatabase {
         manifest: &crate::chunking::ChunkManifest,
     ) -> anyhow::Result<()> {
         let manifest_key = format!("manifests/{}", oid.to_hex());
-        let manifest_data = bincode::serialize(manifest)
+        let manifest_data = crate::format::serialize(manifest)
             .map_err(|e| anyhow::anyhow!("Failed to serialize manifest: {}", e))?;
         self.storage
             .put(&manifest_key, &manifest_data)

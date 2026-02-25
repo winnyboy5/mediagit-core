@@ -61,12 +61,12 @@ async fn test_fsck_clean_repository() {
         Signature::now("Test".to_string(), "test@example.com".to_string()),
         "Test commit".to_string(),
     );
-    let commit_data = bincode::serialize(&commit).unwrap();
+    let commit_data = mediagit_versioning::format::serialize(&commit).unwrap();
     let commit_oid = odb.write(ObjectType::Commit, &commit_data).await.unwrap();
 
     // Create a reference
     let main_ref = Ref::new_direct("refs/heads/main".to_string(), commit_oid);
-    let ref_data = bincode::serialize(&main_ref).unwrap();
+    let ref_data = mediagit_versioning::format::serialize(&main_ref).unwrap();
     storage.put("refs/heads/main", &ref_data).await.unwrap();
 
     // Run FSCK
@@ -125,12 +125,12 @@ async fn test_fsck_detect_missing_object() {
         Signature::now("Test".to_string(), "test@example.com".to_string()),
         "Test commit".to_string(),
     );
-    let commit_data = bincode::serialize(&commit).unwrap();
+    let commit_data = mediagit_versioning::format::serialize(&commit).unwrap();
     let commit_oid = odb.write(ObjectType::Commit, &commit_data).await.unwrap();
 
     // Create a reference to the commit
     let main_ref = Ref::new_direct("refs/heads/main".to_string(), commit_oid);
-    let ref_data = bincode::serialize(&main_ref).unwrap();
+    let ref_data = mediagit_versioning::format::serialize(&main_ref).unwrap();
     storage.put("refs/heads/main", &ref_data).await.unwrap();
 
     // Now delete the tree object that the commit references
@@ -163,7 +163,7 @@ async fn test_fsck_detect_broken_reference() {
     // Create a reference pointing to a non-existent commit
     let fake_oid = Oid::hash(b"nonexistent");
     let broken_ref = Ref::new_direct("refs/heads/broken".to_string(), fake_oid);
-    let ref_data = bincode::serialize(&broken_ref).unwrap();
+    let ref_data = mediagit_versioning::format::serialize(&broken_ref).unwrap();
     storage.put("refs/heads/broken", &ref_data).await.unwrap();
 
     // Run FSCK
@@ -213,12 +213,12 @@ async fn test_fsck_full_mode() {
         Signature::now("Test".to_string(), "test@example.com".to_string()),
         "Test".to_string(),
     );
-    let commit_data = bincode::serialize(&commit).unwrap();
+    let commit_data = mediagit_versioning::format::serialize(&commit).unwrap();
     let commit_oid = odb.write(ObjectType::Commit, &commit_data).await.unwrap();
 
     // Create reference
     let main_ref = Ref::new_direct("refs/heads/main".to_string(), commit_oid);
-    let ref_data = bincode::serialize(&main_ref).unwrap();
+    let ref_data = mediagit_versioning::format::serialize(&main_ref).unwrap();
     storage.put("refs/heads/main", &ref_data).await.unwrap();
 
     // Run full FSCK (includes dangling object detection)
@@ -239,7 +239,7 @@ async fn test_fsck_repair_broken_reference() {
     // Create a broken reference
     let fake_oid = Oid::hash(b"nonexistent");
     let broken_ref = Ref::new_direct("refs/heads/broken".to_string(), fake_oid);
-    let ref_data = bincode::serialize(&broken_ref).unwrap();
+    let ref_data = mediagit_versioning::format::serialize(&broken_ref).unwrap();
     storage.put("refs/heads/broken", &ref_data).await.unwrap();
 
     // Run FSCK
@@ -266,7 +266,7 @@ async fn test_fsck_repair_dry_run() {
     // Create a broken reference
     let fake_oid = Oid::hash(b"nonexistent");
     let broken_ref = Ref::new_direct("refs/heads/broken".to_string(), fake_oid);
-    let ref_data = bincode::serialize(&broken_ref).unwrap();
+    let ref_data = mediagit_versioning::format::serialize(&broken_ref).unwrap();
     storage.put("refs/heads/broken", &ref_data).await.unwrap();
 
     // Run FSCK
@@ -297,7 +297,7 @@ async fn test_fsck_connectivity_check() {
         Signature::now("Test".to_string(), "test@example.com".to_string()),
         "First commit".to_string(),
     );
-    let commit1_data = bincode::serialize(&commit1).unwrap();
+    let commit1_data = mediagit_versioning::format::serialize(&commit1).unwrap();
     let commit1_oid = odb.write(ObjectType::Commit, &commit1_data).await.unwrap();
 
     let commit2 = Commit::with_parents(
@@ -307,12 +307,12 @@ async fn test_fsck_connectivity_check() {
         Signature::now("Test".to_string(), "test@example.com".to_string()),
         "Second commit".to_string(),
     );
-    let commit2_data = bincode::serialize(&commit2).unwrap();
+    let commit2_data = mediagit_versioning::format::serialize(&commit2).unwrap();
     let commit2_oid = odb.write(ObjectType::Commit, &commit2_data).await.unwrap();
 
     // Create reference to commit2
     let main_ref = Ref::new_direct("refs/heads/main".to_string(), commit2_oid);
-    let ref_data = bincode::serialize(&main_ref).unwrap();
+    let ref_data = mediagit_versioning::format::serialize(&main_ref).unwrap();
     storage.put("refs/heads/main", &ref_data).await.unwrap();
 
     // Run FSCK with connectivity check

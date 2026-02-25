@@ -63,7 +63,7 @@ async fn create_test_commit(
         message: message.to_string(),
     };
 
-    let commit_data = bincode::serialize(&commit).unwrap();
+    let commit_data = mediagit_versioning::format::serialize(&commit).unwrap();
     odb.write(ObjectType::Commit, &commit_data).await.unwrap()
 }
 
@@ -72,7 +72,7 @@ async fn create_test_tree(odb: &ObjectDatabase) -> Oid {
     let tree = Tree {
         entries: BTreeMap::new(),
     };
-    let tree_data = bincode::serialize(&tree).unwrap();
+    let tree_data = mediagit_versioning::format::serialize(&tree).unwrap();
     odb.write(ObjectType::Tree, &tree_data).await.unwrap()
 }
 

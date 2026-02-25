@@ -590,7 +590,7 @@ impl FsckChecker {
             };
 
             // Deserialize commit
-            let commit: Commit = match bincode::deserialize(&data) {
+            let commit: Commit = match crate::format::deserialize(&data) {
                 Ok(c) => c,
                 Err(e) => {
                     report.add_issue(
@@ -683,7 +683,7 @@ impl FsckChecker {
             // Use oid.to_hex() - LocalBackend handles "objects/" prefix and sharding
             let key = oid.to_hex();
             if let Ok(data) = self.storage.get(&key).await {
-                if let Ok(commit) = bincode::deserialize::<Commit>(&data) {
+                if let Ok(commit) = crate::format::deserialize::<Commit>(&data) {
                     referenced.insert(commit.tree);
                     for parent in commit.parents {
                         self.collect_referenced_objects(&parent, visited, referenced)
@@ -728,7 +728,7 @@ impl FsckChecker {
 
         for key in ref_keys {
             if let Ok(data) = self.storage.get(&key).await {
-                if let Ok(r) = bincode::deserialize::<Ref>(&data) {
+                if let Ok(r) = crate::format::deserialize::<Ref>(&data) {
                     refs.push(r);
                 }
             }
@@ -736,7 +736,7 @@ impl FsckChecker {
 
         // Also check HEAD
         if let Ok(head_data) = self.storage.get("HEAD").await {
-            if let Ok(head_ref) = bincode::deserialize::<Ref>(&head_data) {
+            if let Ok(head_ref) = crate::format::deserialize::<Ref>(&head_data) {
                 refs.push(head_ref);
             }
         }

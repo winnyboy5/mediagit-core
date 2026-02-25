@@ -32,17 +32,17 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 # HTTP server
-axum = "0.7"
-tower = { version = "0.4", features = ["util", "limit"] }
-tower-http = { version = "0.5", features = ["trace", "cors", "request-id", "sensitive-headers"] }
+axum = { workspace = true }
+tower = { version = "0.5", features = ["util", "limit"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "request-id", "sensitive-headers"] }
 bytes = "1.9"
-toml = "0.8"
+toml = { workspace = true }
 futures = "0.3"
-clap = { version = "4.4", features = ["derive"] }
+clap = { workspace = true }
 
 # Security
-tower_governor = "0.4"
-governor = "0.6"
+tower_governor = "0.8"
+governor = "0.10"
 
 # HTTPS/TLS
 axum-server = { version = "0.8", features = ["tls-rustls"] }

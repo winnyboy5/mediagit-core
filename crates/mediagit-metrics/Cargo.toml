@@ -18,7 +18,7 @@ tracing.workspace = true
 prometheus = { workspace = true, features = ["process"] }
 
 # HTTP server for metrics endpoint
-axum = "0.7"
+axum = { workspace = true }
 
 [dev-dependencies]
 criterion.workspace = true
