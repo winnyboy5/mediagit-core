@@ -170,9 +170,13 @@ impl AddCmd {
             let mut files = HashMap::new();
             if let Ok(head_oid) = refdb.resolve("HEAD").await {
                 if let Ok(commit_data) = odb.read(&head_oid).await {
-                    if let Ok(commit) = bincode::deserialize::<Commit>(&commit_data) {
+                    if let Ok(commit) =
+                        mediagit_versioning::format::deserialize::<Commit>(&commit_data)
+                    {
                         if let Ok(tree_data) = odb.read(&commit.tree).await {
-                            if let Ok(tree) = bincode::deserialize::<Tree>(&tree_data) {
+                            if let Ok(tree) =
+                                mediagit_versioning::format::deserialize::<Tree>(&tree_data)
+                            {
                                 for entry in tree.iter() {
                                     files.insert(PathBuf::from(&entry.name), entry.oid);
                                 }

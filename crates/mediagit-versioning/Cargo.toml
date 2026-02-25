@@ -13,7 +13,7 @@ mediagit-compression = { path = "../mediagit-compression" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-bincode.workspace = true
+postcard.workspace = true
 sha2.workspace = true
 hex.workspace = true
 anyhow.workspace = true

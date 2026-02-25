@@ -68,6 +68,7 @@ mod config;
 mod conflict;
 mod delta;
 mod diff;
+pub mod format;
 pub mod fsck;
 mod index;
 mod lca;

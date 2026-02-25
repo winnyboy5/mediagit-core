@@ -157,11 +157,11 @@ impl CommitCmd {
             // Read parent commit and its tree
             let parent_commit_data = odb.read(parent_oid_val).await?;
             let parent_commit: mediagit_versioning::Commit =
-                bincode::deserialize(&parent_commit_data)
+                mediagit_versioning::format::deserialize(&parent_commit_data)
                     .context("Failed to deserialize parent commit")?;
 
             let parent_tree_data = odb.read(&parent_commit.tree).await?;
-            let parent_tree: Tree = bincode::deserialize(&parent_tree_data)
+            let parent_tree: Tree = mediagit_versioning::format::deserialize(&parent_tree_data)
                 .context("Failed to deserialize parent tree")?;
 
             // Build a set of deleted paths for fast lookup (normalized for cross-platform)

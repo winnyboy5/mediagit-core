@@ -68,7 +68,7 @@ async fn create_commit(
         message: message.to_string(),
     };
 
-    let commit_data = bincode::serialize(&commit).unwrap();
+    let commit_data = mediagit_versioning::format::serialize(&commit).unwrap();
     odb.write(ObjectType::Commit, &commit_data).await.unwrap()
 }
 
@@ -92,7 +92,7 @@ async fn create_tree(odb: &ObjectDatabase, num_files: usize) -> Oid {
     }
 
     let tree = Tree { entries };
-    let tree_data = bincode::serialize(&tree).unwrap();
+    let tree_data = mediagit_versioning::format::serialize(&tree).unwrap();
     odb.write(ObjectType::Tree, &tree_data).await.unwrap()
 }
 
@@ -100,7 +100,7 @@ async fn create_tree(odb: &ObjectDatabase, num_files: usize) -> Oid {
 async fn create_modified_tree(odb: &ObjectDatabase, base_tree_oid: Oid, num_changes: usize) -> Oid {
     // Read base tree
     let base_tree_data = odb.read(&base_tree_oid).await.unwrap();
-    let mut base_tree: Tree = bincode::deserialize(&base_tree_data).unwrap();
+    let mut base_tree: Tree = mediagit_versioning::format::deserialize(&base_tree_data).unwrap();
 
     // Modify some entries
     let keys: Vec<String> = base_tree
@@ -117,7 +117,7 @@ async fn create_modified_tree(odb: &ObjectDatabase, base_tree_oid: Oid, num_chan
         }
     }
 
-    let tree_data = bincode::serialize(&base_tree).unwrap();
+    let tree_data = mediagit_versioning::format::serialize(&base_tree).unwrap();
     odb.write(ObjectType::Tree, &tree_data).await.unwrap()
 }
 
@@ -173,8 +173,10 @@ fn bench_merge_no_conflict(c: &mut Criterion) {
 
                     // Read base tree
                     let base_tree_data = odb.read(&base_tree).await.unwrap();
-                    let mut our_tree: Tree = bincode::deserialize(&base_tree_data).unwrap();
-                    let mut their_tree: Tree = bincode::deserialize(&base_tree_data).unwrap();
+                    let mut our_tree: Tree =
+                        mediagit_versioning::format::deserialize(&base_tree_data).unwrap();
+                    let mut their_tree: Tree =
+                        mediagit_versioning::format::deserialize(&base_tree_data).unwrap();
 
                     // Modify first half in our branch
                     let our_keys: Vec<String> = our_tree
@@ -207,11 +209,17 @@ fn bench_merge_no_conflict(c: &mut Criterion) {
                     }
 
                     let our_tree_oid = odb
-                        .write(ObjectType::Tree, &bincode::serialize(&our_tree).unwrap())
+                        .write(
+                            ObjectType::Tree,
+                            &mediagit_versioning::format::serialize(&our_tree).unwrap(),
+                        )
                         .await
                         .unwrap();
                     let their_tree_oid = odb
-                        .write(ObjectType::Tree, &bincode::serialize(&their_tree).unwrap())
+                        .write(
+                            ObjectType::Tree,
+                            &mediagit_versioning::format::serialize(&their_tree).unwrap(),
+                        )
                         .await
                         .unwrap();
 
@@ -256,8 +264,10 @@ fn bench_merge_with_conflicts(c: &mut Criterion) {
 
             // Read base tree
             let base_tree_data = odb.read(&base_tree).await.unwrap();
-            let mut our_tree: Tree = bincode::deserialize(&base_tree_data).unwrap();
-            let mut their_tree: Tree = bincode::deserialize(&base_tree_data).unwrap();
+            let mut our_tree: Tree =
+                mediagit_versioning::format::deserialize(&base_tree_data).unwrap();
+            let mut their_tree: Tree =
+                mediagit_versioning::format::deserialize(&base_tree_data).unwrap();
 
             // Modify same files differently (creates conflicts)
             let conflict_keys: Vec<String> = our_tree.entries.keys().take(5).cloned().collect();
@@ -277,11 +287,17 @@ fn bench_merge_with_conflicts(c: &mut Criterion) {
             }
 
             let our_tree_oid = odb
-                .write(ObjectType::Tree, &bincode::serialize(&our_tree).unwrap())
+                .write(
+                    ObjectType::Tree,
+                    &mediagit_versioning::format::serialize(&our_tree).unwrap(),
+                )
                 .await
                 .unwrap();
             let their_tree_oid = odb
-                .write(ObjectType::Tree, &bincode::serialize(&their_tree).unwrap())
+                .write(
+                    ObjectType::Tree,
+                    &mediagit_versioning::format::serialize(&their_tree).unwrap(),
+                )
                 .await
                 .unwrap();
 

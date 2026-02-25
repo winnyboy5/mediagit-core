@@ -48,7 +48,7 @@ bcrypt = { version = "0.15", optional = true }
 uuid = { version = "1.10", features = ["v4", "serde"], optional = true }
 
 # HTTP/Web framework (for middleware)
-axum = { version = "0.7", optional = true }
+axum = { workspace = true, optional = true }
 http = { version = "1.0", optional = true }
 
 # TLS/Certificate management (optional)

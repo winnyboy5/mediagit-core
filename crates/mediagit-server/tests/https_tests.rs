@@ -51,8 +51,7 @@ mod https_tests {
             .unwrap();
 
         let key_pem = certificate.key_pem.as_bytes();
-        let private_key: PrivateKeyDer<'static> =
-            PrivateKeyDer::from_pem_slice(key_pem).unwrap();
+        let private_key: PrivateKeyDer<'static> = PrivateKeyDer::from_pem_slice(key_pem).unwrap();
 
         let rustls_config = rustls::ServerConfig::builder()
             .with_no_client_auth()

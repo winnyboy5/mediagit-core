@@ -145,12 +145,14 @@ impl StatusCmd {
         let mut head_files: HashMap<PathBuf, Oid> = HashMap::new();
         if let Ok(head_oid) = refdb.resolve("HEAD").await {
             if let Ok(commit_data) = odb.read(&head_oid).await {
-                if let Ok(commit) =
-                    bincode::deserialize::<mediagit_versioning::Commit>(&commit_data)
+                if let Ok(commit) = mediagit_versioning::format::deserialize::<
+                    mediagit_versioning::Commit,
+                >(&commit_data)
                 {
                     if let Ok(tree_data) = odb.read(&commit.tree).await {
-                        if let Ok(tree) =
-                            bincode::deserialize::<mediagit_versioning::Tree>(&tree_data)
+                        if let Ok(tree) = mediagit_versioning::format::deserialize::<
+                            mediagit_versioning::Tree,
+                        >(&tree_data)
                         {
                             for entry in tree.iter() {
                                 head_files.insert(PathBuf::from(&entry.name), entry.oid);

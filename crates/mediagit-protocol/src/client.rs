@@ -684,9 +684,11 @@ impl ProtocolClient {
                     // Detect actual object type by reading and inspecting the object
                     let obj_type = if let Ok(obj_data) = odb.read(&oid).await {
                         // Try to deserialize as each type to detect the actual type
-                        if bincode::deserialize::<Commit>(&obj_data).is_ok() {
+                        if mediagit_versioning::format::deserialize::<Commit>(&obj_data).is_ok() {
                             ObjectType::Commit
-                        } else if bincode::deserialize::<Tree>(&obj_data).is_ok() {
+                        } else if mediagit_versioning::format::deserialize::<Tree>(&obj_data)
+                            .is_ok()
+                        {
                             ObjectType::Tree
                         } else {
                             ObjectType::Blob
@@ -705,7 +707,9 @@ impl ProtocolClient {
                 if let Ok(obj_data) = odb.read(&oid).await {
                     match obj_type {
                         ObjectType::Commit => {
-                            if let Ok(commit) = bincode::deserialize::<Commit>(&obj_data) {
+                            if let Ok(commit) =
+                                mediagit_versioning::format::deserialize::<Commit>(&obj_data)
+                            {
                                 if visited.insert(commit.tree) {
                                     have_queue.push_back((commit.tree, ObjectType::Tree));
                                 }
@@ -717,7 +721,9 @@ impl ProtocolClient {
                             }
                         }
                         ObjectType::Tree => {
-                            if let Ok(tree) = bincode::deserialize::<Tree>(&obj_data) {
+                            if let Ok(tree) =
+                                mediagit_versioning::format::deserialize::<Tree>(&obj_data)
+                            {
                                 for entry in tree.entries.values() {
                                     if visited.insert(entry.oid) {
                                         let entry_type = match entry.mode {
@@ -758,7 +764,7 @@ impl ProtocolClient {
                         .context(format!("Failed to read commit {}", oid))?;
 
                     // Deserialize commit to extract tree and parent refs
-                    let commit: Commit = bincode::deserialize(&obj_data)
+                    let commit: Commit = mediagit_versioning::format::deserialize(&obj_data)
                         .context(format!("Failed to deserialize commit {}", oid))?;
 
                     // Add tree OID
@@ -780,7 +786,7 @@ impl ProtocolClient {
                         .context(format!("Failed to read tree {}", oid))?;
 
                     // Deserialize tree to extract blob/subtree refs
-                    let tree: Tree = bincode::deserialize(&obj_data)
+                    let tree: Tree = mediagit_versioning::format::deserialize(&obj_data)
                         .context(format!("Failed to deserialize tree {}", oid))?;
 
                     for entry in tree.entries.values() {
@@ -1046,8 +1052,8 @@ impl ProtocolClient {
             }
 
             // Upload manifest last (ensures all chunks exist first)
-            let manifest_data =
-                bincode::serialize(&manifest).context("Failed to serialize manifest")?;
+            let manifest_data = mediagit_versioning::format::serialize(&manifest)
+                .context("Failed to serialize manifest")?;
             self.upload_manifest(oid, &manifest_data).await?;
 
             tracing::debug!(oid = %oid, "Manifest uploaded");
@@ -1083,7 +1089,7 @@ impl ProtocolClient {
         }
 
         let data = response.bytes().await?;
-        bincode::deserialize(&data).context("Failed to deserialize manifest")
+        mediagit_versioning::format::deserialize(&data).context("Failed to deserialize manifest")
     }
 
     /// Download a single chunk from the remote server

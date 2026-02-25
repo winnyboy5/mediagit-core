@@ -209,15 +209,14 @@ impl Tree {
     }
 
     /// Serialize tree to bytes
-    ///
-    /// Uses bincode for efficient serialization.
     pub fn serialize(&self) -> anyhow::Result<Vec<u8>> {
-        bincode::serialize(self).map_err(|e| anyhow::anyhow!("Tree serialization failed: {}", e))
+        crate::format::serialize(self)
+            .map_err(|e| anyhow::anyhow!("Tree serialization failed: {}", e))
     }
 
     /// Deserialize tree from bytes
     pub fn deserialize(data: &[u8]) -> anyhow::Result<Self> {
-        bincode::deserialize(data)
+        crate::format::deserialize(data)
             .map_err(|e| anyhow::anyhow!("Tree deserialization failed: {}", e))
     }
 
