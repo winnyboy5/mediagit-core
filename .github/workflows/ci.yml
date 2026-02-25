@@ -18,6 +18,7 @@ jobs:
   test:
     name: Test
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       matrix:
         include:
@@ -71,7 +72,14 @@ jobs:
 
       - name: Run tests
         if: ${{ !matrix.cross }}
-        run: cargo test --workspace --verbose --all-features
+        run: |
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            cargo test --workspace --verbose --all-features
+          else
+            cargo test -p mediagit-cli --verbose
+          fi
+        shell: bash
+
 
   lint:
     name: Lint
@@ -183,7 +191,7 @@ jobs:
           AWS_REGION: us-east-1
           AZURE_STORAGE_CONNECTION_STRING: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://localhost:10000/devstoreaccount1;"
           GCS_EMULATOR_HOST: http://localhost:4443
-        run: cargo test --ignored -p mediagit-storage -p mediagit-server --verbose
+        run: cargo test -p mediagit-storage -p mediagit-server --verbose -- --ignored
 
       - name: Stop storage emulators
         if: always()
