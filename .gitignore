@@ -194,3 +194,6 @@ test-archives/
 **/minio_data/
 **/azurite_data/
 **/gcs_data/
+
+# Lefthook local overrides
+lefthook-local.yml
