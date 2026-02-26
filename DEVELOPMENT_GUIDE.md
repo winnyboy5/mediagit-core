@@ -331,7 +331,27 @@ cargo test -- --nocapture
 cargo nextest run
 ```
 
-### 5. Project Structure
+### 5. Set Up Pre-Commit Hooks
+
+We use **[Lefthook](https://github.com/evilmartians/lefthook)** for pre-commit hooks that run `cargo fmt --check`, `cargo clippy`, and license header checks in parallel before each commit.
+
+```bash
+# Install lefthook (choose one):
+brew install lefthook          # macOS
+winget install evilmartians.lefthook  # Windows
+npm install -g lefthook        # Any platform with Node
+
+# Activate hooks in the repo:
+lefthook install
+
+# Test that hooks work:
+lefthook run pre-commit
+```
+
+> **Tip**: If you need to bypass hooks for a quick WIP commit, use `git commit --no-verify`.
+> For personal overrides, create `lefthook-local.yml` (gitignored).
+
+### 6. Project Structure
 
 ```
 mediagit-core/
