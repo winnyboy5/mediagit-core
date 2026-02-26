@@ -484,11 +484,24 @@ impl AzureBackend {
                         tracing::info!("Successfully created container: {}", self.container_name);
                         Ok(())
                     }
-                    Err(e) => Err(anyhow::anyhow!(
-                        "Failed to create container {}: {}",
-                        self.container_name,
-                        e
-                    )),
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        // Another concurrent caller may have created the container between our
+                        // exists() check and create() call (TOCTOU). Treat 409 as success.
+                        if err_msg.contains("ContainerAlreadyExists") || err_msg.contains("409") {
+                            tracing::debug!(
+                                "Container {} already exists (concurrent creation)",
+                                self.container_name
+                            );
+                            Ok(())
+                        } else {
+                            Err(anyhow::anyhow!(
+                                "Failed to create container {}: {}",
+                                self.container_name,
+                                e
+                            ))
+                        }
+                    }
                 }
             }
             Ok(_) => {
