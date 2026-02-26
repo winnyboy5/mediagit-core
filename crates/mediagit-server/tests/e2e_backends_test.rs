@@ -174,6 +174,13 @@ async fn read_test_file(filename: &str) -> Vec<u8> {
         "mp4" => generate_test_mp4(),
         "wav" => generate_test_wav(),
         "psd" => generate_test_psd(),
+        "flac" => {
+            let mut data = Vec::with_capacity(11_000_000);
+            data.extend_from_slice(b"fLaC");
+            data.extend_from_slice(&[0x80, 0x00, 0x00, 0x22]);
+            data.resize(11_000_000, 0xAA);
+            data
+        }
         _ => vec![0u8; 1024], // Generic test data
     }
 }
