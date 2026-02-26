@@ -794,7 +794,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires live Azure credentials to create container
+    #[ignore = "requires live Azure credentials - not available in CI"]
     async fn test_sas_token_backend_creation() {
         let result = AzureBackend::with_sas_token(
             "testaccount",
@@ -810,7 +810,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires live Azure credentials to create container
+    #[ignore = "requires live Azure credentials - not available in CI"]
     async fn test_account_key_backend_creation() {
         let result = AzureBackend::with_account_key(
             "testaccount",
@@ -826,15 +826,15 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires live Azure credentials to create container
+    #[ignore = "requires Azurite emulator"]
     async fn test_connection_string_backend_creation() {
-        let conn_str = "DefaultEndpointsProtocol=https;AccountName=testaccount;AccountKey=test==;EndpointSuffix=core.windows.net";
-        let result = AzureBackend::with_connection_string("testcontainer", conn_str).await;
+        let conn_str = "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://localhost:10000/devstoreaccount1;";
+        let result = AzureBackend::with_connection_string("mediagit-test", conn_str).await;
 
         assert!(result.is_ok());
         let backend = result.unwrap();
-        assert_eq!(backend.account_name, "testaccount");
-        assert_eq!(backend.container_name, "testcontainer");
+        assert_eq!(backend.account_name, "devstoreaccount1");
+        assert_eq!(backend.container_name, "mediagit-test");
     }
 
     #[tokio::test]
