@@ -2275,6 +2275,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
+name = "husky-rs"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62b00c51c8ea1f7e8d93caaf071948f766eb331cd55cb9871096614c9291642e"
+
+[[package]]
 name = "hyper"
 version = "0.14.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2852,6 +2858,7 @@ dependencies = [
  "dialoguer",
  "dunce",
  "glob",
+ "husky-rs",
  "indicatif",
  "mediagit-config",
  "mediagit-git",
