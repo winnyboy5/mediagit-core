@@ -35,7 +35,7 @@
 //! ```rust,no_run
 //! use mediagit_media::model3d::Model3DParser;
 //!
-//! # async fn example() -> anyhow::Result<()> {
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let model_data = std::fs::read("model.obj")?;
 //! let parser = Model3DParser::new();
 //! let info = parser.parse(&model_data, "model.obj").await?;

@@ -29,7 +29,7 @@
 //! ```rust,no_run
 //! use mediagit_media::strategy::{MergeStrategy, MediaType, MergeResult};
 //!
-//! # async fn example() -> anyhow::Result<()> {
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let strategy = MergeStrategy::for_media_type(MediaType::Image);
 //!
 //! let base = std::fs::read("base.jpg")?;
