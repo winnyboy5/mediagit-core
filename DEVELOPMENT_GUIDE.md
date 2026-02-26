@@ -333,13 +333,21 @@ cargo nextest run
 
 ### 5. Set Up Pre-Commit Hooks
 
-We use **[Lefthook](https://github.com/evilmartians/lefthook)** for pre-commit hooks that run `cargo fmt --check`, `cargo clippy`, and license header checks in parallel before each commit.
+We use **[Lefthook](https://github.com/evilmartians/lefthook)** for pre-commit hooks that enforce code quality before each commit:
+- `cargo fmt --check` — formatting
+- `cargo clippy` — lint warnings
+- License header check — AGPL compliance
+- Large file guard — blocks files > 5MB
+- Conflict marker check — catches leftover merge markers
+- Conventional commit message validation
 
 ```bash
-# Install lefthook (choose one):
-brew install lefthook          # macOS
-winget install evilmartians.lefthook  # Windows
-npm install -g lefthook        # Any platform with Node
+# Install lefthook (recommended: npm works reliably across all platforms):
+npm install -g lefthook
+
+# Alternative installs:
+brew install lefthook          # macOS (Homebrew)
+# Note: winget has PATH issues on Windows — use npm instead
 
 # Activate hooks in the repo:
 lefthook install
