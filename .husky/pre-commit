@@ -1,0 +1,60 @@
+#!/bin/sh
+# Pre-commit hook: runs formatting, linting, and checks in sequence
+
+echo "🔍 Running pre-commit checks..."
+
+# 1. Check formatting
+echo "  → cargo fmt --check"
+cargo fmt --check
+if [ $? -ne 0 ]; then
+  echo "❌ Formatting check failed. Run 'cargo fmt' to fix."
+  exit 1
+fi
+
+# 2. Run clippy
+echo "  → cargo clippy"
+cargo clippy --workspace --all-targets -- -D warnings
+if [ $? -ne 0 ]; then
+  echo "❌ Clippy check failed. Fix the warnings above."
+  exit 1
+fi
+
+# 3. License header check
+missing=0
+for file in $(git diff --cached --name-only --diff-filter=ACM -- '*.rs'); do
+  if ! grep -q "GNU Affero General Public License" "$file" 2>/dev/null; then
+    echo "❌ Missing license header: $file"
+    missing=$((missing + 1))
+  fi
+done
+if [ "$missing" -gt 0 ]; then
+  echo "❌ $missing file(s) missing AGPL-3.0 license headers"
+  exit 1
+fi
+
+# 4. Large file check (> 5MB)
+MAX_SIZE=$((5 * 1024 * 1024))
+large_files=0
+for file in $(git diff --cached --name-only --diff-filter=ACM); do
+  if [ -f "$file" ]; then
+    size=$(wc -c < "$file" 2>/dev/null | tr -d ' ')
+    if [ "$size" -gt "$MAX_SIZE" ] 2>/dev/null; then
+      echo "❌ Large file: $file (exceeds 5MB limit)"
+      large_files=$((large_files + 1))
+    fi
+  fi
+done
+if [ "$large_files" -gt 0 ]; then
+  echo "❌ $large_files file(s) exceed 5MB."
+  exit 1
+fi
+
+# 5. Conflict marker check
+for file in $(git diff --cached --name-only --diff-filter=ACM); do
+  if grep -qE "^(<<<<<<<|=======|>>>>>>>)" "$file" 2>/dev/null; then
+    echo "❌ Conflict markers found in: $file"
+    exit 1
+  fi
+done
+
+echo "✅ All pre-commit checks passed!"
