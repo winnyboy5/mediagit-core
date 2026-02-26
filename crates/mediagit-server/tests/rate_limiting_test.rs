@@ -174,9 +174,8 @@ async fn test_rate_limit_headers_present() {
 }
 
 #[tokio::test]
-#[ignore] // Flaky due to timing precision - replenishment works but exact timing is hard to test reliably
 async fn test_rate_limit_replenishment() {
-    // 2 requests per second with burst of 2
+    // 2 requests per second with burst of 2 (token period = 500ms)
     let rate_config = RateLimitConfig::new(2, 2);
     let server = TestServer::new_with_rate_limit(rate_config).await;
     let client = Client::new();
@@ -198,10 +197,11 @@ async fn test_rate_limit_replenishment() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
 
-    // Wait for replenishment (at 2 req/sec = 500ms per token, wait 1.5s to be safe)
-    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+    // Wait for replenishment: 3000ms gives a 6× safety margin over the 500ms token period.
+    // This is generous enough to be reliable even on loaded CI runners.
+    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
 
-    // Request should now succeed (replenished)
+    // Request should now succeed (tokens replenished)
     let resp = client
         .get(server.url("/test-repo/info/refs"))
         .send()
