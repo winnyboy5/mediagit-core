@@ -124,8 +124,13 @@ impl AddCmd {
             anyhow::bail!("Nothing specified, nothing added.\nUse 'mediagit add <file>...' or 'mediagit add --all' to stage files.");
         }
 
-        // Find repository root
-        let repo_root = find_repo_root()?;
+        // Find repository root and canonicalize to match the canonicalized file
+        // paths produced by collect_files_recursive (which uses dunce::canonicalize).
+        // Without this, strip_prefix fails on Windows when the working directory
+        // path differs from the canonicalized form (e.g. 8.3 short names), causing
+        // files to be stored with absolute paths in the index/tree.
+        let repo_root = dunce::canonicalize(find_repo_root()?)
+            .unwrap_or_else(|_| find_repo_root().expect("repo root"));
 
         if self.dry_run {
             output::info("Running in dry-run mode");

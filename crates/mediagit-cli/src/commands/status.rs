@@ -88,8 +88,9 @@ impl StatusCmd {
     pub async fn execute(&self) -> Result<()> {
         use crate::output;
 
-        // Find repository root
-        let repo_root = find_repo_root()?;
+        // Find repository root and canonicalize for consistent path handling on Windows
+        let repo_root = dunce::canonicalize(find_repo_root()?)
+            .unwrap_or_else(|_| find_repo_root().expect("repo root"));
 
         if !self.quiet {
             output::header("Repository Status");
