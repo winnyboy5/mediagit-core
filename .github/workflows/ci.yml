@@ -191,7 +191,7 @@ jobs:
           AWS_REGION: us-east-1
           AZURE_STORAGE_CONNECTION_STRING: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://localhost:10000/devstoreaccount1;"
           GCS_EMULATOR_HOST: http://localhost:4443
-        run: cargo test -p mediagit-storage -p mediagit-server --verbose -- --ignored
+        run: cargo test -p mediagit-storage -p mediagit-server --verbose --tests -- --ignored
 
       - name: Stop storage emulators
         if: always()
