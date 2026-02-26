@@ -29,7 +29,7 @@
 //! ```rust,no_run
 //! use mediagit_media::audio::AudioParser;
 //!
-//! # async fn example() -> anyhow::Result<()> {
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let audio_data = std::fs::read("audio.mp3")?;
 //! let parser = AudioParser::new();
 //! let info = parser.parse(&audio_data, "audio.mp3").await?;

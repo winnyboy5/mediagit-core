@@ -29,7 +29,7 @@
 //! ```rust,no_run
 //! use mediagit_media::video::VideoParser;
 //!
-//! # async fn example() -> anyhow::Result<()> {
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let video_data = std::fs::read("video.mp4")?;
 //! let parser = VideoParser::new();
 //! let info = parser.parse(&video_data).await?;

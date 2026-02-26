@@ -848,7 +848,13 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires MinIO server"]
     async fn test_new_removes_trailing_slash() {
-        let backend = MinIOBackend::new("http://localhost:9000/", "mediagit-test", "minioadmin", "minioadmin").await;
+        let backend = MinIOBackend::new(
+            "http://localhost:9000/",
+            "mediagit-test",
+            "minioadmin",
+            "minioadmin",
+        )
+        .await;
 
         assert!(backend.is_ok());
         let backend = backend.unwrap();
@@ -958,9 +964,14 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires MinIO server"]
     async fn test_debug_impl() {
-        let backend = MinIOBackend::new("http://localhost:9000", "mediagit-test", "minioadmin", "minioadmin")
-            .await
-            .unwrap();
+        let backend = MinIOBackend::new(
+            "http://localhost:9000",
+            "mediagit-test",
+            "minioadmin",
+            "minioadmin",
+        )
+        .await
+        .unwrap();
 
         let debug_str = format!("{:?}", backend);
         assert!(debug_str.contains("MinIOBackend"));
@@ -971,9 +982,14 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires MinIO server"]
     async fn test_clone() {
-        let backend1 = MinIOBackend::new("http://localhost:9000", "mediagit-test", "minioadmin", "minioadmin")
-            .await
-            .unwrap();
+        let backend1 = MinIOBackend::new(
+            "http://localhost:9000",
+            "mediagit-test",
+            "minioadmin",
+            "minioadmin",
+        )
+        .await
+        .unwrap();
 
         let backend2 = backend1.clone();
         assert_eq!(backend2.endpoint(), backend1.endpoint());
@@ -984,11 +1000,29 @@ mod tests {
     #[ignore = "requires MinIO server"]
     async fn test_valid_bucket_names() {
         // Validate that the CI-provisioned bucket works
-        let result = MinIOBackend::new("http://localhost:9000", "mediagit-test", "minioadmin", "minioadmin").await;
-        assert!(result.is_ok(), "Bucket name 'mediagit-test' should be valid");
+        let result = MinIOBackend::new(
+            "http://localhost:9000",
+            "mediagit-test",
+            "minioadmin",
+            "minioadmin",
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "Bucket name 'mediagit-test' should be valid"
+        );
 
-        let result2 = MinIOBackend::new("http://localhost:9000", "mediagit-repos", "minioadmin", "minioadmin").await;
-        assert!(result2.is_ok(), "Bucket name 'mediagit-repos' should be valid");
+        let result2 = MinIOBackend::new(
+            "http://localhost:9000",
+            "mediagit-repos",
+            "minioadmin",
+            "minioadmin",
+        )
+        .await;
+        assert!(
+            result2.is_ok(),
+            "Bucket name 'mediagit-repos' should be valid"
+        );
     }
 
     #[tokio::test]

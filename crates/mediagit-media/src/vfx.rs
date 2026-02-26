@@ -29,7 +29,7 @@
 //! ```rust,no_run
 //! use mediagit_media::vfx::VfxParser;
 //!
-//! # async fn example() -> anyhow::Result<()> {
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let file_data = std::fs::read("document.indd")?;
 //! let parser = VfxParser::new();
 //! let info = parser.parse(&file_data, "document.indd").await?;

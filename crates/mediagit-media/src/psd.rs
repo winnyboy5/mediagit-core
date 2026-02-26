@@ -29,7 +29,7 @@
 //! ```rust,no_run
 //! use mediagit_media::psd::PsdParser;
 //!
-//! # async fn example() -> anyhow::Result<()> {
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let psd_data = std::fs::read("image.psd")?;
 //! let parser = PsdParser::new();
 //! let info = parser.parse(&psd_data).await?;
