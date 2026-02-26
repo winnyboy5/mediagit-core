@@ -333,31 +333,22 @@ cargo nextest run
 
 ### 5. Set Up Pre-Commit Hooks
 
-We use **[Lefthook](https://github.com/evilmartians/lefthook)** for pre-commit hooks that enforce code quality before each commit:
+We use **[husky-rs](https://github.com/pplmx/husky-rs)** (pure Rust) for Git hooks that enforce code quality:
 - `cargo fmt --check` — formatting
 - `cargo clippy` — lint warnings
 - License header check — AGPL compliance
 - Large file guard — blocks files > 5MB
 - Conflict marker check — catches leftover merge markers
-- Conventional commit message validation
+- Conventional commit message validation (`feat:`, `fix:`, `docs:`, etc.)
+
+Hooks auto-install when you build:
 
 ```bash
-# Install lefthook (recommended: npm works reliably across all platforms):
-npm install -g lefthook
-
-# Alternative installs:
-brew install lefthook          # macOS (Homebrew)
-# Note: winget has PATH issues on Windows — use npm instead
-
-# Activate hooks in the repo:
-lefthook install
-
-# Test that hooks work:
-lefthook run pre-commit
+cargo build    # hooks are automatically configured
 ```
 
-> **Tip**: If you need to bypass hooks for a quick WIP commit, use `git commit --no-verify`.
-> For personal overrides, create `lefthook-local.yml` (gitignored).
+> **Tip**: To bypass hooks for a WIP commit: `git commit --no-verify`
+> To skip hook installation in CI: `NO_HUSKY_HOOKS=1 cargo build`
 
 ### 6. Project Structure
 
