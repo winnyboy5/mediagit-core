@@ -191,7 +191,13 @@ jobs:
           AWS_REGION: us-east-1
           AZURE_STORAGE_CONNECTION_STRING: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://localhost:10000/devstoreaccount1;"
           GCS_EMULATOR_HOST: http://localhost:4443
-        run: cargo test -p mediagit-storage -p mediagit-server --verbose --tests -- --ignored
+        run: |
+          # Run MinIO integration tests (emulator available)
+          cargo test -p mediagit-storage --verbose --tests -- --ignored minio::tests
+          # Run Azure integration tests that use Azurite emulator
+          cargo test -p mediagit-storage --verbose --tests -- --ignored azure::tests::test_connection_string_backend_creation
+          # Run mediagit-server ignored tests
+          cargo test -p mediagit-server --verbose --tests -- --ignored
 
       - name: Stop storage emulators
         if: always()

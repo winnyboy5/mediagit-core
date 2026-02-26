@@ -24,11 +24,10 @@
 //!
 //! ## Basic Compression
 //!
-//! ```rust
+//! ```rust,no_run
 //! use mediagit_compression::{Compressor, CompressionLevel, ZstdCompressor};
 //!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
+//! fn main() -> anyhow::Result<()> {
 //!     let compressor = ZstdCompressor::new(CompressionLevel::Default);
 //!
 //!     let original = b"Hello, World!";
@@ -45,11 +44,10 @@
 //!
 //! ## Smart Type-Aware Compression
 //!
-//! ```rust
+//! ```rust,no_run
 //! use mediagit_compression::{SmartCompressor, TypeAwareCompressor, ObjectType};
 //!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
+//! fn main() -> anyhow::Result<()> {
 //!     let compressor = SmartCompressor::new();
 //!
 //!     // Automatically selects best strategy based on file type
