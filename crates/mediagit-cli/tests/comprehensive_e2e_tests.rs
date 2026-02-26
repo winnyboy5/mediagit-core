@@ -287,7 +287,10 @@ fn e2e_media_3d_model_glb() {
     // 14MB 3D model (falls back to minimal GLB header on CI)
     let dest = copy_test_file("1965_ac_shelby_427_cobra_sc.glb", repo_path, "car.glb");
     // Minimal GLB magic bytes
-    ensure_test_file(&dest, b"glTF\x02\x00\x00\x00\x0C\x00\x00\x00\x00\x00\x00\x00");
+    ensure_test_file(
+        &dest,
+        b"glTF\x02\x00\x00\x00\x0C\x00\x00\x00\x00\x00\x00\x00",
+    );
 
     mediagit()
         .current_dir(repo_path)
@@ -385,9 +388,17 @@ fn e2e_media_mixed_formats() {
     let dest1 = copy_test_file("freepik__talk__71826.jpeg", repo_path, "image1.jpg");
     ensure_test_file(&dest1, &[0xFF, 0xD8, 0xFF, 0xD9]);
     let dest2 = copy_test_file("freepik__talk__72772.jpeg", repo_path, "image2.jpg");
-    ensure_test_file(&dest2, &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00]);
+    ensure_test_file(
+        &dest2,
+        &[
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00,
+        ],
+    );
     let dest3 = copy_test_file("1965_ac_shelby_427_cobra_sc.glb", repo_path, "model.glb");
-    ensure_test_file(&dest3, b"glTF\x02\x00\x00\x00\x0C\x00\x00\x00\x00\x00\x00\x00");
+    ensure_test_file(
+        &dest3,
+        b"glTF\x02\x00\x00\x00\x0C\x00\x00\x00\x00\x00\x00\x00",
+    );
 
     // Create text file
     fs::write(repo_path.join("notes.txt"), "Project notes\n").unwrap();
@@ -508,7 +519,12 @@ fn e2e_branch_with_media_files() {
 
     // Add different media on feature branch (fallback to minimal JPEG on CI)
     let dest2 = copy_test_file("freepik__talk__72772.jpeg", repo_path, "feature_image.jpg");
-    ensure_test_file(&dest2, &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00]);
+    ensure_test_file(
+        &dest2,
+        &[
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00,
+        ],
+    );
     mediagit()
         .current_dir(repo_path)
         .args(["add", "feature_image.jpg"])
@@ -695,8 +711,16 @@ fn e2e_media_file_replacement() {
         .success();
 
     // Replace with different image (different fallback bytes to ensure content differs)
+    // Use fs::write unconditionally so the file is always overwritten (ensure_test_file skips
+    // existing files, which would leave image.jpg unchanged and break the status check below).
     let dest2 = copy_test_file("freepik__talk__72772.jpeg", repo_path, "image.jpg");
-    ensure_test_file(&dest2, &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00]);
+    fs::write(
+        &dest2,
+        [
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00,
+        ],
+    )
+    .expect("Failed to write replacement test file");
 
     // Check status
     mediagit()

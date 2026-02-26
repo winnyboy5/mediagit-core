@@ -25,5 +25,3 @@ futures = "0.3"
 # Internal dependencies
 mediagit-versioning = { path = "../mediagit-versioning" }
 
-[dev-dependencies]
-postcard = { workspace = true }
