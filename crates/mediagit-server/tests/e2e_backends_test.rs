@@ -24,7 +24,6 @@
 //!
 //! All storage backends must be running via Docker Compose:
 //! ```bash
-//! cd /mnt/d/own/saas/mediagit-core
 //! docker-compose -f docker-compose.test.yml up -d
 //! ```
 //!
@@ -41,7 +40,7 @@
 //!
 //! # Media File Testing
 //!
-//! Tests use real media files from /mnt/d/own/saas/mediagit-core/test-files/:
+//! Tests use real media files from the `test-files/` directory in the repo root:
 //! - Video: MP4, MOV (Big Buck Bunny clips)
 //! - Audio: FLAC, OGG, WAV
 //! - Images: JPEG, WebP
