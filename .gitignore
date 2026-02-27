@@ -195,5 +195,4 @@ test-archives/
 **/azurite_data/
 **/gcs_data/
 
-# Lefthook local overrides
-lefthook-local.yml
+# Husky-rs hooks (already in .husky/)
