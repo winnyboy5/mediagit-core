@@ -343,6 +343,32 @@ cargo nextest run
 > `RUST_TEST_THREADS=2` or `cargo test -- --test-threads=2` to stay under 4 GB.
 > See [Troubleshooting → Tests consuming too much RAM](#tests-consuming-too-much-ram).
 
+#### Low-Memory Build Tips (≤ 8 GB RAM)
+
+If your machine has limited memory, use these settings to prevent OOM during builds and tests:
+
+```bash
+# Cap parallel compile/link jobs (default is 1 per CPU core)
+export CARGO_BUILD_JOBS=1          # Safest — serialises all link steps
+
+# Cap test parallelism separately
+export RUST_TEST_THREADS=1         # Or =2 for a good middle-ground
+
+# Build only the crate you're working on (skip heavy deps you're not touching)
+cargo build -p mediagit-cli        # Just the CLI
+cargo test  -p mediagit-config     # Just the config crate
+
+# On Windows: the /INCREMENTAL:NO flag in .cargo/config.toml already
+# disables incremental linking, which halves peak link-step RAM.
+```
+
+**Why these help**: Each parallel link job can consume 1–4 GB of RAM. With
+`CARGO_BUILD_JOBS=1`, only one linker runs at a time, keeping peak memory
+under 4 GB even for the largest test binary (`e2e_backends_test`).
+
+> **Tip**: If you still see OOM errors, increase your swap/page file to 8 GB.
+> On Linux: `sudo fallocate -l 8G /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile`
+
 ### 5. Set Up Pre-Commit Hooks
 
 We use **[husky-rs](https://github.com/pplmx/husky-rs)** (pure Rust) for Git hooks that enforce code quality:

@@ -5,6 +5,7 @@
 # openssl-sys + reqwest + rustls simultaneously).
 jobs = 2
 
+# ── Linux ────────────────────────────────────────────────────────────
 [target.x86_64-unknown-linux-gnu]
 # Write DWARF debug info to separate .dwo files instead of embedding it in the
 # output binary.  This cuts linker peak RAM by 50–70% for debug builds, which is
@@ -12,7 +13,14 @@ jobs = 2
 # e2e_backends_test link step.
 rustflags = ["-C", "split-debuginfo=unpacked"]
 
+# ── Windows ──────────────────────────────────────────────────────────
+[target.x86_64-pc-windows-msvc]
+# Disable incremental linking on Windows; the default /INCREMENTAL causes
+# link.exe to memory-map the entire previous binary, doubling peak RAM usage
+# for large binaries like mediagit-server and mediagit-cli.
+rustflags = ["-C", "link-arg=/INCREMENTAL:NO"]
+
 [env]
-# Limit proptest cases to reduce memory usage.
+# Limit proptest cases to reduce memory usage during test execution.
 # Default is 256; lower values prevent additional OOM during test execution.
 PROPTEST_CASES = "32"

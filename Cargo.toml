@@ -99,10 +99,27 @@ clone_on_ref_ptr = "warn"
 large_futures = "warn"
 needless_pass_by_value = "warn"
 
+# ── Development profile ──────────────────────────────────────────────
+# Optimised for fast compile + low linker RAM on ≤16 GB machines.
+[profile.dev]
+debug = "line-tables-only"       # Minimal debug info → 5-10× smaller, faster link
+split-debuginfo = "unpacked"     # Write .dwo/.pdb per CU instead of one huge blob
+incremental = true               # Default, but explicit for documentation
+
+[profile.dev.build-override]
+opt-level = 0                    # Don't waste time optimising proc-macros / build scripts
+
+# ── Test profile ─────────────────────────────────────────────────────
+[profile.test]
+inherits = "dev"
+opt-level = 1                    # Slight optimisation so tests *run* faster; minor build cost
+
+# ── Release profile ─────────────────────────────────────────────────
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
+strip = "symbols"                # Strip debug symbols from release binary → smaller output
 
 # Optimized distribution profile (used by cargo-dist)
 [profile.dist]
