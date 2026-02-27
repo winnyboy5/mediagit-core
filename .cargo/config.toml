@@ -1,7 +1,18 @@
-[env]
-# Limit proptest cases to reduce memory usage
-# Default is 256, which can cause memory issues on Windows
-PROPTEST_CASES = "32"
+[build]
+# Limit parallel codegen/link jobs.
+# Default is one job per logical CPU; on machines with ≤16 GB RAM this causes OOM
+# when linking heavy test binaries (e2e_backends_test links aws-lc-sys + ring +
+# openssl-sys + reqwest + rustls simultaneously).
+jobs = 2
 
-# Note: For memory-constrained environments, also use:
-# cargo test -- --test-threads=2
+[target.x86_64-unknown-linux-gnu]
+# Write DWARF debug info to separate .dwo files instead of embedding it in the
+# output binary.  This cuts linker peak RAM by 50–70% for debug builds, which is
+# the main cause of "LLVM ERROR: IO failure: Cannot allocate memory" on the
+# e2e_backends_test link step.
+rustflags = ["-C", "split-debuginfo=unpacked"]
+
+[env]
+# Limit proptest cases to reduce memory usage.
+# Default is 256; lower values prevent additional OOM during test execution.
+PROPTEST_CASES = "32"
