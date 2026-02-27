@@ -58,7 +58,7 @@ Delta objects reference a base object and store only the difference.
 
 ## Chunk Manifests
 
-Large files are split into content-addressable chunks. The mapping of file → ordered list of chunks is stored as a `ChunkManifest` serialized with [bincode](https://github.com/bincode-org/bincode):
+Large files are split into content-addressable chunks. The mapping of file → ordered list of chunks is stored as a `ChunkManifest` serialized with [postcard](https://docs.rs/postcard) (compact binary format):
 
 ```
 .mediagit/manifests/<content-hash>.bin

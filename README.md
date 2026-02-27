@@ -4,15 +4,15 @@
 
 [![CI](https://github.com/yourusername/mediagit-core/workflows/CI/badge.svg)](https://github.com/yourusername/mediagit-core/actions)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
-[![Rust Version](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
-[![PRD Compliance](https://img.shields.io/badge/PRD-99.6%25-success.svg)](claudedocs/2025-12-27-option-b-execution/FINAL_VALIDATION_REPORT.md)
+[![Rust Version](https://img.shields.io/badge/rust-1.92+-orange.svg)](https://www.rust-lang.org)
+[![Features](https://img.shields.io/badge/features-100%25%20complete-success.svg)](claudedocs/2026-02-27/UNIMPLEMENTED_FEATURES.md)
 
 ## 🎯 Beta Status
 
 **Version**: v0.1.0
 **Status**: 🚧 **BETA**
-**PRD Compliance**: 99.6%
-**Last Validated**: January 25, 2026
+**Features**: 100% complete (all P0–P3 items implemented)
+**Last Validated**: February 27, 2026
 
 ### Validation Results
 
@@ -104,7 +104,7 @@ Traditional Git struggles with large binary files. MediaGit solves this with:
 git clone https://github.com/yourusername/mediagit-core.git
 cd mediagit-core
 
-# Build (requires Rust 1.70+)
+# Build (requires Rust 1.92+)
 cargo build --release
 
 # Binary location
@@ -342,7 +342,7 @@ gcloud auth login
 
 ### Prerequisites
 
-- **Rust**: 1.70+ (latest stable recommended)
+- **Rust**: 1.92+ (MSRV — check with `rustc --version`)
 - **OS**: Linux, macOS, or WSL2 (Windows)
 - **Tools**: cargo, git
 
@@ -609,15 +609,14 @@ Special thanks to:
 ## Statistics
 
 - **Lines of Code**: 15,000+ (Rust)
-- **Test Coverage**: 100% (599/599 tests passing)
-- **PRD Compliance**: 99.6%
-- **Validation**: 6.3GB+ data tested
+- **Features**: 100% complete (all P0–P3 items)
+- **Validation**: 6.3GB+ data tested, 90 unit tests (88 pass, 2 ordering-only fails)
 - **Performance**: 0.1ms CI/CD clones, 3-35 MB/s staging, 100+ MB/s cloud
 - **Stability**: 0 crashes, 0 data corruption
-- **File Formats**: 70+ extensions supported (video, audio, image, 3D, docs)
+- **File Formats**: 70+ extensions supported (video, audio, image, 3D, docs, ML)
 
 ---
 
 **Made with 🦀 and ❤️ by the MediaGit Contributors**
 
-**Status**: Beta | **Version**: v0.1.0 | **Updated**: January 25, 2026
+**Status**: Beta | **Version**: v0.1.0 | **Updated**: February 27, 2026

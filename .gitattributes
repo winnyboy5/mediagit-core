@@ -1,0 +1,37 @@
+# Normalize line endings on checkout
+* text=auto
+
+# Shell scripts and hooks must always use LF (CRLF breaks the shebang on Linux/WSL2)
+*.sh        text eol=lf
+.husky/*    text eol=lf
+
+# Rust source
+*.rs        text eol=lf
+*.toml      text eol=lf
+
+# Docs and config
+*.md        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.json      text eol=lf
+
+# Binary files — no line-ending conversion
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.webp      binary
+*.mp4       binary
+*.mov       binary
+*.avi       binary
+*.wav       binary
+*.flac      binary
+*.mp3       binary
+*.psd       binary
+*.ai        binary
+*.pdf       binary
+*.zip       binary
+*.gz        binary
+*.tar       binary
+*.zst       binary

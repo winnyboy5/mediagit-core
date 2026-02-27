@@ -30,7 +30,7 @@ cargo build --release --bin mediagit --bin mediagit-server
 cargo test --workspace --all-features
 
 # 7. Check MSRV still passes
-cargo +1.91.0 check --workspace --all-features
+cargo +1.92.0 check --workspace --all-features
 
 # 8. Commit and push
 git add Cargo.toml Cargo.lock CHANGELOG.md

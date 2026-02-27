@@ -11,7 +11,7 @@ Build MediaGit from source when:
 
 ### All platforms
 
-- **Rust 1.91.0 or later** — install via [rustup.rs](https://rustup.rs)
+- **Rust 1.92.0 or later** — install via [rustup.rs](https://rustup.rs)
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   rustup update
@@ -166,10 +166,10 @@ See [Windows ARM64 Installation](./windows-arm64.md).
 
 ## Checking MSRV
 
-MediaGit's Minimum Supported Rust Version (MSRV) is **1.91.0**. Verify compatibility:
+MediaGit's Minimum Supported Rust Version (MSRV) is **1.92.0**. Verify compatibility:
 
 ```bash
-cargo +1.91.0 check --workspace --all-features
+cargo +1.92.0 check --workspace --all-features
 ```
 
 ---
