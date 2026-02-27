@@ -9,6 +9,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_VERSION: "1.92.0"
+  CARGO_INCREMENTAL: "0"        # Skip incremental artefacts on ephemeral CI runners
+  CARGO_BUILD_JOBS: "2"         # Cap parallelism to avoid OOM on 7 GB GitHub runners
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -92,6 +94,10 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lint
 
       - name: Check formatting
         run: cargo fmt --all -- --check
