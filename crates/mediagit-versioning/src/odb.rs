@@ -2605,6 +2605,33 @@ impl ObjectDatabase {
         Ok(seeded)
     }
 
+    /// Seed the similarity detector from a full blob object (non-chunked files).
+    ///
+    /// Used to enable cross-invocation delta encoding for files that are too small
+    /// to be chunked (< 5 MB). After calling this with the previous version's OID,
+    /// the next `write_with_delta` call can find a similar base and produce a delta.
+    pub async fn seed_similarity_from_blob(&self, oid: &Oid, filename: &str) -> anyhow::Result<()> {
+        let data = self.read(oid).await?;
+        let mut meta = crate::similarity::ObjectMetadata::new(
+            *oid,
+            data.len(),
+            crate::ObjectType::Blob,
+            if filename.is_empty() {
+                None
+            } else {
+                Some(filename.to_string())
+            },
+        );
+        meta.generate_samples(&data);
+        self.similarity_detector.write().await.add_object(meta);
+        debug!(
+            oid = %oid,
+            filename,
+            "Seeded similarity detector from previous blob"
+        );
+        Ok(())
+    }
+
     /// Get chunk data by chunk ID
     ///
     /// Reads and decompresses a single chunk, reconstructing from delta if needed.

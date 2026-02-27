@@ -16,7 +16,7 @@ mod output;
 mod progress;
 mod repo;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use commands::*;
@@ -230,8 +230,15 @@ fn main() {
 }
 
 async fn async_main(cli: Cli) -> Result<()> {
+    // Suppress INFO logs for machine-readable output modes (--json, --prometheus)
+    // to avoid mixing log lines with structured data even when stderr is redirected
+    let machine_readable = matches!(
+        &cli.command,
+        Some(Commands::Stats(cmd)) if cmd.json || cmd.prometheus
+    );
+
     // Initialize structured logging
-    if !cli.quiet {
+    if !cli.quiet && !machine_readable {
         let level = if cli.verbose { "debug" } else { "info" };
         let format = LogFormat::Pretty; // Pretty format for CLI output
 
@@ -252,9 +259,18 @@ async fn async_main(cli: Cli) -> Result<()> {
         }
     }
 
-    // Set repository path if provided
-    if let Some(repo_path) = cli.repository {
-        std::env::set_var("MEDIAGIT_REPO", repo_path);
+    // Set repository path if provided via -C flag.
+    // Change working directory so that:
+    //   - relative path arguments (e.g. `mediagit -C /repo add file.mp4`) resolve correctly
+    //   - `init` without a positional path creates the repo in the -C directory
+    if let Some(repo_path) = &cli.repository {
+        std::env::set_current_dir(repo_path)
+            .with_context(|| format!("Cannot change to directory '{}'", repo_path))?;
+        // Set MEDIAGIT_REPO to the resolved absolute path so find_repo_root() works
+        // even when called from code that doesn't inspect current_dir() directly.
+        if let Ok(cwd) = std::env::current_dir() {
+            std::env::set_var("MEDIAGIT_REPO", cwd);
+        }
     }
 
     // Execute command

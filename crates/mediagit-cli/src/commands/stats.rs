@@ -375,8 +375,9 @@ impl StatsCmd {
                     // Chunk file (stored as "chunks/{hex}" → encoded as "chunks__{hex}")
                     stats.chunk_count += 1;
                     stats.chunk_bytes += file_size;
-                } else if filename.starts_with("chunk-deltas__") {
-                    // Delta file or delta metadata
+                } else if filename.starts_with("chunk-deltas__") || filename.starts_with("deltas__")
+                {
+                    // Delta file (chunk-level or object-level) or delta metadata
                     if !filename.ends_with(".meta") {
                         stats.delta_count += 1;
                         stats.delta_bytes += file_size;
