@@ -1,4 +1,4 @@
-// Copyright (C) 2026  winnyboy5
+﻿// Copyright (C) 2026  winnyboy5
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -509,10 +509,16 @@ impl AddCmd {
 
         let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-        // Seed similarity detector from previous version's manifest
+        // Seed similarity detector from previous version (manifest for chunked, blob for small)
         if let Some(head_oid) = head_files.get(&relative_path) {
             if let Ok(Some(old_manifest)) = odb.get_chunk_manifest(head_oid).await {
                 let _ = odb.seed_similarity_from_manifest(&old_manifest).await;
+            } else if delta_enabled {
+                // Non-chunked file: seed from the previous full blob so write_with_delta
+                // can find a similar base across invocations.  We seed regardless of
+                // whether the current file will ultimately use delta, because we haven't
+                // read the file yet and the actual delta decision is made later.
+                let _ = odb.seed_similarity_from_blob(head_oid, filename).await;
             }
         }
 
@@ -771,7 +777,7 @@ impl AddCmd {
             // Text-based formats: Excellent delta candidates
             "txt" | "md" | "json" | "xml" | "html" | "css" | "js" | "ts" | "py" | "rs" | "go"
             | "java" | "c" | "cpp" | "h" | "hpp" => true,
-            // Uncompressed formats: Good delta candidates
+            // Uncompressed raster/audio: Good delta candidates
             "psd" | "tif" | "tiff" | "bmp" | "wav" | "aiff" => true,
             // Video (raw/uncompressed): Good delta candidates
             "avi" | "mov" => true,
@@ -781,6 +787,12 @@ impl AddCmd {
             "jpg" | "jpeg" | "png" | "webp" | "gif" => false,
             // Archives: No delta benefit (skip)
             "zip" | "gz" | "bz2" | "7z" | "rar" => false,
+            // 3D text-based formats: Excellent delta candidates
+            "obj" | "gltf" | "dae" | "ply" | "stl" | "stp" | "step" => true,
+            // 3D binary formats: Moderate delta candidates
+            "glb" | "fbx" | "blend" | "abc" | "usd" | "usda" | "usdc" => data.len() > 1024 * 1024,
+            // Vector/PostScript text formats: Good delta candidates
+            "eps" | "svg" => true,
             // Unknown: Conservative approach (allow if large)
             _ => data.len() > 50 * 1024 * 1024,
         }
