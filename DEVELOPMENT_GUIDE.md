@@ -1,6 +1,6 @@
 # MediaGit-Core Development Guide
 **Version**: 0.1.0
-**Last Updated**: February 19, 2026
+**Last Updated**: February 27, 2026
 
 Complete setup guide for MediaGit development - from beginner setup to production deployment.
 
@@ -164,7 +164,7 @@ Need collaboration OR remote backups?
 ```bash
 curl --proto='=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
-rustc --version  # Must show 1.91.0 or higher
+rustc --version  # Must show 1.92.0 or higher
 ```
 
 ### Step 2: Clone and Build
@@ -224,9 +224,9 @@ cd /path/to/your/project
 
 ### System Requirements
 - **OS**: Linux, macOS, Windows (native or WSL2)
-- **Rust**: 1.91.0+ (required - check with `rustc --version`)
+- **Rust**: 1.92.0+ (required - check with `rustc --version`)
 - **CPU**: 2+ cores
-- **RAM**: 4GB minimum, 8GB+ recommended
+- **RAM**: 8GB minimum (for `RUST_TEST_THREADS=2`), 16GB+ recommended (for default parallel tests)
 - **Disk**: 10GB+ free space
 
 ### Required Tools
@@ -237,7 +237,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
 
 # Verify installation
-rustc --version  # Must be 1.91.0 or higher
+rustc --version  # Must be 1.92.0 or higher
 cargo --version
 
 # Install build essentials
@@ -318,18 +318,30 @@ ls -lh target/debug/mediagit-server
 ### 4. Run Tests
 
 ```bash
-# Run all tests
-cargo test
+# Run all tests (memory-constrained: limit threads — see note below)
+RUST_TEST_THREADS=2 cargo test --workspace
+
+# Run all tests on high-RAM machines (default: one thread per CPU)
+cargo test --workspace
 
 # Run specific test suite
-cargo test --test medieval_village_test
+cargo test --test cli_add_test
 
 # Run with output
-cargo test -- --nocapture
+cargo test --workspace -- --nocapture
+
+# Run only ignored large-file / benchmark tests
+cargo test --workspace -- --ignored --nocapture
 
 # Fast testing with nextest (if installed)
 cargo nextest run
 ```
+
+> **Memory note**: `cargo test` defaults to one thread per logical CPU. Each thread spawns
+> a full mediagit process with its own 1000-object Moka cache, parallel chunk workers, and
+> file buffers. On 8-core machines this can peak at **8–16 GB RAM**. Use
+> `RUST_TEST_THREADS=2` or `cargo test -- --test-threads=2` to stay under 4 GB.
+> See [Troubleshooting → Tests consuming too much RAM](#tests-consuming-too-much-ram).
 
 ### 5. Set Up Pre-Commit Hooks
 
@@ -1481,8 +1493,8 @@ project_id = "my-project"
 ### Test Suite
 
 ```bash
-# Run all integration tests
-cargo test
+# Run all integration tests (limit threads to avoid OOM — see Troubleshooting)
+RUST_TEST_THREADS=2 cargo test --workspace
 
 # Run specific backend test
 cargo test test_s3_backend
@@ -1490,7 +1502,7 @@ cargo test test_azure_backend
 cargo test test_gcs_backend
 
 # Run with logging
-RUST_LOG=debug cargo test -- --nocapture
+RUST_LOG=debug cargo test --workspace -- --nocapture
 ```
 
 ### Manual Testing
@@ -1541,13 +1553,116 @@ ls -lh target/debug/mediagit  # Verify it exists
 
 **Problem**: Build fails with compiler errors or feature compatibility issues
 
-**Solution**: Update Rust to 1.91.0+
+**Solution**: Update Rust to 1.92.0+
 ```bash
 rustup update
-rustc --version  # Must show 1.91.0 or higher
+rustc --version  # Must show 1.92.0 or higher
 ```
 
-**Why this happens**: MediaGit uses features from Rust 1.91.0+ that aren't in older versions.
+**Why this happens**: MediaGit uses features from Rust 1.92.0+ that aren't in older versions.
+
+#### Tests consuming too much RAM
+
+**Problem**: `cargo test --workspace` triggers OOM, swap usage spikes, or system becomes
+unresponsive during the test run.
+
+**Root causes** (identified 2026-02-27):
+
+| Cause | Impact |
+|-------|--------|
+| Default thread count = CPU count | Multiplies all other costs |
+| Moka cache: 1000-object count limit (not byte-bounded) | Up to GB per ODB on large chunks |
+| 3-layer nested parallelism (test × files × chunk workers) | Hundreds of concurrent async tasks |
+| `write_chunked_parallel` reads entire file into RAM | 50–500 MB per concurrent test |
+
+**Quick fix — limit test threads**:
+```bash
+# Option 1: environment variable (persists for the shell session)
+RUST_TEST_THREADS=2 cargo test --workspace
+
+# Option 2: explicit flag
+cargo test --workspace -- --test-threads=2
+
+# Option 3: nextest (better memory isolation, parallel-safe)
+cargo nextest run --workspace --test-threads 2
+```
+
+**Memory budget by thread count** (approximate, 8-core machine):
+
+| `--test-threads` | Peak RAM | Suitable for |
+|-----------------|----------|--------------|
+| 1 | ~1–2 GB | CI, 4 GB machines |
+| 2 | ~2–4 GB | 8 GB machines (recommended) |
+| 4 | ~4–8 GB | 16 GB machines |
+| default (8+) | ~8–16 GB | 32 GB+ machines |
+
+**Skip large/ignored tests** (they are all `#[ignore]` and excluded by default):
+```bash
+cargo test --workspace  # already excludes #[ignore] tests
+# To run them explicitly (high memory):
+cargo test --workspace -- --ignored
+```
+
+**Why this happens**: Each test thread spawns a separate `mediagit` subprocess containing:
+- A `ObjectDatabase` with Moka cache (1000 objects by count — not bounded by bytes)
+- `num_cpus::get().clamp(2, 16)` async chunk workers per large file
+- `num_cpus::get().min(8)` concurrent file tasks during `add`
+- The entire file content loaded into RAM before chunking for files under 100 MB
+
+#### Git hooks not executing
+
+**Problem**: `git commit` (or `git push`) fails with:
+```
+fatal: cannot exec '.husky/pre-commit': No such file or directory
+```
+
+This failure has two independent causes that can occur on any platform (Windows, WSL2,
+Linux, macOS, and CI runners that unzip archives instead of using `git clone`).
+
+**Cause 1 — CRLF line endings**
+
+When `core.autocrlf` is enabled (the Windows git default) or the repo is unzipped on
+Windows, git converts `\n` → `\r\n` in text files. The hook shebang becomes
+`#!/bin/sh\r`, and the kernel cannot find an interpreter named `sh` + carriage-return.
+
+Diagnose:
+```bash
+file .husky/pre-commit   # reports "with CRLF line terminators" if affected
+```
+
+Fix:
+```bash
+sed -i 's/\r//' .husky/pre-commit .husky/pre-push .husky/commit-msg
+```
+
+**Cause 2 — Missing execute bit**
+
+On filesystems that do not store Unix permissions (NTFS, FAT32, some SMB shares,
+CI artifact extracts), the `+x` bit may be absent after cloning or extraction.
+
+Diagnose:
+```bash
+ls -la .husky/   # pre-commit should show -rwxr-xr-x, not -rw-r--r--
+```
+
+Fix:
+```bash
+chmod +x .husky/pre-commit .husky/pre-push .husky/commit-msg
+git update-index --chmod=+x .husky/pre-commit .husky/pre-push .husky/commit-msg
+```
+
+`git update-index --chmod=+x` records mode `100755` in the index so the bit is
+preserved for future `git checkout` operations.
+
+**Combined one-shot fix** (safe to run on any platform after a fresh clone):
+```bash
+sed -i 's/\r//' .husky/pre-commit .husky/pre-push .husky/commit-msg
+chmod +x        .husky/pre-commit .husky/pre-push .husky/commit-msg
+git update-index --chmod=+x .husky/pre-commit .husky/pre-push .husky/commit-msg
+```
+
+The `.gitattributes` file in the repo root enforces `eol=lf` for `.husky/*`, which
+prevents CRLF recurrence on subsequent checkouts once applied.
 
 #### "Server not responding" error
 
@@ -1921,5 +2036,5 @@ find . -name "*.tmp" -o -name "*.log" -o -name "*~"
 ---
 
 **Version**: 0.1.0
-**Last Updated**: February 19, 2026
+**Last Updated**: February 27, 2026
 **Maintained by**: MediaGit Core Team

@@ -6,7 +6,7 @@ A complete guide for setting up MediaGit for development and contribution.
 
 | Tool | Version | Purpose |
 |------|---------|---------|
-| Rust | 1.91.0+ | Language toolchain (MSRV) |
+| Rust | 1.92.0+ | Language toolchain (MSRV) |
 | Docker | 20.10+ | Integration test emulators |
 | Git | 2.x | Source code management |
 
@@ -17,7 +17,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://rustup.rs | sh
 source ~/.cargo/env
 
 # Install the exact MSRV toolchain
-rustup toolchain install 1.91.0
+rustup toolchain install 1.92.0
 rustup component add rustfmt clippy
 ```
 
@@ -103,8 +103,21 @@ docker compose -f docker-compose.test.yml down -v
 ### MSRV Check
 
 ```bash
-cargo +1.91.0 check --workspace --all-features
+cargo +1.92.0 check --workspace --all-features
 ```
+
+## Git Hooks (husky-rs)
+
+Git hooks are managed by **[husky-rs](https://github.com/pplmx/husky-rs)** and installed automatically when you `cargo build`:
+
+| Hook | What it enforces |
+|------|-----------------|
+| `pre-commit` | `cargo fmt --check`, `cargo clippy --workspace`, AGPL license headers, 5MB file size limit, conflict markers |
+| `pre-push` | `cargo test --workspace` — all tests must pass |
+| `commit-msg` | [Conventional Commits](https://www.conventionalcommits.org/) format, max 72 chars |
+
+To bypass hooks for a WIP: `git commit --no-verify`
+To skip in CI: set `NO_HUSKY_HOOKS=1` before building.
 
 ## Code Quality
 
@@ -230,11 +243,64 @@ mdbook serve
 
 ## WSL2 Notes
 
-When developing on Windows via WSL2 with the repository on an NTFS mount (`/mnt/d/...`):
-- Cargo's fingerprinting may not detect file changes reliably
-- Prefer cloning to a WSL2-native path (`~/projects/mediagit-core`) for reliable incremental builds
+When developing on Windows via WSL2 with the repository on an NTFS mount:
+- Cargo's fingerprinting may not detect file changes reliably on NTFS mounts
+- Prefer cloning to a WSL2-native path (e.g. `~/projects/mediagit-core`) for reliable incremental builds
 - The Linux ELF binary at `target/release/mediagit` works from WSL2
 - The Windows PE binary (`mediagit.exe`) requires building from Windows `cmd` or PowerShell
+
+## Troubleshooting
+
+### Git hooks not executing
+
+`git commit` (or `git push`) fails with:
+
+```
+fatal: cannot exec '.husky/pre-commit': No such file or directory
+```
+
+This can happen on any platform — Windows, Linux, macOS, or CI — when either of two
+conditions are present:
+
+**Cause 1 — CRLF line endings**
+
+`git config core.autocrlf true` (the Windows git default) converts `\n` → `\r\n` in
+text files on checkout. The hook shebang becomes `#!/bin/sh\r`, and the kernel cannot
+find an interpreter named `sh` followed by a carriage return.
+
+Diagnose: `file .husky/pre-commit` — reports "with CRLF line terminators" if affected.
+
+Fix:
+```bash
+sed -i 's/\r//' .husky/pre-commit .husky/pre-push .husky/commit-msg
+```
+
+**Cause 2 — Missing execute bit**
+
+Filesystems that do not track Unix permissions (NTFS, FAT32, SMB shares, CI artifact
+zip extracts) may drop the `+x` bit on checkout.
+
+Diagnose: `ls -la .husky/` — hook files should be `-rwxr-xr-x`, not `-rw-r--r--`.
+
+Fix:
+```bash
+chmod +x .husky/pre-commit .husky/pre-push .husky/commit-msg
+git update-index --chmod=+x .husky/pre-commit .husky/pre-push .husky/commit-msg
+```
+
+`git update-index --chmod=+x` records mode `100755` in the git index so the bit is
+preserved for future checkouts on the same machine.
+
+**Combined fix** (safe to run on any platform after a fresh clone):
+
+```bash
+sed -i 's/\r//' .husky/pre-commit .husky/pre-push .husky/commit-msg
+chmod +x        .husky/pre-commit .husky/pre-push .husky/commit-msg
+git update-index --chmod=+x .husky/pre-commit .husky/pre-push .husky/commit-msg
+```
+
+The `.gitattributes` file at the repo root enforces `eol=lf` for `.husky/*`, which
+prevents the CRLF issue from recurring on subsequent checkouts.
 
 ## Getting Help
 

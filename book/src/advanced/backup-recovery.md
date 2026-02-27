@@ -9,7 +9,7 @@ A MediaGit repository consists of:
 ```
 .mediagit/
 ├── objects/          # Content-addressable object database (chunks, trees, commits)
-├── manifests/        # Chunk manifests (bincode format) — index of all chunks per file
+├── manifests/        # Chunk manifests (postcard format) — index of all chunks per file
 ├── refs/             # Branch and tag references
 ├── HEAD              # Current branch pointer
 ├── config.toml       # Repository configuration

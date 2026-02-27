@@ -1,8 +1,15 @@
 #!/bin/sh
 # Pre-push hook: runs the full test suite before pushing
+#
+# Thread limit: cargo test defaults to one thread per CPU, which can exhaust RAM
+# on developer machines (each thread allocates its own ODB cache + chunk workers).
+# RUST_TEST_THREADS=2 keeps peak usage under ~4 GB on 8 GB machines.
+# Override with: RUST_TEST_THREADS=N git push  (or set NO_TEST_THREAD_LIMIT=1 to disable)
 
-echo "🧪 Running tests before push..."
-cargo test --workspace
+THREADS="${RUST_TEST_THREADS:-2}"
+
+echo "🧪 Running tests before push (--test-threads=${THREADS})..."
+cargo test --workspace -- --test-threads="${THREADS}"
 if [ $? -ne 0 ]; then
   echo "❌ Tests failed. Push aborted."
   exit 1
