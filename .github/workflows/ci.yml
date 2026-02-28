@@ -9,8 +9,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_VERSION: "1.92.0"
-  CARGO_INCREMENTAL: "0"        # Skip incremental artefacts on ephemeral CI runners
-  CARGO_BUILD_JOBS: "2"         # Cap parallelism to avoid OOM on 7 GB GitHub runners
+  # CARGO_INCREMENTAL: "0"        # Skip incremental artefacts on ephemeral CI runners
+  # CARGO_BUILD_JOBS: "2"         # Cap parallelism to avoid OOM on 7 GB GitHub runners
 
 concurrency:
   group: ci-${{ github.ref }}
