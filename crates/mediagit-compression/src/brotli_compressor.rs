@@ -110,10 +110,8 @@ impl Compressor for BrotliCompressor {
             let compressed_data = &data[4..];
             let mut output = Vec::with_capacity(data.len() * 2);
 
-            match brotli::BrotliDecompress(
-                &mut std::io::Cursor::new(compressed_data),
-                &mut output,
-            ) {
+            match brotli::BrotliDecompress(&mut std::io::Cursor::new(compressed_data), &mut output)
+            {
                 Ok(_) => Ok(output),
                 Err(e) => Err(CompressionError::decompression_failed(format!(
                     "brotli decompression failed: {}",
@@ -128,6 +126,7 @@ impl Compressor for BrotliCompressor {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

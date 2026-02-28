@@ -82,11 +82,11 @@ impl Default for AdaptiveTransferConfig {
     /// Default configuration optimized for GB-scale operations.
     fn default() -> Self {
         Self {
-            base_chunk_size: 4 * 1024 * 1024,              // 4MB
-            max_chunk_size: 64 * 1024 * 1024,              // 64MB
-            tb_scale_threshold: TB_SCALE_THRESHOLD,        // 100GB
+            base_chunk_size: 4 * 1024 * 1024,       // 4MB
+            max_chunk_size: 64 * 1024 * 1024,       // 64MB
+            tb_scale_threshold: TB_SCALE_THRESHOLD, // 100GB
             connect_timeout: Duration::from_secs(30),
-            read_timeout: Some(Duration::from_secs(300)),  // 5 min per chunk
+            read_timeout: Some(Duration::from_secs(300)), // 5 min per chunk
             write_timeout: Some(Duration::from_secs(300)), // 5 min per chunk
             keepalive_interval: Duration::from_secs(30),
             checkpoint_interval: Duration::from_secs(60),
@@ -102,15 +102,15 @@ impl AdaptiveTransferConfig {
     /// Uses infinite timeouts, larger chunks, and more frequent keepalives.
     pub fn tb_scale() -> Self {
         Self {
-            base_chunk_size: 16 * 1024 * 1024,             // 16MB
-            max_chunk_size: 64 * 1024 * 1024,              // 64MB
+            base_chunk_size: 16 * 1024 * 1024, // 16MB
+            max_chunk_size: 64 * 1024 * 1024,  // 64MB
             tb_scale_threshold: TB_SCALE_THRESHOLD,
             connect_timeout: Duration::from_secs(60),
-            read_timeout: None,                             // Infinite
-            write_timeout: None,                            // Infinite
-            keepalive_interval: Duration::from_secs(15),    // More frequent
-            checkpoint_interval: Duration::from_secs(30),   // More frequent checkpoints
-            max_retries: 5,                                 // More retries
+            read_timeout: None,                           // Infinite
+            write_timeout: None,                          // Infinite
+            keepalive_interval: Duration::from_secs(15),  // More frequent
+            checkpoint_interval: Duration::from_secs(30), // More frequent checkpoints
+            max_retries: 5,                               // More retries
             retry_base_delay: Duration::from_secs(2),
         }
     }
@@ -120,8 +120,8 @@ impl AdaptiveTransferConfig {
     /// Smaller timeouts for quick failure detection.
     pub fn fast_local() -> Self {
         Self {
-            base_chunk_size: 8 * 1024 * 1024,              // 8MB
-            max_chunk_size: 32 * 1024 * 1024,              // 32MB
+            base_chunk_size: 8 * 1024 * 1024, // 8MB
+            max_chunk_size: 32 * 1024 * 1024, // 32MB
             tb_scale_threshold: TB_SCALE_THRESHOLD,
             connect_timeout: Duration::from_secs(5),
             read_timeout: Some(Duration::from_secs(30)),
@@ -319,10 +319,7 @@ mod tests {
         let config = AdaptiveTransferConfig::default();
 
         // 1GB at 100MB/s = 10 seconds
-        let duration = config.estimated_duration(
-            1024 * 1024 * 1024,
-            100 * 1024 * 1024,
-        );
+        let duration = config.estimated_duration(1024 * 1024 * 1024, 100 * 1024 * 1024);
         assert_eq!(duration, Duration::from_secs(10));
     }
 

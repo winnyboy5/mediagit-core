@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 MediaGit Contributors
 
@@ -48,11 +62,7 @@ fn test_init_with_path() {
     let temp_dir = TempDir::new().unwrap();
     let repo_path = temp_dir.path().join("new-repo");
 
-    mediagit()
-        .arg("init")
-        .arg(&repo_path)
-        .assert()
-        .success();
+    mediagit().arg("init").arg(&repo_path).assert().success();
 
     assert!(repo_path.join(".mediagit").exists());
 }
@@ -177,9 +187,15 @@ fn test_init_directory_structure() {
 
     // Check core directories exist
     assert!(mediagit_dir.exists(), ".mediagit should exist");
-    assert!(mediagit_dir.join("objects").exists(), "objects dir should exist");
+    assert!(
+        mediagit_dir.join("objects").exists(),
+        "objects dir should exist"
+    );
     assert!(mediagit_dir.join("refs").exists(), "refs dir should exist");
-    assert!(mediagit_dir.join("refs/heads").exists(), "refs/heads should exist");
+    assert!(
+        mediagit_dir.join("refs/heads").exists(),
+        "refs/heads should exist"
+    );
 
     // Check HEAD file exists
     assert!(mediagit_dir.join("HEAD").exists(), "HEAD file should exist");

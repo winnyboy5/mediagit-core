@@ -1,18 +1,33 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use axum::{
     extract::{Path, State},
-    http::{StatusCode, HeaderMap},
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    Extension,
-    Json,
+    Extension, Json,
 };
 use bytes::Bytes;
 use mediagit_protocol::{
-    RefInfo, RefUpdateRequest, RefUpdateResponse, RefUpdateResult, RefsResponse,
-    WantRequest, WantResponse,
+    RefInfo, RefUpdateRequest, RefUpdateResponse, RefUpdateResult, RefsResponse, WantRequest,
+    WantResponse,
 };
 use mediagit_security::auth::AuthUser;
-use mediagit_storage::{LocalBackend, StorageBackend, MinIOBackend, AzureBackend, GcsBackend};
-use mediagit_versioning::{Commit, ObjectDatabase, Oid, ObjectType, Ref, RefDatabase, Tree, StreamingPackWriter};
+use mediagit_storage::{AzureBackend, GcsBackend, LocalBackend, MinIOBackend, StorageBackend};
+use mediagit_versioning::{
+    Commit, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, StreamingPackWriter, Tree,
+};
 use std::path::Path as StdPath;
 use std::sync::Arc;
 use tokio::io::duplex;
@@ -71,13 +86,14 @@ async fn create_storage_backend(
             } else {
                 repo_path.join(&fs_config.base_path)
             };
-            tracing::debug!("Using filesystem storage backend: {}", storage_path.display());
-            let storage = LocalBackend::new(&storage_path)
-                .await
-                .map_err(|e| {
-                    tracing::error!("Failed to initialize filesystem backend: {}", e);
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?;
+            tracing::debug!(
+                "Using filesystem storage backend: {}",
+                storage_path.display()
+            );
+            let storage = LocalBackend::new(&storage_path).await.map_err(|e| {
+                tracing::error!("Failed to initialize filesystem backend: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
             Arc::new(storage)
         }
         mediagit_config::StorageConfig::S3(s3_config) => {
@@ -125,14 +141,20 @@ async fn create_storage_backend(
             }
         }
         mediagit_config::StorageConfig::Azure(azure_config) => {
-            tracing::info!("Using Azure storage backend: container={}", azure_config.container);
+            tracing::info!(
+                "Using Azure storage backend: container={}",
+                azure_config.container
+            );
 
             // Use connection string if provided, otherwise use account key
             let storage = if let Some(conn_str) = &azure_config.connection_string {
                 AzureBackend::with_connection_string(&azure_config.container, conn_str)
                     .await
                     .map_err(|e| {
-                        tracing::error!("Failed to initialize Azure backend with connection string: {}", e);
+                        tracing::error!(
+                            "Failed to initialize Azure backend with connection string: {}",
+                            e
+                        );
                         StatusCode::INTERNAL_SERVER_ERROR
                     })?
             } else if let Some(account_key) = &azure_config.account_key {
@@ -163,7 +185,12 @@ async fn create_storage_backend(
             let credentials_path = gcs_config
                 .credentials_path
                 .as_deref()
-                .or_else(|| std::env::var("GOOGLE_APPLICATION_CREDENTIALS").ok().as_deref().map(|_| ""))
+                .or_else(|| {
+                    std::env::var("GOOGLE_APPLICATION_CREDENTIALS")
+                        .ok()
+                        .as_deref()
+                        .map(|_| "")
+                })
                 .unwrap_or("");
 
             let storage = if credentials_path.is_empty() {
@@ -171,7 +198,10 @@ async fn create_storage_backend(
                 GcsBackend::with_default_credentials(&gcs_config.project_id, &gcs_config.bucket)
                     .await
                     .map_err(|e| {
-                        tracing::error!("Failed to initialize GCS backend with default credentials: {}", e);
+                        tracing::error!(
+                            "Failed to initialize GCS backend with default credentials: {}",
+                            e
+                        );
                         StatusCode::INTERNAL_SERVER_ERROR
                     })?
             } else {
@@ -220,7 +250,7 @@ pub async fn get_refs(
 
     // Initialize storage and refdb
     let _storage = create_storage_backend(&repo_path).await?;
-    let refdb = RefDatabase::new(&repo_path.join(".mediagit"));
+    let refdb = RefDatabase::new(repo_path.join(".mediagit"));
 
     // List all refs by scanning refs directory
     let refs_dir = repo_path.join(".mediagit/refs");
@@ -255,7 +285,10 @@ pub async fn get_refs(
                         // Construct ref name relative to refs_dir
                         // e.g., refs/heads/main, refs/heads/feature/branch, refs/remotes/origin/main
                         if let Ok(relative_path) = path.strip_prefix(&refs_dir) {
-                            let ref_name = format!("refs/{}", relative_path.to_string_lossy().replace('\\', "/"));
+                            let ref_name = format!(
+                                "refs/{}",
+                                relative_path.to_string_lossy().replace('\\', "/")
+                            );
 
                             if let Ok(r) = refdb.read(&ref_name).await {
                                 ref_infos.push(RefInfo {
@@ -303,9 +336,7 @@ pub async fn upload_pack(
     use futures::stream::TryStreamExt;
     use tokio_util::io::StreamReader;
 
-    let stream = body
-        .into_data_stream()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+    let stream = body.into_data_stream().map_err(std::io::Error::other);
 
     let stream_reader = StreamReader::new(stream);
 
@@ -328,12 +359,10 @@ pub async fn upload_pack(
         })?;
 
         // Write through ODB which handles compression and correct storage paths
-        let stored_oid = odb.write(obj_type, &data)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to write object {} to ODB: {}", oid, e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
+        let stored_oid = odb.write(obj_type, &data).await.map_err(|e| {
+            tracing::error!("Failed to write object {} to ODB: {}", oid, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
         if stored_oid != oid {
             tracing::warn!(
@@ -349,7 +378,10 @@ pub async fn upload_pack(
         }
     }
 
-    tracing::info!("Successfully unpacked {} objects (streaming via ODB)", object_count);
+    tracing::info!(
+        "Successfully unpacked {} objects (streaming via ODB)",
+        object_count
+    );
     Ok(StatusCode::OK)
 }
 
@@ -385,7 +417,9 @@ pub async fn download_pack(
                 if entry.repo != repo {
                     tracing::error!(
                         "Request ID {} was for repo '{}' but pack requested for '{}'",
-                        request_id, entry.repo, repo
+                        request_id,
+                        entry.repo,
+                        repo
                     );
                     return Err(StatusCode::BAD_REQUEST);
                 }
@@ -416,8 +450,7 @@ pub async fn download_pack(
     // Recursively collect all objects reachable from wanted OIDs
     // This properly handles nested trees (subdirectories) and parent commits (history)
     for oid_str in &want_list {
-        let oid = Oid::from_hex(oid_str)
-            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        let oid = Oid::from_hex(oid_str).map_err(|_| StatusCode::BAD_REQUEST)?;
 
         // Use recursive collection to get all commits, trees, and blobs
         collect_objects_recursive(&odb, oid, &mut objects_to_pack, &mut seen_objects)
@@ -428,7 +461,11 @@ pub async fn download_pack(
             })?;
     }
 
-    tracing::info!("Collecting {} objects for pack (from {} requested)", objects_to_pack.len(), want_list.len());
+    tracing::info!(
+        "Collecting {} objects for pack (from {} requested)",
+        objects_to_pack.len(),
+        want_list.len()
+    );
 
     // Filter out chunked objects - they'll be transferred separately
     let mut chunked_objects: Vec<String> = Vec::new();
@@ -451,8 +488,8 @@ pub async fn download_pack(
 
     // Use streaming pack generation for O(64KB) memory instead of O(pack_size)
     // This prevents server OOM when generating large packs
-    use axum::response::Response;
     use axum::http::header;
+    use axum::response::Response;
 
     // Create 64KB buffered duplex channel for streaming
     let (writer, reader) = duplex(64 * 1024);
@@ -472,26 +509,28 @@ pub async fn download_pack(
     tokio::spawn(async move {
         let temp_dir = std::env::temp_dir();
         let result: Result<(), anyhow::Error> = async {
-            let mut pack_writer = StreamingPackWriter::new(
-                writer,
-                object_count,
-                &temp_dir,
-            ).await
+            let mut pack_writer = StreamingPackWriter::new(writer, object_count, &temp_dir)
+                .await
                 .map_err(|e| anyhow::anyhow!("Failed to create streaming pack writer: {}", e))?;
 
             for oid in objects_to_stream {
                 let obj_data = odb_clone.read(&oid).await?;
                 let obj_type = detect_object_type(&obj_data).unwrap_or(ObjectType::Blob);
-                pack_writer.write_object(oid, obj_type, &obj_data).await
+                pack_writer
+                    .write_object(oid, obj_type, &obj_data)
+                    .await
                     .map_err(|e| anyhow::anyhow!("Failed to write object {}: {}", oid, e))?;
             }
 
-            pack_writer.finalize().await
+            pack_writer
+                .finalize()
+                .await
                 .map_err(|e| anyhow::anyhow!("Failed to finalize pack: {}", e))?;
-            
+
             tracing::info!("Streaming pack generation completed successfully");
             Ok(())
-        }.await;
+        }
+        .await;
 
         if let Err(e) = result {
             tracing::error!(error = %e, "Streaming pack generation failed");
@@ -515,7 +554,8 @@ pub async fn download_pack(
         );
     }
 
-    response_builder.body(body)
+    response_builder
+        .body(body)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
@@ -555,13 +595,19 @@ async fn collect_objects_recursive(
 
     // Determine type and recursively collect children
     let obj_type = detect_object_type(&obj_data).unwrap_or(ObjectType::Blob);
-    
+
     match obj_type {
         ObjectType::Commit => {
             // Parse commit to get tree OID and parent commits using Commit's own deserializer
             if let Ok(commit) = Commit::deserialize(&obj_data) {
                 // Collect the tree
-                Box::pin(collect_objects_recursive(odb, commit.tree, collected, visited)).await?;
+                Box::pin(collect_objects_recursive(
+                    odb,
+                    commit.tree,
+                    collected,
+                    visited,
+                ))
+                .await?;
 
                 // Collect parent commits (REQUIRED for complete history)
                 for parent in &commit.parents {
@@ -573,7 +619,10 @@ async fn collect_objects_recursive(
             // Parse tree to get entry OIDs using Tree's own deserializer
             if let Ok(tree) = Tree::deserialize(&obj_data) {
                 for entry in tree.iter() {
-                    Box::pin(collect_objects_recursive(odb, entry.oid, collected, visited)).await?;
+                    Box::pin(collect_objects_recursive(
+                        odb, entry.oid, collected, visited,
+                    ))
+                    .await?;
                 }
             }
         }
@@ -635,7 +684,7 @@ pub async fn update_refs(
 
     // Initialize storage and refdb
     let _storage = create_storage_backend(&repo_path).await?;
-    let refdb = RefDatabase::new(&repo_path.join(".mediagit"));
+    let refdb = RefDatabase::new(repo_path.join(".mediagit"));
 
     let mut results = Vec::new();
     let mut all_success = true;
@@ -749,8 +798,7 @@ pub async fn update_refs(
         }
 
         // Update the ref
-        let new_oid = Oid::from_hex(&update.new_oid)
-            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        let new_oid = Oid::from_hex(&update.new_oid).map_err(|_| StatusCode::BAD_REQUEST)?;
         let ref_update = Ref::new_direct(update.name.clone(), new_oid);
 
         match refdb.write(&ref_update).await {
@@ -788,12 +836,12 @@ fn detect_object_type(data: &[u8]) -> Option<ObjectType> {
     if Commit::deserialize(data).is_ok() {
         return Some(ObjectType::Commit);
     }
-    
+
     // Try to deserialize as Tree using its own deserializer
     if Tree::deserialize(data).is_ok() {
         return Some(ObjectType::Tree);
     }
-    
+
     // If neither, it's a Blob (or at minimum treat it as one)
     Some(ObjectType::Blob)
 }
@@ -803,7 +851,7 @@ fn detect_object_type(data: &[u8]) -> Option<ObjectType> {
 // ============================================================================
 
 /// POST /:repo/chunks/check - Check which chunks exist on remote
-/// 
+///
 /// Request body: JSON array of chunk IDs (hex strings)
 /// Response: JSON array of MISSING chunk IDs
 pub async fn check_chunks_exist(
@@ -813,11 +861,7 @@ pub async fn check_chunks_exist(
     Json(chunk_ids): Json<Vec<String>>,
 ) -> Result<Json<Vec<String>>, StatusCode> {
     // Check write permission
-    check_permission(
-        auth_user.as_deref(),
-        "repo:write",
-        state.is_auth_enabled(),
-    )?;
+    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
 
     tracing::debug!(repo = %repo, chunk_count = chunk_ids.len(), "Checking chunk existence");
 
@@ -859,7 +903,7 @@ pub async fn check_chunks_exist(
 }
 
 /// PUT /:repo/chunks/:chunk_id - Upload a single chunk
-/// 
+///
 /// Request body: Raw compressed chunk data
 pub async fn upload_chunk(
     Path((repo, chunk_id)): Path<(String, String)>,
@@ -868,11 +912,7 @@ pub async fn upload_chunk(
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
     // Check write permission
-    check_permission(
-        auth_user.as_deref(),
-        "repo:write",
-        state.is_auth_enabled(),
-    )?;
+    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
 
     tracing::debug!(
         repo = %repo,
@@ -903,7 +943,7 @@ pub async fn upload_chunk(
 }
 
 /// PUT /:repo/manifests/:oid - Upload a chunk manifest
-/// 
+///
 /// Request body: Serialized ChunkManifest
 pub async fn upload_manifest(
     Path((repo, oid)): Path<(String, String)>,
@@ -912,11 +952,7 @@ pub async fn upload_manifest(
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
     // Check write permission
-    check_permission(
-        auth_user.as_deref(),
-        "repo:write",
-        state.is_auth_enabled(),
-    )?;
+    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
 
     tracing::debug!(
         repo = %repo,
@@ -951,7 +987,7 @@ pub async fn upload_manifest(
 // ============================================================================
 
 /// GET /:repo/chunks/:chunk_id - Download a single chunk
-/// 
+///
 /// Returns raw compressed chunk data
 pub async fn download_chunk(
     Path((repo, chunk_id)): Path<(String, String)>,
@@ -959,11 +995,7 @@ pub async fn download_chunk(
     auth_user: Option<Extension<AuthUser>>,
 ) -> Result<impl IntoResponse, StatusCode> {
     // Check read permission
-    check_permission(
-        auth_user.as_deref(),
-        "repo:read",
-        state.is_auth_enabled(),
-    )?;
+    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
 
     tracing::debug!(repo = %repo, chunk_id = %chunk_id, "Downloading chunk");
 
@@ -993,7 +1025,7 @@ pub async fn download_chunk(
 }
 
 /// GET /:repo/manifests/:oid - Download a chunk manifest
-/// 
+///
 /// Returns serialized ChunkManifest
 pub async fn download_manifest(
     Path((repo, oid)): Path<(String, String)>,
@@ -1001,11 +1033,7 @@ pub async fn download_manifest(
     auth_user: Option<Extension<AuthUser>>,
 ) -> Result<impl IntoResponse, StatusCode> {
     // Check read permission
-    check_permission(
-        auth_user.as_deref(),
-        "repo:read",
-        state.is_auth_enabled(),
-    )?;
+    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
 
     tracing::debug!(repo = %repo, oid = %oid, "Downloading manifest");
 

@@ -13,15 +13,17 @@
 
 //! Verify command - Quick integrity verification
 
+use crate::repo::create_storage_backend;
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_storage::StorageBackend;
-use mediagit_versioning::{Commit, FsckChecker, FsckOptions, IssueSeverity, ObjectDatabase, Oid, RefDatabase};
+use mediagit_versioning::{
+    Commit, FsckChecker, FsckOptions, IssueSeverity, ObjectDatabase, Oid, RefDatabase,
+};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
-use crate::repo::create_storage_backend;
 
 /// Verify repository integrity with quick checks
 ///
@@ -107,12 +109,15 @@ impl VerifyCmd {
         }
 
         // Create storage backend
-        let storage = create_storage_backend(&repo_path).await
+        let storage = create_storage_backend(&repo_path)
+            .await
             .context("Failed to open repository. Is this a MediaGit repository?")?;
 
         // Handle commit range verification
         if self.start.is_some() || self.end.is_some() {
-            return self.verify_commit_range(&mediagit_dir, storage.clone()).await;
+            return self
+                .verify_commit_range(&mediagit_dir, storage.clone())
+                .await;
         }
 
         // Create FSCK checker (verify is a lightweight wrapper)
@@ -122,10 +127,11 @@ impl VerifyCmd {
         let mut options = if self.quick {
             FsckOptions::quick()
         } else {
-            let mut opts = FsckOptions::default();
-            opts.check_connectivity = false; // Verify skips connectivity
-            opts.check_dangling = false; // Verify doesn't check dangling
-            opts
+            FsckOptions {
+                check_connectivity: false,
+                check_dangling: false,
+                ..Default::default()
+            }
         };
 
         options.verbose = self.verbose || self.detailed;
@@ -148,10 +154,7 @@ impl VerifyCmd {
         }
 
         if !self.quiet {
-            println!(
-                "{} All verifications passed",
-                style("✅").green().bold()
-            );
+            println!("{} All verifications passed", style("✅").green().bold());
         }
 
         Ok(())
@@ -225,7 +228,10 @@ impl VerifyCmd {
         storage: Arc<dyn StorageBackend>,
     ) -> Result<()> {
         let refdb = RefDatabase::new(mediagit_dir);
-        let odb = Arc::new(ObjectDatabase::with_smart_compression(storage.clone(), 1000));
+        let odb = Arc::new(ObjectDatabase::with_smart_compression(
+            storage.clone(),
+            1000,
+        ));
 
         // Resolve start commit (defaults to root)
         let start_oid = if let Some(ref start) = self.start {
@@ -262,7 +268,9 @@ impl VerifyCmd {
         }
 
         // Collect commits in range
-        let commits_in_range = self.collect_commits_in_range(&odb, start_oid, end_oid).await?;
+        let commits_in_range = self
+            .collect_commits_in_range(&odb, start_oid, end_oid)
+            .await?;
 
         if !self.quiet {
             println!("  Commits to verify: {}", commits_in_range.len());

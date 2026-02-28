@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! Audit logging integration tests
 //!
 //! Tests the audit logging system with MediaGit server to verify that
@@ -81,7 +95,7 @@ async fn test_audit_path_traversal_attempt() {
 
     // Attempt path traversal - should trigger audit log
     let resp = client
-        .get(&server.url("/../etc/passwd/info/refs"))
+        .get(server.url("/../etc/passwd/info/refs"))
         .send()
         .await
         .unwrap();
@@ -104,7 +118,7 @@ async fn test_audit_absolute_path_attempt() {
 
     // Attempt absolute path - should trigger audit log
     let resp = client
-        .get(&server.url("/etc/passwd/info/refs"))
+        .get(server.url("/etc/passwd/info/refs"))
         .send()
         .await
         .unwrap();
@@ -125,7 +139,7 @@ async fn test_audit_invalid_characters() {
 
     // Repository name with invalid characters - should trigger audit log
     let resp = client
-        .get(&server.url("/repo$test/info/refs"))
+        .get(server.url("/repo$test/info/refs"))
         .send()
         .await
         .unwrap();
@@ -194,7 +208,7 @@ async fn test_audit_oversized_request() {
     let oversized_content_length = "3000000000"; // 3GB, exceeds 2GB limit
 
     let resp = client
-        .post(&server.url("/test-repo/objects/pack"))
+        .post(server.url("/test-repo/objects/pack"))
         .header("content-length", oversized_content_length)
         .body("dummy")
         .send()
@@ -215,7 +229,7 @@ async fn test_audit_normal_request_no_log() {
     // Normal request to non-existent repo - should NOT trigger security audit logs
     // (only NOT_FOUND, no security violation)
     let resp = client
-        .get(&server.url("/valid-repo/info/refs"))
+        .get(server.url("/valid-repo/info/refs"))
         .send()
         .await
         .unwrap();
@@ -233,17 +247,13 @@ async fn test_audit_multiple_violations() {
 
     // Multiple different security violations
     let violations = vec![
-        "/../etc/passwd/info/refs",       // Path traversal
-        "/repo$bad/info/refs",             // Invalid characters
-        "/repo\0null/info/refs",           // Null byte (URL encoded)
+        "/../etc/passwd/info/refs", // Path traversal
+        "/repo$bad/info/refs",      // Invalid characters
+        "/repo\0null/info/refs",    // Null byte (URL encoded)
     ];
 
     for violation_path in violations {
-        let resp = client
-            .get(&server.url(violation_path))
-            .send()
-            .await
-            .unwrap();
+        let resp = client.get(server.url(violation_path)).send().await.unwrap();
 
         // All should be rejected
         assert!(
@@ -280,7 +290,10 @@ async fn test_audit_event_serialization() {
 
     // Verify we can deserialize
     let deserialized: AuditEvent = serde_json::from_str(&json).unwrap();
-    assert_eq!(deserialized.event_type, AuditEventType::PathTraversalAttempt);
+    assert_eq!(
+        deserialized.event_type,
+        AuditEventType::PathTraversalAttempt
+    );
     assert_eq!(deserialized.client_ip, Some(ip));
 }
 
@@ -295,24 +308,14 @@ async fn test_audit_helper_functions() {
     audit::log_authentication_failed(Some(ip), Some("user123".to_string()), "invalid password");
     audit::log_authentication_success(ip, "user123".to_string());
     audit::log_rate_limit_exceeded(ip, "/test".to_string(), "GET".to_string());
-    audit::log_path_traversal_attempt(
-        ip,
-        "repo".to_string(),
-        "/../etc".to_string(),
-        "contains ..",
-    );
+    audit::log_path_traversal_attempt(ip, "repo".to_string(), "/../etc".to_string(), "contains ..");
     audit::log_invalid_request(
         ip,
         "/test".to_string(),
         "POST".to_string(),
         "oversized content",
     );
-    audit::log_suspicious_pattern(
-        ip,
-        "/test".to_string(),
-        "GET".to_string(),
-        "rapid requests",
-    );
+    audit::log_suspicious_pattern(ip, "/test".to_string(), "GET".to_string(), "rapid requests");
     audit::log_access_denied(
         ip,
         Some("user123".to_string()),

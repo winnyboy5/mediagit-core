@@ -866,7 +866,7 @@ merge = "refs/heads/main"
 
 ## Build & Distribution
 
-- **MSRV**: Rust 1.91.0
+- **MSRV**: Rust 1.92.0
 - **License**: AGPL-3.0
 - **Release profile**: `opt-level = 3`, LTO, `codegen-units = 1`
 - **Distribution**: cargo-dist (v0.26.0) with GitHub CI

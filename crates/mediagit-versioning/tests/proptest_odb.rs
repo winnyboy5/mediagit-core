@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! Property-Based Tests for Object Database
 //!
 //! Uses proptest to verify ODB properties with random data:
@@ -28,7 +42,10 @@ fn proptest_store_retrieve_roundtrip() {
                 let odb = ObjectDatabase::new(storage, 100);
 
                 // Store data
-                let oid = odb.write(mediagit_versioning::ObjectType::Blob, &data).await.unwrap();
+                let oid = odb
+                    .write(mediagit_versioning::ObjectType::Blob, &data)
+                    .await
+                    .unwrap();
 
                 // Retrieve data
                 let retrieved = odb.read(&oid).await.unwrap();
@@ -78,10 +95,16 @@ fn proptest_deduplication() {
                 let odb = ObjectDatabase::new(storage, 100);
 
                 // Store once
-                let oid1 = odb.write(mediagit_versioning::ObjectType::Blob, &data).await.unwrap();
+                let oid1 = odb
+                    .write(mediagit_versioning::ObjectType::Blob, &data)
+                    .await
+                    .unwrap();
 
                 // Store again (should be deduplicated - same OID)
-                let oid2 = odb.write(mediagit_versioning::ObjectType::Blob, &data).await.unwrap();
+                let oid2 = odb
+                    .write(mediagit_versioning::ObjectType::Blob, &data)
+                    .await
+                    .unwrap();
 
                 // Should return same OID (deduplication)
                 prop_assert_eq!(oid1, oid2);
@@ -100,27 +123,33 @@ fn proptest_cache_consistency() {
     });
 
     runner
-        .run(&prop::collection::vec(arb_binary_data(), 1..20), |datasets| {
-            tokio::runtime::Runtime::new().unwrap().block_on(async {
-                let storage = Arc::new(MockBackend::new());
-                let odb = ObjectDatabase::new(storage, 10); // Small cache to test eviction
+        .run(
+            &prop::collection::vec(arb_binary_data(), 1..20),
+            |datasets| {
+                tokio::runtime::Runtime::new().unwrap().block_on(async {
+                    let storage = Arc::new(MockBackend::new());
+                    let odb = ObjectDatabase::new(storage, 10); // Small cache to test eviction
 
-                // Store all data
-                let mut oids = Vec::new();
-                for data in &datasets {
-                    let oid = odb.write(mediagit_versioning::ObjectType::Blob, data).await.unwrap();
-                    oids.push((oid, data.clone()));
-                }
+                    // Store all data
+                    let mut oids = Vec::new();
+                    for data in &datasets {
+                        let oid = odb
+                            .write(mediagit_versioning::ObjectType::Blob, data)
+                            .await
+                            .unwrap();
+                        oids.push((oid, data.clone()));
+                    }
 
-                // Retrieve all data (some from cache, some from storage)
-                for (oid, expected_data) in &oids {
-                    let retrieved = odb.read(&oid).await.unwrap();
-                    prop_assert_eq!(expected_data, &retrieved);
-                }
+                    // Retrieve all data (some from cache, some from storage)
+                    for (oid, expected_data) in &oids {
+                        let retrieved = odb.read(oid).await.unwrap();
+                        prop_assert_eq!(expected_data, &retrieved);
+                    }
 
-                Ok(())
-            })
-        })
+                    Ok(())
+                })
+            },
+        )
         .unwrap();
 }
 
@@ -132,7 +161,10 @@ async fn proptest_empty_data() {
 
     let empty_data = Vec::new();
 
-    let oid = odb.write(mediagit_versioning::ObjectType::Blob, &empty_data).await.unwrap();
+    let oid = odb
+        .write(mediagit_versioning::ObjectType::Blob, &empty_data)
+        .await
+        .unwrap();
     let retrieved = odb.read(&oid).await.unwrap();
 
     assert_eq!(empty_data, retrieved);
@@ -140,7 +172,7 @@ async fn proptest_empty_data() {
 
 /// Property: Large data (>1MB) should work correctly
 #[tokio::test]
-#[ignore]  // Run with --ignored flag due to high memory usage
+#[ignore] // Run with --ignored flag due to high memory usage
 async fn proptest_large_data() {
     let storage = Arc::new(MockBackend::new());
     let odb = ObjectDatabase::new(storage, 100);
@@ -148,7 +180,10 @@ async fn proptest_large_data() {
     // 1MB of data (reduced from 11MB for memory efficiency)
     let large_data: Vec<u8> = (0..1_000_000).map(|i| (i % 256) as u8).collect();
 
-    let oid = odb.write(mediagit_versioning::ObjectType::Blob, &large_data).await.unwrap();
+    let oid = odb
+        .write(mediagit_versioning::ObjectType::Blob, &large_data)
+        .await
+        .unwrap();
     let retrieved = odb.read(&oid).await.unwrap();
 
     assert_eq!(large_data.len(), retrieved.len());
@@ -163,7 +198,10 @@ async fn proptest_concurrent_reads() {
 
     let data = vec![1u8, 2, 3, 4, 5];
 
-    let oid = odb.write(mediagit_versioning::ObjectType::Blob, &data).await.unwrap();
+    let oid = odb
+        .write(mediagit_versioning::ObjectType::Blob, &data)
+        .await
+        .unwrap();
 
     // Spawn multiple concurrent reads
     let mut handles = vec![];

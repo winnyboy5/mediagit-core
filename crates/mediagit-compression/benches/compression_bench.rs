@@ -11,12 +11,13 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
 
+#![allow(clippy::unwrap_used)]
 //! Compression benchmarks comparing Zstd vs Brotli vs Adaptive
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mediagit_compression::{
-    adaptive::AdaptiveCompressor, BrotliCompressor, Compressor, CompressionLevel, ZstdCompressor,
-    PerObjectTypeCompressor, CompressionProfile, ObjectType, TypeAwareCompressor,
+    adaptive::AdaptiveCompressor, BrotliCompressor, CompressionLevel, CompressionProfile,
+    Compressor, ObjectType, PerObjectTypeCompressor, TypeAwareCompressor, ZstdCompressor,
 };
 
 /// Generate test data with specified pattern
@@ -25,16 +26,13 @@ fn generate_test_data(size: usize, pattern: &str) -> Vec<u8> {
         "text" => {
             // Repetitive text data (highly compressible)
             let text = "The quick brown fox jumps over the lazy dog. ".as_bytes();
-            (0..size)
-                .map(|i| text[i % text.len()])
-                .collect()
+            (0..size).map(|i| text[i % text.len()]).collect()
         }
         "json" => {
             // JSON-like structured data
-            let json = r#"{"id":123,"name":"MediaGit","size":1024,"hash":"abc123def456"}"#.as_bytes();
-            (0..size)
-                .map(|i| json[i % json.len()])
-                .collect()
+            let json =
+                r#"{"id":123,"name":"MediaGit","size":1024,"hash":"abc123def456"}"#.as_bytes();
+            (0..size).map(|i| json[i % json.len()]).collect()
         }
         "random" => {
             // Random data (incompressible)
@@ -48,9 +46,7 @@ fn generate_test_data(size: usize, pattern: &str) -> Vec<u8> {
                 "METADATA={'key':'value'}\n"
             )
             .as_bytes();
-            (0..size)
-                .map(|i| metadata[i % metadata.len()])
-                .collect()
+            (0..size).map(|i| metadata[i % metadata.len()]).collect()
         }
         _ => vec![0u8; size],
     }
@@ -167,10 +163,7 @@ fn benchmark_levels(c: &mut Criterion) {
 fn benchmark_data_types(c: &mut Criterion) {
     let mut group = c.benchmark_group("data_types");
 
-    let sizes = vec![
-        ("1kb", 1024),
-        ("100kb", 100 * 1024),
-    ];
+    let sizes = vec![("1kb", 1024), ("100kb", 100 * 1024)];
 
     for (name, size) in sizes {
         let text_data = black_box(generate_test_data(size, "text"));
@@ -240,12 +233,8 @@ fn benchmark_adaptive(c: &mut Criterion) {
 
     // Test 4: Random data (optimal: Store)
     let random = black_box(generate_test_data(10 * 1024, "random"));
-    group.bench_function("adaptive_random", |b| {
-        b.iter(|| adaptive.compress(&random))
-    });
-    group.bench_function("static_zstd_random", |b| {
-        b.iter(|| zstd.compress(&random))
-    });
+    group.bench_function("adaptive_random", |b| b.iter(|| adaptive.compress(&random)));
+    group.bench_function("static_zstd_random", |b| b.iter(|| zstd.compress(&random)));
 
     // Test 5: Mixed workload (show overall benefit)
     group.bench_function("adaptive_mixed_workload", |b| {

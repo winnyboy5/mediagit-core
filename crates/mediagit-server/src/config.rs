@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -108,8 +122,8 @@ impl ServerConfig {
         let config_path = PathBuf::from(config_path);
 
         if config_path.exists() {
-            let content = std::fs::read_to_string(&config_path)
-                .context("Failed to read config file")?;
+            let content =
+                std::fs::read_to_string(&config_path).context("Failed to read config file")?;
 
             toml::from_str(&content).context("Failed to parse config file")
         } else {
@@ -145,9 +159,13 @@ impl ServerConfig {
             builder = builder.self_signed("localhost");
         } else {
             // Use provided certificate paths
-            let cert_path = self.tls_cert_path.as_ref()
+            let cert_path = self
+                .tls_cert_path
+                .as_ref()
                 .context("TLS certificate path is required when not using self-signed")?;
-            let key_path = self.tls_key_path.as_ref()
+            let key_path = self
+                .tls_key_path
+                .as_ref()
                 .context("TLS key path is required when not using self-signed")?;
 
             builder = builder.certificate_paths(cert_path, key_path);
@@ -160,7 +178,9 @@ impl ServerConfig {
     #[cfg(not(feature = "tls"))]
     pub fn build_tls_config(&self) -> Result<()> {
         if self.enable_tls {
-            anyhow::bail!("TLS is enabled in configuration but not compiled in. Rebuild with --features tls");
+            anyhow::bail!(
+                "TLS is enabled in configuration but not compiled in. Rebuild with --features tls"
+            );
         }
         Ok(())
     }

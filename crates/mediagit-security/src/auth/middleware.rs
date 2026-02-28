@@ -1,9 +1,22 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! Axum middleware for authentication
 //!
 //! Provides HTTP middleware for JWT and API key authentication.
 
 use axum::{
-    async_trait,
     extract::{FromRequestParts, Request},
     http::{request::Parts, HeaderMap, StatusCode},
     middleware::Next,
@@ -27,7 +40,6 @@ pub struct AuthUser {
 }
 
 /// Implement FromRequestParts for AuthUser to enable it as an extractor
-#[async_trait]
 impl<S> FromRequestParts<S> for AuthUser
 where
     S: Send + Sync,
@@ -178,6 +190,7 @@ pub fn require_permission(auth_user: &AuthUser, permission: &str) -> Result<(), 
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::clone_on_ref_ptr)]
 mod tests {
     use super::*;
     use axum::http::{HeaderMap, HeaderValue};
@@ -218,16 +231,17 @@ mod tests {
         // Generate API key
         let permissions = vec!["repo:write".to_string()];
         let (plaintext_key, _) = api_key_auth
-            .generate_key("user123".to_string(), "Test Key".to_string(), permissions.clone())
+            .generate_key(
+                "user123".to_string(),
+                "Test Key".to_string(),
+                permissions.clone(),
+            )
             .await
             .unwrap();
 
         // Create headers with API key
         let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-api-key",
-            HeaderValue::from_str(&plaintext_key).unwrap(),
-        );
+        headers.insert("x-api-key", HeaderValue::from_str(&plaintext_key).unwrap());
 
         // Authenticate
         let auth_user = auth_layer.authenticate(&headers).await.unwrap();

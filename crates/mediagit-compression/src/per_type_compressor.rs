@@ -17,12 +17,13 @@
 //! strategies for each object type, with configurable profiles for different
 //! use cases (speed, balanced, maximum compression).
 
-use crate::{
-    BrotliCompressor, CompressionResult, Compressor,
-    ZlibCompressor, ZstdCompressor,
+use crate::metrics::{
+    CompressionAlgorithm as MetricsAlgorithm, CompressionLevel as MetricsLevel, CompressionMetrics,
 };
-use crate::smart_compressor::{CompressionStrategy, ObjectCategory, ObjectType, TypeAwareCompressor};
-use crate::metrics::{CompressionMetrics, CompressionAlgorithm as MetricsAlgorithm, CompressionLevel as MetricsLevel};
+use crate::smart_compressor::{
+    CompressionStrategy, ObjectCategory, ObjectType, TypeAwareCompressor,
+};
+use crate::{BrotliCompressor, CompressionResult, Compressor, ZlibCompressor, ZstdCompressor};
 use crate::{CompressionAlgorithm, CompressionLevel};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -66,9 +67,7 @@ impl CompressionProfile {
             ObjectCategory::Text | ObjectCategory::Document => {
                 CompressionStrategy::Zstd(CompressionLevel::Fast)
             }
-            ObjectCategory::GitObject => {
-                CompressionStrategy::Zlib(CompressionLevel::Fast)
-            }
+            ObjectCategory::GitObject => CompressionStrategy::Zlib(CompressionLevel::Fast),
             ObjectCategory::Archive if obj_type == ObjectType::Tar => {
                 CompressionStrategy::Zstd(CompressionLevel::Fast)
             }
@@ -86,15 +85,9 @@ impl CompressionProfile {
             ObjectCategory::Image | ObjectCategory::Audio => {
                 CompressionStrategy::Zstd(CompressionLevel::Best)
             }
-            ObjectCategory::Text => {
-                CompressionStrategy::Brotli(CompressionLevel::Best)
-            }
-            ObjectCategory::Document => {
-                CompressionStrategy::Brotli(CompressionLevel::Best)
-            }
-            ObjectCategory::GitObject => {
-                CompressionStrategy::Zlib(CompressionLevel::Best)
-            }
+            ObjectCategory::Text => CompressionStrategy::Brotli(CompressionLevel::Best),
+            ObjectCategory::Document => CompressionStrategy::Brotli(CompressionLevel::Best),
+            ObjectCategory::GitObject => CompressionStrategy::Zlib(CompressionLevel::Best),
             ObjectCategory::Archive if obj_type == ObjectType::Tar => {
                 CompressionStrategy::Zstd(CompressionLevel::Best)
             }
@@ -250,7 +243,11 @@ impl PerObjectTypeCompressor {
 
     /// Get statistics for all object types
     pub fn all_stats(&self) -> HashMap<ObjectType, PerTypeStats> {
-        self.stats.lock().ok().map(|s| s.clone()).unwrap_or_default()
+        self.stats
+            .lock()
+            .ok()
+            .map(|s| s.clone())
+            .unwrap_or_default()
     }
 
     /// Reset all statistics
@@ -268,17 +265,20 @@ impl PerObjectTypeCompressor {
         };
         let mut output = String::new();
 
-        output.push_str("# HELP mediagit_compression_per_type_ratio Compression ratio by object type\n");
+        output.push_str(
+            "# HELP mediagit_compression_per_type_ratio Compression ratio by object type\n",
+        );
         output.push_str("# TYPE mediagit_compression_per_type_ratio gauge\n");
         for (obj_type, stat) in stats.iter() {
             output.push_str(&format!(
                 "mediagit_compression_per_type_ratio{{type=\"{:?}\"}} {}\n",
-                obj_type,
-                stat.avg_ratio
+                obj_type, stat.avg_ratio
             ));
         }
 
-        output.push_str("\n# HELP mediagit_compression_per_type_throughput Throughput by object type (MB/s)\n");
+        output.push_str(
+            "\n# HELP mediagit_compression_per_type_throughput Throughput by object type (MB/s)\n",
+        );
         output.push_str("# TYPE mediagit_compression_per_type_throughput gauge\n");
         for (obj_type, stat) in stats.iter() {
             output.push_str(&format!(
@@ -288,13 +288,14 @@ impl PerObjectTypeCompressor {
             ));
         }
 
-        output.push_str("\n# HELP mediagit_compression_per_type_operations Total operations by object type\n");
+        output.push_str(
+            "\n# HELP mediagit_compression_per_type_operations Total operations by object type\n",
+        );
         output.push_str("# TYPE mediagit_compression_per_type_operations counter\n");
         for (obj_type, stat) in stats.iter() {
             output.push_str(&format!(
                 "mediagit_compression_per_type_operations{{type=\"{:?}\"}} {}\n",
-                obj_type,
-                stat.compressions
+                obj_type, stat.compressions
             ));
         }
 
@@ -326,20 +327,23 @@ impl TypeAwareCompressor for PerObjectTypeCompressor {
         };
         let level = match strategy {
             CompressionStrategy::Store => MetricsLevel::Fast,
-            CompressionStrategy::Zlib(l) | CompressionStrategy::Zstd(l) | CompressionStrategy::Brotli(l) => {
-                match l {
-                    CompressionLevel::Fast => MetricsLevel::Fast,
-                    CompressionLevel::Default => MetricsLevel::Default,
-                    CompressionLevel::Best => MetricsLevel::Best,
-                }
-            }
+            CompressionStrategy::Zlib(l)
+            | CompressionStrategy::Zstd(l)
+            | CompressionStrategy::Brotli(l) => match l {
+                CompressionLevel::Fast => MetricsLevel::Fast,
+                CompressionLevel::Default => MetricsLevel::Default,
+                CompressionLevel::Best => MetricsLevel::Best,
+            },
             CompressionStrategy::Delta => MetricsLevel::Default,
         };
         metrics.record_compression(data, &result, duration, algorithm, level);
 
         // Update per-type stats
         if let Ok(mut stats) = self.stats.lock() {
-            stats.entry(obj_type).or_insert_with(PerTypeStats::default).record(&metrics);
+            stats
+                .entry(obj_type)
+                .or_insert_with(PerTypeStats::default)
+                .record(&metrics);
         }
 
         Ok(result)
@@ -361,7 +365,11 @@ impl TypeAwareCompressor for PerObjectTypeCompressor {
         self.strategy_for_type(obj_type)
     }
 
-    fn compress_typed_with_size(&self, data: &[u8], obj_type: ObjectType) -> CompressionResult<Vec<u8>> {
+    fn compress_typed_with_size(
+        &self,
+        data: &[u8],
+        obj_type: ObjectType,
+    ) -> CompressionResult<Vec<u8>> {
         let start = Instant::now();
         let strategy = CompressionStrategy::for_object_type_with_size(obj_type, data.len());
         let result = self.compress_with_strategy(data, strategy)?;
@@ -378,26 +386,33 @@ impl TypeAwareCompressor for PerObjectTypeCompressor {
         };
         let level = match strategy {
             CompressionStrategy::Store => MetricsLevel::Fast,
-            CompressionStrategy::Zlib(l) | CompressionStrategy::Zstd(l) | CompressionStrategy::Brotli(l) => {
-                match l {
-                    CompressionLevel::Fast => MetricsLevel::Fast,
-                    CompressionLevel::Default => MetricsLevel::Default,
-                    CompressionLevel::Best => MetricsLevel::Best,
-                }
-            }
+            CompressionStrategy::Zlib(l)
+            | CompressionStrategy::Zstd(l)
+            | CompressionStrategy::Brotli(l) => match l {
+                CompressionLevel::Fast => MetricsLevel::Fast,
+                CompressionLevel::Default => MetricsLevel::Default,
+                CompressionLevel::Best => MetricsLevel::Best,
+            },
             CompressionStrategy::Delta => MetricsLevel::Default,
         };
         metrics.record_compression(data, &result, duration, algorithm, level);
 
         // Update per-type stats
         if let Ok(mut stats) = self.stats.lock() {
-            stats.entry(obj_type).or_insert_with(PerTypeStats::default).record(&metrics);
+            stats
+                .entry(obj_type)
+                .or_insert_with(PerTypeStats::default)
+                .record(&metrics);
         }
 
         Ok(result)
     }
 
-    fn strategy_for_type_with_size(&self, obj_type: ObjectType, data_size: usize) -> CompressionStrategy {
+    fn strategy_for_type_with_size(
+        &self,
+        obj_type: ObjectType,
+        data_size: usize,
+    ) -> CompressionStrategy {
         CompressionStrategy::for_object_type_with_size(obj_type, data_size)
     }
 }
@@ -414,6 +429,7 @@ impl Compressor for PerObjectTypeCompressor {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -429,11 +445,20 @@ mod tests {
         let text_strategy_max = max.strategy_for_type(ObjectType::Text);
 
         // Speed should use Zstd Fast
-        assert_eq!(text_strategy_speed, CompressionStrategy::Zstd(CompressionLevel::Fast));
+        assert_eq!(
+            text_strategy_speed,
+            CompressionStrategy::Zstd(CompressionLevel::Fast)
+        );
         // Balanced should use Brotli Default (delegated from for_object_type, changed from Zstd)
-        assert_eq!(text_strategy_balanced, CompressionStrategy::Brotli(CompressionLevel::Default));
+        assert_eq!(
+            text_strategy_balanced,
+            CompressionStrategy::Brotli(CompressionLevel::Default)
+        );
         // Max should use Brotli Best (maximum compression for text)
-        assert_eq!(text_strategy_max, CompressionStrategy::Brotli(CompressionLevel::Best));
+        assert_eq!(
+            text_strategy_max,
+            CompressionStrategy::Brotli(CompressionLevel::Best)
+        );
     }
 
     #[test]
@@ -441,7 +466,9 @@ mod tests {
         let compressor = PerObjectTypeCompressor::new();
         let text_data = b"Hello, World! ".repeat(100);
 
-        let compressed = compressor.compress_typed(&text_data, ObjectType::Text).unwrap();
+        let compressed = compressor
+            .compress_typed(&text_data, ObjectType::Text)
+            .unwrap();
         assert!(compressed.len() < text_data.len());
 
         let decompressed = compressor.decompress_typed(&compressed).unwrap();
@@ -453,7 +480,9 @@ mod tests {
         let compressor = PerObjectTypeCompressor::with_profile(CompressionProfile::Speed);
         let image_data = vec![0x42u8; 10000];
 
-        let compressed = compressor.compress_typed(&image_data, ObjectType::Tiff).unwrap();
+        let compressed = compressor
+            .compress_typed(&image_data, ObjectType::Tiff)
+            .unwrap();
         let decompressed = compressor.decompress_typed(&compressed).unwrap();
         assert_eq!(image_data, decompressed);
     }
@@ -463,10 +492,15 @@ mod tests {
         let mut compressor = PerObjectTypeCompressor::new();
 
         // Set custom strategy for JSON files
-        compressor.set_strategy(ObjectType::Json, CompressionStrategy::Zstd(CompressionLevel::Fast));
+        compressor.set_strategy(
+            ObjectType::Json,
+            CompressionStrategy::Zstd(CompressionLevel::Fast),
+        );
 
         let json_data = b"{\"test\": \"data\"}";
-        let compressed = compressor.compress_typed(json_data, ObjectType::Json).unwrap();
+        let compressed = compressor
+            .compress_typed(json_data, ObjectType::Json)
+            .unwrap();
 
         // Should use Zstd Fast instead of Brotli Best
         let decompressed = compressor.decompress_typed(&compressed).unwrap();
@@ -478,7 +512,9 @@ mod tests {
         let compressor = PerObjectTypeCompressor::new();
         let jpeg_data = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
 
-        let compressed = compressor.compress_typed(&jpeg_data, ObjectType::Jpeg).unwrap();
+        let compressed = compressor
+            .compress_typed(&jpeg_data, ObjectType::Jpeg)
+            .unwrap();
 
         // Should store as-is (no compression)
         assert_eq!(compressed, jpeg_data);
@@ -490,12 +526,18 @@ mod tests {
 
         // Compress some text data
         let text_data = b"Test data";
-        compressor.compress_typed(text_data, ObjectType::Text).unwrap();
-        compressor.compress_typed(text_data, ObjectType::Text).unwrap();
+        compressor
+            .compress_typed(text_data, ObjectType::Text)
+            .unwrap();
+        compressor
+            .compress_typed(text_data, ObjectType::Text)
+            .unwrap();
 
         // Compress some JSON data
         let json_data = b"{\"test\": \"data\"}";
-        compressor.compress_typed(json_data, ObjectType::Json).unwrap();
+        compressor
+            .compress_typed(json_data, ObjectType::Json)
+            .unwrap();
 
         // Check stats
         let text_stats = compressor.stats_for_type(ObjectType::Text).unwrap();
@@ -509,7 +551,9 @@ mod tests {
     fn test_prometheus_export() {
         let compressor = PerObjectTypeCompressor::new();
 
-        compressor.compress_typed(b"test data", ObjectType::Text).unwrap();
+        compressor
+            .compress_typed(b"test data", ObjectType::Text)
+            .unwrap();
 
         let prometheus = compressor.to_prometheus_metrics();
 
@@ -524,7 +568,9 @@ mod tests {
         let compressor = PerObjectTypeCompressor::new();
         let blob_data = b"blob content";
 
-        let compressed = compressor.compress_typed(blob_data, ObjectType::GitBlob).unwrap();
+        let compressed = compressor
+            .compress_typed(blob_data, ObjectType::GitBlob)
+            .unwrap();
         let decompressed = compressor.decompress_typed(&compressed).unwrap();
 
         assert_eq!(blob_data, &decompressed[..]);

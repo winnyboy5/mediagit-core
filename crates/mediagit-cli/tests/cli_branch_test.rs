@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 MediaGit Contributors
 
@@ -17,13 +31,29 @@ fn mediagit() -> Command {
 }
 
 fn init_repo(dir: &Path) {
-    mediagit().arg("init").arg("-q").current_dir(dir).assert().success();
+    mediagit()
+        .arg("init")
+        .arg("-q")
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 fn add_and_commit(dir: &Path, name: &str, content: &str, message: &str) {
     fs::write(dir.join(name), content).unwrap();
-    mediagit().arg("add").arg(name).current_dir(dir).assert().success();
-    mediagit().arg("commit").arg("-m").arg(message).current_dir(dir).assert().success();
+    mediagit()
+        .arg("add")
+        .arg(name)
+        .current_dir(dir)
+        .assert()
+        .success();
+    mediagit()
+        .arg("commit")
+        .arg("-m")
+        .arg(message)
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 // ============================================================================
@@ -118,7 +148,12 @@ fn test_branch_switch_with_media_files() {
     init_repo(temp_dir.path());
 
     // Main branch: add file
-    add_and_commit(temp_dir.path(), "main_file.txt", "Main content", "Initial on main");
+    add_and_commit(
+        temp_dir.path(),
+        "main_file.txt",
+        "Main content",
+        "Initial on main",
+    );
 
     // Create feature branch
     mediagit()
@@ -138,7 +173,12 @@ fn test_branch_switch_with_media_files() {
         .success();
 
     // Add file on feature branch
-    add_and_commit(temp_dir.path(), "feature_file.txt", "Feature content", "Add feature file");
+    add_and_commit(
+        temp_dir.path(),
+        "feature_file.txt",
+        "Feature content",
+        "Add feature file",
+    );
 
     // Verify feature file exists
     assert!(temp_dir.path().join("feature_file.txt").exists());
@@ -287,7 +327,12 @@ fn test_branch_delete_force() {
         .assert()
         .success();
 
-    add_and_commit(temp_dir.path(), "unmerged.txt", "Unmerged", "Unmerged commit");
+    add_and_commit(
+        temp_dir.path(),
+        "unmerged.txt",
+        "Unmerged",
+        "Unmerged commit",
+    );
 
     // Switch back to main
     mediagit()
@@ -318,7 +363,7 @@ fn test_branch_delete_current_fails() {
     add_and_commit(temp_dir.path(), "file.txt", "Content", "Initial commit");
 
     // Try to delete current branch - behavior may vary
-    mediagit()
+    let _ = mediagit()
         .arg("branch")
         .arg("delete")
         .arg("main")

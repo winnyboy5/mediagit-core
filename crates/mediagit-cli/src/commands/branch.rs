@@ -1,9 +1,23 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+use super::super::repo::{create_storage_backend, find_repo_root};
+use crate::progress::{OperationStats, ProgressTracker};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use mediagit_versioning::{Oid, Ref, RefDatabase, Reflog, ReflogEntry};
 use std::time::Instant;
-use crate::progress::{ProgressTracker, OperationStats};
-use super::super::repo::{find_repo_root, create_storage_backend};
 
 /// Manage branches
 ///
@@ -305,9 +319,8 @@ impl BranchCmd {
                 for branch_name in local_branches {
                     // Normalize path separators for cross-platform compatibility (Windows uses \)
                     let normalized_branch = branch_name.replace('\\', "/");
-                    let normalized_current = current_branch
-                        .as_ref()
-                        .map(|cb| cb.replace('\\', "/"));
+                    let normalized_current =
+                        current_branch.as_ref().map(|cb| cb.replace('\\', "/"));
 
                     let is_current = normalized_current
                         .as_ref()
@@ -321,18 +334,28 @@ impl BranchCmd {
 
                     if opts.verbose {
                         let branch_ref = refdb.read(&branch_name).await.ok();
-                        let oid_display = branch_ref.and_then(|r| r.oid).map(|o| format!("{}", &o.to_string()[..8])).unwrap_or_else(|| "unknown".to_string());
+                        let oid_display = branch_ref
+                            .and_then(|r| r.oid)
+                            .map(|o| o.to_string()[..8].to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
                         if is_current {
-                            println!("{}{} -> {}", style(prefix).green(), style(display_name).green().bold(), oid_display);
+                            println!(
+                                "{}{} -> {}",
+                                style(prefix).green(),
+                                style(display_name).green().bold(),
+                                oid_display
+                            );
                         } else {
                             println!("{}{} -> {}", prefix, display_name, oid_display);
                         }
+                    } else if is_current {
+                        println!(
+                            "{}{}",
+                            style(prefix).green(),
+                            style(display_name).green().bold()
+                        );
                     } else {
-                        if is_current {
-                            println!("{}{}", style(prefix).green(), style(display_name).green().bold());
-                        } else {
-                            println!("{}{}", prefix, display_name);
-                        }
+                        println!("{}{}", prefix, display_name);
                     }
                 }
             }
@@ -341,15 +364,15 @@ impl BranchCmd {
         // List remote branches (if --remote or --all)
         if opts.remote || opts.all {
             let remote_branches = refdb.list("remotes").await?;
-            
+
             if !remote_branches.is_empty() {
                 any_branches_found = true;
-                
+
                 // Add separator if we printed local branches
                 if opts.all && !opts.remote {
-                    println!();  // Empty line between local and remote
+                    println!(); // Empty line between local and remote
                 }
-                
+
                 for branch_name in remote_branches {
                     // Normalize path separators for cross-platform compatibility
                     let normalized_branch = branch_name.replace('\\', "/");
@@ -359,7 +382,10 @@ impl BranchCmd {
 
                     if opts.verbose {
                         let branch_ref = refdb.read(&branch_name).await.ok();
-                        let oid_display = branch_ref.and_then(|r| r.oid).map(|o| format!("{}", &o.to_string()[..8])).unwrap_or_else(|| "unknown".to_string());
+                        let oid_display = branch_ref
+                            .and_then(|r| r.oid)
+                            .map(|o| o.to_string()[..8].to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
                         println!("  {} -> {}", style(display_name).red(), oid_display);
                     } else {
                         println!("  {}", style(display_name).red());
@@ -368,13 +394,11 @@ impl BranchCmd {
             }
         }
 
-        if !any_branches_found {
-            if !opts.quiet {
-                if opts.remote {
-                    output::info("No remote branches found");
-                } else {
-                    output::info("No branches found");
-                }
+        if !any_branches_found && !opts.quiet {
+            if opts.remote {
+                output::info("No remote branches found");
+            } else {
+                output::info("No branches found");
             }
         }
 
@@ -404,11 +428,15 @@ impl BranchCmd {
         // Get start point (defaults to HEAD) - resolve symbolic refs
         let start_oid = if let Some(start_point) = &opts.start_point {
             // Try to resolve the start point as a reference or commit
-            refdb.resolve(start_point).await
+            refdb
+                .resolve(start_point)
+                .await
                 .context(format!("Invalid start point: {}", start_point))?
         } else {
             // Use HEAD as start point (resolve symbolic ref)
-            refdb.resolve("HEAD").await
+            refdb
+                .resolve("HEAD")
+                .await
                 .context("HEAD has no commit yet")?
         };
 
@@ -437,7 +465,10 @@ impl BranchCmd {
         let refdb = RefDatabase::new(&storage_path);
 
         // Strip refs/heads/ prefix if already present
-        let branch_name = opts.branch.strip_prefix("refs/heads/").unwrap_or(&opts.branch);
+        let branch_name = opts
+            .branch
+            .strip_prefix("refs/heads/")
+            .unwrap_or(&opts.branch);
         let branch_ref_name = format!("refs/heads/{}", branch_name);
 
         // OPTIMIZATION: Get current commit BEFORE updating HEAD
@@ -452,7 +483,9 @@ impl BranchCmd {
             }
 
             // Get current HEAD for start point (resolve symbolic ref)
-            let start_oid = refdb.resolve("HEAD").await
+            let start_oid = refdb
+                .resolve("HEAD")
+                .await
                 .context("HEAD has no commit yet")?;
 
             // Create the branch reference
@@ -464,14 +497,17 @@ impl BranchCmd {
             }
         } else {
             // Verify branch exists
-            refdb.read(&branch_ref_name)
+            refdb
+                .read(&branch_ref_name)
                 .await
                 .context(format!("Branch '{}' not found", opts.branch))?;
         }
 
         // Get the commit that the target branch points to
-        let target_commit_oid = refdb.resolve(&branch_ref_name).await
-            .context(format!("Failed to resolve branch '{}' to a commit", opts.branch))?;
+        let target_commit_oid = refdb.resolve(&branch_ref_name).await.context(format!(
+            "Failed to resolve branch '{}' to a commit",
+            opts.branch
+        ))?;
 
         // Update HEAD to point to the branch
         let head = Ref::new_symbolic("HEAD".to_string(), branch_ref_name.clone());
@@ -482,30 +518,43 @@ impl BranchCmd {
         let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
 
         let checkout_pb = progress.spinner("Updating working directory");
-        
+
         // OPTIMIZATION: Use differential checkout when we have a current commit
         // This only updates files that actually changed between commits
         let files_updated = if let Some(ref current_oid) = current_commit_oid {
             // Differential checkout: only update changed files
-            let checkout_stats = checkout_mgr.checkout_diff(current_oid, &target_commit_oid).await
+            let checkout_stats = checkout_mgr
+                .checkout_diff(current_oid, &target_commit_oid)
+                .await
                 .context("Failed to update working directory")?;
             checkout_stats.files_changed()
         } else {
             // No current commit (initial checkout) - do full checkout
-            checkout_mgr.checkout_commit(&target_commit_oid).await
+            checkout_mgr
+                .checkout_commit(&target_commit_oid)
+                .await
                 .context("Failed to update working directory")?
         };
-        
+
         checkout_pb.finish_with_message("Working directory updated");
 
         stats.files_updated = files_updated as u64;
 
         // Record reflog entry for branch switch
         let reflog = Reflog::new(&storage_path);
-        let old_oid = current_commit_oid.clone().unwrap_or_else(|| Oid::from_bytes([0u8; 32]));
-        let reflog_msg = format!("checkout: moving from {} to {}",
-            old_oid.to_hex().get(..8).unwrap_or("00000000"), branch_name);
-        let entry = ReflogEntry::now(old_oid, target_commit_oid, "user", "user@mediagit", &reflog_msg);
+        let old_oid = current_commit_oid.unwrap_or_else(|| Oid::from_bytes([0u8; 32]));
+        let reflog_msg = format!(
+            "checkout: moving from {} to {}",
+            old_oid.to_hex().get(..8).unwrap_or("00000000"),
+            branch_name
+        );
+        let entry = ReflogEntry::now(
+            old_oid,
+            target_commit_oid,
+            "user",
+            "user@mediagit",
+            &reflog_msg,
+        );
         let _ = reflog.append("HEAD", &entry).await;
 
         // Clear the index (staging area) when switching branches
@@ -517,7 +566,10 @@ impl BranchCmd {
         if !opts.quiet {
             output::success(&format!("Switched to branch '{}'", opts.branch));
             if files_updated > 0 {
-                output::info(&format!("Updated {} file(s) in working directory", files_updated));
+                output::info(&format!(
+                    "Updated {} file(s) in working directory",
+                    files_updated
+                ));
             }
         }
 
@@ -536,122 +588,122 @@ impl BranchCmd {
     }
 
     async fn delete(&self, opts: &DeleteOpts) -> Result<()> {
-    use crate::output;
+        use crate::output;
 
-    let repo_root = find_repo_root()?;
-    let storage_path = repo_root.join(".mediagit");
-    let _storage = create_storage_backend(&repo_root).await?;
-    let refdb = RefDatabase::new(&storage_path);
+        let repo_root = find_repo_root()?;
+        let storage_path = repo_root.join(".mediagit");
+        let _storage = create_storage_backend(&repo_root).await?;
+        let refdb = RefDatabase::new(&storage_path);
 
-    let mut deleted_count = 0;
+        let mut deleted_count = 0;
 
-    // Handle remote tracking branch deletion (e.g. origin/feature)
-    if opts.remote {
+        // Handle remote tracking branch deletion (e.g. origin/feature)
+        if opts.remote {
+            for branch_name in &opts.branches {
+                // Parse "remote/branch" by splitting on first '/'
+                let (remote_name, branch_part) = match branch_name.split_once('/') {
+                    Some((r, b)) => (r, b),
+                    None => {
+                        if !opts.quiet {
+                            output::warning(&format!(
+                                "Invalid remote branch name '{}' (expected format: remote/branch)",
+                                branch_name
+                            ));
+                        }
+                        continue;
+                    }
+                };
+
+                let remote_ref_name = format!("refs/remotes/{}/{}", remote_name, branch_part);
+
+                // Verify ref exists and delete
+                match refdb.read(&remote_ref_name).await {
+                    Ok(_) => {
+                        refdb.delete(&remote_ref_name).await?;
+                        deleted_count += 1;
+
+                        if !opts.quiet {
+                            output::success(&format!(
+                                "Deleted remote-tracking branch '{}'",
+                                branch_name
+                            ));
+                        }
+                    }
+                    Err(_) => {
+                        if !opts.quiet {
+                            output::warning(&format!(
+                                "Remote-tracking branch '{}' not found",
+                                branch_name
+                            ));
+                        }
+                    }
+                }
+            }
+
+            if !opts.quiet && deleted_count == 0 {
+                output::info("No remote-tracking branches were deleted");
+            }
+
+            return Ok(());
+        }
+
+        // Local branch deletion
+        // Load config to check branch protection
+        let config = mediagit_config::Config::load(&repo_root).await?;
+
+        // Get current branch to prevent deletion
+        let head = refdb.read("HEAD").await?;
+        let current_branch = head.target;
+
         for branch_name in &opts.branches {
-            // Parse "remote/branch" by splitting on first '/'
-            let (remote_name, branch_part) = match branch_name.split_once('/') {
-                Some((r, b)) => (r, b),
-                None => {
+            let branch_ref_name = format!("refs/heads/{}", branch_name);
+
+            // Check if trying to delete current branch
+            if Some(&branch_ref_name) == current_branch.as_ref() {
+                if !opts.quiet {
+                    output::warning(&format!("Cannot delete current branch '{}'", branch_name));
+                }
+                continue;
+            }
+
+            // Check branch protection
+            if let Some(protection) = config.get_branch_protection(branch_name) {
+                if protection.prevent_deletion && !opts.force {
                     if !opts.quiet {
                         output::warning(&format!(
-                            "Invalid remote branch name '{}' (expected format: remote/branch)",
+                            "Branch '{}' is protected (use --force to override)",
                             branch_name
                         ));
                     }
                     continue;
                 }
-            };
+            }
 
-            let remote_ref_name = format!("refs/remotes/{}/{}", remote_name, branch_part);
-
-            // Verify ref exists and delete
-            match refdb.read(&remote_ref_name).await {
+            // Verify branch exists
+            match refdb.read(&branch_ref_name).await {
                 Ok(_) => {
-                    refdb.delete(&remote_ref_name).await?;
+                    // Delete the branch reference
+                    refdb.delete(&branch_ref_name).await?;
                     deleted_count += 1;
 
                     if !opts.quiet {
-                        output::success(&format!(
-                            "Deleted remote-tracking branch '{}'",
-                            branch_name
-                        ));
+                        output::success(&format!("Deleted branch '{}'", branch_name));
                     }
                 }
                 Err(_) => {
                     if !opts.quiet {
-                        output::warning(&format!(
-                            "Remote-tracking branch '{}' not found",
-                            branch_name
-                        ));
+                        output::warning(&format!("Branch '{}' not found", branch_name));
                     }
                 }
             }
         }
 
         if !opts.quiet && deleted_count == 0 {
-            output::info("No remote-tracking branches were deleted");
+            output::info("No branches were deleted");
         }
 
-        return Ok(());
+        Ok(())
     }
-
-    // Local branch deletion
-    // Load config to check branch protection
-    let config = mediagit_config::Config::load(&repo_root).await?;
-
-    // Get current branch to prevent deletion
-    let head = refdb.read("HEAD").await?;
-    let current_branch = head.target;
-
-    for branch_name in &opts.branches {
-        let branch_ref_name = format!("refs/heads/{}", branch_name);
-
-        // Check if trying to delete current branch
-        if Some(&branch_ref_name) == current_branch.as_ref() {
-            if !opts.quiet {
-                output::warning(&format!("Cannot delete current branch '{}'", branch_name));
-            }
-            continue;
-        }
-
-        // Check branch protection
-        if let Some(protection) = config.get_branch_protection(branch_name) {
-            if protection.prevent_deletion && !opts.force {
-                if !opts.quiet {
-                    output::warning(&format!(
-                        "Branch '{}' is protected (use --force to override)",
-                        branch_name
-                    ));
-                }
-                continue;
-            }
-        }
-
-        // Verify branch exists
-        match refdb.read(&branch_ref_name).await {
-            Ok(_) => {
-                // Delete the branch reference
-                refdb.delete(&branch_ref_name).await?;
-                deleted_count += 1;
-
-                if !opts.quiet {
-                    output::success(&format!("Deleted branch '{}'", branch_name));
-                }
-            }
-            Err(_) => {
-                if !opts.quiet {
-                    output::warning(&format!("Branch '{}' not found", branch_name));
-                }
-            }
-        }
-    }
-
-    if !opts.quiet && deleted_count == 0 {
-        output::info("No branches were deleted");
-    }
-
-    Ok(())
-}
     async fn protect(&self, opts: &ProtectOpts) -> Result<()> {
         use crate::output;
         use mediagit_config::BranchProtection;
@@ -660,7 +712,9 @@ impl BranchCmd {
         let mut config = mediagit_config::Config::load(&repo_root).await?;
 
         // Normalize branch name
-        let branch_name = opts.branch.strip_prefix("refs/heads/")
+        let branch_name = opts
+            .branch
+            .strip_prefix("refs/heads/")
             .unwrap_or(&opts.branch)
             .to_string();
 
@@ -743,11 +797,16 @@ impl BranchCmd {
 
         // Check if new branch already exists (unless force)
         if !opts.force && refdb.read(&new_ref_name).await.is_ok() {
-            anyhow::bail!("Branch '{}' already exists. Use --force to overwrite.", new_branch);
+            anyhow::bail!(
+                "Branch '{}' already exists. Use --force to overwrite.",
+                new_branch
+            );
         }
 
         // Get the OID from the old branch
-        let branch_oid = old_ref.oid.ok_or_else(|| anyhow::anyhow!("Branch has no commit"))?;
+        let branch_oid = old_ref
+            .oid
+            .ok_or_else(|| anyhow::anyhow!("Branch has no commit"))?;
 
         // Create new branch reference
         let new_ref = Ref::new_direct(new_ref_name.clone(), branch_oid);
@@ -764,7 +823,10 @@ impl BranchCmd {
         refdb.delete(&old_ref_name).await?;
 
         if !opts.quiet {
-            output::success(&format!("Renamed branch '{}' to '{}'", old_branch, new_branch));
+            output::success(&format!(
+                "Renamed branch '{}' to '{}'",
+                old_branch, new_branch
+            ));
         }
 
         Ok(())

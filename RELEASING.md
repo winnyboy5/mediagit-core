@@ -33,6 +33,8 @@ MediaGit uses an automated release process powered by GitHub Actions. Releases a
 
 ### 2. Create Release Commit
 
+> **Note**: Git hooks enforce [Conventional Commits](https://www.conventionalcommits.org/) format (max 72 chars) and run `cargo test --workspace` before push. Commit messages must match: `type(scope): description`
+
 ```bash
 # Update version to 0.2.0 (example)
 vim Cargo.toml # Update [workspace.package] version
@@ -40,7 +42,7 @@ vim Cargo.toml # Update [workspace.package] version
 # Update CHANGELOG.md
 vim CHANGELOG.md
 
-# Commit changes
+# Commit changes (conventional commit format required)
 git add Cargo.toml CHANGELOG.md
 git commit -m "chore: prepare release 0.2.0"
 git push origin main

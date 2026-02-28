@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! HTTPS/TLS integration tests
 //!
 //! Tests the HTTPS server functionality with self-signed certificates
@@ -13,6 +27,7 @@ mod https_tests {
     /// Helper to create a test server with HTTPS
     async fn create_test_https_server() -> (String, TempDir, u16) {
         use axum_server::tls_rustls::RustlsConfig;
+        use rustls::pki_types::pem::PemObject;
         use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
         // Install default crypto provider (required for rustls 0.23)
@@ -29,18 +44,14 @@ mod https_tests {
             .generate_self_signed()
             .unwrap();
 
-        // Build rustls ServerConfig
+        // Build rustls ServerConfig using rustls-pki-types PEM parsing
         let cert_pem = certificate.cert_pem.as_bytes();
-        let certs: Vec<CertificateDer> = rustls_pemfile::certs(&mut &cert_pem[..])
+        let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem)
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
 
         let key_pem = certificate.key_pem.as_bytes();
-        let mut key_reader = &key_pem[..];
-        let private_keys = rustls_pemfile::pkcs8_private_keys(&mut key_reader)
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        let private_key = PrivateKeyDer::Pkcs8(private_keys.into_iter().next().unwrap());
+        let private_key: PrivateKeyDer<'static> = PrivateKeyDer::from_pem_slice(key_pem).unwrap();
 
         let rustls_config = rustls::ServerConfig::builder()
             .with_no_client_auth()
@@ -54,7 +65,7 @@ mod https_tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
-        let addr = format!("127.0.0.1:{}", port).parse().unwrap();
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
         let https_url = format!("https://127.0.0.1:{}", port);
 
         // Spawn server in background
@@ -176,9 +187,7 @@ mod https_tests {
             let url = format!("{}/test{}/info/refs", https_url, i);
             let client = client.clone();
 
-            handles.push(tokio::spawn(async move {
-                client.get(&url).send().await
-            }));
+            handles.push(tokio::spawn(async move { client.get(&url).send().await }));
         }
 
         // Wait for all requests

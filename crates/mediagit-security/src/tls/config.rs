@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! TLS configuration management
 //!
 //! Manages TLS settings, certificate paths, and security parameters.
@@ -131,17 +145,19 @@ impl TlsConfig {
         // Verify files exist
         if let Some(cert_path) = &self.cert_path {
             if !cert_path.exists() {
-                return Err(TlsError::CertificateLoading(
-                    format!("Certificate file not found: {}", cert_path.display()),
-                ));
+                return Err(TlsError::CertificateLoading(format!(
+                    "Certificate file not found: {}",
+                    cert_path.display()
+                )));
             }
         }
 
         if let Some(key_path) = &self.key_path {
             if !key_path.exists() {
-                return Err(TlsError::CertificateLoading(
-                    format!("Key file not found: {}", key_path.display()),
-                ));
+                return Err(TlsError::CertificateLoading(format!(
+                    "Key file not found: {}",
+                    key_path.display()
+                )));
             }
         }
 
@@ -149,9 +165,10 @@ impl TlsConfig {
         if self.require_client_cert {
             if let Some(ca_path) = &self.client_ca_path {
                 if !ca_path.exists() {
-                    return Err(TlsError::CertificateLoading(
-                        format!("Client CA file not found: {}", ca_path.display()),
-                    ));
+                    return Err(TlsError::CertificateLoading(format!(
+                        "Client CA file not found: {}",
+                        ca_path.display()
+                    )));
                 }
             } else {
                 return Err(TlsError::CertificateValidation(
@@ -182,9 +199,10 @@ impl TlsConfig {
                 TlsError::CertificateLoading("Certificate path not set".to_string())
             })?;
 
-            let key_path = self.key_path.as_ref().ok_or_else(|| {
-                TlsError::CertificateLoading("Key path not set".to_string())
-            })?;
+            let key_path = self
+                .key_path
+                .as_ref()
+                .ok_or_else(|| TlsError::CertificateLoading("Key path not set".to_string()))?;
 
             Certificate::from_pem_files(cert_path, key_path)
         }
@@ -264,6 +282,7 @@ impl Default for TlsConfigBuilder {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -277,7 +296,9 @@ mod tests {
 
     #[test]
     fn test_self_signed_config() {
-        let config = TlsConfig::new().with_self_signed("test.example.com").clone();
+        let config = TlsConfig::new()
+            .with_self_signed("test.example.com")
+            .clone();
         assert!(config.use_self_signed);
         assert_eq!(config.self_signed_common_name, "test.example.com");
         assert!(config.validate().is_ok());

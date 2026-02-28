@@ -1,3 +1,17 @@
+﻿// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // Copyright (C) 2025 MediaGit Contributors
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -49,7 +63,7 @@ fn bench_cache_put(c: &mut Criterion) {
                 async move {
                     let idx = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let key = format!("key_{}", black_box(idx));
-                    black_box(cache.put(key, vec![0u8; 1024]).await)
+                    cache.put(black_box(key), black_box(vec![0u8; 1024])).await;
                 }
             });
         });
@@ -72,7 +86,7 @@ fn bench_cache_eviction(c: &mut Criterion) {
                 // This will trigger evictions after 100 entries
                 let idx = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let key = format!("key_{}", black_box(idx));
-                black_box(cache.put(key, vec![0u8; 1024]).await)
+                cache.put(black_box(key), black_box(vec![0u8; 1024])).await;
             }
         });
     });

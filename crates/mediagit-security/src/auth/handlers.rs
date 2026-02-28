@@ -1,12 +1,22 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! HTTP handlers for authentication endpoints
 //!
 //! Provides Axum handlers for user registration, login, logout, and token refresh.
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -169,7 +179,11 @@ pub async fn register_handler(
     let user = User::new(user_id, req.username, req.email, req.role);
 
     // Register user
-    match auth_service.credentials_store.register_user(user.clone(), &req.password).await {
+    match auth_service
+        .credentials_store
+        .register_user(user.clone(), &req.password)
+        .await
+    {
         Ok(_) => {
             info!("User registered: {} ({})", user.username, user.id);
 
@@ -217,7 +231,11 @@ pub async fn login_handler(
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<AuthResponse>, (StatusCode, Json<ErrorResponse>)> {
     // Authenticate user
-    match auth_service.credentials_store.authenticate(&req.identifier, &req.password).await {
+    match auth_service
+        .credentials_store
+        .authenticate(&req.identifier, &req.password)
+        .await
+    {
         Ok(user) => {
             info!("User logged in: {} ({})", user.username, user.id);
 
@@ -261,7 +279,10 @@ pub async fn refresh_handler(
     State(auth_service): State<Arc<AuthService>>,
     Json(req): Json<RefreshRequest>,
 ) -> Result<Json<TokenPair>, (StatusCode, Json<ErrorResponse>)> {
-    match auth_service.jwt_auth.refresh_access_token(&req.refresh_token) {
+    match auth_service
+        .jwt_auth
+        .refresh_access_token(&req.refresh_token)
+    {
         Ok(access_token) => {
             // Decode to get expiration
             if let Ok(claims) = auth_service.jwt_auth.validate_token(&access_token) {
@@ -301,7 +322,11 @@ pub async fn me_handler(
     State(auth_service): State<Arc<AuthService>>,
     auth_user: super::middleware::AuthUser,
 ) -> Result<Json<UserInfo>, (StatusCode, Json<ErrorResponse>)> {
-    match auth_service.credentials_store.get_user(&auth_user.user_id).await {
+    match auth_service
+        .credentials_store
+        .get_user(&auth_user.user_id)
+        .await
+    {
         Ok(user) => Ok(Json(user.into())),
         Err(e) => {
             warn!("Failed to get user info: {}", e);
@@ -339,6 +364,7 @@ pub fn auth_error_to_response(error: AuthError) -> (StatusCode, Json<ErrorRespon
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -354,10 +380,7 @@ mod tests {
             role: Role::Write,
         };
 
-        let result = register_handler(
-            State(Arc::clone(&auth_service)),
-            Json(register_req),
-        ).await;
+        let result = register_handler(State(Arc::clone(&auth_service)), Json(register_req)).await;
 
         assert!(result.is_ok());
         let (status, response) = result.unwrap();
@@ -371,10 +394,7 @@ mod tests {
             password: "password123".to_string(),
         };
 
-        let result = login_handler(
-            State(Arc::clone(&auth_service)),
-            Json(login_req),
-        ).await;
+        let result = login_handler(State(Arc::clone(&auth_service)), Json(login_req)).await;
 
         assert!(result.is_ok());
         let response = result.unwrap();
@@ -391,10 +411,7 @@ mod tests {
             password: "wrongpassword".to_string(),
         };
 
-        let result = login_handler(
-            State(auth_service),
-            Json(login_req),
-        ).await;
+        let result = login_handler(State(auth_service), Json(login_req)).await;
 
         assert!(result.is_err());
         let (status, _) = result.unwrap_err();
@@ -412,10 +429,7 @@ mod tests {
             role: Role::Write,
         };
 
-        let result = register_handler(
-            State(auth_service),
-            Json(register_req),
-        ).await;
+        let result = register_handler(State(auth_service), Json(register_req)).await;
 
         assert!(result.is_err());
         let (status, _) = result.unwrap_err();
@@ -434,20 +448,17 @@ mod tests {
             role: Role::Write,
         };
 
-        let (_, auth_response) = register_handler(
-            State(Arc::clone(&auth_service)),
-            Json(register_req),
-        ).await.unwrap();
+        let (_, auth_response) =
+            register_handler(State(Arc::clone(&auth_service)), Json(register_req))
+                .await
+                .unwrap();
 
         // Refresh token
         let refresh_req = RefreshRequest {
             refresh_token: auth_response.tokens.refresh_token.clone(),
         };
 
-        let result = refresh_handler(
-            State(auth_service),
-            Json(refresh_req),
-        ).await;
+        let result = refresh_handler(State(auth_service), Json(refresh_req)).await;
 
         assert!(result.is_ok());
         let new_tokens = result.unwrap();

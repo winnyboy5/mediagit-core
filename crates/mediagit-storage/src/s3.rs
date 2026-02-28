@@ -254,10 +254,10 @@ impl S3Backend {
             } else {
                 builder = builder.region(aws_sdk_s3::config::Region::new("us-east-1"));
             }
-            if let (Some(key_id), Some(secret)) = (&config.access_key_id, &config.secret_access_key) {
-                let credentials = aws_sdk_s3::config::Credentials::new(
-                    key_id, secret, None, None, "S3Backend",
-                );
+            if let (Some(key_id), Some(secret)) = (&config.access_key_id, &config.secret_access_key)
+            {
+                let credentials =
+                    aws_sdk_s3::config::Credentials::new(key_id, secret, None, None, "S3Backend");
                 builder = builder.credentials_provider(credentials);
             }
             Client::from_conf(builder.build())
@@ -408,9 +408,7 @@ impl S3Backend {
     /// Perform operation with exponential backoff retry logic
     async fn with_retry<F, T>(&self, mut operation: F) -> Result<T>
     where
-        F: FnMut() -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<T>> + Send>,
-        >,
+        F: FnMut() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send>>,
     {
         let mut retry_count = 0;
         let mut delay_ms = self.config.initial_retry_delay_ms;
@@ -421,10 +419,8 @@ impl S3Backend {
                 Err(e) => {
                     retry_count += 1;
                     if retry_count >= self.config.max_retries {
-                        return Err(e).context(format!(
-                            "Failed after {} retries",
-                            self.config.max_retries
-                        ));
+                        return Err(e)
+                            .context(format!("Failed after {} retries", self.config.max_retries));
                     }
 
                     warn!(
@@ -497,7 +493,9 @@ impl StorageBackend for S3Backend {
                     .map_err(|e| anyhow!("Failed to read object body: {}", e))?;
 
                 let data = body.into_bytes().to_vec();
-                stats.total_bytes_downloaded.fetch_add(data.len() as u64, Ordering::Relaxed);
+                stats
+                    .total_bytes_downloaded
+                    .fetch_add(data.len() as u64, Ordering::Relaxed);
 
                 Ok(data)
             })
@@ -557,13 +555,7 @@ impl StorageBackend for S3Backend {
             Box::pin(async move {
                 debug!("Checking if object exists in S3: {}", key);
 
-                match client
-                    .head_object()
-                    .bucket(&bucket)
-                    .key(&key)
-                    .send()
-                    .await
-                {
+                match client.head_object().bucket(&bucket).key(&key).send().await {
                     Ok(_) => {
                         debug!("Object exists: {}", key);
                         Ok(true)
@@ -666,9 +658,7 @@ impl StorageBackend for S3Backend {
                 let mut continuation_token: Option<String> = None;
 
                 loop {
-                    let mut request = client
-                        .list_objects_v2()
-                        .bucket(&bucket);
+                    let mut request = client.list_objects_v2().bucket(&bucket);
 
                     if !prefix.is_empty() {
                         request = request.prefix(&prefix);
@@ -692,7 +682,8 @@ impl StorageBackend for S3Backend {
 
                     // Check if there are more results
                     if response.is_truncated() == Some(true) {
-                        continuation_token = response.next_continuation_token().map(|t| t.to_string());
+                        continuation_token =
+                            response.next_continuation_token().map(|t| t.to_string());
                     } else {
                         break;
                     }
@@ -713,11 +704,7 @@ impl StorageBackend for S3Backend {
 impl S3Backend {
     /// Upload small objects using direct put_object
     async fn put_simple(&self, key: &str, data: &[u8]) -> Result<()> {
-        debug!(
-            "Putting small object to S3: {} ({} bytes)",
-            key,
-            data.len()
-        );
+        debug!("Putting small object to S3: {} ({} bytes)", key, data.len());
 
         let client = self.client.clone();
         let bucket = self.config.bucket.clone();
@@ -742,7 +729,9 @@ impl S3Backend {
                     .await
                     .map_err(|e| anyhow!("Failed to put object: {}", e))?;
 
-                stats.total_bytes_uploaded.fetch_add(data.len() as u64, Ordering::Relaxed);
+                stats
+                    .total_bytes_uploaded
+                    .fetch_add(data.len() as u64, Ordering::Relaxed);
 
                 debug!("Successfully put object to S3: {}", key);
                 Ok(())
@@ -809,7 +798,7 @@ impl S3Backend {
                     .bucket(&bucket)
                     .key(&key)
                     .upload_id(&upload_id)
-                    .part_number(part_num as i32)
+                    .part_number(part_num)
                     .body(Bytes::from(chunk_data.clone()).into())
                     .send()
                     .await
@@ -820,7 +809,9 @@ impl S3Backend {
                     .ok_or_else(|| anyhow!("No ETag returned for part {}", part_num))?
                     .to_string();
 
-                stats.total_bytes_uploaded.fetch_add(chunk_data.len() as u64, Ordering::Relaxed);
+                stats
+                    .total_bytes_uploaded
+                    .fetch_add(chunk_data.len() as u64, Ordering::Relaxed);
 
                 Ok::<_, anyhow::Error>((part_num, etag))
             });
@@ -853,7 +844,7 @@ impl S3Backend {
             .into_iter()
             .map(|(part_num, etag)| {
                 aws_sdk_s3::types::CompletedPart::builder()
-                    .part_number(part_num as i32)
+                    .part_number(part_num)
                     .e_tag(etag)
                     .build()
             })

@@ -57,11 +57,11 @@ impl ObjectType {
     /// ```
     /// use mediagit_versioning::ObjectType;
     ///
-    /// assert_eq!(ObjectType::from_str("blob").unwrap(), ObjectType::Blob);
-    /// assert_eq!(ObjectType::from_str("tree").unwrap(), ObjectType::Tree);
-    /// assert!(ObjectType::from_str("invalid").is_err());
+    /// assert_eq!(ObjectType::parse("blob").unwrap(), ObjectType::Blob);
+    /// assert_eq!(ObjectType::parse("tree").unwrap(), ObjectType::Tree);
+    /// assert!(ObjectType::parse("invalid").is_err());
     /// ```
-    pub fn from_str(s: &str) -> anyhow::Result<Self> {
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
         match s {
             "blob" => Ok(ObjectType::Blob),
             "tree" => Ok(ObjectType::Tree),
@@ -109,10 +109,10 @@ mod tests {
 
     #[test]
     fn test_object_type_from_str() {
-        assert_eq!(ObjectType::from_str("blob").unwrap(), ObjectType::Blob);
-        assert_eq!(ObjectType::from_str("tree").unwrap(), ObjectType::Tree);
-        assert_eq!(ObjectType::from_str("commit").unwrap(), ObjectType::Commit);
-        assert!(ObjectType::from_str("invalid").is_err());
+        assert_eq!(ObjectType::parse("blob").unwrap(), ObjectType::Blob);
+        assert_eq!(ObjectType::parse("tree").unwrap(), ObjectType::Tree);
+        assert_eq!(ObjectType::parse("commit").unwrap(), ObjectType::Commit);
+        assert!(ObjectType::parse("invalid").is_err());
     }
 
     #[test]
@@ -126,7 +126,7 @@ mod tests {
     fn test_object_type_roundtrip() {
         for obj_type in [ObjectType::Blob, ObjectType::Tree, ObjectType::Commit] {
             let s = obj_type.as_str();
-            let parsed = ObjectType::from_str(s).unwrap();
+            let parsed = ObjectType::parse(s).unwrap();
             assert_eq!(obj_type, parsed);
         }
     }

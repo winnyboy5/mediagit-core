@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // SPDX-License-Identifier: AGPL-3.0
 // Copyright (C) 2025 MediaGit Contributors
 
@@ -210,15 +224,17 @@ fn test_filter_driver_with_custom_config() {
 
     let driver = FilterDriver::new(config).expect("Failed to create filter driver");
     assert_eq!(driver.config().min_file_size, 5 * 1024 * 1024);
-    assert_eq!(driver.config().storage_path, Some("/custom/path".to_string()));
+    assert_eq!(
+        driver.config().storage_path,
+        Some("/custom/path".to_string())
+    );
     assert!(driver.config().skip_binary_check);
 }
 
 #[test]
 fn test_pointer_file_size_limits() {
     // Test that very large "pointer" files are rejected
-    let large_content = "version https://mediagit.dev/spec/v1\n".to_string()
-        + &"x".repeat(1000);
+    let large_content = "version https://mediagit.dev/spec/v1\n".to_string() + &"x".repeat(1000);
 
     assert!(!PointerFile::is_pointer(&large_content));
 

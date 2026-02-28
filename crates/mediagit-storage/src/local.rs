@@ -1063,7 +1063,10 @@ mod tests {
         let mmap = backend.get_mmap("large_mmap_test").unwrap();
         assert_eq!(mmap.len(), 5 * 1024 * 1024);
         assert_eq!(&mmap[..100], &large_data[..100]);
-        assert_eq!(&mmap[mmap.len() - 100..], &large_data[large_data.len() - 100..]);
+        assert_eq!(
+            &mmap[mmap.len() - 100..],
+            &large_data[large_data.len() - 100..]
+        );
     }
 
     #[tokio::test]
@@ -1127,4 +1130,3 @@ mod tests {
         assert_eq!(slice, data);
     }
 }
-

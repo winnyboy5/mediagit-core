@@ -209,15 +209,14 @@ impl Tree {
     }
 
     /// Serialize tree to bytes
-    ///
-    /// Uses bincode for efficient serialization.
     pub fn serialize(&self) -> anyhow::Result<Vec<u8>> {
-        bincode::serialize(self).map_err(|e| anyhow::anyhow!("Tree serialization failed: {}", e))
+        crate::format::serialize(self)
+            .map_err(|e| anyhow::anyhow!("Tree serialization failed: {}", e))
     }
 
     /// Deserialize tree from bytes
     pub fn deserialize(data: &[u8]) -> anyhow::Result<Self> {
-        bincode::deserialize(data)
+        crate::format::deserialize(data)
             .map_err(|e| anyhow::anyhow!("Tree deserialization failed: {}", e))
     }
 
@@ -230,10 +229,7 @@ impl Tree {
     /// # Returns
     ///
     /// The OID of the written tree
-    pub async fn write(
-        &self,
-        odb: &crate::ObjectDatabase,
-    ) -> anyhow::Result<Oid> {
+    pub async fn write(&self, odb: &crate::ObjectDatabase) -> anyhow::Result<Oid> {
         let data = self.serialize()?;
         odb.write(ObjectType::Tree, &data).await
     }
@@ -248,10 +244,7 @@ impl Tree {
     /// # Returns
     ///
     /// The deserialized tree object
-    pub async fn read(
-        odb: &crate::ObjectDatabase,
-        oid: &Oid,
-    ) -> anyhow::Result<Self> {
+    pub async fn read(odb: &crate::ObjectDatabase, oid: &Oid) -> anyhow::Result<Self> {
         let data = odb.read(oid).await?;
         Self::deserialize(&data)
     }
@@ -365,7 +358,11 @@ mod tests {
     fn test_tree_serialization() {
         let mut tree = Tree::new();
         let oid = Oid::hash(b"content");
-        tree.add_entry(TreeEntry::new("file.txt".to_string(), FileMode::Regular, oid));
+        tree.add_entry(TreeEntry::new(
+            "file.txt".to_string(),
+            FileMode::Regular,
+            oid,
+        ));
 
         let serialized = tree.serialize().unwrap();
         let deserialized = Tree::deserialize(&serialized).unwrap();
@@ -378,9 +375,21 @@ mod tests {
         let mut tree = Tree::new();
         let oid = Oid::hash(b"content");
 
-        tree.add_entry(TreeEntry::new("file1.txt".to_string(), FileMode::Regular, oid));
-        tree.add_entry(TreeEntry::new("file2.txt".to_string(), FileMode::Executable, oid));
-        tree.add_entry(TreeEntry::new("subdir".to_string(), FileMode::Directory, oid));
+        tree.add_entry(TreeEntry::new(
+            "file1.txt".to_string(),
+            FileMode::Regular,
+            oid,
+        ));
+        tree.add_entry(TreeEntry::new(
+            "file2.txt".to_string(),
+            FileMode::Executable,
+            oid,
+        ));
+        tree.add_entry(TreeEntry::new(
+            "subdir".to_string(),
+            FileMode::Directory,
+            oid,
+        ));
 
         assert_eq!(tree.file_count(), 2);
         assert_eq!(tree.dir_count(), 1);
@@ -396,7 +405,11 @@ mod tests {
 
         let mut tree = Tree::new();
         let oid = Oid::hash(b"file content");
-        tree.add_entry(TreeEntry::new("file.txt".to_string(), FileMode::Regular, oid));
+        tree.add_entry(TreeEntry::new(
+            "file.txt".to_string(),
+            FileMode::Regular,
+            oid,
+        ));
 
         // Write tree
         let tree_oid = tree.write(&odb).await.unwrap();

@@ -12,7 +12,6 @@ documentation.workspace = true
 [dependencies]
 # Encryption
 aes-gcm = "0.10"
-chacha20poly1305 = "0.10"
 
 # Key derivation
 argon2 = { version = "0.5", features = ["std"] }
@@ -21,17 +20,12 @@ argon2 = { version = "0.5", features = ["std"] }
 zeroize = { version = "1.8", features = ["derive"] }
 secrecy = { version = "0.8", features = ["serde"] }
 
-# Keyring integration
-keyring = { version = "3.6", features = ["apple-native", "windows-native", "linux-native"] }
-
 # Random number generation
 rand = "0.8"
-getrandom = { version = "0.2", features = ["std"] }
 
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
-bincode.workspace = true
 
 # Error handling
 thiserror.workspace = true
@@ -39,7 +33,6 @@ anyhow.workspace = true
 
 # Async runtime
 tokio.workspace = true
-async-trait.workspace = true
 
 # Observability
 tracing.workspace = true
@@ -54,35 +47,29 @@ jsonwebtoken = { version = "9.2", optional = true }
 bcrypt = { version = "0.15", optional = true }
 uuid = { version = "1.10", features = ["v4", "serde"], optional = true }
 
-# Database (optional features)
-# Updated to 0.8+ to fix RUSTSEC-2024-0363 (binary protocol issue)
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls", "chrono"], optional = true }
-
 # HTTP/Web framework (for middleware)
-axum = { version = "0.7", optional = true }
-tower = { version = "0.4", optional = true }
+axum = { workspace = true, optional = true }
 http = { version = "1.0", optional = true }
 
 # TLS/Certificate management (optional)
 rcgen = { version = "0.13", features = ["pem"], optional = true }
-rustls-pemfile = { version = "2.0", optional = true }
-x509-parser = { version = "0.16", optional = true }
 time = { version = "0.3", features = ["macros"], optional = true }
 
 [features]
 default = []
 auth = ["jsonwebtoken", "bcrypt", "uuid"]
-database = ["sqlx"]
-middleware = ["axum", "tower", "http"]
-tls = ["rcgen", "rustls-pemfile", "x509-parser", "time"]
+database = []
+middleware = ["axum", "http"]
+tls = ["rcgen", "time"]
 all = ["auth", "database", "middleware", "tls"]
 
 [dev-dependencies]
-tokio-test.workspace = true
 tempfile.workspace = true
 criterion.workspace = true
-proptest.workspace = true
 
 [[bench]]
 name = "encryption_benchmark"
 harness = false
+
+[lints]
+workspace = true

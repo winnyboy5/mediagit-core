@@ -1,0 +1,10 @@
+[advisories]
+# No advisories suppressed.
+#
+# RUSTSEC-2025-0141 (bincode unmaintained) - RESOLVED: migrated to postcard.
+#
+# RUSTSEC-2024-0384 (instant unmaintained) and RUSTSEC-2024-0436 (paste unmaintained):
+# These are transitive warnings from azure_storage_blobs 0.21.x (the final published
+# version of the old Azure SDK for Rust). They are "unmaintained" notices, not
+# vulnerabilities, and cargo-audit does not fail on them by default.
+ignore = []

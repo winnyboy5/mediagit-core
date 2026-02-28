@@ -93,7 +93,7 @@ impl ReflogEntry {
         let timestamp = self.committer.timestamp.timestamp();
         let offset_secs = 0i32; // UTC for simplicity, could enhance later
         let tz = format!("{:+05}", offset_secs / 36);
-        
+
         format!(
             "{} {} {} <{}> {} {}\t{}\n",
             self.old_oid.to_hex(),
@@ -123,29 +123,29 @@ impl ReflogEntry {
             anyhow::bail!("Invalid reflog header: insufficient parts");
         }
 
-        let old_oid = Oid::from_hex(header_parts[0])
-            .context("Invalid old OID in reflog")?;
-        let new_oid = Oid::from_hex(header_parts[1])
-            .context("Invalid new OID in reflog")?;
+        let old_oid = Oid::from_hex(header_parts[0]).context("Invalid old OID in reflog")?;
+        let new_oid = Oid::from_hex(header_parts[1]).context("Invalid new OID in reflog")?;
 
         // Name may contain spaces, so we need to find the email which is enclosed in <>
         let header_rest = header_parts[2..].join(" ");
-        let email_start = header_rest.find('<').context("Missing email start bracket")?;
+        let email_start = header_rest
+            .find('<')
+            .context("Missing email start bracket")?;
         let email_end = header_rest.find('>').context("Missing email end bracket")?;
-        
+
         let name = header_rest[..email_start].trim().to_string();
         let email = header_rest[email_start + 1..email_end].to_string();
-        
+
         // Parse timestamp and timezone after email
         let after_email = header_rest[email_end + 1..].trim();
         let time_parts: Vec<&str> = after_email.split_whitespace().collect();
-        if time_parts.len() < 1 {
+        if time_parts.is_empty() {
             anyhow::bail!("Invalid timestamp in reflog");
         }
-        
-        let timestamp: i64 = time_parts[0].parse()
-            .context("Invalid timestamp number")?;
-        let datetime = Utc.timestamp_opt(timestamp, 0)
+
+        let timestamp: i64 = time_parts[0].parse().context("Invalid timestamp number")?;
+        let datetime = Utc
+            .timestamp_opt(timestamp, 0)
             .single()
             .context("Invalid timestamp value")?;
 
@@ -177,15 +177,13 @@ impl Reflog {
     /// # Arguments
     /// * `root` - Path to the .mediagit directory
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self {
-            root: root.into(),
-        }
+        Self { root: root.into() }
     }
 
     /// Get the path to a reflog file
     fn reflog_path(&self, ref_name: &str) -> PathBuf {
         let logs_dir = self.root.join("logs");
-        
+
         // Normalize ref name
         if ref_name == "HEAD" {
             logs_dir.join("HEAD")
@@ -206,10 +204,11 @@ impl Reflog {
     /// * `entry` - The reflog entry to append
     pub async fn append(&self, ref_name: &str, entry: &ReflogEntry) -> Result<()> {
         let path = self.reflog_path(ref_name);
-        
+
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).await
+            fs::create_dir_all(parent)
+                .await
                 .context("Failed to create reflog directory")?;
         }
 
@@ -222,7 +221,8 @@ impl Reflog {
             .context("Failed to open reflog file")?;
 
         let line = entry.to_line();
-        file.write_all(line.as_bytes()).await
+        file.write_all(line.as_bytes())
+            .await
             .context("Failed to write reflog entry")?;
 
         Ok(())
@@ -237,12 +237,13 @@ impl Reflog {
     /// * `limit` - Maximum number of entries to return (None for all)
     pub async fn read(&self, ref_name: &str, limit: Option<usize>) -> Result<Vec<ReflogEntry>> {
         let path = self.reflog_path(ref_name);
-        
+
         if !path.exists() {
             return Ok(Vec::new());
         }
 
-        let file = fs::File::open(&path).await
+        let file = fs::File::open(&path)
+            .await
             .context("Failed to open reflog file")?;
         let reader = BufReader::new(file);
         let mut lines = reader.lines();
@@ -281,23 +282,23 @@ impl Reflog {
     /// Number of entries that were expired (removed)
     pub async fn expire(&self, ref_name: &str, keep: usize) -> Result<usize> {
         let path = self.reflog_path(ref_name);
-        
+
         if !path.exists() {
             return Ok(0);
         }
 
         // Read all entries
         let entries = self.read(ref_name, None).await?;
-        
+
         if entries.len() <= keep {
             return Ok(0);
         }
 
         let expired_count = entries.len() - keep;
-        
+
         // Keep only the most recent entries (entries are newest-first)
         let to_keep = &entries[..keep];
-        
+
         // Rewrite file with kept entries (reverse back to oldest-first for storage)
         let mut kept_entries: Vec<_> = to_keep.to_vec();
         kept_entries.reverse();
@@ -307,7 +308,8 @@ impl Reflog {
             content.push_str(&entry.to_line());
         }
 
-        fs::write(&path, content).await
+        fs::write(&path, content)
+            .await
             .context("Failed to write expired reflog")?;
 
         Ok(expired_count)
@@ -319,9 +321,10 @@ impl Reflog {
     /// * `ref_name` - Name of the ref
     pub async fn delete(&self, ref_name: &str) -> Result<bool> {
         let path = self.reflog_path(ref_name);
-        
+
         if path.exists() {
-            fs::remove_file(&path).await
+            fs::remove_file(&path)
+                .await
                 .context("Failed to delete reflog file")?;
             Ok(true)
         } else {
@@ -358,6 +361,7 @@ impl Reflog {
     }
 
     /// Recursively walk refs directory to find all reflogs
+    #[allow(clippy::only_used_in_recursion)]
     fn walk_refs_dir<'a>(
         &'a self,
         dir: &'a PathBuf,

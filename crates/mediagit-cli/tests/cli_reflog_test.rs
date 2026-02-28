@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 MediaGit Contributors
 
@@ -19,13 +33,29 @@ fn mediagit() -> Command {
 }
 
 fn init_repo(dir: &Path) {
-    mediagit().arg("init").arg("-q").current_dir(dir).assert().success();
+    mediagit()
+        .arg("init")
+        .arg("-q")
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 fn add_and_commit(dir: &Path, name: &str, content: &str, message: &str) {
     fs::write(dir.join(name), content).unwrap();
-    mediagit().arg("add").arg(name).current_dir(dir).assert().success();
-    mediagit().arg("commit").arg("-m").arg(message).current_dir(dir).assert().success();
+    mediagit()
+        .arg("add")
+        .arg(name)
+        .current_dir(dir)
+        .assert()
+        .success();
+    mediagit()
+        .arg("commit")
+        .arg("-m")
+        .arg(message)
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 // ============================================================================
@@ -91,7 +121,12 @@ fn test_reflog_show_limit() {
     init_repo(temp_dir.path());
 
     for i in 1..=5 {
-        add_and_commit(temp_dir.path(), "file.txt", &format!("v{}", i), &format!("Commit {}", i));
+        add_and_commit(
+            temp_dir.path(),
+            "file.txt",
+            &format!("v{}", i),
+            &format!("Commit {}", i),
+        );
     }
 
     // Show only last 2 entries
@@ -105,7 +140,7 @@ fn test_reflog_show_limit() {
 }
 
 #[test]
-#[ignore] // Requires reflog population 
+#[ignore] // Requires reflog population
 fn test_reflog_show_all() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
@@ -215,7 +250,12 @@ fn test_reflog_expire() {
     init_repo(temp_dir.path());
 
     for i in 1..=10 {
-        add_and_commit(temp_dir.path(), "file.txt", &format!("v{}", i), &format!("Commit {}", i));
+        add_and_commit(
+            temp_dir.path(),
+            "file.txt",
+            &format!("v{}", i),
+            &format!("Commit {}", i),
+        );
     }
 
     // Expire keeping only 5 entries

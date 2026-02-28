@@ -28,7 +28,7 @@
 //! ```rust,no_run
 //! use mediagit_media::phash::PerceptualHasher;
 //!
-//! # async fn example() -> anyhow::Result<()> {
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let hasher = PerceptualHasher::new();
 //!
 //! let image1 = std::fs::read("image1.jpg")?;
@@ -45,7 +45,7 @@
 
 use crate::error::{MediaError, Result};
 use image::{DynamicImage, GenericImageView};
-use img_hash::HasherConfig;
+use image_hasher::HasherConfig;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use tracing::{debug, info, instrument, trace};
@@ -152,8 +152,8 @@ impl PerceptualHasher {
         let start = Instant::now();
 
         // Load image
-        let img = image::load_from_memory(data)
-            .map_err(|e| MediaError::ImageError(e.to_string()))?;
+        let img =
+            image::load_from_memory(data).map_err(|e| MediaError::ImageError(e.to_string()))?;
 
         let (width, height) = img.dimensions();
         trace!("Loaded image: {}x{}", width, height);
@@ -176,38 +176,26 @@ impl PerceptualHasher {
         })
     }
 
-    /// Compute hash using img-hash crate
+    /// Compute hash using image-hasher crate
     fn compute_hash(&self, img: &DynamicImage) -> Result<Vec<u8>> {
         let hasher = HasherConfig::new()
             .hash_size(self.hash_size, self.hash_size)
             .hash_alg(self.algorithm_to_img_hash())
             .to_hasher();
 
-        // img_hash::HasherConfig uses its own image re-export
-        // We need to convert from our image::DynamicImage to img_hash's image type
-        use img_hash::image as img_hash_image;
-
-        // Convert to image bytes and reload with img_hash's image type
-        let mut bytes = Vec::new();
-        let mut cursor = std::io::Cursor::new(&mut bytes);
-        img.write_to(&mut cursor, image::ImageFormat::Png)
-            .map_err(|e| MediaError::ImageError(e.to_string()))?;
-
-        let img_hash_img = img_hash_image::load_from_memory(&bytes)
-            .map_err(|e| MediaError::ImageError(e.to_string()))?;
-
-        let image_hash = hasher.hash_image(&img_hash_img);
+        // image-hasher uses the same image crate version, no conversion needed
+        let image_hash = hasher.hash_image(img);
 
         Ok(image_hash.as_bytes().to_vec())
     }
 
-    /// Convert algorithm enum to img-hash algorithm
-    fn algorithm_to_img_hash(&self) -> img_hash::HashAlg {
+    /// Convert algorithm enum to image-hasher algorithm
+    fn algorithm_to_img_hash(&self) -> image_hasher::HashAlg {
         match self.algorithm {
-            HashAlgorithm::Average => img_hash::HashAlg::Mean,
-            HashAlgorithm::Difference => img_hash::HashAlg::Gradient,
-            HashAlgorithm::Perceptual => img_hash::HashAlg::DoubleGradient,
-            HashAlgorithm::Gradient => img_hash::HashAlg::Gradient,
+            HashAlgorithm::Average => image_hasher::HashAlg::Mean,
+            HashAlgorithm::Difference => image_hasher::HashAlg::Gradient,
+            HashAlgorithm::Perceptual => image_hasher::HashAlg::DoubleGradient,
+            HashAlgorithm::Gradient => image_hasher::HashAlg::Gradient,
         }
     }
 
@@ -326,7 +314,7 @@ mod tests {
         };
 
         let hash2 = PerceptualHash {
-            hash: vec![0b11110001, 0b10101010],  // 1 bit different
+            hash: vec![0b11110001, 0b10101010], // 1 bit different
             algorithm: HashAlgorithm::Difference,
             hash_size: 16,
             image_width: 100,
@@ -347,7 +335,7 @@ mod tests {
         };
 
         let hash2 = PerceptualHash {
-            hash: vec![0b11111111],  // Identical
+            hash: vec![0b11111111], // Identical
             algorithm: HashAlgorithm::Difference,
             hash_size: 8,
             image_width: 100,
@@ -376,7 +364,7 @@ mod tests {
 
         let hash2 = PerceptualHash {
             hash: vec![0b11111111],
-            algorithm: HashAlgorithm::Difference,  // Different algorithm
+            algorithm: HashAlgorithm::Difference, // Different algorithm
             hash_size: 8,
             image_width: 100,
             image_height: 100,

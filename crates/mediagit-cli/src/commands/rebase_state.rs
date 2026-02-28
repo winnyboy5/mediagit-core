@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! Rebase state management for persisting rebase progress across sessions.
 //!
 //! State is stored in `.mediagit/rebase-apply/state.json` and tracks:
@@ -80,11 +94,11 @@ impl RebaseState {
             anyhow::bail!("No rebase in progress (no state file found)");
         }
 
-        let content = std::fs::read_to_string(&state_file)
-            .context("Failed to read rebase state file")?;
+        let content =
+            std::fs::read_to_string(&state_file).context("Failed to read rebase state file")?;
 
-        let state: RebaseState = serde_json::from_str(&content)
-            .context("Failed to parse rebase state file")?;
+        let state: RebaseState =
+            serde_json::from_str(&content).context("Failed to parse rebase state file")?;
 
         Ok(state)
     }
@@ -100,11 +114,10 @@ impl RebaseState {
                 .context("Failed to create rebase-apply directory")?;
         }
 
-        let content = serde_json::to_string_pretty(self)
-            .context("Failed to serialize rebase state")?;
+        let content =
+            serde_json::to_string_pretty(self).context("Failed to serialize rebase state")?;
 
-        std::fs::write(&state_file, content)
-            .context("Failed to write rebase state file")?;
+        std::fs::write(&state_file, content).context("Failed to write rebase state file")?;
 
         Ok(())
     }
@@ -233,19 +246,11 @@ mod tests {
         let upstream = make_oid("upstream_commit_12");
         let commits = vec![make_oid("commit_a_1234567")];
 
-        let mut state = RebaseState::new(
-            original_head,
-            None,
-            upstream,
-            commits,
-        );
+        let mut state = RebaseState::new(original_head, None, upstream, commits);
 
         assert!(!state.has_conflicts());
 
-        state.set_conflicts(vec![
-            PathBuf::from("src/main.rs"),
-            PathBuf::from("lib.rs"),
-        ]);
+        state.set_conflicts(vec![PathBuf::from("src/main.rs"), PathBuf::from("lib.rs")]);
 
         assert!(state.has_conflicts());
         assert_eq!(state.conflict_files.len(), 2);

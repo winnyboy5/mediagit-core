@@ -109,11 +109,10 @@ impl IntegrityVerifier {
     }
 
     /// Get metadata for an object
-    pub async fn get_metadata(
-        backend: &dyn StorageBackend,
-        key: &str,
-    ) -> Result<ObjectMetadata> {
-        let data = backend.get(key).await
+    pub async fn get_metadata(backend: &dyn StorageBackend, key: &str) -> Result<ObjectMetadata> {
+        let data = backend
+            .get(key)
+            .await
             .with_context(|| format!("Failed to get object: {}", key))?;
 
         let checksum = Self::compute_checksum(&data);
@@ -205,10 +204,16 @@ impl IntegrityVerifier {
     ///
     /// Checks that all objects from source exist in target
     pub async fn verify_completeness(&self, prefix: &str) -> Result<Vec<String>> {
-        let source_keys = self.source.list_objects(prefix).await
+        let source_keys = self
+            .source
+            .list_objects(prefix)
+            .await
             .context("Failed to list source objects")?;
 
-        let target_keys = self.target.list_objects(prefix).await
+        let target_keys = self
+            .target
+            .list_objects(prefix)
+            .await
             .context("Failed to list target objects")?;
 
         let target_set: std::collections::HashSet<_> = target_keys.into_iter().collect();
@@ -273,12 +278,14 @@ impl VerificationReport {
         if !self.failures.is_empty() {
             output.push_str("\nFailures:\n");
             for failure in &self.failures {
-                output.push_str(&format!("  - {}: {}\n",
+                output.push_str(&format!(
+                    "  - {}: {}\n",
                     failure.key,
                     failure.error.as_deref().unwrap_or("Unknown error")
                 ));
 
-                if let (Some(src), Some(tgt)) = (&failure.source_checksum, &failure.target_checksum) {
+                if let (Some(src), Some(tgt)) = (&failure.source_checksum, &failure.target_checksum)
+                {
                     output.push_str(&format!("    Source checksum: {}\n", src));
                     output.push_str(&format!("    Target checksum: {}\n", tgt));
                 }

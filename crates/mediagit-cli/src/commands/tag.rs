@@ -14,7 +14,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use mediagit_versioning::{Oid, Ref, RefDatabase};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Manage tags
 #[derive(Parser, Debug)]
@@ -158,7 +158,10 @@ impl TagCmd {
         // Check if tag already exists
         let tag_ref = format!("refs/tags/{}", opts.name);
         if refdb.exists(&tag_ref).await? && !opts.force {
-            anyhow::bail!("Tag '{}' already exists. Use --force to overwrite.", opts.name);
+            anyhow::bail!(
+                "Tag '{}' already exists. Use --force to overwrite.",
+                opts.name
+            );
         }
 
         // Resolve target commit
@@ -166,28 +169,47 @@ impl TagCmd {
             self.resolve_commit(&refdb, commit_ref).await?
         } else {
             // Default to HEAD
-            refdb.resolve("HEAD").await.context("Failed to resolve HEAD")?
+            refdb
+                .resolve("HEAD")
+                .await
+                .context("Failed to resolve HEAD")?
         };
 
         // Create tag based on type
         if let Some(ref message) = opts.message {
             // Annotated tag
-            self.create_annotated_tag(&refdb, &opts.name, target_oid, message, opts).await?;
+            self.create_annotated_tag(&refdb, &opts.name, target_oid, message, opts)
+                .await?;
         } else {
             // Lightweight tag
-            self.create_lightweight_tag(&refdb, &opts.name, target_oid).await?;
+            self.create_lightweight_tag(&refdb, &opts.name, target_oid)
+                .await?;
         }
 
         if !opts.quiet {
-            let tag_type = if opts.message.is_some() { "annotated" } else { "lightweight" };
-            println!("Created {} tag '{}' at {}", tag_type, opts.name, target_oid.to_hex());
+            let tag_type = if opts.message.is_some() {
+                "annotated"
+            } else {
+                "lightweight"
+            };
+            println!(
+                "Created {} tag '{}' at {}",
+                tag_type,
+                opts.name,
+                target_oid.to_hex()
+            );
         }
 
         Ok(())
     }
 
     /// Create lightweight tag (ref pointing directly to commit)
-    async fn create_lightweight_tag(&self, refdb: &RefDatabase, name: &str, commit_oid: Oid) -> Result<()> {
+    async fn create_lightweight_tag(
+        &self,
+        refdb: &RefDatabase,
+        name: &str,
+        commit_oid: Oid,
+    ) -> Result<()> {
         let tag_ref = format!("refs/tags/{}", name);
         let r = Ref::new_direct(tag_ref, commit_oid);
         refdb.write(&r).await?;
@@ -346,7 +368,10 @@ impl TagCmd {
                 if let Ok(metadata_json) = tokio::fs::read_to_string(&metadata_path).await {
                     if let Ok(metadata) = serde_json::from_str::<TagMetadata>(&metadata_json) {
                         println!("{:<20} {} (annotated)", tag_name, commit_oid.to_hex());
-                        println!("  Message: {}", metadata.message.lines().next().unwrap_or(""));
+                        println!(
+                            "  Message: {}",
+                            metadata.message.lines().next().unwrap_or("")
+                        );
                         if let Some(tagger) = metadata.tagger {
                             println!("  Tagger:  {}", tagger);
                         }
@@ -379,7 +404,10 @@ impl TagCmd {
             }
 
             // Delete tag reference
-            refdb.delete(&tag_ref).await.context(format!("Failed to delete tag '{}'", name))?;
+            refdb
+                .delete(&tag_ref)
+                .await
+                .context(format!("Failed to delete tag '{}'", name))?;
 
             // Delete metadata if exists
             let metadata_path = get_ref_path(&mediagit_dir, &format!("{}.meta", tag_ref));
@@ -485,7 +513,9 @@ impl TagCmd {
         }
 
         // Try resolving directly
-        refdb.resolve(commit_ref).await
+        refdb
+            .resolve(commit_ref)
+            .await
             .context(format!("Cannot resolve commit reference: {}", commit_ref))
     }
 
@@ -519,7 +549,7 @@ struct TagMetadata {
 }
 
 // Helper to get ref path
-fn get_ref_path(mediagit_dir: &PathBuf, ref_name: &str) -> PathBuf {
+fn get_ref_path(mediagit_dir: &Path, ref_name: &str) -> PathBuf {
     mediagit_dir.join(ref_name)
 }
 
@@ -534,8 +564,12 @@ mod tests {
         let mediagit_dir = repo_path.join(".mediagit");
 
         tokio::fs::create_dir_all(&mediagit_dir).await.unwrap();
-        tokio::fs::create_dir_all(mediagit_dir.join("refs/tags")).await.unwrap();
-        tokio::fs::create_dir_all(mediagit_dir.join("refs/heads")).await.unwrap();
+        tokio::fs::create_dir_all(mediagit_dir.join("refs/tags"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(mediagit_dir.join("refs/heads"))
+            .await
+            .unwrap();
 
         // Create HEAD pointing to main
         let refdb = RefDatabase::new(&mediagit_dir);
@@ -566,7 +600,11 @@ mod tests {
         };
 
         let result = cmd.execute(repo_path.clone()).await;
-        assert!(result.is_ok(), "Failed to create lightweight tag: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to create lightweight tag: {:?}",
+            result.err()
+        );
 
         // Verify tag exists
         let mediagit_dir = repo_path.join(".mediagit");
@@ -591,7 +629,11 @@ mod tests {
         };
 
         let result = cmd.execute(repo_path.clone()).await;
-        assert!(result.is_ok(), "Failed to create annotated tag: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to create annotated tag: {:?}",
+            result.err()
+        );
 
         // Verify tag and metadata exist
         let mediagit_dir = repo_path.join(".mediagit");

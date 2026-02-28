@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! Streaming file transfer with chunked uploads/downloads
 //!
 //! This module provides efficient streaming transfer capabilities for large
@@ -317,8 +331,7 @@ impl UploadHandle {
     /// Execute the upload
     pub async fn execute(self) -> Result<()> {
         let mut file = File::open(&self.local_path).await?;
-        let total_chunks = (self.file_size as usize + self.uploader.config.chunk_size - 1)
-            / self.uploader.config.chunk_size;
+        let total_chunks = (self.file_size as usize).div_ceil(self.uploader.config.chunk_size);
 
         let semaphore = Arc::new(Semaphore::new(self.uploader.config.parallel_transfers));
         let mut tasks = Vec::new();
@@ -446,7 +459,10 @@ impl StreamingDownloader {
                 .header("Range", format!("bytes={}-{}", start, end));
 
             match request.send().await {
-                Ok(response) if response.status().is_success() || response.status() == StatusCode::PARTIAL_CONTENT => {
+                Ok(response)
+                    if response.status().is_success()
+                        || response.status() == StatusCode::PARTIAL_CONTENT =>
+                {
                     let data = response.bytes().await?.to_vec();
                     debug!(
                         start = start,
@@ -526,8 +542,7 @@ impl DownloadHandle {
     /// Execute the download
     pub async fn execute(self) -> Result<()> {
         let mut file = tokio::fs::File::create(&self.local_path).await?;
-        let total_chunks = (self.file_size as usize + self.downloader.config.chunk_size - 1)
-            / self.downloader.config.chunk_size;
+        let total_chunks = (self.file_size as usize).div_ceil(self.downloader.config.chunk_size);
 
         let semaphore = Arc::new(Semaphore::new(self.downloader.config.parallel_transfers));
         let mut tasks = Vec::new();
@@ -536,7 +551,8 @@ impl DownloadHandle {
 
         for chunk_index in 0..total_chunks {
             let start = (chunk_index * self.downloader.config.chunk_size) as u64;
-            let end = (start + self.downloader.config.chunk_size as u64 - 1).min(self.file_size - 1);
+            let end =
+                (start + self.downloader.config.chunk_size as u64 - 1).min(self.file_size - 1);
 
             let downloader = self.downloader.clone();
             let remote_path = self.remote_path.clone();

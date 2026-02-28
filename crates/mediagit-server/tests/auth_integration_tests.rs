@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! Integration tests for authentication system
 //!
 //! Tests JWT and API key authentication, permission enforcement,
@@ -39,7 +53,10 @@ fn create_test_state_with_auth() -> (Arc<AppState>, String, String) {
 
     // Generate a test JWT token for user with write permissions
     let write_token = jwt_auth
-        .generate_token("test-user-write", vec!["repo:read".to_string(), "repo:write".to_string()])
+        .generate_token(
+            "test-user-write",
+            vec!["repo:read".to_string(), "repo:write".to_string()],
+        )
         .unwrap();
 
     (state, read_token, write_token)

@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! MediaGit Metrics Module
 //!
 //! Prometheus-based metrics collection and HTTP endpoint for monitoring MediaGit operations.
@@ -49,7 +63,7 @@ pub mod types;
 pub use collector::MediaGitCollector;
 pub use registry::MetricsRegistry;
 pub use server::MetricsServer;
-pub use types::{MetricsConfig, StorageBackend, CompressionAlgorithm};
+pub use types::{CompressionAlgorithm, MetricsConfig, StorageBackend};
 
 // Re-export prometheus types for convenience
 pub use prometheus::{Encoder, TextEncoder};

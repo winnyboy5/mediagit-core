@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! Rate limiting integration tests
 //!
 //! Tests the tower_governor rate limiting middleware with MediaGit server.
@@ -80,7 +94,7 @@ async fn test_rate_limit_allows_requests_within_limit() {
     // Send 10 requests within burst limit - all should succeed
     for i in 0..10 {
         let resp = client
-            .get(&server.url("/test-repo/info/refs"))
+            .get(server.url("/test-repo/info/refs"))
             .send()
             .await
             .unwrap();
@@ -106,7 +120,7 @@ async fn test_rate_limit_blocks_requests_exceeding_burst() {
     // First 2 requests should succeed (within burst)
     for i in 0..2 {
         let resp = client
-            .get(&server.url("/test-repo/info/refs"))
+            .get(server.url("/test-repo/info/refs"))
             .send()
             .await
             .unwrap();
@@ -121,7 +135,7 @@ async fn test_rate_limit_blocks_requests_exceeding_burst() {
 
     // Third request should be rate limited
     let resp = client
-        .get(&server.url("/test-repo/info/refs"))
+        .get(server.url("/test-repo/info/refs"))
         .send()
         .await
         .unwrap();
@@ -141,7 +155,7 @@ async fn test_rate_limit_headers_present() {
     let client = Client::new();
 
     let resp = client
-        .get(&server.url("/test-repo/info/refs"))
+        .get(server.url("/test-repo/info/refs"))
         .send()
         .await
         .unwrap();
@@ -160,9 +174,8 @@ async fn test_rate_limit_headers_present() {
 }
 
 #[tokio::test]
-#[ignore] // Flaky due to timing precision - replenishment works but exact timing is hard to test reliably
 async fn test_rate_limit_replenishment() {
-    // 2 requests per second with burst of 2
+    // 2 requests per second with burst of 2 (token period = 500ms)
     let rate_config = RateLimitConfig::new(2, 2);
     let server = TestServer::new_with_rate_limit(rate_config).await;
     let client = Client::new();
@@ -170,7 +183,7 @@ async fn test_rate_limit_replenishment() {
     // Use up the burst (2 requests)
     for _ in 0..2 {
         client
-            .get(&server.url("/test-repo/info/refs"))
+            .get(server.url("/test-repo/info/refs"))
             .send()
             .await
             .unwrap();
@@ -178,18 +191,19 @@ async fn test_rate_limit_replenishment() {
 
     // Third request should be rate limited
     let resp = client
-        .get(&server.url("/test-repo/info/refs"))
+        .get(server.url("/test-repo/info/refs"))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
 
-    // Wait for replenishment (at 2 req/sec = 500ms per token, wait 1.5s to be safe)
-    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+    // Wait for replenishment: 3000ms gives a 6× safety margin over the 500ms token period.
+    // This is generous enough to be reliable even on loaded CI runners.
+    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
 
-    // Request should now succeed (replenished)
+    // Request should now succeed (tokens replenished)
     let resp = client
-        .get(&server.url("/test-repo/info/refs"))
+        .get(server.url("/test-repo/info/refs"))
         .send()
         .await
         .unwrap();
@@ -214,7 +228,7 @@ async fn test_rate_limit_per_ip_isolation() {
 
     // Client 1: use up its quota
     let resp1 = client1
-        .get(&server.url("/test-repo/info/refs"))
+        .get(server.url("/test-repo/info/refs"))
         .send()
         .await
         .unwrap();
@@ -222,7 +236,7 @@ async fn test_rate_limit_per_ip_isolation() {
 
     // Client 1: second request should be rate limited
     let resp1_second = client1
-        .get(&server.url("/test-repo/info/refs"))
+        .get(server.url("/test-repo/info/refs"))
         .send()
         .await
         .unwrap();
@@ -232,7 +246,7 @@ async fn test_rate_limit_per_ip_isolation() {
     // Note: This may not work as expected because both clients appear from 127.0.0.1
     // In real deployment with reverse proxy, x-forwarded-for would differentiate
     let resp2 = client2
-        .get(&server.url("/test-repo/info/refs"))
+        .get(server.url("/test-repo/info/refs"))
         .send()
         .await
         .unwrap();
@@ -270,9 +284,7 @@ async fn test_rate_limit_with_high_throughput() {
     for _ in 0..50 {
         let client = client.clone();
         let url = server.url("/test-repo/info/refs");
-        let task = tokio::spawn(async move {
-            client.get(&url).send().await.unwrap().status()
-        });
+        let task = tokio::spawn(async move { client.get(&url).send().await.unwrap().status() });
         tasks.push(task);
     }
 

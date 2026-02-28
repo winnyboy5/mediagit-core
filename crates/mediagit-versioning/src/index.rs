@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! Staging area index management.
 //!
 //! The index (staging area) tracks files that have been staged for the next commit.
@@ -76,8 +90,7 @@ impl Index {
         let contents = fs::read_to_string(&index_path)
             .with_context(|| format!("Failed to read index file: {}", index_path.display()))?;
 
-        let index: Index = serde_json::from_str(&contents)
-            .context("Failed to parse index file")?;
+        let index: Index = serde_json::from_str(&contents).context("Failed to parse index file")?;
 
         Ok(index)
     }
@@ -86,8 +99,7 @@ impl Index {
     pub fn save(&self, repo_root: &Path) -> Result<()> {
         let index_path = repo_root.join(".mediagit/index");
 
-        let contents = serde_json::to_string_pretty(self)
-            .context("Failed to serialize index")?;
+        let contents = serde_json::to_string_pretty(self).context("Failed to serialize index")?;
 
         fs::write(&index_path, contents)
             .with_context(|| format!("Failed to write index file: {}", index_path.display()))?;
@@ -261,8 +273,20 @@ mod tests {
         let oid1 = Oid::hash(b"content1");
         let oid2 = Oid::hash(b"content2");
 
-        index.add_entry(IndexEntry::new(PathBuf::from("file1.txt"), oid1, 0o100644, 8, None));
-        index.add_entry(IndexEntry::new(PathBuf::from("file2.txt"), oid2, 0o100644, 8, None));
+        index.add_entry(IndexEntry::new(
+            PathBuf::from("file1.txt"),
+            oid1,
+            0o100644,
+            8,
+            None,
+        ));
+        index.add_entry(IndexEntry::new(
+            PathBuf::from("file2.txt"),
+            oid2,
+            0o100644,
+            8,
+            None,
+        ));
 
         let paths = index.staged_paths();
         assert_eq!(paths.len(), 2);

@@ -180,7 +180,7 @@ sequenceDiagram
 
 ## Technology Stack
 
-- **Language**: Rust 1.91.0
+- **Language**: Rust 1.92.0
 - **Async Runtime**: Tokio 1.40+
 - **CLI Framework**: Clap 4.5+
 - **Compression**: zstd, brotli, bsdiff

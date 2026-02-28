@@ -1,13 +1,28 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 MediaGit Contributors
 
+#![allow(clippy::unwrap_used, clippy::assertions_on_constants)]
 //! Integration tests for mediagit-security crate
 //!
 //! Tests the public API of the security module including encryption,
 //! key derivation, and audit logging.
 
-use mediagit_security::encryption::{encrypt, decrypt, EncryptionKey};
-use mediagit_security::kdf::{derive_key, Salt, Argon2Params};
+use mediagit_security::encryption::{decrypt, encrypt, EncryptionKey};
+use mediagit_security::kdf::{derive_key, Argon2Params, Salt};
 use secrecy::SecretString;
 
 #[test]
@@ -53,7 +68,10 @@ fn test_encrypt_decrypt_roundtrip_empty() {
     let ciphertext = encrypt(&key, plaintext).unwrap();
     let decrypted = decrypt(&key, &ciphertext).unwrap();
 
-    assert_eq!(decrypted, plaintext, "Empty data should roundtrip correctly");
+    assert_eq!(
+        decrypted, plaintext,
+        "Empty data should roundtrip correctly"
+    );
 }
 
 #[test]
@@ -65,7 +83,10 @@ fn test_encrypt_decrypt_roundtrip_large() {
     let ciphertext = encrypt(&key, &plaintext).unwrap();
     let decrypted = decrypt(&key, &ciphertext).unwrap();
 
-    assert_eq!(decrypted, plaintext, "Large data should roundtrip correctly");
+    assert_eq!(
+        decrypted, plaintext,
+        "Large data should roundtrip correctly"
+    );
 }
 
 #[test]
@@ -77,7 +98,10 @@ fn test_ciphertext_is_different() {
     let ciphertext2 = encrypt(&key, plaintext).unwrap();
 
     // Due to random nonce, ciphertexts should be different
-    assert_ne!(ciphertext1, ciphertext2, "Ciphertexts should differ due to nonce");
+    assert_ne!(
+        ciphertext1, ciphertext2,
+        "Ciphertexts should differ due to nonce"
+    );
 
     // But both should decrypt to same plaintext
     assert_eq!(decrypt(&key, &ciphertext1).unwrap(), plaintext);
@@ -116,7 +140,7 @@ fn test_decrypt_tampered_data_fails() {
 fn test_salt_generation() {
     let salt = Salt::generate();
     assert!(salt.is_ok(), "Salt generation should succeed");
-    
+
     let salt = salt.unwrap();
     assert!(!salt.as_bytes().is_empty(), "Salt should have bytes");
 }
@@ -145,7 +169,10 @@ fn test_key_derivation_deterministic() {
 
     // Keys should be equal (we can't compare directly, but the derivation should work)
     // Both derivations succeeded with same inputs, indicating deterministic behavior
-    assert!(true, "Same password and salt should produce consistent results");
+    assert!(
+        true,
+        "Same password and salt should produce consistent results"
+    );
 }
 
 #[test]
@@ -179,19 +206,26 @@ fn test_audit_event_creation() {
 
 #[test]
 fn test_audit_logging_functions() {
-    use std::net::{IpAddr, Ipv4Addr};
     use mediagit_security::{
-        log_authentication_success,
-        log_authentication_failed,
-        log_access_denied,
+        log_access_denied, log_authentication_failed, log_authentication_success,
     };
+    use std::net::{IpAddr, Ipv4Addr};
 
     let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
 
     // These should not panic
     log_authentication_success(ip, "test_user".to_string());
-    log_authentication_failed(Some(ip), Some("unknown_user".to_string()), "invalid password");
-    log_access_denied(ip, Some("user".to_string()), "repo".to_string(), "permission denied");
+    log_authentication_failed(
+        Some(ip),
+        Some("unknown_user".to_string()),
+        "invalid password",
+    );
+    log_access_denied(
+        ip,
+        Some("user".to_string()),
+        "repo".to_string(),
+        "permission denied",
+    );
 }
 
 #[test]
@@ -202,14 +236,16 @@ fn test_encryption_version_byte() {
     let ciphertext = encrypt(&key, plaintext).unwrap();
 
     // First byte should be version (currently 0x01 or 0x02)
-    assert!(ciphertext[0] == 0x01 || ciphertext[0] == 0x02, 
-        "Ciphertext should start with version byte");
+    assert!(
+        ciphertext[0] == 0x01 || ciphertext[0] == 0x02,
+        "Ciphertext should start with version byte"
+    );
 }
 
 #[test]
 fn test_concurrent_encryption() {
-    use std::thread;
     use std::sync::Arc;
+    use std::thread;
 
     let key = Arc::new(EncryptionKey::generate().unwrap());
 

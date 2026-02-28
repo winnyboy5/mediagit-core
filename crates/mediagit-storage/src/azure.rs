@@ -415,9 +415,7 @@ impl AzureBackend {
             let host = url
                 .host_str()
                 .ok_or_else(|| anyhow::anyhow!("Invalid BlobEndpoint: missing host"))?;
-            let port = url
-                .port()
-                .unwrap_or(10000); // Default Azurite port
+            let port = url.port().unwrap_or(10000); // Default Azurite port
 
             // Use emulator CloudLocation for custom endpoints
             let cloud_location = CloudLocation::Emulator {
@@ -486,11 +484,24 @@ impl AzureBackend {
                         tracing::info!("Successfully created container: {}", self.container_name);
                         Ok(())
                     }
-                    Err(e) => Err(anyhow::anyhow!(
-                        "Failed to create container {}: {}",
-                        self.container_name,
-                        e
-                    ))
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        // Another concurrent caller may have created the container between our
+                        // exists() check and create() call (TOCTOU). Treat 409 as success.
+                        if err_msg.contains("ContainerAlreadyExists") || err_msg.contains("409") {
+                            tracing::debug!(
+                                "Container {} already exists (concurrent creation)",
+                                self.container_name
+                            );
+                            Ok(())
+                        } else {
+                            Err(anyhow::anyhow!(
+                                "Failed to create container {}: {}",
+                                self.container_name,
+                                e
+                            ))
+                        }
+                    }
                 }
             }
             Ok(_) => {
@@ -499,7 +510,10 @@ impl AzureBackend {
             }
             Err(e) => {
                 // If we can't check existence, try to create anyway
-                tracing::warn!("Could not check container existence: {}, attempting to create", e);
+                tracing::warn!(
+                    "Could not check container existence: {}, attempting to create",
+                    e
+                );
                 match self.client.create().await {
                     Ok(_) => {
                         tracing::info!("Successfully created container: {}", self.container_name);
@@ -577,7 +591,10 @@ impl StorageBackend for AzureBackend {
     async fn exists(&self, key: &str) -> anyhow::Result<bool> {
         Self::validate_key(key)?;
 
-        tracing::debug!("Checking existence of object in Azure Blob Storage: {}", key);
+        tracing::debug!(
+            "Checking existence of object in Azure Blob Storage: {}",
+            key
+        );
 
         let blob_client = self.client.blob_client(key);
 
@@ -645,9 +662,11 @@ impl StorageBackend for AzureBackend {
         };
 
         let mut results = Vec::new();
-        while let Some(blob_list) = stream.try_next().await.map_err(|e| {
-            Self::map_error(e, &format!("listing with prefix '{}'", prefix))
-        })? {
+        while let Some(blob_list) = stream
+            .try_next()
+            .await
+            .map_err(|e| Self::map_error(e, &format!("listing with prefix '{}'", prefix)))?
+        {
             // Extract blob names from the response
             for blob in blob_list.blobs.blobs() {
                 results.push(blob.name.clone());
@@ -695,7 +714,7 @@ impl AzureBackend {
     /// This is more efficient than uploading the entire file at once
     /// and allows for better handling of network interruptions.
     async fn put_chunked(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
-        let chunk_count = (data.len() + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        let chunk_count = data.len().div_ceil(CHUNK_SIZE);
         tracing::debug!(
             "Uploading {} bytes in {} chunks to {} in container {}",
             data.len(),
@@ -735,7 +754,7 @@ impl AzureBackend {
         let block_list = BlockList {
             blocks: block_ids
                 .into_iter()
-                .map(|id| BlobBlockType::new_uncommitted(id))
+                .map(BlobBlockType::new_uncommitted)
                 .collect(),
         };
 
@@ -775,7 +794,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires live Azure credentials to create container
+    #[ignore = "requires live Azure credentials - not available in CI"]
     async fn test_sas_token_backend_creation() {
         let result = AzureBackend::with_sas_token(
             "testaccount",
@@ -791,7 +810,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires live Azure credentials to create container
+    #[ignore = "requires live Azure credentials - not available in CI"]
     async fn test_account_key_backend_creation() {
         let result = AzureBackend::with_account_key(
             "testaccount",
@@ -807,76 +826,51 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires live Azure credentials to create container
+    #[ignore = "requires Azurite emulator"]
     async fn test_connection_string_backend_creation() {
-        let conn_str = "DefaultEndpointsProtocol=https;AccountName=testaccount;AccountKey=test==;EndpointSuffix=core.windows.net";
-        let result = AzureBackend::with_connection_string("testcontainer", conn_str).await;
+        let conn_str = "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://localhost:10000/devstoreaccount1;";
+        let result = AzureBackend::with_connection_string("mediagit-test", conn_str).await;
 
         assert!(result.is_ok());
         let backend = result.unwrap();
-        assert_eq!(backend.account_name, "testaccount");
-        assert_eq!(backend.container_name, "testcontainer");
+        assert_eq!(backend.account_name, "devstoreaccount1");
+        assert_eq!(backend.container_name, "mediagit-test");
     }
 
     #[tokio::test]
     async fn test_empty_account_name_fails() {
-        let result = AzureBackend::with_sas_token(
-            "",
-            "testcontainer",
-            "token",
-        )
-        .await;
+        let result = AzureBackend::with_sas_token("", "testcontainer", "token").await;
 
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_empty_container_name_fails() {
-        let result = AzureBackend::with_account_key(
-            "testaccount",
-            "",
-            "key",
-        )
-        .await;
+        let result = AzureBackend::with_account_key("testaccount", "", "key").await;
 
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_empty_sas_token_fails() {
-        let result = AzureBackend::with_sas_token(
-            "testaccount",
-            "testcontainer",
-            "",
-        )
-        .await;
+        let result = AzureBackend::with_sas_token("testaccount", "testcontainer", "").await;
 
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_empty_account_key_fails() {
-        let result = AzureBackend::with_account_key(
-            "testaccount",
-            "testcontainer",
-            "",
-        )
-        .await;
+        let result = AzureBackend::with_account_key("testaccount", "testcontainer", "").await;
 
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_empty_connection_string_fails() {
-        let result = AzureBackend::with_connection_string(
-            "testcontainer",
-            "",
-        )
-        .await;
+        let result = AzureBackend::with_connection_string("testcontainer", "").await;
 
         assert!(result.is_err());
     }
-
 
     #[test]
     fn test_chunk_size_constant() {
@@ -891,7 +885,7 @@ mod tests {
     #[test]
     fn test_chunk_size_alignment() {
         // Verify chunk size is reasonable (between 1MB and 100MB)
-        assert!(CHUNK_SIZE >= 1024 * 1024);
-        assert!(CHUNK_SIZE <= 100 * 1024 * 1024);
+        const { assert!(CHUNK_SIZE >= 1024 * 1024) };
+        const { assert!(CHUNK_SIZE <= 100 * 1024 * 1024) };
     }
 }

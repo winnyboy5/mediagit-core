@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 MediaGit Contributors
 
@@ -238,7 +252,9 @@ fn test_status_clean_repo() {
         .arg("status")
         .assert()
         .success()
-        .stdout(predicate::str::contains("clean").or(predicate::str::contains("nothing to commit")));
+        .stdout(
+            predicate::str::contains("clean").or(predicate::str::contains("nothing to commit")),
+        );
 }
 
 #[test]
@@ -294,7 +310,10 @@ fn test_commit_nothing_to_commit() {
         .arg("test")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("nothing to commit").or(predicate::str::contains("no changes")));
+        .stderr(
+            predicate::str::contains("nothing to commit")
+                .or(predicate::str::contains("no changes")),
+        );
 }
 
 #[test]
@@ -519,7 +538,9 @@ fn test_invalid_flag() {
         .arg("--invalid-flag")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("unexpected").or(predicate::str::contains("unrecognized")));
+        .stderr(
+            predicate::str::contains("unexpected").or(predicate::str::contains("unrecognized")),
+        );
 }
 
 // ============================================================================
@@ -604,26 +625,26 @@ fn test_workflow_branch_create_switch() {
     std::fs::write(repo.path().join("main.txt"), b"main content").unwrap();
     mediagit_cmd()
         .current_dir(&repo)
-        .args(&["add", "main.txt"])
+        .args(["add", "main.txt"])
         .assert()
         .success();
     mediagit_cmd()
         .current_dir(&repo)
-        .args(&["commit", "-m", "Initial commit"])
+        .args(["commit", "-m", "Initial commit"])
         .assert()
         .success();
 
     // Create feature branch
     mediagit_cmd()
         .current_dir(&repo)
-        .args(&["branch", "create", "feature"])
+        .args(["branch", "create", "feature"])
         .assert()
         .success();
 
     // Switch to feature branch
     mediagit_cmd()
         .current_dir(&repo)
-        .args(&["branch", "switch", "feature"])
+        .args(["branch", "switch", "feature"])
         .assert()
         .success();
 
@@ -631,12 +652,12 @@ fn test_workflow_branch_create_switch() {
     std::fs::write(repo.path().join("feature.txt"), b"feature content").unwrap();
     mediagit_cmd()
         .current_dir(&repo)
-        .args(&["add", "feature.txt"])
+        .args(["add", "feature.txt"])
         .assert()
         .success();
     mediagit_cmd()
         .current_dir(&repo)
-        .args(&["commit", "-m", "Add feature"])
+        .args(["commit", "-m", "Add feature"])
         .assert()
         .success();
 }

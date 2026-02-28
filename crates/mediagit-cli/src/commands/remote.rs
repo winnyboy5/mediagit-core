@@ -1,8 +1,22 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+use super::super::repo::find_repo_root;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use console::style;
 use mediagit_config::Config;
-use super::super::repo::find_repo_root;
 
 /// Manage remote repositories
 #[derive(Parser, Debug)]
@@ -79,18 +93,14 @@ pub enum RemoteSubcommand {
 impl RemoteCmd {
     pub async fn execute(&self) -> Result<()> {
         match &self.command {
-            RemoteSubcommand::Add { name, url, fetch } => {
-                self.add_remote(name, url, *fetch).await
-            }
+            RemoteSubcommand::Add { name, url, fetch } => self.add_remote(name, url, *fetch).await,
             RemoteSubcommand::Remove { name } => self.remove_remote(name).await,
             RemoteSubcommand::List { verbose } => self.list_remotes(*verbose).await,
             RemoteSubcommand::Rename { old_name, new_name } => {
                 self.rename_remote(old_name, new_name).await
             }
             RemoteSubcommand::Show { name } => self.show_remote(name).await,
-            RemoteSubcommand::SetUrl { name, url, push } => {
-                self.set_url(name, url, *push).await
-            }
+            RemoteSubcommand::SetUrl { name, url, push } => self.set_url(name, url, *push).await,
         }
     }
 
@@ -193,28 +203,16 @@ impl RemoteCmd {
 
                     // Show fetch URL
                     if let Some(fetch_url) = &remote.fetch {
-                        println!(
-                            "  Fetch URL: {}",
-                            style(fetch_url).cyan()
-                        );
+                        println!("  Fetch URL: {}", style(fetch_url).cyan());
                     } else {
-                        println!(
-                            "  Fetch URL: {}",
-                            style(&remote.url).cyan()
-                        );
+                        println!("  Fetch URL: {}", style(&remote.url).cyan());
                     }
 
                     // Show push URL
                     if let Some(push_url) = &remote.push {
-                        println!(
-                            "  Push URL:  {}",
-                            style(push_url).cyan()
-                        );
+                        println!("  Push URL:  {}", style(push_url).cyan());
                     } else {
-                        println!(
-                            "  Push URL:  {}",
-                            style(&remote.url).cyan()
-                        );
+                        println!("  Push URL:  {}", style(&remote.url).cyan());
                     }
                 } else {
                     println!("{}", name);
@@ -278,16 +276,10 @@ impl RemoteCmd {
         println!("{}", style(format!("* remote {}", name)).yellow().bold());
 
         let fetch_url = remote.fetch.as_ref().unwrap_or(&remote.url);
-        println!(
-            "  Fetch URL: {}",
-            style(fetch_url).cyan()
-        );
+        println!("  Fetch URL: {}", style(fetch_url).cyan());
 
         let push_url = remote.push.as_ref().unwrap_or(&remote.url);
-        println!(
-            "  Push URL:  {}",
-            style(push_url).cyan()
-        );
+        println!("  Push URL:  {}", style(push_url).cyan());
 
         // Try to fetch remote refs to show HEAD and branches
         let remote_url = remote.url.clone();
@@ -306,9 +298,7 @@ impl RemoteCmd {
                     println!("    {}", style("(none)").dim());
                 } else {
                     for branch in branches {
-                        let short_name = branch
-                            .strip_prefix("refs/heads/")
-                            .unwrap_or(&branch);
+                        let short_name = branch.strip_prefix("refs/heads/").unwrap_or(&branch);
                         println!("    {}", style(short_name).cyan());
                     }
                 }
@@ -317,7 +307,11 @@ impl RemoteCmd {
                 // Graceful degradation - show what we can
                 println!("  HEAD branch: {}", style("(could not connect)").dim());
                 println!("  Remote branches:");
-                println!("    {} {}", style("(could not fetch:").dim(), style(e.to_string()).dim());
+                println!(
+                    "    {} {}",
+                    style("(could not fetch:").dim(),
+                    style(e.to_string()).dim()
+                );
 
                 // Try to show locally cached remote tracking branches
                 let storage_path = repo_root.join(".mediagit");
@@ -347,15 +341,22 @@ impl RemoteCmd {
         let head_ref = refs.refs.iter().find(|r| r.name == "HEAD");
         let head_branch = if let Some(head) = head_ref {
             // Try to find which branch HEAD points to by matching OID
-            refs.refs.iter()
+            refs.refs
+                .iter()
                 .find(|r| r.name.starts_with("refs/heads/") && r.oid == head.oid)
-                .map(|r| r.name.strip_prefix("refs/heads/").unwrap_or(&r.name).to_string())
+                .map(|r| {
+                    r.name
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(&r.name)
+                        .to_string()
+                })
         } else {
             None
         };
 
         // Collect branches
-        let branches: Vec<String> = refs.refs
+        let branches: Vec<String> = refs
+            .refs
             .iter()
             .filter(|r| r.name.starts_with("refs/heads/"))
             .map(|r| r.name.clone())
@@ -404,7 +405,6 @@ impl RemoteCmd {
 
         Ok(())
     }
-
 }
 
 /// Validate remote URL format

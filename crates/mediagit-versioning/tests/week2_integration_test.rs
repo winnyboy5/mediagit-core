@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // MediaGit - Git for Media Files
 // Copyright (C) 2025 MediaGit Contributors
 //
@@ -9,7 +23,7 @@
 
 use mediagit_storage::mock::MockBackend;
 use mediagit_versioning::{
-    BranchManager, Commit, ObjectDatabase, ObjectType, Signature, Tree, TreeEntry, FileMode,
+    BranchManager, Commit, FileMode, ObjectDatabase, ObjectType, Signature, Tree, TreeEntry,
 };
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -82,7 +96,10 @@ async fn test_week2_milestone_end_to_end() {
     // STEP 2: Create feature branch
     // ========================================
 
-    branch_mgr.create("feature/compression", commit1_oid).await.unwrap();
+    branch_mgr
+        .create("feature/compression", commit1_oid)
+        .await
+        .unwrap();
     branch_mgr.switch_to("feature/compression").await.unwrap();
 
     let current_name = branch_mgr.current_branch().await.unwrap().unwrap();
@@ -128,7 +145,10 @@ async fn test_week2_milestone_end_to_end() {
     let commit2_oid = commit2.write(&odb).await.unwrap();
 
     // Update feature branch to point to new commit
-    branch_mgr.update_to("feature/compression", commit2_oid, true).await.unwrap();
+    branch_mgr
+        .update_to("feature/compression", commit2_oid, true)
+        .await
+        .unwrap();
 
     // ========================================
     // STEP 4: Switch back to main branch
@@ -146,7 +166,10 @@ async fn test_week2_milestone_end_to_end() {
     // STEP 5: Create another branch from main
     // ========================================
 
-    branch_mgr.create("feature/docs", commit1_oid).await.unwrap();
+    branch_mgr
+        .create("feature/docs", commit1_oid)
+        .await
+        .unwrap();
     branch_mgr.switch_to("feature/docs").await.unwrap();
 
     // Add documentation file
@@ -181,7 +204,10 @@ async fn test_week2_milestone_end_to_end() {
     commit3.add_parent(commit1_oid);
 
     let commit3_oid = commit3.write(&odb).await.unwrap();
-    branch_mgr.update_to("feature/docs", commit3_oid, true).await.unwrap();
+    branch_mgr
+        .update_to("feature/docs", commit3_oid, true)
+        .await
+        .unwrap();
     branch_mgr.switch_to("feature/docs").await.unwrap();
 
     // ========================================
@@ -273,9 +299,18 @@ async fn test_week2_milestone_end_to_end() {
 
     println!("✅ Week 2 Milestone Integration Test PASSED");
     println!("   - Object Database: Working");
-    println!("   - Deduplication: Working (ratio: {:.1}%)", final_metrics.dedup_ratio() * 100.0);
-    println!("   - Cache: Working (hit rate: {:.1}%)", final_metrics.hit_rate() * 100.0);
-    println!("   - Trees: Working ({} files)", tree2_retrieved.file_count());
+    println!(
+        "   - Deduplication: Working (ratio: {:.1}%)",
+        final_metrics.dedup_ratio() * 100.0
+    );
+    println!(
+        "   - Cache: Working (hit rate: {:.1}%)",
+        final_metrics.hit_rate() * 100.0
+    );
+    println!(
+        "   - Trees: Working ({} files)",
+        tree2_retrieved.file_count()
+    );
     println!("   - Commits: Working (commit chain verified)");
     println!("   - Branches: Working ({} branches)", branches.len());
     println!("   - Tags: Working ({} tags)", tags.len());
@@ -299,7 +334,11 @@ async fn test_detached_head_workflow() {
 
     let blob_oid = odb.write(ObjectType::Blob, b"content").await.unwrap();
     let mut tree = Tree::new();
-    tree.add_entry(TreeEntry::new("file.txt".to_string(), FileMode::Regular, blob_oid));
+    tree.add_entry(TreeEntry::new(
+        "file.txt".to_string(),
+        FileMode::Regular,
+        blob_oid,
+    ));
     let tree_oid = tree.write(&odb).await.unwrap();
 
     let commit = Commit::new(tree_oid, author.clone(), author, "Initial".to_string());

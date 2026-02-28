@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! Authentication module for MediaGit
 //!
 //! Provides JWT-based and API key authentication for secure access control.
@@ -21,23 +35,22 @@
 //! # }
 //! ```
 
-pub mod jwt;
 pub mod apikey;
-pub mod user;
-pub mod middleware;
 pub mod credentials;
 pub mod handlers;
+pub mod jwt;
+pub mod middleware;
+pub mod user;
 
-pub use jwt::{JwtAuth, Claims, TokenPair};
-pub use apikey::{ApiKeyAuth, ApiKey};
-pub use user::{User, UserId};
-pub use middleware::{AuthLayer, AuthUser, auth_middleware};
-pub use credentials::{UserCredentials, CredentialsStore};
+pub use apikey::{ApiKey, ApiKeyAuth};
+pub use credentials::{CredentialsStore, UserCredentials};
 pub use handlers::{
-    AuthService, RegisterRequest, LoginRequest, RefreshRequest,
-    AuthResponse, UserInfo, ErrorResponse,
-    register_handler, login_handler, refresh_handler, me_handler, logout_handler,
+    login_handler, logout_handler, me_handler, refresh_handler, register_handler, AuthResponse,
+    AuthService, ErrorResponse, LoginRequest, RefreshRequest, RegisterRequest, UserInfo,
 };
+pub use jwt::{Claims, JwtAuth, TokenPair};
+pub use middleware::{auth_middleware, AuthLayer, AuthUser};
+pub use user::{User, UserId};
 
 use thiserror::Error;
 

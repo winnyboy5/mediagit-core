@@ -1,16 +1,32 @@
+﻿// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! Stage file contents for commit.
 //!
 //! The `add` command stages changes to files for inclusion in the next commit.
 
+use super::super::repo::{create_storage_backend, find_repo_root};
 use anyhow::{Context, Result};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
-use mediagit_versioning::{ChunkStrategy, Commit, Index, IndexEntry, ObjectDatabase, ObjectType, Oid, RefDatabase, Tree};
-use super::super::repo::{find_repo_root, create_storage_backend};
+use mediagit_versioning::{
+    ChunkStrategy, Commit, Index, IndexEntry, ObjectDatabase, ObjectType, Oid, RefDatabase, Tree,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Add file contents to the staging area
@@ -108,8 +124,13 @@ impl AddCmd {
             anyhow::bail!("Nothing specified, nothing added.\nUse 'mediagit add <file>...' or 'mediagit add --all' to stage files.");
         }
 
-        // Find repository root
-        let repo_root = find_repo_root()?;
+        // Find repository root and canonicalize to match the canonicalized file
+        // paths produced by collect_files_recursive (which uses dunce::canonicalize).
+        // Without this, strip_prefix fails on Windows when the working directory
+        // path differs from the canonicalized form (e.g. 8.3 short names), causing
+        // files to be stored with absolute paths in the index/tree.
+        let repo_root = dunce::canonicalize(find_repo_root()?)
+            .unwrap_or_else(|_| find_repo_root().expect("repo root"));
 
         if self.dry_run {
             output::info("Running in dry-run mode");
@@ -129,7 +150,7 @@ impl AddCmd {
             storage,
             1000,
             Some(ChunkStrategy::MediaAware),
-            delta_enabled
+            delta_enabled,
         );
 
         if !self.quiet && self.verbose {
@@ -154,9 +175,13 @@ impl AddCmd {
             let mut files = HashMap::new();
             if let Ok(head_oid) = refdb.resolve("HEAD").await {
                 if let Ok(commit_data) = odb.read(&head_oid).await {
-                    if let Ok(commit) = bincode::deserialize::<Commit>(&commit_data) {
+                    if let Ok(commit) =
+                        mediagit_versioning::format::deserialize::<Commit>(&commit_data)
+                    {
                         if let Ok(tree_data) = odb.read(&commit.tree).await {
-                            if let Ok(tree) = bincode::deserialize::<Tree>(&tree_data) {
+                            if let Ok(tree) =
+                                mediagit_versioning::format::deserialize::<Tree>(&tree_data)
+                            {
                                 for entry in tree.iter() {
                                     files.insert(PathBuf::from(&entry.name), entry.oid);
                                 }
@@ -223,6 +248,7 @@ impl AddCmd {
                 let mut file_tasks = tokio::task::JoinSet::new();
                 let skipped = Arc::new(AtomicU64::new(0));
 
+                #[allow(clippy::unnecessary_to_owned)]
                 for file_path in files_to_add.iter().cloned() {
                     let sem = semaphore.clone();
                     let odb = odb.clone();
@@ -232,12 +258,12 @@ impl AddCmd {
                     let progress_bytes = progress_bytes.clone();
                     let progress_files = progress_files.clone();
                     let progress_bar = progress_bar.clone();
-                    let total_files = total_files;
                     let skipped = skipped.clone();
-                    let delta_enabled = delta_enabled;
 
                     file_tasks.spawn(async move {
-                        let _permit = sem.acquire().await
+                        let _permit = sem
+                            .acquire()
+                            .await
                             .map_err(|_| anyhow::anyhow!("Semaphore closed"))?;
 
                         let result = Self::process_single_file(
@@ -247,7 +273,8 @@ impl AddCmd {
                             &head_files,
                             &index_files,
                             delta_enabled,
-                        ).await;
+                        )
+                        .await;
 
                         match result {
                             Ok(Some(file_result)) => {
@@ -318,12 +345,16 @@ impl AddCmd {
                         &head_files,
                         &index_files,
                         delta_enabled,
-                    ).await;
+                    )
+                    .await;
 
                     match result {
                         Ok(Some(file_result)) => {
                             if self.verbose {
-                                output::detail("added", &format!("{} ({})", file_path.display(), file_result.oid));
+                                output::detail(
+                                    "added",
+                                    &format!("{} ({})", file_path.display(), file_result.oid),
+                                );
                             }
 
                             let entry = IndexEntry::new(
@@ -346,7 +377,10 @@ impl AddCmd {
                         Ok(None) => {
                             skipped_count += 1;
                             if self.verbose {
-                                output::detail("skipped (unchanged)", &file_path.display().to_string());
+                                output::detail(
+                                    "skipped (unchanged)",
+                                    &file_path.display().to_string(),
+                                );
                             }
                         }
                         Err(e) => {
@@ -373,10 +407,9 @@ impl AddCmd {
             .map(|p| p.to_path_buf())
             .collect();
 
-        for (head_path, _head_oid) in head_files.as_ref() {
-            let head_path_normalized = PathBuf::from(
-                head_path.to_string_lossy().replace('\\', "/")
-            );
+        for head_path in head_files.as_ref().keys() {
+            let head_path_normalized =
+                PathBuf::from(head_path.to_string_lossy().replace('\\', "/"));
 
             let exists_in_working_dir = working_files.iter().any(|wp| {
                 wp.to_string_lossy().replace('\\', "/") == head_path_normalized.to_string_lossy()
@@ -403,8 +436,7 @@ impl AddCmd {
 
         // Save the index
         if !self.dry_run {
-            index.save(&repo_root)
-                .context("Failed to save index")?;
+            index.save(&repo_root).context("Failed to save index")?;
         }
 
         if !self.quiet {
@@ -445,19 +477,22 @@ impl AddCmd {
         index_files: &HashMap<PathBuf, (u64, Option<u64>)>,
         delta_enabled: bool,
     ) -> Result<Option<FileResult>> {
-        let metadata = tokio::fs::metadata(file_path)
-            .await
-            .context(format!("Failed to read file metadata: {}", file_path.display()))?;
+        let metadata = tokio::fs::metadata(file_path).await.context(format!(
+            "Failed to read file metadata: {}",
+            file_path.display()
+        ))?;
 
         let file_size = metadata.len();
         const STREAMING_THRESHOLD: u64 = 100 * 1024 * 1024; // 100MB
 
-        let relative_path = file_path.strip_prefix(repo_root)
+        let relative_path = file_path
+            .strip_prefix(repo_root)
             .unwrap_or(file_path)
             .to_path_buf();
 
         // Stat-cache check: skip if file hasn't changed since last staging
-        let file_mtime = metadata.modified()
+        let file_mtime = metadata
+            .modified()
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs());
@@ -472,21 +507,26 @@ impl AddCmd {
             }
         }
 
-        let filename = file_path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-        // Seed similarity detector from previous version's manifest
+        // Seed similarity detector from previous version (manifest for chunked, blob for small)
         if let Some(head_oid) = head_files.get(&relative_path) {
             if let Ok(Some(old_manifest)) = odb.get_chunk_manifest(head_oid).await {
                 let _ = odb.seed_similarity_from_manifest(&old_manifest).await;
+            } else if delta_enabled {
+                // Non-chunked file: seed from the previous full blob so write_with_delta
+                // can find a similar base across invocations.  We seed regardless of
+                // whether the current file will ultimately use delta, because we haven't
+                // read the file yet and the actual delta decision is made later.
+                let _ = odb.seed_similarity_from_blob(head_oid, filename).await;
             }
         }
 
         // Choose streaming vs in-memory based on file size
         let (_content_oid, oid) = if file_size >= STREAMING_THRESHOLD {
             // STREAMING PATH: Files >= 100MB (parallel internally)
-            let content_oid = Oid::from_file_async(file_path).await
+            let content_oid = Oid::from_file_async(file_path)
+                .await
                 .context(format!("Failed to hash file: {}", file_path.display()))?;
 
             // Check if unchanged from HEAD
@@ -496,7 +536,8 @@ impl AddCmd {
                 }
             }
 
-            let oid = odb.write_chunked_from_file(file_path, filename)
+            let oid = odb
+                .write_chunked_from_file(file_path, filename)
                 .await
                 .context("Failed to write chunked object (streaming)")?;
 
@@ -610,7 +651,7 @@ impl AddCmd {
             }
 
             if !path.exists() {
-                if !self.force {
+                if !self.force && !self.quiet {
                     output::warning(&format!("Path does not exist: {}", path_str));
                 }
                 continue;
@@ -627,6 +668,7 @@ impl AddCmd {
     }
 
     /// Recursively collect all files from a directory
+    #[allow(clippy::only_used_in_recursion)]
     fn collect_files_recursive(
         &self,
         dir: &Path,
@@ -681,15 +723,16 @@ impl AddCmd {
             "csv" | "json" | "jsonl" | "txt" | "xml" | "yaml" | "yml" | "toml" => true,
 
             // === ML DATA: Excellent dedup for incremental datasets (5MB) ===
-            "parquet" | "arrow" | "feather" | "orc" | "avro" |
-            "hdf5" | "h5" | "npy" | "npz" | "tfrecords" | "petastorm" => true,
+            "parquet" | "arrow" | "feather" | "orc" | "avro" | "hdf5" | "h5" | "npy" | "npz"
+            | "tfrecords" | "petastorm" => true,
 
             // === ML MODELS: Good dedup for checkpoint files (5MB) ===
-            "pt" | "pth" | "safetensors" | "ckpt" | "pb" | "onnx" |
-            "gguf" | "ggml" | "tflite" | "keras" | "bin" => true,
+            "pt" | "pth" | "safetensors" | "ckpt" | "pb" | "onnx" | "gguf" | "ggml" | "tflite"
+            | "keras" | "bin" => true,
 
             // === VIDEO: Structure-aware chunking (5MB) ===
-            "mp4" | "mov" | "avi" | "mkv" | "webm" | "flv" | "wmv" | "mpg" | "mpeg" | "m4v" | "3gp" => true,
+            "mp4" | "mov" | "avi" | "mkv" | "webm" | "flv" | "wmv" | "mpg" | "mpeg" | "m4v"
+            | "3gp" => true,
 
             // === UNCOMPRESSED IMAGES: Rolling CDC (5MB) ===
             "psd" | "tif" | "tiff" | "bmp" | "exr" | "hdr" | "raw" => true,
@@ -707,15 +750,16 @@ impl AddCmd {
             "wav" | "flac" | "aiff" | "alac" => size > MIN_SIZE_10MB,
 
             // === 3D MODELS: Good dedup (10MB) ===
-            "glb" | "gltf" | "obj" | "fbx" | "blend" | "usd" | "usda" | "usdc" => size > MIN_SIZE_10MB,
+            "glb" | "gltf" | "obj" | "fbx" | "blend" | "usd" | "usda" | "usdc" => {
+                size > MIN_SIZE_10MB
+            }
 
             // === ARCHIVES: Uncompressed archives benefit from chunking (5MB) ===
             "tar" | "cpio" | "iso" | "dmg" => true,
 
             // === PRE-COMPRESSED: Never chunk (no benefit) ===
-            "jpg" | "jpeg" | "png" | "webp" | "gif" | "avif" | "heic" |
-            "mp3" | "aac" | "ogg" | "opus" |
-            "zip" | "gz" | "bz2" | "xz" | "7z" | "rar" | "tar.gz" | "tgz" => false,
+            "jpg" | "jpeg" | "png" | "webp" | "gif" | "avif" | "heic" | "mp3" | "aac" | "ogg"
+            | "opus" | "zip" | "gz" | "bz2" | "xz" | "7z" | "rar" | "tar.gz" | "tgz" => false,
 
             // === UNKNOWN: Conservative threshold (10MB) ===
             _ => size > MIN_SIZE_10MB,
@@ -731,9 +775,9 @@ impl AddCmd {
 
         match ext.to_lowercase().as_str() {
             // Text-based formats: Excellent delta candidates
-            "txt" | "md" | "json" | "xml" | "html" | "css" | "js" | "ts" |
-            "py" | "rs" | "go" | "java" | "c" | "cpp" | "h" | "hpp" => true,
-            // Uncompressed formats: Good delta candidates
+            "txt" | "md" | "json" | "xml" | "html" | "css" | "js" | "ts" | "py" | "rs" | "go"
+            | "java" | "c" | "cpp" | "h" | "hpp" => true,
+            // Uncompressed raster/audio: Good delta candidates
             "psd" | "tif" | "tiff" | "bmp" | "wav" | "aiff" => true,
             // Video (raw/uncompressed): Good delta candidates
             "avi" | "mov" => true,
@@ -743,6 +787,12 @@ impl AddCmd {
             "jpg" | "jpeg" | "png" | "webp" | "gif" => false,
             // Archives: No delta benefit (skip)
             "zip" | "gz" | "bz2" | "7z" | "rar" => false,
+            // 3D text-based formats: Excellent delta candidates
+            "obj" | "gltf" | "dae" | "ply" | "stl" | "stp" | "step" => true,
+            // 3D binary formats: Moderate delta candidates
+            "glb" | "fbx" | "blend" | "abc" | "usd" | "usda" | "usdc" => data.len() > 1024 * 1024,
+            // Vector/PostScript text formats: Good delta candidates
+            "eps" | "svg" => true,
             // Unknown: Conservative approach (allow if large)
             _ => data.len() > 50 * 1024 * 1024,
         }
