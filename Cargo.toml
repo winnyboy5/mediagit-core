@@ -67,7 +67,7 @@ prometheus = "0.14"
 
 # Testing
 tokio-test = "0.4"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 proptest = "1.6"
 tempfile = "3"
 

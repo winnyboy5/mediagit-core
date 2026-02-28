@@ -27,7 +27,7 @@ serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
 # azure_storage = "0.21"
 
 [[bench]]
