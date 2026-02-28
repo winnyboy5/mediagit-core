@@ -25,7 +25,7 @@ jobs:
           key: bench
 
       - name: Run benchmarks
-        run: cargo bench --workspace -- --output-format bencher | tee output.txt
+        run: cargo bench --workspace 2>&1 | tee output.txt
 
       - name: Store benchmark results
         uses: benchmark-action/github-action-benchmark@v1
