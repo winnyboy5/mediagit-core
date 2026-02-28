@@ -53,7 +53,7 @@ hex = "0.4"
 
 # Compression
 zstd = "0.13"
-brotli = "7.0"
+brotli = "8.0"
 flate2 = "1.0"
 
 # Parallelization
