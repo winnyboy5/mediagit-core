@@ -4,7 +4,7 @@ Get up and running with MediaGit in 5 minutes!
 
 ## Prerequisites
 
-- Rust 1.91.0 or later (if building from source)
+- Rust 1.92.0 or later (if building from source)
 - Git (for installing from source or contributing)
 
 ## Installation

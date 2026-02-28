@@ -1,10 +1,24 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+use super::super::repo::{create_storage_backend, find_repo_root};
 use anyhow::Result;
 use clap::Parser;
 use mediagit_versioning::{Index, ObjectDatabase, Oid, Ref, RefDatabase};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use super::super::repo::{find_repo_root, create_storage_backend};
 
 /// Show the working tree status
 ///
@@ -74,8 +88,9 @@ impl StatusCmd {
     pub async fn execute(&self) -> Result<()> {
         use crate::output;
 
-        // Find repository root
-        let repo_root = find_repo_root()?;
+        // Find repository root and canonicalize for consistent path handling on Windows
+        let repo_root = dunce::canonicalize(find_repo_root()?)
+            .unwrap_or_else(|_| find_repo_root().expect("repo root"));
 
         if !self.quiet {
             output::header("Repository Status");
@@ -131,9 +146,15 @@ impl StatusCmd {
         let mut head_files: HashMap<PathBuf, Oid> = HashMap::new();
         if let Ok(head_oid) = refdb.resolve("HEAD").await {
             if let Ok(commit_data) = odb.read(&head_oid).await {
-                if let Ok(commit) = bincode::deserialize::<mediagit_versioning::Commit>(&commit_data) {
+                if let Ok(commit) = mediagit_versioning::format::deserialize::<
+                    mediagit_versioning::Commit,
+                >(&commit_data)
+                {
                     if let Ok(tree_data) = odb.read(&commit.tree).await {
-                        if let Ok(tree) = bincode::deserialize::<mediagit_versioning::Tree>(&tree_data) {
+                        if let Ok(tree) = mediagit_versioning::format::deserialize::<
+                            mediagit_versioning::Tree,
+                        >(&tree_data)
+                        {
                             for entry in tree.iter() {
                                 head_files.insert(PathBuf::from(&entry.name), entry.oid);
                             }
@@ -154,7 +175,7 @@ impl StatusCmd {
         let head_files_vec: Vec<_> = head_files.iter().collect();
 
         let modified_files: Vec<PathBuf> = head_files_vec
-            .par_iter()  // Parallel iterator for multi-core processing
+            .par_iter() // Parallel iterator for multi-core processing
             .filter_map(|(path, head_oid)| {
                 // Skip files not in working directory
                 if !working_files.contains(*path) {
@@ -172,7 +193,7 @@ impl StatusCmd {
                 if let Ok(metadata) = std::fs::metadata(&full_path) {
                     let file_size = metadata.len();
                     const STREAMING_THRESHOLD: u64 = 100 * 1024 * 1024; // 100MB
-                    
+
                     // Compute hash - use streaming for large files
                     let working_oid = if file_size >= STREAMING_THRESHOLD {
                         // STREAMING: Use constant-memory hash for large files
@@ -270,7 +291,11 @@ impl StatusCmd {
 
         // Display clean status (ISS-005 fix)
         if !self.quiet {
-            if index.is_empty() && modified_files.is_empty() && deleted_files.is_empty() && untracked_files.is_empty() {
+            if index.is_empty()
+                && modified_files.is_empty()
+                && deleted_files.is_empty()
+                && untracked_files.is_empty()
+            {
                 if !has_commits {
                     output::info("No commits yet");
                 }
@@ -292,7 +317,13 @@ impl StatusCmd {
         Ok(files)
     }
 
-    fn scan_directory_recursive(&self, repo_root: &Path, current_dir: &Path, files: &mut HashSet<PathBuf>) -> Result<()> {
+    #[allow(clippy::only_used_in_recursion)]
+    fn scan_directory_recursive(
+        &self,
+        repo_root: &Path,
+        current_dir: &Path,
+        files: &mut HashSet<PathBuf>,
+    ) -> Result<()> {
         for entry in std::fs::read_dir(current_dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -313,5 +344,4 @@ impl StatusCmd {
         }
         Ok(())
     }
-
 }

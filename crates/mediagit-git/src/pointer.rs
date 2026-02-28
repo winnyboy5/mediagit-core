@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // SPDX-License-Identifier: AGPL-3.0
 // Copyright (C) 2025 MediaGit Contributors
 
@@ -93,7 +107,7 @@ impl PointerFile {
     pub fn parse(content: &str) -> GitResult<Self> {
         if content.len() > MAX_POINTER_SIZE {
             return Err(GitError::InvalidPointerFormat(
-                "Pointer file too large".to_string()
+                "Pointer file too large".to_string(),
             ));
         }
 
@@ -135,7 +149,9 @@ impl PointerFile {
                         )));
                     }
                     // Validate hash format (64 hex characters)
-                    if oid_parts[1].len() != 64 || !oid_parts[1].chars().all(|c| c.is_ascii_hexdigit()) {
+                    if oid_parts[1].len() != 64
+                        || !oid_parts[1].chars().all(|c| c.is_ascii_hexdigit())
+                    {
                         return Err(GitError::InvalidOid(format!(
                             "Invalid SHA-256 hash: {}",
                             oid_parts[1]
@@ -158,17 +174,12 @@ impl PointerFile {
         }
 
         // Validate required fields
-        let version = version.ok_or_else(|| {
-            GitError::MissingPointerField("version".to_string())
-        })?;
+        let version =
+            version.ok_or_else(|| GitError::MissingPointerField("version".to_string()))?;
 
-        let oid = oid.ok_or_else(|| {
-            GitError::MissingPointerField("oid".to_string())
-        })?;
+        let oid = oid.ok_or_else(|| GitError::MissingPointerField("oid".to_string()))?;
 
-        let size = size.ok_or_else(|| {
-            GitError::MissingPointerField("size".to_string())
-        })?;
+        let size = size.ok_or_else(|| GitError::MissingPointerField("size".to_string()))?;
 
         Ok(Self { version, oid, size })
     }
@@ -305,7 +316,10 @@ mod tests {
 
     #[test]
     fn test_parse_missing_size() {
-        let content = format!("version https://mediagit.dev/spec/v1\noid sha256:{}\n", VALID_OID);
+        let content = format!(
+            "version https://mediagit.dev/spec/v1\noid sha256:{}\n",
+            VALID_OID
+        );
         let result = PointerFile::parse(&content);
         assert!(matches!(result, Err(GitError::MissingPointerField(_))));
     }
@@ -345,14 +359,18 @@ mod tests {
 
     #[test]
     fn test_is_pointer_invalid() {
-        assert!(!PointerFile::is_pointer("This is just regular file content"));
-        assert!(!PointerFile::is_pointer("version something\noid something\n"));
+        assert!(!PointerFile::is_pointer(
+            "This is just regular file content"
+        ));
+        assert!(!PointerFile::is_pointer(
+            "version something\noid something\n"
+        ));
     }
 
     #[test]
     fn test_is_pointer_too_large() {
-        let large_content = "version https://mediagit.dev/spec/v1\n".to_string()
-            + &"x".repeat(MAX_POINTER_SIZE);
+        let large_content =
+            "version https://mediagit.dev/spec/v1\n".to_string() + &"x".repeat(MAX_POINTER_SIZE);
         assert!(!PointerFile::is_pointer(&large_content));
     }
 

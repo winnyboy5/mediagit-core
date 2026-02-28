@@ -29,7 +29,7 @@
 //! ```rust,no_run
 //! use mediagit_media::video::VideoParser;
 //!
-//! # async fn example() -> anyhow::Result<()> {
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let video_data = std::fs::read("video.mp4")?;
 //! let parser = VideoParser::new();
 //! let info = parser.parse(&video_data).await?;
@@ -161,10 +161,7 @@ impl VideoParser {
         let tracks = self.extract_tracks(&context)?;
         let segments = self.extract_segments(&tracks);
 
-        let duration_seconds = tracks
-            .first()
-            .map(|t| t.duration_seconds)
-            .unwrap_or(0.0);
+        let duration_seconds = tracks.first().map(|t| t.duration_seconds).unwrap_or(0.0);
 
         let video_codec = tracks
             .iter()
@@ -206,14 +203,10 @@ impl VideoParser {
             let track_type = Self::track_type_string(&track.track_type);
 
             // Extract timescale value from TrackTimeScale wrapper
-            let timescale = track.timescale
-                .map(|ts| ts.0 as u32)
-                .unwrap_or(1000);
+            let timescale = track.timescale.map(|ts| ts.0 as u32).unwrap_or(1000);
 
             // Extract duration value from TrackScaledTime wrapper
-            let duration = track.duration
-                .map(|d| d.0 as u64)
-                .unwrap_or(0);
+            let duration = track.duration.map(|d| d.0).unwrap_or(0);
 
             let duration_seconds = duration as f64 / timescale as f64;
 
@@ -231,7 +224,11 @@ impl VideoParser {
 
             // Extract width/height from track header for video tracks
             let (width, height) = if track.track_type == TrackType::Video {
-                track.tkhd.as_ref().map(|tkhd| (Some(tkhd.width), Some(tkhd.height))).unwrap_or((None, None))
+                track
+                    .tkhd
+                    .as_ref()
+                    .map(|tkhd| (Some(tkhd.width), Some(tkhd.height)))
+                    .unwrap_or((None, None))
             } else {
                 (None, None)
             };
@@ -243,9 +240,10 @@ impl VideoParser {
                     .as_ref()
                     .and_then(|stsd| stsd.descriptions.first())
                     .and_then(|entry| match entry {
-                        mp4parse::SampleEntry::Audio(audio) => {
-                            Some((Some(audio.samplerate as u32), Some(audio.channelcount as u16)))
-                        }
+                        mp4parse::SampleEntry::Audio(audio) => Some((
+                            Some(audio.samplerate as u32),
+                            Some(audio.channelcount as u16),
+                        )),
                         _ => None,
                     })
                     .unwrap_or((None, None))
@@ -430,17 +428,25 @@ impl VideoParser {
 
         // Add segments from 'theirs' that don't overlap with 'ours'
         for their_seg in &theirs.segments {
-            let overlaps = merged_segments.iter().any(|our_seg| their_seg.overlaps(our_seg));
+            let overlaps = merged_segments
+                .iter()
+                .any(|our_seg| their_seg.overlaps(our_seg));
             if !overlaps {
-                debug!("Adding non-overlapping segment from 'theirs': track {}", their_seg.track_id);
+                debug!(
+                    "Adding non-overlapping segment from 'theirs': track {}",
+                    their_seg.track_id
+                );
                 merged_segments.push(their_seg.clone());
             }
         }
 
         merged_video.segments = merged_segments;
 
-        info!("Video timeline merge complete: {} tracks, {} segments",
-              merged_video.tracks.len(), merged_video.segments.len());
+        info!(
+            "Video timeline merge complete: {} tracks, {} segments",
+            merged_video.tracks.len(),
+            merged_video.segments.len()
+        );
 
         Ok(merged_video)
     }

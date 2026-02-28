@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use crate::error::{ConfigError, ConfigResult};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -9,10 +23,10 @@ pub const CONFIG_VERSION: u32 = 1;
 /// Migration trait for handling config upgrades
 pub trait ConfigMigration {
     /// Get the source version this migration handles
-    fn from_version(&self) -> u32;
+    fn source_version(&self) -> u32;
 
     /// Get the target version after migration
-    fn to_version(&self) -> u32;
+    fn target_version(&self) -> u32;
 
     /// Execute the migration
     fn migrate(&self, config: Value) -> ConfigResult<Value>;
@@ -36,20 +50,26 @@ impl MigrationManager {
 
     /// Register a migration
     pub fn register(&mut self, migration: Box<dyn ConfigMigration>) {
-        let key = (migration.from_version(), migration.to_version());
+        let key = (migration.source_version(), migration.target_version());
         self.migrations.insert(key, migration);
     }
 
     /// Migrate configuration from one version to another
-    pub fn migrate(&self, mut config: Value, from_version: u32, to_version: u32) -> ConfigResult<Value> {
+    pub fn migrate(
+        &self,
+        mut config: Value,
+        from_version: u32,
+        to_version: u32,
+    ) -> ConfigResult<Value> {
         if from_version == to_version {
             return Ok(config);
         }
 
         if from_version > to_version {
-            return Err(ConfigError::migration_error(
-                format!("Cannot migrate from version {} to lower version {}", from_version, to_version),
-            ));
+            return Err(ConfigError::migration_error(format!(
+                "Cannot migrate from version {} to lower version {}",
+                from_version, to_version
+            )));
         }
 
         let mut current_version = from_version;
@@ -64,7 +84,8 @@ impl MigrationManager {
                 Some(migration) => {
                     debug!(
                         "Applying migration from v{} to v{}: {}",
-                        current_version, next_version,
+                        current_version,
+                        next_version,
                         migration.description()
                     );
                     config = migration.migrate(config)?;
@@ -75,9 +96,10 @@ impl MigrationManager {
                     current_version = next_version;
                 }
                 None => {
-                    return Err(ConfigError::migration_error(
-                        format!("No migration found from v{} to v{}", current_version, next_version),
-                    ));
+                    return Err(ConfigError::migration_error(format!(
+                        "No migration found from v{} to v{}",
+                        current_version, next_version
+                    )));
                 }
             }
         }
@@ -93,8 +115,8 @@ impl MigrationManager {
             .map(|m| {
                 format!(
                     "v{} -> v{}: {}",
-                    m.from_version(),
-                    m.to_version(),
+                    m.source_version(),
+                    m.target_version(),
                     m.description()
                 )
             })
@@ -114,11 +136,11 @@ impl Default for MigrationManager {
 pub struct MigrationV0ToV1;
 
 impl ConfigMigration for MigrationV0ToV1 {
-    fn from_version(&self) -> u32 {
+    fn source_version(&self) -> u32 {
         0
     }
 
-    fn to_version(&self) -> u32 {
+    fn target_version(&self) -> u32 {
         1
     }
 
@@ -147,6 +169,7 @@ impl ConfigMigration for MigrationV0ToV1 {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -163,7 +186,9 @@ mod tests {
         assert!(result.is_ok());
 
         let migrated = result.unwrap();
-        assert!(migrated["observability"]["metrics"]["enabled"].as_bool().unwrap());
+        assert!(migrated["observability"]["metrics"]["enabled"]
+            .as_bool()
+            .unwrap());
     }
 
     #[test]
@@ -206,7 +231,10 @@ mod tests {
         assert!(result.is_ok());
 
         let migrated = result.unwrap();
-        assert_eq!(migrated["observability"]["metrics"]["port"].as_u64(), Some(9090));
+        assert_eq!(
+            migrated["observability"]["metrics"]["port"].as_u64(),
+            Some(9090)
+        );
         assert_eq!(
             migrated["observability"]["metrics"]["endpoint"].as_str(),
             Some("/metrics")

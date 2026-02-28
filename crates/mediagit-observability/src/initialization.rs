@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! Logging initialization and setup.
 //!
 //! This module provides functions to initialize the tracing system with
@@ -75,9 +89,13 @@ pub fn init_tracing_with_config(config: LogConfig) -> Result<(), LogError> {
                 .pretty();
 
             if config.use_timestamps && config.use_color {
-                registry.with(layer.with_timer(fmt::time::SystemTime).with_ansi(true)).init();
+                registry
+                    .with(layer.with_timer(fmt::time::SystemTime).with_ansi(true))
+                    .init();
             } else if config.use_timestamps {
-                registry.with(layer.with_timer(fmt::time::SystemTime).with_ansi(false)).init();
+                registry
+                    .with(layer.with_timer(fmt::time::SystemTime).with_ansi(false))
+                    .init();
             } else if config.use_color {
                 registry.with(layer.without_time().with_ansi(true)).init();
             } else {
@@ -94,9 +112,13 @@ pub fn init_tracing_with_config(config: LogConfig) -> Result<(), LogError> {
                 .compact();
 
             if config.use_timestamps && config.use_color {
-                registry.with(layer.with_timer(fmt::time::SystemTime).with_ansi(true)).init();
+                registry
+                    .with(layer.with_timer(fmt::time::SystemTime).with_ansi(true))
+                    .init();
             } else if config.use_timestamps {
-                registry.with(layer.with_timer(fmt::time::SystemTime).with_ansi(false)).init();
+                registry
+                    .with(layer.with_timer(fmt::time::SystemTime).with_ansi(false))
+                    .init();
             } else if config.use_color {
                 registry.with(layer.without_time().with_ansi(true)).init();
             } else {
@@ -113,7 +135,9 @@ pub fn init_tracing_with_config(config: LogConfig) -> Result<(), LogError> {
                 .with_span_events(FmtSpan::FULL);
 
             if config.use_timestamps {
-                registry.with(layer.with_timer(fmt::time::SystemTime)).init();
+                registry
+                    .with(layer.with_timer(fmt::time::SystemTime))
+                    .init();
             } else {
                 registry.with(layer.without_time()).init();
             }

@@ -16,18 +16,17 @@
 //! This module orchestrates LCA finding, tree diffing, and conflict detection
 //! to perform complete merge operations with various strategies.
 
-use crate::{
-    Commit, Conflict, ConflictDetector, LcaFinder, ObjectDatabase, Oid, Tree, TreeDiffer,
-};
+use crate::{Commit, Conflict, ConflictDetector, LcaFinder, ObjectDatabase, Oid, Tree, TreeDiffer};
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 use tracing::{debug, instrument, trace};
 
 /// Merge strategy to use when conflicts are detected
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MergeStrategy {
     /// Recursive 3-way merge (default)
     /// Automatically merges non-conflicting changes, reports conflicts
+    #[default]
     Recursive,
 
     /// Always take our version on conflict
@@ -35,12 +34,6 @@ pub enum MergeStrategy {
 
     /// Always take their version on conflict
     Theirs,
-}
-
-impl Default for MergeStrategy {
-    fn default() -> Self {
-        MergeStrategy::Recursive
-    }
 }
 
 /// Fast-forward merge information
@@ -252,9 +245,7 @@ impl MergeEngine {
             }
             MergeStrategy::Theirs => {
                 // Always use their version, resolve conflicts in their favor
-                let tree = self
-                    .build_merged_tree_theirs(base, ours, theirs)
-                    .await?;
+                let tree = self.build_merged_tree_theirs(base, ours, theirs).await?;
                 let tree_oid = tree.write(&self.odb).await?;
                 (Some(tree_oid), Vec::new(), true)
             }
@@ -380,7 +371,12 @@ impl MergeEngine {
     }
 
     /// Build merged tree using "ours" strategy
-    async fn build_merged_tree_ours(&self, base: &Tree, ours: &Tree, theirs: &Tree) -> Result<Tree> {
+    async fn build_merged_tree_ours(
+        &self,
+        base: &Tree,
+        ours: &Tree,
+        theirs: &Tree,
+    ) -> Result<Tree> {
         let mut merged = Tree::new();
 
         // Get all unique paths
@@ -571,18 +567,21 @@ mod tests {
         let engine = MergeEngine::new(Arc::clone(&odb));
 
         // Base commit
-        let base_tree = create_tree(&odb, vec![("file1.txt", b"base1"), ("file2.txt", b"base2")])
-            .await;
+        let base_tree =
+            create_tree(&odb, vec![("file1.txt", b"base1"), ("file2.txt", b"base2")]).await;
         let base_commit = create_commit(&odb, base_tree, vec![], "Base").await;
 
         // Ours: modify file1
-        let ours_tree = create_tree(&odb, vec![("file1.txt", b"ours1"), ("file2.txt", b"base2")])
-            .await;
+        let ours_tree =
+            create_tree(&odb, vec![("file1.txt", b"ours1"), ("file2.txt", b"base2")]).await;
         let ours_commit = create_commit(&odb, ours_tree, vec![base_commit], "Ours").await;
 
         // Theirs: modify file2
-        let theirs_tree =
-            create_tree(&odb, vec![("file1.txt", b"base1"), ("file2.txt", b"theirs2")]).await;
+        let theirs_tree = create_tree(
+            &odb,
+            vec![("file1.txt", b"base1"), ("file2.txt", b"theirs2")],
+        )
+        .await;
         let theirs_commit = create_commit(&odb, theirs_tree, vec![base_commit], "Theirs").await;
 
         let result = engine
@@ -597,7 +596,10 @@ mod tests {
         // Verify merged tree has both changes
         let merged_tree = Tree::read(&odb, &result.tree_oid.unwrap()).await.unwrap();
         assert_eq!(merged_tree.entries.len(), 2);
-        assert_eq!(merged_tree.entries.get("file1.txt").unwrap().oid, Oid::hash(b"ours1"));
+        assert_eq!(
+            merged_tree.entries.get("file1.txt").unwrap().oid,
+            Oid::hash(b"ours1")
+        );
         assert_eq!(
             merged_tree.entries.get("file2.txt").unwrap().oid,
             Oid::hash(b"theirs2")
@@ -660,7 +662,10 @@ mod tests {
 
         // Verify we got our version
         let merged_tree = Tree::read(&odb, &result.tree_oid.unwrap()).await.unwrap();
-        assert_eq!(merged_tree.entries.get("file.txt").unwrap().oid, Oid::hash(b"ours"));
+        assert_eq!(
+            merged_tree.entries.get("file.txt").unwrap().oid,
+            Oid::hash(b"ours")
+        );
     }
 
     #[tokio::test]
@@ -738,8 +743,11 @@ mod tests {
         let engine = MergeEngine::new(Arc::clone(&odb));
 
         // Base commit with two files
-        let base_tree = create_tree(&odb, vec![("file1.txt", b"content1"), ("file2.txt", b"content2")])
-            .await;
+        let base_tree = create_tree(
+            &odb,
+            vec![("file1.txt", b"content1"), ("file2.txt", b"content2")],
+        )
+        .await;
         let base_commit = create_commit(&odb, base_tree, vec![], "Base").await;
 
         // Ours: delete file1

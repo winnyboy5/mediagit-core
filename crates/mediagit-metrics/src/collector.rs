@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! Prometheus metrics collector for MediaGit
 //!
 //! Provides a custom Prometheus collector that gathers metrics from MediaGit operations.
@@ -45,11 +59,8 @@ impl Collector for MediaGitCollector {
         let gatherer = self.registry.registry();
 
         // Gather metrics from the Prometheus registry
-        match gatherer.gather() {
-            metrics => {
-                families.extend(metrics);
-            }
-        }
+        let metrics = gatherer.gather();
+        families.extend(metrics);
 
         families
     }
@@ -87,10 +98,7 @@ mod tests {
         assert!(!families.is_empty());
 
         // Verify we have expected metric names
-        let metric_names: Vec<String> = families
-            .iter()
-            .map(|f| f.name().to_string())
-            .collect();
+        let metric_names: Vec<String> = families.iter().map(|f| f.name().to_string()).collect();
 
         // Check for key metrics
         assert!(metric_names.iter().any(|n| n.contains("dedup")));
@@ -117,11 +125,7 @@ mod tests {
         }
 
         for _ in 0..5 {
-            registry.record_backend_latency(
-                StorageBackend::S3,
-                OperationType::Retrieve,
-                0.1,
-            );
+            registry.record_backend_latency(StorageBackend::S3, OperationType::Retrieve, 0.1);
         }
 
         let collector = MediaGitCollector::new(registry);
@@ -131,10 +135,7 @@ mod tests {
         assert!(!families.is_empty());
 
         // Check for operation and backend metrics
-        let metric_names: Vec<String> = families
-            .iter()
-            .map(|f| f.name().to_string())
-            .collect();
+        let metric_names: Vec<String> = families.iter().map(|f| f.name().to_string()).collect();
 
         assert!(metric_names.iter().any(|n| n.contains("operation")));
         assert!(metric_names.iter().any(|n| n.contains("backend")));

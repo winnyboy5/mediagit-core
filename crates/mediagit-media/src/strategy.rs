@@ -29,7 +29,7 @@
 //! ```rust,no_run
 //! use mediagit_media::strategy::{MergeStrategy, MediaType, MergeResult};
 //!
-//! # async fn example() -> anyhow::Result<()> {
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let strategy = MergeStrategy::for_media_type(MediaType::Image);
 //!
 //! let base = std::fs::read("base.jpg")?;
@@ -170,11 +170,11 @@ impl MergeStrategy {
     pub fn for_media_type(media_type: MediaType) -> Self {
         match media_type {
             MediaType::Image => MergeStrategy::Image(ImageStrategy::default()),
-            MediaType::Psd => MergeStrategy::Psd(PsdStrategy::default()),
-            MediaType::Video => MergeStrategy::Video(VideoStrategy::default()),
-            MediaType::Audio => MergeStrategy::Audio(AudioStrategy::default()),
-            MediaType::Model3D => MergeStrategy::Model3D(Model3DStrategy::default()),
-            MediaType::Vfx => MergeStrategy::Vfx(VfxStrategy::default()),
+            MediaType::Psd => MergeStrategy::Psd(PsdStrategy),
+            MediaType::Video => MergeStrategy::Video(VideoStrategy),
+            MediaType::Audio => MergeStrategy::Audio(AudioStrategy),
+            MediaType::Model3D => MergeStrategy::Model3D(Model3DStrategy),
+            MediaType::Vfx => MergeStrategy::Vfx(VfxStrategy),
             MediaType::Unknown => MergeStrategy::Generic,
         }
     }
@@ -237,17 +237,23 @@ impl ImageStrategy {
         // Parse all three versions
         let base_metadata = ImageMetadataParser::parse(base, &format!("base_{}", filename)).await?;
         let ours_metadata = ImageMetadataParser::parse(ours, &format!("ours_{}", filename)).await?;
-        let theirs_metadata = ImageMetadataParser::parse(theirs, &format!("theirs_{}", filename)).await?;
+        let theirs_metadata =
+            ImageMetadataParser::parse(theirs, &format!("theirs_{}", filename)).await?;
 
         // Check if auto-merge is possible
-        let decision = ImageMetadataParser::can_auto_merge(&base_metadata, &ours_metadata, &theirs_metadata);
+        let decision =
+            ImageMetadataParser::can_auto_merge(&base_metadata, &ours_metadata, &theirs_metadata);
 
         match decision {
             MergeDecision::AutoMerge => {
                 info!("Images are visually identical - executing auto-merge");
 
                 // Perform intelligent metadata merge
-                let merged_metadata = ImageMetadataParser::merge_metadata(&base_metadata, &ours_metadata, &theirs_metadata)?;
+                let merged_metadata = ImageMetadataParser::merge_metadata(
+                    &base_metadata,
+                    &ours_metadata,
+                    &theirs_metadata,
+                )?;
 
                 // Serialize merged metadata to JSON
                 // NOTE: Full image reconstruction would require image processing libraries
@@ -316,7 +322,10 @@ impl PsdStrategy {
                 let merged_json = serde_json::to_vec_pretty(&merged_psd)
                     .map_err(|e| MediaError::SerializationError(e.to_string()))?;
 
-                info!("PSD auto-merge successful: {} layers", merged_psd.layers.len());
+                info!(
+                    "PSD auto-merge successful: {} layers",
+                    merged_psd.layers.len()
+                );
                 Ok(MergeResult::AutoMerged(merged_json))
             }
             crate::psd::MergeDecision::ManualReview(conflicts) => {
@@ -356,7 +365,8 @@ impl VideoStrategy {
                 info!("Non-overlapping timeline edits - executing auto-merge");
 
                 // Perform actual timeline merge
-                let merged_video = VideoParser::merge_timelines(&base_video, &ours_video, &theirs_video)?;
+                let merged_video =
+                    VideoParser::merge_timelines(&base_video, &ours_video, &theirs_video)?;
 
                 // Serialize merged video info to JSON
                 // NOTE: Full video re-encoding would require FFmpeg or similar
@@ -364,8 +374,11 @@ impl VideoStrategy {
                 let merged_json = serde_json::to_vec_pretty(&merged_video)
                     .map_err(|e| MediaError::SerializationError(e.to_string()))?;
 
-                info!("Video auto-merge successful: {} tracks, {} segments",
-                      merged_video.tracks.len(), merged_video.segments.len());
+                info!(
+                    "Video auto-merge successful: {} tracks, {} segments",
+                    merged_video.tracks.len(),
+                    merged_video.segments.len()
+                );
                 Ok(MergeResult::AutoMerged(merged_json))
             }
             crate::video::MergeDecision::ManualReview(conflicts) => {
@@ -396,7 +409,9 @@ impl AudioStrategy {
         let parser = AudioParser::new();
         let base_audio = parser.parse(base, &format!("base_{}", filename)).await?;
         let ours_audio = parser.parse(ours, &format!("ours_{}", filename)).await?;
-        let theirs_audio = parser.parse(theirs, &format!("theirs_{}", filename)).await?;
+        let theirs_audio = parser
+            .parse(theirs, &format!("theirs_{}", filename))
+            .await?;
 
         let decision = AudioParser::can_auto_merge(&base_audio, &ours_audio, &theirs_audio);
 
@@ -405,7 +420,8 @@ impl AudioStrategy {
                 info!("Different audio tracks modified - executing auto-merge");
 
                 // Perform actual track merge
-                let merged_audio = AudioParser::merge_tracks(&base_audio, &ours_audio, &theirs_audio)?;
+                let merged_audio =
+                    AudioParser::merge_tracks(&base_audio, &ours_audio, &theirs_audio)?;
 
                 // Serialize merged audio info to JSON
                 // NOTE: Full audio mixing would require audio processing libraries
@@ -413,7 +429,10 @@ impl AudioStrategy {
                 let merged_json = serde_json::to_vec_pretty(&merged_audio)
                     .map_err(|e| MediaError::SerializationError(e.to_string()))?;
 
-                info!("Audio auto-merge successful: {} tracks", merged_audio.tracks.len());
+                info!(
+                    "Audio auto-merge successful: {} tracks",
+                    merged_audio.tracks.len()
+                );
                 Ok(MergeResult::AutoMerged(merged_json))
             }
             crate::audio::MergeDecision::ManualReview(conflicts) => {
@@ -444,7 +463,9 @@ impl Model3DStrategy {
         let parser = Model3DParser::new();
         let base_model = parser.parse(base, &format!("base_{}", filename)).await?;
         let ours_model = parser.parse(ours, &format!("ours_{}", filename)).await?;
-        let theirs_model = parser.parse(theirs, &format!("theirs_{}", filename)).await?;
+        let theirs_model = parser
+            .parse(theirs, &format!("theirs_{}", filename))
+            .await?;
 
         let decision = Model3DParser::can_auto_merge(&base_model, &ours_model, &theirs_model);
 
@@ -485,7 +506,9 @@ impl VfxStrategy {
         let parser = VfxParser::new();
         let base_vfx = parser.parse(base, &format!("base_{}", filename)).await?;
         let ours_vfx = parser.parse(ours, &format!("ours_{}", filename)).await?;
-        let theirs_vfx = parser.parse(theirs, &format!("theirs_{}", filename)).await?;
+        let theirs_vfx = parser
+            .parse(theirs, &format!("theirs_{}", filename))
+            .await?;
 
         let decision = VfxParser::can_auto_merge(&base_vfx, &ours_vfx, &theirs_vfx);
 

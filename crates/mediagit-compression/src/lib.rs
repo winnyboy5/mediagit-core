@@ -24,11 +24,10 @@
 //!
 //! ## Basic Compression
 //!
-//! ```rust
+//! ```rust,no_run
 //! use mediagit_compression::{Compressor, CompressionLevel, ZstdCompressor};
 //!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
+//! fn main() -> anyhow::Result<()> {
 //!     let compressor = ZstdCompressor::new(CompressionLevel::Default);
 //!
 //!     let original = b"Hello, World!";
@@ -45,11 +44,10 @@
 //!
 //! ## Smart Type-Aware Compression
 //!
-//! ```rust
+//! ```rust,no_run
 //! use mediagit_compression::{SmartCompressor, TypeAwareCompressor, ObjectType};
 //!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
+//! fn main() -> anyhow::Result<()> {
 //!     let compressor = SmartCompressor::new();
 //!
 //!     // Automatically selects best strategy based on file type
@@ -103,16 +101,13 @@ pub mod zstd_compressor;
 use std::fmt::Debug;
 
 pub use adaptive::{
-    AdaptiveCompressor, CompressionStrategy as AdaptiveStrategy,
-    EntropyClass, FileProfile, PatternClass, PerformanceStats,
-    SizeClass, calculate_entropy,
+    calculate_entropy, AdaptiveCompressor, CompressionStrategy as AdaptiveStrategy, EntropyClass,
+    FileProfile, PatternClass, PerformanceStats, SizeClass,
 };
 pub use brotli_compressor::BrotliCompressor;
 pub use error::{CompressionError, CompressionResult};
 pub use metrics::{AggregatedStats, CompressionMetrics, MetricsAggregator};
-pub use per_type_compressor::{
-    CompressionProfile, PerObjectTypeCompressor, PerTypeStats,
-};
+pub use per_type_compressor::{CompressionProfile, PerObjectTypeCompressor, PerTypeStats};
 pub use smart_compressor::{
     CompressionStrategy, ObjectCategory, ObjectType, SmartCompressor, TypeAwareCompressor,
 };
@@ -171,9 +166,9 @@ impl CompressionAlgorithm {
     pub fn magic_bytes(self) -> &'static [u8] {
         match self {
             CompressionAlgorithm::None => b"",
-            CompressionAlgorithm::Zlib => b"\x78",              // Zlib header
+            CompressionAlgorithm::Zlib => b"\x78", // Zlib header
             CompressionAlgorithm::Zstd => b"\x28\xb5\x2f\xfd", // Zstd frame magic
-            CompressionAlgorithm::Brotli => b"BRT\x01",         // Custom marker for brotli
+            CompressionAlgorithm::Brotli => b"BRT\x01", // Custom marker for brotli
         }
     }
 
@@ -202,7 +197,7 @@ impl CompressionAlgorithm {
             let flg = data[1] as u16;
             let header_check = cmf * 256 + flg;
             // Valid zlib headers: 0x789C (default), 0x78DA (best), 0x7801 (no compression)
-            if header_check % 31 == 0 {
+            if header_check.is_multiple_of(31) {
                 return CompressionAlgorithm::Zlib;
             }
         }

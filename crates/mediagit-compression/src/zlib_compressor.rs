@@ -56,9 +56,9 @@ impl ZlibCompressor {
     /// Get the flate2 compression level
     fn get_compression(&self) -> Compression {
         match self.level {
-            CompressionLevel::Fast => Compression::fast(),      // Level 1
-            CompressionLevel::Default => Compression::new(6),    // Git default
-            CompressionLevel::Best => Compression::best(),       // Level 9
+            CompressionLevel::Fast => Compression::fast(), // Level 1
+            CompressionLevel::Default => Compression::new(6), // Git default
+            CompressionLevel::Best => Compression::best(), // Level 9
         }
     }
 }
@@ -98,18 +98,16 @@ impl Compressor for ZlibCompressor {
         let is_zlib = data.len() >= 2 && data[0] == 0x78 && {
             let cmf = data[0] as u16;
             let flg = data[1] as u16;
-            (cmf * 256 + flg) % 31 == 0
+            (cmf * 256 + flg).is_multiple_of(31)
         };
 
         if is_zlib {
             let mut decoder = ZlibDecoder::new(data);
             let mut decompressed = Vec::new();
 
-            decoder
-                .read_to_end(&mut decompressed)
-                .map_err(|e| {
-                    CompressionError::decompression_failed(format!("zlib decompression failed: {}", e))
-                })?;
+            decoder.read_to_end(&mut decompressed).map_err(|e| {
+                CompressionError::decompression_failed(format!("zlib decompression failed: {}", e))
+            })?;
 
             Ok(decompressed)
         } else {
@@ -120,8 +118,8 @@ impl Compressor for ZlibCompressor {
     }
 }
 
-
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

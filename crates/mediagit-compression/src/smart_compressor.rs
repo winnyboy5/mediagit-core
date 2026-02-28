@@ -114,42 +114,42 @@ pub enum ObjectType {
     AvidMediaComposer, // .avb
 
     // 3D interchange/exchange formats (mesh/scene data)
-    Model3D,           // .stl, .obj, .fbx, .glb, .gltf, .ply, .dae, .abc, .3ds, .usd, .usda, .usdc
+    Model3D, // .stl, .obj, .fbx, .glb, .gltf, .ply, .dae, .abc, .3ds, .usd, .usda, .usdc
 
     // Creative project files - 3D/DCC
-    Blender,           // .blend
-    Maya,              // .ma, .mb
-    ThreeDsMax,        // .max
-    Cinema4D,          // .c4d
-    Houdini,           // .hip, .hipnc
+    Blender,    // .blend
+    Maya,       // .ma, .mb
+    ThreeDsMax, // .max
+    Cinema4D,   // .c4d
+    Houdini,    // .hip, .hipnc
 
     // Creative project files - Audio DAWs
-    ProTools,          // .ptx
-    AbletonLive,       // .als
-    FLStudio,          // .flp
-    LogicPro,          // .logic, .logicx
+    ProTools,    // .ptx
+    AbletonLive, // .als
+    FLStudio,    // .flp
+    LogicPro,    // .logic, .logicx
 
     // Creative project files - CAD
-    AutoCad,           // .dwg, .dxf
-    SketchUp,          // .skp
-    Revit,             // .rvt
+    AutoCad,  // .dwg, .dxf
+    SketchUp, // .skp
+    Revit,    // .rvt
 
     // Creative project files - Game engines
-    UnityProject,      // .unity, .prefab, .asset
-    UnrealProject,     // .uasset, .umap
-    GodotProject,      // .tscn, .tres
+    UnityProject,  // .unity, .prefab, .asset
+    UnrealProject, // .uasset, .umap
+    GodotProject,  // .tscn, .tres
 
     // Office documents (modern XML-based)
-    WordDocument,      // .docx, .doc
-    ExcelSpreadsheet,  // .xlsx, .xls
+    WordDocument,           // .docx, .doc
+    ExcelSpreadsheet,       // .xlsx, .xls
     PowerpointPresentation, // .pptx, .ppt
-    OpenDocument,      // .odt, .ods, .odp
+    OpenDocument,           // .odt, .ods, .odp
 
     // Database formats
-    SqliteDatabase,    // .sqlite, .db, .db3
+    SqliteDatabase, // .sqlite, .db, .db3
 
     // Compressed text/logs
-    CompressedLog,     // .log.gz, .log.bz2
+    CompressedLog, // .log.gz, .log.bz2
 
     // Git object types (for interoperability)
     GitBlob,
@@ -212,13 +212,10 @@ impl ObjectType {
             "eps" => ObjectType::Eps, // "ai" moved to AdobeIllustrator
 
             // Text/Code
-            "txt" | "md" | "markdown" | "rst" | "adoc" |
-            "rs" | "js" | "ts" | "jsx" | "tsx" |
-            "py" | "go" | "c" | "cpp" | "cc" | "cxx" |
-            "h" | "hpp" | "hh" | "hxx" |
-            "java" | "kt" | "swift" | "rb" | "php" |
-            "sh" | "bash" | "zsh" | "fish" |
-            "vim" | "lua" | "pl" | "r" | "m" => ObjectType::Text,
+            "txt" | "md" | "markdown" | "rst" | "adoc" | "rs" | "js" | "ts" | "jsx" | "tsx"
+            | "py" | "go" | "c" | "cpp" | "cc" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "java"
+            | "kt" | "swift" | "rb" | "php" | "sh" | "bash" | "zsh" | "fish" | "vim" | "lua"
+            | "pl" | "r" | "m" => ObjectType::Text,
             "json" | "json5" | "jsonc" => ObjectType::Json,
             "xml" | "html" | "xhtml" | "htm" | "xsl" | "xslt" => ObjectType::Xml,
             "yml" | "yaml" => ObjectType::Yaml,
@@ -236,8 +233,9 @@ impl ObjectType {
             "parquet" | "arrow" | "feather" | "orc" | "avro" => ObjectType::Parquet,
 
             // ML data formats (arrays, tensors)
-            "hdf5" | "h5" | "nc" | "netcdf" | "npy" | "npz" |
-            "tfrecords" | "petastorm" => ObjectType::MlData,
+            "hdf5" | "h5" | "nc" | "netcdf" | "npy" | "npz" | "tfrecords" | "petastorm" => {
+                ObjectType::MlData
+            }
 
             // ML model weights (general)
             "pb" | "safetensors" | "pkl" | "joblib" => ObjectType::MlModel,
@@ -248,8 +246,8 @@ impl ObjectType {
             "ckpt" | "pt" | "pth" | "bin" => ObjectType::MlCheckpoint,
 
             // ML inference models (optimized for deployment)
-            "onnx" | "gguf" | "ggml" | "tflite" | "mlmodel" | "coreml" |
-            "keras" | "pte" | "mleap" | "pmml" | "llamafile" => ObjectType::MlInference,
+            "onnx" | "gguf" | "ggml" | "tflite" | "mlmodel" | "coreml" | "keras" | "pte"
+            | "mleap" | "pmml" | "llamafile" => ObjectType::MlInference,
 
             // Creative projects - Adobe Creative Cloud
             "ai" | "ait" => ObjectType::AdobeIllustrator,
@@ -264,9 +262,8 @@ impl ObjectType {
 
             // 3D interchange/exchange formats (mesh/scene data)
             // Note: usdz is a ZIP container → maps to Zip (Store strategy)
-            "stl" | "obj" | "fbx" | "glb" | "gltf" |
-            "ply" | "dae" | "abc" | "3ds" |
-            "usd" | "usda" | "usdc" => ObjectType::Model3D,
+            "stl" | "obj" | "fbx" | "glb" | "gltf" | "ply" | "dae" | "abc" | "3ds" | "usd"
+            | "usda" | "usdc" => ObjectType::Model3D,
             "usdz" => ObjectType::Zip,
 
             // Creative projects - 3D/DCC
@@ -303,7 +300,6 @@ impl ObjectType {
 
             // Special handling for compound extensions (must check before generic extensions)
             // This is handled in from_path() with better logic
-
             _ => ObjectType::Unknown,
         }
     }
@@ -344,7 +340,9 @@ impl ObjectType {
         }
 
         // TIFF: 49 49 2A 00 (little-endian) or 4D 4D 00 2A (big-endian)
-        if data.starts_with(&[0x49, 0x49, 0x2A, 0x00]) || data.starts_with(&[0x4D, 0x4D, 0x00, 0x2A]) {
+        if data.starts_with(&[0x49, 0x49, 0x2A, 0x00])
+            || data.starts_with(&[0x4D, 0x4D, 0x00, 0x2A])
+        {
             return ObjectType::Tiff;
         }
 
@@ -364,7 +362,9 @@ impl ObjectType {
         }
 
         // ZIP: 50 4B 03 04 or 50 4B 05 06
-        if data.starts_with(&[0x50, 0x4B, 0x03, 0x04]) || data.starts_with(&[0x50, 0x4B, 0x05, 0x06]) {
+        if data.starts_with(&[0x50, 0x4B, 0x03, 0x04])
+            || data.starts_with(&[0x50, 0x4B, 0x05, 0x06])
+        {
             return ObjectType::Zip;
         }
 
@@ -419,26 +419,57 @@ impl ObjectType {
     /// Get the category of this object type
     pub fn category(self) -> ObjectCategory {
         match self {
-            ObjectType::Jpeg | ObjectType::Png | ObjectType::Gif | ObjectType::Webp |
-            ObjectType::Avif | ObjectType::Heic | ObjectType::GpuTexture | ObjectType::Tiff | ObjectType::Bmp |
-            ObjectType::Raw | ObjectType::Exr | ObjectType::Hdr => ObjectCategory::Image,
+            ObjectType::Jpeg
+            | ObjectType::Png
+            | ObjectType::Gif
+            | ObjectType::Webp
+            | ObjectType::Avif
+            | ObjectType::Heic
+            | ObjectType::GpuTexture
+            | ObjectType::Tiff
+            | ObjectType::Bmp
+            | ObjectType::Raw
+            | ObjectType::Exr
+            | ObjectType::Hdr => ObjectCategory::Image,
 
-            ObjectType::Mp4 | ObjectType::Mov | ObjectType::Avi | ObjectType::Mkv |
-            ObjectType::Webm | ObjectType::Flv | ObjectType::Wmv | ObjectType::Mpg => ObjectCategory::Video,
+            ObjectType::Mp4
+            | ObjectType::Mov
+            | ObjectType::Avi
+            | ObjectType::Mkv
+            | ObjectType::Webm
+            | ObjectType::Flv
+            | ObjectType::Wmv
+            | ObjectType::Mpg => ObjectCategory::Video,
 
-            ObjectType::Mp3 | ObjectType::Aac | ObjectType::Ogg | ObjectType::Opus |
-            ObjectType::Flac | ObjectType::Wav | ObjectType::Aiff | ObjectType::Alac => ObjectCategory::Audio,
+            ObjectType::Mp3
+            | ObjectType::Aac
+            | ObjectType::Ogg
+            | ObjectType::Opus
+            | ObjectType::Flac
+            | ObjectType::Wav
+            | ObjectType::Aiff
+            | ObjectType::Alac => ObjectCategory::Audio,
 
             ObjectType::Pdf | ObjectType::Svg | ObjectType::Eps => ObjectCategory::Document,
 
-            ObjectType::Text | ObjectType::Json | ObjectType::Xml | ObjectType::Yaml |
-            ObjectType::Toml | ObjectType::Csv => ObjectCategory::Text,
+            ObjectType::Text
+            | ObjectType::Json
+            | ObjectType::Xml
+            | ObjectType::Yaml
+            | ObjectType::Toml
+            | ObjectType::Csv => ObjectCategory::Text,
 
-            ObjectType::Zip | ObjectType::Tar | ObjectType::Gz | ObjectType::SevenZ |
-            ObjectType::Rar | ObjectType::CompressedLog => ObjectCategory::Archive,
+            ObjectType::Zip
+            | ObjectType::Tar
+            | ObjectType::Gz
+            | ObjectType::SevenZ
+            | ObjectType::Rar
+            | ObjectType::CompressedLog => ObjectCategory::Archive,
 
-            ObjectType::Parquet | ObjectType::MlData | ObjectType::MlModel |
-            ObjectType::MlDeployment => ObjectCategory::Archive, // ML formats as data archives
+            ObjectType::Parquet
+            | ObjectType::MlData
+            | ObjectType::MlModel
+            | ObjectType::MlDeployment => ObjectCategory::Archive, // ML formats as data archives
 
             // ML specialized (training vs inference)
             ObjectType::MlCheckpoint | ObjectType::MlInference => ObjectCategory::MlSpecialized,
@@ -447,23 +478,42 @@ impl ObjectType {
             ObjectType::Model3D => ObjectCategory::CreativeProject,
 
             // Creative project files
-            ObjectType::AdobePhotoshop | ObjectType::AdobeIllustrator | ObjectType::AdobeIndesign |
-            ObjectType::AdobeAfterEffects | ObjectType::AdobePremiere |
-            ObjectType::DavinciResolve | ObjectType::FinalCutPro | ObjectType::AvidMediaComposer |
-            ObjectType::Blender | ObjectType::Maya | ObjectType::ThreeDsMax | ObjectType::Cinema4D |
-            ObjectType::Houdini |
-            ObjectType::ProTools | ObjectType::AbletonLive | ObjectType::FLStudio | ObjectType::LogicPro |
-            ObjectType::AutoCad | ObjectType::SketchUp | ObjectType::Revit |
-            ObjectType::UnityProject | ObjectType::UnrealProject | ObjectType::GodotProject => ObjectCategory::CreativeProject,
+            ObjectType::AdobePhotoshop
+            | ObjectType::AdobeIllustrator
+            | ObjectType::AdobeIndesign
+            | ObjectType::AdobeAfterEffects
+            | ObjectType::AdobePremiere
+            | ObjectType::DavinciResolve
+            | ObjectType::FinalCutPro
+            | ObjectType::AvidMediaComposer
+            | ObjectType::Blender
+            | ObjectType::Maya
+            | ObjectType::ThreeDsMax
+            | ObjectType::Cinema4D
+            | ObjectType::Houdini
+            | ObjectType::ProTools
+            | ObjectType::AbletonLive
+            | ObjectType::FLStudio
+            | ObjectType::LogicPro
+            | ObjectType::AutoCad
+            | ObjectType::SketchUp
+            | ObjectType::Revit
+            | ObjectType::UnityProject
+            | ObjectType::UnrealProject
+            | ObjectType::GodotProject => ObjectCategory::CreativeProject,
 
             // Office documents
-            ObjectType::WordDocument | ObjectType::ExcelSpreadsheet |
-            ObjectType::PowerpointPresentation | ObjectType::OpenDocument => ObjectCategory::Office,
+            ObjectType::WordDocument
+            | ObjectType::ExcelSpreadsheet
+            | ObjectType::PowerpointPresentation
+            | ObjectType::OpenDocument => ObjectCategory::Office,
 
             // Database
             ObjectType::SqliteDatabase => ObjectCategory::Database,
 
-            ObjectType::GitBlob | ObjectType::GitTree | ObjectType::GitCommit => ObjectCategory::GitObject,
+            ObjectType::GitBlob | ObjectType::GitTree | ObjectType::GitCommit => {
+                ObjectCategory::GitObject
+            }
 
             ObjectType::Unknown => ObjectCategory::Unknown,
         }
@@ -479,10 +529,10 @@ pub enum ObjectCategory {
     Document,
     Text,
     Archive,
-    CreativeProject,  // Adobe, video NLEs, DAWs, 3D/DCC, CAD, game engines
-    Office,           // Word, Excel, PowerPoint, OpenDocument
-    MlSpecialized,    // ML training checkpoints vs inference models
-    Database,         // SQLite, database files
+    CreativeProject, // Adobe, video NLEs, DAWs, 3D/DCC, CAD, game engines
+    Office,          // Word, Excel, PowerPoint, OpenDocument
+    MlSpecialized,   // ML training checkpoints vs inference models
+    Database,        // SQLite, database files
     GitObject,
     Unknown,
 }
@@ -542,16 +592,14 @@ impl CompressionStrategy {
             | ObjectType::Mpg => CompressionStrategy::Store,
 
             // Already compressed audio: store without recompression
-            ObjectType::Mp3
-            | ObjectType::Aac
-            | ObjectType::Ogg
-            | ObjectType::Opus => CompressionStrategy::Store,
+            ObjectType::Mp3 | ObjectType::Aac | ObjectType::Ogg | ObjectType::Opus => {
+                CompressionStrategy::Store
+            }
 
             // Uncompressed/lossless audio: Zstd best
-            ObjectType::Flac
-            | ObjectType::Wav
-            | ObjectType::Aiff
-            | ObjectType::Alac => CompressionStrategy::Zstd(CompressionLevel::Best),
+            ObjectType::Flac | ObjectType::Wav | ObjectType::Aiff | ObjectType::Alac => {
+                CompressionStrategy::Zstd(CompressionLevel::Best)
+            }
 
             // Documents: Zstd default
             ObjectType::Pdf | ObjectType::Svg | ObjectType::Eps => {
@@ -580,7 +628,9 @@ impl CompressionStrategy {
             ObjectType::Tar => CompressionStrategy::Zstd(CompressionLevel::Default),
 
             // ML data formats: Zstd fast (good for large numeric arrays)
-            ObjectType::MlData | ObjectType::MlModel => CompressionStrategy::Zstd(CompressionLevel::Fast),
+            ObjectType::MlData | ObjectType::MlModel => {
+                CompressionStrategy::Zstd(CompressionLevel::Fast)
+            }
 
             // ML training checkpoints: Zstd fast (huge files, created frequently)
             ObjectType::MlCheckpoint => CompressionStrategy::Zstd(CompressionLevel::Fast),
@@ -598,8 +648,7 @@ impl CompressionStrategy {
             // PDF-based creative containers: store without recompression
             // AI/InDesign files are PDF containers with embedded compressed streams
             // Zstd compression expands the data on every chunk, wasting CPU
-            ObjectType::AdobeIllustrator
-            | ObjectType::AdobeIndesign => CompressionStrategy::Store,
+            ObjectType::AdobeIllustrator | ObjectType::AdobeIndesign => CompressionStrategy::Store,
 
             // Creative project files: Zstd default with heavy delta compression
             // These files have internal structure and benefit from both compression + delta
@@ -635,9 +684,9 @@ impl CompressionStrategy {
             ObjectType::SqliteDatabase => CompressionStrategy::Zstd(CompressionLevel::Default),
 
             // Git objects: Zlib for compatibility
-            ObjectType::GitBlob
-            | ObjectType::GitTree
-            | ObjectType::GitCommit => CompressionStrategy::Zlib(CompressionLevel::Default),
+            ObjectType::GitBlob | ObjectType::GitTree | ObjectType::GitCommit => {
+                CompressionStrategy::Zlib(CompressionLevel::Default)
+            }
 
             // Unknown/binary: Zstd default (safe choice)
             ObjectType::Unknown => CompressionStrategy::Zstd(CompressionLevel::Default),
@@ -645,13 +694,13 @@ impl CompressionStrategy {
     }
 
     /// Select optimal strategy for object type with size consideration
-    /// 
+    ///
     /// For large text files (>500MB), switches from Brotli to Zstd for 10x faster compression
     /// with only ~20% compression ratio loss.
     pub fn for_object_type_with_size(obj_type: ObjectType, data_size: usize) -> Self {
         // Check if this is a text type that would normally use Brotli
         let base_strategy = Self::for_object_type(obj_type);
-        
+
         // For large text files, switch from Brotli to Zstd for faster compression
         if data_size >= LARGE_TEXT_THRESHOLD {
             if let CompressionStrategy::Brotli(_) = base_strategy {
@@ -659,7 +708,7 @@ impl CompressionStrategy {
                 return CompressionStrategy::Zstd(CompressionLevel::Default);
             }
         }
-        
+
         base_strategy
     }
 }
@@ -671,7 +720,11 @@ pub trait TypeAwareCompressor: Send + Sync {
 
     /// Compress with automatic strategy selection considering data size
     /// For large text files (>500MB), uses Zstd instead of Brotli for faster compression
-    fn compress_typed_with_size(&self, data: &[u8], obj_type: ObjectType) -> CompressionResult<Vec<u8>>;
+    fn compress_typed_with_size(
+        &self,
+        data: &[u8],
+        obj_type: ObjectType,
+    ) -> CompressionResult<Vec<u8>>;
 
     /// Decompress data (auto-detects algorithm)
     fn decompress_typed(&self, data: &[u8]) -> CompressionResult<Vec<u8>>;
@@ -680,7 +733,11 @@ pub trait TypeAwareCompressor: Send + Sync {
     fn strategy_for_type(&self, obj_type: ObjectType) -> CompressionStrategy;
 
     /// Get compression strategy for object type with size consideration
-    fn strategy_for_type_with_size(&self, obj_type: ObjectType, data_size: usize) -> CompressionStrategy;
+    fn strategy_for_type_with_size(
+        &self,
+        obj_type: ObjectType,
+        data_size: usize,
+    ) -> CompressionStrategy;
 }
 
 /// Smart compressor with automatic type-based strategy selection
@@ -706,7 +763,7 @@ impl SmartCompressor {
     }
 
     /// Compress with explicit strategy
-    /// 
+    ///
     /// If compression would EXPAND the data (common for already-compressed content
     /// like embedded JPEGs in AI/PSD files), automatically falls back to Store mode.
     fn compress_with_strategy(
@@ -721,7 +778,7 @@ impl SmartCompressor {
             result.extend_from_slice(data);
             return Ok(result);
         }
-        
+
         let compressed = match strategy {
             CompressionStrategy::Store => unreachable!(), // Handled above
 
@@ -750,7 +807,7 @@ impl SmartCompressor {
                 self.zstd_default.compress(data)?
             }
         };
-        
+
         // CRITICAL FIX: If compression expanded the data (happens with already-compressed
         // content like embedded JPEGs in AI/PSD files), fall back to Store mode.
         // This prevents significant size overhead on creative files.
@@ -765,7 +822,7 @@ impl SmartCompressor {
             result.extend_from_slice(data);
             return Ok(result);
         }
-        
+
         Ok(compressed)
     }
 }
@@ -790,7 +847,11 @@ impl TypeAwareCompressor for SmartCompressor {
         self.compress_with_strategy(data, strategy)
     }
 
-    fn compress_typed_with_size(&self, data: &[u8], obj_type: ObjectType) -> CompressionResult<Vec<u8>> {
+    fn compress_typed_with_size(
+        &self,
+        data: &[u8],
+        obj_type: ObjectType,
+    ) -> CompressionResult<Vec<u8>> {
         let strategy = self.strategy_for_type_with_size(obj_type, data.len());
         self.compress_with_strategy(data, strategy)
     }
@@ -823,23 +884,31 @@ impl TypeAwareCompressor for SmartCompressor {
             CompressionAlgorithm::Zstd => {
                 // False positive rare but possible: raw data starting with zstd magic bytes
                 // (0x28 0xB5 0x2F 0xFD). Fall back to raw data if decompression fails.
-                Ok(self.zstd_default.decompress(data).unwrap_or_else(|_| data.to_vec()))
+                Ok(self
+                    .zstd_default
+                    .decompress(data)
+                    .unwrap_or_else(|_| data.to_vec()))
             }
             CompressionAlgorithm::Brotli => {
                 // False positive rare but possible: raw data starting with "BRT\x01".
                 // Fall back to raw data if decompression fails.
-                Ok(self.brotli_best.decompress(data).unwrap_or_else(|_| data.to_vec()))
+                Ok(self
+                    .brotli_best
+                    .decompress(data)
+                    .unwrap_or_else(|_| data.to_vec()))
             }
         }
-
     }
-
 
     fn strategy_for_type(&self, obj_type: ObjectType) -> CompressionStrategy {
         CompressionStrategy::for_object_type(obj_type)
     }
 
-    fn strategy_for_type_with_size(&self, obj_type: ObjectType, data_size: usize) -> CompressionStrategy {
+    fn strategy_for_type_with_size(
+        &self,
+        obj_type: ObjectType,
+        data_size: usize,
+    ) -> CompressionStrategy {
         CompressionStrategy::for_object_type_with_size(obj_type, data_size)
     }
 }
@@ -856,6 +925,7 @@ impl Compressor for SmartCompressor {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -902,7 +972,10 @@ mod tests {
 
         // Unknown
         let unknown_data = b"random";
-        assert_eq!(ObjectType::from_magic_bytes(unknown_data), ObjectType::Unknown);
+        assert_eq!(
+            ObjectType::from_magic_bytes(unknown_data),
+            ObjectType::Unknown
+        );
     }
 
     #[test]
@@ -1051,31 +1124,64 @@ mod tests {
         // Verify strategy exists for all types
         let all_types = [
             // Images
-            ObjectType::Jpeg, ObjectType::Png, ObjectType::Gif, ObjectType::Webp,
-            ObjectType::Avif, ObjectType::Heic,
-            ObjectType::Tiff, ObjectType::Bmp, ObjectType::Raw,
-            ObjectType::Exr, ObjectType::Hdr,
+            ObjectType::Jpeg,
+            ObjectType::Png,
+            ObjectType::Gif,
+            ObjectType::Webp,
+            ObjectType::Avif,
+            ObjectType::Heic,
+            ObjectType::Tiff,
+            ObjectType::Bmp,
+            ObjectType::Raw,
+            ObjectType::Exr,
+            ObjectType::Hdr,
             // Video
-            ObjectType::Mp4, ObjectType::Mov, ObjectType::Avi, ObjectType::Mkv,
-            ObjectType::Webm, ObjectType::Flv, ObjectType::Wmv, ObjectType::Mpg,
+            ObjectType::Mp4,
+            ObjectType::Mov,
+            ObjectType::Avi,
+            ObjectType::Mkv,
+            ObjectType::Webm,
+            ObjectType::Flv,
+            ObjectType::Wmv,
+            ObjectType::Mpg,
             // Audio
-            ObjectType::Mp3, ObjectType::Aac, ObjectType::Ogg, ObjectType::Opus,
-            ObjectType::Flac, ObjectType::Wav, ObjectType::Aiff, ObjectType::Alac,
+            ObjectType::Mp3,
+            ObjectType::Aac,
+            ObjectType::Ogg,
+            ObjectType::Opus,
+            ObjectType::Flac,
+            ObjectType::Wav,
+            ObjectType::Aiff,
+            ObjectType::Alac,
             // Documents
-            ObjectType::Pdf, ObjectType::Svg, ObjectType::Eps,
+            ObjectType::Pdf,
+            ObjectType::Svg,
+            ObjectType::Eps,
             // Text
-            ObjectType::Text, ObjectType::Json, ObjectType::Xml, ObjectType::Yaml,
-            ObjectType::Toml, ObjectType::Csv,
+            ObjectType::Text,
+            ObjectType::Json,
+            ObjectType::Xml,
+            ObjectType::Yaml,
+            ObjectType::Toml,
+            ObjectType::Csv,
             // Archives
-            ObjectType::Zip, ObjectType::Tar, ObjectType::Gz, ObjectType::SevenZ, ObjectType::Rar,
+            ObjectType::Zip,
+            ObjectType::Tar,
+            ObjectType::Gz,
+            ObjectType::SevenZ,
+            ObjectType::Rar,
             // Creative projects (sample)
-            ObjectType::AdobePhotoshop, ObjectType::Blender,
+            ObjectType::AdobePhotoshop,
+            ObjectType::Blender,
             // Office (sample)
             ObjectType::WordDocument,
             // ML specialized (sample)
-            ObjectType::MlCheckpoint, ObjectType::MlInference,
+            ObjectType::MlCheckpoint,
+            ObjectType::MlInference,
             // Git
-            ObjectType::GitBlob, ObjectType::GitTree, ObjectType::GitCommit,
+            ObjectType::GitBlob,
+            ObjectType::GitTree,
+            ObjectType::GitCommit,
             // Unknown
             ObjectType::Unknown,
         ];
@@ -1131,9 +1237,15 @@ mod tests {
         // Test different types with same content
         let content = b"Test content ".repeat(100);
 
-        let jpeg_result = compressor.compress_typed(&content, ObjectType::Jpeg).unwrap();
-        let text_result = compressor.compress_typed(&content, ObjectType::Text).unwrap();
-        let tiff_result = compressor.compress_typed(&content, ObjectType::Tiff).unwrap();
+        let jpeg_result = compressor
+            .compress_typed(&content, ObjectType::Jpeg)
+            .unwrap();
+        let text_result = compressor
+            .compress_typed(&content, ObjectType::Text)
+            .unwrap();
+        let tiff_result = compressor
+            .compress_typed(&content, ObjectType::Tiff)
+            .unwrap();
 
         // JPEG should not compress (store with 0x00 prefix)
         assert_eq!(jpeg_result.len(), content.len() + 1);
@@ -1173,17 +1285,44 @@ mod tests {
     #[test]
     fn test_creative_project_file_extensions() {
         // Adobe Creative Cloud
-        assert_eq!(ObjectType::from_extension("psd"), ObjectType::AdobePhotoshop);
-        assert_eq!(ObjectType::from_extension("psb"), ObjectType::AdobePhotoshop);
-        assert_eq!(ObjectType::from_extension("ai"), ObjectType::AdobeIllustrator);
-        assert_eq!(ObjectType::from_extension("indd"), ObjectType::AdobeIndesign);
-        assert_eq!(ObjectType::from_extension("aep"), ObjectType::AdobeAfterEffects);
-        assert_eq!(ObjectType::from_extension("prproj"), ObjectType::AdobePremiere);
+        assert_eq!(
+            ObjectType::from_extension("psd"),
+            ObjectType::AdobePhotoshop
+        );
+        assert_eq!(
+            ObjectType::from_extension("psb"),
+            ObjectType::AdobePhotoshop
+        );
+        assert_eq!(
+            ObjectType::from_extension("ai"),
+            ObjectType::AdobeIllustrator
+        );
+        assert_eq!(
+            ObjectType::from_extension("indd"),
+            ObjectType::AdobeIndesign
+        );
+        assert_eq!(
+            ObjectType::from_extension("aep"),
+            ObjectType::AdobeAfterEffects
+        );
+        assert_eq!(
+            ObjectType::from_extension("prproj"),
+            ObjectType::AdobePremiere
+        );
 
         // Video NLEs
-        assert_eq!(ObjectType::from_extension("drp"), ObjectType::DavinciResolve);
-        assert_eq!(ObjectType::from_extension("fcpbundle"), ObjectType::FinalCutPro);
-        assert_eq!(ObjectType::from_extension("avb"), ObjectType::AvidMediaComposer);
+        assert_eq!(
+            ObjectType::from_extension("drp"),
+            ObjectType::DavinciResolve
+        );
+        assert_eq!(
+            ObjectType::from_extension("fcpbundle"),
+            ObjectType::FinalCutPro
+        );
+        assert_eq!(
+            ObjectType::from_extension("avb"),
+            ObjectType::AvidMediaComposer
+        );
 
         // 3D/DCC
         assert_eq!(ObjectType::from_extension("blend"), ObjectType::Blender);
@@ -1204,8 +1343,14 @@ mod tests {
         assert_eq!(ObjectType::from_extension("rvt"), ObjectType::Revit);
 
         // Game engines
-        assert_eq!(ObjectType::from_extension("unity"), ObjectType::UnityProject);
-        assert_eq!(ObjectType::from_extension("uasset"), ObjectType::UnrealProject);
+        assert_eq!(
+            ObjectType::from_extension("unity"),
+            ObjectType::UnityProject
+        );
+        assert_eq!(
+            ObjectType::from_extension("uasset"),
+            ObjectType::UnrealProject
+        );
         assert_eq!(ObjectType::from_extension("tscn"), ObjectType::GodotProject);
     }
 
@@ -1213,10 +1358,22 @@ mod tests {
     fn test_office_document_extensions() {
         assert_eq!(ObjectType::from_extension("docx"), ObjectType::WordDocument);
         assert_eq!(ObjectType::from_extension("doc"), ObjectType::WordDocument);
-        assert_eq!(ObjectType::from_extension("xlsx"), ObjectType::ExcelSpreadsheet);
-        assert_eq!(ObjectType::from_extension("xls"), ObjectType::ExcelSpreadsheet);
-        assert_eq!(ObjectType::from_extension("pptx"), ObjectType::PowerpointPresentation);
-        assert_eq!(ObjectType::from_extension("ppt"), ObjectType::PowerpointPresentation);
+        assert_eq!(
+            ObjectType::from_extension("xlsx"),
+            ObjectType::ExcelSpreadsheet
+        );
+        assert_eq!(
+            ObjectType::from_extension("xls"),
+            ObjectType::ExcelSpreadsheet
+        );
+        assert_eq!(
+            ObjectType::from_extension("pptx"),
+            ObjectType::PowerpointPresentation
+        );
+        assert_eq!(
+            ObjectType::from_extension("ppt"),
+            ObjectType::PowerpointPresentation
+        );
         assert_eq!(ObjectType::from_extension("odt"), ObjectType::OpenDocument);
         assert_eq!(ObjectType::from_extension("ods"), ObjectType::OpenDocument);
     }
@@ -1231,44 +1388,89 @@ mod tests {
         // Inference models
         assert_eq!(ObjectType::from_extension("onnx"), ObjectType::MlInference);
         assert_eq!(ObjectType::from_extension("gguf"), ObjectType::MlInference);
-        assert_eq!(ObjectType::from_extension("tflite"), ObjectType::MlInference);
-        assert_eq!(ObjectType::from_extension("llamafile"), ObjectType::MlInference);
+        assert_eq!(
+            ObjectType::from_extension("tflite"),
+            ObjectType::MlInference
+        );
+        assert_eq!(
+            ObjectType::from_extension("llamafile"),
+            ObjectType::MlInference
+        );
     }
 
     #[test]
     fn test_database_extensions() {
-        assert_eq!(ObjectType::from_extension("sqlite"), ObjectType::SqliteDatabase);
+        assert_eq!(
+            ObjectType::from_extension("sqlite"),
+            ObjectType::SqliteDatabase
+        );
         assert_eq!(ObjectType::from_extension("db"), ObjectType::SqliteDatabase);
-        assert_eq!(ObjectType::from_extension("db3"), ObjectType::SqliteDatabase);
+        assert_eq!(
+            ObjectType::from_extension("db3"),
+            ObjectType::SqliteDatabase
+        );
     }
 
     #[test]
     fn test_creative_project_categories() {
-        assert_eq!(ObjectType::AdobePhotoshop.category(), ObjectCategory::CreativeProject);
-        assert_eq!(ObjectType::Blender.category(), ObjectCategory::CreativeProject);
-        assert_eq!(ObjectType::DavinciResolve.category(), ObjectCategory::CreativeProject);
-        assert_eq!(ObjectType::ProTools.category(), ObjectCategory::CreativeProject);
-        assert_eq!(ObjectType::AutoCad.category(), ObjectCategory::CreativeProject);
-        assert_eq!(ObjectType::UnityProject.category(), ObjectCategory::CreativeProject);
+        assert_eq!(
+            ObjectType::AdobePhotoshop.category(),
+            ObjectCategory::CreativeProject
+        );
+        assert_eq!(
+            ObjectType::Blender.category(),
+            ObjectCategory::CreativeProject
+        );
+        assert_eq!(
+            ObjectType::DavinciResolve.category(),
+            ObjectCategory::CreativeProject
+        );
+        assert_eq!(
+            ObjectType::ProTools.category(),
+            ObjectCategory::CreativeProject
+        );
+        assert_eq!(
+            ObjectType::AutoCad.category(),
+            ObjectCategory::CreativeProject
+        );
+        assert_eq!(
+            ObjectType::UnityProject.category(),
+            ObjectCategory::CreativeProject
+        );
     }
 
     #[test]
     fn test_office_category() {
         assert_eq!(ObjectType::WordDocument.category(), ObjectCategory::Office);
-        assert_eq!(ObjectType::ExcelSpreadsheet.category(), ObjectCategory::Office);
-        assert_eq!(ObjectType::PowerpointPresentation.category(), ObjectCategory::Office);
+        assert_eq!(
+            ObjectType::ExcelSpreadsheet.category(),
+            ObjectCategory::Office
+        );
+        assert_eq!(
+            ObjectType::PowerpointPresentation.category(),
+            ObjectCategory::Office
+        );
         assert_eq!(ObjectType::OpenDocument.category(), ObjectCategory::Office);
     }
 
     #[test]
     fn test_ml_specialized_category() {
-        assert_eq!(ObjectType::MlCheckpoint.category(), ObjectCategory::MlSpecialized);
-        assert_eq!(ObjectType::MlInference.category(), ObjectCategory::MlSpecialized);
+        assert_eq!(
+            ObjectType::MlCheckpoint.category(),
+            ObjectCategory::MlSpecialized
+        );
+        assert_eq!(
+            ObjectType::MlInference.category(),
+            ObjectCategory::MlSpecialized
+        );
     }
 
     #[test]
     fn test_database_category() {
-        assert_eq!(ObjectType::SqliteDatabase.category(), ObjectCategory::Database);
+        assert_eq!(
+            ObjectType::SqliteDatabase.category(),
+            ObjectCategory::Database
+        );
     }
 
     #[test]
@@ -1338,7 +1540,10 @@ mod tests {
     #[test]
     fn test_case_insensitive_extensions() {
         // Test uppercase extensions work correctly
-        assert_eq!(ObjectType::from_extension("PSD"), ObjectType::AdobePhotoshop);
+        assert_eq!(
+            ObjectType::from_extension("PSD"),
+            ObjectType::AdobePhotoshop
+        );
         assert_eq!(ObjectType::from_extension("BLEND"), ObjectType::Blender);
         assert_eq!(ObjectType::from_extension("ONNX"), ObjectType::MlInference);
         assert_eq!(ObjectType::from_extension("DOCX"), ObjectType::WordDocument);
@@ -1370,32 +1575,58 @@ mod tests {
         let compressor = SmartCompressor::new();
 
         // Test JSON
-        let json_data = r#"{"name": "MediaGit", "version": "1.0", "features": ["compression", "delta"]}"#.repeat(50);
-        let compressed = compressor.compress_typed(json_data.as_bytes(), ObjectType::Json).unwrap();
+        let json_data =
+            r#"{"name": "MediaGit", "version": "1.0", "features": ["compression", "delta"]}"#
+                .repeat(50);
+        let compressed = compressor
+            .compress_typed(json_data.as_bytes(), ObjectType::Json)
+            .unwrap();
         assert!(compressed.len() < json_data.len(), "JSON should compress");
         let decompressed = compressor.decompress_typed(&compressed).unwrap();
-        assert_eq!(json_data.as_bytes(), &decompressed[..], "JSON roundtrip failed");
+        assert_eq!(
+            json_data.as_bytes(),
+            &decompressed[..],
+            "JSON roundtrip failed"
+        );
 
         // Test CSV
         let csv_data = "id,name,value\n1,Alice,100\n2,Bob,200\n".repeat(100);
-        let compressed = compressor.compress_typed(csv_data.as_bytes(), ObjectType::Csv).unwrap();
+        let compressed = compressor
+            .compress_typed(csv_data.as_bytes(), ObjectType::Csv)
+            .unwrap();
         assert!(compressed.len() < csv_data.len(), "CSV should compress");
         let decompressed = compressor.decompress_typed(&compressed).unwrap();
-        assert_eq!(csv_data.as_bytes(), &decompressed[..], "CSV roundtrip failed");
+        assert_eq!(
+            csv_data.as_bytes(),
+            &decompressed[..],
+            "CSV roundtrip failed"
+        );
 
         // Test XML
         let xml_data = "<root><item id=\"1\">Value</item></root>".repeat(50);
-        let compressed = compressor.compress_typed(xml_data.as_bytes(), ObjectType::Xml).unwrap();
+        let compressed = compressor
+            .compress_typed(xml_data.as_bytes(), ObjectType::Xml)
+            .unwrap();
         assert!(compressed.len() < xml_data.len(), "XML should compress");
         let decompressed = compressor.decompress_typed(&compressed).unwrap();
-        assert_eq!(xml_data.as_bytes(), &decompressed[..], "XML roundtrip failed");
+        assert_eq!(
+            xml_data.as_bytes(),
+            &decompressed[..],
+            "XML roundtrip failed"
+        );
 
         // Test plain text
         let text_data = "The quick brown fox jumps over the lazy dog. ".repeat(100);
-        let compressed = compressor.compress_typed(text_data.as_bytes(), ObjectType::Text).unwrap();
+        let compressed = compressor
+            .compress_typed(text_data.as_bytes(), ObjectType::Text)
+            .unwrap();
         assert!(compressed.len() < text_data.len(), "Text should compress");
         let decompressed = compressor.decompress_typed(&compressed).unwrap();
-        assert_eq!(text_data.as_bytes(), &decompressed[..], "Text roundtrip failed");
+        assert_eq!(
+            text_data.as_bytes(),
+            &decompressed[..],
+            "Text roundtrip failed"
+        );
     }
 
     #[test]
@@ -1408,7 +1639,9 @@ mod tests {
         let mut data = psd_data.clone();
         data.extend_from_slice(&vec![0xAB; 10000]); // Add some data
 
-        let compressed = compressor.compress_typed(&data, ObjectType::AdobePhotoshop).unwrap();
+        let compressed = compressor
+            .compress_typed(&data, ObjectType::AdobePhotoshop)
+            .unwrap();
         assert!(compressed.len() < data.len(), "PSD should compress");
 
         let decompressed = compressor.decompress_typed(&compressed).unwrap();
@@ -1424,14 +1657,24 @@ mod tests {
         let model_data = (0..5000).map(|x| (x % 256) as u8).collect::<Vec<_>>();
 
         // Test checkpoint compression
-        let checkpoint_compressed = compressor.compress_typed(&model_data, ObjectType::MlCheckpoint).unwrap();
+        let checkpoint_compressed = compressor
+            .compress_typed(&model_data, ObjectType::MlCheckpoint)
+            .unwrap();
         let checkpoint_decompressed = compressor.decompress_typed(&checkpoint_compressed).unwrap();
-        assert_eq!(model_data, checkpoint_decompressed, "Checkpoint roundtrip failed");
+        assert_eq!(
+            model_data, checkpoint_decompressed,
+            "Checkpoint roundtrip failed"
+        );
 
         // Test inference model compression
-        let inference_compressed = compressor.compress_typed(&model_data, ObjectType::MlInference).unwrap();
+        let inference_compressed = compressor
+            .compress_typed(&model_data, ObjectType::MlInference)
+            .unwrap();
         let inference_decompressed = compressor.decompress_typed(&inference_compressed).unwrap();
-        assert_eq!(model_data, inference_decompressed, "Inference model roundtrip failed");
+        assert_eq!(
+            model_data, inference_decompressed,
+            "Inference model roundtrip failed"
+        );
 
         // Both should work, but inference might compress better (Default vs Fast)
         // We just verify both decompress correctly
@@ -1445,7 +1688,9 @@ mod tests {
         // Simulate docx structure (ZIP-like)
         let docx_data = b"PK\x03\x04...document content...".repeat(100);
 
-        let compressed = compressor.compress_typed(&docx_data, ObjectType::WordDocument).unwrap();
+        let compressed = compressor
+            .compress_typed(&docx_data, ObjectType::WordDocument)
+            .unwrap();
         let decompressed = compressor.decompress_typed(&compressed).unwrap();
         assert_eq!(docx_data, &decompressed[..], "DOCX roundtrip failed");
     }
@@ -1458,7 +1703,9 @@ mod tests {
         // Simulate SQLite data
         let db_data = b"SQLite format 3\x00...table data...".repeat(100);
 
-        let compressed = compressor.compress_typed(&db_data, ObjectType::SqliteDatabase).unwrap();
+        let compressed = compressor
+            .compress_typed(&db_data, ObjectType::SqliteDatabase)
+            .unwrap();
         let decompressed = compressor.decompress_typed(&compressed).unwrap();
         assert_eq!(db_data, &decompressed[..], "SQLite roundtrip failed");
     }
@@ -1503,17 +1750,35 @@ mod tests {
         let zip_data = vec![0x50, 0x4B, 0x03, 0x04];
 
         // These should be stored with 0x00 Store prefix (not recompressed)
-        let jpeg_compressed = compressor.compress_typed(&jpeg_data, ObjectType::Jpeg).unwrap();
+        let jpeg_compressed = compressor
+            .compress_typed(&jpeg_data, ObjectType::Jpeg)
+            .unwrap();
         assert_eq!(jpeg_compressed[0], 0x00, "JPEG should have Store prefix");
-        assert_eq!(&jpeg_compressed[1..], &jpeg_data[..], "JPEG should not be recompressed");
+        assert_eq!(
+            &jpeg_compressed[1..],
+            &jpeg_data[..],
+            "JPEG should not be recompressed"
+        );
 
-        let mp4_compressed = compressor.compress_typed(mp4_data, ObjectType::Mp4).unwrap();
+        let mp4_compressed = compressor
+            .compress_typed(mp4_data, ObjectType::Mp4)
+            .unwrap();
         assert_eq!(mp4_compressed[0], 0x00, "MP4 should have Store prefix");
-        assert_eq!(&mp4_compressed[1..], mp4_data, "MP4 should not be recompressed");
+        assert_eq!(
+            &mp4_compressed[1..],
+            mp4_data,
+            "MP4 should not be recompressed"
+        );
 
-        let zip_compressed = compressor.compress_typed(&zip_data, ObjectType::Zip).unwrap();
+        let zip_compressed = compressor
+            .compress_typed(&zip_data, ObjectType::Zip)
+            .unwrap();
         assert_eq!(zip_compressed[0], 0x00, "ZIP should have Store prefix");
-        assert_eq!(&zip_compressed[1..], &zip_data[..], "ZIP should not be recompressed");
+        assert_eq!(
+            &zip_compressed[1..],
+            &zip_data[..],
+            "ZIP should not be recompressed"
+        );
     }
 
     #[test]
@@ -1523,9 +1788,15 @@ mod tests {
 
         // Highly repetitive text should compress very well with Brotli
         let repetitive_text = "AAAAAAAAAA".repeat(1000);
-        let compressed = compressor.compress_typed(repetitive_text.as_bytes(), ObjectType::Text).unwrap();
+        let compressed = compressor
+            .compress_typed(repetitive_text.as_bytes(), ObjectType::Text)
+            .unwrap();
         let ratio = compressed.len() as f64 / repetitive_text.len() as f64;
-        assert!(ratio < 0.1, "Repetitive text should compress to <10% with Brotli, got {:.2}%", ratio * 100.0);
+        assert!(
+            ratio < 0.1,
+            "Repetitive text should compress to <10% with Brotli, got {:.2}%",
+            ratio * 100.0
+        );
 
         // Verify decompression
         let decompressed = compressor.decompress_typed(&compressed).unwrap();
@@ -1550,7 +1821,12 @@ mod tests {
         for obj_type in types {
             let compressed = compressor.compress_typed(empty, obj_type).unwrap();
             let decompressed = compressor.decompress_typed(&compressed).unwrap();
-            assert_eq!(empty, &decompressed[..], "Empty data failed for {:?}", obj_type);
+            assert_eq!(
+                empty,
+                &decompressed[..],
+                "Empty data failed for {:?}",
+                obj_type
+            );
         }
     }
 
@@ -1560,17 +1836,36 @@ mod tests {
         let compressor = SmartCompressor::new();
 
         // 1MB of structured data
-        let large_json = format!(r#"{{"data": [{}]}}"#, (0..10000).map(|i| format!("{}", i)).collect::<Vec<_>>().join(","));
+        let large_json = format!(
+            r#"{{"data": [{}]}}"#,
+            (0..10000)
+                .map(|i| format!("{}", i))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
 
-        let compressed = compressor.compress_typed(large_json.as_bytes(), ObjectType::Json).unwrap();
-        assert!(compressed.len() < large_json.len(), "Large JSON should compress");
+        let compressed = compressor
+            .compress_typed(large_json.as_bytes(), ObjectType::Json)
+            .unwrap();
+        assert!(
+            compressed.len() < large_json.len(),
+            "Large JSON should compress"
+        );
 
         let decompressed = compressor.decompress_typed(&compressed).unwrap();
-        assert_eq!(large_json.as_bytes(), &decompressed[..], "Large JSON roundtrip failed");
+        assert_eq!(
+            large_json.as_bytes(),
+            &decompressed[..],
+            "Large JSON roundtrip failed"
+        );
 
         // Verify significant compression for structured data
         let ratio = compressed.len() as f64 / large_json.len() as f64;
-        assert!(ratio < 0.5, "Large JSON should compress to <50%, got {:.2}%", ratio * 100.0);
+        assert!(
+            ratio < 0.5,
+            "Large JSON should compress to <50%, got {:.2}%",
+            ratio * 100.0
+        );
     }
 
     #[test]
@@ -1604,12 +1899,9 @@ mod tests {
         for (ext, expected_type) in new_extensions {
             let detected_type = ObjectType::from_extension(ext);
             assert_eq!(
-                detected_type,
-                expected_type,
+                detected_type, expected_type,
                 "Extension '{}' should map to {:?}, got {:?}",
-                ext,
-                expected_type,
-                detected_type
+                ext, expected_type, detected_type
             );
 
             // Verify each type has a compression strategy
@@ -1643,11 +1935,9 @@ mod tests {
         for (obj_type, expected_category) in category_samples {
             let category = obj_type.category();
             assert_eq!(
-                category,
-                expected_category,
+                category, expected_category,
                 "{:?} should be in {:?} category",
-                obj_type,
-                expected_category
+                obj_type, expected_category
             );
         }
     }

@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // SPDX-License-Identifier: AGPL-3.0
 // Copyright (C) 2025 MediaGit Contributors
 
@@ -102,11 +116,13 @@ impl FilterDriver {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn install(&self, repo_path: &Path) -> GitResult<()> {
-        info!("Installing MediaGit filter driver in repository: {:?}", repo_path);
+        info!(
+            "Installing MediaGit filter driver in repository: {:?}",
+            repo_path
+        );
 
-        let repo = Repository::open(repo_path).map_err(|e| {
-            GitError::RepositoryNotFound(format!("{}: {}", repo_path.display(), e))
-        })?;
+        let repo = Repository::open(repo_path)
+            .map_err(|e| GitError::RepositoryNotFound(format!("{}: {}", repo_path.display(), e)))?;
 
         let mut config = repo.config()?;
 
@@ -277,7 +293,10 @@ impl FilterDriver {
             .write_all(&pointer_content)
             .map_err(|e| GitError::FilterFailed(format!("Failed to write pointer: {}", e)))?;
 
-        info!("Clean filter completed for {}: {} bytes → pointer", path_info, file_size);
+        info!(
+            "Clean filter completed for {}: {} bytes → pointer",
+            path_info, file_size
+        );
         Ok(())
     }
 
@@ -320,16 +339,19 @@ impl FilterDriver {
 
         // Parse pointer file
         let pointer = PointerFile::parse(&input)?;
-        debug!("Parsed pointer for {}: OID={}, size={}", path_info, pointer.oid, pointer.size);
+        debug!(
+            "Parsed pointer for {}: OID={}, size={}",
+            path_info, pointer.oid, pointer.size
+        );
 
         // Try to retrieve object from storage
         if let Some(ref storage_path) = self.config.storage_path {
             match self.retrieve_object(storage_path, &pointer.oid) {
                 Ok(content) => {
                     debug!("Retrieved object {} ({} bytes)", pointer.oid, content.len());
-                    io::stdout()
-                        .write_all(&content)
-                        .map_err(|e| GitError::FilterFailed(format!("Failed to write stdout: {}", e)))?;
+                    io::stdout().write_all(&content).map_err(|e| {
+                        GitError::FilterFailed(format!("Failed to write stdout: {}", e))
+                    })?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -342,12 +364,13 @@ impl FilterDriver {
             if let Ok(cwd) = std::env::current_dir() {
                 let default_storage = cwd.join(".mediagit");
                 if default_storage.exists() {
-                    match self.retrieve_object(default_storage.to_str().unwrap_or(""), &pointer.oid) {
+                    match self.retrieve_object(default_storage.to_str().unwrap_or(""), &pointer.oid)
+                    {
                         Ok(content) => {
                             debug!("Retrieved object {} ({} bytes)", pointer.oid, content.len());
-                            io::stdout()
-                                .write_all(&content)
-                                .map_err(|e| GitError::FilterFailed(format!("Failed to write stdout: {}", e)))?;
+                            io::stdout().write_all(&content).map_err(|e| {
+                                GitError::FilterFailed(format!("Failed to write stdout: {}", e))
+                            })?;
                             return Ok(());
                         }
                         Err(e) => {
@@ -359,7 +382,10 @@ impl FilterDriver {
         }
 
         // Object not found - output pointer file (allows partial checkouts)
-        warn!("Object {} not found in storage, outputting pointer file", pointer.oid);
+        warn!(
+            "Object {} not found in storage, outputting pointer file",
+            pointer.oid
+        );
         io::stdout()
             .write_all(input.as_bytes())
             .map_err(|e| GitError::FilterFailed(format!("Failed to write stdout: {}", e)))?;
@@ -383,8 +409,9 @@ impl FilterDriver {
             .join(suffix);
 
         if object_path.exists() {
-            let content = fs::read(&object_path)
-                .map_err(|e| GitError::FilterFailed(format!("Failed to read object {}: {}", oid, e)))?;
+            let content = fs::read(&object_path).map_err(|e| {
+                GitError::FilterFailed(format!("Failed to read object {}: {}", oid, e))
+            })?;
 
             // Object might be compressed - try to decompress
             if let Ok(decompressed) = self.try_decompress(&content) {
@@ -411,7 +438,12 @@ impl FilterDriver {
     /// Try to decompress zstd-compressed content
     fn try_decompress(&self, data: &[u8]) -> Result<Vec<u8>, ()> {
         // Check for zstd magic number (0x28 0xB5 0x2F 0xFD)
-        if data.len() >= 4 && data[0] == 0x28 && data[1] == 0xB5 && data[2] == 0x2F && data[3] == 0xFD {
+        if data.len() >= 4
+            && data[0] == 0x28
+            && data[1] == 0xB5
+            && data[2] == 0x2F
+            && data[3] == 0xFD
+        {
             if let Ok(decompressed) = zstd::decode_all(std::io::Cursor::new(data)) {
                 return Ok(decompressed);
             }
@@ -424,7 +456,9 @@ impl FilterDriver {
         // Read chunk manifest
         let manifest_path = chunks_dir.join("manifest.json");
         if !manifest_path.exists() {
-            return Err(GitError::FilterFailed("Chunk manifest not found".to_string()));
+            return Err(GitError::FilterFailed(
+                "Chunk manifest not found".to_string(),
+            ));
         }
 
         let manifest_content = fs::read_to_string(&manifest_path)
@@ -446,8 +480,9 @@ impl FilterDriver {
                 .ok_or_else(|| GitError::FilterFailed("Invalid chunk OID".to_string()))?;
 
             let chunk_path = chunks_dir.join(chunk_oid);
-            let chunk_data = fs::read(&chunk_path)
-                .map_err(|e| GitError::FilterFailed(format!("Failed to read chunk {}: {}", chunk_oid, e)))?;
+            let chunk_data = fs::read(&chunk_path).map_err(|e| {
+                GitError::FilterFailed(format!("Failed to read chunk {}: {}", chunk_oid, e))
+            })?;
 
             // Try to decompress chunk
             let chunk_content = self.try_decompress(&chunk_data).unwrap_or(chunk_data);

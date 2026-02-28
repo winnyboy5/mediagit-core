@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // SPDX-License-Identifier: AGPL-3.0
 // Copyright (C) 2025 MediaGit Contributors
 
@@ -52,7 +66,7 @@ impl InstallCmd {
         // Check if already installed
         if !self.force {
             let check = Command::new("git")
-                .args(&["config", "--get", "filter.mediagit.clean"])
+                .args(["config", "--get", "filter.mediagit.clean"])
                 .current_dir(&repo_path)
                 .output();
 
@@ -66,8 +80,8 @@ impl InstallCmd {
         }
 
         // Get mediagit binary path
-        let mediagit_path = std::env::current_exe()
-            .context("Failed to get mediagit executable path")?;
+        let mediagit_path =
+            std::env::current_exe().context("Failed to get mediagit executable path")?;
 
         // Install filter driver configuration
         self.run_git_config(
@@ -82,11 +96,7 @@ impl InstallCmd {
             &format!("{} filter smudge", mediagit_path.display()),
         )?;
 
-        self.run_git_config(
-            &repo_path,
-            "filter.mediagit.required",
-            "true",
-        )?;
+        self.run_git_config(&repo_path, "filter.mediagit.required", "true")?;
 
         // Install diff driver
         self.run_git_config(
@@ -96,11 +106,7 @@ impl InstallCmd {
         )?;
 
         // Install merge driver
-        self.run_git_config(
-            &repo_path,
-            "merge.mediagit.name",
-            "MediaGit merge driver",
-        )?;
+        self.run_git_config(&repo_path, "merge.mediagit.name", "MediaGit merge driver")?;
 
         self.run_git_config(
             &repo_path,
@@ -128,10 +134,13 @@ impl InstallCmd {
     }
 
     fn install_global(&self) -> Result<()> {
-        let mediagit_path = std::env::current_exe()
-            .context("Failed to get mediagit executable path")?;
+        let mediagit_path =
+            std::env::current_exe().context("Failed to get mediagit executable path")?;
 
-        println!("{} Installing globally for all repositories", style("🌍").cyan());
+        println!(
+            "{} Installing globally for all repositories",
+            style("🌍").cyan()
+        );
 
         // Install global configuration
         self.run_git_config_global(
@@ -144,20 +153,14 @@ impl InstallCmd {
             &format!("{} filter smudge", mediagit_path.display()),
         )?;
 
-        self.run_git_config_global(
-            "filter.mediagit.required",
-            "true",
-        )?;
+        self.run_git_config_global("filter.mediagit.required", "true")?;
 
         self.run_git_config_global(
             "diff.mediagit.command",
             &format!("{} diff", mediagit_path.display()),
         )?;
 
-        self.run_git_config_global(
-            "merge.mediagit.name",
-            "MediaGit merge driver",
-        )?;
+        self.run_git_config_global("merge.mediagit.name", "MediaGit merge driver")?;
 
         self.run_git_config_global(
             "merge.mediagit.driver",
@@ -177,7 +180,7 @@ impl InstallCmd {
 
     fn run_git_config(&self, repo_path: &PathBuf, key: &str, value: &str) -> Result<()> {
         let output = Command::new("git")
-            .args(&["config", key, value])
+            .args(["config", key, value])
             .current_dir(repo_path)
             .output()
             .context(format!("Failed to run: git config {} {}", key, value))?;
@@ -192,9 +195,12 @@ impl InstallCmd {
 
     fn run_git_config_global(&self, key: &str, value: &str) -> Result<()> {
         let output = Command::new("git")
-            .args(&["config", "--global", key, value])
+            .args(["config", "--global", key, value])
             .output()
-            .context(format!("Failed to run: git config --global {} {}", key, value))?;
+            .context(format!(
+                "Failed to run: git config --global {} {}",
+                key, value
+            ))?;
 
         if !output.status.success() {
             let error = String::from_utf8_lossy(&output.stderr);

@@ -1,7 +1,19 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use mediagit_versioning::{
-    DeltaDecoder, DeltaEncoder, ObjectType, Oid, PackReader, PackWriter,
-};
+use mediagit_versioning::{DeltaDecoder, DeltaEncoder, ObjectType, Oid, PackReader, PackWriter};
 
 fn benchmark_pack_write(c: &mut Criterion) {
     c.bench_function("pack_write_single_1mb", |b| {
@@ -64,9 +76,7 @@ fn benchmark_delta_encoding(c: &mut Criterion) {
                 target[5000] = 0x43;
                 (base, target)
             },
-            |(base, target)| {
-                DeltaEncoder::encode(&base, &target)
-            },
+            |(base, target)| DeltaEncoder::encode(&base, &target),
         );
     });
 
@@ -75,14 +85,12 @@ fn benchmark_delta_encoding(c: &mut Criterion) {
             || {
                 let base = vec![0x42u8; 100 * 1024];
                 let mut target = base.clone();
-                for i in 50000..50100 {
-                    target[i] = 0x43;
+                for b in &mut target[50000..50100] {
+                    *b = 0x43;
                 }
                 (base, target)
             },
-            |(base, target)| {
-                DeltaEncoder::encode(&base, &target)
-            },
+            |(base, target)| DeltaEncoder::encode(&base, &target),
         );
     });
 
@@ -93,9 +101,7 @@ fn benchmark_delta_encoding(c: &mut Criterion) {
                 let target = vec![0xFFu8; 10 * 1024];
                 (base, target)
             },
-            |(base, target)| {
-                DeltaEncoder::encode(&base, &target)
-            },
+            |(base, target)| DeltaEncoder::encode(&base, &target),
         );
     });
 }
@@ -103,8 +109,8 @@ fn benchmark_delta_encoding(c: &mut Criterion) {
 fn benchmark_delta_application(c: &mut Criterion) {
     let base = vec![0x42u8; 100 * 1024];
     let mut target = base.clone();
-    for i in 50000..50100 {
-        target[i] = 0x43;
+    for b in &mut target[50000..50100] {
+        *b = 0x43;
     }
     let delta = DeltaEncoder::encode(&base, &target);
 
@@ -121,8 +127,8 @@ fn benchmark_pack_with_deltas(c: &mut Criterion) {
             || {
                 let base_data = vec![0x42u8; 100 * 1024];
                 let mut target = base_data.clone();
-                for i in 50000..50100 {
-                    target[i] = 0x43;
+                for b in &mut target[50000..50100] {
+                    *b = 0x43;
                 }
                 (base_data, target)
             },

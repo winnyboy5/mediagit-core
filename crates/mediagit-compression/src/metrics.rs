@@ -13,10 +13,10 @@
 
 //! Compression metrics and statistics
 
-use std::time::{Duration, Instant};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Compression algorithm identifier (copy to avoid circular dependency)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -132,14 +132,14 @@ impl CompressionMetrics {
         self.compressed_size = compressed.len();
 
         // Calculate compression ratio (original/compressed, higher is better)
-        self.compression_ratio = if compressed.len() == 0 {
+        self.compression_ratio = if compressed.is_empty() {
             f64::INFINITY
         } else {
             original.len() as f64 / compressed.len() as f64
         };
 
         self.space_saved = original.len().saturating_sub(compressed.len());
-        self.space_saved_percent = if original.len() == 0 {
+        self.space_saved_percent = if original.is_empty() {
             0.0
         } else {
             (self.space_saved as f64 / original.len() as f64) * 100.0
@@ -152,11 +152,7 @@ impl CompressionMetrics {
         // Calculate throughput (MB/s)
         let mb = original.len() as f64 / 1_048_576.0;
         let seconds = duration.as_secs_f64();
-        self.throughput_mbps = if seconds > 0.0 {
-            mb / seconds
-        } else {
-            0.0
-        };
+        self.throughput_mbps = if seconds > 0.0 { mb / seconds } else { 0.0 };
 
         // Update accumulated metrics
         self.total_operations += 1;
@@ -177,8 +173,7 @@ impl CompressionMetrics {
             // Weighted average: current avg + (new_ratio - avg) / total_ops
             let weight = 1.0 / self.total_operations as f64;
             self.avg_compression_ratio =
-                self.avg_compression_ratio * (1.0 - weight) +
-                self.compression_ratio * weight;
+                self.avg_compression_ratio * (1.0 - weight) + self.compression_ratio * weight;
         }
     }
 
@@ -208,12 +203,24 @@ impl CompressionMetrics {
              # HELP mediagit_compression_avg_ratio Average compression ratio\n\
              # TYPE mediagit_compression_avg_ratio gauge\n\
              mediagit_compression_avg_ratio{{algorithm=\"{:?}\",level=\"{:?}\"}} {}\n",
-            self.algorithm, self.level, self.compression_ratio,
-            self.algorithm, self.level, self.throughput_mbps,
-            self.algorithm, self.level, self.space_saved,
-            self.algorithm, self.level, self.total_operations,
-            self.algorithm, self.level, self.total_bytes_processed,
-            self.algorithm, self.level, self.avg_compression_ratio
+            self.algorithm,
+            self.level,
+            self.compression_ratio,
+            self.algorithm,
+            self.level,
+            self.throughput_mbps,
+            self.algorithm,
+            self.level,
+            self.space_saved,
+            self.algorithm,
+            self.level,
+            self.total_operations,
+            self.algorithm,
+            self.level,
+            self.total_bytes_processed,
+            self.algorithm,
+            self.level,
+            self.avg_compression_ratio
         )
     }
 
@@ -344,6 +351,7 @@ impl CompressionTimer {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -499,7 +507,10 @@ mod tests {
         metrics.record_decompression(Duration::from_millis(5));
 
         assert!(metrics.decompression_time.is_some());
-        assert_eq!(metrics.decompression_time.unwrap(), Duration::from_millis(5));
+        assert_eq!(
+            metrics.decompression_time.unwrap(),
+            Duration::from_millis(5)
+        );
     }
 
     #[test]
@@ -539,8 +550,8 @@ mod tests {
         for _ in 0..iterations {
             let mut metrics = CompressionMetrics::new();
             metrics.record_compression(
-                &vec![0u8; 100],
-                &vec![0u8; 50],
+                &[0u8; 100],
+                &[0u8; 50],
                 Duration::from_micros(1),
                 CompressionAlgorithm::Zstd,
                 CompressionLevel::Fast,
@@ -553,7 +564,11 @@ mod tests {
         let per_op = elapsed.as_micros() / iterations;
 
         // Should be under 100 microseconds per operation
-        assert!(per_op < 100, "Metrics overhead too high: {}μs per operation", per_op);
+        assert!(
+            per_op < 100,
+            "Metrics overhead too high: {}μs per operation",
+            per_op
+        );
     }
 }
 
@@ -683,7 +698,11 @@ impl MetricsAggregator {
 
     /// Get global statistics
     pub fn global_stats(&self) -> AggregatedStats {
-        self.global.lock().ok().map(|s| s.clone()).unwrap_or_default()
+        self.global
+            .lock()
+            .ok()
+            .map(|s| s.clone())
+            .unwrap_or_default()
     }
 
     /// Get statistics for a specific algorithm
@@ -698,12 +717,20 @@ impl MetricsAggregator {
 
     /// Get all algorithm statistics
     pub fn all_algorithm_stats(&self) -> HashMap<CompressionAlgorithm, AggregatedStats> {
-        self.per_algorithm.lock().ok().map(|s| s.clone()).unwrap_or_default()
+        self.per_algorithm
+            .lock()
+            .ok()
+            .map(|s| s.clone())
+            .unwrap_or_default()
     }
 
     /// Get all level statistics
     pub fn all_level_stats(&self) -> HashMap<CompressionLevel, AggregatedStats> {
-        self.per_level.lock().ok().map(|s| s.clone()).unwrap_or_default()
+        self.per_level
+            .lock()
+            .ok()
+            .map(|s| s.clone())
+            .unwrap_or_default()
     }
 
     /// Reset all statistics
@@ -727,18 +754,29 @@ impl MetricsAggregator {
         let global = self.global_stats();
         output.push_str("# HELP mediagit_compression_global_ratio Global compression ratio\n");
         output.push_str("# TYPE mediagit_compression_global_ratio gauge\n");
-        output.push_str(&format!("mediagit_compression_global_ratio {}\n\n", global.avg_ratio));
+        output.push_str(&format!(
+            "mediagit_compression_global_ratio {}\n\n",
+            global.avg_ratio
+        ));
 
         output.push_str("# HELP mediagit_compression_global_throughput Global throughput (MB/s)\n");
         output.push_str("# TYPE mediagit_compression_global_throughput gauge\n");
-        output.push_str(&format!("mediagit_compression_global_throughput {}\n\n", global.avg_throughput_mbps()));
+        output.push_str(&format!(
+            "mediagit_compression_global_throughput {}\n\n",
+            global.avg_throughput_mbps()
+        ));
 
         output.push_str("# HELP mediagit_compression_global_operations Total operations\n");
         output.push_str("# TYPE mediagit_compression_global_operations counter\n");
-        output.push_str(&format!("mediagit_compression_global_operations {}\n\n", global.operations));
+        output.push_str(&format!(
+            "mediagit_compression_global_operations {}\n\n",
+            global.operations
+        ));
 
         // Per-algorithm metrics
-        output.push_str("# HELP mediagit_compression_algorithm_ratio Compression ratio by algorithm\n");
+        output.push_str(
+            "# HELP mediagit_compression_algorithm_ratio Compression ratio by algorithm\n",
+        );
         output.push_str("# TYPE mediagit_compression_algorithm_ratio gauge\n");
         for (algo, stats) in self.all_algorithm_stats() {
             output.push_str(&format!(
@@ -778,6 +816,7 @@ impl Default for MetricsAggregator {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod aggregator_tests {
     use super::*;
 
@@ -852,11 +891,15 @@ mod aggregator_tests {
         aggregator.record(&metrics_brotli);
 
         // Check per-algorithm stats
-        let zstd_stats = aggregator.algorithm_stats(CompressionAlgorithm::Zstd).unwrap();
+        let zstd_stats = aggregator
+            .algorithm_stats(CompressionAlgorithm::Zstd)
+            .unwrap();
         assert_eq!(zstd_stats.operations, 1);
         assert_eq!(zstd_stats.total_bytes_compressed, 500);
 
-        let brotli_stats = aggregator.algorithm_stats(CompressionAlgorithm::Brotli).unwrap();
+        let brotli_stats = aggregator
+            .algorithm_stats(CompressionAlgorithm::Brotli)
+            .unwrap();
         assert_eq!(brotli_stats.operations, 1);
         assert_eq!(brotli_stats.total_bytes_compressed, 400);
 

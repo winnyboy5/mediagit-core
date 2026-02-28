@@ -1,10 +1,26 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use mediagit_server::{create_router, create_router_with_rate_limit, AppState, RateLimitConfig, ServerConfig};
+use mediagit_server::{
+    create_router, create_router_with_rate_limit, AppState, RateLimitConfig, ServerConfig,
+};
 
 /// MediaGit Server - HTTP(S) server for MediaGit repositories
 #[derive(Parser, Debug)]
@@ -44,7 +60,7 @@ async fn main() -> Result<()> {
 
     // Load configuration from file (use path from --config, default is "mediagit-server.toml")
     let mut config = ServerConfig::load(&args.config)?;
-    
+
     // Override config with CLI arguments if provided
     if let Some(port) = args.port {
         tracing::info!("Overriding port from CLI: {} -> {}", config.port, port);
@@ -55,10 +71,14 @@ async fn main() -> Result<()> {
         config.host = host;
     }
     if let Some(data_dir) = args.data_dir {
-        tracing::info!("Overriding repos_dir from CLI: {:?} -> {:?}", config.repos_dir, data_dir);
+        tracing::info!(
+            "Overriding repos_dir from CLI: {:?} -> {:?}",
+            config.repos_dir,
+            data_dir
+        );
         config.repos_dir = data_dir;
     }
-    
+
     tracing::info!("Server configuration: {:?}", config);
 
     // Create repos directory if it doesn't exist
@@ -67,10 +87,14 @@ async fn main() -> Result<()> {
 
     // Setup shared state with optional authentication
     let state = if config.enable_auth {
-        let jwt_secret = config.jwt_secret.as_deref()
-            .ok_or_else(|| anyhow::anyhow!("JWT secret is required when authentication is enabled"))?;
+        let jwt_secret = config.jwt_secret.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("JWT secret is required when authentication is enabled")
+        })?;
         tracing::info!("Authentication is ENABLED");
-        Arc::new(AppState::new_with_full_auth(config.repos_dir.clone(), jwt_secret))
+        Arc::new(AppState::new_with_full_auth(
+            config.repos_dir.clone(),
+            jwt_secret,
+        ))
     } else {
         tracing::warn!("Authentication is DISABLED - not suitable for production!");
         Arc::new(AppState::new(config.repos_dir.clone()))
@@ -78,8 +102,11 @@ async fn main() -> Result<()> {
 
     // Build router with optional rate limiting
     let (app, _cleanup_task) = if config.enable_rate_limiting {
-        tracing::info!("Rate limiting ENABLED: {} req/s, burst {}",
-                      config.rate_limit_rps, config.rate_limit_burst);
+        tracing::info!(
+            "Rate limiting ENABLED: {} req/s, burst {}",
+            config.rate_limit_rps,
+            config.rate_limit_burst
+        );
         let rate_config = RateLimitConfig {
             requests_per_second: config.rate_limit_rps,
             burst_size: config.rate_limit_burst,
@@ -116,8 +143,11 @@ async fn main() -> Result<()> {
         let https_app = create_router(Arc::clone(&state));
 
         // Run both servers concurrently
-        tracing::info!("MediaGit server listening on HTTP: {} and HTTPS: {}",
-                      http_bind_addr, https_bind_addr);
+        tracing::info!(
+            "MediaGit server listening on HTTP: {} and HTTPS: {}",
+            http_bind_addr,
+            https_bind_addr
+        );
         tracing::info!("Press Ctrl+C to stop");
 
         // Spawn HTTP server task
@@ -128,7 +158,8 @@ async fn main() -> Result<()> {
 
         // Spawn HTTPS server task
         let https_server = tokio::spawn(async move {
-            let addr = https_bind_addr.parse()
+            let addr: std::net::SocketAddr = https_bind_addr
+                .parse()
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
             axum_server::bind_rustls(addr, rustls_config)
                 .serve(https_app.into_make_service())
@@ -162,42 +193,19 @@ fn build_axum_rustls_config(
     certificate: &mediagit_security::Certificate,
 ) -> Result<axum_server::tls_rustls::RustlsConfig> {
     use axum_server::tls_rustls::RustlsConfig;
-
-    // axum-server 0.7 requires rustls 0.23
-    // Build rustls ServerConfig first
+    use rustls::pki_types::pem::PemObject;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
     // Parse certificate PEM
     let cert_pem = certificate.cert_pem.as_bytes();
-    let certs: Vec<CertificateDer> = rustls_pemfile::certs(&mut &cert_pem[..])
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| anyhow::anyhow!("Failed to parse certificate: {}", e))?;
 
-    // Parse private key PEM
+    // Parse private key PEM (handles PKCS#8, RSA PKCS#1, and EC SEC1 automatically)
     let key_pem = certificate.key_pem.as_bytes();
-    let mut key_reader = &key_pem[..];
-
-    // Try to read as PKCS#8 first, then RSA
-    let private_key = if let Ok(key) = rustls_pemfile::pkcs8_private_keys(&mut key_reader)
-        .collect::<Result<Vec<_>, _>>()
-    {
-        if let Some(key) = key.into_iter().next() {
-            PrivateKeyDer::Pkcs8(key)
-        } else {
-            // Reset reader and try RSA
-            key_reader = &key_pem[..];
-            let rsa_keys = rustls_pemfile::rsa_private_keys(&mut key_reader)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| anyhow::anyhow!("Failed to parse private key: {}", e))?;
-
-            PrivateKeyDer::Pkcs1(
-                rsa_keys.into_iter().next()
-                    .ok_or_else(|| anyhow::anyhow!("No private key found in PEM"))?
-            )
-        }
-    } else {
-        anyhow::bail!("Failed to parse private key");
-    };
+    let private_key: PrivateKeyDer<'static> = PrivateKeyDer::from_pem_slice(key_pem)
+        .map_err(|e| anyhow::anyhow!("Failed to parse private key: {}", e))?;
 
     // Build rustls ServerConfig
     let rustls_config = rustls::ServerConfig::builder()

@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 MediaGit Contributors
 
@@ -13,8 +27,8 @@ use predicates::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
-use std::time::{Duration, Instant};
 use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 #[cfg(windows)]
@@ -36,13 +50,29 @@ fn mediagit_server() -> Command {
 }
 
 fn init_repo(dir: &Path) {
-    mediagit().arg("init").arg("-q").current_dir(dir).assert().success();
+    mediagit()
+        .arg("init")
+        .arg("-q")
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 fn add_and_commit(dir: &Path, name: &str, content: &str, message: &str) {
     fs::write(dir.join(name), content).unwrap();
-    mediagit().arg("add").arg(name).current_dir(dir).assert().success();
-    mediagit().arg("commit").arg("-m").arg(message).current_dir(dir).assert().success();
+    mediagit()
+        .arg("add")
+        .arg(name)
+        .current_dir(dir)
+        .assert()
+        .success();
+    mediagit()
+        .arg("commit")
+        .arg("-m")
+        .arg(message)
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 fn copy_test_file(test_file: &str, repo_dir: &Path, dest_name: &str) -> PathBuf {
@@ -75,7 +105,15 @@ repos_dir = "{}"
     fs::write(&config_path, config_content).ok()?;
 
     let child = std::process::Command::new("cargo")
-        .args(["run", "--release", "--bin", "mediagit-server", "--", "-c", &config_path.to_string_lossy()])
+        .args([
+            "run",
+            "--release",
+            "--bin",
+            "mediagit-server",
+            "--",
+            "-c",
+            &config_path.to_string_lossy(),
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -102,7 +140,7 @@ fn test_remote_add_origin() {
         .arg("remote")
         .arg("add")
         .arg("origin")
-        .arg(&server_url("test-repo"))
+        .arg(server_url("test-repo"))
         .current_dir(temp_dir.path())
         .assert()
         .success();
@@ -116,7 +154,7 @@ fn test_remote_add_origin() {
         .assert()
         .success()
         .stdout(predicate::str::contains("origin"))
-        .stdout(predicate::str::contains(&server_url("test-repo")));
+        .stdout(predicate::str::contains(server_url("test-repo")));
 }
 
 // ============================================================================
@@ -159,7 +197,7 @@ fn test_push_dry_run() {
         .arg("remote")
         .arg("add")
         .arg("origin")
-        .arg(&server_url("test-repo"))
+        .arg(server_url("test-repo"))
         .current_dir(temp_dir.path())
         .assert()
         .success();
@@ -278,7 +316,12 @@ fn test_push_to_server() {
 
     // Initialize client repo
     init_repo(temp_dir.path());
-    add_and_commit(temp_dir.path(), "file.txt", "Test content", "Initial commit");
+    add_and_commit(
+        temp_dir.path(),
+        "file.txt",
+        "Test content",
+        "Initial commit",
+    );
 
     // Add remote (using file:// protocol for testing without server)
     let remote_url = format!("file://{}", bare_repo.to_string_lossy().replace("\\", "/"));
@@ -312,11 +355,19 @@ fn test_clone_from_server() {
     let source_repo = server_repos.path().join("source-repo");
     fs::create_dir_all(&source_repo).unwrap();
     init_repo(&source_repo);
-    add_and_commit(&source_repo, "README.md", "# Test Repository\n", "Initial commit");
+    add_and_commit(
+        &source_repo,
+        "README.md",
+        "# Test Repository\n",
+        "Initial commit",
+    );
     add_and_commit(&source_repo, "code.txt", "Some code content", "Add code");
 
     // Clone
-    let remote_url = format!("file://{}", source_repo.to_string_lossy().replace("\\", "/"));
+    let remote_url = format!(
+        "file://{}",
+        source_repo.to_string_lossy().replace("\\", "/")
+    );
     mediagit()
         .arg("clone")
         .arg(&remote_url)
@@ -340,23 +391,51 @@ fn test_push_with_media_files() {
     // Initialize bare repo
     let bare_repo = server_repos.path().join("media-repo.git");
     fs::create_dir_all(&bare_repo).unwrap();
-    mediagit().arg("init").arg("--bare").current_dir(&bare_repo).assert().success();
+    mediagit()
+        .arg("init")
+        .arg("--bare")
+        .current_dir(&bare_repo)
+        .assert()
+        .success();
 
     // Initialize client repo with media files
     init_repo(temp_dir.path());
-    
+
     // Copy a test image
     let dest = copy_test_file("freepik__talk__71826.jpeg", temp_dir.path(), "image.jpg");
     if dest.exists() {
-        mediagit().arg("add").arg("image.jpg").current_dir(temp_dir.path()).assert().success();
-        mediagit().arg("commit").arg("-m").arg("Add image").current_dir(temp_dir.path()).assert().success();
+        mediagit()
+            .arg("add")
+            .arg("image.jpg")
+            .current_dir(temp_dir.path())
+            .assert()
+            .success();
+        mediagit()
+            .arg("commit")
+            .arg("-m")
+            .arg("Add image")
+            .current_dir(temp_dir.path())
+            .assert()
+            .success();
     }
 
-    add_and_commit(temp_dir.path(), "README.md", "# Media Project\n", "Add readme");
+    add_and_commit(
+        temp_dir.path(),
+        "README.md",
+        "# Media Project\n",
+        "Add readme",
+    );
 
     // Add remote and push
     let remote_url = format!("file://{}", bare_repo.to_string_lossy().replace("\\", "/"));
-    mediagit().arg("remote").arg("add").arg("origin").arg(&remote_url).current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("remote")
+        .arg("add")
+        .arg("origin")
+        .arg(&remote_url)
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     let start = Instant::now();
     mediagit()
@@ -380,15 +459,39 @@ fn test_fetch_updates() {
     // Create shared bare repo
     let bare_repo = server_repos.path().join("shared-repo.git");
     fs::create_dir_all(&bare_repo).unwrap();
-    mediagit().arg("init").arg("--bare").current_dir(&bare_repo).assert().success();
+    mediagit()
+        .arg("init")
+        .arg("--bare")
+        .current_dir(&bare_repo)
+        .assert()
+        .success();
 
     let remote_url = format!("file://{}", bare_repo.to_string_lossy().replace("\\", "/"));
 
     // Client 1: Initialize and push
     init_repo(client1_dir.path());
-    add_and_commit(client1_dir.path(), "file1.txt", "Content 1", "Client 1 commit");
-    mediagit().arg("remote").arg("add").arg("origin").arg(&remote_url).current_dir(client1_dir.path()).assert().success();
-    mediagit().arg("push").arg("-u").arg("origin").arg("main").current_dir(client1_dir.path()).assert().success();
+    add_and_commit(
+        client1_dir.path(),
+        "file1.txt",
+        "Content 1",
+        "Client 1 commit",
+    );
+    mediagit()
+        .arg("remote")
+        .arg("add")
+        .arg("origin")
+        .arg(&remote_url)
+        .current_dir(client1_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("push")
+        .arg("-u")
+        .arg("origin")
+        .arg("main")
+        .current_dir(client1_dir.path())
+        .assert()
+        .success();
 
     // Client 2: Clone
     mediagit()
@@ -400,8 +503,17 @@ fn test_fetch_updates() {
         .success();
 
     // Client 1: Make more commits
-    add_and_commit(client1_dir.path(), "file2.txt", "Content 2", "Client 1 second commit");
-    mediagit().arg("push").current_dir(client1_dir.path()).assert().success();
+    add_and_commit(
+        client1_dir.path(),
+        "file2.txt",
+        "Content 2",
+        "Client 1 second commit",
+    );
+    mediagit()
+        .arg("push")
+        .current_dir(client1_dir.path())
+        .assert()
+        .success();
 
     // Client 2: Fetch updates
     let client2_repo = client2_dir.path().join("repo");
@@ -422,15 +534,39 @@ fn test_pull_updates() {
     // Create shared bare repo
     let bare_repo = server_repos.path().join("pull-test-repo.git");
     fs::create_dir_all(&bare_repo).unwrap();
-    mediagit().arg("init").arg("--bare").current_dir(&bare_repo).assert().success();
+    mediagit()
+        .arg("init")
+        .arg("--bare")
+        .current_dir(&bare_repo)
+        .assert()
+        .success();
 
     let remote_url = format!("file://{}", bare_repo.to_string_lossy().replace("\\", "/"));
 
     // Client 1: Initialize and push
     init_repo(client1_dir.path());
-    add_and_commit(client1_dir.path(), "initial.txt", "Initial content", "Initial commit");
-    mediagit().arg("remote").arg("add").arg("origin").arg(&remote_url).current_dir(client1_dir.path()).assert().success();
-    mediagit().arg("push").arg("-u").arg("origin").arg("main").current_dir(client1_dir.path()).assert().success();
+    add_and_commit(
+        client1_dir.path(),
+        "initial.txt",
+        "Initial content",
+        "Initial commit",
+    );
+    mediagit()
+        .arg("remote")
+        .arg("add")
+        .arg("origin")
+        .arg(&remote_url)
+        .current_dir(client1_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("push")
+        .arg("-u")
+        .arg("origin")
+        .arg("main")
+        .current_dir(client1_dir.path())
+        .assert()
+        .success();
 
     // Client 2: Clone
     mediagit()
@@ -442,8 +578,17 @@ fn test_pull_updates() {
         .success();
 
     // Client 1: Add more content
-    add_and_commit(client1_dir.path(), "update.txt", "Updated content", "Update commit");
-    mediagit().arg("push").current_dir(client1_dir.path()).assert().success();
+    add_and_commit(
+        client1_dir.path(),
+        "update.txt",
+        "Updated content",
+        "Update commit",
+    );
+    mediagit()
+        .arg("push")
+        .current_dir(client1_dir.path())
+        .assert()
+        .success();
 
     // Client 2: Pull updates
     let client2_repo = client2_dir.path().join("repo");
@@ -469,25 +614,55 @@ fn test_push_large_file() {
 
     let bare_repo = server_repos.path().join("large-file-repo.git");
     fs::create_dir_all(&bare_repo).unwrap();
-    mediagit().arg("init").arg("--bare").current_dir(&bare_repo).assert().success();
+    mediagit()
+        .arg("init")
+        .arg("--bare")
+        .current_dir(&bare_repo)
+        .assert()
+        .success();
 
     init_repo(temp_dir.path());
 
     // Copy a larger test file
-    let dest = copy_test_file("1965_ac_shelby_427_cobra_sc.glb", temp_dir.path(), "model.glb");
+    let dest = copy_test_file(
+        "1965_ac_shelby_427_cobra_sc.glb",
+        temp_dir.path(),
+        "model.glb",
+    );
     if !dest.exists() {
         println!("SKIP: Large test file not found");
         return;
     }
 
     let file_size = fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
-    println!("Testing push with {:.2} MB file", file_size as f64 / 1024.0 / 1024.0);
+    println!(
+        "Testing push with {:.2} MB file",
+        file_size as f64 / 1024.0 / 1024.0
+    );
 
-    mediagit().arg("add").arg("model.glb").current_dir(temp_dir.path()).assert().success();
-    mediagit().arg("commit").arg("-m").arg("Add large model").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("add")
+        .arg("model.glb")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("commit")
+        .arg("-m")
+        .arg("Add large model")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     let remote_url = format!("file://{}", bare_repo.to_string_lossy().replace("\\", "/"));
-    mediagit().arg("remote").arg("add").arg("origin").arg(&remote_url).current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("remote")
+        .arg("add")
+        .arg("origin")
+        .arg(&remote_url)
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     let start = Instant::now();
     mediagit()
@@ -501,7 +676,10 @@ fn test_push_large_file() {
 
     let duration = start.elapsed();
     let throughput = (file_size as f64 / 1024.0 / 1024.0) / duration.as_secs_f64();
-    println!("Push duration: {:?}, Throughput: {:.2} MB/s", duration, throughput);
+    println!(
+        "Push duration: {:?}, Throughput: {:.2} MB/s",
+        duration, throughput
+    );
 }
 
 // ============================================================================
@@ -516,23 +694,75 @@ fn test_push_multiple_branches() {
 
     let bare_repo = server_repos.path().join("multi-branch-repo.git");
     fs::create_dir_all(&bare_repo).unwrap();
-    mediagit().arg("init").arg("--bare").current_dir(&bare_repo).assert().success();
+    mediagit()
+        .arg("init")
+        .arg("--bare")
+        .current_dir(&bare_repo)
+        .assert()
+        .success();
 
     init_repo(temp_dir.path());
     add_and_commit(temp_dir.path(), "main.txt", "Main content", "Main commit");
 
     // Create feature branches
-    mediagit().arg("branch").arg("create").arg("feature-1").current_dir(temp_dir.path()).assert().success();
-    mediagit().arg("branch").arg("switch").arg("feature-1").current_dir(temp_dir.path()).assert().success();
-    add_and_commit(temp_dir.path(), "feature1.txt", "Feature 1", "Feature 1 commit");
+    mediagit()
+        .arg("branch")
+        .arg("create")
+        .arg("feature-1")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("feature-1")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    add_and_commit(
+        temp_dir.path(),
+        "feature1.txt",
+        "Feature 1",
+        "Feature 1 commit",
+    );
 
-    mediagit().arg("branch").arg("switch").arg("refs/heads/main").current_dir(temp_dir.path()).assert().success();
-    mediagit().arg("branch").arg("create").arg("feature-2").current_dir(temp_dir.path()).assert().success();
-    mediagit().arg("branch").arg("switch").arg("feature-2").current_dir(temp_dir.path()).assert().success();
-    add_and_commit(temp_dir.path(), "feature2.txt", "Feature 2", "Feature 2 commit");
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("refs/heads/main")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("branch")
+        .arg("create")
+        .arg("feature-2")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("feature-2")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    add_and_commit(
+        temp_dir.path(),
+        "feature2.txt",
+        "Feature 2",
+        "Feature 2 commit",
+    );
 
     let remote_url = format!("file://{}", bare_repo.to_string_lossy().replace("\\", "/"));
-    mediagit().arg("remote").arg("add").arg("origin").arg(&remote_url).current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("remote")
+        .arg("add")
+        .arg("origin")
+        .arg(&remote_url)
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     // Push all branches
     mediagit()

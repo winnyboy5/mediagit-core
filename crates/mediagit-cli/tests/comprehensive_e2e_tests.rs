@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 MediaGit Contributors
 
@@ -25,11 +39,7 @@ fn mediagit() -> Command {
 
 /// Helper to initialize repository
 fn init_repo(dir: &Path) {
-    mediagit()
-        .current_dir(dir)
-        .arg("init")
-        .assert()
-        .success();
+    mediagit().current_dir(dir).arg("init").assert().success();
 }
 
 /// Copy test file to repository
@@ -62,6 +72,15 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Ensure test file exists at dest — if copy_test_file couldn't copy (because the
+/// local test-files directory is absent on CI), write synthetic fallback bytes.
+/// Accepts a small byte slice that mimics the file format so the CLI can process it.
+fn ensure_test_file(dest: &Path, fallback_bytes: &[u8]) {
+    if !dest.exists() {
+        fs::write(dest, fallback_bytes).expect("Failed to write synthetic test file");
+    }
 }
 
 // ============================================================================
@@ -121,8 +140,10 @@ fn e2e_basic_workflow_image_file() {
 
     init_repo(repo_path);
 
-    // Copy image file
-    copy_test_file("freepik__talk__71826.jpeg", repo_path, "image.jpg");
+    // Copy image file (falls back to a minimal JPEG on CI)
+    let dest = copy_test_file("freepik__talk__71826.jpeg", repo_path, "image.jpg");
+    // Minimal JPEG header so the CLI treats it as a valid (tiny) JPEG
+    ensure_test_file(&dest, &[0xFF, 0xD8, 0xFF, 0xD9]);
 
     // Add and commit
     mediagit()
@@ -162,7 +183,11 @@ fn e2e_large_file_video_264mb() {
     init_repo(repo_path);
 
     // Copy 264MB video file
-    copy_test_file("bbb_sunflower_1080p_30fps_normal.mp4", repo_path, "video.mp4");
+    copy_test_file(
+        "bbb_sunflower_1080p_30fps_normal.mp4",
+        repo_path,
+        "video.mp4",
+    );
 
     // Add large file
     mediagit()
@@ -226,7 +251,11 @@ fn e2e_very_large_file_2gb() {
     init_repo(repo_path);
 
     // Copy 2GB file
-    copy_test_file("bbb_sunflower_1080p_30fps_stereo_abl.mp4", repo_path, "huge_video.mp4");
+    copy_test_file(
+        "bbb_sunflower_1080p_30fps_stereo_abl.mp4",
+        repo_path,
+        "huge_video.mp4",
+    );
 
     mediagit()
         .current_dir(repo_path)
@@ -255,8 +284,13 @@ fn e2e_media_3d_model_glb() {
 
     init_repo(repo_path);
 
-    // 14MB 3D model
-    copy_test_file("1965_ac_shelby_427_cobra_sc.glb", repo_path, "car.glb");
+    // 14MB 3D model (falls back to minimal GLB header on CI)
+    let dest = copy_test_file("1965_ac_shelby_427_cobra_sc.glb", repo_path, "car.glb");
+    // Minimal GLB magic bytes
+    ensure_test_file(
+        &dest,
+        b"glTF\x02\x00\x00\x00\x0C\x00\x00\x00\x00\x00\x00\x00",
+    );
 
     mediagit()
         .current_dir(repo_path)
@@ -281,8 +315,14 @@ fn e2e_media_audio_flac() {
 
     init_repo(repo_path);
 
-    // 38MB FLAC audio
-    copy_test_file("_Amir_Tangsiri__Dokhtare_Koli.flac", repo_path, "audio.flac");
+    // 38MB FLAC audio (falls back to minimal FLAC header on CI)
+    let dest = copy_test_file(
+        "_Amir_Tangsiri__Dokhtare_Koli.flac",
+        repo_path,
+        "audio.flac",
+    );
+    // FLAC stream marker
+    ensure_test_file(&dest, b"fLaC\x00\x00\x00\x22");
 
     mediagit()
         .current_dir(repo_path)
@@ -307,8 +347,19 @@ fn e2e_media_audio_wav() {
 
     init_repo(repo_path);
 
-    // 55MB WAV audio
-    copy_test_file("_Quando_le_sere_al_placido__(Ferruccio_Giannini).wav", repo_path, "audio.wav");
+    // 55MB WAV audio (falls back to minimal RIFF/WAV header on CI)
+    let dest = copy_test_file(
+        "_Quando_le_sere_al_placido__(Ferruccio_Giannini).wav",
+        repo_path,
+        "audio.wav",
+    );
+    // Minimal RIFF WAV header (44 bytes)
+    ensure_test_file(
+        &dest,
+        b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\
+          \x01\x00\x44\xAC\x00\x00\x88\x58\x01\x00\x02\x00\x10\x00\
+          data\x00\x00\x00\x00",
+    );
 
     mediagit()
         .current_dir(repo_path)
@@ -333,10 +384,21 @@ fn e2e_media_mixed_formats() {
 
     init_repo(repo_path);
 
-    // Copy multiple different media files
-    copy_test_file("freepik__talk__71826.jpeg", repo_path, "image1.jpg");
-    copy_test_file("freepik__talk__72772.jpeg", repo_path, "image2.jpg");
-    copy_test_file("1965_ac_shelby_427_cobra_sc.glb", repo_path, "model.glb");
+    // Copy multiple different media files (fallback to minimal bytes on CI)
+    let dest1 = copy_test_file("freepik__talk__71826.jpeg", repo_path, "image1.jpg");
+    ensure_test_file(&dest1, &[0xFF, 0xD8, 0xFF, 0xD9]);
+    let dest2 = copy_test_file("freepik__talk__72772.jpeg", repo_path, "image2.jpg");
+    ensure_test_file(
+        &dest2,
+        &[
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00,
+        ],
+    );
+    let dest3 = copy_test_file("1965_ac_shelby_427_cobra_sc.glb", repo_path, "model.glb");
+    ensure_test_file(
+        &dest3,
+        b"glTF\x02\x00\x00\x00\x0C\x00\x00\x00\x00\x00\x00\x00",
+    );
 
     // Create text file
     fs::write(repo_path.join("notes.txt"), "Project notes\n").unwrap();
@@ -382,26 +444,26 @@ fn e2e_branch_create_and_switch() {
     fs::write(repo_path.join("file.txt"), "main branch\n").unwrap();
     mediagit()
         .current_dir(repo_path)
-        .args(&["add", "file.txt"])
+        .args(["add", "file.txt"])
         .assert()
         .success();
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Initial"])
+        .args(["commit", "-m", "Initial"])
         .assert()
         .success();
 
     // Create branch
     mediagit()
         .current_dir(repo_path)
-        .args(&["branch", "create", "feature"])
+        .args(["branch", "create", "feature"])
         .assert()
         .success();
 
     // List branches
     mediagit()
         .current_dir(repo_path)
-        .args(&["branch", "list"])
+        .args(["branch", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("feature"));
@@ -409,14 +471,14 @@ fn e2e_branch_create_and_switch() {
     // Switch to branch
     mediagit()
         .current_dir(repo_path)
-        .args(&["branch", "switch", "feature"])
+        .args(["branch", "switch", "feature"])
         .assert()
         .success();
 
     // Verify we're on feature branch
     mediagit()
         .current_dir(repo_path)
-        .args(&["branch", "list"])
+        .args(["branch", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("* feature"));
@@ -429,41 +491,48 @@ fn e2e_branch_with_media_files() {
 
     init_repo(repo_path);
 
-    // Main branch: add image
-    copy_test_file("freepik__talk__71826.jpeg", repo_path, "main_image.jpg");
+    // Main branch: add image (fallback to minimal JPEG on CI)
+    let dest = copy_test_file("freepik__talk__71826.jpeg", repo_path, "main_image.jpg");
+    ensure_test_file(&dest, &[0xFF, 0xD8, 0xFF, 0xD9]);
     mediagit()
         .current_dir(repo_path)
-        .args(&["add", "main_image.jpg"])
+        .args(["add", "main_image.jpg"])
         .assert()
         .success();
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Add main image"])
+        .args(["commit", "-m", "Add main image"])
         .assert()
         .success();
 
     // Create and switch to feature branch
     mediagit()
         .current_dir(repo_path)
-        .args(&["branch", "create", "feature"])
+        .args(["branch", "create", "feature"])
         .assert()
         .success();
     mediagit()
         .current_dir(repo_path)
-        .args(&["branch", "switch", "feature"])
+        .args(["branch", "switch", "feature"])
         .assert()
         .success();
 
-    // Add different media on feature branch
-    copy_test_file("freepik__talk__72772.jpeg", repo_path, "feature_image.jpg");
+    // Add different media on feature branch (fallback to minimal JPEG on CI)
+    let dest2 = copy_test_file("freepik__talk__72772.jpeg", repo_path, "feature_image.jpg");
+    ensure_test_file(
+        &dest2,
+        &[
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00,
+        ],
+    );
     mediagit()
         .current_dir(repo_path)
-        .args(&["add", "feature_image.jpg"])
+        .args(["add", "feature_image.jpg"])
         .assert()
         .success();
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Add feature image"])
+        .args(["commit", "-m", "Add feature image"])
         .assert()
         .success();
 
@@ -474,7 +543,7 @@ fn e2e_branch_with_media_files() {
     // Switch back to main
     mediagit()
         .current_dir(repo_path)
-        .args(&["branch", "switch", "refs/heads/main"])
+        .args(["branch", "switch", "refs/heads/main"])
         .assert()
         .success();
 
@@ -496,7 +565,11 @@ fn e2e_multiple_files_batch_add() {
 
     // Create multiple files
     for i in 1..=10 {
-        fs::write(repo_path.join(format!("file{}.txt", i)), format!("Content {}\n", i)).unwrap();
+        fs::write(
+            repo_path.join(format!("file{}.txt", i)),
+            format!("Content {}\n", i),
+        )
+        .unwrap();
     }
 
     // Add all files
@@ -510,7 +583,7 @@ fn e2e_multiple_files_batch_add() {
     // Commit
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Add 10 files"])
+        .args(["commit", "-m", "Add 10 files"])
         .assert()
         .success();
 
@@ -536,12 +609,21 @@ fn e2e_directory_structure() {
     fs::create_dir_all(repo_path.join("docs")).unwrap();
 
     // Add files
-    fs::write(repo_path.join("src/components/App.js"), "// App component\n").unwrap();
+    fs::write(
+        repo_path.join("src/components/App.js"),
+        "// App component\n",
+    )
+    .unwrap();
     fs::write(repo_path.join("src/utils/helper.js"), "// Helper utils\n").unwrap();
     fs::write(repo_path.join("docs/README.md"), "# Documentation\n").unwrap();
 
-    // Copy media into structure
-    copy_test_file("freepik__talk__71826.jpeg", repo_path, "docs/screenshot.jpg");
+    // Copy media into structure (fallback to minimal JPEG on CI)
+    let dest = copy_test_file(
+        "freepik__talk__71826.jpeg",
+        repo_path,
+        "docs/screenshot.jpg",
+    );
+    ensure_test_file(&dest, &[0xFF, 0xD8, 0xFF, 0xD9]);
 
     // Add all
     mediagit()
@@ -554,7 +636,7 @@ fn e2e_directory_structure() {
     // Commit
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Add project structure"])
+        .args(["commit", "-m", "Add project structure"])
         .assert()
         .success();
 }
@@ -574,12 +656,12 @@ fn e2e_file_modification() {
     fs::write(repo_path.join("file.txt"), "Version 1\n").unwrap();
     mediagit()
         .current_dir(repo_path)
-        .args(&["add", "file.txt"])
+        .args(["add", "file.txt"])
         .assert()
         .success();
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Version 1"])
+        .args(["commit", "-m", "Version 1"])
         .assert()
         .success();
 
@@ -597,12 +679,12 @@ fn e2e_file_modification() {
     // Add and commit modification
     mediagit()
         .current_dir(repo_path)
-        .args(&["add", "file.txt"])
+        .args(["add", "file.txt"])
         .assert()
         .success();
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Version 2"])
+        .args(["commit", "-m", "Version 2"])
         .assert()
         .success();
 }
@@ -614,21 +696,31 @@ fn e2e_media_file_replacement() {
 
     init_repo(repo_path);
 
-    // Add first image
-    copy_test_file("freepik__talk__71826.jpeg", repo_path, "image.jpg");
+    // Add first image (fallback to minimal JPEG on CI)
+    let dest = copy_test_file("freepik__talk__71826.jpeg", repo_path, "image.jpg");
+    ensure_test_file(&dest, &[0xFF, 0xD8, 0xFF, 0xD9]);
     mediagit()
         .current_dir(repo_path)
-        .args(&["add", "image.jpg"])
+        .args(["add", "image.jpg"])
         .assert()
         .success();
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Add image v1"])
+        .args(["commit", "-m", "Add image v1"])
         .assert()
         .success();
 
-    // Replace with different image
-    copy_test_file("freepik__talk__72772.jpeg", repo_path, "image.jpg");
+    // Replace with different image (different fallback bytes to ensure content differs)
+    // Use fs::write unconditionally so the file is always overwritten (ensure_test_file skips
+    // existing files, which would leave image.jpg unchanged and break the status check below).
+    let dest2 = copy_test_file("freepik__talk__72772.jpeg", repo_path, "image.jpg");
+    fs::write(
+        &dest2,
+        [
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00,
+        ],
+    )
+    .expect("Failed to write replacement test file");
 
     // Check status
     mediagit()
@@ -641,12 +733,12 @@ fn e2e_media_file_replacement() {
     // Commit replacement
     mediagit()
         .current_dir(repo_path)
-        .args(&["add", "image.jpg"])
+        .args(["add", "image.jpg"])
         .assert()
         .success();
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Replace image"])
+        .args(["commit", "-m", "Replace image"])
         .assert()
         .success();
 }
@@ -666,12 +758,12 @@ fn e2e_stats_command() {
     fs::write(repo_path.join("file.txt"), "Test content\n").unwrap();
     mediagit()
         .current_dir(repo_path)
-        .args(&["add", "file.txt"])
+        .args(["add", "file.txt"])
         .assert()
         .success();
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Test commit"])
+        .args(["commit", "-m", "Test commit"])
         .assert()
         .success();
 
@@ -686,13 +778,13 @@ fn e2e_stats_command() {
     // Run stats with different flags
     mediagit()
         .current_dir(repo_path)
-        .args(&["stats", "--storage"])
+        .args(["stats", "--storage"])
         .assert()
         .success();
 
     mediagit()
         .current_dir(repo_path)
-        .args(&["stats", "--branches"])
+        .args(["stats", "--branches"])
         .assert()
         .success();
 }
@@ -710,7 +802,7 @@ fn e2e_add_nonexistent_file() {
 
     mediagit()
         .current_dir(repo_path)
-        .args(&["add", "nonexistent.txt"])
+        .args(["add", "nonexistent.txt"])
         .assert()
         .failure();
 }
@@ -724,7 +816,7 @@ fn e2e_commit_without_add() {
 
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Empty commit"])
+        .args(["commit", "-m", "Empty commit"])
         .assert()
         .failure();
 }
@@ -739,7 +831,7 @@ fn e2e_branch_nonexistent() {
     // Try to switch to nonexistent branch
     mediagit()
         .current_dir(repo_path)
-        .args(&["branch", "switch", "nonexistent"])
+        .args(["branch", "switch", "nonexistent"])
         .assert()
         .failure();
 }
@@ -755,12 +847,14 @@ fn e2e_verify_progress_quiet_mode() {
 
     init_repo(repo_path);
 
-    copy_test_file("freepik__talk__71826.jpeg", repo_path, "image.jpg");
+    // Copy image (fallback to minimal JPEG on CI)
+    let dest = copy_test_file("freepik__talk__71826.jpeg", repo_path, "image.jpg");
+    ensure_test_file(&dest, &[0xFF, 0xD8, 0xFF, 0xD9]);
 
     // Add with quiet mode - should not show progress
     mediagit()
         .current_dir(repo_path)
-        .args(&["add", "--quiet", "image.jpg"])
+        .args(["add", "--quiet", "image.jpg"])
         .assert()
         .success()
         .stdout(predicate::str::is_empty());
@@ -773,17 +867,19 @@ fn e2e_verify_stats_displayed() {
 
     init_repo(repo_path);
 
-    copy_test_file("freepik__talk__71826.jpeg", repo_path, "image.jpg");
+    // Copy image (fallback to minimal JPEG on CI)
+    let dest = copy_test_file("freepik__talk__71826.jpeg", repo_path, "image.jpg");
+    ensure_test_file(&dest, &[0xFF, 0xD8, 0xFF, 0xD9]);
 
     mediagit()
         .current_dir(repo_path)
-        .args(&["add", "image.jpg"])
+        .args(["add", "image.jpg"])
         .assert()
         .success();
 
     mediagit()
         .current_dir(repo_path)
-        .args(&["commit", "-m", "Add image"])
+        .args(["commit", "-m", "Add image"])
         .assert()
         .success();
 }

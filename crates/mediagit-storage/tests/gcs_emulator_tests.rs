@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! Integration tests for GCS backend using fake-gcs-server emulator
 //!
 //! # ⚠️ EMULATOR TESTS CURRENTLY DISABLED
@@ -68,8 +82,8 @@ mod gcs_emulator_tests {
             "token_uri": "https://oauth2.googleapis.com/token"
         }"#;
 
-        let mut file = fs::File::create(&creds_path)
-            .expect("Failed to create temporary credentials file");
+        let mut file =
+            fs::File::create(&creds_path).expect("Failed to create temporary credentials file");
         file.write_all(creds_content.as_bytes())
             .expect("Failed to write credentials");
 
@@ -456,8 +470,7 @@ mod gcs_emulator_tests {
 
         let temp_creds = create_temp_credentials();
 
-        let config = GcsConfig::new("test-project", "test-bucket")
-            .with_max_retries(5); // Increase retries for testing
+        let config = GcsConfig::new("test-project", "test-bucket").with_max_retries(5); // Increase retries for testing
 
         let backend = GcsBackend::with_config(config, &temp_creds)
             .await

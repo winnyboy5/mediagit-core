@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // Copyright (C) 2025 MediaGit Contributors
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -8,7 +22,9 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use mediagit_storage::LocalBackend;
-use mediagit_versioning::{BranchManager, Commit, ObjectDatabase, ObjectType, Oid, Signature, Tree};
+use mediagit_versioning::{
+    BranchManager, Commit, ObjectDatabase, ObjectType, Oid, Signature, Tree,
+};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -16,7 +32,11 @@ use tempfile::TempDir;
 /// Setup branch manager with temporary storage (async version)
 async fn setup_branch_manager_async() -> (BranchManager, ObjectDatabase, TempDir) {
     let temp_dir = TempDir::new().unwrap();
-    let storage = Arc::new(LocalBackend::new(temp_dir.path().to_str().unwrap()).await.unwrap());
+    let storage = Arc::new(
+        LocalBackend::new(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap(),
+    );
     let branch_mgr = BranchManager::new(temp_dir.path());
     let odb = ObjectDatabase::new(storage, 1000);
     (branch_mgr, odb, temp_dir)
@@ -43,14 +63,16 @@ async fn create_test_commit(
         message: message.to_string(),
     };
 
-    let commit_data = bincode::serialize(&commit).unwrap();
+    let commit_data = mediagit_versioning::format::serialize(&commit).unwrap();
     odb.write(ObjectType::Commit, &commit_data).await.unwrap()
 }
 
 /// Create a test tree
 async fn create_test_tree(odb: &ObjectDatabase) -> Oid {
-    let tree = Tree { entries: BTreeMap::new() };
-    let tree_data = bincode::serialize(&tree).unwrap();
+    let tree = Tree {
+        entries: BTreeMap::new(),
+    };
+    let tree_data = mediagit_versioning::format::serialize(&tree).unwrap();
     odb.write(ObjectType::Tree, &tree_data).await.unwrap()
 }
 
@@ -69,12 +91,8 @@ fn bench_branch_create(c: &mut Criterion) {
             },
             |(branch_mgr, commit_oid)| async move {
                 let branch_name = format!("feature/{}", uuid::Uuid::new_v4());
-                black_box(
-                    branch_mgr
-                        .create(&branch_name, commit_oid)
-                        .await
-                        .unwrap(),
-                )
+                let _: () = branch_mgr.create(&branch_name, commit_oid).await.unwrap();
+                black_box(())
             },
         );
     });
@@ -109,10 +127,12 @@ fn bench_branch_switch(c: &mut Criterion) {
             let counter = counter.clone();
             async move {
                 let idx = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if idx % 2 == 0 {
-                    black_box(branch_mgr.switch_to("feature").await.unwrap());
+                if idx.is_multiple_of(2) {
+                    let _: () = branch_mgr.switch_to("feature").await.unwrap();
+                    black_box(());
                 } else {
-                    black_box(branch_mgr.switch_to("main").await.unwrap());
+                    let _: () = branch_mgr.switch_to("main").await.unwrap();
+                    black_box(());
                 }
             }
         });
@@ -124,28 +144,23 @@ fn bench_branch_list(c: &mut Criterion) {
     let mut group = c.benchmark_group("branch_list");
 
     for count in [10, 50, 100].iter() {
-        group.bench_with_input(
-            BenchmarkId::new("list", count),
-            count,
-            |b, &count| {
-                let (branch_mgr, odb, _temp) = rt.block_on(setup_branch_manager_async());
+        group.bench_with_input(BenchmarkId::new("list", count), count, |b, &count| {
+            let (branch_mgr, odb, _temp) = rt.block_on(setup_branch_manager_async());
 
-                // Setup: create multiple branches
-                rt.block_on(async {
-                    let tree_oid = create_test_tree(&odb).await;
-                    let commit_oid =
-                        create_test_commit(&odb, tree_oid, None, "Initial commit").await;
+            // Setup: create multiple branches
+            rt.block_on(async {
+                let tree_oid = create_test_tree(&odb).await;
+                let commit_oid = create_test_commit(&odb, tree_oid, None, "Initial commit").await;
 
-                    for i in 0..count {
-                        let branch_name = format!("branch_{}", i);
-                        branch_mgr.create(&branch_name, commit_oid).await.unwrap();
-                    }
-                });
+                for i in 0..count {
+                    let branch_name = format!("branch_{}", i);
+                    branch_mgr.create(&branch_name, commit_oid).await.unwrap();
+                }
+            });
 
-                b.to_async(&rt)
-                    .iter(|| async { black_box(branch_mgr.list().await.unwrap()) });
-            },
-        );
+            b.to_async(&rt)
+                .iter(|| async { black_box(branch_mgr.list().await.unwrap()) });
+        });
     }
 
     group.finish();
@@ -162,15 +177,15 @@ fn bench_branch_delete(c: &mut Criterion) {
 
                 rt.block_on(async {
                     let tree_oid = create_test_tree(&odb).await;
-                    let commit_oid =
-                        create_test_commit(&odb, tree_oid, None, "Test commit").await;
+                    let commit_oid = create_test_commit(&odb, tree_oid, None, "Test commit").await;
                     branch_mgr.create(&branch_name, commit_oid).await.unwrap();
                 });
 
                 (branch_mgr, branch_name)
             },
             |(branch_mgr, branch_name)| async move {
-                black_box(branch_mgr.delete(&branch_name).await.unwrap())
+                let _: () = branch_mgr.delete(&branch_name).await.unwrap();
+                black_box(())
             },
         );
     });
@@ -237,13 +252,13 @@ fn bench_branch_update(c: &mut Criterion) {
             let counter = counter.clone();
             async move {
                 let idx = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let commit = if idx % 2 == 0 { new_commit } else { initial_commit };
-                black_box(
-                    branch_mgr
-                        .update_to("main", commit, false)
-                        .await
-                        .unwrap(),
-                )
+                let commit = if idx.is_multiple_of(2) {
+                    new_commit
+                } else {
+                    initial_commit
+                };
+                let _: () = branch_mgr.update_to("main", commit, false).await.unwrap();
+                black_box(())
             }
         });
     });

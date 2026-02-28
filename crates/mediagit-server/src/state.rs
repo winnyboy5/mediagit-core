@@ -1,7 +1,21 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
 
@@ -37,12 +51,12 @@ pub struct WantCache {
 impl WantCache {
     /// Default maximum entries
     pub const DEFAULT_MAX_ENTRIES: usize = 10_000;
-    
+
     /// Create a new want cache with default capacity
     pub fn new() -> Self {
         Self::with_capacity(Self::DEFAULT_MAX_ENTRIES)
     }
-    
+
     /// Create a new want cache with specified capacity
     pub fn with_capacity(max_entries: usize) -> Self {
         Self {
@@ -50,7 +64,7 @@ impl WantCache {
             max_entries,
         }
     }
-    
+
     /// Insert a want entry, evicting oldest if at capacity
     pub fn insert(&mut self, request_id: String, repo: String, want_list: Vec<String>) {
         // Evict oldest entry if at capacity
@@ -65,24 +79,27 @@ impl WantCache {
                 tracing::debug!("Evicted oldest want entry: {}", oldest_key);
             }
         }
-        
-        self.entries.insert(request_id, WantEntry {
-            repo,
-            want_list,
-            created_at: Instant::now(),
-        });
+
+        self.entries.insert(
+            request_id,
+            WantEntry {
+                repo,
+                want_list,
+                created_at: Instant::now(),
+            },
+        );
     }
-    
+
     /// Remove and return a want entry
     pub fn remove(&mut self, request_id: &str) -> Option<WantEntry> {
         self.entries.remove(request_id)
     }
-    
+
     /// Get current entry count
     pub fn len(&self) -> usize {
         self.entries.len()
     }
-    
+
     /// Check if cache is empty
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -130,7 +147,10 @@ impl AppState {
         api_key_auth: Arc<ApiKeyAuth>,
     ) -> Self {
         let jwt_auth = Arc::new(JwtAuth::new(jwt_secret));
-        let auth_layer = Arc::new(AuthLayer::new(Arc::clone(&jwt_auth), Arc::clone(&api_key_auth)));
+        let auth_layer = Arc::new(AuthLayer::new(
+            Arc::clone(&jwt_auth),
+            Arc::clone(&api_key_auth),
+        ));
         let auth_service = Arc::new(AuthService::new(jwt_secret));
 
         Self {
@@ -173,4 +193,3 @@ impl AppState {
         self.auth_service.as_ref()
     }
 }
-

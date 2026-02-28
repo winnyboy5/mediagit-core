@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 MediaGit Contributors
 
@@ -17,18 +31,46 @@ fn mediagit() -> Command {
 }
 
 fn init_repo(dir: &Path) {
-    mediagit().arg("init").arg("-q").current_dir(dir).assert().success();
+    mediagit()
+        .arg("init")
+        .arg("-q")
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 fn add_and_commit(dir: &Path, name: &str, content: &str, message: &str) {
     fs::write(dir.join(name), content).unwrap();
-    mediagit().arg("add").arg(name).current_dir(dir).assert().success();
-    mediagit().arg("commit").arg("-m").arg(message).current_dir(dir).assert().success();
+    mediagit()
+        .arg("add")
+        .arg(name)
+        .current_dir(dir)
+        .assert()
+        .success();
+    mediagit()
+        .arg("commit")
+        .arg("-m")
+        .arg(message)
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 fn create_and_switch_branch(dir: &Path, branch_name: &str) {
-    mediagit().arg("branch").arg("create").arg(branch_name).current_dir(dir).assert().success();
-    mediagit().arg("branch").arg("switch").arg(branch_name).current_dir(dir).assert().success();
+    mediagit()
+        .arg("branch")
+        .arg("create")
+        .arg(branch_name)
+        .current_dir(dir)
+        .assert()
+        .success();
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg(branch_name)
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 // ============================================================================
@@ -46,16 +88,38 @@ fn test_rebase_simple() {
 
     // Create feature branch
     create_and_switch_branch(temp_dir.path(), "feature");
-    add_and_commit(temp_dir.path(), "feature1.txt", "Feature 1", "Feature commit 1");
-    add_and_commit(temp_dir.path(), "feature2.txt", "Feature 2", "Feature commit 2");
+    add_and_commit(
+        temp_dir.path(),
+        "feature1.txt",
+        "Feature 1",
+        "Feature commit 1",
+    );
+    add_and_commit(
+        temp_dir.path(),
+        "feature2.txt",
+        "Feature 2",
+        "Feature commit 2",
+    );
 
     // Switch to main and add a commit
-    mediagit().arg("branch").arg("switch").arg("refs/heads/main").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("refs/heads/main")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
     add_and_commit(temp_dir.path(), "main.txt", "Main content", "Main commit");
 
     // Switch back to feature and rebase onto main
-    mediagit().arg("branch").arg("switch").arg("feature").current_dir(temp_dir.path()).assert().success();
-    
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("feature")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+
     mediagit()
         .arg("rebase")
         .arg("refs/heads/main")
@@ -179,10 +243,21 @@ fn test_cherrypick_single_commit() {
 
     // Create feature branch with commit
     create_and_switch_branch(temp_dir.path(), "feature");
-    add_and_commit(temp_dir.path(), "feature.txt", "Feature content", "Feature commit");
+    add_and_commit(
+        temp_dir.path(),
+        "feature.txt",
+        "Feature content",
+        "Feature commit",
+    );
 
     // Switch back to main
-    mediagit().arg("branch").arg("switch").arg("refs/heads/main").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("refs/heads/main")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     // Cherry-pick the feature commit
     mediagit()
@@ -206,7 +281,13 @@ fn test_cherrypick_no_commit_mode() {
     create_and_switch_branch(temp_dir.path(), "feature");
     add_and_commit(temp_dir.path(), "feature.txt", "Feature", "Feature commit");
 
-    mediagit().arg("branch").arg("switch").arg("refs/heads/main").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("refs/heads/main")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     // Cherry-pick with --no-commit
     mediagit()
@@ -231,7 +312,13 @@ fn test_cherrypick_with_edit() {
     create_and_switch_branch(temp_dir.path(), "feature");
     add_and_commit(temp_dir.path(), "feature.txt", "Feature", "Feature commit");
 
-    mediagit().arg("branch").arg("switch").arg("refs/heads/main").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("refs/heads/main")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     // Cherry-pick with -e (edit) - in test mode this might not open editor
     // Just verify the command is recognized
@@ -285,7 +372,13 @@ fn test_cherrypick_quiet() {
     create_and_switch_branch(temp_dir.path(), "feature");
     add_and_commit(temp_dir.path(), "feature.txt", "Feature", "Feature commit");
 
-    mediagit().arg("branch").arg("switch").arg("refs/heads/main").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("refs/heads/main")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     mediagit()
         .arg("cherry-pick")
@@ -365,12 +458,24 @@ fn test_rebase_multiple_commits() {
     }
 
     // Add commits to main
-    mediagit().arg("branch").arg("switch").arg("refs/heads/main").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("refs/heads/main")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
     add_and_commit(temp_dir.path(), "main1.txt", "Main 1", "Main commit 1");
     add_and_commit(temp_dir.path(), "main2.txt", "Main 2", "Main commit 2");
 
     // Switch back to feature and rebase
-    mediagit().arg("branch").arg("switch").arg("feature").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("feature")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     mediagit()
         .arg("rebase")
@@ -397,9 +502,20 @@ fn test_cherrypick_preserves_content() {
 
     create_and_switch_branch(temp_dir.path(), "feature");
     let feature_content = "This is specific feature content that should be preserved\n";
-    add_and_commit(temp_dir.path(), "special.txt", feature_content, "Add special file");
+    add_and_commit(
+        temp_dir.path(),
+        "special.txt",
+        feature_content,
+        "Add special file",
+    );
 
-    mediagit().arg("branch").arg("switch").arg("refs/heads/main").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("refs/heads/main")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     mediagit()
         .arg("cherry-pick")

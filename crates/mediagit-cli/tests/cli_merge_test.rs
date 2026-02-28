@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 MediaGit Contributors
 
@@ -17,18 +31,46 @@ fn mediagit() -> Command {
 }
 
 fn init_repo(dir: &Path) {
-    mediagit().arg("init").arg("-q").current_dir(dir).assert().success();
+    mediagit()
+        .arg("init")
+        .arg("-q")
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 fn add_and_commit(dir: &Path, name: &str, content: &str, message: &str) {
     fs::write(dir.join(name), content).unwrap();
-    mediagit().arg("add").arg(name).current_dir(dir).assert().success();
-    mediagit().arg("commit").arg("-m").arg(message).current_dir(dir).assert().success();
+    mediagit()
+        .arg("add")
+        .arg(name)
+        .current_dir(dir)
+        .assert()
+        .success();
+    mediagit()
+        .arg("commit")
+        .arg("-m")
+        .arg(message)
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 fn create_and_switch_branch(dir: &Path, branch_name: &str) {
-    mediagit().arg("branch").arg("create").arg(branch_name).current_dir(dir).assert().success();
-    mediagit().arg("branch").arg("switch").arg(branch_name).current_dir(dir).assert().success();
+    mediagit()
+        .arg("branch")
+        .arg("create")
+        .arg(branch_name)
+        .current_dir(dir)
+        .assert()
+        .success();
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg(branch_name)
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 // ============================================================================
@@ -41,12 +83,27 @@ fn test_merge_fast_forward() {
     init_repo(temp_dir.path());
 
     // Create initial commit on main
-    add_and_commit(temp_dir.path(), "file.txt", "Initial content", "Initial commit");
+    add_and_commit(
+        temp_dir.path(),
+        "file.txt",
+        "Initial content",
+        "Initial commit",
+    );
 
     // Create feature branch and add commits
     create_and_switch_branch(temp_dir.path(), "feature");
-    add_and_commit(temp_dir.path(), "feature.txt", "Feature content", "Feature commit");
-    add_and_commit(temp_dir.path(), "feature2.txt", "Feature 2", "Feature commit 2");
+    add_and_commit(
+        temp_dir.path(),
+        "feature.txt",
+        "Feature content",
+        "Feature commit",
+    );
+    add_and_commit(
+        temp_dir.path(),
+        "feature2.txt",
+        "Feature 2",
+        "Feature commit 2",
+    );
 
     // Switch back to main
     mediagit()
@@ -229,7 +286,12 @@ fn test_merge_three_way() {
 
     // Create feature branch with new file
     create_and_switch_branch(temp_dir.path(), "feature");
-    add_and_commit(temp_dir.path(), "feature.txt", "Feature content", "Feature commit");
+    add_and_commit(
+        temp_dir.path(),
+        "feature.txt",
+        "Feature content",
+        "Feature commit",
+    );
 
     // Switch back to main and add different file
     mediagit()

@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! Configuration for MediaGit storage optimizations
 
 use crate::chunking::ChunkStrategy;
@@ -35,10 +49,10 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             smart_compression: true,
-            chunking_enabled: true,  // Enable chunk-level deduplication
+            chunking_enabled: true, // Enable chunk-level deduplication
             chunking_strategy: ChunkingStrategyConfig::default(), // MediaAware
-            delta_enabled: true,     // Enable delta encoding for similar files
-            pack_enabled: true,      // Enable pack file generation
+            delta_enabled: true,    // Enable delta encoding for similar files
+            pack_enabled: true,     // Enable pack file generation
             pack_window: 10,
         }
     }
@@ -46,7 +60,7 @@ impl Default for StorageConfig {
 
 impl StorageConfig {
     /// Create a minimal configuration with only basic features
-    /// 
+    ///
     /// Use this for simple repositories or when performance is critical.
     /// Only smart compression is enabled.
     pub fn minimal() -> Self {
@@ -61,7 +75,7 @@ impl StorageConfig {
     }
 
     /// Create a configuration optimized for large media files
-    /// 
+    ///
     /// Enables all optimization features with larger pack window
     /// for better delta compression of similar video files.
     pub fn for_large_media() -> Self {
@@ -71,7 +85,7 @@ impl StorageConfig {
             chunking_strategy: ChunkingStrategyConfig::MediaAware,
             delta_enabled: true,
             pack_enabled: true,
-            pack_window: 50,  // Larger window for better delta matches
+            pack_window: 50, // Larger window for better delta matches
         }
     }
 }
@@ -85,7 +99,7 @@ fn default_pack_window() -> usize {
 }
 
 /// Chunking strategy configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChunkingStrategyConfig {
     /// Fixed-size chunks
@@ -97,13 +111,8 @@ pub enum ChunkingStrategyConfig {
         max_size: usize,
     },
     /// Media-aware chunking (parse structure, separate streams)
+    #[default]
     MediaAware,
-}
-
-impl Default for ChunkingStrategyConfig {
-    fn default() -> Self {
-        ChunkingStrategyConfig::MediaAware
-    }
 }
 
 impl From<ChunkingStrategyConfig> for ChunkStrategy {
@@ -174,9 +183,9 @@ mod tests {
     fn test_default_config() {
         let config = StorageConfig::default();
         assert!(config.smart_compression);
-        assert!(config.chunking_enabled);  // Now enabled by default
-        assert!(config.delta_enabled);     // Now enabled by default
-        assert!(config.pack_enabled);      // Now enabled by default
+        assert!(config.chunking_enabled); // Now enabled by default
+        assert!(config.delta_enabled); // Now enabled by default
+        assert!(config.pack_enabled); // Now enabled by default
     }
 
     #[test]

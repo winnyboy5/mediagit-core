@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 MediaGit Contributors
 
@@ -44,7 +58,8 @@ fn copy_test_file(test_file: &str, repo_dir: &Path, dest_name: &str) -> PathBuf 
     }
 
     if source.exists() {
-        fs::copy(&source, &dest).expect(&format!("Failed to copy {} to {:?}", test_file, dest));
+        fs::copy(&source, &dest)
+            .unwrap_or_else(|_| panic!("Failed to copy {} to {:?}", test_file, dest));
     }
 
     dest
@@ -53,7 +68,9 @@ fn copy_test_file(test_file: &str, repo_dir: &Path, dest_name: &str) -> PathBuf 
 /// Get file size in MB
 fn file_size_mb(path: &Path) -> f64 {
     if path.exists() {
-        fs::metadata(path).map(|m| m.len() as f64 / 1024.0 / 1024.0).unwrap_or(0.0)
+        fs::metadata(path)
+            .map(|m| m.len() as f64 / 1024.0 / 1024.0)
+            .unwrap_or(0.0)
     } else {
         0.0
     }
@@ -94,7 +111,11 @@ fn test_add_multiple_files() {
 
     // Create multiple files
     for i in 1..=5 {
-        fs::write(temp_dir.path().join(format!("file{}.txt", i)), format!("Content {}", i)).unwrap();
+        fs::write(
+            temp_dir.path().join(format!("file{}.txt", i)),
+            format!("Content {}", i),
+        )
+        .unwrap();
     }
 
     mediagit()
@@ -193,8 +214,19 @@ fn test_add_update() {
 
     // Create and commit a file
     fs::write(temp_dir.path().join("tracked.txt"), "Version 1").unwrap();
-    mediagit().arg("add").arg("tracked.txt").current_dir(temp_dir.path()).assert().success();
-    mediagit().arg("commit").arg("-m").arg("Initial").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("add")
+        .arg("tracked.txt")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("commit")
+        .arg("-m")
+        .arg("Initial")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     // Modify file and create new untracked file
     fs::write(temp_dir.path().join("tracked.txt"), "Version 2").unwrap();
@@ -270,7 +302,10 @@ fn test_add_jpeg_image() {
 
     let duration = start.elapsed();
     let throughput = size / duration.as_secs_f64();
-    println!("Add duration: {:?}, Throughput: {:.2} MB/s", duration, throughput);
+    println!(
+        "Add duration: {:?}, Throughput: {:.2} MB/s",
+        duration, throughput
+    );
 }
 
 #[test]
@@ -278,7 +313,11 @@ fn test_add_png_image() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
 
-    let dest = copy_test_file("3D_model_of_Shucaris_ankylosskelos_appendage.png", temp_dir.path(), "model.png");
+    let dest = copy_test_file(
+        "3D_model_of_Shucaris_ankylosskelos_appendage.png",
+        temp_dir.path(),
+        "model.png",
+    );
     if !dest.exists() {
         println!("SKIP: Test file not found");
         return;
@@ -307,7 +346,11 @@ fn test_add_ogg_audio() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
 
-    let dest = copy_test_file("_Into_the_Oceans_and_the_Air_.ogg", temp_dir.path(), "audio.ogg");
+    let dest = copy_test_file(
+        "_Into_the_Oceans_and_the_Air_.ogg",
+        temp_dir.path(),
+        "audio.ogg",
+    );
     if !dest.exists() {
         println!("SKIP: Test file not found");
         return;
@@ -333,7 +376,11 @@ fn test_add_flac_audio() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
 
-    let dest = copy_test_file("_Amir_Tangsiri__Dokhtare_Koli.flac", temp_dir.path(), "audio.flac");
+    let dest = copy_test_file(
+        "_Amir_Tangsiri__Dokhtare_Koli.flac",
+        temp_dir.path(),
+        "audio.flac",
+    );
     if !dest.exists() {
         println!("SKIP: Test file not found");
         return;
@@ -352,7 +399,10 @@ fn test_add_flac_audio() {
 
     let duration = start.elapsed();
     let throughput = size / duration.as_secs_f64();
-    println!("Add duration: {:?}, Throughput: {:.2} MB/s", duration, throughput);
+    println!(
+        "Add duration: {:?}, Throughput: {:.2} MB/s",
+        duration, throughput
+    );
 }
 
 #[test]
@@ -361,7 +411,11 @@ fn test_add_wav_audio() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
 
-    let dest = copy_test_file("_Quando_le_sere_al_placido__(Ferruccio_Giannini).wav", temp_dir.path(), "audio.wav");
+    let dest = copy_test_file(
+        "_Quando_le_sere_al_placido__(Ferruccio_Giannini).wav",
+        temp_dir.path(),
+        "audio.wav",
+    );
     if !dest.exists() {
         println!("SKIP: Test file not found");
         return;
@@ -380,7 +434,10 @@ fn test_add_wav_audio() {
 
     let duration = start.elapsed();
     let throughput = size / duration.as_secs_f64();
-    println!("Add duration: {:?}, Throughput: {:.2} MB/s", duration, throughput);
+    println!(
+        "Add duration: {:?}, Throughput: {:.2} MB/s",
+        duration, throughput
+    );
 }
 
 // ============================================================================
@@ -411,7 +468,10 @@ fn test_add_small_video() {
 
     let duration = start.elapsed();
     let throughput = size / duration.as_secs_f64();
-    println!("Add duration: {:?}, Throughput: {:.2} MB/s", duration, throughput);
+    println!(
+        "Add duration: {:?}, Throughput: {:.2} MB/s",
+        duration, throughput
+    );
 }
 
 // ============================================================================
@@ -423,7 +483,11 @@ fn test_add_glb_model() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
 
-    let dest = copy_test_file("1965_ac_shelby_427_cobra_sc.glb", temp_dir.path(), "model.glb");
+    let dest = copy_test_file(
+        "1965_ac_shelby_427_cobra_sc.glb",
+        temp_dir.path(),
+        "model.glb",
+    );
     if !dest.exists() {
         println!("SKIP: Test file not found");
         return;
@@ -442,7 +506,10 @@ fn test_add_glb_model() {
 
     let duration = start.elapsed();
     let throughput = size / duration.as_secs_f64();
-    println!("Add duration: {:?}, Throughput: {:.2} MB/s", duration, throughput);
+    println!(
+        "Add duration: {:?}, Throughput: {:.2} MB/s",
+        duration, throughput
+    );
 }
 
 #[test]
@@ -479,7 +546,11 @@ fn test_add_svg_document() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
 
-    let dest = copy_test_file("3D_Model_of_the_Main_Gallery_in_Skednena_jama_Cave.svg", temp_dir.path(), "model.svg");
+    let dest = copy_test_file(
+        "3D_Model_of_the_Main_Gallery_in_Skednena_jama_Cave.svg",
+        temp_dir.path(),
+        "model.svg",
+    );
     if !dest.exists() {
         println!("SKIP: Test file not found");
         return;
@@ -548,8 +619,16 @@ fn test_add_mixed_file_types() {
 
     // Copy various file types
     copy_test_file("freepik__talk__71826.jpeg", temp_dir.path(), "image.jpg");
-    copy_test_file("_Into_the_Oceans_and_the_Air_.ogg", temp_dir.path(), "audio.ogg");
-    copy_test_file("3D_Model_of_the_Main_Gallery_in_Skednena_jama_Cave.svg", temp_dir.path(), "model.svg");
+    copy_test_file(
+        "_Into_the_Oceans_and_the_Air_.ogg",
+        temp_dir.path(),
+        "audio.ogg",
+    );
+    copy_test_file(
+        "3D_Model_of_the_Main_Gallery_in_Skednena_jama_Cave.svg",
+        temp_dir.path(),
+        "model.svg",
+    );
 
     // Create text file
     fs::write(temp_dir.path().join("README.md"), "# Project\n").unwrap();
@@ -624,7 +703,8 @@ fn test_add_many_small_files_performance() {
         fs::write(
             temp_dir.path().join(format!("file_{:03}.txt", i)),
             format!("Content for file {}\n", i),
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     let start = Instant::now();

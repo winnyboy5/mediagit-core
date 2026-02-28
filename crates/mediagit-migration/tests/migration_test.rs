@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 MediaGit Contributors
 
@@ -6,7 +20,7 @@
 //! Tests the public API of the migration module including state management,
 //! progress tracking, and integrity verification.
 
-use mediagit_migration::{MigrationState, IntegrityVerifier};
+use mediagit_migration::{IntegrityVerifier, MigrationState};
 use mediagit_storage::mock::MockBackend;
 use mediagit_storage::StorageBackend;
 use std::sync::Arc;
@@ -153,7 +167,10 @@ async fn test_integrity_verifier_checksum_mismatch() {
     );
     let result = verifier.verify_object(key).await.unwrap();
 
-    assert!(!result.passed, "Verification should fail for mismatched data");
+    assert!(
+        !result.passed,
+        "Verification should fail for mismatched data"
+    );
     assert!(result.error.is_some());
 }
 
@@ -173,7 +190,10 @@ async fn test_integrity_verifier_missing_object() {
     );
     let result = verifier.verify_object(key).await.unwrap();
 
-    assert!(!result.passed, "Verification should fail for missing target object");
+    assert!(
+        !result.passed,
+        "Verification should fail for missing target object"
+    );
 }
 
 #[tokio::test]

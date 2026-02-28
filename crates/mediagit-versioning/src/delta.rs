@@ -160,7 +160,7 @@ impl DeltaEncoder {
         let mut hash_table: HashMap<&[u8], Vec<usize>> = HashMap::new();
         for i in 0..base.len().saturating_sub(MIN_MATCH_LENGTH) {
             let seq = &base[i..cmp::min(i + MIN_MATCH_LENGTH, base.len())];
-            hash_table.entry(seq).or_insert_with(Vec::new).push(i);
+            hash_table.entry(seq).or_default().push(i);
         }
 
         while target_pos < target.len() {
@@ -169,15 +169,13 @@ impl DeltaEncoder {
 
             // Try to find a match in the base
             if target_pos + MIN_MATCH_LENGTH <= target.len() {
-                let target_seq = &target[target_pos..cmp::min(target_pos + MIN_MATCH_LENGTH, target.len())];
+                let target_seq =
+                    &target[target_pos..cmp::min(target_pos + MIN_MATCH_LENGTH, target.len())];
 
                 if let Some(positions) = hash_table.get(target_seq) {
                     for &base_pos in positions {
                         let max_len = cmp::min(
-                            cmp::min(
-                                base.len() - base_pos,
-                                target.len() - target_pos,
-                            ),
+                            cmp::min(base.len() - base_pos, target.len() - target_pos),
                             WINDOW_SIZE,
                         );
 
@@ -216,7 +214,8 @@ impl DeltaEncoder {
 
                     // Check if we can start a match
                     if target_pos + MIN_MATCH_LENGTH <= target.len() {
-                        let target_seq = &target[target_pos..cmp::min(target_pos + MIN_MATCH_LENGTH, target.len())];
+                        let target_seq = &target
+                            [target_pos..cmp::min(target_pos + MIN_MATCH_LENGTH, target.len())];
                         if hash_table.contains_key(target_seq) {
                             break;
                         }
@@ -229,7 +228,7 @@ impl DeltaEncoder {
             }
         }
 
-        let compression_ratio = if target.len() > 0 {
+        let compression_ratio = if !target.is_empty() {
             let encoded_size = instructions
                 .iter()
                 .map(|instr| match instr {
@@ -404,7 +403,10 @@ mod tests {
 
         // The compression ratio should be reasonable (may not always be < 1 for small objects)
         // For this test, we just verify it produces a valid delta
-        assert!(!delta.instructions.is_empty(), "Delta should have instructions");
+        assert!(
+            !delta.instructions.is_empty(),
+            "Delta should have instructions"
+        );
     }
 
     #[test]

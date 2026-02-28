@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use anyhow::Result;
 use mediagit_config::Config;
 use std::fs;
@@ -120,7 +134,9 @@ async fn test_rename_remote() -> Result<()> {
     // Rename remote
     let mut loaded_config = Config::load(&repo_path).await?;
     let old_remote = loaded_config.remove_remote("old-name").unwrap();
-    loaded_config.remotes.insert("new-name".to_string(), old_remote);
+    loaded_config
+        .remotes
+        .insert("new-name".to_string(), old_remote);
     loaded_config.save(&repo_path)?;
 
     // Verify rename

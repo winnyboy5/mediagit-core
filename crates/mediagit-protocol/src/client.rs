@@ -1,8 +1,24 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use anyhow::{Context, Result};
 use mediagit_versioning::{Commit, FileMode, ObjectDatabase, ObjectType, Oid, PackWriter, Tree};
 use std::collections::{HashSet, VecDeque};
 
-use crate::types::{RefUpdate, RefUpdateRequest, RefUpdateResponse, RefsResponse, WantRequest, WantResponse};
+use crate::types::{
+    RefUpdate, RefUpdateRequest, RefUpdateResponse, RefsResponse, WantRequest, WantResponse,
+};
 
 /// Statistics from a push operation
 #[derive(Debug, Clone, Default)]
@@ -76,10 +92,7 @@ impl ProtocolClient {
             .context("Failed to send GET /info/refs")?;
 
         if !response.status().is_success() {
-            anyhow::bail!(
-                "GET /info/refs failed with status: {}",
-                response.status()
-            );
+            anyhow::bail!("GET /info/refs failed with status: {}", response.status());
         }
 
         response
@@ -103,17 +116,17 @@ impl ProtocolClient {
         force: bool,
     ) -> Result<(RefUpdateResponse, PushStats)> {
         let mut stats = PushStats::default();
-        
+
         // Collect commit OIDs from ref updates (what we want to push)
         let mut commit_oids = Vec::new();
         // Collect "have" OIDs - objects remote already has (to exclude from push)
         let mut have_oids = Vec::new();
-        
+
         for update in &updates {
             let oid = Oid::from_hex(&update.new_oid)
                 .context(format!("Invalid OID in update: {}", update.new_oid))?;
             commit_oids.push(oid);
-            
+
             // If remote has an existing OID, add it to "have" list
             if let Some(old_oid) = &update.old_oid {
                 if let Ok(oid) = Oid::from_hex(old_oid) {
@@ -124,12 +137,23 @@ impl ProtocolClient {
 
         // Collect only NEW objects (not reachable from remote's current state)
         if !commit_oids.is_empty() {
-            let objects = self.collect_reachable_objects(odb, commit_oids, have_oids).await?;
+            let objects = self
+                .collect_reachable_objects(odb, commit_oids, have_oids)
+                .await?;
 
             stats.objects_count = objects.len();
-            stats.commits_count = objects.iter().filter(|(_, t)| matches!(t, ObjectType::Commit)).count();
-            stats.trees_count = objects.iter().filter(|(_, t)| matches!(t, ObjectType::Tree)).count();
-            stats.blobs_count = objects.iter().filter(|(_, t)| matches!(t, ObjectType::Blob)).count();
+            stats.commits_count = objects
+                .iter()
+                .filter(|(_, t)| matches!(t, ObjectType::Commit))
+                .count();
+            stats.trees_count = objects
+                .iter()
+                .filter(|(_, t)| matches!(t, ObjectType::Tree))
+                .count();
+            stats.blobs_count = objects
+                .iter()
+                .filter(|(_, t)| matches!(t, ObjectType::Blob))
+                .count();
 
             tracing::info!(
                 "Collected {} objects for push ({} commits, {} trees, {} blobs)",
@@ -148,7 +172,8 @@ impl ProtocolClient {
 
                 // Upload chunked objects (large files) if any
                 if !chunked_oids.is_empty() {
-                    self.upload_chunked_objects(odb, &chunked_oids, |_, _, _| {}).await?;
+                    self.upload_chunked_objects(odb, &chunked_oids, |_, _, _| {})
+                        .await?;
                 }
             } else {
                 tracing::info!("No new objects to push - remote already has all objects");
@@ -181,16 +206,16 @@ impl ProtocolClient {
         F: Fn(PushProgress),
     {
         let mut stats = PushStats::default();
-        
+
         // Collect commit OIDs from ref updates (what we want to push)
         let mut commit_oids = Vec::new();
         let mut have_oids = Vec::new();
-        
+
         for update in &updates {
             let oid = Oid::from_hex(&update.new_oid)
                 .context(format!("Invalid OID in update: {}", update.new_oid))?;
             commit_oids.push(oid);
-            
+
             if let Some(old_oid) = &update.old_oid {
                 if let Ok(oid) = Oid::from_hex(old_oid) {
                     have_oids.push(oid);
@@ -207,15 +232,25 @@ impl ProtocolClient {
         });
 
         let objects = if !commit_oids.is_empty() {
-            self.collect_reachable_objects(odb, commit_oids, have_oids).await?
+            self.collect_reachable_objects(odb, commit_oids, have_oids)
+                .await?
         } else {
             Vec::new()
         };
 
         stats.objects_count = objects.len();
-        stats.commits_count = objects.iter().filter(|(_, t)| matches!(t, ObjectType::Commit)).count();
-        stats.trees_count = objects.iter().filter(|(_, t)| matches!(t, ObjectType::Tree)).count();
-        stats.blobs_count = objects.iter().filter(|(_, t)| matches!(t, ObjectType::Blob)).count();
+        stats.commits_count = objects
+            .iter()
+            .filter(|(_, t)| matches!(t, ObjectType::Commit))
+            .count();
+        stats.trees_count = objects
+            .iter()
+            .filter(|(_, t)| matches!(t, ObjectType::Tree))
+            .count();
+        stats.blobs_count = objects
+            .iter()
+            .filter(|(_, t)| matches!(t, ObjectType::Blob))
+            .count();
 
         on_progress(PushProgress {
             phase: PushPhase::Collecting,
@@ -241,7 +276,11 @@ impl ProtocolClient {
                 phase: PushPhase::Packing,
                 current: total_objects,
                 total: total_objects,
-                message: format!("Packed {} objects ({} bytes)", total_objects, pack_data.len()),
+                message: format!(
+                    "Packed {} objects ({} bytes)",
+                    total_objects,
+                    pack_data.len()
+                ),
             });
 
             // Phase 3: Upload pack with progress
@@ -270,15 +309,21 @@ impl ProtocolClient {
                     message: format!("Uploading {} chunked files...", chunked_oids.len()),
                 });
 
-                let chunks_uploaded = self.upload_chunked_objects(odb, &chunked_oids, |current, total, msg| {
-                    tracing::info!("Chunked upload: {}/{} - {}", current, total, msg);
-                }).await?;
+                let chunks_uploaded = self
+                    .upload_chunked_objects(odb, &chunked_oids, |current, total, msg| {
+                        tracing::info!("Chunked upload: {}/{} - {}", current, total, msg);
+                    })
+                    .await?;
 
                 on_progress(PushProgress {
                     phase: PushPhase::Uploading,
                     current: chunked_oids.len() as u64,
                     total: chunked_oids.len() as u64,
-                    message: format!("Uploaded {} chunked files ({} chunks)", chunked_oids.len(), chunks_uploaded),
+                    message: format!(
+                        "Uploaded {} chunked files ({} chunks)",
+                        chunked_oids.len(),
+                        chunks_uploaded
+                    ),
                 });
             }
         } else {
@@ -328,7 +373,11 @@ impl ProtocolClient {
     /// Pull objects from a remote ref (backwards compatible, downloads all objects)
     ///
     /// For incremental pulls, use `pull_with_have` instead.
-    pub async fn pull(&self, odb: &ObjectDatabase, remote_ref: &str) -> Result<(Vec<u8>, Vec<Oid>)> {
+    pub async fn pull(
+        &self,
+        odb: &ObjectDatabase,
+        remote_ref: &str,
+    ) -> Result<(Vec<u8>, Vec<Oid>)> {
         self.pull_with_have(odb, remote_ref, Vec::new()).await
     }
 
@@ -359,7 +408,11 @@ impl ProtocolClient {
     /// Download a pack file from the server
     ///
     /// Returns (pack_data, chunked_oids) - chunked objects need separate transfer
-    pub async fn download_pack(&self, want: Vec<String>, have: Vec<String>) -> Result<(Vec<u8>, Vec<Oid>)> {
+    pub async fn download_pack(
+        &self,
+        want: Vec<String>,
+        have: Vec<String>,
+    ) -> Result<(Vec<u8>, Vec<Oid>)> {
         // First, send want request
         let want_url = format!("{}/objects/want", self.base_url);
         tracing::debug!("POST {}", want_url);
@@ -389,7 +442,11 @@ impl ProtocolClient {
 
         // Then download the pack with the request_id header
         let pack_url = format!("{}/objects/pack", self.base_url);
-        tracing::debug!("GET {} (request_id: {})", pack_url, want_response.request_id);
+        tracing::debug!(
+            "GET {} (request_id: {})",
+            pack_url,
+            want_response.request_id
+        );
 
         let response = self
             .client
@@ -426,10 +483,7 @@ impl ProtocolClient {
             );
         }
 
-        let pack_data = response
-            .bytes()
-            .await
-            .context("Failed to read pack data")?;
+        let pack_data = response.bytes().await.context("Failed to read pack data")?;
 
         Ok((pack_data.to_vec(), chunked_oids))
     }
@@ -474,7 +528,11 @@ impl ProtocolClient {
 
         // Download pack with streaming
         let pack_url = format!("{}/objects/pack", self.base_url);
-        tracing::debug!("GET {} (streaming, request_id: {})", pack_url, want_response.request_id);
+        tracing::debug!(
+            "GET {} (streaming, request_id: {})",
+            pack_url,
+            want_response.request_id
+        );
 
         let response = self
             .client
@@ -515,9 +573,7 @@ impl ProtocolClient {
         use futures::stream::TryStreamExt;
         use tokio_util::io::StreamReader;
 
-        let stream = response
-            .bytes_stream()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+        let stream = response.bytes_stream().map_err(std::io::Error::other);
 
         let stream_reader = StreamReader::new(stream);
 
@@ -529,11 +585,13 @@ impl ProtocolClient {
 
         let mut object_count = 0;
         while let Some(result) = reader.next_object().await {
-            let (_oid, obj_type, data) = result.context("Failed to read object from pack stream")?;
+            let (_oid, obj_type, data) =
+                result.context("Failed to read object from pack stream")?;
 
             // Write through ODB to ensure proper compression and storage format.
             // PackTransaction bypassed compression, causing read failures.
-            odb.write(obj_type, &data).await
+            odb.write(obj_type, &data)
+                .await
                 .context("Failed to write object from pack")?;
 
             object_count += 1;
@@ -542,7 +600,10 @@ impl ProtocolClient {
             }
         }
 
-        tracing::info!("Successfully downloaded {} objects (streaming)", object_count);
+        tracing::info!(
+            "Successfully downloaded {} objects (streaming)",
+            object_count
+        );
 
         Ok(chunked_oids)
     }
@@ -623,9 +684,11 @@ impl ProtocolClient {
                     // Detect actual object type by reading and inspecting the object
                     let obj_type = if let Ok(obj_data) = odb.read(&oid).await {
                         // Try to deserialize as each type to detect the actual type
-                        if bincode::deserialize::<Commit>(&obj_data).is_ok() {
+                        if mediagit_versioning::format::deserialize::<Commit>(&obj_data).is_ok() {
                             ObjectType::Commit
-                        } else if bincode::deserialize::<Tree>(&obj_data).is_ok() {
+                        } else if mediagit_versioning::format::deserialize::<Tree>(&obj_data)
+                            .is_ok()
+                        {
                             ObjectType::Tree
                         } else {
                             ObjectType::Blob
@@ -644,7 +707,9 @@ impl ProtocolClient {
                 if let Ok(obj_data) = odb.read(&oid).await {
                     match obj_type {
                         ObjectType::Commit => {
-                            if let Ok(commit) = bincode::deserialize::<Commit>(&obj_data) {
+                            if let Ok(commit) =
+                                mediagit_versioning::format::deserialize::<Commit>(&obj_data)
+                            {
                                 if visited.insert(commit.tree) {
                                     have_queue.push_back((commit.tree, ObjectType::Tree));
                                 }
@@ -656,7 +721,9 @@ impl ProtocolClient {
                             }
                         }
                         ObjectType::Tree => {
-                            if let Ok(tree) = bincode::deserialize::<Tree>(&obj_data) {
+                            if let Ok(tree) =
+                                mediagit_versioning::format::deserialize::<Tree>(&obj_data)
+                            {
                                 for entry in tree.entries.values() {
                                     if visited.insert(entry.oid) {
                                         let entry_type = match entry.mode {
@@ -695,9 +762,9 @@ impl ProtocolClient {
                         .read(&oid)
                         .await
                         .context(format!("Failed to read commit {}", oid))?;
-                    
+
                     // Deserialize commit to extract tree and parent refs
-                    let commit: Commit = bincode::deserialize(&obj_data)
+                    let commit: Commit = mediagit_versioning::format::deserialize(&obj_data)
                         .context(format!("Failed to deserialize commit {}", oid))?;
 
                     // Add tree OID
@@ -717,9 +784,9 @@ impl ProtocolClient {
                         .read(&oid)
                         .await
                         .context(format!("Failed to read tree {}", oid))?;
-                    
+
                     // Deserialize tree to extract blob/subtree refs
-                    let tree: Tree = bincode::deserialize(&obj_data)
+                    let tree: Tree = mediagit_versioning::format::deserialize(&obj_data)
                         .context(format!("Failed to deserialize tree {}", oid))?;
 
                     for entry in tree.entries.values() {
@@ -744,11 +811,11 @@ impl ProtocolClient {
     }
 
     /// Generate a pack file containing specified objects with their types
-    /// 
+    ///
     /// Uses incremental pack generation to minimize memory usage.
     /// Note: Chunked blobs (large files stored as chunks) are SKIPPED in packs.
     /// They should be transferred separately via manifest + chunks.
-    /// 
+    ///
     /// Returns: (pack_data, chunked_object_oids)
     async fn generate_pack(
         &self,
@@ -789,7 +856,7 @@ impl ProtocolClient {
 
             // Add to pack (internally compressed/processed)
             pack_writer.add_object(oid, obj_type, &obj_data);
-            
+
             // obj_data is dropped here, freeing memory before next iteration
         }
 
@@ -803,11 +870,14 @@ impl ProtocolClient {
     // ========================================================================
 
     /// Check which chunks exist on the remote server
-    /// 
+    ///
     /// Returns list of chunk IDs that are MISSING (need to be uploaded)
     async fn check_chunks_exist(&self, chunk_ids: &[String]) -> Result<Vec<String>> {
         let url = format!("{}/chunks/check", self.base_url);
-        tracing::debug!(count = chunk_ids.len(), "Checking chunk existence on remote");
+        tracing::debug!(
+            count = chunk_ids.len(),
+            "Checking chunk existence on remote"
+        );
 
         let response = self
             .client
@@ -818,7 +888,10 @@ impl ProtocolClient {
             .context("Failed to POST /chunks/check")?;
 
         if !response.status().is_success() {
-            anyhow::bail!("POST /chunks/check failed with status: {}", response.status());
+            anyhow::bail!(
+                "POST /chunks/check failed with status: {}",
+                response.status()
+            );
         }
 
         response
@@ -831,7 +904,7 @@ impl ProtocolClient {
     #[allow(dead_code)]
     async fn upload_single_chunk(&self, chunk_id: &str, data: &[u8]) -> Result<()> {
         let url = format!("{}/chunks/{}", self.base_url, chunk_id);
-        
+
         let response = self
             .client
             .put(&url)
@@ -841,7 +914,11 @@ impl ProtocolClient {
             .context(format!("Failed to PUT /chunks/{}", chunk_id))?;
 
         if !response.status().is_success() {
-            anyhow::bail!("PUT /chunks/{} failed with status: {}", chunk_id, response.status());
+            anyhow::bail!(
+                "PUT /chunks/{} failed with status: {}",
+                chunk_id,
+                response.status()
+            );
         }
 
         Ok(())
@@ -850,7 +927,7 @@ impl ProtocolClient {
     /// Upload a manifest to the remote server
     async fn upload_manifest(&self, oid: &Oid, data: &[u8]) -> Result<()> {
         let url = format!("{}/manifests/{}", self.base_url, oid.to_hex());
-        
+
         let response = self
             .client
             .put(&url)
@@ -860,14 +937,18 @@ impl ProtocolClient {
             .context(format!("Failed to PUT /manifests/{}", oid))?;
 
         if !response.status().is_success() {
-            anyhow::bail!("PUT /manifests/{} failed with status: {}", oid, response.status());
+            anyhow::bail!(
+                "PUT /manifests/{} failed with status: {}",
+                oid,
+                response.status()
+            );
         }
 
         Ok(())
     }
 
     /// Upload all chunks for a chunked object with parallel uploads
-    /// 
+    ///
     /// Uses 8 concurrent uploads for optimal throughput (>100MB/s target)
     pub async fn upload_chunked_objects<F>(
         &self,
@@ -900,29 +981,36 @@ impl ProtocolClient {
             };
 
             let total_chunks = manifest.chunks.len();
-            on_progress(obj_idx + 1, chunked_oids.len(), 
-                &format!("Object {}/{}: {} chunks", obj_idx + 1, chunked_oids.len(), total_chunks));
+            on_progress(
+                obj_idx + 1,
+                chunked_oids.len(),
+                &format!(
+                    "Object {}/{}: {} chunks",
+                    obj_idx + 1,
+                    chunked_oids.len(),
+                    total_chunks
+                ),
+            );
 
             // Get all chunk IDs
-            let chunk_ids: Vec<String> = manifest.chunks.iter()
-                .map(|c| c.id.to_hex())
-                .collect();
+            let chunk_ids: Vec<String> = manifest.chunks.iter().map(|c| c.id.to_hex()).collect();
 
             // Check which chunks the remote needs
             let missing_chunks = self.check_chunks_exist(&chunk_ids).await?;
-            
+
             if missing_chunks.is_empty() {
                 tracing::debug!(oid = %oid, "All chunks already exist on remote");
             } else {
                 tracing::info!(
-                    oid = %oid, 
+                    oid = %oid,
                     missing = missing_chunks.len(),
                     total = total_chunks,
                     "Uploading missing chunks"
                 );
 
                 // Upload missing chunks in parallel
-                let missing_set: std::collections::HashSet<String> = missing_chunks.into_iter().collect();
+                let missing_set: std::collections::HashSet<String> =
+                    missing_chunks.into_iter().collect();
                 let mut upload_handles = Vec::new();
 
                 for chunk_ref in &manifest.chunks {
@@ -931,21 +1019,25 @@ impl ProtocolClient {
                         let sem = Arc::clone(&semaphore);
                         let client = self.client.clone();
                         let base_url = self.base_url.clone();
-                        
+
                         // Get compressed chunk data (no decompression needed)
                         let chunk_data = odb.get_compressed_chunk(&chunk_id).await?;
 
                         let handle = tokio::spawn(async move {
-                            let _permit = sem.acquire().await
-                                .map_err(|_| anyhow::anyhow!("Semaphore closed during chunk upload"))?;
+                            let _permit = sem.acquire().await.map_err(|_| {
+                                anyhow::anyhow!("Semaphore closed during chunk upload")
+                            })?;
                             let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
-                            
-                            client.put(&url)
+
+                            client
+                                .put(&url)
                                 .body(chunk_data)
                                 .send()
                                 .await
                                 .map(|_| ())
-                                .map_err(|e| anyhow::anyhow!("Failed to upload chunk {}: {}", chunk_id, e))
+                                .map_err(|e| {
+                                    anyhow::anyhow!("Failed to upload chunk {}: {}", chunk_id, e)
+                                })
                         });
 
                         upload_handles.push(handle);
@@ -960,10 +1052,10 @@ impl ProtocolClient {
             }
 
             // Upload manifest last (ensures all chunks exist first)
-            let manifest_data = bincode::serialize(&manifest)
+            let manifest_data = mediagit_versioning::format::serialize(&manifest)
                 .context("Failed to serialize manifest")?;
             self.upload_manifest(oid, &manifest_data).await?;
-            
+
             tracing::debug!(oid = %oid, "Manifest uploaded");
         }
 
@@ -975,9 +1067,12 @@ impl ProtocolClient {
     // ========================================================================
 
     /// Download a manifest from the remote server
-    pub async fn download_manifest(&self, oid: &Oid) -> Result<mediagit_versioning::chunking::ChunkManifest> {
+    pub async fn download_manifest(
+        &self,
+        oid: &Oid,
+    ) -> Result<mediagit_versioning::chunking::ChunkManifest> {
         let url = format!("{}/manifests/{}", self.base_url, oid.to_hex());
-        
+
         let response = self
             .client
             .get(&url)
@@ -986,17 +1081,21 @@ impl ProtocolClient {
             .context(format!("Failed to GET /manifests/{}", oid))?;
 
         if !response.status().is_success() {
-            anyhow::bail!("GET /manifests/{} failed with status: {}", oid, response.status());
+            anyhow::bail!(
+                "GET /manifests/{} failed with status: {}",
+                oid,
+                response.status()
+            );
         }
 
         let data = response.bytes().await?;
-        bincode::deserialize(&data).context("Failed to deserialize manifest")
+        mediagit_versioning::format::deserialize(&data).context("Failed to deserialize manifest")
     }
 
     /// Download a single chunk from the remote server
     pub async fn download_chunk(&self, chunk_id: &Oid) -> Result<Vec<u8>> {
         let url = format!("{}/chunks/{}", self.base_url, chunk_id.to_hex());
-        
+
         let response = self
             .client
             .get(&url)
@@ -1005,14 +1104,18 @@ impl ProtocolClient {
             .context(format!("Failed to GET /chunks/{}", chunk_id))?;
 
         if !response.status().is_success() {
-            anyhow::bail!("GET /chunks/{} failed with status: {}", chunk_id, response.status());
+            anyhow::bail!(
+                "GET /chunks/{} failed with status: {}",
+                chunk_id,
+                response.status()
+            );
         }
 
         Ok(response.bytes().await?.to_vec())
     }
 
     /// Download all chunks for chunked objects with parallel downloads
-    /// 
+    ///
     /// Uses 8 concurrent downloads for optimal throughput (>100MB/s target)
     pub async fn download_chunked_objects<F>(
         &self,
@@ -1039,8 +1142,16 @@ impl ProtocolClient {
             let manifest = self.download_manifest(oid).await?;
             let total_chunks = manifest.chunks.len();
 
-            on_progress(obj_idx + 1, chunked_oids.len(), 
-                &format!("Object {}/{}: {} chunks", obj_idx + 1, chunked_oids.len(), total_chunks));
+            on_progress(
+                obj_idx + 1,
+                chunked_oids.len(),
+                &format!(
+                    "Object {}/{}: {} chunks",
+                    obj_idx + 1,
+                    chunked_oids.len(),
+                    total_chunks
+                ),
+            );
 
             // Check which chunks we already have locally
             let mut missing_chunks: Vec<Oid> = Vec::new();
@@ -1069,22 +1180,27 @@ impl ProtocolClient {
                     let base_url = self.base_url.clone();
 
                     let handle = tokio::spawn(async move {
-                        let _permit = sem.acquire().await
-                            .map_err(|_| anyhow::anyhow!("Semaphore closed during chunk download"))?;
+                        let _permit = sem.acquire().await.map_err(|_| {
+                            anyhow::anyhow!("Semaphore closed during chunk download")
+                        })?;
                         let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
 
-                        let response = client.get(&url)
-                            .send()
-                            .await
-                            .map_err(|e| anyhow::anyhow!("Failed to download chunk {}: {}", chunk_id, e))?;
-                        
+                        let response = client.get(&url).send().await.map_err(|e| {
+                            anyhow::anyhow!("Failed to download chunk {}: {}", chunk_id, e)
+                        })?;
+
                         if !response.status().is_success() {
-                            anyhow::bail!("GET /chunks/{} failed with status: {}", chunk_id, response.status());
+                            anyhow::bail!(
+                                "GET /chunks/{} failed with status: {}",
+                                chunk_id,
+                                response.status()
+                            );
                         }
-                        
-                        let data = response.bytes().await
-                            .map_err(|e| anyhow::anyhow!("Failed to read chunk {}: {}", chunk_id, e))?;
-                        
+
+                        let data = response.bytes().await.map_err(|e| {
+                            anyhow::anyhow!("Failed to read chunk {}: {}", chunk_id, e)
+                        })?;
+
                         Ok::<_, anyhow::Error>((chunk_id, data.to_vec()))
                     });
 
@@ -1101,7 +1217,7 @@ impl ProtocolClient {
 
             // Store manifest locally
             odb.put_manifest(oid, &manifest).await?;
-            
+
             tracing::debug!(oid = %oid, "Chunked object downloaded");
         }
 

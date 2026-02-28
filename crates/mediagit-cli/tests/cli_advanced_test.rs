@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 MediaGit Contributors
 
@@ -17,18 +31,46 @@ fn mediagit() -> Command {
 }
 
 fn init_repo(dir: &Path) {
-    mediagit().arg("init").arg("-q").current_dir(dir).assert().success();
+    mediagit()
+        .arg("init")
+        .arg("-q")
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 fn add_and_commit(dir: &Path, name: &str, content: &str, message: &str) {
     fs::write(dir.join(name), content).unwrap();
-    mediagit().arg("add").arg(name).current_dir(dir).assert().success();
-    mediagit().arg("commit").arg("-m").arg(message).current_dir(dir).assert().success();
+    mediagit()
+        .arg("add")
+        .arg(name)
+        .current_dir(dir)
+        .assert()
+        .success();
+    mediagit()
+        .arg("commit")
+        .arg("-m")
+        .arg(message)
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 fn create_and_switch_branch(dir: &Path, branch_name: &str) {
-    mediagit().arg("branch").arg("create").arg(branch_name).current_dir(dir).assert().success();
-    mediagit().arg("branch").arg("switch").arg(branch_name).current_dir(dir).assert().success();
+    mediagit()
+        .arg("branch")
+        .arg("create")
+        .arg(branch_name)
+        .current_dir(dir)
+        .assert()
+        .success();
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg(branch_name)
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 // ============================================================================
@@ -45,15 +87,37 @@ fn test_rebase_basic() {
 
     // Create feature branch with commits
     create_and_switch_branch(temp_dir.path(), "feature");
-    add_and_commit(temp_dir.path(), "feature.txt", "Feature 1", "Feature commit 1");
-    add_and_commit(temp_dir.path(), "feature2.txt", "Feature 2", "Feature commit 2");
+    add_and_commit(
+        temp_dir.path(),
+        "feature.txt",
+        "Feature 1",
+        "Feature commit 1",
+    );
+    add_and_commit(
+        temp_dir.path(),
+        "feature2.txt",
+        "Feature 2",
+        "Feature commit 2",
+    );
 
     // Switch to main and add commit
-    mediagit().arg("branch").arg("switch").arg("refs/heads/main").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("refs/heads/main")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
     add_and_commit(temp_dir.path(), "main.txt", "Main content", "Main commit");
 
     // Switch back to feature
-    mediagit().arg("branch").arg("switch").arg("feature").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("feature")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     // Rebase onto main
     mediagit()
@@ -138,11 +202,22 @@ fn test_cherrypick_single() {
 
     // Create feature branch with a commit
     create_and_switch_branch(temp_dir.path(), "feature");
-    add_and_commit(temp_dir.path(), "feature.txt", "Feature content", "Feature commit");
+    add_and_commit(
+        temp_dir.path(),
+        "feature.txt",
+        "Feature content",
+        "Feature commit",
+    );
 
     // Get the commit hash (we'll use HEAD)
     // Switch back to main
-    mediagit().arg("branch").arg("switch").arg("refs/heads/main").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("refs/heads/main")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     // Cherry-pick from feature branch
     mediagit()
@@ -166,7 +241,13 @@ fn test_cherrypick_no_commit() {
     create_and_switch_branch(temp_dir.path(), "feature");
     add_and_commit(temp_dir.path(), "feature.txt", "Feature", "Feature commit");
 
-    mediagit().arg("branch").arg("switch").arg("refs/heads/main").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("refs/heads/main")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     mediagit()
         .arg("cherry-pick")
@@ -216,7 +297,12 @@ fn test_bisect_start() {
 
     // Create several commits
     for i in 1..=5 {
-        add_and_commit(temp_dir.path(), &format!("file{}.txt", i), &format!("Content {}", i), &format!("Commit {}", i));
+        add_and_commit(
+            temp_dir.path(),
+            &format!("file{}.txt", i),
+            &format!("Content {}", i),
+            &format!("Commit {}", i),
+        );
     }
 
     mediagit()
@@ -234,7 +320,12 @@ fn test_bisect_start_with_refs() {
     init_repo(temp_dir.path());
 
     for i in 1..=5 {
-        add_and_commit(temp_dir.path(), &format!("file{}.txt", i), &format!("Content {}", i), &format!("Commit {}", i));
+        add_and_commit(
+            temp_dir.path(),
+            &format!("file{}.txt", i),
+            &format!("Content {}", i),
+            &format!("Commit {}", i),
+        );
     }
 
     // Start bisect with bad and good commits
@@ -360,9 +451,24 @@ fn test_track_multiple_patterns() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
 
-    mediagit().arg("track").arg("*.psd").current_dir(temp_dir.path()).assert().success();
-    mediagit().arg("track").arg("*.mp4").current_dir(temp_dir.path()).assert().success();
-    mediagit().arg("track").arg("*.mov").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("track")
+        .arg("*.psd")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("track")
+        .arg("*.mp4")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("track")
+        .arg("*.mov")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 }
 
 #[test]
@@ -370,8 +476,18 @@ fn test_track_list() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
 
-    mediagit().arg("track").arg("*.psd").current_dir(temp_dir.path()).assert().success();
-    mediagit().arg("track").arg("*.mp4").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("track")
+        .arg("*.psd")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("track")
+        .arg("*.mp4")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     mediagit()
         .arg("track")
@@ -415,7 +531,11 @@ fn test_install_force() {
     init_repo(temp_dir.path());
 
     // First install
-    mediagit().arg("install").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("install")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     // Force reinstall
     mediagit()

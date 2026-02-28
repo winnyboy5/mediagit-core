@@ -24,7 +24,11 @@ use tempfile::TempDir;
 /// Create a test repository with some objects
 async fn setup_test_repo() -> (TempDir, Arc<LocalBackend>, ObjectDatabase) {
     let temp_dir = TempDir::new().unwrap();
-    let storage = Arc::new(LocalBackend::new(temp_dir.path().to_str().unwrap()).await.unwrap());
+    let storage = Arc::new(
+        LocalBackend::new(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap(),
+    );
     let odb = ObjectDatabase::new(storage.clone(), 100);
 
     (temp_dir, storage, odb)
@@ -37,9 +41,18 @@ async fn test_fsck_clean_repository() {
     let (_temp_dir, storage, odb) = setup_test_repo().await;
 
     // Write some valid objects
-    let blob1 = odb.write(ObjectType::Blob, b"test content 1").await.unwrap();
-    let _blob2 = odb.write(ObjectType::Blob, b"test content 2").await.unwrap();
-    let _blob3 = odb.write(ObjectType::Blob, b"test content 3").await.unwrap();
+    let blob1 = odb
+        .write(ObjectType::Blob, b"test content 1")
+        .await
+        .unwrap();
+    let _blob2 = odb
+        .write(ObjectType::Blob, b"test content 2")
+        .await
+        .unwrap();
+    let _blob3 = odb
+        .write(ObjectType::Blob, b"test content 3")
+        .await
+        .unwrap();
 
     // Create a commit
     let commit = Commit::new(
@@ -48,12 +61,12 @@ async fn test_fsck_clean_repository() {
         Signature::now("Test".to_string(), "test@example.com".to_string()),
         "Test commit".to_string(),
     );
-    let commit_data = bincode::serialize(&commit).unwrap();
+    let commit_data = mediagit_versioning::format::serialize(&commit).unwrap();
     let commit_oid = odb.write(ObjectType::Commit, &commit_data).await.unwrap();
 
     // Create a reference
     let main_ref = Ref::new_direct("refs/heads/main".to_string(), commit_oid);
-    let ref_data = bincode::serialize(&main_ref).unwrap();
+    let ref_data = mediagit_versioning::format::serialize(&main_ref).unwrap();
     storage.put("refs/heads/main", &ref_data).await.unwrap();
 
     // Run FSCK
@@ -77,7 +90,10 @@ async fn test_fsck_detect_corrupted_object() {
 
     // Corrupt the object by writing different content at the same location
     let corrupted_key = format!("objects/{}", valid_oid.to_path());
-    storage.put(&corrupted_key, b"corrupted data").await.unwrap();
+    storage
+        .put(&corrupted_key, b"corrupted data")
+        .await
+        .unwrap();
 
     // Run FSCK
     let checker = FsckChecker::new(storage);
@@ -89,7 +105,9 @@ async fn test_fsck_detect_corrupted_object() {
 
     let errors = report.issues_by_severity(IssueSeverity::Error);
     assert!(!errors.is_empty());
-    assert!(errors.iter().any(|e| matches!(e.category, IssueCategory::ChecksumMismatch)));
+    assert!(errors
+        .iter()
+        .any(|e| matches!(e.category, IssueCategory::ChecksumMismatch)));
 }
 
 #[tokio::test]
@@ -107,12 +125,12 @@ async fn test_fsck_detect_missing_object() {
         Signature::now("Test".to_string(), "test@example.com".to_string()),
         "Test commit".to_string(),
     );
-    let commit_data = bincode::serialize(&commit).unwrap();
+    let commit_data = mediagit_versioning::format::serialize(&commit).unwrap();
     let commit_oid = odb.write(ObjectType::Commit, &commit_data).await.unwrap();
 
     // Create a reference to the commit
     let main_ref = Ref::new_direct("refs/heads/main".to_string(), commit_oid);
-    let ref_data = bincode::serialize(&main_ref).unwrap();
+    let ref_data = mediagit_versioning::format::serialize(&main_ref).unwrap();
     storage.put("refs/heads/main", &ref_data).await.unwrap();
 
     // Now delete the tree object that the commit references
@@ -121,8 +139,10 @@ async fn test_fsck_detect_missing_object() {
 
     // Run FSCK with connectivity check
     let checker = FsckChecker::new(storage);
-    let mut options = FsckOptions::default();
-    options.check_connectivity = true;
+    let options = FsckOptions {
+        check_connectivity: true,
+        ..Default::default()
+    };
     let report = checker.check(options).await.unwrap();
 
     // Should detect missing tree object
@@ -131,7 +151,9 @@ async fn test_fsck_detect_missing_object() {
 
     let errors = report.issues_by_severity(IssueSeverity::Error);
     assert!(!errors.is_empty());
-    assert!(errors.iter().any(|e| matches!(e.category, IssueCategory::MissingObject)));
+    assert!(errors
+        .iter()
+        .any(|e| matches!(e.category, IssueCategory::MissingObject)));
 }
 
 #[tokio::test]
@@ -141,7 +163,7 @@ async fn test_fsck_detect_broken_reference() {
     // Create a reference pointing to a non-existent commit
     let fake_oid = Oid::hash(b"nonexistent");
     let broken_ref = Ref::new_direct("refs/heads/broken".to_string(), fake_oid);
-    let ref_data = bincode::serialize(&broken_ref).unwrap();
+    let ref_data = mediagit_versioning::format::serialize(&broken_ref).unwrap();
     storage.put("refs/heads/broken", &ref_data).await.unwrap();
 
     // Run FSCK
@@ -154,7 +176,9 @@ async fn test_fsck_detect_broken_reference() {
 
     let errors = report.issues_by_severity(IssueSeverity::Error);
     assert!(!errors.is_empty());
-    assert!(errors.iter().any(|e| matches!(e.category, IssueCategory::BrokenReference)));
+    assert!(errors
+        .iter()
+        .any(|e| matches!(e.category, IssueCategory::BrokenReference)));
 }
 
 #[tokio::test]
@@ -189,12 +213,12 @@ async fn test_fsck_full_mode() {
         Signature::now("Test".to_string(), "test@example.com".to_string()),
         "Test".to_string(),
     );
-    let commit_data = bincode::serialize(&commit).unwrap();
+    let commit_data = mediagit_versioning::format::serialize(&commit).unwrap();
     let commit_oid = odb.write(ObjectType::Commit, &commit_data).await.unwrap();
 
     // Create reference
     let main_ref = Ref::new_direct("refs/heads/main".to_string(), commit_oid);
-    let ref_data = bincode::serialize(&main_ref).unwrap();
+    let ref_data = mediagit_versioning::format::serialize(&main_ref).unwrap();
     storage.put("refs/heads/main", &ref_data).await.unwrap();
 
     // Run full FSCK (includes dangling object detection)
@@ -203,9 +227,9 @@ async fn test_fsck_full_mode() {
 
     // blob2 is dangling (not referenced by any commit)
     let info_issues = report.issues_by_severity(IssueSeverity::Info);
-    assert!(info_issues.iter().any(|e| {
-        matches!(e.category, IssueCategory::DanglingObject) && e.oid == Some(blob2)
-    }));
+    assert!(info_issues
+        .iter()
+        .any(|e| { matches!(e.category, IssueCategory::DanglingObject) && e.oid == Some(blob2) }));
 }
 
 #[tokio::test]
@@ -215,7 +239,7 @@ async fn test_fsck_repair_broken_reference() {
     // Create a broken reference
     let fake_oid = Oid::hash(b"nonexistent");
     let broken_ref = Ref::new_direct("refs/heads/broken".to_string(), fake_oid);
-    let ref_data = bincode::serialize(&broken_ref).unwrap();
+    let ref_data = mediagit_versioning::format::serialize(&broken_ref).unwrap();
     storage.put("refs/heads/broken", &ref_data).await.unwrap();
 
     // Run FSCK
@@ -242,7 +266,7 @@ async fn test_fsck_repair_dry_run() {
     // Create a broken reference
     let fake_oid = Oid::hash(b"nonexistent");
     let broken_ref = Ref::new_direct("refs/heads/broken".to_string(), fake_oid);
-    let ref_data = bincode::serialize(&broken_ref).unwrap();
+    let ref_data = mediagit_versioning::format::serialize(&broken_ref).unwrap();
     storage.put("refs/heads/broken", &ref_data).await.unwrap();
 
     // Run FSCK
@@ -273,7 +297,7 @@ async fn test_fsck_connectivity_check() {
         Signature::now("Test".to_string(), "test@example.com".to_string()),
         "First commit".to_string(),
     );
-    let commit1_data = bincode::serialize(&commit1).unwrap();
+    let commit1_data = mediagit_versioning::format::serialize(&commit1).unwrap();
     let commit1_oid = odb.write(ObjectType::Commit, &commit1_data).await.unwrap();
 
     let commit2 = Commit::with_parents(
@@ -283,18 +307,20 @@ async fn test_fsck_connectivity_check() {
         Signature::now("Test".to_string(), "test@example.com".to_string()),
         "Second commit".to_string(),
     );
-    let commit2_data = bincode::serialize(&commit2).unwrap();
+    let commit2_data = mediagit_versioning::format::serialize(&commit2).unwrap();
     let commit2_oid = odb.write(ObjectType::Commit, &commit2_data).await.unwrap();
 
     // Create reference to commit2
     let main_ref = Ref::new_direct("refs/heads/main".to_string(), commit2_oid);
-    let ref_data = bincode::serialize(&main_ref).unwrap();
+    let ref_data = mediagit_versioning::format::serialize(&main_ref).unwrap();
     storage.put("refs/heads/main", &ref_data).await.unwrap();
 
     // Run FSCK with connectivity check
     let checker = FsckChecker::new(storage);
-    let mut options = FsckOptions::default();
-    options.check_connectivity = true;
+    let options = FsckOptions {
+        check_connectivity: true,
+        ..Default::default()
+    };
 
     let report = checker.check(options).await.unwrap();
 
@@ -310,13 +336,17 @@ async fn test_fsck_max_objects_limit() {
     // Create multiple objects
     for i in 0..10 {
         let content = format!("content {}", i);
-        odb.write(ObjectType::Blob, content.as_bytes()).await.unwrap();
+        odb.write(ObjectType::Blob, content.as_bytes())
+            .await
+            .unwrap();
     }
 
     // Run FSCK with max objects limit
     let checker = FsckChecker::new(storage);
-    let mut options = FsckOptions::default();
-    options.max_objects = 5;
+    let options = FsckOptions {
+        max_objects: 5,
+        ..Default::default()
+    };
 
     let report = checker.check(options).await.unwrap();
 

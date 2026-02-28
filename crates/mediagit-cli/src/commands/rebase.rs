@@ -1,12 +1,28 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
-use mediagit_versioning::{Commit, LcaFinder, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Signature};
+use mediagit_versioning::{
+    Commit, LcaFinder, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Signature,
+};
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use super::super::repo::{create_storage_backend, find_repo_root};
 use super::rebase_state::RebaseState;
-use super::super::repo::{find_repo_root, create_storage_backend};
 
 /// Rebase commits
 #[derive(Parser, Debug)]
@@ -73,9 +89,7 @@ impl RebaseCmd {
 
         // Check if rebase already in progress
         if RebaseState::in_progress(&repo_root) {
-            anyhow::bail!(
-                "A rebase is already in progress. Use --continue, --skip, or --abort."
-            );
+            anyhow::bail!("A rebase is already in progress. Use --continue, --skip, or --abort.");
         }
 
         // Interactive and merge rebases not yet supported
@@ -119,7 +133,9 @@ impl RebaseCmd {
 
         // Find merge base (common ancestor)
         let lca_finder = LcaFinder::new(odb.clone());
-        let merge_bases = lca_finder.find_merge_base(&current_oid, &upstream_oid).await?;
+        let merge_bases = lca_finder
+            .find_merge_base(&current_oid, &upstream_oid)
+            .await?;
 
         if merge_bases.is_empty() {
             anyhow::bail!("No common ancestor found");
@@ -150,10 +166,7 @@ impl RebaseCmd {
         }
 
         if !self.quiet {
-            println!(
-                "  Rebasing {} commit(s)...",
-                commits_to_rebase.len()
-            );
+            println!("  Rebasing {} commit(s)...", commits_to_rebase.len());
         }
 
         // Collect commit OIDs for state tracking
@@ -192,7 +205,9 @@ impl RebaseCmd {
         state.save(&repo_root)?;
 
         // Rebase commits one by one
-        let result = self.apply_commits(&repo_root, &odb, &refdb, &mut state, &commits_to_rebase).await;
+        let result = self
+            .apply_commits(&repo_root, &odb, &refdb, &mut state, &commits_to_rebase)
+            .await;
 
         match result {
             Ok(new_head) => {
@@ -235,7 +250,7 @@ impl RebaseCmd {
     ) -> Result<Oid> {
         let mut new_parent = state.new_parent;
 
-        for (_i, original_commit) in commits.iter().enumerate() {
+        for original_commit in commits.iter() {
             // Update state for current commit
             if !state.commits_remaining.is_empty() {
                 state.advance();
@@ -388,7 +403,8 @@ impl RebaseCmd {
         if state.has_conflicts() {
             anyhow::bail!(
                 "Cannot continue: unresolved conflicts in:\n  {}",
-                state.conflict_files
+                state
+                    .conflict_files
                     .iter()
                     .map(|p| p.display().to_string())
                     .collect::<Vec<_>>()
@@ -401,7 +417,7 @@ impl RebaseCmd {
         }
 
         let storage_path = repo_root.join(".mediagit");
-        let storage = create_storage_backend(&repo_root).await?;
+        let storage = create_storage_backend(repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
         let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
 
@@ -421,16 +437,15 @@ impl RebaseCmd {
             RebaseState::clear(repo_root)?;
 
             if !self.quiet {
-                println!(
-                    "{} Rebase complete",
-                    style("✓").green().bold()
-                );
+                println!("{} Rebase complete", style("✓").green().bold());
             }
             return Ok(());
         }
 
         // Continue applying remaining commits
-        let result = self.apply_commits(repo_root, &odb, &refdb, &mut state, &remaining_commits).await;
+        let result = self
+            .apply_commits(repo_root, &odb, &refdb, &mut state, &remaining_commits)
+            .await;
 
         match result {
             Ok(new_head) => {
@@ -505,5 +520,4 @@ impl RebaseCmd {
 
         Ok(commits)
     }
-
 }

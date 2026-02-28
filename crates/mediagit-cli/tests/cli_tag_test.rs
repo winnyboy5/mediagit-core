@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 MediaGit Contributors
 
@@ -17,13 +31,29 @@ fn mediagit() -> Command {
 }
 
 fn init_repo(dir: &Path) {
-    mediagit().arg("init").arg("-q").current_dir(dir).assert().success();
+    mediagit()
+        .arg("init")
+        .arg("-q")
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 fn add_and_commit(dir: &Path, name: &str, content: &str, message: &str) {
     fs::write(dir.join(name), content).unwrap();
-    mediagit().arg("add").arg(name).current_dir(dir).assert().success();
-    mediagit().arg("commit").arg("-m").arg(message).current_dir(dir).assert().success();
+    mediagit()
+        .arg("add")
+        .arg(name)
+        .current_dir(dir)
+        .assert()
+        .success();
+    mediagit()
+        .arg("commit")
+        .arg("-m")
+        .arg(message)
+        .current_dir(dir)
+        .assert()
+        .success();
 }
 
 // ============================================================================
@@ -135,9 +165,27 @@ fn test_tag_list() {
     add_and_commit(temp_dir.path(), "file.txt", "Content", "Initial commit");
 
     // Create multiple tags
-    mediagit().arg("tag").arg("create").arg("v0.1.0").current_dir(temp_dir.path()).assert().success();
-    mediagit().arg("tag").arg("create").arg("v0.2.0").current_dir(temp_dir.path()).assert().success();
-    mediagit().arg("tag").arg("create").arg("v1.0.0").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("tag")
+        .arg("create")
+        .arg("v0.1.0")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("tag")
+        .arg("create")
+        .arg("v0.2.0")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("tag")
+        .arg("create")
+        .arg("v1.0.0")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     mediagit()
         .arg("tag")
@@ -157,10 +205,34 @@ fn test_tag_list_with_pattern() {
 
     add_and_commit(temp_dir.path(), "file.txt", "Content", "Initial commit");
 
-    mediagit().arg("tag").arg("create").arg("v1.0.0").current_dir(temp_dir.path()).assert().success();
-    mediagit().arg("tag").arg("create").arg("v1.1.0").current_dir(temp_dir.path()).assert().success();
-    mediagit().arg("tag").arg("create").arg("v2.0.0").current_dir(temp_dir.path()).assert().success();
-    mediagit().arg("tag").arg("create").arg("release-1").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("tag")
+        .arg("create")
+        .arg("v1.0.0")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("tag")
+        .arg("create")
+        .arg("v1.1.0")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("tag")
+        .arg("create")
+        .arg("v2.0.0")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("tag")
+        .arg("create")
+        .arg("release-1")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     // List only v1.* tags
     mediagit()
@@ -179,9 +251,27 @@ fn test_tag_list_sorted() {
 
     add_and_commit(temp_dir.path(), "file.txt", "Content", "Initial commit");
 
-    mediagit().arg("tag").arg("create").arg("z-tag").current_dir(temp_dir.path()).assert().success();
-    mediagit().arg("tag").arg("create").arg("a-tag").current_dir(temp_dir.path()).assert().success();
-    mediagit().arg("tag").arg("create").arg("m-tag").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("tag")
+        .arg("create")
+        .arg("z-tag")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("tag")
+        .arg("create")
+        .arg("a-tag")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("tag")
+        .arg("create")
+        .arg("m-tag")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     mediagit()
         .arg("tag")
@@ -200,8 +290,20 @@ fn test_tag_list_reverse() {
 
     add_and_commit(temp_dir.path(), "file.txt", "Content", "Initial commit");
 
-    mediagit().arg("tag").arg("create").arg("v1.0.0").current_dir(temp_dir.path()).assert().success();
-    mediagit().arg("tag").arg("create").arg("v2.0.0").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("tag")
+        .arg("create")
+        .arg("v1.0.0")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("tag")
+        .arg("create")
+        .arg("v2.0.0")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     mediagit()
         .arg("tag")
@@ -223,7 +325,13 @@ fn test_tag_delete() {
 
     add_and_commit(temp_dir.path(), "file.txt", "Content", "Initial commit");
 
-    mediagit().arg("tag").arg("create").arg("to-delete").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("tag")
+        .arg("create")
+        .arg("to-delete")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     // Verify tag exists
     mediagit()
@@ -260,9 +368,27 @@ fn test_tag_delete_multiple() {
 
     add_and_commit(temp_dir.path(), "file.txt", "Content", "Initial commit");
 
-    mediagit().arg("tag").arg("create").arg("tag1").current_dir(temp_dir.path()).assert().success();
-    mediagit().arg("tag").arg("create").arg("tag2").current_dir(temp_dir.path()).assert().success();
-    mediagit().arg("tag").arg("create").arg("tag3").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("tag")
+        .arg("create")
+        .arg("tag1")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("tag")
+        .arg("create")
+        .arg("tag2")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("tag")
+        .arg("create")
+        .arg("tag3")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     // Delete multiple tags
     mediagit()
@@ -324,7 +450,13 @@ fn test_tag_create_force() {
     init_repo(temp_dir.path());
 
     add_and_commit(temp_dir.path(), "file1.txt", "Content 1", "First commit");
-    mediagit().arg("tag").arg("create").arg("v1.0.0").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("tag")
+        .arg("create")
+        .arg("v1.0.0")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     add_and_commit(temp_dir.path(), "file2.txt", "Content 2", "Second commit");
 
@@ -350,7 +482,13 @@ fn test_tag_create_duplicate_fails() {
 
     add_and_commit(temp_dir.path(), "file.txt", "Content", "Initial commit");
 
-    mediagit().arg("tag").arg("create").arg("v1.0.0").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("tag")
+        .arg("create")
+        .arg("v1.0.0")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     // Creating duplicate without force should fail
     mediagit()
@@ -371,7 +509,7 @@ fn test_tag_delete_nonexistent() {
     add_and_commit(temp_dir.path(), "file.txt", "Content", "Initial commit");
 
     // Deleting nonexistent tag - behavior may vary
-    mediagit()
+    let _ = mediagit()
         .arg("tag")
         .arg("delete")
         .arg("nonexistent")
@@ -415,7 +553,13 @@ fn test_tag_list_full() {
     init_repo(temp_dir.path());
 
     add_and_commit(temp_dir.path(), "file.txt", "Content", "Initial commit");
-    mediagit().arg("tag").arg("create").arg("v1.0.0").current_dir(temp_dir.path()).assert().success();
+    mediagit()
+        .arg("tag")
+        .arg("create")
+        .arg("v1.0.0")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 
     // Just list tags (--full may not be supported)
     mediagit()

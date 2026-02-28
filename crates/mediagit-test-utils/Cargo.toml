@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Shared test utilities for MediaGit crates"
+publish = false
 
 [dependencies]
 # Test framework
@@ -15,9 +16,6 @@ tempfile.workspace = true
 
 # Path handling
 dunce = "1.0"
-
-# Async support for server tests
-tokio.workspace = true
 
 [lib]
 name = "mediagit_test_utils"

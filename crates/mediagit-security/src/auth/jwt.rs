@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! JWT (JSON Web Token) authentication implementation
 //!
 //! Provides secure token generation and validation using HMAC-SHA256.
@@ -84,11 +98,7 @@ impl JwtAuth {
     ///
     /// # Returns
     /// JWT token string
-    pub fn generate_token(
-        &self,
-        user_id: &str,
-        permissions: Vec<String>,
-    ) -> AuthResult<String> {
+    pub fn generate_token(&self, user_id: &str, permissions: Vec<String>) -> AuthResult<String> {
         let now = Utc::now();
         let claims = Claims {
             sub: user_id.to_string(),
@@ -158,15 +168,14 @@ impl JwtAuth {
     ///
     /// Expects format: "Bearer <token>"
     pub fn extract_from_header(auth_header: &str) -> AuthResult<&str> {
-        auth_header
-            .strip_prefix("Bearer ")
-            .ok_or_else(|| {
-                AuthError::InvalidToken("Invalid Authorization header format".to_string())
-            })
+        auth_header.strip_prefix("Bearer ").ok_or_else(|| {
+            AuthError::InvalidToken("Invalid Authorization header format".to_string())
+        })
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

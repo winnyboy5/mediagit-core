@@ -1,3 +1,17 @@
+// Copyright (C) 2026  winnyboy5
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // ! Initialize a new MediaGit repository.
 //!
 //! The `init` command creates a new MediaGit repository with the required
@@ -60,15 +74,15 @@ impl InitCmd {
         let repo_path = self.get_repo_path()?;
 
         if !self.quiet {
-            output::header(&format!("Initializing MediaGit repository in {}", repo_path.display()));
+            output::header(&format!(
+                "Initializing MediaGit repository in {}",
+                repo_path.display()
+            ));
         }
 
         // Check if already initialized
         if repo_path.join(".mediagit").exists() {
-            anyhow::bail!(
-                "Repository already initialized at {}",
-                repo_path.display()
-            );
+            anyhow::bail!("Repository already initialized at {}", repo_path.display());
         }
 
         // Create repository structure
@@ -78,7 +92,8 @@ impl InitCmd {
         // Initialize storage backend (local for now)
         // LocalBackend will create the "objects" directory automatically
         let storage_path = repo_path.join(".mediagit");
-        let storage: Arc<dyn mediagit_storage::StorageBackend> = Arc::new(LocalBackend::new(&storage_path).await?);
+        let storage: Arc<dyn mediagit_storage::StorageBackend> =
+            Arc::new(LocalBackend::new(&storage_path).await?);
 
         // Initialize object database
         let _odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
@@ -121,8 +136,7 @@ impl InitCmd {
             .context(format!("Failed to create directory: {}", path.display()))?;
         // Use dunce::canonicalize for cross-platform compatibility
         // This avoids Windows \\?\ prefix in display paths
-        dunce::canonicalize(&path)
-            .context("Failed to canonicalize path")
+        dunce::canonicalize(&path).context("Failed to canonicalize path")
     }
 
     fn create_directory_structure(&self, repo_path: &Path) -> Result<()> {
@@ -131,14 +145,12 @@ impl InitCmd {
         let mediagit_dir = repo_path.join(".mediagit");
 
         // Create main directories
-        fs::create_dir(&mediagit_dir)
-            .context("Failed to create .mediagit directory")?;
+        fs::create_dir(&mediagit_dir).context("Failed to create .mediagit directory")?;
 
         fs::create_dir(mediagit_dir.join("objects"))
             .context("Failed to create objects directory")?;
 
-        fs::create_dir(mediagit_dir.join("refs"))
-            .context("Failed to create refs directory")?;
+        fs::create_dir(mediagit_dir.join("refs")).context("Failed to create refs directory")?;
 
         fs::create_dir(mediagit_dir.join("refs/heads"))
             .context("Failed to create refs/heads directory")?;
@@ -155,22 +167,22 @@ impl InitCmd {
     fn create_default_config(&self, repo_path: &Path, _initial_branch: &str) -> Result<()> {
         info!("Creating default configuration");
 
-        let mut config = Config::default();
-
         // Configure filesystem storage
-        config.storage = StorageConfig::FileSystem(FileSystemStorage {
-            base_path: repo_path.join(".mediagit/objects").display().to_string(),
-            create_dirs: true,
-            sync: false,
-            file_permissions: "0644".to_string(),
-        });
+        let config = Config {
+            storage: StorageConfig::FileSystem(FileSystemStorage {
+                base_path: repo_path.join(".mediagit/objects").display().to_string(),
+                create_dirs: true,
+                sync: false,
+                file_permissions: "0644".to_string(),
+            }),
+            ..Config::default()
+        };
 
         let config_path = repo_path.join(".mediagit/config.toml");
-        let config_content = toml::to_string_pretty(&config)
-            .context("Failed to serialize config")?;
+        let config_content =
+            toml::to_string_pretty(&config).context("Failed to serialize config")?;
 
-        fs::write(&config_path, config_content)
-            .context("Failed to write config file")?;
+        fs::write(&config_path, config_content).context("Failed to write config file")?;
 
         Ok(())
     }
