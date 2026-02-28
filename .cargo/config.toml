@@ -1,26 +1,103 @@
-[build]
-# Limit parallel codegen/link jobs.
-# Default is one job per logical CPU; on machines with ≤16 GB RAM this causes OOM
-# when linking heavy test binaries (e2e_backends_test links aws-lc-sys + ring +
-# openssl-sys + reqwest + rustls simultaneously).
-jobs = 2
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║  mediagit-core — Cargo Build Configuration                         ║
+# ║  Optimised for fast builds across Windows, Linux, macOS, and WSL.  ║
+# ╚══════════════════════════════════════════════════════════════════════╝
+#
+# ── Memory tuning ────────────────────────────────────────────────────
+# Parallelism auto-detects CPU count (best for 16+ GB RAM machines).
+# Low-RAM override examples (add to your shell profile or .env):
+#   ≤ 8 GB RAM  →  export CARGO_BUILD_JOBS=2
+#   8–16 GB RAM →  export CARGO_BUILD_JOBS=4
+# CI already sets CARGO_BUILD_JOBS=2 via workflow env.
+#
+# ── WSL2 tip ─────────────────────────────────────────────────────────
+# Always clone to the WSL-native filesystem (~/projects/...), NOT
+# /mnt/c/..., which uses the 9P bridge and is 5–50× slower for I/O.
+# WSL2 uses the x86_64-unknown-linux-gnu target triple — the Linux
+# settings below apply identically.
 
-# ── Linux ────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════
+# 1. Global build settings
+# ═════════════════════════════════════════════════════════════════════
+[build]
+# Uncomment if you have sccache installed (cargo install sccache):
+# rustc-wrapper = "sccache"
+
+# ═════════════════════════════════════════════════════════════════════
+# 2. Linux x86_64 (native + WSL2)
+# ═════════════════════════════════════════════════════════════════════
+# Uses lld for 2–5× faster linking.
+# Prerequisites: sudo apt install lld clang
+# If clang/lld are NOT installed, comment out `linker` and the first
+# two rustflags entries — builds will fall back to the default linker.
 [target.x86_64-unknown-linux-gnu]
-# Write DWARF debug info to separate .dwo files instead of embedding it in the
-# output binary.  This cuts linker peak RAM by 50–70% for debug builds, which is
-# the main cause of "LLVM ERROR: IO failure: Cannot allocate memory" on the
-# e2e_backends_test link step.
+linker = "clang"
+rustflags = [
+    "-C", "link-arg=-fuse-ld=lld",
+    "-C", "split-debuginfo=unpacked",
+]
+
+# ═════════════════════════════════════════════════════════════════════
+# 3. Linux aarch64 (cross-compile / ARM servers)
+# ═════════════════════════════════════════════════════════════════════
+[target.aarch64-unknown-linux-gnu]
 rustflags = ["-C", "split-debuginfo=unpacked"]
 
-# ── Windows ──────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════
+# 4. Windows x86_64 MSVC
+# ═════════════════════════════════════════════════════════════════════
+# rust-lld ships with Rust ≥1.85 — no extra install required.
+# 1.5–3× faster linking than the default MSVC link.exe.
+# If you encounter linking issues with native C deps, comment out
+# the linker line to fall back to link.exe.
 [target.x86_64-pc-windows-msvc]
-# Disable incremental linking on Windows; the default /INCREMENTAL causes
-# link.exe to memory-map the entire previous binary, doubling peak RAM usage
-# for large binaries like mediagit-server and mediagit-cli.
-rustflags = ["-C", "link-arg=/INCREMENTAL:NO"]
+linker = "rust-lld"
+rustflags = [
+    # Disable incremental linking — link.exe/lld memory-maps the
+    # previous binary, doubling peak RAM for large binaries.
+    "-C", "link-arg=/INCREMENTAL:NO",
+]
 
+# ═════════════════════════════════════════════════════════════════════
+# 5. macOS x86_64
+# ═════════════════════════════════════════════════════════════════════
+# Apple linker (Xcode 15+) is already fast; no custom linker needed.
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "split-debuginfo=unpacked"]
+
+# ═════════════════════════════════════════════════════════════════════
+# 6. macOS aarch64 (Apple Silicon)
+# ═════════════════════════════════════════════════════════════════════
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "split-debuginfo=unpacked"]
+
+# ═════════════════════════════════════════════════════════════════════
+# 7. Network & Registry
+# ═════════════════════════════════════════════════════════════════════
+[registries.crates-io]
+protocol = "sparse"              # Faster index updates (default since 1.70)
+
+[net]
+git-fetch-with-cli = true        # Use system git (faster, better proxy support)
+retry = 3                        # Retry failed network requests
+
+# ═════════════════════════════════════════════════════════════════════
+# 8. Command aliases
+# ═════════════════════════════════════════════════════════════════════
+[alias]
+b  = "build"
+c  = "check"
+t  = "test"
+r  = "run"
+rr = "run --release"
+ta = "test --workspace --all-features"
+cl = "clippy --workspace --all-targets --all-features -- -D warnings"
+
+# ═════════════════════════════════════════════════════════════════════
+# 9. Environment
+# ═════════════════════════════════════════════════════════════════════
 [env]
-# Limit proptest cases to reduce memory usage during test execution.
-# Default is 256; lower values prevent additional OOM during test execution.
+# Limit proptest case count to prevent OOM during test execution.
+# Default is 256; 32 keeps memory stable on ≤8 GB machines.
+# Override per-run: PROPTEST_CASES=256 cargo test
 PROPTEST_CASES = "32"
