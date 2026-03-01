@@ -93,11 +93,24 @@ mediagit add --jobs $(nproc) --all
 
 ## How do I undo a commit?
 
-MediaGit does not yet have a built-in revert or reset command. To recover from a bad commit, check out an earlier commit:
+MediaGit provides two commands for undoing commits:
 
+**Revert** — creates a new commit that undoes a previous commit (preserves history):
 ```bash
-mediagit log           # find the target commit hash
-mediagit checkout <hash>
+mediagit revert <commit-hash>   # undo a specific commit
+```
+
+**Reset** — moves the current branch pointer backward (rewrites history):
+```bash
+mediagit reset --soft HEAD~1    # undo commit but keep changes staged
+mediagit reset --mixed HEAD~1   # undo commit and unstage changes (default)
+mediagit reset --hard HEAD~1    # undo commit and discard changes
+```
+
+For recovering specific files from an earlier commit, use `mediagit show`:
+```bash
+mediagit log --oneline          # find the target commit hash
+mediagit show <hash>:<path>     # inspect a file from that commit
 ```
 
 ---

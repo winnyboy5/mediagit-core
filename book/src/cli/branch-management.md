@@ -7,6 +7,12 @@ Commands for working with branches.
 - [branch](./branch.md) - Create, list, delete, rename branches
 - [merge](./merge.md) - Merge branches together
 - [rebase](./rebase.md) - Rebase branch onto another
+- [cherry-pick](./cherry-pick.md) - Apply specific commits from another branch
+- [bisect](./bisect.md) - Binary search to find a regression-introducing commit
+- [stash](./stash.md) - Save and restore uncommitted changes
+- [reset](./reset.md) - Reset branch pointer to a commit
+- [revert](./revert.md) - Undo a commit by creating an inverse commit
+- [tag](./tag.md) - Create and manage tags
 
 ## Typical Workflow
 
