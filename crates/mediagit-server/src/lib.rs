@@ -29,13 +29,11 @@
 //! ```no_run
 //! use mediagit_server::{create_router, AppState};
 //! use std::sync::Arc;
+//! use std::path::PathBuf;
 //!
-//! # async fn example() -> anyhow::Result<()> {
-//! let state = Arc::new(AppState::new("/data/repos", Default::default()).await?);
+//! let state = Arc::new(AppState::new(PathBuf::from("/data/repos")));
 //! let app = create_router(state);
 //! // Serve with: axum::serve(listener, app).await
-//! # Ok(())
-//! # }
 //! ```
 
 // Library exports for mediagit-server
