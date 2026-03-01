@@ -1,17 +1,16 @@
-// Copyright (C) 2026  winnyboy5
+// MediaGit - Git for Media Files
+// Copyright (C) 2025 MediaGit Contributors
 //
 // This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 //
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 //! Certificate generation and management
 //!
 //! Handles self-signed certificate generation for development
@@ -183,7 +182,6 @@ impl CertificateBuilder {
 
     /// Generate self-signed certificate
     #[cfg(feature = "tls")]
-    #[allow(clippy::unwrap_used)]
     pub fn generate_self_signed(self) -> TlsResult<Certificate> {
         // Create certificate parameters
         let mut params = CertificateParams::default();
@@ -192,7 +190,13 @@ impl CertificateBuilder {
         params.subject_alt_names = self
             .san_dns_names
             .iter()
-            .map(|name| rcgen::SanType::DnsName(name.clone().try_into().unwrap()))
+            .map(|name| {
+                rcgen::SanType::DnsName(
+                    name.clone()
+                        .try_into()
+                        .expect("SAN DNS names must be valid RFC 5280 DNS names"),
+                )
+            })
             .collect();
 
         // Set distinguished name

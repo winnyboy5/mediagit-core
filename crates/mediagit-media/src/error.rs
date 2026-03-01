@@ -63,5 +63,29 @@ pub enum MediaError {
     SerializationError(String),
 }
 
+impl MediaError {
+    /// Returns `true` if this is an unsupported format error.
+    pub fn is_unsupported(&self) -> bool {
+        matches!(self, Self::UnsupportedFormat(_))
+    }
+
+    /// Returns `true` if this is an I/O error.
+    pub fn is_io_error(&self) -> bool {
+        matches!(self, Self::IoError(_))
+    }
+
+    /// Returns `true` if this is a parse/format error.
+    pub fn is_parse_error(&self) -> bool {
+        matches!(
+            self,
+            Self::ImageError(_)
+                | Self::PsdError(_)
+                | Self::VideoError(_)
+                | Self::AudioError(_)
+                | Self::InvalidStructure(_)
+        )
+    }
+}
+
 /// Result type for media operations
 pub type Result<T> = std::result::Result<T, MediaError>;

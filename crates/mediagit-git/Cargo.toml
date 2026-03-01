@@ -8,6 +8,7 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
+description = "Git migration support: filter drivers and pointer files"
 
 [dependencies]
 # Git library (with vendored openssl to avoid system dependencies)

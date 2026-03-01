@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
 description = "Prometheus metrics and performance monitoring for MediaGit"
 
 [dependencies]
@@ -22,7 +25,7 @@ axum = { workspace = true }
 
 [dev-dependencies]
 criterion.workspace = true
-reqwest = "0.12"
+reqwest = { workspace = true }
 
 [[bench]]
 name = "metrics_overhead"

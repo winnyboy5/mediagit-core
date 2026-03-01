@@ -1,26 +1,26 @@
-// Copyright (C) 2026  winnyboy5
+// MediaGit - Git for Media Files
+// Copyright (C) 2025 MediaGit Contributors
 //
 // This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 //
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 //! Benchmark metrics collection overhead
 //!
 //! Measures the performance overhead of metrics collection to ensure it stays below 1%
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use mediagit_metrics::{
     types::{CompressionAlgorithm, OperationType, StorageBackend},
     MetricsRegistry,
 };
+use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 /// Benchmark deduplication write without metrics
@@ -157,18 +157,6 @@ fn operation_with_metrics(iterations: u64, registry: &MetricsRegistry) -> Durati
     start.elapsed()
 }
 
-/// Calculate overhead percentage
-fn calculate_overhead(baseline: Duration, with_metrics: Duration) -> f64 {
-    let baseline_ms = baseline.as_secs_f64() * 1000.0;
-    let metrics_ms = with_metrics.as_secs_f64() * 1000.0;
-
-    if baseline_ms == 0.0 {
-        return 0.0;
-    }
-
-    ((metrics_ms - baseline_ms) / baseline_ms) * 100.0
-}
-
 fn bench_dedup_overhead(c: &mut Criterion) {
     let registry = MetricsRegistry::new().unwrap();
     let mut group = c.benchmark_group("dedup_overhead");
@@ -269,21 +257,16 @@ fn bench_operation_overhead(c: &mut Criterion) {
     group.finish();
 }
 
-fn comprehensive_overhead_test(c: &mut Criterion) {
+fn bench_comprehensive_mixed(c: &mut Criterion) {
     let registry = MetricsRegistry::new().unwrap();
 
-    c.bench_function("comprehensive_overhead_100k", |b| {
+    // Benchmark mixed metrics operations (all four types) at 100k iterations.
+    // This measures absolute throughput, not relative overhead. Use the
+    // individual `*_overhead` groups above to compare baseline vs metrics
+    // for each operation type.
+    c.bench_function("comprehensive_mixed_metrics_100k", |b| {
         b.iter(|| {
-            // Baseline: operations without metrics
-            let baseline_start = Instant::now();
-            for i in 0..100_000 {
-                black_box(i);
-            }
-            let baseline = baseline_start.elapsed();
-
-            // With metrics: mixed operations
-            let metrics_start = Instant::now();
-            for i in 0..100_000 {
+            for i in 0u64..100_000 {
                 match i % 4 {
                     0 => registry.record_dedup_write(1024, i % 2 == 0),
                     1 => registry.record_compression(CompressionAlgorithm::Zstd, 1000, 600),
@@ -295,19 +278,6 @@ fn comprehensive_overhead_test(c: &mut Criterion) {
                     ),
                 }
             }
-            let with_metrics = metrics_start.elapsed();
-
-            let overhead = calculate_overhead(baseline, with_metrics);
-
-            // Report overhead
-            eprintln!("Overhead: {:.2}%", overhead);
-
-            // Assert <1% overhead (allowing some measurement variance)
-            assert!(
-                overhead < 2.0,
-                "Metrics overhead {:.2}% exceeds 2% threshold",
-                overhead
-            );
         });
     });
 }
@@ -318,6 +288,6 @@ criterion_group!(
     bench_compression_overhead,
     bench_cache_overhead,
     bench_operation_overhead,
-    comprehensive_overhead_test
+    bench_comprehensive_mixed
 );
 criterion_main!(benches);

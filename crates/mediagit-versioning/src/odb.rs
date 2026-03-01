@@ -3164,9 +3164,10 @@ impl ObjectDatabase {
         Ok(oids)
     }
 
-    /// Parse OID from object path (DEPRECATED - kept for compatibility)
+    /// Parse OID from object path.
     ///
-    /// Converts "objects/ab/cdef..." to "abcdef..." OR just returns the key if it's already a hex string
+    /// Converts "objects/ab/cdef..." to "abcdef..." OR just returns the key if it's already a hex string.
+    #[deprecated(since = "0.1.0", note = "use Oid::from_path() instead")]
     #[allow(dead_code)]
     fn parse_oid_from_path(path: &str) -> Option<String> {
         // New behavior: if path doesn't contain "/", it's already a hex OID

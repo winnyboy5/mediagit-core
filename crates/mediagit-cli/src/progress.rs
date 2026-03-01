@@ -1,26 +1,48 @@
-// Copyright (C) 2026  winnyboy5
+// MediaGit - Git for Media Files
+// Copyright (C) 2025 MediaGit Contributors
 //
 // This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 //
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 use chrono::{DateTime, Utc};
 use indicatif::{
-    HumanBytes, HumanCount, HumanDuration, MultiProgress, ProgressBar, ProgressDrawTarget,
-    ProgressFinish, ProgressStyle,
+    HumanBytes, HumanDuration, MultiProgress, ProgressBar, ProgressDrawTarget, ProgressFinish,
+    ProgressStyle,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Standard progress bar templates used across all CLI commands.
+/// All bars use 40-char width, "█▓░" characters, 100ms tick, stderr output.
+mod templates {
+    /// Bytes-based progress for downloads and streaming transfers.
+    pub const DOWNLOAD: &str =
+        "{spinner:.cyan} {msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})";
+
+    /// Bytes-based progress for staging (`add`) operations.
+    pub const ADD: &str =
+        "{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%) {msg}";
+
+    /// Item-count progress for object processing (pack, delta, chunk transfer).
+    pub const OBJECTS: &str =
+        "{spinner:.yellow} {msg} [{bar:40.yellow/blue}] {pos}/{len} ({percent}%)";
+
+    /// Item-count progress for file operations (add, gc, stats, verify).
+    pub const FILES: &str =
+        "{spinner:.magenta} {msg} [{bar:40.magenta/blue}] {pos}/{len} files ({percent}%)";
+
+    /// Indeterminate spinner for operations without a known total.
+    pub const SPINNER: &str = "{spinner:.cyan} {msg}";
+}
 
 /// Progress tracker for Git operations
 pub struct ProgressTracker {
@@ -42,17 +64,13 @@ impl ProgressTracker {
         }
     }
 
-    /// Create progress bar for download operations
-    pub fn download_bar(&self, msg: &str) -> ProgressBar {
-        if self.quiet {
-            return ProgressBar::hidden();
-        }
-
-        let pb = self.multi.add(ProgressBar::new(0));
+    /// Shared implementation for determinate progress bars.
+    fn make_bar_impl(&self, total: u64, msg: &str, template: &str) -> ProgressBar {
+        let pb = self.multi.add(ProgressBar::new(total));
         pb.set_style(
             ProgressStyle::default_bar()
-                .template("{spinner:.cyan} {msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
-                .unwrap()
+                .template(template)
+                .expect("valid progress template")
                 .progress_chars("█▓░"),
         );
         pb.set_message(msg.to_string());
@@ -60,23 +78,23 @@ impl ProgressTracker {
         pb
     }
 
-    /// Create progress bar for upload operations
-    #[allow(dead_code)]
-    pub fn upload_bar(&self, msg: &str) -> ProgressBar {
+    /// Create progress bar for download operations
+    pub fn download_bar(&self, msg: &str) -> ProgressBar {
         if self.quiet {
             return ProgressBar::hidden();
         }
+        self.make_bar_impl(0, msg, templates::DOWNLOAD)
+    }
 
-        let pb = self.multi.add(ProgressBar::new(0));
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} {msg} [{bar:40.green/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
-                .unwrap()
-                .progress_chars("█▓░"),
-        );
-        pb.set_message(msg.to_string());
-        pb.enable_steady_tick(Duration::from_millis(100));
-        pb
+    /// Create progress bar for staging (`add`) operations.
+    ///
+    /// Unlike `download_bar`, the total byte count is known upfront and set as the bar's length,
+    /// allowing percentage display. The returned bar is suitable for wrapping in `Arc`.
+    pub fn add_bar(&self, msg: &str, total_bytes: u64) -> ProgressBar {
+        if self.quiet {
+            return ProgressBar::hidden();
+        }
+        self.make_bar_impl(total_bytes, msg, templates::ADD)
     }
 
     /// Create progress bar for object processing
@@ -84,17 +102,7 @@ impl ProgressTracker {
         if self.quiet {
             return ProgressBar::hidden();
         }
-
-        let pb = self.multi.add(ProgressBar::new(total));
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.yellow} {msg} [{bar:40.yellow/blue}] {pos}/{len} ({percent}%)")
-                .unwrap()
-                .progress_chars("█▓░"),
-        );
-        pb.set_message(msg.to_string());
-        pb.enable_steady_tick(Duration::from_millis(100));
-        pb
+        self.make_bar_impl(total, msg, templates::OBJECTS)
     }
 
     /// Create progress bar for file operations
@@ -102,82 +110,7 @@ impl ProgressTracker {
         if self.quiet {
             return ProgressBar::hidden();
         }
-
-        let pb = self.multi.add(ProgressBar::new(total));
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.magenta} {msg} [{bar:40.magenta/blue}] {pos}/{len} files ({percent}%)")
-                .unwrap()
-                .progress_chars("█▓░"),
-        );
-        pb.set_message(msg.to_string());
-        pb.enable_steady_tick(Duration::from_millis(100));
-        pb
-    }
-
-    /// Create progress bar for verification operations (fsck, verify)
-    #[allow(dead_code)]
-    pub fn verify_bar(&self, msg: &str, total: u64) -> ProgressBar {
-        if self.quiet {
-            return ProgressBar::hidden();
-        }
-
-        let pb = self.multi.add(
-            ProgressBar::new(total).with_finish(ProgressFinish::WithMessage("✓ verified".into())),
-        );
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.blue} {msg} [{bar:40.blue/cyan}] {pos}/{len} ({percent}%, {per_sec})")
-                .unwrap()
-                .progress_chars("█▓░"),
-        );
-        pb.set_message(msg.to_string());
-        pb.enable_steady_tick(Duration::from_millis(100));
-        pb
-    }
-
-    /// Create progress bar for merge/rebase operations
-    #[allow(dead_code)]
-    pub fn merge_bar(&self, msg: &str, total: u64) -> ProgressBar {
-        if self.quiet {
-            return ProgressBar::hidden();
-        }
-
-        let pb = self.multi.add(
-            ProgressBar::new(total).with_finish(ProgressFinish::WithMessage("✓ complete".into())),
-        );
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.magenta} {msg} [{bar:40.magenta/blue}] {pos}/{len}")
-                .unwrap()
-                .progress_chars("█▓░"),
-        );
-        pb.set_message(msg.to_string());
-        pb.enable_steady_tick(Duration::from_millis(100));
-        pb
-    }
-
-    /// Create progress bar for streaming I/O operations
-    /// Suitable for use with wrap_read()/wrap_write()
-    #[allow(dead_code)]
-    pub fn io_bar(&self, msg: &str, total_bytes: u64) -> ProgressBar {
-        if self.quiet {
-            return ProgressBar::hidden();
-        }
-
-        let pb = self.multi.add(
-            ProgressBar::new(total_bytes)
-                .with_finish(ProgressFinish::WithMessage("✓ complete".into())),
-        );
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.cyan} {msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec})")
-                .unwrap()
-                .progress_chars("█▓░"),
-        );
-        pb.set_message(msg.to_string());
-        pb.enable_steady_tick(Duration::from_millis(100));
-        pb
+        self.make_bar_impl(total, msg, templates::FILES)
     }
 
     /// Create spinner for indeterminate operations
@@ -192,24 +125,12 @@ impl ProgressTracker {
             .add(ProgressBar::new_spinner().with_finish(ProgressFinish::AndClear));
         pb.set_style(
             ProgressStyle::default_spinner()
-                .template("{spinner:.cyan} {msg}")
-                .unwrap(),
+                .template(templates::SPINNER)
+                .expect("valid spinner template"),
         );
         pb.set_message(msg.to_string());
         pb.enable_steady_tick(Duration::from_millis(100));
         pb
-    }
-
-    /// Check if progress bars are hidden (quiet mode)
-    #[allow(dead_code)]
-    pub fn is_quiet(&self) -> bool {
-        self.quiet
-    }
-
-    /// Format a count with thousands separators
-    #[allow(dead_code)]
-    pub fn format_count(count: u64) -> String {
-        format!("{}", HumanCount(count))
     }
 }
 
@@ -232,7 +153,7 @@ fn default_timestamp() -> DateTime<Utc> {
 }
 
 impl OperationStats {
-    #[allow(dead_code)]
+    #[allow(dead_code)] // used in tests only
     pub fn new() -> Self {
         Self {
             timestamp: Utc::now(),
