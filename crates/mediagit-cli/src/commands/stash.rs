@@ -454,12 +454,22 @@ impl StashCmd {
         let mediagit_dir = repo_root.join(".mediagit");
 
         if !opts.force {
-            // Prompt for confirmation
+            // Prompt for confirmation — fall back gracefully when stdin is not a terminal
             use dialoguer::Confirm;
-            let confirmed = Confirm::new()
+            let confirmed = match Confirm::new()
                 .with_prompt("Clear all stash entries?")
                 .default(false)
-                .interact()?;
+                .interact()
+            {
+                Ok(answer) => answer,
+                Err(_) => {
+                    // Non-interactive context (pipe, script, CI) — require --force to proceed
+                    eprintln!(
+                        "stdin is not a terminal. Use 'mediagit stash clear --force' to clear without confirmation."
+                    );
+                    return Ok(());
+                }
+            };
 
             if !confirmed {
                 println!("Cancelled");

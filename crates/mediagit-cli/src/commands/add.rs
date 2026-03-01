@@ -778,6 +778,14 @@ impl AddCmd {
             "jpg" | "jpeg" | "png" | "webp" | "gif" => false,
             // Archives: No delta benefit (skip)
             "zip" | "gz" | "bz2" | "7z" | "rar" => false,
+            // PDF-container formats (AI, InDesign, PDF):
+            // These embed DEFLATE-compressed streams internally; any content change
+            // reshuffles the compressed bytes, reducing byte-level similarity.
+            // For small files (<50 MB) the delta attempt yields negligible savings and
+            // wastes CPU — skip. For large files (≥50 MB) even partial similarity
+            // (e.g., unchanged embedded images) can save tens of MB, so attempt delta
+            // and let the 80% benefit gate reject it if the delta is not worthwhile.
+            "ai" | "ait" | "indd" | "idml" | "indt" | "pdf" => data.len() > 50 * 1024 * 1024,
             // 3D text-based formats: Excellent delta candidates
             "obj" | "gltf" | "dae" | "ply" | "stl" | "stp" | "step" => true,
             // 3D binary formats: Moderate delta candidates

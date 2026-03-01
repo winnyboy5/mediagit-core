@@ -134,7 +134,7 @@ impl BisectCmd {
 
         // Resolve bad commit (defaults to HEAD)
         let bad_oid = if let Some(ref bad_ref) = opts.bad {
-            self.resolve_commit(&refdb, bad_ref).await?
+            self.resolve_commit(&refdb, &repo_root, bad_ref).await?
         } else {
             original_head
         };
@@ -150,7 +150,7 @@ impl BisectCmd {
 
         // If good commit provided, mark it and start bisecting
         if let Some(ref good_ref) = opts.good {
-            let good_oid = self.resolve_commit(&refdb, good_ref).await?;
+            let good_oid = self.resolve_commit(&refdb, &repo_root, good_ref).await?;
             state.good_commits.push(good_oid.to_hex());
             state.log_entry(format!(
                 "start: bad={}, good={}",
@@ -193,7 +193,7 @@ impl BisectCmd {
 
         // Get commit to mark as good
         let good_oid = if let Some(ref commit_ref) = opts.commit {
-            self.resolve_commit(&refdb, commit_ref).await?
+            self.resolve_commit(&refdb, &repo_root, commit_ref).await?
         } else {
             // Use current commit
             refdb.resolve("HEAD").await?
@@ -233,7 +233,7 @@ impl BisectCmd {
 
         // Get commit to mark as bad
         let bad_oid = if let Some(ref commit_ref) = opts.commit {
-            self.resolve_commit(&refdb, commit_ref).await?
+            self.resolve_commit(&refdb, &repo_root, commit_ref).await?
         } else {
             refdb.resolve("HEAD").await?
         };
@@ -272,7 +272,7 @@ impl BisectCmd {
 
         // Get commit to skip
         let skip_oid = if let Some(ref commit_ref) = opts.commit {
-            self.resolve_commit(&refdb, commit_ref).await?
+            self.resolve_commit(&refdb, &repo_root, commit_ref).await?
         } else {
             refdb.resolve("HEAD").await?
         };
@@ -305,7 +305,7 @@ impl BisectCmd {
         // Determine reset target
         let reset_oid = if let Some(ref commit_ref) = opts.commit {
             let refdb = RefDatabase::new(&mediagit_dir);
-            self.resolve_commit(&refdb, commit_ref).await?
+            self.resolve_commit(&refdb, &repo_root, commit_ref).await?
         } else {
             Oid::from_hex(&state.original_head)?
         };
@@ -542,8 +542,13 @@ impl BisectCmd {
         Ok(())
     }
 
-    async fn resolve_commit(&self, refdb: &RefDatabase, commit_ref: &str) -> Result<Oid> {
-        // Try direct OID first
+    async fn resolve_commit(
+        &self,
+        refdb: &RefDatabase,
+        repo_root: &std::path::Path,
+        commit_ref: &str,
+    ) -> Result<Oid> {
+        // Try full 64-char hex OID first
         if let Ok(oid) = Oid::from_hex(commit_ref) {
             return Ok(oid);
         }
@@ -560,11 +565,44 @@ impl BisectCmd {
             return refdb.resolve(&tag_ref).await;
         }
 
-        // Try resolving directly
+        // Try short hash prefix matching (e.g., 7-char hashes from `log --oneline`)
+        let looks_like_hex = commit_ref.len() >= 4
+            && commit_ref.len() < 64
+            && commit_ref.chars().all(|c| c.is_ascii_hexdigit());
+        if looks_like_hex {
+            if let Ok(storage) = create_storage_backend(repo_root).await {
+                if let Ok(keys) = storage.list_objects(commit_ref).await {
+                    let matches: Vec<_> = keys
+                        .into_iter()
+                        .filter(|k| k.starts_with(commit_ref) && k.len() == 64)
+                        .collect();
+                    match matches.len() {
+                        1 => {
+                            if let Ok(oid) = Oid::from_hex(&matches[0]) {
+                                return Ok(oid);
+                            }
+                        }
+                        n if n > 1 => {
+                            anyhow::bail!(
+                                "Ambiguous short hash '{}' matches {} objects. Use a longer prefix.",
+                                commit_ref,
+                                n
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // Try resolving directly via refdb
         refdb
             .resolve(commit_ref)
             .await
-            .context(format!("Cannot resolve commit reference: {}", commit_ref))
+            .context(format!(
+                "Cannot resolve commit reference: {}: Reference not found: {}",
+                commit_ref, commit_ref
+            ))
     }
 }
 

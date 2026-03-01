@@ -105,7 +105,7 @@ impl CherryPickCmd {
         let mut picked_commits = Vec::new();
         for commit_ref in &self.commits {
             let commit_oid = self
-                .resolve_commit(&refdb, commit_ref)
+                .resolve_commit(&refdb, repo_root, commit_ref)
                 .await
                 .context(format!("Failed to resolve commit: {}", commit_ref))?;
 
@@ -490,8 +490,13 @@ impl CherryPickCmd {
         Ok(())
     }
 
-    async fn resolve_commit(&self, refdb: &RefDatabase, commit_ref: &str) -> Result<Oid> {
-        // Try direct OID first
+    async fn resolve_commit(
+        &self,
+        refdb: &RefDatabase,
+        repo_root: &std::path::Path,
+        commit_ref: &str,
+    ) -> Result<Oid> {
+        // Try full 64-char hex OID first
         if let Ok(oid) = Oid::from_hex(commit_ref) {
             return Ok(oid);
         }
@@ -508,7 +513,37 @@ impl CherryPickCmd {
             return refdb.resolve(&tag_ref).await;
         }
 
-        // Try resolving directly
+        // Try short hash prefix matching (e.g., 7-char hashes from `log --oneline`)
+        let looks_like_hex = commit_ref.len() >= 4
+            && commit_ref.len() < 64
+            && commit_ref.chars().all(|c| c.is_ascii_hexdigit());
+        if looks_like_hex {
+            if let Ok(storage) = create_storage_backend(repo_root).await {
+                if let Ok(keys) = storage.list_objects(commit_ref).await {
+                    let matches: Vec<_> = keys
+                        .into_iter()
+                        .filter(|k| k.starts_with(commit_ref) && k.len() == 64)
+                        .collect();
+                    match matches.len() {
+                        1 => {
+                            if let Ok(oid) = Oid::from_hex(&matches[0]) {
+                                return Ok(oid);
+                            }
+                        }
+                        n if n > 1 => {
+                            anyhow::bail!(
+                                "Ambiguous short hash '{}' matches {} objects. Use a longer prefix.",
+                                commit_ref,
+                                n
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // Try resolving directly via refdb
         refdb
             .resolve(commit_ref)
             .await
