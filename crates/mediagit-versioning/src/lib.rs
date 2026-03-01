@@ -11,6 +11,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
 
+#![allow(missing_docs)]
 //! Versioning and object database for MediaGit
 //!
 //! This crate implements the core version control functionality:

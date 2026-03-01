@@ -11,6 +11,8 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
 
+#![allow(missing_docs)] // binary crate — documentation is in book/ not rustdoc
+
 mod commands;
 mod output;
 mod progress;

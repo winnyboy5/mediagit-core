@@ -1,25 +1,21 @@
-// Copyright (C) 2026  winnyboy5
+// MediaGit - Git for Media Files
+// Copyright (C) 2025 MediaGit Contributors
 //
 // This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 //
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// Week 2 Milestone Integration Test
-// Tests: Object Database + Compression + Commits + Trees + Branches + Pack Files
-//
-// This integration test validates the complete Week 2 milestone by testing
-// all components working together in a realistic version control workflow.
+
+//! Week 2 Milestone Integration Test.
+//! Tests: Object Database + Compression + Commits + Trees + Branches + Pack Files.
+//!
+//! This integration test validates the complete Week 2 milestone by testing
+//! all components working together in a realistic version control workflow.
 
 use mediagit_storage::mock::MockBackend;
 use mediagit_versioning::{

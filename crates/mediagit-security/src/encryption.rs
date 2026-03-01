@@ -48,7 +48,7 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
 };
 use rand::{thread_rng, RngCore};
-use secrecy::{ExposeSecret, SecretVec};
+use secrecy::{ExposeSecret, SecretBox};
 use thiserror::Error;
 use tracing::debug;
 
@@ -73,34 +73,40 @@ const STREAM_THRESHOLD: usize = CHUNK_SIZE;
 /// Encryption errors
 #[derive(Error, Debug)]
 pub enum EncryptionError {
+    /// AES-GCM encryption operation failed.
     #[error("Encryption failed: {0}")]
     EncryptionFailed(String),
 
+    /// AES-GCM decryption or authentication tag verification failed.
     #[error("Decryption failed: {0}")]
     DecryptionFailed(String),
 
+    /// Key byte length was not `KEY_SIZE` (32 bytes).
     #[error("Invalid key size: expected {KEY_SIZE}, got {0}")]
     InvalidKeySize(usize),
 
+    /// Ciphertext is malformed or truncated (missing nonce, tag, or version byte).
     #[error("Invalid ciphertext: {0}")]
     InvalidCiphertext(String),
 
+    /// Ciphertext was produced by a newer version of this encryption format.
     #[error("Unsupported encryption version: {0}")]
     UnsupportedVersion(u8),
 
+    /// OS random number generator failed (extremely rare).
     #[error("Random number generation failed: {0}")]
     RandomGenerationFailed(String),
 }
 
 /// Encryption key wrapper with secure memory handling
 pub struct EncryptionKey {
-    key: SecretVec<u8>,
+    key: SecretBox<Vec<u8>>,
 }
 
 impl Clone for EncryptionKey {
     fn clone(&self) -> Self {
         Self {
-            key: SecretVec::new(self.key.expose_secret().to_vec()),
+            key: SecretBox::new(Box::new(self.key.expose_secret().clone())),
         }
     }
 }
@@ -117,7 +123,7 @@ impl EncryptionKey {
         }
 
         Ok(Self {
-            key: SecretVec::new(bytes),
+            key: SecretBox::new(Box::new(bytes)),
         })
     }
 
@@ -131,7 +137,7 @@ impl EncryptionKey {
             .map_err(|e| EncryptionError::RandomGenerationFailed(e.to_string()))?;
 
         Ok(Self {
-            key: SecretVec::new(key_bytes),
+            key: SecretBox::new(Box::new(key_bytes)),
         })
     }
 
@@ -142,7 +148,7 @@ impl EncryptionKey {
     /// This exposes the key material. Only use when necessary and ensure
     /// the exposed bytes are properly zeroized after use.
     pub(crate) fn expose_key(&self) -> &[u8] {
-        self.key.expose_secret()
+        self.key.expose_secret().as_slice()
     }
 }
 

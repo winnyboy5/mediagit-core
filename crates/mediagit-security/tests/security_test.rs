@@ -1,19 +1,15 @@
-// Copyright (C) 2026  winnyboy5
+// MediaGit - Git for Media Files
+// Copyright (C) 2025 MediaGit Contributors
 //
 // This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 //
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
-// SPDX-License-Identifier: AGPL-3.0-only
-// Copyright (C) 2025 MediaGit Contributors
 
 #![allow(clippy::unwrap_used, clippy::assertions_on_constants)]
 //! Integration tests for mediagit-security crate
@@ -147,7 +143,7 @@ fn test_salt_generation() {
 
 #[test]
 fn test_key_derivation() {
-    let password = SecretString::new("strong_password_123".to_string());
+    let password = SecretString::from("strong_password_123".to_string());
     let salt = Salt::generate().unwrap();
     let params = Argon2Params::testing(); // Use testing params for speed
 
@@ -157,13 +153,13 @@ fn test_key_derivation() {
 
 #[test]
 fn test_key_derivation_deterministic() {
-    let password = SecretString::new("same_password".to_string());
+    let password = SecretString::from("same_password".to_string());
     let salt = Salt::from_bytes(vec![0x42u8; 16]).unwrap();
     let params = Argon2Params::testing();
 
     let _key1 = derive_key(&password, &salt, params).unwrap();
 
-    let password2 = SecretString::new("same_password".to_string());
+    let password2 = SecretString::from("same_password".to_string());
     let salt2 = Salt::from_bytes(vec![0x42u8; 16]).unwrap();
     let _key2 = derive_key(&password2, &salt2, params).unwrap();
 
@@ -180,10 +176,10 @@ fn test_key_derivation_different_passwords() {
     let salt = Salt::from_bytes(vec![0x42u8; 16]).unwrap();
     let params = Argon2Params::testing();
 
-    let password1 = SecretString::new("password1".to_string());
+    let password1 = SecretString::from("password1".to_string());
     let _ = derive_key(&password1, &salt, params).unwrap();
 
-    let password2 = SecretString::new("password2".to_string());
+    let password2 = SecretString::from("password2".to_string());
     let salt2 = Salt::from_bytes(vec![0x42u8; 16]).unwrap();
     let _ = derive_key(&password2, &salt2, params).unwrap();
 

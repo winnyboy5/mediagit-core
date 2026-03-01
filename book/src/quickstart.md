@@ -70,10 +70,9 @@ Output:
 On branch main
 
 Changes to be committed:
-  (use "mediagit restore --staged <file>..." to unstage)
-        new file:   my-video.mp4
-        new file:   images/photo1.jpg
-        new file:   images/photo2.jpg
+  new file:   my-video.mp4
+  new file:   images/photo1.jpg
+  new file:   images/photo2.jpg
 ```
 
 ### 4. Commit Changes

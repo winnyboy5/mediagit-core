@@ -36,8 +36,6 @@
 //! output::detail("Commits", "42");
 //! ```
 
-#![allow(dead_code)] // Functions used by commands, not all implemented yet
-
 use console::style;
 
 /// Print a success message with green checkmark emoji.

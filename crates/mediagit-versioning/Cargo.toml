@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Core VCS engine: ODB, refs, commits, trees, and packs"
 
 [dependencies]
 mediagit-storage = { path = "../mediagit-storage" }

@@ -1,17 +1,41 @@
-// Copyright (C) 2026  winnyboy5
+// MediaGit - Git for Media Files
+// Copyright (C) 2025 MediaGit Contributors
 //
 // This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 //
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+#![allow(missing_docs)]
+//! Axum REST API server for MediaGit repositories.
+//!
+//! Provides HTTP endpoints for push, pull, clone, and repository management.
+//! Includes rate limiting, authentication middleware, and CORS support.
+//!
+//! # Middleware Stack (applied in order)
+//!
+//! 1. `TraceLayer` — request/response logging via `tracing`
+//! 2. `RateLimitLayer` — per-IP rate limiting via `governor`
+//! 3. `AuthLayer` — JWT or API key authentication (skipped for `/health` and `/auth/*`)
+//! 4. `DefaultBodyLimit` — 10 GiB cap on request bodies
+//!
+//! # Quick Start
+//!
+//! ```no_run
+//! use mediagit_server::{create_router, AppState};
+//! use std::sync::Arc;
+//! use std::path::PathBuf;
+//!
+//! let state = Arc::new(AppState::new(PathBuf::from("/data/repos")));
+//! let app = create_router(state);
+//! // Serve with: axum::serve(listener, app).await
+//! ```
+
 // Library exports for mediagit-server
 // This allows integration tests to use server components
 
