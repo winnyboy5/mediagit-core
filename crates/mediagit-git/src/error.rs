@@ -1,19 +1,15 @@
-﻿// Copyright (C) 2026  winnyboy5
+// MediaGit - Git for Media Files
+// Copyright (C) 2025 MediaGit Contributors
 //
 // This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 //
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
-// SPDX-License-Identifier: AGPL-3.0
-// Copyright (C) 2025 MediaGit Contributors
 
 //! Error types for Git integration
 
@@ -68,4 +64,21 @@ pub enum GitError {
     /// Invalid repository state
     #[error("Invalid repository state: {0}")]
     InvalidRepositoryState(String),
+}
+
+impl GitError {
+    /// Returns `true` if this is a repository-not-found error.
+    pub fn is_repo_not_found(&self) -> bool {
+        matches!(self, Self::RepositoryNotFound(_))
+    }
+
+    /// Returns `true` if this is an invalid OID format error.
+    pub fn is_invalid_oid(&self) -> bool {
+        matches!(self, Self::InvalidOid(_))
+    }
+
+    /// Returns `true` if this is a filter driver error.
+    pub fn is_filter_error(&self) -> bool {
+        matches!(self, Self::FilterFailed(_) | Self::FilterNotConfigured(_))
+    }
 }

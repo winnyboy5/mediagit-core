@@ -14,11 +14,12 @@
 #![allow(clippy::unwrap_used)]
 //! Compression benchmarks comparing Zstd vs Brotli vs Adaptive
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use mediagit_compression::{
     adaptive::AdaptiveCompressor, BrotliCompressor, CompressionLevel, CompressionProfile,
     Compressor, ObjectType, PerObjectTypeCompressor, TypeAwareCompressor, ZstdCompressor,
 };
+use std::hint::black_box;
 
 /// Generate test data with specified pattern
 fn generate_test_data(size: usize, pattern: &str) -> Vec<u8> {

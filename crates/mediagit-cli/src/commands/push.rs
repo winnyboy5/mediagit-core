@@ -1,18 +1,18 @@
-// Copyright (C) 2026  winnyboy5
+// MediaGit - Git for Media Files
+// Copyright (C) 2025 MediaGit Contributors
 //
 // This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 //
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 use super::super::repo::{create_storage_backend, find_repo_root};
+use super::utils::validate_ref_name;
 use crate::progress::{OperationStats, ProgressTracker};
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -21,46 +21,6 @@ use mediagit_protocol::PushPhase;
 use mediagit_versioning::RefDatabase;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-/// Validate a ref name for safety
-/// Ref names must not contain special characters that could cause filesystem issues
-fn validate_ref_name(name: &str) -> Result<()> {
-    // Empty ref names are invalid
-    if name.is_empty() {
-        anyhow::bail!("Ref name cannot be empty");
-    }
-
-    // Check for prohibited characters that could cause filesystem issues
-    // Based on git's ref naming rules
-    let prohibited_chars = ['\\', ':', '?', '*', '"', '<', '>', '|', '\0'];
-    for c in prohibited_chars {
-        if name.contains(c) {
-            anyhow::bail!("Ref name '{}' contains prohibited character '{}'", name, c);
-        }
-    }
-
-    // Check for prohibited patterns
-    if name.starts_with('.') || name.ends_with('.') {
-        anyhow::bail!("Ref name '{}' cannot start or end with '.'", name);
-    }
-    if name.starts_with('/') || name.ends_with('/') {
-        anyhow::bail!("Ref name '{}' cannot start or end with '/'", name);
-    }
-    if name.contains("..") {
-        anyhow::bail!("Ref name '{}' cannot contain '..'", name);
-    }
-    if name.contains("//") {
-        anyhow::bail!("Ref name '{}' cannot contain consecutive '/'", name);
-    }
-    if name.ends_with(".lock") {
-        anyhow::bail!("Ref name '{}' cannot end with '.lock'", name);
-    }
-    if name.contains("@{") {
-        anyhow::bail!("Ref name '{}' cannot contain '@{{'", name);
-    }
-
-    Ok(())
-}
 
 /// Update remote references and send objects
 ///

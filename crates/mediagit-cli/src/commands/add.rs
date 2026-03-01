@@ -1,25 +1,24 @@
-﻿// Copyright (C) 2026  winnyboy5
+// MediaGit - Git for Media Files
+// Copyright (C) 2025 MediaGit Contributors
 //
 // This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 //
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 //! Stage file contents for commit.
 //!
 //! The `add` command stages changes to files for inclusion in the next commit.
 
+use super::super::progress::ProgressTracker;
 use super::super::repo::{create_storage_backend, find_repo_root};
 use anyhow::{Context, Result};
 use clap::Parser;
-use indicatif::{ProgressBar, ProgressStyle};
 use mediagit_versioning::{
     ChunkStrategy, Commit, Index, IndexEntry, ObjectDatabase, ObjectType, Oid, RefDatabase, Tree,
 };
@@ -27,7 +26,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Add file contents to the staging area
 ///
@@ -210,16 +208,9 @@ impl AddCmd {
         };
 
         // Create progress bar
-        let progress_bar = if !self.quiet && !self.dry_run && total_files > 0 {
-            let pb = ProgressBar::new(total_bytes);
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%) {msg}")
-                    .unwrap()
-                    .progress_chars("█▓░"),
-            );
-            pb.enable_steady_tick(Duration::from_millis(100));
-            pb.set_message(format!("0/{} files", total_files));
+        let progress_bar = if !self.dry_run && total_files > 0 {
+            let tracker = ProgressTracker::new(self.quiet);
+            let pb = tracker.add_bar(&format!("0/{} files", total_files), total_bytes);
             Some(Arc::new(pb))
         } else {
             None

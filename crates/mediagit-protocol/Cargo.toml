@@ -8,6 +8,7 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
+description = "Network push/pull/clone protocol implementation"
 
 [dependencies]
 # Workspace dependencies
@@ -18,7 +19,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 
 # Protocol-specific dependencies
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { workspace = true }
 tokio-util = { version = "0.7", features = ["io"] }
 futures = "0.3"
 

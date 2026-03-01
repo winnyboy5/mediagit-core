@@ -11,6 +11,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
 
+#![allow(missing_docs)]
 //! Intelligent compression for MediaGit
 //!
 //! This crate provides compression abstractions and implementations:

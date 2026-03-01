@@ -1,55 +1,25 @@
-// Copyright (C) 2026  winnyboy5
+// MediaGit - Git for Media Files
+// Copyright (C) 2025 MediaGit Contributors
 //
 // This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 //
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 use super::super::repo::{create_storage_backend, find_repo_root};
+use super::utils::{categorize_extension, format_duration_ago};
 use anyhow::Result;
-use chrono::Duration;
 use clap::Parser;
 use console::style;
 use indicatif::HumanBytes;
 use mediagit_versioning::{Commit, ObjectDatabase, Oid, RefDatabase, Tree};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-
-/// Format a duration as a human-readable "time ago" string
-fn format_duration_ago(duration: Duration) -> String {
-    let secs = duration.num_seconds();
-    if secs < 60 {
-        format!("{} seconds ago", secs)
-    } else if secs < 3600 {
-        format!("{} minutes ago", secs / 60)
-    } else if secs < 86400 {
-        format!("{} hours ago", secs / 3600)
-    } else {
-        format!("{} days ago", secs / 86400)
-    }
-}
-
-/// Categorize a file extension into a broad media type group
-fn categorize_extension(ext: &str) -> &'static str {
-    match ext.to_lowercase().as_str() {
-        "mp4" | "mov" | "avi" | "mkv" | "webm" | "flv" | "wmv" | "m4v" | "mxf" | "r3d" => "video",
-        "wav" | "aiff" | "aif" | "mp3" | "flac" | "ogg" | "m4a" | "aac" | "opus" => "audio",
-        "jpg" | "jpeg" | "png" | "tif" | "tiff" | "bmp" | "webp" | "heic" | "raw" | "dng"
-        | "cr2" | "nef" | "arw" => "image",
-        "psd" | "psb" | "ai" | "ait" | "indd" | "idml" | "eps" | "pdf" | "xd" => "creative",
-        "glb" | "gltf" | "fbx" | "obj" | "blend" | "ma" | "mb" | "abc" | "usd" | "usda"
-        | "usdc" | "usdz" | "stl" | "ply" => "3d",
-        "docx" | "xlsx" | "pptx" | "doc" | "xls" | "ppt" | "odt" | "ods" | "odp" => "office",
-        _ => "other",
-    }
-}
 
 /// Show repository statistics
 #[derive(Parser, Debug)]

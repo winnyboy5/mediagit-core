@@ -8,6 +8,7 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
+description = "Axum REST API server for MediaGit repositories"
 
 [lib]
 name = "mediagit_server"
@@ -51,11 +52,11 @@ rustls = { version = "0.23", features = ["ring"] }
 # Internal dependencies
 mediagit-protocol = { path = "../mediagit-protocol" }
 mediagit-versioning = { path = "../mediagit-versioning" }
-mediagit-storage = { path = "../mediagit-storage" }
+mediagit-storage = { path = "../mediagit-storage", features = ["all"] }
 mediagit-config = { path = "../mediagit-config" }
 mediagit-security = { path = "../mediagit-security", features = ["all"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-reqwest = { version = "0.12", features = ["rustls-tls"] }
+reqwest = { workspace = true }
 futures = "0.3"
