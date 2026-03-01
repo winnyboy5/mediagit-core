@@ -596,13 +596,10 @@ impl BisectCmd {
         }
 
         // Try resolving directly via refdb
-        refdb
-            .resolve(commit_ref)
-            .await
-            .context(format!(
-                "Cannot resolve commit reference: {}: Reference not found: {}",
-                commit_ref, commit_ref
-            ))
+        refdb.resolve(commit_ref).await.context(format!(
+            "Cannot resolve commit reference: {}: Reference not found: {}",
+            commit_ref, commit_ref
+        ))
     }
 }
 
