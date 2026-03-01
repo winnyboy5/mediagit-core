@@ -11,6 +11,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
 
+#![allow(missing_docs)]
 //! Storage abstraction layer for MediaGit
 //!
 //! This crate provides a unified, asynchronous storage interface that supports multiple backends:
@@ -102,10 +103,12 @@
 //! }
 //! ```
 
+#[cfg(feature = "azure")]
 pub mod azure;
 pub mod b2_spaces;
 pub mod cache;
 pub mod error;
+#[cfg(feature = "gcs")]
 pub mod gcs;
 pub mod local;
 pub mod minio;
@@ -115,9 +118,11 @@ pub mod s3;
 use async_trait::async_trait;
 use std::fmt::Debug;
 
+#[cfg(feature = "azure")]
 pub use azure::AzureBackend;
 pub use b2_spaces::B2SpacesBackend;
 pub use error::{StorageError, StorageResult};
+#[cfg(feature = "gcs")]
 pub use gcs::GcsBackend;
 pub use local::LocalBackend;
 pub use minio::MinIOBackend;

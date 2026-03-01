@@ -11,15 +11,27 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
 
-//! Media-aware merge intelligence for MediaGit
+#![allow(missing_docs)]
+//! Media-aware merge intelligence for MediaGit.
 //!
-//! This crate provides:
-//! - Image metadata parsing (EXIF, IPTC, XMP)
-//! - PSD layer detection and merging
-//! - Video timeline parsing
-//! - Audio track merging
-//! - Perceptual hashing for similarity detection
-//! - Format-specific merge strategies
+//! This crate provides format-specific metadata extraction and merge strategies
+//! for binary media files, enabling semantically correct three-way merges
+//! instead of byte-level conflicts.
+//!
+//! # Capabilities
+//!
+//! - **Image**: EXIF, IPTC, XMP metadata parsing; perceptual hash similarity
+//! - **PSD**: Photoshop layer detection and layer-aware merging
+//! - **Video**: Timeline parsing for MOV, MP4, MXF, R3D formats
+//! - **Audio**: Track merging for WAV, AIFF, FLAC, MP3
+//! - **3D Models**: GLB, FBX, OBJ, USD scene graph analysis
+//! - **Merge Strategies**: Per-format `MergeStrategy` selected by file extension
+//!
+//! # Key Types
+//!
+//! - [`strategy::MergeStrategy`] — enum of all supported merge strategies;
+//!   use `MergeStrategy::from_extension("psd")` to select the right one
+//! - [`error::MediaError`] — unified error type for all parse failures
 
 pub mod audio;
 pub mod error;

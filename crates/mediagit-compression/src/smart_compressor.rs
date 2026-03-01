@@ -21,6 +21,7 @@ use std::fmt;
 use std::path::Path;
 
 /// Object/File type classification for compression strategy selection
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ObjectType {
     // Already compressed image formats (lossy)
@@ -521,6 +522,7 @@ impl ObjectType {
 }
 
 /// Object category for high-level classification
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ObjectCategory {
     Image,

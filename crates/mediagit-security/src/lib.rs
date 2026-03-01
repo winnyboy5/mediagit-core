@@ -1,17 +1,35 @@
-// Copyright (C) 2026  winnyboy5
+// MediaGit - Git for Media Files
+// Copyright (C) 2025 MediaGit Contributors
 //
 // This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 //
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+#![allow(missing_docs)]
+//! Authentication, encryption, and audit trail for MediaGit.
+//!
+//! Provides security primitives for protecting repository data at rest
+//! and in transit, plus authentication for remote operations.
+//!
+//! # Components
+//!
+//! - **Encryption**: AES-256-GCM symmetric encryption with Argon2id key derivation
+//! - **Authentication**: JWT tokens and API key verification (`auth` feature)
+//! - **TLS**: Certificate management for secure transport (`tls` feature)
+//! - **Audit**: Structured audit trail for security-sensitive operations
+//!
+//! # Security Model
+//!
+//! Keys are never logged or serialized in plaintext. [`encryption::EncryptionKey`]
+//! wraps raw key material and only exposes it through `expose_key()` to make
+//! accidental leakage difficult.
+
 // Re-export encryption and KDF modules
 pub mod encryption;
 pub mod kdf;

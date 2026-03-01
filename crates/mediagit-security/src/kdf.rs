@@ -50,15 +50,19 @@ const SALT_SIZE: usize = 16;
 /// Key derivation errors
 #[derive(Error, Debug)]
 pub enum KdfError {
+    /// Argon2id computation failed (e.g., memory allocation or parameter rejection).
     #[error("Key derivation failed: {0}")]
     DerivationFailed(String),
 
+    /// Password was empty or otherwise invalid for key derivation.
     #[error("Invalid password")]
     InvalidPassword,
 
+    /// Salt bytes were the wrong length or could not be parsed.
     #[error("Invalid salt: {0}")]
     InvalidSalt(String),
 
+    /// Argon2 parameter values (memory, iterations, parallelism) were out of range.
     #[error("Parameter configuration error: {0}")]
     ParameterError(String),
 }
@@ -182,7 +186,7 @@ impl Salt {
 /// use mediagit_security::kdf::{derive_key, Salt, Argon2Params};
 /// use secrecy::SecretString;
 ///
-/// let password = SecretString::new("my-secure-password".to_string());
+/// let password = SecretString::from("my-secure-password".to_string());
 /// let salt = Salt::generate().unwrap();
 /// let params = Argon2Params::default();
 ///
@@ -365,7 +369,9 @@ impl Default for KeyCache {
 /// Cache statistics
 #[derive(Debug, Clone)]
 pub struct CacheStats {
+    /// Current number of cached key derivation results.
     pub entries: usize,
+    /// Maximum number of entries the cache is allowed to hold.
     pub max_entries: usize,
 }
 
@@ -390,7 +396,7 @@ mod tests {
 
     #[test]
     fn test_derive_key() {
-        let password = SecretString::new("test-password".to_string());
+        let password = SecretString::from("test-password".to_string());
         let salt = Salt::generate().unwrap();
         let params = Argon2Params::testing(); // Fast for tests
 
@@ -400,7 +406,7 @@ mod tests {
 
     #[test]
     fn test_derive_key_deterministic() {
-        let password = SecretString::new("test-password".to_string());
+        let password = SecretString::from("test-password".to_string());
         let salt = Salt::from_bytes(vec![42u8; SALT_SIZE]).unwrap();
         let params = Argon2Params::testing();
 
@@ -412,7 +418,7 @@ mod tests {
 
     #[test]
     fn test_derive_key_different_salts() {
-        let password = SecretString::new("test-password".to_string());
+        let password = SecretString::from("test-password".to_string());
         let salt1 = Salt::generate().unwrap();
         let salt2 = Salt::generate().unwrap();
         let params = Argon2Params::testing();
@@ -425,8 +431,8 @@ mod tests {
 
     #[test]
     fn test_derive_key_different_passwords() {
-        let password1 = SecretString::new("password1".to_string());
-        let password2 = SecretString::new("password2".to_string());
+        let password1 = SecretString::from("password1".to_string());
+        let password2 = SecretString::from("password2".to_string());
         let salt = Salt::from_bytes(vec![42u8; SALT_SIZE]).unwrap();
         let params = Argon2Params::testing();
 
@@ -439,7 +445,7 @@ mod tests {
     #[tokio::test]
     async fn test_key_cache() {
         let cache = KeyCache::new();
-        let password = SecretString::new("test-password".to_string());
+        let password = SecretString::from("test-password".to_string());
         let salt = Salt::generate().unwrap();
         let params = Argon2Params::testing();
 
@@ -458,7 +464,7 @@ mod tests {
     #[tokio::test]
     async fn test_cache_clear() {
         let cache = KeyCache::new();
-        let password = SecretString::new("test-password".to_string());
+        let password = SecretString::from("test-password".to_string());
         let salt = Salt::generate().unwrap();
         let params = Argon2Params::testing();
 

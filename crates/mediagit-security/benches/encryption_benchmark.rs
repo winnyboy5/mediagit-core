@@ -1,17 +1,16 @@
-// Copyright (C) 2026  winnyboy5
+// MediaGit - Git for Media Files
+// Copyright (C) 2025 MediaGit Contributors
 //
 // This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 //
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 #![allow(clippy::unwrap_used)]
 //! Encryption and KDF performance benchmarks
 //!
@@ -20,12 +19,13 @@
 //! - Stream encryption performance for large objects
 //! - Argon2id key derivation with different parameters
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use mediagit_security::{
     encryption::{decrypt, encrypt, EncryptionKey},
     kdf::{derive_key, Argon2Params, Salt},
 };
 use secrecy::SecretString;
+use std::hint::black_box;
 
 /// Benchmark key generation
 fn bench_key_generation(c: &mut Criterion) {
@@ -123,7 +123,7 @@ fn bench_round_trip(c: &mut Criterion) {
 
 /// Benchmark Argon2id key derivation with different parameters
 fn bench_kdf(c: &mut Criterion) {
-    let password = SecretString::new("benchmark-password-12345".to_string());
+    let password = SecretString::from("benchmark-password-12345".to_string());
     let salt = Salt::generate().unwrap();
 
     let mut group = c.benchmark_group("argon2id_kdf");

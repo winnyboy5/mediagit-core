@@ -5,6 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Unified async storage backend trait and implementations"
+
+[features]
+azure = ["dep:azure_storage", "dep:azure_storage_blobs", "dep:azure_core"]
+gcs = ["dep:google-cloud-storage", "dep:google-cloud-auth"]
+all = ["azure", "gcs"]
 
 [dependencies]
 tokio.workspace = true
@@ -18,17 +27,28 @@ bytes = "1.7"
 memmap2 = "0.9"
 futures = "0.3"
 
-azure_storage_blobs = "0.21"
-azure_storage = "0.21"
-azure_core = "0.21"
-google-cloud-storage = "0.24"
-google-cloud-auth = "0.17"
+azure_storage_blobs = { version = "0.21", optional = true }
+azure_storage = { version = "0.21", optional = true }
+azure_core = { version = "0.21", optional = true }
+google-cloud-storage = { version = "0.24", optional = true }
+google-cloud-auth = { version = "0.17", optional = true }
 serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-criterion = { version = "0.5", features = ["async_tokio"] }
-# azure_storage = "0.21"
+criterion = { version = "0.8", features = ["async_tokio"] }
+
+[[test]]
+name = "azure_azurite_tests"
+required-features = ["azure"]
+
+[[test]]
+name = "gcs_emulator_tests"
+required-features = ["gcs"]
+
+[[test]]
+name = "gcs_integration_tests"
+required-features = ["gcs"]
 
 [[bench]]
 name = "cache_bench"
