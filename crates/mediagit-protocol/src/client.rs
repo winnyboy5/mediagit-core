@@ -72,15 +72,20 @@ impl ProtocolClient {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                // Cap idle connections per host to match max concurrent downloads.
+                // On Windows, each socket registers with IOCP; unbounded idle
+                // connections exhaust kernel handles (OS error 1450).
+                .pool_max_idle_per_host(if cfg!(target_os = "windows") { 4 } else { 8 })
+                .tcp_keepalive(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 
     /// Get all refs from the remote repository
     pub async fn get_refs(&self) -> Result<RefsResponse> {
-        println!("Fetching refs from {}", self.base_url);
         let url = format!("{}/info/refs", self.base_url);
-        println!("Fetching url from {}", url);
         tracing::debug!("GET {}", url);
 
         let response = self
@@ -958,16 +963,18 @@ impl ProtocolClient {
     where
         F: FnMut(usize, usize, &str),
     {
-        use std::sync::Arc;
-        use tokio::sync::Semaphore;
+        use futures::stream::StreamExt;
 
         if chunked_oids.is_empty() {
             return Ok(0);
         }
 
         let mut total_chunks_uploaded = 0;
-        let concurrent_uploads = 8;
-        let semaphore = Arc::new(Semaphore::new(concurrent_uploads));
+        // Lower concurrency on Windows to avoid IOCP kernel handle exhaustion
+        // (OS error 1450 / ERROR_NO_SYSTEM_RESOURCES). Spawning all tasks
+        // upfront with a semaphore-inside pattern registers all N futures with
+        // the IOCP driver at once; buffer_unordered limits active futures to N.
+        let concurrent_uploads: usize = if cfg!(target_os = "windows") { 4 } else { 8 };
 
         for (obj_idx, oid) in chunked_oids.iter().enumerate() {
             // Get manifest for this object
@@ -1007,27 +1014,27 @@ impl ProtocolClient {
                     "Uploading missing chunks"
                 );
 
-                // Upload missing chunks in parallel
+                // Upload missing chunks with bounded concurrency.
+                // buffer_unordered keeps at most `concurrent_uploads` futures
+                // active at once, preventing Windows IOCP handle exhaustion
+                // that occurs when all tasks are spawned upfront.
                 let missing_set: std::collections::HashSet<String> =
                     missing_chunks.into_iter().collect();
-                let mut upload_handles = Vec::new();
+                let chunks_to_upload: Vec<Oid> = manifest
+                    .chunks
+                    .iter()
+                    .filter(|c| missing_set.contains(&c.id.to_hex()))
+                    .map(|c| c.id)
+                    .collect();
 
-                for chunk_ref in &manifest.chunks {
-                    if missing_set.contains(&chunk_ref.id.to_hex()) {
-                        let chunk_id = chunk_ref.id;
-                        let sem = Arc::clone(&semaphore);
+                let results: Vec<anyhow::Result<()>> = futures::stream::iter(chunks_to_upload)
+                    .map(|chunk_id| {
                         let client = self.client.clone();
                         let base_url = self.base_url.clone();
-
-                        // Get compressed chunk data (no decompression needed)
-                        let chunk_data = odb.get_compressed_chunk(&chunk_id).await?;
-
-                        let handle = tokio::spawn(async move {
-                            let _permit = sem.acquire().await.map_err(|_| {
-                                anyhow::anyhow!("Semaphore closed during chunk upload")
-                            })?;
+                        let odb = odb.clone();
+                        async move {
+                            let chunk_data = odb.get_compressed_chunk(&chunk_id).await?;
                             let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
-
                             client
                                 .put(&url)
                                 .body(chunk_data)
@@ -1037,15 +1044,14 @@ impl ProtocolClient {
                                 .map_err(|e| {
                                     anyhow::anyhow!("Failed to upload chunk {}: {}", chunk_id, e)
                                 })
-                        });
+                        }
+                    })
+                    .buffer_unordered(concurrent_uploads)
+                    .collect()
+                    .await;
 
-                        upload_handles.push(handle);
-                    }
-                }
-
-                // Wait for all uploads to complete
-                for handle in upload_handles {
-                    handle.await??;
+                for result in results {
+                    result?;
                     total_chunks_uploaded += 1;
                 }
             }
@@ -1125,16 +1131,18 @@ impl ProtocolClient {
     where
         F: FnMut(usize, usize, &str),
     {
-        use std::sync::Arc;
-        use tokio::sync::Semaphore;
+        use futures::stream::StreamExt;
 
         if chunked_oids.is_empty() {
             return Ok(0);
         }
 
         let mut total_chunks_downloaded = 0;
-        let concurrent_downloads = 8;
-        let semaphore = Arc::new(Semaphore::new(concurrent_downloads));
+        // Lower concurrency on Windows to avoid IOCP kernel handle exhaustion
+        // (OS error 1450 / ERROR_NO_SYSTEM_RESOURCES). Spawning all tasks
+        // upfront with a semaphore-inside pattern registers all N futures with
+        // the IOCP driver at once; buffer_unordered limits active futures to N.
+        let concurrent_downloads: usize = if cfg!(target_os = "windows") { 4 } else { 8 };
 
         for (obj_idx, oid) in chunked_oids.iter().enumerate() {
             // Download manifest first
@@ -1170,45 +1178,39 @@ impl ProtocolClient {
                     "Downloading missing chunks"
                 );
 
-                // Download missing chunks in parallel
-                let mut download_handles = Vec::new();
+                // Download missing chunks with bounded concurrency.
+                // buffer_unordered keeps at most `concurrent_downloads` futures
+                // active at once, preventing Windows IOCP handle exhaustion
+                // that occurs when all tasks are spawned upfront.
+                let results: Vec<anyhow::Result<(Oid, Vec<u8>)>> =
+                    futures::stream::iter(missing_chunks)
+                        .map(|chunk_id| {
+                            let client = self.client.clone();
+                            let base_url = self.base_url.clone();
+                            async move {
+                                let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
+                                let response = client.get(&url).send().await.map_err(|e| {
+                                    anyhow::anyhow!("Failed to download chunk {}: {}", chunk_id, e)
+                                })?;
+                                if !response.status().is_success() {
+                                    anyhow::bail!(
+                                        "GET /chunks/{} failed with status: {}",
+                                        chunk_id,
+                                        response.status()
+                                    );
+                                }
+                                let data = response.bytes().await.map_err(|e| {
+                                    anyhow::anyhow!("Failed to read chunk {}: {}", chunk_id, e)
+                                })?;
+                                Ok::<_, anyhow::Error>((chunk_id, data.to_vec()))
+                            }
+                        })
+                        .buffer_unordered(concurrent_downloads)
+                        .collect()
+                        .await;
 
-                for chunk_id in missing_chunks {
-                    let sem = Arc::clone(&semaphore);
-                    let client = self.client.clone();
-                    let base_url = self.base_url.clone();
-
-                    let handle = tokio::spawn(async move {
-                        let _permit = sem.acquire().await.map_err(|_| {
-                            anyhow::anyhow!("Semaphore closed during chunk download")
-                        })?;
-                        let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
-
-                        let response = client.get(&url).send().await.map_err(|e| {
-                            anyhow::anyhow!("Failed to download chunk {}: {}", chunk_id, e)
-                        })?;
-
-                        if !response.status().is_success() {
-                            anyhow::bail!(
-                                "GET /chunks/{} failed with status: {}",
-                                chunk_id,
-                                response.status()
-                            );
-                        }
-
-                        let data = response.bytes().await.map_err(|e| {
-                            anyhow::anyhow!("Failed to read chunk {}: {}", chunk_id, e)
-                        })?;
-
-                        Ok::<_, anyhow::Error>((chunk_id, data.to_vec()))
-                    });
-
-                    download_handles.push(handle);
-                }
-
-                // Wait for all downloads and store chunks
-                for handle in download_handles {
-                    let (chunk_id, chunk_data) = handle.await??;
+                for result in results {
+                    let (chunk_id, chunk_data) = result?;
                     odb.put_compressed_chunk(&chunk_id, &chunk_data).await?;
                     total_chunks_downloaded += 1;
                 }
