@@ -3044,7 +3044,7 @@ dependencies = [
  "hex",
  "http 1.4.0",
  "jsonwebtoken",
- "rand 0.8.5",
+ "rand 0.9.2",
  "rcgen",
  "secrecy",
  "serde",
