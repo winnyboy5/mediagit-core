@@ -44,7 +44,7 @@ sha2.workspace = true
 chrono.workspace = true
 
 # Authentication (optional)
-jsonwebtoken = { version = "9.2", optional = true }
+jsonwebtoken = { version = "10.3", optional = true }
 bcrypt = { version = "0.15", optional = true }
 uuid = { version = "1.10", features = ["v4", "serde"], optional = true }
 
