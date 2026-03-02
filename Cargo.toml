@@ -72,7 +72,7 @@ proptest = "1.6"
 tempfile = "3"
 
 # Time
-chrono = { version = "0.4.39", features = ["serde"] }
+chrono = { version = "0.4.44", features = ["serde"] }
 
 # AWS SDK (using ring crypto backend to avoid aws-lc-sys build issues on Windows)
 # rt-tokio feature provides tokio sleep implementation for async operations
