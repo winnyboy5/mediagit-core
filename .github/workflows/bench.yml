@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
 
+# Required for benchmark-action to push results to gh-pages
+permissions:
+  contents: write
+
 env:
   CARGO_TERM_COLOR: always
   RUST_VERSION: "1.92.0"
@@ -25,7 +29,12 @@ jobs:
           key: bench
 
       - name: Run benchmarks
-        run: cargo bench --workspace 2>&1 | tee output.txt
+        run: |
+          set -o pipefail
+          # Capture only stdout (Criterion results) in output.txt.
+          # Compilation output goes to stderr and is visible in the Actions log
+          # but does not pollute the file that benchmark-action must parse.
+          cargo bench --workspace | tee output.txt
 
       - name: Store benchmark results
         uses: benchmark-action/github-action-benchmark@v1
