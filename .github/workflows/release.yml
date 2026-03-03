@@ -136,7 +136,7 @@ jobs:
           certUtil -hashfile ${{ matrix.archive-name }} SHA256 > ${{ matrix.archive-name }}.sha256
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: binaries-${{ matrix.target }}
           path: |
@@ -266,7 +266,7 @@ jobs:
           EOF
 
       - name: Upload installers
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: installers
           path: installers/
