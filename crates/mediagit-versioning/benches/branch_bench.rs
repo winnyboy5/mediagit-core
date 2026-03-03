@@ -79,14 +79,21 @@ fn bench_branch_create(c: &mut Criterion) {
     c.bench_function("branch_create", |b| {
         b.to_async(&rt).iter_with_setup(
             || {
-                let (branch_mgr, odb, _temp) = rt.block_on(setup_branch_manager_async());
-                let commit_oid = rt.block_on(async {
-                    let tree_oid = create_test_tree(&odb).await;
-                    create_test_commit(&odb, tree_oid, None, "Initial commit").await
-                });
-                (branch_mgr, commit_oid)
+                // Use block_in_place to run async setup from within the running runtime
+                // (iter_with_setup calls the setup closure inside rt.block_on, so we
+                // cannot call rt.block_on again directly — that would panic).
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        let (branch_mgr, odb, temp) = setup_branch_manager_async().await;
+                        let tree_oid = create_test_tree(&odb).await;
+                        let commit_oid =
+                            create_test_commit(&odb, tree_oid, None, "Initial commit").await;
+                        // Return temp to keep the TempDir alive through the benchmark
+                        (branch_mgr, commit_oid, temp)
+                    })
+                })
             },
-            |(branch_mgr, commit_oid)| async move {
+            |(branch_mgr, commit_oid, _temp)| async move {
                 let branch_name = format!("feature/{}", uuid::Uuid::new_v4());
                 let _: () = branch_mgr.create(&branch_name, commit_oid).await.unwrap();
                 black_box(())
@@ -169,18 +176,21 @@ fn bench_branch_delete(c: &mut Criterion) {
     c.bench_function("branch_delete", |b| {
         b.to_async(&rt).iter_with_setup(
             || {
-                let (branch_mgr, odb, _temp) = rt.block_on(setup_branch_manager_async());
-                let branch_name = format!("temp_{}", uuid::Uuid::new_v4());
-
-                rt.block_on(async {
-                    let tree_oid = create_test_tree(&odb).await;
-                    let commit_oid = create_test_commit(&odb, tree_oid, None, "Test commit").await;
-                    branch_mgr.create(&branch_name, commit_oid).await.unwrap();
-                });
-
-                (branch_mgr, branch_name)
+                // Use block_in_place to avoid nested block_on panic (same as bench_branch_create)
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        let (branch_mgr, odb, temp) = setup_branch_manager_async().await;
+                        let branch_name = format!("temp_{}", uuid::Uuid::new_v4());
+                        let tree_oid = create_test_tree(&odb).await;
+                        let commit_oid =
+                            create_test_commit(&odb, tree_oid, None, "Test commit").await;
+                        branch_mgr.create(&branch_name, commit_oid).await.unwrap();
+                        // Return temp to keep the TempDir alive through the benchmark
+                        (branch_mgr, branch_name, temp)
+                    })
+                })
             },
-            |(branch_mgr, branch_name)| async move {
+            |(branch_mgr, branch_name, _temp)| async move {
                 let _: () = branch_mgr.delete(&branch_name).await.unwrap();
                 black_box(())
             },
