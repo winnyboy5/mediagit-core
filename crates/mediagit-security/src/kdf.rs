@@ -33,8 +33,10 @@
 //! - **Key caching**: Optional in-memory cache to avoid re-derivation
 
 use crate::encryption::{EncryptionKey, KEY_SIZE};
-use argon2::{password_hash::SaltString, Algorithm, Argon2, ParamsBuilder, Version};
-use rand::thread_rng;
+use argon2::{
+    password_hash::{rand_core::OsRng, SaltString},
+    Algorithm, Argon2, ParamsBuilder, Version,
+};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -127,7 +129,7 @@ pub struct Salt {
 impl Salt {
     /// Generate a new random salt
     pub fn generate() -> Result<Self, KdfError> {
-        let salt_string = SaltString::generate(&mut thread_rng());
+        let salt_string = SaltString::generate(&mut OsRng);
         let bytes = salt_string
             .as_str()
             .as_bytes()

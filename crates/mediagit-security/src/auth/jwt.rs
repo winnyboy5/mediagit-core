@@ -16,7 +16,7 @@
 //! Provides secure token generation and validation using HMAC-SHA256.
 
 use chrono::{Duration, Utc};
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 
 use super::{AuthError, AuthResult};
@@ -148,7 +148,7 @@ impl JwtAuth {
     /// # Errors
     /// Returns `AuthError::InvalidToken` if token is invalid or expired
     pub fn validate_token(&self, token: &str) -> AuthResult<Claims> {
-        let validation = Validation::default();
+        let validation = Validation::new(Algorithm::HS256);
 
         decode::<Claims>(token, &self.decoding_key, &validation)
             .map(|data| data.claims)
