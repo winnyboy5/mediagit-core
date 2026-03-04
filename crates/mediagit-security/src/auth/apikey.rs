@@ -15,7 +15,7 @@
 //!
 //! Provides secure API key generation and validation using SHA-256 hashing.
 
-use rand::{thread_rng, Rng};
+use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use tokio::sync::RwLock;
@@ -152,14 +152,14 @@ impl ApiKeyAuth {
     // Private helper methods
 
     fn generate_random_key(&self) -> String {
-        let mut rng = thread_rng();
-        let bytes: Vec<u8> = (0..32).map(|_| rng.gen()).collect();
+        let mut rng = rand::rng();
+        let bytes: Vec<u8> = (0..32).map(|_| rng.random::<u8>()).collect();
         hex::encode(bytes)
     }
 
     fn generate_random_id(&self) -> String {
-        let mut rng = thread_rng();
-        let bytes: Vec<u8> = (0..16).map(|_| rng.gen()).collect();
+        let mut rng = rand::rng();
+        let bytes: Vec<u8> = (0..16).map(|_| rng.random::<u8>()).collect();
         hex::encode(bytes)
     }
 
