@@ -31,10 +31,12 @@ jobs:
       - name: Run benchmarks
         run: |
           set -o pipefail
-          # Capture only stdout (Criterion results) in output.txt.
-          # Compilation output goes to stderr and is visible in the Actions log
-          # but does not pollute the file that benchmark-action must parse.
-          cargo bench --workspace --benches | tee output.txt
+          # Run Criterion benchmarks, filtering out the test-harness noise
+          # that cargo emits (running N tests / test … ignored / test result).
+          # Only clean Criterion output lands in output.txt for benchmark-action.
+          cargo bench --workspace --benches \
+            | grep -vE '^running [0-9]+ tests?$|^test .+ \.\.\. ignored$|^test result: ok\.' \
+            | tee output.txt
 
       - name: Store benchmark results
         uses: benchmark-action/github-action-benchmark@v1
