@@ -31,11 +31,14 @@ jobs:
       - name: Run benchmarks
         run: |
           set -o pipefail
-          # Run Criterion benchmarks, filtering out the test-harness noise
-          # that cargo emits (running N tests / test … ignored / test result).
-          # Only clean Criterion output lands in output.txt for benchmark-action.
-          cargo bench --workspace --benches \
-            | grep -vE '^running [0-9]+ tests?$|^test .+ \.\.\. ignored$|^test result: ok\.' \
+          # benchmark-action with tool:cargo expects the libtest/bencher format:
+          #   test name ... bench:  123 ns/iter (+/- 4)
+          # Criterion's default output (time: [low med high]) is NOT recognised.
+          # --output-format=bencher makes Criterion emit the compatible format.
+          # --color=never prevents ANSI codes from breaking the parser regex.
+          cargo bench --workspace --benches --color=never \
+            -- --output-format=bencher \
+            | grep -vE '^(running [0-9]+ tests?|test result: ok\.)' \
             | tee output.txt
 
       - name: Store benchmark results
