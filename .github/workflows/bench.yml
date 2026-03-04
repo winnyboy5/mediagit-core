@@ -29,16 +29,31 @@ jobs:
           key: bench
 
       - name: Run benchmarks
+        env:
+          CARGO_TERM_COLOR: never
         run: |
           set -o pipefail
           # benchmark-action with tool:cargo expects the libtest/bencher format:
           #   test name ... bench:  123 ns/iter (+/- 4)
           # Criterion's default output (time: [low med high]) is NOT recognised.
           # --output-format=bencher makes Criterion emit the compatible format.
-          # --color=never prevents ANSI codes from breaking the parser regex.
-          cargo bench --workspace --benches --color=never \
+          # CARGO_TERM_COLOR=never (step-level override) prevents ANSI codes.
+          #
+          # IMPORTANT: We must use --bench <name> for each [[bench]] target, NOT
+          # --workspace --benches. The --benches flag includes lib/bin targets
+          # (which use the default libtest harness and reject --output-format).
+          # When adding a new [[bench]] target, add a --bench line here.
+          cargo bench \
+            --bench compression_bench \
+            --bench metrics_overhead \
+            --bench encryption_benchmark \
+            --bench cache_bench \
+            --bench branch_bench \
+            --bench merge_bench \
+            --bench odb_bench \
+            --bench pack_benchmark \
             -- --output-format=bencher \
-            | grep -vE '^(running [0-9]+ tests?|test result: ok\.)' \
+            | grep -E '^test .+ \.\.\. bench:' \
             | tee output.txt
 
       - name: Store benchmark results
