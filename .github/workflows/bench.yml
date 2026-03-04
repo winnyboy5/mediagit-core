@@ -34,7 +34,7 @@ jobs:
           # Capture only stdout (Criterion results) in output.txt.
           # Compilation output goes to stderr and is visible in the Actions log
           # but does not pollute the file that benchmark-action must parse.
-          cargo bench --workspace | tee output.txt
+          cargo bench --workspace --benches | tee output.txt
 
       - name: Store benchmark results
         uses: benchmark-action/github-action-benchmark@v1
