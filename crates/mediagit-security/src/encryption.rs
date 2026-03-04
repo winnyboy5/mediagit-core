@@ -47,7 +47,7 @@ use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
-use rand::{thread_rng, RngCore};
+use rand::RngCore;
 use secrecy::{ExposeSecret, SecretBox};
 use thiserror::Error;
 use tracing::debug;
@@ -132,9 +132,7 @@ impl EncryptionKey {
     /// Uses cryptographically secure random number generation.
     pub fn generate() -> Result<Self, EncryptionError> {
         let mut key_bytes = vec![0u8; KEY_SIZE];
-        thread_rng()
-            .try_fill_bytes(&mut key_bytes)
-            .map_err(|e| EncryptionError::RandomGenerationFailed(e.to_string()))?;
+        rand::rng().fill_bytes(&mut key_bytes);
 
         Ok(Self {
             key: SecretBox::new(Box::new(key_bytes)),
@@ -190,9 +188,7 @@ pub fn encrypt(key: &EncryptionKey, plaintext: &[u8]) -> Result<Vec<u8>, Encrypt
 
     // Generate random nonce
     let mut nonce_bytes = [0u8; NONCE_SIZE];
-    thread_rng()
-        .try_fill_bytes(&mut nonce_bytes)
-        .map_err(|e| EncryptionError::RandomGenerationFailed(e.to_string()))?;
+    rand::rng().fill_bytes(&mut nonce_bytes);
 
     let nonce = Nonce::from_slice(&nonce_bytes);
 
@@ -330,9 +326,7 @@ fn encrypt_stream(key: &EncryptionKey, plaintext: &[u8]) -> Result<Vec<u8>, Encr
 
     // Generate base nonce
     let mut nonce_bytes = [0u8; NONCE_SIZE];
-    thread_rng()
-        .try_fill_bytes(&mut nonce_bytes)
-        .map_err(|e| EncryptionError::RandomGenerationFailed(e.to_string()))?;
+    rand::rng().fill_bytes(&mut nonce_bytes);
 
     output.extend_from_slice(&nonce_bytes);
 

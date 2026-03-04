@@ -77,28 +77,22 @@ fn bench_branch_create(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     c.bench_function("branch_create", |b| {
-        b.to_async(&rt).iter_with_setup(
-            || {
-                // Use block_in_place to run async setup from within the running runtime
-                // (iter_with_setup calls the setup closure inside rt.block_on, so we
-                // cannot call rt.block_on again directly — that would panic).
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        let (branch_mgr, odb, temp) = setup_branch_manager_async().await;
-                        let tree_oid = create_test_tree(&odb).await;
-                        let commit_oid =
-                            create_test_commit(&odb, tree_oid, None, "Initial commit").await;
-                        // Return temp to keep the TempDir alive through the benchmark
-                        (branch_mgr, commit_oid, temp)
-                    })
-                })
-            },
-            |(branch_mgr, commit_oid, _temp)| async move {
+        // Use iter_custom so setup and routine share the same async context,
+        // avoiding the nested-runtime panic that occurs with iter_with_setup.
+        b.to_async(&rt).iter_custom(|iters| async move {
+            let mut elapsed = std::time::Duration::ZERO;
+            for _ in 0..iters {
+                let (branch_mgr, odb, _temp) = setup_branch_manager_async().await;
+                let tree_oid = create_test_tree(&odb).await;
+                let commit_oid = create_test_commit(&odb, tree_oid, None, "Initial commit").await;
                 let branch_name = format!("feature/{}", uuid::Uuid::new_v4());
+
+                let start = std::time::Instant::now();
                 let _: () = branch_mgr.create(&branch_name, commit_oid).await.unwrap();
-                black_box(())
-            },
-        );
+                elapsed += start.elapsed();
+            }
+            elapsed
+        });
     });
 }
 
@@ -174,27 +168,23 @@ fn bench_branch_delete(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     c.bench_function("branch_delete", |b| {
-        b.to_async(&rt).iter_with_setup(
-            || {
-                // Use block_in_place to avoid nested block_on panic (same as bench_branch_create)
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        let (branch_mgr, odb, temp) = setup_branch_manager_async().await;
-                        let branch_name = format!("temp_{}", uuid::Uuid::new_v4());
-                        let tree_oid = create_test_tree(&odb).await;
-                        let commit_oid =
-                            create_test_commit(&odb, tree_oid, None, "Test commit").await;
-                        branch_mgr.create(&branch_name, commit_oid).await.unwrap();
-                        // Return temp to keep the TempDir alive through the benchmark
-                        (branch_mgr, branch_name, temp)
-                    })
-                })
-            },
-            |(branch_mgr, branch_name, _temp)| async move {
+        // Use iter_custom so setup (branch creation) and the timed delete share
+        // the same async context — no nested-runtime issues.
+        b.to_async(&rt).iter_custom(|iters| async move {
+            let mut elapsed = std::time::Duration::ZERO;
+            for _ in 0..iters {
+                let (branch_mgr, odb, _temp) = setup_branch_manager_async().await;
+                let tree_oid = create_test_tree(&odb).await;
+                let commit_oid = create_test_commit(&odb, tree_oid, None, "Test commit").await;
+                let branch_name = format!("temp_{}", uuid::Uuid::new_v4());
+                branch_mgr.create(&branch_name, commit_oid).await.unwrap();
+
+                let start = std::time::Instant::now();
                 let _: () = branch_mgr.delete(&branch_name).await.unwrap();
-                black_box(())
-            },
-        );
+                elapsed += start.elapsed();
+            }
+            elapsed
+        });
     });
 }
 
@@ -264,7 +254,8 @@ fn bench_branch_update(c: &mut Criterion) {
                 } else {
                     initial_commit
                 };
-                let _: () = branch_mgr.update_to("main", commit, false).await.unwrap();
+                // force=true: benchmark alternates direction, so non-fast-forward must be allowed
+                let _: () = branch_mgr.update_to("main", commit, true).await.unwrap();
                 black_box(())
             }
         });
