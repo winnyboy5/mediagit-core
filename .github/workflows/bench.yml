@@ -56,6 +56,17 @@ jobs:
             | grep -E '^test .+ \.\.\. bench:' \
             | tee output.txt
 
+      - name: Ensure gh-pages branch exists
+        run: |
+          if ! git ls-remote --exit-code --heads origin gh-pages; then
+            echo "Creating orphan gh-pages branch..."
+            git checkout --orphan gh-pages
+            git reset --hard
+            git commit --allow-empty -m "Initial benchmark data branch"
+            git push origin gh-pages
+            git checkout main
+          fi
+
       - name: Store benchmark results
         uses: benchmark-action/github-action-benchmark@v1
         with:
