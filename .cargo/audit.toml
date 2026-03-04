@@ -1,10 +1,34 @@
+# cargo-audit configuration
+# https://rustsec.org/
+
 [advisories]
-# No advisories suppressed.
+
+# ── Advisories with no upstream fix available ───────────────────────────
 #
-# RUSTSEC-2025-0141 (bincode unmaintained) - RESOLVED: migrated to postcard.
+# RUSTSEC-2023-0071: rsa 0.9.10 — Marvin Attack (medium severity)
+#   jsonwebtoken 10.3 → rsa 0.9.10
+#   The rsa crate has NO fixed version available. Our code only uses
+#   HMAC-SHA256 (Algorithm::HS256) with secret keys — RSA functionality
+#   is never invoked. The `auth` feature (and therefore jsonwebtoken)
+#   is optional in mediagit-security.
 #
-# RUSTSEC-2024-0384 (instant unmaintained) and RUSTSEC-2024-0436 (paste unmaintained):
-# These are transitive warnings from azure_storage_blobs 0.21.x (the final published
-# version of the old Azure SDK for Rust). They are "unmaintained" notices, not
-# vulnerabilities, and cargo-audit does not fail on them by default.
-ignore = []
+# RUSTSEC-2023-0089: atomic-polyfill 1.0.3 (unmaintained)
+#   postcard 1.1.3 → heapless 0.7 → atomic-polyfill
+#   postcard 1.1.3 is the latest release. atomic-polyfill is a no-op on
+#   desktop targets (only relevant for embedded/no_std).
+#
+# RUSTSEC-2024-0384: instant 0.1.13 (unmaintained)
+#   azure_core 0.21 → futures-lite 1.x → fastrand 1.x → instant
+#   azure_storage_blobs 0.21 is the latest on crates.io and requires
+#   azure_core 0.21. The azure feature is optional in mediagit-storage.
+#
+# RUSTSEC-2024-0436: paste 1.0.15 (unmaintained)
+#   azure_core 0.21 → paste. Same root cause as RUSTSEC-2024-0384.
+#
+# Review date: 2026-03-04
+ignore = [
+    "RUSTSEC-2023-0071",
+    "RUSTSEC-2023-0089",
+    "RUSTSEC-2024-0384",
+    "RUSTSEC-2024-0436",
+]
