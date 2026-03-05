@@ -34,13 +34,15 @@ MediaGit automatically applies delta compression based on:
 
 | File Type | Threshold | Behavior |
 |-----------|-----------|----------|
-| **PSD/PSB** (Photoshop) | 0.85 | Aggressive delta (layer changes) |
-| **BLEND** (Blender) | 0.85 | Aggressive delta (material/vertex changes) |
-| **FBX/OBJ** (3D Models) | 0.75 | Moderate delta (geometry changes) |
-| **WAV/AIF** (Audio) | 0.90 | Conservative (audio usually rewritten) |
-| **MP4/MOV** (Video) | 0.95+ | Very conservative (rarely delta) |
-| **TXT/Code** | 0.70 | Very aggressive (excellent compression) |
-| **Default** | 0.75 | Moderate (unknown types) |
+| **AI/PDF/InDesign** | 0.15 | Very aggressive (compressed streams, structural similarity) |
+| **DOCX/XLSX/PPTX** (Office) | 0.20 | Aggressive (ZIP containers, shared structure) |
+| **MP4/MOV** (Video) | 0.50 | Moderate (metadata/timeline changes) |
+| **WAV/AIF** (Audio) | 0.65 | Medium (clip edits) |
+| **PSD/JPG/PNG** (Images) | 0.70 | Moderate (perceptual similarity) |
+| **FBX/OBJ/BLEND** (3D Models) | 0.70 | Moderate (geometry changes) |
+| **TXT/Code** | 0.85 | Conservative (small changes matter) |
+| **JSON/YAML/TOML** (Config) | 0.95 | Very conservative (exact matches preferred) |
+| **Default** | 0.30 | Global minimum (`MIN_SIMILARITY_THRESHOLD`) |
 
 **Lower threshold** = more files use delta compression
 **Higher threshold** = only very similar files use delta
@@ -96,20 +98,22 @@ min_size = "10MB"
 min_savings = 0.1
 
 # Maximum delta chain depth before creating new base
-max_depth = 50
+max_depth = 10
 
 # Per-file-type similarity thresholds
 [compression.delta.thresholds]
-psd = 0.85        # Photoshop documents
-psb = 0.85        # Large Photoshop documents
-blend = 0.85      # Blender projects
-fbx = 0.75        # FBX 3D models
-obj = 0.75        # OBJ 3D models
-wav = 0.90        # WAV audio
-aif = 0.90        # AIF audio
-mp4 = 0.95        # MP4 video (rarely delta)
-mov = 0.95        # QuickTime video
-default = 0.75    # Unknown file types
+psd = 0.70        # Images (perceptual similarity)
+psb = 0.70        # Large Photoshop documents
+blend = 0.70      # Blender projects
+fbx = 0.70        # FBX 3D models
+obj = 0.70        # OBJ 3D models
+wav = 0.65        # WAV audio
+aif = 0.65        # AIF audio
+mp4 = 0.50        # MP4 video
+mov = 0.50        # QuickTime video
+ai = 0.15         # Creative/PDF containers
+pdf = 0.15        # PDF containers
+default = 0.30    # Global minimum
 ```
 
 ### Adjust Aggressiveness
@@ -146,9 +150,9 @@ Base (v1) → Δ2 → Δ3 → Δ4 → Δ5
 ```
 
 **Reconstruction** requires applying all deltas in sequence:
-- Chain depth 1-10: Fast reconstruction
-- Chain depth 11-50: Acceptable performance
-- Chain depth >50: Slow, should optimize
+- Chain depth 1-5: Fast reconstruction
+- Chain depth 6-10: Good performance
+- Chain depth >10: New base created automatically
 
 ### Check Chain Depth
 
@@ -168,7 +172,7 @@ Recommendation: Run 'mediagit gc --aggressive' to optimize chains
 ### Optimize Chains
 
 ```bash
-# Standard GC (optimizes chains >50 depth)
+# Standard GC (optimizes chains >10 depth)
 $ mediagit gc
 
 # Aggressive GC (optimizes chains >20 depth)
@@ -195,7 +199,7 @@ parallel = true
 threads = 0
 
 # Chunk size for large file delta
-chunk_size = "64MB"
+chunk_size = "4MB"
 ```
 
 ### Memory Limits

@@ -4,8 +4,8 @@ MediaGit understands structured media formats for intelligent merging.
 
 ## Supported Formats
 - **PSD/PSB**: Layer-aware merging
-- **Video**: Track-based merging (planned)
-- **Audio**: Channel-aware merging (planned)
+- **Video**: Track-based merging
+- **Audio**: Channel-aware merging
 
 ## How It Works
 1. Parse file format structure

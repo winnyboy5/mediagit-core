@@ -78,7 +78,7 @@ cat > "${PKG_DIR}/usr/share/doc/mediagit/copyright" << 'EOF'
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: mediagit
 Upstream-Contact: MediaGit Contributors <hello@mediagit.dev>
-Source: https://github.com/yourusername/mediagit-core
+Source: https://github.com/winnyboy5/mediagit-core
 
 Files: *
 Copyright: 2025 MediaGit Contributors

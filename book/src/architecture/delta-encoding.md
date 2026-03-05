@@ -20,19 +20,27 @@ Version 3: 3 MB (delta from v2)
 Total: 108 MB (64% reduction!)
 ```
 
-## bsdiff Algorithm
+## Delta Algorithm
 
-MediaGit uses bsdiff for binary delta compression:
+MediaGit uses a **dual-layer** delta system:
+
+### Layer 1: bsdiff (Whole-File Delta)
+- **Crate**: `mediagit-compression` — uses `bsdiff::diff/patch` with zstd compression wrapper
+- **When**: Applied at `add` time for whole-file delta against previous version
 - **Efficiency**: 90%+ reduction for typical media workflows
-- **Speed**: Fast reconstruction (50-100 MB/s)
-- **Streaming**: No need to load full file into memory
+
+### Layer 2: Sliding-Window (Chunk-Level Delta)
+- **Crate**: `mediagit-versioning` — custom `DeltaEncoder` with Copy/Insert instructions
+- **When**: Applied by the ODB at chunk level for similar chunks
+- **Algorithm**: Hash-table based pattern matching with 32 KB sliding window
 
 ### How It Works
 1. Compare new version with base version
-2. Identify identical blocks (using rolling hash)
-3. Store only differences as delta instructions:
-   - COPY blocks from base
-   - INSERT new bytes
+2. Build hash table of base sequences (4-byte minimum match)
+3. Scan target for matching sequences using the hash table
+4. Store only differences as delta instructions:
+   - **COPY**: reference offset + length from base
+   - **INSERT**: literal new bytes
 
 ## Delta Chain Management
 
@@ -41,15 +49,14 @@ MediaGit uses bsdiff for binary delta compression:
 Base → Delta 1 → Delta 2 → Delta 3 → ... → Delta N
 ```
 
-- **Default Max Depth**: 50
+- **Default Max Depth**: 10 (`MAX_DELTA_DEPTH` in `odb.rs`)
 - **Reason**: Deeper chains = slower reconstruction
-- **Solution**: `mediagit gc` creates new bases
+- **Solution**: After depth 10, the next version is stored as a new full base
 
 ### Optimal Chain Depth
-Empirical analysis shows:
-- **Depth 1-10**: Fast reconstruction, good savings
-- **Depth 11-50**: Slower reconstruction, diminishing returns
-- **Depth >50**: Unacceptably slow, poor user experience
+- **Depth 1-5**: Fast reconstruction, excellent savings
+- **Depth 6-10**: Good reconstruction speed, good savings
+- **Depth >10**: Automatically triggers new base creation
 
 ## When to Use Deltas
 
@@ -65,27 +72,27 @@ Empirical analysis shows:
 
 ### Automatic Detection
 ```rust
-fn should_use_delta(file: &Path, size: u64, previous_version: Option<Oid>) -> bool {
-    // Must be large enough
-    if size < 10_MB {
-        return false;
-    }
-
-    // Must have previous version
-    if previous_version.is_none() {
-        return false;
-    }
-
-    // Check file type
-    match file.extension() {
-        // Already compressed
-        Some("mp4" | "mov" | "jpg" | "png") => false,
-
-        // Good delta candidates
-        Some("psd" | "psb" | "blend" | "fbx" | "wav" | "aif") => true,
-
-        // Default: try delta
-        _ => true,
+// Simplified from add.rs — type-based eligibility
+fn should_use_delta(filename: &str, data: &[u8]) -> bool {
+    match ext.to_lowercase().as_str() {
+        // Text-based: Always eligible
+        "txt" | "md" | "json" | "xml" | "rs" | "py" | "js" => true,
+        // Uncompressed media: Always eligible
+        "psd" | "tiff" | "bmp" | "wav" | "aiff" => true,
+        // Uncompressed video: Always eligible
+        "avi" | "mov" => true,
+        // Compressed video: Only for very large files
+        "mp4" | "mkv" | "flv" => data.len() > 100_MB,
+        // PDF/Creative: Only for large files
+        "ai" | "indd" | "pdf" => data.len() > 50_MB,
+        // 3D text formats: Always eligible
+        "obj" | "gltf" | "ply" | "stl" => true,
+        // 3D binary: Only for files >1MB
+        "glb" | "fbx" | "blend" | "usd" => data.len() > 1_MB,
+        // Compressed images/archives: Never
+        "jpg" | "png" | "webp" | "zip" | "gz" => false,
+        // Unknown: Only for large files
+        _ => data.len() > 50_MB,
     }
 }
 ```
@@ -117,12 +124,15 @@ MediaGit uses intelligent thresholds based on file characteristics:
 
 | File Type | Example | Threshold | Rationale |
 |-----------|---------|-----------|-----------|
-| **Uncompressed Images** | PSD, XCF, BLEND | 0.85 | Layer/material changes are localized |
-| **Compressed Media** | MP4, MOV, JPEG | 0.95+ | Rarely edited, usually complete re-records |
-| **Audio Files** | WAV, AIF, MP3 | 0.90 | Edits create new audio, not modifications |
-| **Text/Code** | TXT, PY, JS, RS | 0.70 | Very effective delta compression |
-| **3D Models** | FBX, OBJ | 0.75 | Vertex/animation changes |
-| **Default** | Unknown types | 0.75 | Conservative middle ground |
+| **Creative/PDF** | AI, InDesign, PDF | 0.15 | Compressed streams shift bytes; structural similarity remains |
+| **Office** | DOCX, XLSX, PPTX | 0.20 | ZIP containers with shared structure |
+| **Video** | MP4, MOV, AVI, MKV | 0.50 | Metadata/timeline changes significant |
+| **Audio** | WAV, AIFF, MP3, FLAC | 0.65 | Medium threshold |
+| **Images** | JPG, PNG, PSD | 0.70 | Perceptual similarity |
+| **3D Models** | OBJ, FBX, BLEND, glTF, GLB | 0.70 | Vertex/animation changes |
+| **Text/Code** | TXT, PY, RS, JS | 0.85 | Small changes matter |
+| **Config** | JSON, YAML, TOML, XML | 0.95 | Exact matches preferred |
+| **Default** | Unknown types | 0.30 | Global minimum (`MIN_SIMILARITY_THRESHOLD`) |
 
 **Lower threshold** = more aggressive compression (more files use delta)
 **Higher threshold** = more conservative (only very similar files use delta)
@@ -136,21 +146,21 @@ Customize thresholds in `.mediagit/config`:
 # Enable similarity detection (default: true)
 auto_detect = true
 
-# Minimum file size for delta consideration (default: 10MB)
-min_size = "10MB"
-
 # Minimum savings threshold (default: 10%, 0.1)
 min_savings = 0.1
 
-# Per-file-type similarity thresholds
+# Per-file-type similarity thresholds (from similarity.rs)
 [compression.delta.thresholds]
-psd = 0.85        # Photoshop documents
-blend = 0.85      # Blender projects
-fbx = 0.75        # 3D models
-wav = 0.90        # Audio files
-mp4 = 0.95        # Compressed video
-mov = 0.95        # QuickTime video
-default = 0.75    # Unknown types
+psd = 0.70        # Images (perceptual similarity)
+blend = 0.70      # 3D models
+fbx = 0.70        # 3D models
+wav = 0.65        # Audio files
+mp4 = 0.50        # Video (metadata changes)
+mov = 0.50        # Video
+ai = 0.15         # Creative/PDF containers
+pdf = 0.15        # PDF containers
+rs = 0.85         # Text/code
+default = 0.30    # Global minimum
 ```
 
 **Change similarity aggressiveness**:
@@ -185,22 +195,23 @@ The similarity checking process:
 ### Process
 1. Read base version from ODB
 2. Read new version from working directory
-3. Generate delta using bsdiff
-4. If delta smaller than full object, store delta
+3. Generate delta (bsdiff at file level, sliding-window at chunk level)
+4. If delta < 80% of full object, store delta
 5. If delta larger, store full object (no benefit)
 
-### Example
+### Example (Chunk-Level Delta in ODB)
 ```rust
-let base = odb.read(base_oid)?;
-let new_content = std::fs::read("large-file.psd")?;
+// From odb.rs — chunk-level delta using sliding-window
+let delta = DeltaEncoder::encode(&base_data, &chunk.data);
+let delta_bytes = delta.to_bytes();
+let delta_ratio = delta_bytes.len() as f64 / chunk.data.len() as f64;
 
-let mut delta = Vec::new();
-bsdiff::diff(&base, &new_content, &mut delta)?;
-
-if delta.len() < new_content.len() {
-    odb.write_delta(base_oid, &delta)?;
+if delta_ratio < 0.80 {
+    // Store as delta (compressed with zstd)
+    backend.put(&delta_key, &compressed_delta).await?;
 } else {
-    odb.write_blob(&new_content)?;
+    // Store full chunk
+    backend.put(&chunk_key, &compressed_chunk).await?;
 }
 ```
 
@@ -212,24 +223,15 @@ if delta.len() < new_content.len() {
 3. Apply deltas in sequence
 4. Verify final content hash
 
-### Example
+### Example (Chunk-Level Reconstruction)
 ```rust
-fn reconstruct(odb: &Odb, target_oid: Oid) -> Result<Vec<u8>> {
-    let chain = odb.get_delta_chain(target_oid)?;
+// From odb.rs — reconstruct from sliding-window delta
+let delta = Delta::from_bytes(&decompressed_delta)?;
+let reconstructed = DeltaDecoder::apply(&base_data, &delta)?;
 
-    let mut content = odb.read(chain.base)?;
-
-    for delta_oid in chain.deltas {
-        let delta = odb.read(delta_oid)?;
-        let mut reconstructed = Vec::new();
-        bsdiff::patch(&content, &mut delta.as_ref(), &mut reconstructed)?;
-        content = reconstructed;
-    }
-
-    // Verify
-    assert_eq!(sha256(&content), target_oid);
-    Ok(content)
-}
+// Verify integrity
+let actual_hash = sha256(&reconstructed);
+assert_eq!(actual_hash, expected_hash);
 ```
 
 ## Performance Optimization
@@ -259,7 +261,7 @@ Choose base to minimize average reconstruction time:
 
 ### Recompression
 `mediagit gc` optimizes delta chains:
-1. Identify long chains (depth >50)
+1. Identify long chains (depth >10)
 2. Create new base from most recent version
 3. Regenerate deltas from new base
 4. Delete old chain
@@ -267,10 +269,10 @@ Choose base to minimize average reconstruction time:
 ### Example
 ```
 Before GC:
-Base (v1) → Δ2 → Δ3 → ... → Δ52 (depth 51)
+Base (v1) → Δ2 → Δ3 → ... → Δ12 (depth 11)
 
 After GC:
-Base (v52) → Δ1 → Δ2 → ... → Δ10 (depth 10, reversed)
+Base (v12) → Δ1 → ... → Δ5 (depth 5, rebalanced)
 ```
 
 ## Storage Savings
