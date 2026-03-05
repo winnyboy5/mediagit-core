@@ -112,11 +112,10 @@ MediaGit uses the **`fastcdc` crate v3.2** (`fastcdc::v2020`) for all content-de
 
 | File Size | Avg Chunk | Min Chunk | Max Chunk |
 |-----------|-----------|-----------|-----------|
-| < 1 MB | 256 KB | 128 KB | 512 KB |
-| 1–10 MB | 512 KB | 256 KB | 1 MB |
-| 10–100 MB | 1 MB | 512 KB | 2 MB |
-| 100 MB–1 GB | 2 MB | 1 MB | 4 MB |
-| > 1 GB | 4 MB | 2 MB | 8 MB |
+| < 100 MB | 1 MB | 512 KB | 4 MB |
+| 100 MB–10 GB | 2 MB | 1 MB | 8 MB |
+| 10–100 GB | 4 MB | 1 MB | 16 MB |
+| > 100 GB | 8 MB | 1 MB | 32 MB |
 
 ### Formats that use FastCDC
 
@@ -501,7 +500,7 @@ graph LR
 | Parser | Formats | How It Works |
 |--------|---------|--------------|
 | **MP4/MOV** | `.mp4`, `.mov`, `.m4v`, `.m4a`, `.3gp` | Walks ISO base media file atom tree (`ftyp`, `moov`, `mdat`) |
-| **AVI/RIFF** | `.avi`, `.riff`, `.wav` | Parses RIFF container chunks (`LIST`, `hdrl`, `movi`, `idx1`) |
+| **AVI/RIFF** | `.avi`, `.riff` | Parses RIFF container chunks (`LIST`, `hdrl`, `movi`, `idx1`) |
 | **MKV/WebM** | `.mkv`, `.webm`, `.mka`, `.mk3d` | Parses EBML element tree (Segment, Cluster, Tracks) |
 | **GLB** | `.glb`, `.gltf` | Parses header + JSON chunk + binary chunk |
 | **FBX** | `.fbx` | Binary: node tree parsing. ASCII: falls back to FastCDC |

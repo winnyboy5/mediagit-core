@@ -269,16 +269,26 @@ impl S3Backend {
             Client::new(&sdk_config)
         };
 
-        // Verify bucket access by checking if it exists
-        client
-            .head_bucket()
-            .bucket(&config.bucket)
-            .send()
-            .await
-            .context(format!(
-                "Failed to verify S3 bucket access: {}",
-                config.bucket
-            ))?;
+        // Ensure bucket exists; use create_bucket and treat "already exists" as success.
+        match client.create_bucket().bucket(&config.bucket).send().await {
+            Ok(_) => {
+                debug!("S3 bucket '{}' created successfully", config.bucket);
+            }
+            Err(e) => {
+                let already_exists = e
+                    .as_service_error()
+                    .map(|se| se.is_bucket_already_owned_by_you() || se.is_bucket_already_exists())
+                    .unwrap_or(false);
+                if already_exists {
+                    debug!("S3 bucket '{}' already exists, continuing", config.bucket);
+                } else {
+                    return Err(e).context(format!(
+                        "Failed to access or create S3 bucket: {}",
+                        config.bucket
+                    ));
+                }
+            }
+        }
 
         debug!(
             "Successfully connected to S3 bucket: {} with endpoint: {:?}",
@@ -362,16 +372,33 @@ impl S3Backend {
 
         let client = Client::from_conf(s3_config_builder.build());
 
-        // Verify bucket access
-        client
-            .head_bucket()
-            .bucket(&config.bucket)
-            .send()
-            .await
-            .context(format!(
-                "Failed to verify bucket access: {}. Check credentials and endpoint.",
-                config.bucket
-            ))?;
+        // Ensure bucket exists; use create_bucket and ignore "already exists" errors.
+        match client.create_bucket().bucket(&config.bucket).send().await {
+            Ok(_) => {
+                debug!(
+                    "S3-compatible bucket '{}' created successfully",
+                    config.bucket
+                );
+            }
+            Err(e) => {
+                let err_str = e.to_string().to_lowercase();
+                if err_str.contains("bucketalreadyownedbyou")
+                    || err_str.contains("bucketalreadyexists")
+                    || err_str.contains("already owned")
+                    || err_str.contains("already exists")
+                {
+                    debug!(
+                        "S3-compatible bucket '{}' already exists, continuing",
+                        config.bucket
+                    );
+                } else {
+                    return Err(e).context(format!(
+                        "Failed to access or create S3-compatible bucket: {}. Check credentials and endpoint.",
+                        config.bucket
+                    ));
+                }
+            }
+        }
 
         debug!(
             "Successfully connected to S3-compatible bucket: {} at {:?}",

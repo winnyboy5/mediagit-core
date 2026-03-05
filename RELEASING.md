@@ -60,7 +60,7 @@ git push origin v0.2.0
 
 ### 4. Monitor Release Workflow
 
-1. Go to [GitHub Actions](https://github.com/yourusername/mediagit-core/actions)
+1. Go to [GitHub Actions](https://github.com/winnyboy5/mediagit-core/actions)
 2. Watch the "Release" workflow run
 3. Verify all jobs complete successfully:
    - plan
@@ -79,15 +79,15 @@ After the workflow completes:
 - [ ] Test installation scripts:
   ```bash
   # Unix/macOS
-  curl -fsSL https://raw.githubusercontent.com/yourusername/mediagit-core/main/install.sh | sh
+  curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 
   # Windows PowerShell
-  iwr https://raw.githubusercontent.com/yourusername/mediagit-core/main/install.ps1 | iex
+  iwr https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.ps1 | iex
   ```
 - [ ] Verify crates.io publication: https://crates.io/crates/mediagit-cli
 - [ ] Test Docker image:
   ```bash
-  docker run --rm ghcr.io/yourusername/mediagit-core:0.2.0 --version
+  docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.0 --version
   ```
 
 ### 6. Post-Release Tasks
@@ -220,5 +220,5 @@ For PPA distribution:
 ## Support
 
 For questions about the release process:
-- Open an issue: https://github.com/yourusername/mediagit-core/issues
+- Open an issue: https://github.com/winnyboy5/mediagit-core/issues
 - Email: hello@mediagit.dev

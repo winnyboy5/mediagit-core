@@ -14,7 +14,7 @@ graph TB
     ODB --> Storage[Storage Abstraction<br/>trait Backend]
     Versioning --> Storage
 
-    Storage --> Compression[Compression Layer<br/>zstd/brotli/bsdiff]
+    Storage --> Compression[Compression Layer<br/>zstd/brotli/delta]
 
     Compression --> Local[Local Storage]
     Compression --> S3[Amazon S3]
@@ -50,7 +50,7 @@ graph TB
 - **Location**: `crates/mediagit-storage/`
 
 ### 4. Compression Layer
-- **Algorithms**: zstd (default), brotli, bsdiff (delta encoding)
+- **Algorithms**: zstd (default), brotli, delta (bsdiff + sliding-window)
 - **Strategy**: Automatic algorithm selection based on file type
 - **Performance**: Async compression with tokio runtime
 - **Location**: `crates/mediagit-compression/`
@@ -123,9 +123,9 @@ sequenceDiagram
 - `mediagit verify` for repository health checks
 
 ### Encryption
-- At-rest: Cloud provider encryption (SSE-S3, Azure Storage Service Encryption)
-- In-transit: TLS 1.2+ for all network operations
-- Future: Client-side encryption support
+- At-rest: AES-256-GCM client-side encryption + cloud provider encryption (SSE-S3, Azure SSE)
+- In-transit: TLS 1.3 for all network operations
+- Client-side encryption: Fully implemented with Argon2id key derivation
 
 ## Scalability
 
@@ -183,7 +183,7 @@ sequenceDiagram
 - **Language**: Rust 1.92.0
 - **Async Runtime**: Tokio 1.40+
 - **CLI Framework**: Clap 4.5+
-- **Compression**: zstd, brotli, bsdiff
+- **Compression**: zstd, brotli, delta (bsdiff + sliding-window)
 - **Cloud SDKs**: aws-sdk-s3, azure_storage, google-cloud-storage
 - **Testing**: proptest (property-based), criterion (benchmarking)
 

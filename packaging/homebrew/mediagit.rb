@@ -9,20 +9,20 @@ class Mediagit < Formula
 
   on_macos do
     if Hardware::CPU.intel?
-      url "https://github.com/yourusername/mediagit-core/releases/download/v#{version}/mediagit-#{version}-x86_64-macos.tar.gz"
+      url "https://github.com/winnyboy5/mediagit-core/releases/download/v#{version}/mediagit-#{version}-x86_64-macos.tar.gz"
       sha256 "PLACEHOLDER_INTEL_SHA256"
     elsif Hardware::CPU.arm?
-      url "https://github.com/yourusername/mediagit-core/releases/download/v#{version}/mediagit-#{version}-aarch64-macos.tar.gz"
+      url "https://github.com/winnyboy5/mediagit-core/releases/download/v#{version}/mediagit-#{version}-aarch64-macos.tar.gz"
       sha256 "PLACEHOLDER_ARM_SHA256"
     end
   end
 
   on_linux do
     if Hardware::CPU.intel?
-      url "https://github.com/yourusername/mediagit-core/releases/download/v#{version}/mediagit-#{version}-x86_64-linux.tar.gz"
+      url "https://github.com/winnyboy5/mediagit-core/releases/download/v#{version}/mediagit-#{version}-x86_64-linux.tar.gz"
       sha256 "PLACEHOLDER_LINUX_INTEL_SHA256"
     elsif Hardware::CPU.arm?
-      url "https://github.com/yourusername/mediagit-core/releases/download/v#{version}/mediagit-#{version}-aarch64-linux.tar.gz"
+      url "https://github.com/winnyboy5/mediagit-core/releases/download/v#{version}/mediagit-#{version}-aarch64-linux.tar.gz"
       sha256 "PLACEHOLDER_LINUX_ARM_SHA256"
     end
   end

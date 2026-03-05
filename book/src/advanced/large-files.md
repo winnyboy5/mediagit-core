@@ -13,7 +13,7 @@ MediaGit automatically adapts its behavior based on file size:
 | > 100 MB | StreamCDC | 100–2000 | Parallel workers |
 | MP4 / MKV / WebM | Video container-aware | 1 per GOP | Per-format |
 | PSD | Layer-aware | 1 per layer group | Per-format |
-| WAV | Audio-aware | Fixed segments | Per-format |
+| WAV | FastCDC | Adaptive by size | Per-format |
 
 No configuration is required. MediaGit detects file size and type automatically.
 
@@ -67,7 +67,7 @@ Progress is shown per-file and per-chunk. The parallel pipeline:
 Each worker holds one uncompressed chunk in memory. Chunk sizes are approximately:
 
 - FastCDC medium: 4–32 MB per chunk
-- StreamCDC (>100 MB files): 16–64 MB per chunk
+- StreamCDC (>100 MB files): 1–8 MB per chunk (adaptive by file size)
 
 With `--jobs 16` and 32 MB average chunk size, expect ~512 MB peak memory during add.
 
