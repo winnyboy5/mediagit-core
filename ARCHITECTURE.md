@@ -136,7 +136,7 @@ graph TD
 
 ## Object Database (ODB)
 
-The ODB is the core storage engine (`mediagit-versioning/src/odb.rs`, 3,310 lines).
+The ODB is the core storage engine (`mediagit-versioning/src/odb.rs`, 3,576 lines).
 
 ### Object Types
 - **Blob** — File content (raw or chunked)
@@ -201,7 +201,7 @@ graph TD
 
 ## Compression Engine
 
-**Crate**: `mediagit-compression` · **Key file**: `smart_compressor.rs` (1,637 lines)
+**Crate**: `mediagit-compression` · **Key file**: `smart_compressor.rs` (1,947 lines)
 
 ### Compression Strategy Selection
 
@@ -296,7 +296,7 @@ Auto-detects algorithm from magic bytes:
 
 ## Chunking Engine
 
-**Crate**: `mediagit-versioning` · **Key file**: `chunking.rs` (1,945 lines)
+**Crate**: `mediagit-versioning` · **Key file**: `chunking.rs` (2,102 lines)
 
 ### Chunking Strategy Decision
 
@@ -309,12 +309,12 @@ graph TD
     B -->|"Unknown ≥ 10MB"| D
     D --> E{"Select strategy<br/>by file type"}
     E -->|"MP4/MOV/M4V/M4A/3GP"| F["🎬 MP4 Atom Parsing"]
-    E -->|"AVI/RIFF/WAV"| G["🎬 RIFF Chunk Parsing"]
+    E -->|"AVI/RIFF"| G["🎬 RIFF Chunk Parsing"]
     E -->|"MKV/WebM/MKA/MK3D"| H["🎬 EBML Element Parsing"]
     E -->|"GLB/glTF"| I["🎬 GLB Binary Parsing"]
     E -->|"FBX (binary)"| J["🎬 FBX Node Parsing"]
     E -->|"OBJ/STL/PLY"| K["🎬 Text 3D Parsing"]
-    E -->|"Text/Code/Data/ML<br/>Documents/Design<br/>3D Apps/Audio/MPEG"| L["✂️ FastCDC v2020<br/>(Rolling CDC)"]
+    E -->|"Text/Code/Data/ML<br/>Documents/Design<br/>3D Apps/Audio/WAV/MPEG"| L["✂️ FastCDC v2020<br/>(Rolling CDC)"]
     E -->|"JPEG/PNG/MP3/ZIP<br/>(if forced)"| M["📐 Fixed 4MB"]
 
     L --> N["fastcdc::v2020::FastCDC<br/>Gear table O(1)/byte"]
@@ -377,7 +377,7 @@ The `chunk_media_aware()` method dispatches to FastCDC (`chunk_rolling()`) for t
 | **ML Deployment** | onnx, gguf, ggml, tflite, mlmodel, coreml, keras, pte, mleap, pmml, llamafile | Adaptive by size |
 | **Documents** | pdf, svg, eps, ai | Adaptive by size |
 | **Design Tools** | fig, sketch, xd, indd, indt | Adaptive by size |
-| **Lossless Audio** | flac, aiff, alac | Adaptive by size |
+| **Lossless Audio** | wav, flac, aiff, alac | Adaptive by size |
 | **MPEG Streams** | mpg, mpeg, vob, mts, m2ts | Adaptive by size |
 | **USD/Alembic** | usd, usda, usdc, usdz, abc | Adaptive by size |
 | **3D Apps** | blend, max, ma, mb, c4d, hip, zpr, ztl | Adaptive by size |
@@ -391,11 +391,10 @@ The `get_chunk_params(file_size)` function selects FastCDC parameters:
 
 | File Size | Avg Chunk | Min Chunk | Max Chunk |
 |-----------|-----------|-----------|-----------|
-| < 1 MB | 256 KB | 128 KB | 512 KB |
-| 1–10 MB | 512 KB | 256 KB | 1 MB |
-| 10–100 MB | 1 MB | 512 KB | 2 MB |
-| 100 MB–1 GB | 2 MB | 1 MB | 4 MB |
-| > 1 GB | 4 MB | 2 MB | 8 MB |
+| < 100 MB | 1 MB | 512 KB | 4 MB |
+| 100 MB–10 GB | 2 MB | 1 MB | 8 MB |
+| 10–100 GB | 4 MB | 1 MB | 16 MB |
+| > 100 GB | 8 MB | 1 MB | 32 MB |
 
 ### Chunking Eligibility (`should_use_chunking`)
 
@@ -411,6 +410,7 @@ The `get_chunk_params(file_size)` function selects FastCDC parameters:
 | Lossless Audio | 10 MB | WAV, FLAC, AIFF |
 | 3D Models | 10 MB | GLB, FBX, Blender, USD |
 | Office | 5 MB | DOCX, XLSX, PPTX |
+| Archives (uncompressed) | 5 MB | TAR, CPIO, ISO, DMG |
 | Pre-compressed | **Never** | JPEG, PNG, MP3, ZIP |
 | Unknown | 10 MB | Conservative default |
 
@@ -418,7 +418,7 @@ The `get_chunk_params(file_size)` function selects FastCDC parameters:
 
 ## Delta Compression
 
-**Crate**: `mediagit-versioning` · **Key files**: `delta.rs` (446 lines), `similarity.rs` (541 lines)
+**Crate**: `mediagit-versioning` · **Key files**: `delta.rs` (448 lines), `similarity.rs` (524 lines)
 
 ### Delta Encoder
 - **Algorithm**: Sliding-window pattern matching
@@ -486,6 +486,10 @@ graph TD
 | Uncompressed media (PSD, TIFF, WAV) | ✅ Always | — |
 | Uncompressed video (AVI, MOV) | ✅ Always | — |
 | Compressed video (MP4, MKV) | ✅ Conditional | File > 100 MB |
+| PDF/Creative (AI, InDesign, PDF) | ✅ Conditional | File > 50 MB |
+| 3D Text (OBJ, glTF, PLY, STL) | ✅ Always | — |
+| 3D Binary (GLB, FBX, Blend, USD) | ✅ Conditional | File > 1 MB |
+| Vector (EPS, SVG) | ✅ Always | — |
 | Compressed images (JPEG, PNG) | ❌ Never | — |
 | Archives (ZIP, GZ) | ❌ Never | — |
 | Unknown | ✅ Conditional | File > 50 MB |
@@ -494,7 +498,7 @@ graph TD
 
 ## Media Merge Strategies
 
-**Crate**: `mediagit-media` · **Key file**: `strategy.rs` (596 lines)
+**Crate**: `mediagit-media` · **Key file**: `strategy.rs` (619 lines)
 
 ```mermaid
 graph TD
@@ -545,7 +549,7 @@ Six format-specific merge strategies with automatic conflict detection:
 
 ## Staging & Index
 
-**Crate**: `mediagit-versioning` · **Key file**: `index.rs` (269 lines)
+**Crate**: `mediagit-versioning` · **Key file**: `index.rs` (296 lines)
 
 ### IndexEntry Fields
 ```rust

@@ -1,5 +1,5 @@
 # MediaGit Installation Script for Windows PowerShell
-# Usage: iwr https://raw.githubusercontent.com/yourusername/mediagit-core/main/install.ps1 | iex
+# Usage: iwr https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.ps1 | iex
 
 param(
     [string]$Version = "latest",
@@ -9,7 +9,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-$Repo = "yourusername/mediagit-core"
+$Repo = "winnyboy5/mediagit-core"
 
 Write-Host "MediaGit Installation Script" -ForegroundColor Green
 Write-Host "==============================" -ForegroundColor Green

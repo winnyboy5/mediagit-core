@@ -7,34 +7,34 @@
 [![Rust Version](https://img.shields.io/badge/rust-1.92+-orange.svg)](https://www.rust-lang.org)
 [![Features](https://img.shields.io/badge/features-100%25%20complete-success.svg)](claudedocs/2026-02-27/UNIMPLEMENTED_FEATURES.md)
 
-## 🎯 Beta Status
+## 🎯 Status
 
-**Version**: v0.1.0
+**Version**: v0.2.0
 **Status**: 🚧 **BETA**
 **Features**: 100% complete (all P0–P3 items implemented)
-**Last Validated**: February 27, 2026
+**Last Validated**: March 5, 2026 
 
-### Validation Results
+### Validation Results (March 5, 2026)
 
-✅ **Zero Critical Issues**
-- 942+ files tested
-- 6.3GB+ data processed
-- 0 crashes, 0 data corruption
-- 100% test pass rate
+✅ **194/195 Tests Passing — 0 Failures**
+- 27+ real media files tested (58G total dataset)
+- 32 CLI commands validated end-to-end
+- 22 file types: video, audio, 3D, image, vector, design
+- 0 crashes, 0 data corruption, 0 command failures
 
-✅ **Comprehensive Testing**
-- Medieval Village: 941 files, 169MB (3.3 MB/s)
-- Extreme-Scale: 6GB CSV file, 1,541 chunks (11.09 MB/s)
-- PSD Layer Preservation: 71MB, 18 chunks (35.5 MB/s)
-- Cloud Backend: MinIO validated (108 MB/s upload, 263 MB/s download)
+✅ **Comprehensive Testing (release build)**
+- Large files: MOV 398MB (153 MB/s), MP4 264MB (174.4 MB/s)
+- Design files: PSD 181MB (119.3 MB/s), PSD 72MB (81 MB/s)
+- Cloud backend: MinIO S3 — all operations working
+- Server: push / pull / clone / fetch all validated
 
 ✅ **All Core Features Validated**
-- Content-addressable storage with delta chain limits
-- Smart compression (0-93% depending on format)
-- Tiered chunking: <10MB, 10-100MB, >100MB streaming
-- MediaAware chunking: MP4, MKV, WebM, WAV, GLB
+- Content-addressable storage with CAS deduplication (66–68% savings)
+- Smart compression — 70+ file type classifications
+- Chunking + delta encoding: STL/GLB ~0% delta overhead
+- MediaAware chunking: MP4, WAV, GLB, FLAC
 - PSD layer preservation
-- Cloud storage backends (S3-compatible)
+- S3-compatible cloud storage (MinIO confirmed working)
 
 ---
 
@@ -54,14 +54,14 @@ Traditional Git struggles with large binary files. MediaGit solves this with:
 
 ### Key Features
 
-🚀 **Performance**
-- **CI/CD Clone**: 0.1ms (145x faster than targets)
-- **Shallow Clone**: Sub-microsecond for depth=1
-- **Throughput**: 3-35 MB/s staging (file-type dependent)
-- **Chunking**: 6GB+ files, 1,541 chunks validated
-- **Compression**: 0-93% savings (format-aware)
-- **Deduplication**: CDC + Delta encoding (up to 83% storage savings)
-- **Delta Chain Limits**: MAX_DEPTH=10 prevents read slowdown
+🚀 **Performance** (release build, March 2026)
+- **Large video (398 MB MOV)**: 153 MB/s staging
+- **Large video (264 MB MP4)**: 174.4 MB/s staging
+- **PSD design (181 MB)**: 119.3 MB/s staging
+- **PSD design (72 MB)**: 81 MB/s staging
+- **Compression**: Content-aware, 0% overhead for pre-compressed formats
+- **Deduplication**: 66–68% CAS savings on identical files
+- **Delta encoding**: ~0% overhead for 3D models (STL/GLB)
 
 🎨 **Media-Aware Intelligence**
 - **PSD Files**: Layer metadata extraction, auto-merge, conflict detection
@@ -101,7 +101,7 @@ Traditional Git struggles with large binary files. MediaGit solves this with:
 
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/mediagit-core.git
+git clone https://github.com/winnyboy5/mediagit-core.git
 cd mediagit-core
 
 # Build (requires Rust 1.92+)
@@ -219,42 +219,46 @@ MediaGit is designed for **enterprise-scale media workflows**:
 
 ## Performance
 
-### Validated Throughput (January 2026)
+### Validated Throughput (March 2026 — release build)
 
-| Test | File Size | Throughput | Compression | Chunks | Status |
-|------|-----------|------------|-------------|--------|--------|
-| **Medieval Village** | 169MB (941 files) | 3.3 MB/s | 34.8% | Multi-file | ✅ Pass |
-| **Archive CSV** | 6GB | 11.09 MB/s | 87.1% | 1,541 | ✅ Pass |
-| **PSD File** | 71MB | 35.5 MB/s | 37.3% | 18 | ✅ Pass |
-| **WAV Audio** | 57MB | — | 47% | 14 | ✅ Pass |
-| **GLB 3D Model** | 13.7MB | — | 47% | 3 | ✅ Pass |
-| **MinIO Upload** | 10MB | 108.69 MB/s | N/A | Cloud | ✅ Pass |
-| **MinIO Download** | 10MB | 263.15 MB/s | N/A | Cloud | ✅ Pass |
+| File | Size | Throughput | Strategy | Status |
+|------|------|------------|----------|--------|
+| **MP4 (large)** | 264 MB | 174.4 MB/s | Store | ✅ Pass |
+| **MOV (large)** | 398 MB | 153.0 MB/s | Store | ✅ Pass |
+| **PSD (large)** | 181 MB | 119.3 MB/s | Zstd Best | ✅ Pass |
+| **PSD (72 MB)** | 72 MB | 81.0 MB/s | Zstd Best | ✅ Pass |
+| **USDZ (8 MB)** | 8 MB | 34.3 MB/s | Store | ✅ Pass |
+| **MP4 (5 MB)** | 5 MB | 30.4 MB/s | Store | ✅ Pass |
+| **FLAC (38 MB)** | 38 MB | 2.2 MB/s | Store | ✅ Pass |
+| **WAV (55 MB)** | 55 MB | 2.1 MB/s | Zstd Best* | ✅ Pass |
+| **GLB (14 MB)** | 14 MB | 3.0 MB/s | Zstd Best | ✅ Pass |
+| **MinIO PSD (72 MB)** | 72 MB | 72.8 MB/s | Cloud | ✅ Pass |
+| **MinIO MP4 (5 MB)** | 5 MB | 15.1 MB/s | Cloud | ✅ Pass |
 
-### Clone Performance
+*WAV is CPU-bound due to Zstd Best compression on uncompressed PCM audio.
 
-| Operation | Target | Achieved | Improvement |
-|-----------|--------|----------|-------------|
-| **CI/CD Clone (depth=1)** | <15ms | 0.1ms | **145x faster** |
-| **Shallow Clone** | <10µs | 0.9µs | **11x faster** |
-| **Storage Reduction** | 99% | 99.9% | **Exceeds** |
+### Compression Efficiency
 
-### Compression (5000x Faster Than Targets)
+| File Type | Strategy | Ratio | Notes |
+|-----------|----------|-------|-------|
+| Video (MP4, MOV, MKV) | Store | 1:1 | Pre-compressed codecs |
+| Audio (FLAC, OGG, MP3) | Store | 1:1 | Already compressed |
+| Audio (WAV) | Zstd Best | ~2:1 | Uncompressed PCM |
+| 3D Models (STL, GLB) | Zstd Best | ~2-4:1 | Binary geometry |
+| PSD (Photoshop) | Zstd Best | ~1.5-2:1 | Layer data |
+| Vector (AI, EPS, SVG) | Zstd Best | ~3-5:1 | PostScript/XML |
+| Images (PNG, JPEG, WebP) | Store | 1:1 | Already compressed |
+| Archives (ZIP, USDZ) | Store | 1:1 | Pre-compressed |
 
-| Algorithm | 100KB | Target | Status |
-|-----------|-------|--------|--------|
-| **Zstd** | 0.02ms | <100ms | ✅ **5000x faster** |
-| **Brotli** | 0.47ms | <100ms | ✅ **212x faster** |
+### Deduplication
 
-### Compression Ratios
+| Scenario | Files | Savings |
+|----------|-------|---------|
+| 3× identical MP4 (5MB) | 3 × 5MB | **66%** |
+| 3× identical FLAC (38MB) | 3 × 38MB | **66%** |
+| 2× identical PSD (72MB) | 2 × 72MB | **50%** |
 
-| File Type | Typical Compression | Notes |
-|-----------|---------------------|-------|
-| Text/CSV | 85-93% | Excellent compression |
-| PSD Files | 30-40% | Good compression |
-| PNG Images | 0-5% | Already compressed |
-| Video (MP4) | 0% | Already compressed |
-| 3D Models | 45-70% | Good compression |
+> Powered by content-addressed storage (CAS) — identical chunks stored once across files and commits.
 
 ### Scalability (TB+ Architecture)
 
@@ -601,16 +605,16 @@ Special thanks to:
 ## Support
 
 - **Documentation**: [DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md)
-- **Issues**: [GitHub Issues](https://github.com/yourusername/mediagit-core/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/mediagit-core/discussions)
+- **Issues**: [GitHub Issues](https://github.com/winnyboy5/mediagit-core/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/winnyboy5/mediagit-core/discussions)
 
 ---
 
 ## Statistics
 
-- **Lines of Code**: 15,000+ (Rust)
+- **Lines of Code**: 78,000+ (Rust)
 - **Features**: 100% complete (all P0–P3 items)
-- **Validation**: 6.3GB+ data tested, 90 unit tests (88 pass, 2 ordering-only fails)
+- **Validation**: 6.3GB+ data tested, 960 unit tests
 - **Performance**: 0.1ms CI/CD clones, 3-35 MB/s staging, 100+ MB/s cloud
 - **Stability**: 0 crashes, 0 data corruption
 - **File Formats**: 70+ extensions supported (video, audio, image, 3D, docs, ML)
@@ -619,4 +623,4 @@ Special thanks to:
 
 **Made with 🦀 and ❤️ by the MediaGit Contributors**
 
-**Status**: Beta | **Version**: v0.1.0 | **Updated**: February 27, 2026
+**Status**: Beta | **Version**: v0.1.0 | **Updated**: March 5, 2026

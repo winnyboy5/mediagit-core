@@ -170,7 +170,7 @@ rustc --version  # Must show 1.92.0 or higher
 ### Step 2: Clone and Build
 
 ```bash
-git clone https://github.com/yourusername/mediagit-core.git
+git clone https://github.com/winnyboy5/mediagit-core.git
 cd mediagit-core
 cargo build  # Takes 5-10 minutes on first build
 ```
@@ -278,7 +278,7 @@ curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
 ### 1. Clone Repository
 
 ```bash
-git clone https://github.com/yourusername/mediagit-core.git
+git clone https://github.com/winnyboy5/mediagit-core.git
 cd mediagit-core
 ```
 
@@ -2021,7 +2021,7 @@ parallel_composite_upload_threshold = 8388608  # 8MB
 - **Docker Configs**: `docker/` directory (see `docker/README.md`)
 - **Test Archives**: `test-archives/` (validation artifacts with 30-day retention)
 - **Cleanup Guide**: `CLEANUP_SUMMARY.md` (project organization and archival)
-- **Issues**: https://github.com/yourusername/mediagit-core/issues
+- **Issues**: https://github.com/winnyboy5/mediagit-core/issues
 
 ## Project Maintenance
 
@@ -2062,5 +2062,5 @@ find . -name "*.tmp" -o -name "*.log" -o -name "*~"
 ---
 
 **Version**: 0.1.0
-**Last Updated**: February 27, 2026
+**Last Updated**: March 5, 2026
 **Maintained by**: MediaGit Core Team

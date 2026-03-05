@@ -80,9 +80,9 @@ Ok(content)
 - **Size**: Unlimited (automatic chunking for large files)
 
 **Large File Handling**:
-For files >100MB, MediaGit automatically chunks the content:
-- **Chunk Size**: 64MB (configurable)
-- **Strategy**: Content-defined chunking (CDC) for deduplication
+For files exceeding type-specific thresholds (5-10MB), MediaGit automatically chunks the content:
+- **Chunk Size**: 1-8 MB adaptive based on file size (via `get_chunk_params()`)
+- **Strategy**: Content-defined chunking (FastCDC v2020) for deduplication
 - **Overhead**: Minimal (chunk index ~0.1% of file size)
 - **Benefit**: Parallel processing and efficient delta compression
 
@@ -164,6 +164,9 @@ fn select_compression(path: &Path, size: u64) -> CompressionAlgorithm {
         // Already compressed media
         Some("mp4" | "mov" | "jpg" | "png") => CompressionAlgorithm::None,
 
+        // Lossless audio (uncompressed — good zstd ratio)
+        Some("wav" | "flac" | "aiff") => CompressionAlgorithm::Zstd,
+
         // Text and code
         Some("txt" | "md" | "rs" | "py") => CompressionAlgorithm::Brotli,
 
@@ -205,7 +208,7 @@ Chain depth: 3
 ```
 
 ### Chain Breaking
-- Maximum depth: 50
+- Maximum depth: 10 (`MAX_DELTA_DEPTH`)
 - After depth exceeded, new base created
 - `mediagit gc` optimizes chains
 
@@ -279,9 +282,9 @@ MediaGit implements intelligent chunking for efficient large file storage and pr
 **Content-Defined Chunking (CDC)**:
 ```rust
 // Chunks split at natural content boundaries
-// Uses rolling hash to find split points
-// Average chunk size: 64MB
-// Range: 16MB - 128MB (adaptive)
+// Uses FastCDC v2020 gear-table hash for O(1)/byte
+// Average chunk size: 1-8 MB (adaptive by file size)
+// Range: 512 KB - 32 MB
 ```
 
 **Benefits**:
@@ -294,10 +297,10 @@ MediaGit implements intelligent chunking for efficient large file storage and pr
 
 | File Size | Chunking Strategy | Chunk Count |
 |-----------|-------------------|-------------|
-| < 100 MB  | No chunking (single blob) | 1 |
-| 100-500 MB | Automatic chunking | 2-8 |
-| 500 MB - 2 GB | Aggressive chunking | 8-32 |
-| > 2 GB | Streaming chunks | 32+ |
+| < 5-10 MB (type-dependent) | No chunking (single blob) | 1 |
+| 5-100 MB | FastCDC (1 MB avg) | 5-100 |
+| 100 MB - 10 GB | FastCDC (2 MB avg) | 50-5000 |
+| > 10 GB | FastCDC (4-8 MB avg) | 2500+ |
 
 ### Chunking Configuration
 
@@ -306,17 +309,11 @@ MediaGit implements intelligent chunking for efficient large file storage and pr
 # Enable automatic chunking
 enabled = true
 
-# Minimum file size for chunking (default: 100MB)
-min_size = "100MB"
-
-# Target chunk size (default: 64MB)
-chunk_size = "64MB"
-
-# Minimum chunk size (prevents tiny chunks)
-min_chunk_size = "16MB"
-
-# Maximum chunk size (prevents huge chunks)
-max_chunk_size = "128MB"
+# Chunk sizes are adaptive by file size (from get_chunk_params()):
+# < 100 MB:     avg 1 MB,  min 512 KB, max 4 MB
+# 100 MB-10 GB: avg 2 MB,  min 1 MB,   max 8 MB
+# 10-100 GB:    avg 4 MB,  min 1 MB,   max 16 MB
+# > 100 GB:     avg 8 MB,  min 1 MB,   max 32 MB
 ```
 
 ### Chunking Performance
@@ -333,11 +330,11 @@ max_chunk_size = "128MB"
 Chunks stored as individual objects:
 ```
 File: large-video.mp4 (6 GB)
-  → Chunk 1: 58/91b5b522... (64 MB)
-  → Chunk 2: a3/c5d7e2f... (64 MB)
-  → Chunk 3: f7/e2a1b8c... (64 MB)
+  → Chunk 1: 58/91b5b522... (2 MB)
+  → Chunk 2: a3/c5d7e2f... (2 MB)
+  → Chunk 3: f7/e2a1b8c... (2 MB)
   ...
-  → Chunk Index: 5a/2b3c4d... (6.2 MB)
+  → Chunk Index: 5a/2b3c4d... (metadata)
 ```
 
 **Chunk Index** contains:

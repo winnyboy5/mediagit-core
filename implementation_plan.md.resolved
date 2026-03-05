@@ -1,0 +1,33 @@
+# Release v0.2.0 — File Changes
+
+## 1. Version Bump
+
+#### [MODIFY] [Cargo.toml](file:///d:/own/saas/mediagit-core/Cargo.toml)
+- Line 21: `version = "0.1.0"` → `"0.2.0"`
+- Propagates to all 14 crates (all use `version.workspace = true`)
+
+## 2. CHANGELOG
+
+#### [MODIFY] [CHANGELOG.md](file:///d:/own/saas/mediagit-core/CHANGELOG.md)
+- Promote `[Unreleased]` → `[0.2.0] - 2026-03-05`
+- Update comparison links
+
+## 3. Release Workflow Fixes
+
+#### [MODIFY] [release.yml](file:///d:/own/saas/mediagit-core/.github/workflows/release.yml)
+
+Two fixes:
+
+**a) macOS Intel runner** (line 82):
+`macos-13` → `macos-15-intel`
+
+> [!IMPORTANT]
+> `macos-13` was retired Dec 2025. `macos-14`/`macos-15` are Apple Silicon — **they cannot build x86_64 natively**. The correct label is `macos-15-intel` (Intel, available until Aug 2027).
+
+**b) GHCR permission** (line 3-6):
+Add `packages: write` — required for Docker push to `ghcr.io`
+
+## User Setup (Not File Changes)
+
+> [!WARNING]
+> Before pushing tag, set `CARGO_REGISTRY_TOKEN` secret in GitHub repo settings (from crates.io/settings/tokens)

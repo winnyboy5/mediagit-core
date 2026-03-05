@@ -7,12 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- Initial release preparation
-- Multi-platform distribution system
-- Automated release workflows
+## [0.2.0] - 2026-03-05
 
-## [0.1.0] - TBD
+### Added
+- Dual-layer delta encoding (bsdiff + sliding-window)
+- AES-256-GCM client-side encryption with Argon2id key derivation
+- TLS 1.3 for all network operations
+- JWT + API key authentication for server mode
+- Video and audio track-based merging (fully implemented)
+- Multi-platform distribution (Linux, macOS, Windows, Docker, crates.io)
+- Automated release pipeline with cross-compilation
+
+### Changed
+- Delta max chain depth reduced from 50 to 10 for faster reads
+- Chunk sizes now adaptive (1-8 MB) instead of fixed 64 MB
+- Similarity thresholds tuned per file type for better delta compression
+- macOS Intel CI runner updated to macos-15-intel
+
+### Fixed
+- macOS Intel (x86_64-apple-darwin) build failure due to retired macos-13 runner
+- Docker push to GHCR (added packages:write permission)
+- Comprehensive documentation sync with codebase (book, architecture docs, CLI reference)
+
+## [0.1.0] - 2026-02-27
 
 ### Added
 - Core MediaGit CLI implementation
@@ -20,7 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Intelligent compression (Zstd, Brotli)
 - Branch management system
 - 3-way merge algorithm
-- Media-aware merge intelligence
+- Media-aware merge intelligence (PSD layer-aware)
 - Git integration layer
 - Multi-cloud storage backends:
   - Local filesystem
@@ -34,7 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Observability: Structured logging with Tracing
 - Metrics: Prometheus metrics endpoint
 - Operations: Garbage collection, FSCK, storage migration
-- Comprehensive test suite (80%+ coverage)
+- Comprehensive test suite (960 tests, 80%+ coverage)
 - Documentation and user guide
 - Multi-platform binaries (Linux, macOS, Windows on x86_64 and ARM64)
 
@@ -43,5 +60,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dependency security audits in CI
 - Encryption at rest with Argon2 key derivation
 
-[Unreleased]: https://github.com/yourusername/mediagit-core/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/yourusername/mediagit-core/releases/tag/v0.1.0
+[Unreleased]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/winnyboy5/mediagit-core/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/winnyboy5/mediagit-core/releases/tag/v0.1.0

@@ -4,6 +4,7 @@ MediaGit security model and best practices.
 
 ## Authentication
 - **Local**: File system permissions
+- **Server mode**: JWT tokens + API key authentication
 - **Cloud**: IAM roles, service principals, API keys
 
 ## Data Integrity
@@ -12,9 +13,9 @@ MediaGit security model and best practices.
 - `mediagit verify` for repository health
 
 ## Encryption
-- **At-rest**: Cloud provider encryption (SSE)
-- **In-transit**: TLS 1.2+ for network operations
-- **Future**: Client-side encryption support
+- **At-rest (client-side)**: AES-256-GCM with Argon2id key derivation
+- **At-rest (cloud)**: Cloud provider encryption (SSE-S3, Azure SSE)
+- **In-transit**: TLS 1.3 for network operations
 
 ## Best Practices
 1. Use IAM roles (avoid hardcoded keys)

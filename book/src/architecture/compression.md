@@ -14,8 +14,9 @@ MediaGit employs intelligent compression based on file type and size to minimize
 - **Ratio**: 3-5x for binaries, 10-20x for text
 - **Use**: Text and code files when size matters more than speed
 
-### bsdiff (Delta Encoding)
-- **Speed**: 50-100 MB/s encoding/decoding
+### delta (Dual-Layer Delta Encoding)
+- **Layer 1**: bsdiff (whole-file delta via `mediagit-compression`)
+- **Layer 2**: Sliding-window Copy/Insert (chunk-level delta via `mediagit-versioning`)
 - **Ratio**: 90%+ reduction for updated files
 - **Use**: Large files with small changes
 
@@ -27,7 +28,10 @@ fn select_algorithm(path: &Path, size: u64) -> CompressionAlgorithm {
         // Already compressed (store as-is)
         Some("mp4" | "mov" | "mkv" | "avi") => None,
         Some("jpg" | "jpeg" | "png" | "webp") => None,
-        Some("mp3" | "aac" | "m4a" | "flac") => None,
+        Some("mp3" | "aac" | "m4a") => None,
+
+        // Lossless audio (zstd Best — uncompressed, good ratio)
+        Some("flac" | "wav" | "aiff") => Zstd,
 
         // Text and code (brotli for better ratio)
         Some("txt" | "md" | "rs" | "py" | "js" | "ts") => Brotli,
@@ -79,7 +83,7 @@ fn select_algorithm(path: &Path, size: u64) -> CompressionAlgorithm {
 algorithm = "zstd"
 level = "default"
 use-delta = true
-delta-max-chain = 50
+delta-max-chain = 10
 ```
 
 ### Per-File Override
