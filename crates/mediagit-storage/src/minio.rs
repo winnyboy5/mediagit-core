@@ -302,16 +302,31 @@ impl MinIOBackend {
 
         let client = Client::from_conf(s3_config);
 
-        // Verify bucket access
-        client
-            .head_bucket()
-            .bucket(&config.bucket)
-            .send()
-            .await
-            .context(format!(
-                "Failed to verify MinIO bucket access: {}",
-                config.bucket
-            ))?;
+        // Ensure bucket exists; use create_bucket and treat "already exists" as success.
+        // This avoids relying on head_bucket which can return unreliable error codes
+        // across different MinIO versions.
+        match client.create_bucket().bucket(&config.bucket).send().await {
+            Ok(_) => {
+                debug!("MinIO bucket '{}' created successfully", config.bucket);
+            }
+            Err(e) => {
+                let already_exists = e
+                    .as_service_error()
+                    .map(|se| se.is_bucket_already_owned_by_you() || se.is_bucket_already_exists())
+                    .unwrap_or(false);
+                if already_exists {
+                    debug!(
+                        "MinIO bucket '{}' already exists, continuing",
+                        config.bucket
+                    );
+                } else {
+                    return Err(e).context(format!(
+                        "Failed to access or create MinIO bucket: {}",
+                        config.bucket
+                    ));
+                }
+            }
+        }
 
         debug!("Successfully connected to MinIO bucket: {}", config.bucket);
 

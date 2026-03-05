@@ -3,7 +3,7 @@
   <metadata>
     <id>mediagit</id>
     <version>0.1.0</version>
-    <packageSourceUrl>https://github.com/yourusername/mediagit-core</packageSourceUrl>
+    <packageSourceUrl>https://github.com/winnyboy5/mediagit-core</packageSourceUrl>
     <owners>MediaGit Contributors</owners>
 
     <title>MediaGit</title>
@@ -11,11 +11,11 @@
     <projectUrl>https://mediagit.dev</projectUrl>
     <iconUrl>https://mediagit.dev/icon.png</iconUrl>
     <copyright>2025 MediaGit Contributors</copyright>
-    <licenseUrl>https://github.com/yourusername/mediagit-core/blob/main/LICENSE</licenseUrl>
+    <licenseUrl>https://github.com/winnyboy5/mediagit-core/blob/main/LICENSE</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
-    <projectSourceUrl>https://github.com/yourusername/mediagit-core</projectSourceUrl>
+    <projectSourceUrl>https://github.com/winnyboy5/mediagit-core</projectSourceUrl>
     <docsUrl>https://docs.mediagit.dev</docsUrl>
-    <bugTrackerUrl>https://github.com/yourusername/mediagit-core/issues</bugTrackerUrl>
+    <bugTrackerUrl>https://github.com/winnyboy5/mediagit-core/issues</bugTrackerUrl>
     <tags>git version-control media binary-files large-files</tags>
 
     <summary>Git-based version control system optimized for large media files</summary>
@@ -30,7 +30,7 @@ MediaGit is a modern version control system designed specifically for managing l
 
 Perfect for game development, VFX, machine learning, and any project dealing with large binary assets.
     </description>
-    <releaseNotes>https://github.com/yourusername/mediagit-core/releases/tag/v0.1.0</releaseNotes>
+    <releaseNotes>https://github.com/winnyboy5/mediagit-core/releases/tag/v0.1.0</releaseNotes>
   </metadata>
 
   <files>

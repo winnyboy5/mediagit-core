@@ -16,7 +16,7 @@ use crate::schema::Config;
 use crate::validation::Validator;
 use std::path::Path;
 use tokio::fs;
-use tracing::{debug, info};
+use tracing::debug;
 
 /// Configuration format
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,7 +77,7 @@ impl ConfigLoader {
         let content = fs::read_to_string(path).await?;
         let format = ConfigFormat::from_path(path)?;
 
-        info!(
+        debug!(
             "Loaded {} configuration file: {}",
             format.name(),
             path.display()
@@ -98,7 +98,7 @@ impl ConfigLoader {
 
         if self.validate {
             config.validate()?;
-            info!("Configuration validated successfully");
+            debug!("Configuration validated successfully");
         }
 
         Ok(config)

@@ -13,7 +13,7 @@ $arch = if ([Environment]::GetEnvironmentVariable("PROCESSOR_ARCHITECTURE") -eq 
     "x86_64"
 }
 
-$url = "https://github.com/yourusername/mediagit-core/releases/download/v${version}/mediagit-${version}-${arch}-windows.zip"
+$url = "https://github.com/winnyboy5/mediagit-core/releases/download/v${version}/mediagit-${version}-${arch}-windows.zip"
 $checksum = 'PLACEHOLDER_CHECKSUM'
 $checksumType = 'sha256'
 

@@ -86,7 +86,7 @@ graph LR
 
 ## Delta Encoding
 
-MediaGit uses delta encoding (via bsdiff) to store only differences between versions.
+MediaGit uses a dual-layer delta system to store only differences between versions:
 
 ### When Deltas Are Used
 - **Scenario**: Large file with small changes
@@ -103,9 +103,9 @@ Version 3: project.psd (100 MB) → Stored as delta from v2 (3 MB)
 **Total storage**: 108 MB instead of 300 MB (64% reduction)
 
 ### Delta Chain Limits
-- Maximum chain depth: 50 (configurable)
-- `mediagit gc` recompresses long chains
-- Base objects chosen for optimal reconstruction speed
+- Maximum chain depth: 10 (`MAX_DELTA_DEPTH`)
+- After depth exceeded, next version stored as new base
+- `mediagit gc` optimizes long chains
 
 ## Compression Strategy
 
@@ -114,7 +114,7 @@ MediaGit employs intelligent compression based on file type:
 ### Compression Algorithms
 1. **zstd** (default): Fastest, good ratio for all file types
 2. **brotli**: Better ratio for text/code, slower
-3. **bsdiff**: Delta encoding for large binary files with small changes
+3. **delta**: Dual-layer (bsdiff at file level, sliding-window at chunk level)
 
 ### Automatic Selection
 ```
@@ -135,7 +135,7 @@ MediaGit supports lightweight branches similar to Git:
 
 ### Branch Storage
 - Branches are just files in `refs/heads/`
-- Each file contains a commit hash (40 hex characters)
+- Each file contains a commit hash (64 hex characters for SHA-256)
 - Creating a branch = writing a 40-byte file (instant)
 
 ### Branch Visualization
@@ -193,11 +193,7 @@ MediaGit provides multiple merge strategies:
 
 ### Text Conflicts
 ```
-<<<<<<< HEAD (your changes)
 Layer 1: Blue Background
-=======
-Layer 1: Red Background
->>>>>>> feature-branch (their changes)
 ```
 
 ### Media Conflicts

@@ -4,7 +4,7 @@ set -e
 
 VERSION="${VERSION:-latest}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
-REPO="yourusername/mediagit-core"
+REPO="winnyboy5/mediagit-core"
 
 # Colors
 RED='\033[0;31m'
