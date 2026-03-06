@@ -185,6 +185,7 @@ claudedocs/
 .taskmaster/
 .serena/
 .claude/
+.mcp.json
 test-files/
 docs/
 dev-tests/
