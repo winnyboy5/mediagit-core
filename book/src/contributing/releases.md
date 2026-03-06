@@ -6,8 +6,8 @@ The MediaGit release process for maintainers. Releases are driven by GitHub Acti
 
 Semantic versioning: `MAJOR.MINOR.PATCH[-prerelease]`
 
-- `v0.1.0` — stable release
-- `v0.2.0-alpha.1` — pre-release (alpha/beta/rc in version → `is-prerelease: true`)
+- `v0.2.0` — stable release
+- `v0.3.0-alpha.1` — pre-release (alpha/beta/rc in version → `is-prerelease: true`)
 
 ## Pre-Release Checklist
 
@@ -116,9 +116,9 @@ The dry run builds all binaries and creates a pre-release with tag `dry-run`. No
 
 After a successful release:
 
-1. Verify [GitHub Releases](https://github.com/mediagit/mediagit-core/releases) has all assets
+1. Verify [GitHub Releases](https://github.com/winnyboy5/mediagit-core/releases) has all assets
 2. Verify crates on [crates.io](https://crates.io/crates/mediagit-cli)
-3. Verify Docker image: `docker pull ghcr.io/mediagit/mediagit-core:latest`
+3. Verify Docker image: `docker pull ghcr.io/winnyboy5/mediagit-core:latest`
 4. Update the [documentation site](https://docs.mediagit.dev) if needed
 5. Announce on Discord/community channels
 
@@ -128,14 +128,14 @@ For critical bug fixes on a stable release:
 
 ```bash
 # Create hotfix branch from the tag
-git checkout -b hotfix/v0.1.1 v0.1.0
+git checkout -b hotfix/v0.2.1 v0.2.0
 
 # Apply the fix, test, commit
 # ...
 
 # Tag and push
-git tag -a v0.1.1 -m "Hotfix v0.1.1: fix critical bug"
-git push origin v0.1.1
+git tag -a v0.2.1 -m "Hotfix v0.2.1: fix critical bug"
+git push origin v0.2.1
 
 # Merge fix back to main
 git checkout main

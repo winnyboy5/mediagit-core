@@ -29,7 +29,7 @@ Building from source on a Windows ARM64 machine (Surface Pro X, Snapdragon-based
 ### Build
 
 ```powershell
-git clone https://github.com/mediagit/mediagit-core.git
+git clone https://github.com/winnyboy5/mediagit-core.git
 cd mediagit-core
 
 # Build for native ARM64
@@ -62,12 +62,12 @@ mediagit --version
 ## Alternative: x64 Binary on ARM64 Windows
 
 Windows ARM64 supports running x64 binaries via emulation. You can download the standard
-`mediagit-x86_64-windows.zip` from the [Releases page](https://github.com/mediagit/mediagit-core/releases)
+`mediagit-0.2.0-x86_64-windows.zip` from the [Releases page](https://github.com/winnyboy5/mediagit-core/releases)
 and run it directly. Performance will be lower than native, but it is fully functional.
 
 ## Tracking Issue
 
-Follow [GitHub Issues](https://github.com/mediagit/mediagit-core/issues) for native Windows
+Follow [GitHub Issues](https://github.com/winnyboy5/mediagit-core/issues) for native Windows
 ARM64 release support. Once a native ARM64 Windows GitHub Actions runner becomes available
 (or an alternative cross-compilation strategy is adopted), pre-built binaries will be added
 to official releases.

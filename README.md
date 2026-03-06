@@ -99,47 +99,95 @@ Traditional Git struggles with large binary files. MediaGit solves this with:
 
 ### Installation
 
+#### Pre-built Binaries (Recommended)
+
+Download the latest release for your platform from [GitHub Releases](https://github.com/winnyboy5/mediagit-core/releases).
+
+**Linux / macOS — one-liner install:**
 ```bash
-# Clone repository
+curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
+```
+
+**Linux x86_64 — manual:**
+```bash
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.0/mediagit-0.2.0-x86_64-linux.tar.gz \
+  | tar xz -C /usr/local/bin
+```
+
+**macOS Apple Silicon — manual:**
+```bash
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.0/mediagit-0.2.0-aarch64-macos.tar.gz \
+  | tar xz -C /usr/local/bin
+```
+
+**Windows x86_64 (PowerShell):**
+```powershell
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.0/mediagit-0.2.0-x86_64-windows.zip" -OutFile mediagit.zip
+Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
+# Add to PATH:
+[Environment]::SetEnvironmentVariable("Path", "$env:Path;$env:LOCALAPPDATA\MediaGit\bin", "User")
+```
+
+#### Docker
+
+```bash
+docker pull ghcr.io/winnyboy5/mediagit-core:0.2.0
+docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.0 mediagit --version
+```
+
+#### From Source
+
+```bash
+# Requires Rust 1.92+
 git clone https://github.com/winnyboy5/mediagit-core.git
 cd mediagit-core
-
-# Build (requires Rust 1.92+)
 cargo build --release
 
-# Binary location
-./target/release/mediagit
-./target/release/mediagit-server
+# Binaries at:
+# ./target/release/mediagit
+# ./target/release/mediagit-server
 ```
+
+#### All Available Archives
+
+| Platform | Archive |
+|----------|---------|
+| Linux x86_64 | `mediagit-0.2.0-x86_64-linux.tar.gz` |
+| Linux ARM64 | `mediagit-0.2.0-aarch64-linux.tar.gz` |
+| macOS Intel | `mediagit-0.2.0-x86_64-macos.tar.gz` |
+| macOS Apple Silicon | `mediagit-0.2.0-aarch64-macos.tar.gz` |
+| Windows x86_64 | `mediagit-0.2.0-x86_64-windows.zip` |
+
+Each archive includes `mediagit` (CLI) and `mediagit-server` binaries, plus a `.sha256` checksum file.
 
 ### Basic Usage
 
 ```bash
 # Initialize repository
-./target/release/mediagit init
+mediagit init
 
 # Add files
-./target/release/mediagit add *.psd
-./target/release/mediagit add large-video.mp4
+mediagit add *.psd
+mediagit add large-video.mp4
 
 # Commit
-./target/release/mediagit commit -m "Initial commit"
+mediagit commit -m "Initial commit"
 
 # Check status
-./target/release/mediagit status
+mediagit status
 
 # View log
-./target/release/mediagit log
+mediagit log
 ```
 
 ### Server Setup
 
 ```bash
 # Run server (default: http://localhost:3000)
-./target/release/mediagit-server
+mediagit-server
 
 # Or with custom config
-./target/release/mediagit-server --config server.toml
+mediagit-server --config server.toml
 ```
 
 **See [DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md) for complete setup instructions.**
@@ -501,7 +549,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 
 ## Roadmap
 
-### v0.1.0 (Current - Production Ready) ✅
+### v0.1.0 ✅
 - [x] Core version control (init, add, commit, status, log)
 - [x] Object database with chunking and compression
 - [x] PSD layer preservation
@@ -510,20 +558,20 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] Comprehensive testing and validation
 - [x] Production deployment guide
 
-### v0.1.1 (Current) ✅
+### v0.1.1 ✅
 - [x] Delta chain limits (MAX_DELTA_DEPTH=10)
 - [x] Medium file streaming (10-100MB tier)
 - [x] WAV audio support (RIFF chunking)
 - [x] GLB 3D model support (binary glTF chunking)
 - [x] Benchmark validation vs industry standards
 
-### v0.2.0 (Future)
-- [ ] Branch switching optimization
-- [ ] Real cloud provider testing (AWS, Azure, GCS)
-- [ ] FBX/Blend 3D model chunking
-- [ ] FLAC/OGG audio support
-- [ ] Enhanced error messages
-- [ ] Web UI for repository browsing
+### v0.2.0 (Current) ✅
+- [x] All P0–P3 features complete
+- [x] S3/MinIO bucket auto-create fix
+- [x] Branch switching, FLAC/OGG support
+- [x] 194/195 tests passing (release build)
+- [x] Pre-built release binaries (5 platforms)
+- [x] Docker multi-arch images (GHCR)
 
 ### v1.0.0 (Long-term)
 - [ ] Git-LFS migration tool
@@ -623,4 +671,4 @@ Special thanks to:
 
 **Made with 🦀 and ❤️ by the MediaGit Contributors**
 
-**Status**: Beta | **Version**: v0.1.0 | **Updated**: March 5, 2026
+**Status**: Beta | **Version**: v0.2.0 | **Updated**: March 6, 2026

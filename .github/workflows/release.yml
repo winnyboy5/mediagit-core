@@ -44,7 +44,9 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             TAG="dry-run"
-            VERSION="0.0.0-dry-run"
+            # Read version from workspace Cargo.toml (single source of truth)
+            VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+            VERSION="${VERSION}-dry-run"
             IS_PRERELEASE="true"
           else
             TAG="${GITHUB_REF#refs/tags/}"
