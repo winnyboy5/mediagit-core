@@ -12,21 +12,39 @@ Get up and running with MediaGit in 5 minutes!
 ### Quick Install (Recommended)
 
 ```bash
-# Linux/macOS
-curl -sSL https://install.mediagit.dev | sh
+# Linux/macOS — one-liner install
+curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
+```
 
+```powershell
 # Windows (PowerShell)
-iwr https://install.mediagit.dev/windows.ps1 | iex
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.0/mediagit-0.2.0-x86_64-windows.zip" -OutFile mediagit.zip
+Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
+```
+
+### Docker
+
+```bash
+docker pull ghcr.io/winnyboy5/mediagit-core:0.2.0
+docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.0 mediagit --version
 ```
 
 ### From Pre-built Binaries
 
-Download the latest release for your platform from [GitHub Releases](https://github.com/mediagit/mediagit-core/releases).
+Download the latest release for your platform from [GitHub Releases](https://github.com/winnyboy5/mediagit-core/releases):
+
+| Platform | Archive |
+|----------|---------|
+| Linux x86_64 | `mediagit-0.2.0-x86_64-linux.tar.gz` |
+| Linux ARM64 | `mediagit-0.2.0-aarch64-linux.tar.gz` |
+| macOS Intel | `mediagit-0.2.0-x86_64-macos.tar.gz` |
+| macOS Apple Silicon | `mediagit-0.2.0-aarch64-macos.tar.gz` |
+| Windows x86_64 | `mediagit-0.2.0-x86_64-windows.zip` |
 
 ### From Source
 
 ```bash
-git clone https://github.com/mediagit/mediagit-core.git
+git clone https://github.com/winnyboy5/mediagit-core.git
 cd mediagit-core
 cargo build --release
 ```
@@ -243,7 +261,7 @@ mediagit stats
 
 - 📖 [Documentation](https://docs.mediagit.dev)
 - 💬 [Discord Community](https://discord.gg/mediagit)
-- 🐛 [Issue Tracker](https://github.com/mediagit/mediagit-core/issues)
+- 🐛 [Issue Tracker](https://github.com/winnyboy5/mediagit-core/issues)
 - 📧 Email: support@mediagit.dev
 
 ## Common Issues
@@ -252,10 +270,10 @@ mediagit stats
 
 ```bash
 # Linux/macOS: Use sudo
-sudo curl -sSL https://install.mediagit.dev | sh
+sudo sh -c 'curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh'
 
 # Or install to user directory
-curl -sSL https://install.mediagit.dev | sh -s -- --no-sudo
+curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh -s -- --no-sudo
 ```
 
 ### Command Not Found After Install

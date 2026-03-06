@@ -23,7 +23,7 @@ jobs:
 
       - name: Install MediaGit
         run: |
-          curl -fsSL https://github.com/mediagit/mediagit-core/releases/latest/download/mediagit-x86_64-linux.tar.gz \
+          curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/latest/download/mediagit-0.2.0-x86_64-linux.tar.gz \
             | tar xz -C /usr/local/bin/
 
       - name: Verify repository integrity
@@ -55,8 +55,8 @@ jobs:
 
       - name: Install MediaGit
         run: |
-          VERSION="0.1.0"
-          curl -fsSL "https://github.com/mediagit/mediagit-core/releases/download/v${VERSION}/mediagit-${VERSION}-x86_64-linux.tar.gz" \
+          VERSION="0.2.0"
+          curl -fsSL "https://github.com/winnyboy5/mediagit-core/releases/download/v${VERSION}/mediagit-${VERSION}-x86_64-linux.tar.gz" \
             | tar xz -C /usr/local/bin/
 
       - name: Configure author identity
@@ -163,7 +163,7 @@ validate-assets:
   image: ubuntu:22.04
   before_script:
     - apt-get update -qq && apt-get install -y -qq curl
-    - curl -fsSL https://github.com/mediagit/mediagit-core/releases/latest/download/mediagit-x86_64-linux.tar.gz
+    - curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/latest/download/mediagit-0.2.0-x86_64-linux.tar.gz
         | tar xz -C /usr/local/bin/
   script:
     - mediagit fsck
@@ -189,7 +189,7 @@ MediaGit is designed for CI performance:
   uses: actions/cache@v4
   with:
     path: /usr/local/bin/mediagit
-    key: mediagit-${{ runner.os }}-0.1.0
+    key: mediagit-${{ runner.os }}-0.2.0
 ```
 
 ## Troubleshooting CI Issues

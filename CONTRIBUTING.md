@@ -36,7 +36,7 @@ git clone https://github.com/YOUR_USERNAME/mediagit-core.git
 cd mediagit-core
 
 # Add upstream remote
-git remote add upstream https://github.com/mediagit/mediagit-core.git
+git remote add upstream https://github.com/winnyboy5/mediagit-core.git
 ```
 
 ## Development Setup
@@ -352,7 +352,7 @@ Releases are managed by maintainers. The process is:
 
 1. **Version Bump**: Update version in `Cargo.toml`
 2. **Changelog**: Update `CHANGELOG.md`
-3. **Tag Release**: Create git tag (e.g., `v0.1.0`)
+3. **Tag Release**: Create git tag (e.g., `v0.2.0`)
 4. **CI/CD**: GitHub Actions builds and publishes binaries
 5. **Crates.io**: Publish to crates.io
 6. **Documentation**: Deploy docs to docs.mediagit.dev
@@ -361,8 +361,8 @@ Releases are managed by maintainers. The process is:
 ## Getting Help
 
 - **Discord**: Join our [Discord server](https://discord.gg/mediagit)
-- **GitHub Discussions**: Ask questions in [Discussions](https://github.com/mediagit/mediagit-core/discussions)
-- **Issue Tracker**: Report bugs in [Issues](https://github.com/mediagit/mediagit-core/issues)
+- **GitHub Discussions**: Ask questions in [Discussions](https://github.com/winnyboy5/mediagit-core/discussions)
+- **Issue Tracker**: Report bugs in [Issues](https://github.com/winnyboy5/mediagit-core/issues)
 
 ## Recognition
 

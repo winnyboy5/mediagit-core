@@ -54,7 +54,7 @@ Or install the full Visual Studio 2022.
 
 ```bash
 # Clone the repository
-git clone https://github.com/mediagit/mediagit-core.git
+git clone https://github.com/winnyboy5/mediagit-core.git
 cd mediagit-core
 
 # Build release binaries
