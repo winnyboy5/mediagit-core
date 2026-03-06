@@ -14,7 +14,7 @@ This script automatically detects your architecture and downloads the correct bi
 ### Direct Download (x86_64)
 
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.0/mediagit-0.2.0-x86_64-linux.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.1/mediagit-0.2.1-x86_64-linux.tar.gz \
   | sudo tar xz -C /usr/local/bin
 mediagit --version
 ```
@@ -41,10 +41,10 @@ sudo apt install mediagit-core
 
 ```bash
 # Download latest release
-wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.0/mediagit_0.2.0_amd64.deb
+wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.1/mediagit_0.2.1_amd64.deb
 
 # Install
-sudo dpkg -i mediagit_0.2.0_amd64.deb
+sudo dpkg -i mediagit_0.2.1_amd64.deb
 
 # Fix dependencies if needed
 sudo apt-get install -f
@@ -69,10 +69,10 @@ sudo yum install mediagit-core
 
 ```bash
 # Download latest release
-wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.0/mediagit-0.2.0-1.x86_64.rpm
+wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.1/mediagit-0.2.1-1.x86_64.rpm
 
 # Install
-sudo rpm -i mediagit-0.2.0-1.x86_64.rpm
+sudo rpm -i mediagit-0.2.1-1.x86_64.rpm
 ```
 
 ### Arch Linux
@@ -107,14 +107,14 @@ If package managers aren't available, install manually:
 
 ```bash
 # Download archive
-wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.0/mediagit-0.2.0-x86_64-linux.tar.gz
+wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.1/mediagit-0.2.1-x86_64-linux.tar.gz
 
 # Verify checksum
-wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.0/mediagit-0.2.0-x86_64-linux.tar.gz.sha256
-sha256sum -c mediagit-0.2.0-x86_64-linux.tar.gz.sha256
+wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.1/mediagit-0.2.1-x86_64-linux.tar.gz.sha256
+sha256sum -c mediagit-0.2.1-x86_64-linux.tar.gz.sha256
 
 # Extract (contains mediagit + mediagit-server)
-tar -xzf mediagit-0.2.0-x86_64-linux.tar.gz
+tar -xzf mediagit-0.2.1-x86_64-linux.tar.gz
 
 # Move to bin directory
 sudo mv mediagit mediagit-server /usr/local/bin/
@@ -178,7 +178,7 @@ mediagit init
 
 Expected output:
 ```
-mediagit-core 0.2.0
+mediagit-core 0.2.1
 ✓ Initialized empty MediaGit repository in .mediagit/
 ```
 
@@ -270,8 +270,8 @@ sudo dnf update mediagit-core
 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 
 # Or download specific version manually
-wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.0/mediagit-0.2.0-x86_64-linux.tar.gz
-tar -xzf mediagit-0.2.0-x86_64-linux.tar.gz
+wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.1/mediagit-0.2.1-x86_64-linux.tar.gz
+tar -xzf mediagit-0.2.1-x86_64-linux.tar.gz
 sudo mv mediagit mediagit-server /usr/local/bin/
 ```
 

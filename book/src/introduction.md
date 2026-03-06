@@ -98,7 +98,7 @@ See the [LICENSE](https://github.com/winnyboy5/mediagit-core/blob/main/LICENSE) 
 
 ## Community and Support
 
-- **GitHub**: [mediagit/mediagit-core](https://github.com/winnyboy5/mediagit-core)
+- **GitHub**: [winnyboy5/mediagit-core](https://github.com/winnyboy5/mediagit-core)
 - **Documentation**: [https://mediagit.dev/docs](https://mediagit.dev/docs)
 - **Discord**: [Join our community](https://discord.gg/mediagit)
 - **Issues**: [GitHub Issues](https://github.com/winnyboy5/mediagit-core/issues)

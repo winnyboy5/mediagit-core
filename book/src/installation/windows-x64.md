@@ -19,7 +19,7 @@ winget install MediaGit.MediaGitCore
 
 ### Direct Download
 
-1. Download the latest ZIP from [GitHub Releases](https://github.com/winnyboy5/mediagit-core/releases): `mediagit-0.2.0-x86_64-windows.zip`
+1. Download the latest ZIP from [GitHub Releases](https://github.com/winnyboy5/mediagit-core/releases): `mediagit-0.2.1-x86_64-windows.zip`
 2. Extract the archive
 3. Move `mediagit.exe` and `mediagit-server.exe` to a directory on your PATH
 
@@ -27,7 +27,7 @@ winget install MediaGit.MediaGitCore
 
 ```powershell
 # Download ZIP archive
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.0/mediagit-0.2.0-x86_64-windows.zip" -OutFile "mediagit.zip"
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.1/mediagit-0.2.1-x86_64-windows.zip" -OutFile "mediagit.zip"
 
 # Extract (contains mediagit.exe + mediagit-server.exe)
 $dest = "$env:LOCALAPPDATA\MediaGit\bin"
@@ -112,7 +112,7 @@ mediagit init
 
 Expected output:
 ```
-mediagit-core 0.2.0
+mediagit-core 0.2.1
 ✓ All checks passed
 ✓ Initialized empty MediaGit repository in .mediagit/
 ```
