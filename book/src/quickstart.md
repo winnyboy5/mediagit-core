@@ -18,15 +18,15 @@ curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/instal
 
 ```powershell
 # Windows (PowerShell)
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.1/mediagit-0.2.1-x86_64-windows.zip" -OutFile mediagit.zip
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.1-beta.1/mediagit-0.2.1-beta.1-x86_64-windows.zip" -OutFile mediagit.zip
 Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 ```
 
 ### Docker
 
 ```bash
-docker pull ghcr.io/winnyboy5/mediagit-core:0.2.1
-docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.1 mediagit --version
+docker pull ghcr.io/winnyboy5/mediagit-core:0.2.1-beta.1
+docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.1-beta.1 mediagit --version
 ```
 
 ### From Pre-built Binaries
@@ -35,11 +35,11 @@ Download the latest release for your platform from [GitHub Releases](https://git
 
 | Platform | Archive |
 |----------|---------|
-| Linux x86_64 | `mediagit-0.2.1-x86_64-linux.tar.gz` |
-| Linux ARM64 | `mediagit-0.2.1-aarch64-linux.tar.gz` |
-| macOS Intel | `mediagit-0.2.1-x86_64-macos.tar.gz` |
-| macOS Apple Silicon | `mediagit-0.2.1-aarch64-macos.tar.gz` |
-| Windows x86_64 | `mediagit-0.2.1-x86_64-windows.zip` |
+| Linux x86_64 | `mediagit-0.2.1-beta.1-x86_64-linux.tar.gz` |
+| Linux ARM64 | `mediagit-0.2.1-beta.1-aarch64-linux.tar.gz` |
+| macOS Intel | `mediagit-0.2.1-beta.1-x86_64-macos.tar.gz` |
+| macOS Apple Silicon | `mediagit-0.2.1-beta.1-aarch64-macos.tar.gz` |
+| Windows x86_64 | `mediagit-0.2.1-beta.1-x86_64-windows.zip` |
 
 ### From Source
 
