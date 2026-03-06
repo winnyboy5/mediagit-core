@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-03-06
+
+### Changed
+- Automated version extraction from Cargo.toml in release workflow dry-run mode
+- Updated all documentation to reflect correct version, URLs, and archive names
+- Added `scripts/bump-version.sh` for automated version bumping across the project
+
 ## [0.2.0] - 2026-03-05
 
 ### Added
@@ -60,6 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dependency security audits in CI
 - Encryption at rest with Argon2 key derivation
 
-[Unreleased]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/winnyboy5/mediagit-core/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/winnyboy5/mediagit-core/releases/tag/v0.1.0
