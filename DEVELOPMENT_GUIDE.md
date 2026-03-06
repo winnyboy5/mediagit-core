@@ -2018,7 +2018,7 @@ parallel_composite_upload_threshold = 8388608  # 8MB
 - **Official Docs**: `book/src/` (mdBook documentation)
 - **Examples**: `crates/mediagit-config/examples/`
 - **Tests**: `tests/` directory
-- **Docker Configs**: `docker/` directory (see `docker/README.md`)
+- **Docker Configs**: `docker-compose*.yml` files in project root
 - **Test Archives**: `test-archives/` (validation artifacts with 30-day retention)
 - **Cleanup Guide**: `CLEANUP_SUMMARY.md` (project organization and archival)
 - **Issues**: https://github.com/winnyboy5/mediagit-core/issues

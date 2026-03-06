@@ -51,8 +51,7 @@ DOC_FILES=$(find "$ROOT" \
     -not -path '*/target/*' \
     -not -path '*/.git/*' \
     -not -path '*/CHANGELOG.md' \
-    -not -path '*/claudedocs/*' \
-    -not -path '*/vast-wishing-minsky.md')
+    -not -path '*/claudedocs/*')
 
 count=0
 for f in $DOC_FILES; do
