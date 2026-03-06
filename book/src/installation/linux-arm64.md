@@ -5,10 +5,11 @@ MediaGit-Core supports ARM64 Linux systems including Raspberry Pi, ARM servers, 
 ## Quick Install
 
 ```bash
-curl -fsSL https://get.mediagit.dev/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 ```
 
-The script auto-detects ARM64 architecture and installs the appropriate binary.
+The script auto-detects ARM64 architecture and downloads the correct binary from
+[GitHub Releases](https://github.com/winnyboy5/mediagit-core/releases).
 
 ## Raspberry Pi Setup
 
@@ -19,8 +20,8 @@ The script auto-detects ARM64 architecture and installs the appropriate binary.
 sudo apt update && sudo apt upgrade
 
 # Install MediaGit
-wget https://github.com/mediagit/mediagit-core/releases/download/v0.1.0/mediagit-linux-arm64.tar.gz
-tar -xzf mediagit-linux-arm64.tar.gz
+wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.0/mediagit-0.2.0-aarch64-linux.tar.gz
+tar -xzf mediagit-0.2.0-aarch64-linux.tar.gz
 sudo mv mediagit /usr/local/bin/
 sudo chmod +x /usr/local/bin/mediagit
 
@@ -59,10 +60,10 @@ sudo apt install mediagit-core
 
 ```bash
 # Download ARM64 build
-wget https://github.com/mediagit/mediagit-core/releases/download/v0.1.0/mediagit-linux-arm64.tar.gz
+wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.0/mediagit-0.2.0-aarch64-linux.tar.gz
 
 # Install
-tar -xzf mediagit-linux-arm64.tar.gz
+tar -xzf mediagit-0.2.0-aarch64-linux.tar.gz
 sudo mv mediagit /usr/local/bin/
 sudo chmod +x /usr/local/bin/mediagit
 ```
@@ -75,7 +76,7 @@ Optimized for AWS Graviton processors:
 
 ```bash
 # Install
-curl -fsSL https://get.mediagit.dev/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 
 # Configure for Graviton
 mediagit config set performance.worker_threads $(nproc)
@@ -94,17 +95,17 @@ sudo dnf install mediagit-core
 
 ```bash
 # Ubuntu 22.04 ARM64
-curl -fsSL https://get.mediagit.dev/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 ```
 
 ## Manual Binary Installation
 
 ```bash
 # Download ARM64 binary
-wget https://github.com/mediagit/mediagit-core/releases/download/v0.1.0/mediagit-linux-arm64.tar.gz
+wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.0/mediagit-0.2.0-aarch64-linux.tar.gz
 
 # Extract and install
-tar -xzf mediagit-linux-arm64.tar.gz
+tar -xzf mediagit-0.2.0-aarch64-linux.tar.gz
 sudo mv mediagit /usr/local/bin/
 sudo chmod +x /usr/local/bin/mediagit
 
@@ -209,7 +210,7 @@ If pre-built binaries don't work:
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Clone and build
-git clone https://github.com/mediagit/mediagit-core.git
+git clone https://github.com/winnyboy5/mediagit-core.git
 cd mediagit-core
 cargo build --release --target aarch64-unknown-linux-gnu
 
