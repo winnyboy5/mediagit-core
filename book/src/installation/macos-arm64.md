@@ -17,14 +17,8 @@ Homebrew automatically installs the ARM64 version on Apple Silicon Macs.
 
 ```bash
 # Download latest ARM64 binary
-curl -LO https://github.com/mediagit/mediagit-core/releases/download/v0.1.0/mediagit-macos-arm64.tar.gz
-
-# Extract
-tar -xzf mediagit-macos-arm64.tar.gz
-
-# Move to PATH
-sudo mv mediagit /usr/local/bin/
-sudo chmod +x /usr/local/bin/mediagit
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.0/mediagit-0.2.0-aarch64-macos.tar.gz \
+  | sudo tar xz -C /usr/local/bin
 
 # Verify native ARM64
 file /usr/local/bin/mediagit
@@ -34,7 +28,7 @@ file /usr/local/bin/mediagit
 ### Using Installation Script
 
 ```bash
-curl -fsSL https://get.mediagit.dev/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 ```
 
 ## macOS Gatekeeper Approval
@@ -154,7 +148,7 @@ mediagit init
 
 Expected output:
 ```
-mediagit-core 0.1.0
+mediagit-core 0.2.0
 /opt/homebrew/bin/mediagit: Mach-O 64-bit executable arm64
 ✓ All checks passed
 ✓ Initialized empty MediaGit repository in .mediagit/
@@ -230,9 +224,8 @@ brew upgrade mediagit-core
 ### Manual Update
 
 ```bash
-curl -LO https://github.com/mediagit/mediagit-core/releases/latest/download/mediagit-macos-arm64.tar.gz
-tar -xzf mediagit-macos-arm64.tar.gz
-sudo mv mediagit /usr/local/bin/
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.0/mediagit-0.2.0-aarch64-macos.tar.gz \
+  | sudo tar xz -C /usr/local/bin
 ```
 
 ## Uninstalling

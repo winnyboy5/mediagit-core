@@ -94,14 +94,14 @@ MediaGit-Core is dual-licensed:
 - **AGPL-3.0** for community use (individuals, open-source projects, education)
 - **Commercial License** for enterprise use requiring proprietary modifications
 
-See the [LICENSE](https://github.com/mediagit/mediagit-core/blob/main/LICENSE) file for details.
+See the [LICENSE](https://github.com/winnyboy5/mediagit-core/blob/main/LICENSE) file for details.
 
 ## Community and Support
 
-- **GitHub**: [mediagit/mediagit-core](https://github.com/mediagit/mediagit-core)
+- **GitHub**: [mediagit/mediagit-core](https://github.com/winnyboy5/mediagit-core)
 - **Documentation**: [https://mediagit.dev/docs](https://mediagit.dev/docs)
 - **Discord**: [Join our community](https://discord.gg/mediagit)
-- **Issues**: [GitHub Issues](https://github.com/mediagit/mediagit-core/issues)
+- **Issues**: [GitHub Issues](https://github.com/winnyboy5/mediagit-core/issues)
 
 ## What's Next?
 

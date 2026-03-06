@@ -4,20 +4,55 @@ MediaGit-Core provides pre-built binaries for all major platforms and architectu
 
 ## Quick Install
 
-### Linux (x64)
+### Linux / macOS (one-liner)
+
 ```bash
-curl -fsSL https://get.mediagit.dev/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 ```
 
-### macOS (Intel/ARM64)
+The install script automatically detects your OS and architecture and downloads the correct binary.
+
+### Linux (x86_64) — manual
+
 ```bash
-brew install mediagit/tap/mediagit-core
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.0/mediagit-0.2.0-x86_64-linux.tar.gz \
+  | tar xz -C /usr/local/bin
 ```
 
-### Windows (x64)
+### macOS (Apple Silicon) — manual
+
+```bash
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.0/mediagit-0.2.0-aarch64-macos.tar.gz \
+  | tar xz -C /usr/local/bin
+```
+
+### Windows (x86_64 — PowerShell)
+
 ```powershell
-choco install mediagit-core
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.0/mediagit-0.2.0-x86_64-windows.zip" -OutFile mediagit.zip
+Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 ```
+
+### Docker
+
+```bash
+docker pull ghcr.io/winnyboy5/mediagit-core:0.2.0
+docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.0 mediagit --version
+```
+
+### All Release Archives
+
+Each release on [GitHub Releases](https://github.com/winnyboy5/mediagit-core/releases) includes:
+
+| Platform | Archive |
+|----------|---------|
+| Linux x86_64 | `mediagit-{VERSION}-x86_64-linux.tar.gz` |
+| Linux ARM64 | `mediagit-{VERSION}-aarch64-linux.tar.gz` |
+| macOS Intel | `mediagit-{VERSION}-x86_64-macos.tar.gz` |
+| macOS Apple Silicon | `mediagit-{VERSION}-aarch64-macos.tar.gz` |
+| Windows x86_64 | `mediagit-{VERSION}-x86_64-windows.zip` |
+
+Each archive contains both `mediagit` (CLI) and `mediagit-server` binaries, with a corresponding `.sha256` checksum file.
 
 ## Platform-Specific Guides
 
@@ -51,7 +86,7 @@ After installation, verify MediaGit-Core is working:
 # Check version
 mediagit --version
 
-# Should output: mediagit-core 0.1.0
+# Should output: mediagit-core 0.2.0
 
 # Run self-test
 mediagit fsck --self-test
@@ -107,19 +142,16 @@ If you encounter issues:
 
 ### Linux/macOS
 ```bash
-# If installed via script
-sudo rm /usr/local/bin/mediagit
-
-# If installed via package manager
-brew uninstall mediagit-core  # macOS
-sudo apt remove mediagit-core  # Debian/Ubuntu
+sudo rm /usr/local/bin/mediagit /usr/local/bin/mediagit-server
 ```
 
 ### Windows
 ```powershell
-# If installed via Chocolatey
-choco uninstall mediagit-core
+# Remove binary directory and clean PATH
+Remove-Item "$env:LOCALAPPDATA\MediaGit" -Recurse -Force
+```
 
-# If installed manually
-# Remove from Program Files and update PATH
+### Docker
+```bash
+docker rmi ghcr.io/winnyboy5/mediagit-core:0.2.0
 ```

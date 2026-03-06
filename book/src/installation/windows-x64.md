@@ -17,26 +17,30 @@ choco install mediagit-core
 winget install MediaGit.MediaGitCore
 ```
 
-### Direct Installer Download
+### Direct Download
 
-1. Download the latest installer: [mediagit-setup-x64.msi](https://github.com/mediagit/mediagit-core/releases/download/v0.1.0/mediagit-setup-x64.msi)
-2. Double-click the `.msi` file
-3. Follow the installation wizard
-4. MediaGit will be added to your PATH automatically
+1. Download the latest ZIP from [GitHub Releases](https://github.com/winnyboy5/mediagit-core/releases): `mediagit-0.2.0-x86_64-windows.zip`
+2. Extract the archive
+3. Move `mediagit.exe` and `mediagit-server.exe` to a directory on your PATH
 
 ### Manual Binary Installation
 
 ```powershell
 # Download ZIP archive
-Invoke-WebRequest -Uri "https://github.com/mediagit/mediagit-core/releases/download/v0.1.0/mediagit-windows-x64.zip" -OutFile "mediagit.zip"
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.0/mediagit-0.2.0-x86_64-windows.zip" -OutFile "mediagit.zip"
 
-# Extract
-Expand-Archive -Path mediagit.zip -DestinationPath "C:\Program Files\MediaGit"
+# Extract (contains mediagit.exe + mediagit-server.exe)
+$dest = "$env:LOCALAPPDATA\MediaGit\bin"
+New-Item -ItemType Directory -Force -Path $dest | Out-Null
+Expand-Archive -Path mediagit.zip -DestinationPath $dest -Force
 
 # Add to PATH
-[Environment]::SetEnvironmentVariable("Path", "$env:Path;C:\Program Files\MediaGit", [EnvironmentVariableTarget]::Machine)
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if ($userPath -notlike "*$dest*") {
+    [Environment]::SetEnvironmentVariable("Path", "$userPath;$dest", "User")
+}
 
-# Verify
+# Restart terminal, then verify
 mediagit --version
 ```
 
@@ -108,7 +112,7 @@ mediagit init
 
 Expected output:
 ```
-mediagit-core 0.1.0
+mediagit-core 0.2.0
 ✓ All checks passed
 ✓ Initialized empty MediaGit repository in .mediagit/
 ```
@@ -261,8 +265,8 @@ winget upgrade MediaGit.MediaGitCore
 
 ### Manual Update
 
-1. Download latest installer from [Releases](https://github.com/mediagit/mediagit-core/releases)
-2. Run the new installer (it will replace the old version)
+1. Download latest ZIP from [GitHub Releases](https://github.com/winnyboy5/mediagit-core/releases)
+2. Extract and replace the binaries in your install directory
 
 ## Uninstalling
 

@@ -40,7 +40,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-mediagit-git = "0.1.0"
+mediagit-git = "0.2.0"
 ```
 
 ## Usage

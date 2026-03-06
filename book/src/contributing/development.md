@@ -24,7 +24,7 @@ rustup component add rustfmt clippy
 ## Clone and Build
 
 ```bash
-git clone https://github.com/mediagit/mediagit-core.git
+git clone https://github.com/winnyboy5/mediagit-core.git
 cd mediagit-core
 
 # Build (debug)
@@ -304,6 +304,6 @@ prevents the CRLF issue from recurring on subsequent checkouts.
 
 ## Getting Help
 
-- Check existing issues: [GitHub Issues](https://github.com/mediagit/mediagit-core/issues)
-- Review [CONTRIBUTING.md](https://github.com/mediagit/mediagit-core/blob/main/CONTRIBUTING.md)
+- Check existing issues: [GitHub Issues](https://github.com/winnyboy5/mediagit-core/issues)
+- Review [CONTRIBUTING.md](https://github.com/winnyboy5/mediagit-core/blob/main/CONTRIBUTING.md)
 - Read the [Architecture Overview](../architecture/README.md)
