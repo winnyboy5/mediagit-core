@@ -1,5 +1,5 @@
 # MediaGit-Core Development Guide
-**Version**: 0.2.1
+**Version**: 0.2.1-beta.1
 **Last Updated**: February 27, 2026
 
 Complete setup guide for MediaGit development - from beginner setup to production deployment.
@@ -309,7 +309,7 @@ ls -lh target/debug/mediagit-server
 
 # Test CLI
 ./target/debug/mediagit --version
-# Should output: mediagit 0.2.1
+# Should output: mediagit 0.2.1-beta.1
 
 # Test server (optional)
 ./target/debug/mediagit-server --help
@@ -648,7 +648,7 @@ Create IAM policy with minimum required permissions:
 
 ```json
 {
-  "Version": "2012-10-17",
+  "Version": "20.2.1-beta.10-17",
   "Statement": [
     {
       "Effect": "Allow",
@@ -2061,6 +2061,6 @@ find . -name "*.tmp" -o -name "*.log" -o -name "*~"
 
 ---
 
-**Version**: 0.2.1
+**Version**: 0.2.1-beta.1
 **Last Updated**: March 5, 2026
 **Maintained by**: MediaGit Core Team
