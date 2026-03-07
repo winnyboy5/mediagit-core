@@ -5,7 +5,27 @@ All notable changes to MediaGit will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.1-beta.2]
+
+### Fixed
+- PowerShell install warning: added `-UseBasicParsing` to `iwr` in `install.ps1` usage comment,
+  `install.sh` (Windows fallback message), `RELEASING.md`, and `.github/workflows/release.yml`
+  release notes body — prevents IE-engine security prompt on Windows PowerShell
+- Install scripts (`install.ps1`, `install.sh`) now fall back to the `/releases` list API when
+  `/releases/latest` returns 404 — this occurs when only pre-release versions exist (e.g. before
+  the first stable release); scripts pick the most recent release including pre-releases
+
+### Changed
+- `README.md`: Added complete 32-command CLI reference section, grouped by workflow with flag docs
+- `README.md`: Replaced compression efficiency table with accurate per-type data (conservative
+  numbers — ~30% average across mixed media projects; pre-compressed formats explicitly shown
+  as Store / 0% additional reduction)
+- `README.md`: Added scenario-based deduplication table (replaces single "66% identical files" row)
+- `README.md`: Updated roadmap to match actual CHANGELOG history (v0.1.0 → v0.2.0 → v0.2.1
+  → v0.3.0 planned → v1.0.0 stable); removed fictional v0.1.1 entry
+- `README.md`: Fixed Statistics section — staging throughput corrected to 80–240 MB/s (release
+  build); removed misleading 3-35 MB/s figure
+- `README.md`: Added "Could not fetch latest version" troubleshooting entry with install workaround
 
 ## [0.2.1-beta.1] - 2026-03-06
 
@@ -67,7 +87,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dependency security audits in CI
 - Encryption at rest with Argon2 key derivation
 
-[Unreleased]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.1-beta.2...HEAD
-[v0.2.1-beta.1]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.1-beta.1...HEAD
+[Unreleased]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.1-beta.1...HEAD
+[0.2.1-beta.1]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.0...v0.2.1-beta.1
 [0.2.0]: https://github.com/winnyboy5/mediagit-core/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/winnyboy5/mediagit-core/releases/tag/v0.1.0
