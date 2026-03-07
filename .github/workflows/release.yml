@@ -310,7 +310,7 @@ jobs:
 
           #### Quick Install (Windows PowerShell)
           ```powershell
-          iwr https://raw.githubusercontent.com/${{ github.repository }}/main/install.ps1 | iex
+          iwr -UseBasicParsing https://raw.githubusercontent.com/${{ github.repository }}/main/install.ps1 | iex
           ```
 
           #### Manual Installation

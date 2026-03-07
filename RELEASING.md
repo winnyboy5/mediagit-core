@@ -82,7 +82,7 @@ After the workflow completes:
   curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 
   # Windows PowerShell
-  iwr https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.ps1 | iex
+  iwr -UseBasicParsing https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.ps1 | iex
   ```
 - [ ] Verify crates.io publication: https://crates.io/crates/mediagit-cli
 - [ ] Test Docker image:
