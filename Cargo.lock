@@ -2991,7 +2991,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-cli"
-version = "0.2.1-beta.1"
+version = "0.2.1-beta.2"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3025,7 +3025,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-compression"
-version = "0.2.1-beta.1"
+version = "0.2.1-beta.2"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3043,7 +3043,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-config"
-version = "0.2.1-beta.1"
+version = "0.2.1-beta.2"
 dependencies = [
  "anyhow",
  "num_cpus",
@@ -3059,7 +3059,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-git"
-version = "0.2.1-beta.1"
+version = "0.2.1-beta.2"
 dependencies = [
  "git2",
  "hex",
@@ -3074,7 +3074,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-media"
-version = "0.2.1-beta.1"
+version = "0.2.1-beta.2"
 dependencies = [
  "image",
  "image_hasher",
@@ -3092,7 +3092,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-metrics"
-version = "0.2.1-beta.1"
+version = "0.2.1-beta.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -3106,7 +3106,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-migration"
-version = "0.2.1-beta.1"
+version = "0.2.1-beta.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3122,7 +3122,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-observability"
-version = "0.2.1-beta.1"
+version = "0.2.1-beta.2"
 dependencies = [
  "anyhow",
  "thiserror 2.0.18",
@@ -3133,7 +3133,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-protocol"
-version = "0.2.1-beta.1"
+version = "0.2.1-beta.2"
 dependencies = [
  "anyhow",
  "futures",
@@ -3148,7 +3148,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-security"
-version = "0.2.1-beta.1"
+version = "0.2.1-beta.2"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3177,7 +3177,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-server"
-version = "0.2.1-beta.1"
+version = "0.2.1-beta.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -3208,7 +3208,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-storage"
-version = "0.2.1-beta.1"
+version = "0.2.1-beta.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3232,7 +3232,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-test-utils"
-version = "0.2.1-beta.1"
+version = "0.2.1-beta.2"
 dependencies = [
  "assert_cmd",
  "dunce",
@@ -3242,7 +3242,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-versioning"
-version = "0.2.1-beta.1"
+version = "0.2.1-beta.2"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",

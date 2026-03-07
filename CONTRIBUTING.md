@@ -352,7 +352,7 @@ Releases are managed by maintainers. The process is:
 
 1. **Version Bump**: Update version in `Cargo.toml`
 2. **Changelog**: Update `CHANGELOG.md`
-3. **Tag Release**: Create git tag (e.g., `v0.2.1-beta.1`)
+3. **Tag Release**: Create git tag (e.g., `v0.2.1-beta.2`)
 4. **CI/CD**: GitHub Actions builds and publishes binaries
 5. **Crates.io**: Publish to crates.io
 6. **Documentation**: Deploy docs to docs.mediagit.dev
