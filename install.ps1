@@ -1,5 +1,5 @@
 # MediaGit Installation Script for Windows PowerShell
-# Usage: iwr https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.ps1 | iex
+# Usage: iwr -UseBasicParsing https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.ps1 | iex
 
 param(
     [string]$Version = "latest",
@@ -30,8 +30,19 @@ Write-Host "Platform: Windows ${Arch}" -ForegroundColor Cyan
 if ($Version -eq "latest") {
     Write-Host "Fetching latest version..." -ForegroundColor Cyan
     try {
-        $LatestRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/${Repo}/releases/latest"
-        $Version = $LatestRelease.tag_name -replace '^v', ''
+        # Try stable release first; fall back to pre-releases if no stable release exists yet
+        try {
+            $LatestRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/${Repo}/releases/latest"
+            $Version = $LatestRelease.tag_name -replace '^v', ''
+        }
+        catch {
+            $Releases = Invoke-RestMethod -Uri "https://api.github.com/repos/${Repo}/releases"
+            if ($Releases.Count -gt 0) {
+                $Version = $Releases[0].tag_name -replace '^v', ''
+            } else {
+                throw "No releases found"
+            }
+        }
     }
     catch {
         Write-Host "Error: Could not fetch latest version" -ForegroundColor Red
