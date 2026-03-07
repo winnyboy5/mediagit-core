@@ -43,7 +43,7 @@ case "$OS" in
   *)
     echo "${RED}Error: Unsupported OS: $OS${NC}"
     echo "This script only supports Linux and macOS."
-    echo "For Windows, use: iwr https://raw.githubusercontent.com/${REPO}/main/install.ps1 | iex"
+    echo "For Windows, use: iwr -UseBasicParsing https://raw.githubusercontent.com/${REPO}/main/install.ps1 | iex"
     exit 1
     ;;
 esac
@@ -51,7 +51,11 @@ esac
 # Fetch latest version if not specified
 if [ "$VERSION" = "latest" ]; then
   echo "Fetching latest version..."
-  VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' | sed 's/^v//')
+  # Try stable release first; fall back to pre-releases if no stable release exists yet
+  VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' | sed 's/^v//')
+  if [ -z "$VERSION" ]; then
+    VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases" 2>/dev/null | grep '"tag_name"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/' | sed 's/^v//')
+  fi
   if [ -z "$VERSION" ]; then
     echo "${RED}Error: Could not fetch latest version${NC}"
     exit 1
