@@ -560,7 +560,8 @@ impl StashCmd {
 
             if path.is_file() {
                 if let Ok(rel_path) = path.strip_prefix(repo_root) {
-                    files.insert(rel_path.to_path_buf());
+                    let normalized = PathBuf::from(rel_path.to_string_lossy().replace('\\', "/"));
+                    files.insert(normalized);
                 }
             } else if path.is_dir() {
                 self.scan_directory_recursive(repo_root, &path, files)?;

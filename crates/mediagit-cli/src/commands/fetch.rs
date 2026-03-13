@@ -193,28 +193,12 @@ impl FetchCmd {
                 .map(|oid| vec![oid.to_hex()])
                 .unwrap_or_default();
 
-            // Download objects for this branch
-            let download_pb = progress.download_bar(&format!("Fetching {}", branch_name));
-            let (pack_data, chunked_oids) = client
-                .pull_with_have(&odb, &branch_ref.name, local_have)
+            // Download objects using streaming (memory-efficient, writes directly to ODB)
+            let download_pb = progress.spinner(&format!("Fetching {}...", branch_name));
+            let chunked_oids = client
+                .pull_streaming(&odb, &branch_ref.name, local_have)
                 .await?;
-            let pack_size = pack_data.len() as u64;
-            download_pb.set_length(pack_size);
-            download_pb.set_position(pack_size);
-            stats.bytes_downloaded += pack_size;
-            download_pb.finish_with_message("Downloaded");
-
-            // Unpack objects
-            if pack_size > 0 {
-                let pack_reader = mediagit_versioning::PackReader::new(pack_data)?;
-                let objects = pack_reader.list_objects();
-                stats.objects_received += objects.len() as u64;
-
-                for oid in &objects {
-                    let (obj_type, obj_data) = pack_reader.get_object_with_type(oid)?;
-                    odb.write(obj_type, &obj_data).await?;
-                }
-            }
+            download_pb.finish_with_message(format!("Fetched {}", branch_name));
 
             // Download chunked objects if any
             if !chunked_oids.is_empty() {

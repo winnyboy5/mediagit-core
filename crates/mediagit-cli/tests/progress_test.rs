@@ -47,7 +47,7 @@ fn test_operation_stats_summary() {
 #[test]
 fn test_progress_tracker_quiet_mode() {
     let tracker = ProgressTracker::new(true);
-    let pb = tracker.download_bar("Test");
+    let pb = tracker.spinner("Test");
     assert!(pb.is_hidden());
 }
 
@@ -55,13 +55,9 @@ fn test_progress_tracker_quiet_mode() {
 fn test_progress_tracker_creates_bars() {
     let tracker = ProgressTracker::new(false);
 
-    let download_pb = tracker.download_bar("Test download");
     let object_pb = tracker.object_bar("Test objects", 100);
-    let file_pb = tracker.file_bar("Test files", 50);
     let spinner = tracker.spinner("Test spinner");
 
-    drop(download_pb);
     drop(object_pb);
-    drop(file_pb);
     drop(spinner);
 }

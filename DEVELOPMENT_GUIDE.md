@@ -1,5 +1,5 @@
 # MediaGit-Core Development Guide
-**Version**: 0.2.1-beta.2
+**Version**: 0.2.3-beta.1
 **Last Updated**: February 27, 2026
 
 Complete setup guide for MediaGit development - from beginner setup to production deployment.
@@ -309,7 +309,7 @@ ls -lh target/debug/mediagit-server
 
 # Test CLI
 ./target/debug/mediagit --version
-# Should output: mediagit 0.2.1-beta.2
+# Should output: mediagit 0.2.3-beta.1
 
 # Test server (optional)
 ./target/debug/mediagit-server --help
@@ -439,9 +439,9 @@ MediaGit looks for configuration files in this order (highest precedence first):
 ```bash
 # If all three exist, values are merged with this priority:
 # 1. MEDIAGIT_S3_BUCKET env var (wins)
-# 2. .mediagit/config.toml [storage.s3] bucket
-# 3. config.toml [storage.s3] bucket
-# 4. ~/.config/mediagit/config.toml [storage.s3] bucket (lowest)
+# 2. .mediagit/config.toml [storage] bucket  (where backend = "s3")
+# 3. config.toml [storage] bucket
+# 4. ~/.config/mediagit/config.toml [storage] bucket (lowest)
 ```
 
 ### 1. Local Filesystem Backend (Default)
@@ -461,8 +461,6 @@ host = "127.0.0.1"
 
 [storage]
 backend = "filesystem"
-
-[storage.filesystem]
 base_path = "./mediagit-data"
 create_dirs = true
 sync = false
@@ -648,7 +646,7 @@ Create IAM policy with minimum required permissions:
 
 ```json
 {
-  "Version": "20.2.1-beta.20-17",
+  "Version": "20.2.3-beta.10-17",
   "Statement": [
     {
       "Effect": "Allow",
@@ -767,31 +765,23 @@ aws s3 ls s3://my-mediagit-bucket/media/objects/ --recursive
 #### Encryption Options
 
 ```toml
-# Server-side encryption (SSE-S3)
-[storage.s3]
+# Server-side encryption (SSE-S3) — add to your [storage] block
+[storage]
+backend = "s3"
+bucket = "my-mediagit-bucket"
+region = "us-east-1"
 encryption = true
-encryption_algorithm = "AES256"
-
-# Server-side encryption with KMS
-[storage.s3]
-encryption = true
-encryption_algorithm = "aws:kms"
-kms_key_id = "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012"
+encryption_algorithm = "AES256"   # Options: AES256, aws:kms
 ```
+
+For KMS-managed keys, set `encryption_algorithm = "aws:kms"`. Key selection and rotation are configured in the AWS Console or via AWS CLI — not in MediaGit config.
 
 #### Cost Optimization
 
-```toml
-# Use S3 Intelligent-Tiering storage class
-[storage.s3]
-storage_class = "INTELLIGENT_TIERING"
-
-# Or use lifecycle policies
-# Configure in AWS Console or via AWS CLI
-```
+S3 storage class (Intelligent-Tiering, Glacier, etc.) and lifecycle policies are configured via the AWS Console or AWS CLI, not in MediaGit config:
 
 ```bash
-# Example lifecycle policy
+# Example: set lifecycle policy via AWS CLI
 aws s3api put-bucket-lifecycle-configuration \
   --bucket my-mediagit-bucket \
   --lifecycle-configuration file://lifecycle-policy.json
@@ -844,15 +834,13 @@ az storage container create \
 ```toml
 [storage]
 backend = "azure"
-
-[storage.azure]
 account_name = "mediagitstorage"
 container = "mediagit-container"
 connection_string = "DefaultEndpointsProtocol=https;AccountName=mediagitstorage;AccountKey=<YOUR_KEY>;EndpointSuffix=core.windows.net"
 prefix = "files/"
 ```
 
-**Option 2: Account Key (Recommended)**
+**Option 2: Account Key via Environment (Recommended)**
 
 ```bash
 # Get account key
@@ -868,27 +856,22 @@ export MEDIAGIT_AZURE_ACCOUNT_KEY=<account_key>
 ```toml
 [storage]
 backend = "azure"
-
-[storage.azure]
 account_name = "mediagitstorage"
 container = "mediagit-container"
-# account_key from environment
+# account_key loaded from MEDIAGIT_AZURE_ACCOUNT_KEY env var
 prefix = "files/"
 ```
 
 **Option 3: Managed Identity (Production)**
 
-For Azure VM/App Service deployments:
+For Azure VM/App Service deployments, omit credentials entirely — the Azure SDK auto-detects the managed identity from the instance metadata service:
 
 ```toml
 [storage]
 backend = "azure"
-
-[storage.azure]
 account_name = "mediagitstorage"
 container = "mediagit-container"
-use_managed_identity = true
-# Credentials auto-detected from Azure AD
+# No account_key or connection_string — Azure SDK uses managed identity
 ```
 
 #### Rust Code Integration
@@ -940,14 +923,10 @@ az storage blob list \
 
 #### Access Tiers
 
-```toml
-# Configure blob access tier for cost optimization
-[storage.azure]
-access_tier = "Hot"  # Options: Hot, Cool, Archive
-```
+Azure blob access tiers (Hot, Cool, Archive) and lifecycle policies are configured via the Azure Portal or Azure CLI — not in MediaGit config:
 
 ```bash
-# Set lifecycle management
+# Set lifecycle management via Azure CLI
 az storage account management-policy create \
   --account-name mediagitstorage \
   --resource-group mediagit-rg \
@@ -1009,8 +988,6 @@ chmod 600 ~/mediagit-credentials.json
 ```toml
 [storage]
 backend = "gcs"
-
-[storage.gcs]
 bucket = "my-mediagit-bucket"
 project_id = "your-project-id"
 credentials_path = "/home/user/mediagit-credentials.json"
@@ -1028,16 +1005,14 @@ export MEDIAGIT_GCS_BUCKET=my-mediagit-bucket
 ```toml
 [storage]
 backend = "gcs"
-
-[storage.gcs]
 bucket = "my-mediagit-bucket"
 project_id = "your-project-id"
-# credentials_path from environment
+# credentials_path loaded from MEDIAGIT_GCS_CREDENTIALS_PATH env var
 ```
 
 **Option 3: Application Default Credentials (Production)**
 
-For GCE/GKE deployments:
+For GCE/GKE deployments, omit `credentials_path` — the GCS client auto-detects credentials from the instance metadata service:
 
 ```bash
 # On GCE/GKE, credentials auto-detected from instance metadata
@@ -1047,11 +1022,9 @@ gcloud auth application-default login  # For local testing
 ```toml
 [storage]
 backend = "gcs"
-
-[storage.gcs]
 bucket = "my-mediagit-bucket"
 project_id = "your-project-id"
-# Credentials auto-detected from environment
+# No credentials_path — auto-detected from environment
 ```
 
 #### Testing
@@ -1073,11 +1046,7 @@ gcloud storage ls gs://my-mediagit-bucket/media/ --recursive
 
 #### Storage Classes
 
-```toml
-# Configure storage class for cost optimization
-[storage.gcs]
-storage_class = "STANDARD"  # Options: STANDARD, NEARLINE, COLDLINE, ARCHIVE
-```
+GCS storage class (STANDARD, NEARLINE, COLDLINE, ARCHIVE) is configured via lifecycle policies in the GCP Console or gcloud CLI — not in MediaGit config.
 
 ```bash
 # Set lifecycle management
@@ -1912,33 +1881,34 @@ write = 30
 
 #### AWS S3
 
-```toml
-[storage.s3]
-# Use transfer acceleration for global uploads
-endpoint = "https://my-mediagit-bucket.s3-accelerate.amazonaws.com"
+For S3 transfer acceleration, set the accelerated endpoint directly in the MediaGit config:
 
-# Use multipart upload for large files (handled automatically)
-multipart_threshold = 8388608  # 8MB
-multipart_chunk_size = 5242880  # 5MB
+```toml
+[storage]
+backend = "s3"
+bucket = "my-mediagit-bucket"
+region = "us-east-1"
+endpoint = "https://my-mediagit-bucket.s3-accelerate.amazonaws.com"
 ```
+
+Multipart upload thresholds and chunk sizes are handled automatically by the AWS SDK. No MediaGit config is needed.
 
 #### Azure Blob
 
-```toml
-[storage.azure]
-# Use premium block blobs for best performance
-performance_tier = "Premium"
+Azure performance tiers (Premium, Standard) are configured when creating the storage account in the Azure Portal. MediaGit uses whatever tier the account is configured with. Concurrent upload streams are controlled by the `[performance] max_concurrency` setting:
 
-# Concurrent upload streams
+```toml
+[performance]
 max_concurrency = 4
 ```
 
 #### GCS
 
+GCS parallel composite uploads are handled automatically by the GCS client. Adjust overall concurrency via `[performance] max_concurrency`:
+
 ```toml
-[storage.gcs]
-# Use parallel composite uploads
-parallel_composite_upload_threshold = 8388608  # 8MB
+[performance]
+max_concurrency = 4
 ```
 
 ---
@@ -2061,6 +2031,6 @@ find . -name "*.tmp" -o -name "*.log" -o -name "*~"
 
 ---
 
-**Version**: 0.2.1-beta.2
+**Version**: 0.2.3-beta.1
 **Last Updated**: March 5, 2026
 **Maintained by**: MediaGit Core Team

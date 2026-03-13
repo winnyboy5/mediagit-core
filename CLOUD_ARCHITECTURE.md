@@ -374,16 +374,15 @@ flowchart LR
 
 ### AWS S3 (mediagit.toml)
 
+All storage backend fields go directly in `[storage]` alongside the `backend` key:
+
 ```toml
 [storage]
 backend = "s3"
-
-[storage.s3]
 bucket = "my-mediagit-repo"
 region = "us-east-1"
-# Uses AWS credential chain by default
-
-# Optional: Custom endpoint for S3-compatible
+# Uses AWS credential chain by default (IAM role, ~/.aws/credentials, env vars)
+# Optional: custom endpoint for S3-compatible services
 # endpoint = "https://s3.us-east-1.amazonaws.com"
 ```
 
@@ -392,12 +391,10 @@ region = "us-east-1"
 ```toml
 [storage]
 backend = "azure"
-
-[storage.azure]
 account_name = "mediagitstorage"
 container = "repos"
-# account_key = "..." # Or use managed identity
-use_managed_identity = true
+# account_key = "..."   # Or set MEDIAGIT_AZURE_ACCOUNT_KEY env var
+# connection_string = "..."  # Alternative to account_key
 ```
 
 ### MinIO (mediagit.toml)
@@ -405,13 +402,11 @@ use_managed_identity = true
 ```toml
 [storage]
 backend = "s3"
-
-[storage.s3]
 bucket = "mediagit"
 endpoint = "http://minio.internal:9000"
-access_key = "minioadmin"
-secret_key = "minioadmin"
-force_path_style = true
+access_key_id = "minioadmin"        # field: access_key_id
+secret_access_key = "minioadmin"    # field: secret_access_key
+region = "us-east-1"                # any value; MinIO ignores region
 ```
 
 ### Multi-Backend (mediagit.toml)
@@ -419,17 +414,17 @@ force_path_style = true
 ```toml
 [storage]
 backend = "multi"
+primary = "primary-s3"
+replicas = ["replica-local"]
 
-[storage.multi]
-primary = "local"
-secondary = "s3"
-
-[storage.multi.local]
-path = "/fast-storage/mediagit"
-
-[storage.multi.s3]
+[storage.backends.primary-s3]
+backend = "s3"
 bucket = "mediagit-backup"
 region = "us-west-2"
+
+[storage.backends.replica-local]
+backend = "filesystem"
+base_path = "/fast-storage/mediagit"
 ```
 
 ---

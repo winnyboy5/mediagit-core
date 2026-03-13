@@ -104,7 +104,7 @@ if command -v mediagit > /dev/null 2>&1; then
   echo "  mediagit init          # Initialize a new repository"
   echo "  mediagit --help        # Show all commands"
   echo ""
-  echo "Documentation: https://docs.mediagit.dev"
+  echo "Documentation: https://winnyboy5.github.io/mediagit-core"
 else
   echo "${YELLOW}Warning: mediagit command not found in PATH${NC}"
   echo "You may need to add ${INSTALL_DIR} to your PATH"
