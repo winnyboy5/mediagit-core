@@ -3,7 +3,7 @@
 
 [app]
 name = "mediagit"
-version = "0.2.1-beta.2"
+version = "0.2.3-beta.1"
 environment = "development"  # development, staging, production
 port = 8080
 host = "127.0.0.1"
@@ -12,46 +12,42 @@ debug = false
 # Storage Backend Configuration
 # Choose one of: filesystem, s3, azure, gcs, or multi
 
+# Storage Backend Configuration
+# All fields for the selected backend go directly in [storage].
+# Choose one of: filesystem, s3, azure, gcs, or multi
+
 [storage]
 # Filesystem Storage (Default)
 backend = "filesystem"
-
-[storage.filesystem]
 base_path = "./data"
 create_dirs = true
 sync = false
 file_permissions = "0644"
 
-# AWS S3 Storage Configuration (Uncomment to use)
+# AWS S3 Storage Configuration (replace [storage] block above with this)
 # [storage]
 # backend = "s3"
-#
-# [storage.s3]
 # bucket = "mediagit-bucket"
 # region = "us-east-1"
 # access_key_id = "YOUR_ACCESS_KEY"        # Or use MEDIAGIT_S3_ACCESS_KEY_ID env var
 # secret_access_key = "YOUR_SECRET_KEY"    # Or use MEDIAGIT_S3_SECRET_ACCESS_KEY env var
-# endpoint = "https://s3.amazonaws.com"    # For S3-compatible services
+# endpoint = "https://s3.amazonaws.com"    # For S3-compatible services (MinIO, etc.)
 # prefix = "media/"
 # encryption = true
-# encryption_algorithm = "AES256"          # Options: AES256, aws:kms, aws:kms:key-id
+# encryption_algorithm = "AES256"          # Options: AES256, aws:kms
 
-# Azure Blob Storage Configuration (Uncomment to use)
+# Azure Blob Storage Configuration (replace [storage] block above with this)
 # [storage]
 # backend = "azure"
-#
-# [storage.azure]
 # account_name = "mediagitaccount"
 # account_key = "YOUR_ACCOUNT_KEY"         # Or use MEDIAGIT_AZURE_ACCOUNT_KEY env var
 # container = "media"
 # prefix = "files/"
 # connection_string = "..."                # Alternative to account_key
 
-# Google Cloud Storage Configuration (Uncomment to use)
+# Google Cloud Storage Configuration (replace [storage] block above with this)
 # [storage]
 # backend = "gcs"
-#
-# [storage.gcs]
 # bucket = "mediagit-bucket"
 # project_id = "your-project-id"
 # credentials_path = "/path/to/credentials.json"  # Or use MEDIAGIT_GCS_CREDENTIALS_PATH

@@ -117,8 +117,8 @@ impl AddCmd {
     pub async fn execute(&self) -> Result<()> {
         use crate::output;
 
-        // Validate: either --all or paths must be provided
-        if !self.all && self.paths.is_empty() {
+        // Validate: either --all, --update, or paths must be provided
+        if !self.all && !self.update && self.paths.is_empty() {
             anyhow::bail!("Nothing specified, nothing added.\nUse 'mediagit add <file>...' or 'mediagit add --all' to stage files.");
         }
 
@@ -257,6 +257,21 @@ impl AddCmd {
                             .await
                             .map_err(|_| anyhow::anyhow!("Semaphore closed"))?;
 
+                        // Per-chunk/file byte callback: updates progress_bytes + bar position
+                        // Called incrementally for large streaming files (per chunk),
+                        // once for small in-memory files, and once for skipped files.
+                        let on_bytes: Option<Arc<dyn Fn(u64) + Send + Sync>> =
+                            if let Some(ref pb) = progress_bar {
+                                let pb = pb.clone();
+                                let pb_bytes = progress_bytes.clone();
+                                Some(Arc::new(move |n: u64| {
+                                    let total = pb_bytes.fetch_add(n, Ordering::Relaxed) + n;
+                                    pb.set_position(total);
+                                }))
+                            } else {
+                                None
+                            };
+
                         let result = Self::process_single_file(
                             &file_path,
                             &repo_root,
@@ -264,22 +279,19 @@ impl AddCmd {
                             &head_files,
                             &index_files,
                             delta_enabled,
+                            on_bytes,
                         )
                         .await;
 
                         match result {
-                            Ok(Some(file_result)) => {
-                                // Update progress
-                                progress_bytes.fetch_add(file_result.file_size, Ordering::Relaxed);
+                            Ok((Some(file_result), _)) => {
                                 let done = progress_files.fetch_add(1, Ordering::Relaxed) + 1;
                                 if let Some(ref pb) = progress_bar {
-                                    pb.set_position(progress_bytes.load(Ordering::Relaxed));
                                     pb.set_message(format!("{}/{} files", done, total_files));
                                 }
                                 Ok(Some(file_result))
                             }
-                            Ok(None) => {
-                                // Skipped (unchanged)
+                            Ok((None, _)) => {
                                 skipped.fetch_add(1, Ordering::Relaxed);
                                 let done = progress_files.fetch_add(1, Ordering::Relaxed) + 1;
                                 if let Some(ref pb) = progress_bar {
@@ -328,6 +340,20 @@ impl AddCmd {
                 skipped_count = skipped.load(Ordering::Relaxed);
             } else {
                 // --- SEQUENTIAL FILE PROCESSING (fallback / --no-parallel) ---
+                // Create callback once; it updates progress_bytes + bar position for every
+                // file (including skipped) and every chunk of large streaming files.
+                let on_bytes_seq: Option<Arc<dyn Fn(u64) + Send + Sync>> =
+                    if let Some(ref pb) = progress_bar {
+                        let pb = pb.clone();
+                        let pb_bytes = progress_bytes.clone();
+                        Some(Arc::new(move |n: u64| {
+                            let total = pb_bytes.fetch_add(n, Ordering::Relaxed) + n;
+                            pb.set_position(total);
+                        }))
+                    } else {
+                        None
+                    };
+
                 for file_path in &files_to_add {
                     let result = Self::process_single_file(
                         file_path,
@@ -336,11 +362,12 @@ impl AddCmd {
                         &head_files,
                         &index_files,
                         delta_enabled,
+                        on_bytes_seq.clone(),
                     )
                     .await;
 
                     match result {
-                        Ok(Some(file_result)) => {
+                        Ok((Some(file_result), _)) => {
                             if self.verbose {
                                 output::detail(
                                     "added",
@@ -358,14 +385,16 @@ impl AddCmd {
                             index.add_entry(entry);
                             added_count += 1;
 
-                            progress_bytes.fetch_add(file_result.file_size, Ordering::Relaxed);
                             let done = progress_files.fetch_add(1, Ordering::Relaxed) + 1;
                             if let Some(ref pb) = progress_bar {
-                                pb.set_position(progress_bytes.load(Ordering::Relaxed));
                                 pb.set_message(format!("{}/{} files", done, total_files));
                             }
                         }
-                        Ok(None) => {
+                        Ok((None, _)) => {
+                            let done = progress_files.fetch_add(1, Ordering::Relaxed) + 1;
+                            if let Some(ref pb) = progress_bar {
+                                pb.set_message(format!("{}/{} files", done, total_files));
+                            }
                             skipped_count += 1;
                             if self.verbose {
                                 output::detail(
@@ -467,7 +496,8 @@ impl AddCmd {
         head_files: &HashMap<PathBuf, Oid>,
         index_files: &HashMap<PathBuf, (u64, Option<u64>)>,
         delta_enabled: bool,
-    ) -> Result<Option<FileResult>> {
+        on_bytes: Option<Arc<dyn Fn(u64) + Send + Sync>>,
+    ) -> Result<(Option<FileResult>, u64)> {
         let metadata = tokio::fs::metadata(file_path).await.context(format!(
             "Failed to read file metadata: {}",
             file_path.display()
@@ -478,8 +508,10 @@ impl AddCmd {
 
         let relative_path = file_path
             .strip_prefix(repo_root)
-            .unwrap_or(file_path)
-            .to_path_buf();
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|_| crate::repo::normalize_path(file_path, repo_root));
+        // Normalize separators for cross-platform consistency
+        let relative_path = PathBuf::from(relative_path.to_string_lossy().replace('\\', "/"));
 
         // Stat-cache check: skip if file hasn't changed since last staging
         let file_mtime = metadata
@@ -492,7 +524,10 @@ impl AddCmd {
             if idx_size == file_size {
                 if let Some(current_mtime) = file_mtime {
                     if idx_mtime == current_mtime {
-                        return Ok(None); // Unchanged since last staging
+                        if let Some(ref cb) = on_bytes {
+                            cb(file_size);
+                        }
+                        return Ok((None, file_size)); // Unchanged since last staging
                     }
                 }
             }
@@ -523,12 +558,15 @@ impl AddCmd {
             // Check if unchanged from HEAD
             if let Some(head_oid) = head_files.get(&relative_path) {
                 if *head_oid == content_oid {
-                    return Ok(None);
+                    if let Some(ref cb) = on_bytes {
+                        cb(file_size);
+                    }
+                    return Ok((None, file_size));
                 }
             }
 
             let oid = odb
-                .write_chunked_from_file(file_path, filename)
+                .write_chunked_from_file(file_path, filename, on_bytes.clone())
                 .await
                 .context("Failed to write chunked object (streaming)")?;
 
@@ -544,7 +582,10 @@ impl AddCmd {
             // Check if unchanged from HEAD
             if let Some(head_oid) = head_files.get(&relative_path) {
                 if *head_oid == content_oid {
-                    return Ok(None);
+                    if let Some(ref cb) = on_bytes {
+                        cb(file_size);
+                    }
+                    return Ok((None, file_size));
                 }
             }
 
@@ -563,6 +604,11 @@ impl AddCmd {
                     .context("Failed to write object")?
             };
 
+            // Report bytes for non-streaming staged files (streaming path uses per-chunk callback)
+            if let Some(ref cb) = on_bytes {
+                cb(file_size);
+            }
+
             (content_oid, oid)
         };
 
@@ -578,13 +624,16 @@ impl AddCmd {
             0o100644
         };
 
-        Ok(Some(FileResult {
-            relative_path,
-            oid,
+        Ok((
+            Some(FileResult {
+                relative_path,
+                oid,
+                file_size,
+                mode,
+                mtime: file_mtime,
+            }),
             file_size,
-            mode,
-            mtime: file_mtime,
-        }))
+        ))
     }
 
     /// Check if path is outside .mediagit directory
@@ -610,6 +659,15 @@ impl AddCmd {
             return Ok(files);
         }
 
+        // If --update (-u) is set, collect all tracked files that exist in working dir
+        if self.update && self.paths.is_empty() {
+            // Walk through the working directory and collect files that exist
+            // (tracked files that have been modified or exist will be picked up;
+            // the actual change detection happens in process_single_file)
+            self.collect_files_recursive(repo_root, &mediagit_dir, &mut files)?;
+            return Ok(files);
+        }
+
         for path_str in &self.paths {
             let path = Path::new(path_str);
 
@@ -621,7 +679,11 @@ impl AddCmd {
                             match entry {
                                 Ok(p) => {
                                     if p.is_file() && Self::is_outside_mediagit(&p, &mediagit_dir) {
-                                        files.push(p);
+                                        if let Ok(abs_path) = dunce::canonicalize(&p) {
+                                            files.push(abs_path);
+                                        } else {
+                                            files.push(p);
+                                        }
                                     }
                                 }
                                 Err(e) => {
@@ -649,7 +711,11 @@ impl AddCmd {
             }
 
             if path.is_file() && Self::is_outside_mediagit(path, &mediagit_dir) {
-                files.push(path.to_path_buf());
+                if let Ok(abs_path) = dunce::canonicalize(path) {
+                    files.push(abs_path);
+                } else {
+                    files.push(path.to_path_buf());
+                }
             } else if path.is_dir() {
                 self.collect_files_recursive(path, &mediagit_dir, &mut files)?;
             }

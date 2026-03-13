@@ -9,32 +9,31 @@
 
 ## 🎯 Status
 
-**Version**: v0.2.1-beta.2
+**Version**: v0.2.3-beta.1
 **Status**: 🚧 **BETA**
 **Features**: 100% complete (all P0–P3 items implemented)
-**Last Validated**: March 5, 2026 
+**Last Validated**: March 2026 — Linux & Windows, release build
 
-### Validation Results (March 5, 2026)
+✅ **32 CLI commands validated end-to-end** — 0 crashes, 0 data corruption
+✅ **27+ file types tested** (58 GB dataset) across video, audio, 3D, image, design, ML
+✅ **All storage backends validated** — local, MinIO S3, push / pull / clone / fetch
+✅ **Files up to 398 MB** staged and transferred; single-file scalability to 6 GB tested
 
-✅ **194/195 Tests Passing — 0 Failures**
-- 27+ real media files tested (58G total dataset)
-- 32 CLI commands validated end-to-end
-- 22 file types: video, audio, 3D, image, vector, design
-- 0 crashes, 0 data corruption, 0 command failures
-
-✅ **Comprehensive Testing (release build)**
-- Large files: MOV 398MB (153 MB/s), MP4 264MB (174.4 MB/s)
-- Design files: PSD 181MB (119.3 MB/s), PSD 72MB (81 MB/s)
-- Cloud backend: MinIO S3 — all operations working
-- Server: push / pull / clone / fetch all validated
-
-✅ **All Core Features Validated**
-- Content-addressable storage with CAS deduplication (~30% avg storage savings)
-- Smart compression — 70+ file type classifications
-- Chunking + delta encoding: STL text meshes up to 65% reduction; GLB ~30–50%
-- MediaAware chunking: MP4, WAV, GLB, FLAC
-- PSD layer preservation
-- S3-compatible cloud storage (MinIO confirmed working)
+| Metric | Result |
+|--------|--------|
+| **Staging (small files < 5 MB)** | 25–182 MB/s |
+| **Staging (large video/PSD, no chunking)** | 80–240 MB/s |
+| **Staging (chunked files 5–60 MB)** | 3.6–5.2 MB/s |
+| **Network push** | 167 MB/s (150 MB over local server) |
+| **Network clone** | 100 MB/s (150 MB over local server) |
+| **Commit latency** | 30–52 ms (constant regardless of file size) |
+| **Average storage savings** | ~30% (compression + dedup + delta, mixed media) |
+| **Exact dedup (CAS): exact duplicate** | 99.9% savings (CAS hit, 0.7 KB overhead) |
+| **Exact dedup (CAS): 3× identical MP4** | 66% savings |
+| **Exact dedup (CAS): small edit to large file** | 70–95% chunk reuse via CDC + CAS |
+| **Similarity delta: STL/OBJ text mesh** | 40–65% savings |
+| **Similarity delta: GLB/FBX binary** | 20–45% savings |
+| **Similarity delta: PSD/WAV** | 15–40% savings |
 
 ---
 
@@ -55,13 +54,14 @@ Traditional Git struggles with large binary files. MediaGit solves this with:
 ### Key Features
 
 🚀 **Performance** (release build, March 2026)
-- **Large video (398 MB MOV)**: 153 MB/s staging
-- **Large video (264 MB MP4)**: 174.4 MB/s staging
-- **PSD design (181 MB)**: 119.3 MB/s staging
-- **PSD design (72 MB)**: 81 MB/s staging
-- **Compression**: Content-aware, 0% overhead for pre-compressed formats (MP4, JPEG, ZIP)
-- **Deduplication**: CAS dedup — 50%+ savings when same content re-stored across branches/versions
-- **Delta encoding**: STL text meshes 40–65% delta savings; GLB binary 20–45%
+- **Pre-compressed files** (MP4, MOV, JPEG, USDZ): 25–240 MB/s — store-mode, zero CPU overhead
+- **Compressible files** (PSD, TIFF, WAV): 2–120 MB/s — Zstd compression + optional chunking
+- **Chunked large files** (GLB, FLAC, AI): 1.9–5.2 MB/s — CDC chunking + delta encoding
+- **Network**: 167 MB/s push · 100 MB/s clone (local server, 150 MB dataset)
+- **Commit latency**: 30–52 ms constant regardless of file size
+- **Compression**: ~30% average storage savings across mixed media projects
+- **Exact dedup (CAS)**: 66–99.9% savings when identical content is re-stored; CDC ensures chunk-level granularity
+- **Similarity delta**: 15–65% savings for similar-but-changed chunks; FNV-1a sampler + type-aware thresholds
 
 🎨 **Media-Aware Intelligence**
 - **PSD Files**: Layer metadata extraction, auto-merge, conflict detection
@@ -110,19 +110,19 @@ curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/instal
 
 **Linux x86_64 — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.1-beta.2/mediagit-0.2.1-beta.2-x86_64-linux.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.3-beta.1/mediagit-0.2.3-beta.1-x86_64-linux.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **macOS Apple Silicon — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.1-beta.2/mediagit-0.2.1-beta.2-aarch64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.3-beta.1/mediagit-0.2.3-beta.1-aarch64-macos.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **Windows x86_64 (PowerShell):**
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.1-beta.2/mediagit-0.2.1-beta.2-x86_64-windows.zip" -OutFile mediagit.zip
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.3-beta.1/mediagit-0.2.3-beta.1-x86_64-windows.zip" -OutFile mediagit.zip
 Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 # Add to PATH:
 [Environment]::SetEnvironmentVariable("Path", "$env:Path;$env:LOCALAPPDATA\MediaGit\bin", "User")
@@ -131,8 +131,8 @@ Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 #### Docker
 
 ```bash
-docker pull ghcr.io/winnyboy5/mediagit-core:0.2.1-beta.2
-docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.1-beta.2 mediagit --version
+docker pull ghcr.io/winnyboy5/mediagit-core:0.2.3-beta.1
+docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.3-beta.1 mediagit --version
 ```
 
 #### From Source
@@ -152,11 +152,11 @@ cargo build --release
 
 | Platform | Archive |
 |----------|---------|
-| Linux x86_64 | `mediagit-0.2.1-beta.2-x86_64-linux.tar.gz` |
-| Linux ARM64 | `mediagit-0.2.1-beta.2-aarch64-linux.tar.gz` |
-| macOS Intel | `mediagit-0.2.1-beta.2-x86_64-macos.tar.gz` |
-| macOS Apple Silicon | `mediagit-0.2.1-beta.2-aarch64-macos.tar.gz` |
-| Windows x86_64 | `mediagit-0.2.1-beta.2-x86_64-windows.zip` |
+| Linux x86_64 | `mediagit-0.2.3-beta.1-x86_64-linux.tar.gz` |
+| Linux ARM64 | `mediagit-0.2.3-beta.1-aarch64-linux.tar.gz` |
+| macOS Intel | `mediagit-0.2.3-beta.1-x86_64-macos.tar.gz` |
+| macOS Apple Silicon | `mediagit-0.2.3-beta.1-aarch64-macos.tar.gz` |
+| Windows x86_64 | `mediagit-0.2.3-beta.1-x86_64-windows.zip` |
 
 Each archive includes `mediagit` (CLI) and `mediagit-server` binaries, plus a `.sha256` checksum file.
 
@@ -359,23 +359,29 @@ MediaGit is designed for **enterprise-scale media workflows**:
 
 ## Performance
 
-### Validated Throughput (March 2026 — release build)
+### Validated Staging Throughput (release build)
 
-| File | Size | Throughput | Strategy | Status |
-|------|------|------------|----------|--------|
-| **MP4 (large)** | 264 MB | 174.4 MB/s | Store | ✅ Pass |
-| **MOV (large)** | 398 MB | 153.0 MB/s | Store | ✅ Pass |
-| **PSD (large)** | 181 MB | 119.3 MB/s | Zstd Best | ✅ Pass |
-| **PSD (72 MB)** | 72 MB | 81.0 MB/s | Zstd Best | ✅ Pass |
-| **USDZ (8 MB)** | 8 MB | 34.3 MB/s | Store | ✅ Pass |
-| **MP4 (5 MB)** | 5 MB | 30.4 MB/s | Store | ✅ Pass |
-| **FLAC (38 MB)** | 38 MB | 2.2 MB/s | Store | ✅ Pass |
-| **WAV (55 MB)** | 55 MB | 2.1 MB/s | Zstd Best* | ✅ Pass |
-| **GLB (14 MB)** | 14 MB | 3.0 MB/s | Zstd Best | ✅ Pass |
-| **MinIO PSD (72 MB)** | 72 MB | 72.8 MB/s | Cloud | ✅ Pass |
-| **MinIO MP4 (5 MB)** | 5 MB | 15.1 MB/s | Cloud | ✅ Pass |
+| Format | Size | Throughput | Strategy | Notes |
+|--------|------|------------|----------|-------|
+| JPEG | 506 KB | 25 MB/s | Store | Direct write, no chunking |
+| PNG | 1.8 MB | 72 MB/s | Store | Direct write, no chunking |
+| USDZ | 8.2 MB | 182 MB/s | Store | Direct write, no chunking |
+| MP4 | 5.1 MB | 146 MB/s | Store | Direct write, no chunking |
+| MP4 (large) | 264 MB | 174 MB/s | Store | Pre-compressed; store-mode |
+| MOV (large) | 398 MB | 153 MB/s | Store | Pre-compressed; store-mode |
+| PSD | 181 MB | 119 MB/s | Zstd Best | Layer data compresses well |
+| PSD | 72 MB | 72–81 MB/s | Zstd Best | Layer data compresses well |
+| GLB | 13.8 MB | 3.0–4.2 MB/s | Zstd Best | GLB parser + CDC chunking |
+| GLB | 25.4 MB | 5.2 MB/s | Zstd Best | GLB parser + CDC chunking |
+| FLAC | 38–39 MB | 2.2–4.1 MB/s | Zstd Best | FastCDC chunking |
+| WAV | 55–57 MB | 2.1–3.6 MB/s | Zstd Best | RIFF parser + chunking (CPU-bound) |
+| AI (large) | 129 MB | 1.9 MB/s | Zstd Best | Deep delta + chunking |
+| AI (very large) | 216 MB | 2.4 MB/s | Zstd Best | Deep delta + chunking |
+| MinIO PSD | 72 MB | 72.8 MB/s | Cloud upload | S3-compatible backend |
+| Push (150 MB) | — | 167 MB/s | Network | Local server |
+| Clone (150 MB) | — | 100 MB/s | Network | Local server |
 
-*WAV is CPU-bound due to Zstd Best compression on uncompressed PCM audio.
+> WAV is CPU-bound: RIFF chunking + Zstd Best on uncompressed PCM. Throughput scales with CPU core count.
 
 ### Compression Efficiency
 
@@ -407,18 +413,74 @@ Compression strategy is selected automatically per file type. Pre-compressed for
 
 > **Average across a mixed media project: ~30% storage reduction.** Results vary by content — text-heavy projects save more, video-heavy projects less.
 
-### Deduplication (Content-Addressed Storage)
+### Comparison with Git LFS and Perforce
 
-MediaGit uses CDC chunking + CAS: identical chunks are stored once regardless of how many files or commits reference them.
+| Feature | **MediaGit** | **Git LFS** | **Perforce (Helix Core)** |
+|---------|:----------:|:---------:|:-----------------------:|
+| **Architecture** | Native VCS with built-in chunking | Git extension + external store | Centralized VCS |
+| **Install Complexity** | Single binary | Git + LFS extension + server | Server + client + license |
+| **Deduplication** | ✅ Content-addressable (SHA-256) | ❌ None | ✅ Server-side |
+| **Delta Compression** | ✅ Cross-version via similarity | ❌ None | ✅ RCS-style deltas |
+| **Chunking** | ✅ Content-defined (CDC) | ❌ Whole-file | ❌ Whole-file |
+| **Storage (100MB × 2 versions)** | ~75–80 MB (with delta) | ~200 MB (2 full copies) | ~110–120 MB |
+| **Small file add** (< 5 MB) | **20–45 ms** | ~50–100 ms | ~100–200 ms |
+| **Large file add** (129 MB) | **69 s** (local, with delta) | 5–30 s (HTTP upload) | 10–60 s |
+| **Clone 150 MB** | **1.5 s** (local server) | 5–20 s (HTTP chunked) | 10–30 s |
+| **Offline Commits** | ✅ Full local history | ✅ (Git handles) | ❌ Requires server |
+| **Branching Cost** | ✅ Instant (ref-based) | ✅ (Git handles) | ⚠️ Copy-based (expensive) |
+| **Lock Support** | ❌ Not yet | ✅ File locking | ✅ Exclusive checkout |
+| **Max File Size** | 16 GB+ (u64 offset) | Varies by server | Unlimited |
+| **Cost** | Free (AGPL-3.0) | Free + server costs | $$$ per-seat |
 
-| Scenario | Description | Typical Savings |
-|----------|-------------|-----------------|
-| Same file in multiple branches | Re-committing unchanged assets | 50–66% per duplicate |
-| Identical files across team members | Same texture/audio stored by N people | ~(N-1)/N savings |
-| Small edits to large files | Only changed chunks stored | 70–95% chunk reuse |
-| Completely different content | No shared chunks | 0% dedup (compression only) |
+### Storage Reduction: Two Complementary Mechanisms
 
-> Validated: 3× identical 5MB MP4 → 66% savings; 2× identical 72MB PSD → 68% savings.
+MediaGit achieves storage savings through two distinct layers that work together on every chunk:
+
+#### Layer 1 — Exact Deduplication (CAS)
+
+SHA-256 content-addressing means identical chunks are stored only once, no matter how many files, commits, or branches reference them. Before storing any chunk, the ODB checks `storage.exists(sha256_key)` — a hit skips the write entirely.
+
+| Scenario | Validated Result | How |
+|----------|-----------------|-----|
+| Exact duplicate file (506 KB JPEG) | **99.9% savings** (0.7 KB stored vs 506 KB) | Full-object CAS hit |
+| 3× identical 5 MB MP4 | **66% savings** | 1 copy stored, 2 zero-cost refs |
+| 2× identical 72 MB PSD | **68% savings** | Chunk-level CAS across both files |
+| Small edit to large file | **70–95% chunk reuse** | Unchanged CDC chunks → CAS hit; only edited chunks are new |
+| Same asset across N team members | ~(N−1)/N savings | Single stored object, N refs |
+| Completely different content | 0% dedup | No shared chunks; compression only |
+
+> **CDC + CAS synergy**: Content-defined chunking (FastCDC) splits files at natural boundaries. When you version a large file, only the chunks that actually changed produce new SHA-256 hashes — all unchanged chunks are free CAS hits.
+
+#### Layer 2 — Similarity-Based Delta Compression
+
+For chunks that are new (no CAS hit) but *similar* to a previously stored chunk, the `SimilarityDetector` samples 10 × 1 KB windows per object using FNV-1a hashing and scores candidates. If the similarity score meets the type-aware threshold, the chunk is stored as a **delta** (base OID + sliding-window diff instructions) rather than a full copy.
+
+```
+New chunk → CAS check → miss → SimilarityDetector.find_similar_with_size_ratio()
+               ↓                        ↓                          ↓
+          hit: free dedup       score ≥ threshold           score < threshold
+                              DeltaEncoder.encode()       compress + store full
+                              store delta (base + diff)
+```
+
+| Format | Eligible? | Similarity Threshold | Size Ratio Threshold | Validated Savings |
+|--------|-----------|---------------------|---------------------|-------------------|
+| Text / Code / JSON | ✅ Always | 0.85–0.95 | 0.80 | **50–75%** |
+| SVG / EPS (vector) | ✅ Always | 0.30 | 0.80 | **20–50%** |
+| PSD / PSB | ✅ Always | 0.70 | 0.80 | **15–35%** |
+| WAV / AIFF (lossless audio) | ✅ Always | 0.65 | 0.80 | **20–40%** |
+| STL / OBJ / PLY (text 3D) | ✅ Always | 0.30 | 0.80 | **40–65%** |
+| GLB / FBX (binary 3D) | ✅ If > 1 MB | 0.70 | 0.80 | **20–45%** |
+| MP4 / MKV (video) | ✅ If > 100 MB | 0.50 | 0.70 | Variable |
+| AI / InDesign (PDF containers) | ✅ If > 50 MB | 0.15 | 0.50 | ~0% (pre-compressed internals) |
+| JPEG / PNG / ZIP | ❌ Never | — | — | Not eligible |
+
+**Delta chain cap**: depth 10 maximum. Prevents read-amplification — at depth 10 the object is re-stored as a full compressed copy.
+
+**Real-world storage observations:**
+- 329 MB AI (2 versions) → 248 MB stored — **25% saved**, 27 delta + 62 full chunks
+- 144 MB mixed dataset → 100 MB stored — **31% saved** (69% storage ratio)
+- 3 versioned 506 KB JPEGs: v1 = 496 KB, v2 = +536 KB new, v3 (exact dup of v1) = **+0.7 KB only** (CAS hit)
 
 ### Scalability (TB+ Architecture)
 
@@ -443,14 +505,13 @@ MediaGit supports multiple configuration methods:
 ### 1. TOML Configuration
 
 ```toml
-# config.toml
+# .mediagit/config.toml
 [storage]
 backend = "s3"
-
-[storage.s3]
 bucket = "my-mediagit-bucket"
 region = "us-east-1"
 encryption = true
+encryption_algorithm = "AES256"   # Options: AES256, aws:kms
 
 [compression]
 enabled = true
@@ -695,6 +756,8 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] Automated version bumping (`scripts/bump-version.sh`)
 - [x] Full documentation sync: book, architecture, CLI reference
 - [x] Security audit clean (`cargo audit`)
+- [x] `branch rename` argument order aligned with git semantics (`OLD NEW`)
+- [x] Validated on Linux + Windows; all 32 commands stable across both platforms
 
 ### v0.3.0 (Planned)
 *Developer experience and ecosystem*
@@ -810,8 +873,9 @@ Special thanks to:
 
 - **Lines of Code**: 78,000+ (Rust)
 - **Features**: 100% complete (all P0–P3 items)
-- **Test Coverage**: 960 unit tests; 194 E2E tests validated on 22+ file types (58 GB dataset)
-- **Staging Throughput**: 80–240 MB/s (release build, local storage); 100+ MB/s on MinIO
+- **Test Coverage**: 960 unit tests; 194 E2E tests (Linux) + 84 scenarios (Windows) validated
+- **Staging Throughput**: 25–240 MB/s for small files; 1.9–5.2 MB/s for chunked large files
+- **Network Throughput**: 167 MB/s push, 100 MB/s clone (local server)
 - **Storage Savings**: ~30% average across mixed media projects (compression + dedup + delta)
 - **Stability**: 0 crashes, 0 data corruption across all validated test runs
 - **File Formats**: 70+ extensions (video, audio, image, 3D, DCC, ML, game engines, office)
@@ -821,4 +885,4 @@ Special thanks to:
 
 **Made with 🦀 and ❤️ by the MediaGit Contributors**
 
-**Status**: Beta | **Version**: v0.2.1-beta.2 | **Updated**: March 7, 2026
+**Status**: Beta | **Version**: v0.2.3-beta.1 | **Updated**: March 12, 2026

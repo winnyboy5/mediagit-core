@@ -78,18 +78,17 @@ fn select_algorithm(path: &Path, size: u64) -> CompressionAlgorithm {
 
 ### Repository-Level
 ```toml
-# .mediagit/config
+# .mediagit/config.toml
 [compression]
 algorithm = "zstd"
-level = "default"
-use-delta = true
-delta-max-chain = 10
+level = 3        # zstd: 1 (fastest) – 22 (best compression)
+min_size = 1024  # bytes; files smaller than this skip compression
 ```
 
 ### Per-File Override
 ```toml
 [compression.overrides]
-"*.psd" = { algorithm = "zstd", level = "best" }
+"*.psd" = { algorithm = "zstd", level = 22 }
 "*.txt" = { algorithm = "brotli", level = 6 }
 "*.mp4" = { algorithm = "none" }
 ```

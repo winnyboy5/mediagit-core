@@ -8,13 +8,14 @@ Located in `.mediagit/config`:
 
 ```toml
 [storage]
-backend = "local"
+backend = "filesystem"
+base_path = "./data"
 
 [compression]
 algorithm = "zstd"
-level = "default"
+level = 3
 
-[user]
+[author]
 name = "Your Name"
 email = "your.email@example.com"
 ```

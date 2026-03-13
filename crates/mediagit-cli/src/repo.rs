@@ -20,6 +20,50 @@ use mediagit_storage::StorageBackend;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Normalize a file path to a repo-relative path with forward slashes.
+///
+/// Handles `./`, `.\`, backslash separators, and non-canonical paths by:
+/// 1. Attempting `dunce::canonicalize()` + `strip_prefix(repo_root)`
+/// 2. Falling back to manual normalization if canonicalization fails
+///
+/// # Arguments
+/// * `path` - The path to normalize (absolute or relative)
+/// * `repo_root` - The canonicalized repository root
+///
+/// # Returns
+/// A repo-relative `PathBuf` with forward slashes (e.g. `dir/file.txt`)
+pub fn normalize_path(path: &Path, repo_root: &Path) -> PathBuf {
+    // Try canonicalize + strip_prefix first (handles symlinks, 8.3 names, etc.)
+    if let Ok(abs) = dunce::canonicalize(path) {
+        if let Ok(rel) = abs.strip_prefix(repo_root) {
+            return PathBuf::from(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
+
+    // Fallback: manual normalization
+    let s = path.to_string_lossy();
+
+    // Strip leading ./ or .\ prefix
+    let stripped = s
+        .strip_prefix("./")
+        .or_else(|| s.strip_prefix(".\\"))
+        .unwrap_or(&s);
+
+    // Normalize separators and collect components to resolve .. etc.
+    let normalized = stripped.replace('\\', "/");
+    let clean: PathBuf = Path::new(&normalized).components().collect();
+
+    // If still absolute, try strip_prefix as last resort
+    if clean.is_absolute() {
+        clean
+            .strip_prefix(repo_root)
+            .map(|p| PathBuf::from(p.to_string_lossy().replace('\\', "/")))
+            .unwrap_or(clean)
+    } else {
+        PathBuf::from(clean.to_string_lossy().replace('\\', "/"))
+    }
+}
+
 /// Find the root of the MediaGit repository by walking up from current directory.
 ///
 /// # Returns
@@ -232,5 +276,43 @@ mod tests {
         // No .mediagit directory
         let result = find_repo_root_from(temp.path());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_normalize_path_strips_dot_slash() {
+        let temp = TempDir::new().unwrap();
+        let repo_root = dunce::canonicalize(temp.path()).unwrap();
+
+        // Create a file to test with
+        let file_path = repo_root.join("test.ai");
+        std::fs::write(&file_path, "test").unwrap();
+
+        // ./test.ai should normalize to test.ai
+        let dot_slash = Path::new("./test.ai");
+        let result = normalize_path(dot_slash, &repo_root);
+        assert_eq!(result, PathBuf::from("test.ai"));
+    }
+
+    #[test]
+    fn test_normalize_path_absolute() {
+        let temp = TempDir::new().unwrap();
+        let repo_root = dunce::canonicalize(temp.path()).unwrap();
+
+        let file_path = repo_root.join("subdir").join("file.psd");
+        std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        std::fs::write(&file_path, "test").unwrap();
+
+        let result = normalize_path(&file_path, &repo_root);
+        assert_eq!(result, PathBuf::from("subdir/file.psd"));
+    }
+
+    #[test]
+    fn test_normalize_path_backslash() {
+        let temp = TempDir::new().unwrap();
+        let repo_root = dunce::canonicalize(temp.path()).unwrap();
+
+        // Simulate Windows-style path
+        let result = normalize_path(Path::new(".\\test.ai"), &repo_root);
+        assert_eq!(result, PathBuf::from("test.ai"));
     }
 }

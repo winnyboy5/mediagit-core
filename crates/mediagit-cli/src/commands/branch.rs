@@ -214,15 +214,15 @@ pub struct ProtectOpts {
 
 /// Rename a branch
 ///
-/// Usage: `branch rename <new-name>` renames the current branch.
-///        `branch rename <old-name> <new-name>` renames a specific branch.
+/// With one argument, renames the current branch: `branch rename <new-name>`
+/// With two arguments, renames a specific branch:  `branch rename <old-name> <new-name>`
 #[derive(Parser, Debug)]
 pub struct RenameOpts {
-    /// New branch name, or old branch name if two arguments given
-    #[arg(value_name = "NAME")]
+    /// New name (1 arg) or old branch name (2 args)
+    #[arg(value_name = "OLD_OR_NEW")]
     pub first_arg: String,
 
-    /// New branch name (when renaming a different branch)
+    /// New branch name when renaming a specific branch
     #[arg(value_name = "NEW_NAME")]
     pub second_arg: Option<String>,
 

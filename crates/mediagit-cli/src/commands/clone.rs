@@ -148,12 +148,13 @@ url = "{}"
         }
 
         // Step 6: Pull objects using streaming (memory-efficient)
-        let download_pb = progress.download_bar("Receiving objects");
+        // Use spinner: total bytes unknown, pull_streaming has no progress callback
+        let download_pb = progress.spinner("Receiving objects...");
         // Use streaming pull to avoid OOM with large files
         let chunked_oids = client
             .pull_streaming(&odb, &remote_ref_name, vec![])
             .await?;
-        download_pb.finish_with_message("Download complete");
+        download_pb.finish_with_message("Received objects");
 
         if self.verbose {
             println!(
@@ -164,17 +165,20 @@ url = "{}"
 
         // Step 7: Download chunked objects (large files)
         if !chunked_oids.is_empty() {
-            let chunk_pb =
-                progress.object_bar("Downloading large files", chunked_oids.len() as u64);
+            // Total is unknown until Phase 1 (manifest download) completes;
+            // set_length is called on the first progress callback.
+            let chunk_pb = progress.object_bar("Downloading large files", 0);
 
             let chunk_pb_ref = chunk_pb.clone();
             let chunks_downloaded = client
-                .download_chunked_objects(&odb, &chunked_oids, move |current, _total, _msg| {
+                .download_chunked_objects(&odb, &chunked_oids, move |current, total, msg| {
+                    chunk_pb_ref.set_length(total as u64);
                     chunk_pb_ref.set_position(current as u64);
+                    chunk_pb_ref.set_message(msg.to_string());
                 })
                 .await?;
 
-            chunk_pb.finish_with_message("Download complete");
+            chunk_pb.finish_with_message(format!("Downloaded {} chunks", chunks_downloaded));
             stats.objects_received += chunks_downloaded as u64;
 
             if self.verbose {
@@ -240,12 +244,11 @@ url = "{}"
         }
 
         // Step 9: Checkout working directory
-        let checkout_pb = progress.file_bar("Checking out", 0);
+        // Use spinner: file count only known after checkout finishes
+        let checkout_pb = progress.spinner("Checking out files...");
         let checkout_mgr = CheckoutManager::new(&odb, &target_dir);
-        let files_count = checkout_mgr.checkout_commit(&remote_oid).await?;
-        checkout_pb.set_length(files_count as u64);
-        checkout_pb.set_position(files_count as u64);
-        checkout_pb.finish_with_message("Checkout complete");
+        let files_count = checkout_mgr.checkout_fresh(&remote_oid).await?;
+        checkout_pb.finish_with_message(format!("Checked out {} files", files_count));
         stats.files_updated = files_count as u64;
 
         if self.verbose {

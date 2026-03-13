@@ -210,14 +210,16 @@ warning: Deleted branch was not fully merged.
 ### Rename branch
 
 ```bash
-$ mediagit branch -m feature/old-name feature/new-name
+# Rename a specific branch: OLD first, then NEW (matches git -m semantics)
+$ mediagit branch rename feature/old-name feature/new-name
 Renamed branch 'feature/old-name' to 'feature/new-name'.
 ```
 
 ### Rename current branch
 
 ```bash
-$ mediagit branch -m new-branch-name
+# With a single argument, the current branch is renamed
+$ mediagit branch rename new-branch-name
 Renamed branch 'old-branch-name' to 'new-branch-name'.
 ```
 

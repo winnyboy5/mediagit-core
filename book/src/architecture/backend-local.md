@@ -6,8 +6,9 @@ Local file system storage for development and small teams.
 
 ```toml
 [storage]
-backend = "local"
-path = ".mediagit/objects"
+backend = "filesystem"
+base_path = "./data"
+create_dirs = true
 ```
 
 ## Usage

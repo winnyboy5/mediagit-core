@@ -235,6 +235,32 @@ impl StatusCmd {
             }
         }
 
+        // Porcelain output mode: machine-readable, no colors/emojis/headers
+        if self.porcelain {
+            // Staged files (new files in index)
+            for entry in index.entries() {
+                // Check if it's a new file or modified staged file
+                if head_files.contains_key(&entry.path) {
+                    println!("M  {}", entry.path.display());
+                } else {
+                    println!("A  {}", entry.path.display());
+                }
+            }
+            // Modified unstaged files
+            for path in &modified_files {
+                println!(" M {}", path.display());
+            }
+            // Deleted files
+            for path in &deleted_files {
+                println!(" D {}", path.display());
+            }
+            // Untracked files
+            for path in &untracked_files {
+                println!("?? {}", path.display());
+            }
+            return Ok(());
+        }
+
         // Display staged files
         if !index.is_empty() && !self.quiet {
             output::header("Changes to be committed:");
@@ -333,9 +359,10 @@ impl StatusCmd {
             }
 
             if path.is_file() {
-                // Store as relative path
+                // Store as relative path with normalized separators
                 if let Ok(rel_path) = path.strip_prefix(repo_root) {
-                    files.insert(rel_path.to_path_buf());
+                    let normalized = PathBuf::from(rel_path.to_string_lossy().replace('\\', "/"));
+                    files.insert(normalized);
                 }
             } else if path.is_dir() {
                 self.scan_directory_recursive(repo_root, &path, files)?;
