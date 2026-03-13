@@ -112,7 +112,7 @@ if (Test-Path $MediaGitPath) {
     Write-Host "  mediagit init          # Initialize a new repository"
     Write-Host "  mediagit --help        # Show all commands"
     Write-Host ""
-    Write-Host "Documentation: https://docs.mediagit.dev" -ForegroundColor Cyan
+    Write-Host "Documentation: https://winnyboy5.github.io/mediagit-core" -ForegroundColor Cyan
 }
 else {
     Write-Host "Warning: mediagit.exe not found at ${MediaGitPath}" -ForegroundColor Yellow

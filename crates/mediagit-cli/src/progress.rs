@@ -24,24 +24,16 @@ use std::time::Duration;
 /// Standard progress bar templates used across all CLI commands.
 /// All bars use 40-char width, "█▓░" characters, 100ms tick, stderr output.
 mod templates {
-    /// Bytes-based progress for downloads and streaming transfers.
-    pub const DOWNLOAD: &str =
-        "{spinner:.cyan} {msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})";
-
     /// Bytes-based progress for staging (`add`) operations.
     pub const ADD: &str =
-        "{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%) {msg}";
+        "{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, eta {eta}) {msg}";
 
     /// Item-count progress for object processing (pack, delta, chunk transfer).
     pub const OBJECTS: &str =
-        "{spinner:.yellow} {msg} [{bar:40.yellow/blue}] {pos}/{len} ({percent}%)";
-
-    /// Item-count progress for file operations (add, gc, stats, verify).
-    pub const FILES: &str =
-        "{spinner:.magenta} {msg} [{bar:40.magenta/blue}] {pos}/{len} files ({percent}%)";
+        "{spinner:.yellow} {msg} [{bar:40.yellow/blue}] {pos}/{len} chunks ({percent}%, {elapsed}) eta {eta}";
 
     /// Indeterminate spinner for operations without a known total.
-    pub const SPINNER: &str = "{spinner:.cyan} {msg}";
+    pub const SPINNER: &str = "{spinner:.cyan} {msg} [{elapsed}]";
 }
 
 /// Progress tracker for Git operations
@@ -78,17 +70,9 @@ impl ProgressTracker {
         pb
     }
 
-    /// Create progress bar for download operations
-    pub fn download_bar(&self, msg: &str) -> ProgressBar {
-        if self.quiet {
-            return ProgressBar::hidden();
-        }
-        self.make_bar_impl(0, msg, templates::DOWNLOAD)
-    }
-
     /// Create progress bar for staging (`add`) operations.
     ///
-    /// Unlike `download_bar`, the total byte count is known upfront and set as the bar's length,
+    /// The total byte count is known upfront and set as the bar's length,
     /// allowing percentage display. The returned bar is suitable for wrapping in `Arc`.
     pub fn add_bar(&self, msg: &str, total_bytes: u64) -> ProgressBar {
         if self.quiet {
@@ -103,14 +87,6 @@ impl ProgressTracker {
             return ProgressBar::hidden();
         }
         self.make_bar_impl(total, msg, templates::OBJECTS)
-    }
-
-    /// Create progress bar for file operations
-    pub fn file_bar(&self, msg: &str, total: u64) -> ProgressBar {
-        if self.quiet {
-            return ProgressBar::hidden();
-        }
-        self.make_bar_impl(total, msg, templates::FILES)
     }
 
     /// Create spinner for indeterminate operations

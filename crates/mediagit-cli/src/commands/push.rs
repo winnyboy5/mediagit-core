@@ -20,7 +20,7 @@ use console::style;
 use mediagit_protocol::PushPhase;
 use mediagit_versioning::RefDatabase;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Update remote references and send objects
 ///
@@ -358,7 +358,7 @@ impl PushCmd {
 
         // BLOCK: Check for new branches without upstream (Git-like behavior)
         // For non-default branches, require explicit -u or --no-track
-        if !self.set_upstream && !self.no_track {
+        if !self.set_upstream && !self.no_track && self.refspec.is_empty() {
             for update in &updates {
                 // Only check new branches (no old_oid means it doesn't exist on remote)
                 if update.old_oid.is_none() && update.name.starts_with("refs/heads/") {
@@ -404,9 +404,7 @@ impl PushCmd {
             // Create progress bar for push using ProgressTracker
             let tracker = ProgressTracker::new(self.quiet);
             let pb = if !self.quiet {
-                let bar = tracker.object_bar("Preparing push", 100);
-                bar.enable_steady_tick(Duration::from_millis(100));
-                Some(bar)
+                Some(tracker.spinner("Pushing..."))
             } else {
                 None
             };
@@ -415,38 +413,29 @@ impl PushCmd {
             let (result, push_stats) = client
                 .push_with_progress(&odb, updates.clone(), self.force, |progress| {
                     if let Some(ref pb) = pb {
-                        let (percent, msg) = match progress.phase {
+                        let msg = match progress.phase {
                             PushPhase::Collecting => {
                                 if progress.total > 0 {
-                                    let pct = progress.current * 100 / progress.total;
-                                    (
-                                        pct.min(30),
-                                        format!(
-                                            "Collecting... {}/{} objects",
-                                            progress.current, progress.total
-                                        ),
+                                    format!(
+                                        "Collecting... {}/{} objects",
+                                        progress.current, progress.total
                                     )
                                 } else {
-                                    (10, "Collecting objects...".to_string())
+                                    "Collecting objects...".to_string()
                                 }
                             }
                             PushPhase::Packing => {
                                 if progress.total > 0 {
-                                    let pct = 30 + (progress.current * 40 / progress.total);
-                                    (
-                                        pct.min(70),
-                                        format!(
-                                            "Packing... {}/{} objects",
-                                            progress.current, progress.total
-                                        ),
+                                    format!(
+                                        "Packing... {}/{} objects",
+                                        progress.current, progress.total
                                     )
                                 } else {
-                                    (50, "Packing...".to_string())
+                                    "Packing...".to_string()
                                 }
                             }
                             PushPhase::Uploading => {
                                 if progress.total > 0 {
-                                    let pct = 70 + (progress.current * 30 / progress.total);
                                     let bytes_str = if progress.total > 1024 * 1024 {
                                         format!(
                                             "{:.1} MiB",
@@ -457,13 +446,12 @@ impl PushCmd {
                                     } else {
                                         format!("{} B", progress.total)
                                     };
-                                    (pct.min(100), format!("Uploading... {}", bytes_str))
+                                    format!("Uploading... {}", bytes_str)
                                 } else {
-                                    (90, "Uploading...".to_string())
+                                    "Uploading...".to_string()
                                 }
                             }
                         };
-                        pb.set_position(percent);
                         pb.set_message(msg);
                     }
                 })

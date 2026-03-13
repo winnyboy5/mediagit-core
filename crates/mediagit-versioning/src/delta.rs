@@ -265,7 +265,24 @@ impl DeltaDecoder {
     ///
     /// Reconstructed target object
     pub fn apply(base: &[u8], delta: &Delta) -> anyhow::Result<Vec<u8>> {
-        let mut result = Vec::with_capacity(delta.result_size);
+        // Validate result_size before allocation to prevent OOM from corrupted deltas
+        const MAX_DELTA_RESULT_SIZE: usize = 16 * 1024 * 1024 * 1024; // 16 GB (matches MAX_OBJECT_SIZE)
+        if delta.result_size > MAX_DELTA_RESULT_SIZE {
+            anyhow::bail!(
+                "Delta result_size {} exceeds maximum {} bytes",
+                delta.result_size,
+                MAX_DELTA_RESULT_SIZE
+            );
+        }
+
+        let mut result = Vec::new();
+        result.try_reserve(delta.result_size).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to allocate {} bytes for delta result: {}",
+                delta.result_size,
+                e
+            )
+        })?;
 
         for instruction in &delta.instructions {
             match instruction {

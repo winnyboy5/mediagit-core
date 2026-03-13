@@ -15,7 +15,9 @@ use super::super::repo::{create_storage_backend, find_repo_root};
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
-use mediagit_versioning::{resolve_revision, Commit, ObjectDatabase, RefDatabase};
+use mediagit_versioning::{resolve_revision, Commit, ObjectDatabase, Oid, RefDatabase, Tree};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 /// Show object information
 #[derive(Parser, Debug)]
@@ -28,8 +30,8 @@ pub struct ShowCmd {
     #[arg(short = 'p', long, hide = true)]
     pub patch: bool,
 
-    /// Show statistics (not yet implemented)
-    #[arg(long, hide = true)]
+    /// Show file change statistics
+    #[arg(long)]
     pub stat: bool,
 
     /// Show pretty format (not yet implemented)
@@ -97,6 +99,80 @@ impl ShowCmd {
                             println!("  {}", parent);
                         }
                     }
+                    println!();
+                }
+
+                // Show file changes (always for show, or when --stat explicitly)
+                let current_tree_files = Self::get_tree_file_list(&odb, &commit.tree)
+                    .await
+                    .unwrap_or_default();
+
+                let parent_tree_files = if let Some(parent_oid) = commit.parents.first() {
+                    if let Ok(parent_data) = odb.read(parent_oid).await {
+                        if let Ok(parent_commit) = Commit::deserialize(&parent_data) {
+                            Self::get_tree_file_list(&odb, &parent_commit.tree)
+                                .await
+                                .unwrap_or_default()
+                        } else {
+                            HashMap::new()
+                        }
+                    } else {
+                        HashMap::new()
+                    }
+                } else {
+                    HashMap::new()
+                };
+
+                let mut added = Vec::new();
+                let mut modified = Vec::new();
+                let mut deleted = Vec::new();
+
+                for (path, current_oid) in &current_tree_files {
+                    match parent_tree_files.get(path) {
+                        Some(parent_oid) if parent_oid != current_oid => {
+                            modified.push(path.clone());
+                        }
+                        None => {
+                            added.push(path.clone());
+                        }
+                        _ => {}
+                    }
+                }
+
+                for path in parent_tree_files.keys() {
+                    if !current_tree_files.contains_key(path) {
+                        deleted.push(path.clone());
+                    }
+                }
+
+                let total_changes = added.len() + modified.len() + deleted.len();
+                if total_changes > 0 {
+                    println!("---");
+                    for path in &added {
+                        println!(" {} | {}", path.display(), style("new file").green());
+                    }
+                    for path in &modified {
+                        println!(" {} | {}", path.display(), style("modified").yellow());
+                    }
+                    for path in &deleted {
+                        println!(" {} | {}", path.display(), style("deleted").red());
+                    }
+                    println!(
+                        " {} file(s) changed, {} added, {} modified, {} deleted",
+                        total_changes,
+                        added.len(),
+                        modified.len(),
+                        deleted.len()
+                    );
+                    println!();
+                } else if commit.parents.is_empty() {
+                    // Root commit: show all files
+                    println!("---");
+                    for path in current_tree_files.keys() {
+                        println!(" {} | {}", path.display(), style("new file").green());
+                    }
+                    println!(" {} file(s) in initial commit", current_tree_files.len());
+                    println!();
                 }
             }
             Err(_) => {
@@ -123,5 +199,41 @@ impl ShowCmd {
         }
 
         Ok(())
+    }
+
+    /// Helper to get a flat map of file paths to OIDs from a tree
+    async fn get_tree_file_list(
+        odb: &ObjectDatabase,
+        tree_oid: &Oid,
+    ) -> Result<HashMap<PathBuf, Oid>> {
+        let mut files = HashMap::new();
+        Self::walk_tree(odb, tree_oid, &PathBuf::new(), &mut files).await?;
+        Ok(files)
+    }
+
+    /// Recursively walk a tree, collecting file entries
+    fn walk_tree<'a>(
+        odb: &'a ObjectDatabase,
+        tree_oid: &'a Oid,
+        prefix: &'a Path,
+        files: &'a mut HashMap<PathBuf, Oid>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>> {
+        Box::pin(async move {
+            let tree_data = odb.read(tree_oid).await?;
+            let tree: Tree = mediagit_versioning::format::deserialize(&tree_data)?;
+
+            for entry in tree.iter() {
+                let entry_path = prefix.join(&entry.name);
+                match entry.mode {
+                    mediagit_versioning::FileMode::Directory => {
+                        Self::walk_tree(odb, &entry.oid, &entry_path, files).await?;
+                    }
+                    _ => {
+                        files.insert(entry_path, entry.oid);
+                    }
+                }
+            }
+            Ok(())
+        })
     }
 }

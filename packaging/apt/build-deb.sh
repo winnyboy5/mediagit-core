@@ -49,7 +49,7 @@ fi
 cat > "${PKG_DIR}/usr/share/doc/mediagit/README" << 'EOF'
 MediaGit - Git-based Version Control for Large Media Files
 
-For full documentation, visit: https://docs.mediagit.dev
+For full documentation, visit: https://winnyboy5.github.io/mediagit-core
 
 Quick Start:
   mediagit init           Initialize a new repository

@@ -73,8 +73,24 @@ use crate::StorageBackend;
 use async_trait::async_trait;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+
+/// Monotonic counter for unique temp file names.
+/// Prevents temp-file collisions when multiple async tasks write the same key concurrently.
+static TEMP_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Returns true if this OS error code is a transient Windows error worth retrying.
+///
+/// - `os error 2`  = `ERROR_FILE_NOT_FOUND` — directory not yet visible after creation
+/// - `os error 5`  = `ERROR_ACCESS_DENIED` — Windows Defender / AV scanning the file,
+///   or concurrent `CreateDirectory` race on NTFS
+/// - `os error 32` = `ERROR_SHARING_VIOLATION` — another process has the file open
+#[inline]
+fn is_transient_windows_error(e: &std::io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(2) | Some(5) | Some(32))
+}
 
 /// Result type for adaptive loading - either memory-mapped or heap-allocated
 ///
@@ -265,11 +281,19 @@ impl LocalBackend {
     /// * `Err` - If directory creation fails
     async fn ensure_parent_dir(&self, path: &Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
-            // Always call create_dir_all — it's idempotent and race-safe.
-            // Previous code had a TOCTOU race: check exists() then create_dir_all().
-            // Per tokio docs, create_dir_all concurrently is guaranteed not to fail
-            // due to a race condition with itself.
-            fs::create_dir_all(parent).await?;
+            // create_dir_all is idempotent on Linux/macOS, but on Windows NTFS
+            // concurrent calls for the same path can transiently return ACCESS_DENIED (5).
+            // Retry with backoff to handle this Windows race condition.
+            for attempt in 0u32..=3 {
+                match fs::create_dir_all(parent).await {
+                    Ok(()) => return Ok(()),
+                    Err(e) if attempt < 3 && is_transient_windows_error(&e) => {
+                        let delay_ms = 5 * (3u64.pow(attempt));
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
         }
         Ok(())
     }
@@ -416,35 +440,44 @@ impl StorageBackend for LocalBackend {
 
         let path = self.object_path(key);
 
-        // On Windows, concurrent parallel writes to a freshly-created shard directory
-        // can transiently fail with "file not found" (os error 2) because directory
-        // creation may not have fully propagated or antivirus briefly locks the dir.
-        // Retry with backoff to handle this race condition.
-        const MAX_RETRIES: u32 = 3;
-        let mut last_error = None;
+        // Windows-specific transient errors require retry with backoff:
+        //
+        // - os error 2  (ERROR_FILE_NOT_FOUND)    — shard dir not yet visible post-creation
+        // - os error 5  (ERROR_ACCESS_DENIED)     — Windows Defender/AV scanning the file,
+        //                                           or concurrent CreateDirectory race on NTFS
+        // - os error 32 (ERROR_SHARING_VIOLATION) — another process has the file open
+        //
+        // "Works on second try" is the classic fingerprint of AV interference.
+        const MAX_RETRIES: u32 = 5;
+        let mut last_error: Option<std::io::Error> = None;
+
+        // Unique ID per write prevents temp-file collisions when multiple async tasks
+        // concurrently write the same key (TOCTOU gap between exists() and put()).
+        let write_id = TEMP_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
 
         for attempt in 0..=MAX_RETRIES {
             if attempt > 0 {
-                // Exponential backoff: 10ms, 50ms, 200ms
-                let delay_ms = 10 * (5u64.pow(attempt - 1));
+                // Exponential backoff: 10ms, 30ms, 90ms, 270ms, 810ms
+                let delay_ms = 10 * (3u64.pow(attempt - 1));
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                // Re-ensure parent dir exists (may have been transiently invisible)
+                // Re-ensure parent dir — may have been transiently invisible
                 let _ = self.ensure_parent_dir(&path).await;
             } else {
                 self.ensure_parent_dir(&path).await?;
             }
 
-            // Write to a temporary file first
-            let temp_path = path.with_extension("tmp");
+            // Unique temp path per write avoids collisions between concurrent writers
+            // of the same key (e.g., two tasks storing the same deduplicated chunk).
+            let temp_path = path.with_extension(format!("tmp{}", write_id));
 
-            // Remove any stale temp file
+            // Remove any stale temp file from a previous (failed) attempt
             let _ = fs::remove_file(&temp_path).await;
 
-            // Create and write to temp file
+            // Create and write temp file
             let file_result = fs::File::create(&temp_path).await;
             let mut file = match file_result {
                 Ok(f) => f,
-                Err(e) if attempt < MAX_RETRIES && e.raw_os_error() == Some(2) => {
+                Err(e) if attempt < MAX_RETRIES && is_transient_windows_error(&e) => {
                     last_error = Some(e);
                     continue;
                 }
@@ -464,11 +497,32 @@ impl StorageBackend for LocalBackend {
             // Atomically rename temp file to final location
             match fs::rename(&temp_path, &path).await {
                 Ok(()) => return Ok(()),
-                Err(e) if attempt < MAX_RETRIES && e.raw_os_error() == Some(2) => {
+
+                Err(e) if attempt < MAX_RETRIES && is_transient_windows_error(&e) => {
+                    // Transient error (AV scan, dir race) — retry after backoff
                     let _ = fs::remove_file(&temp_path).await;
                     last_error = Some(e);
                     continue;
                 }
+
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::AlreadyExists
+                        || e.raw_os_error() == Some(183) =>
+                {
+                    // Windows ERROR_ALREADY_EXISTS (183): another concurrent writer won the
+                    // race and already stored the same content (CAS: same OID = same data).
+                    // The destination is correct — treat as success.
+                    let _ = fs::remove_file(&temp_path).await;
+                    return Ok(());
+                }
+
+                Err(e) if is_transient_windows_error(&e) && fs::metadata(&path).await.is_ok() => {
+                    // ACCESS_DENIED on rename but destination exists: concurrent winner
+                    // already wrote the correct object. Safe to treat as success.
+                    let _ = fs::remove_file(&temp_path).await;
+                    return Ok(());
+                }
+
                 Err(e) => {
                     let _ = fs::remove_file(&temp_path).await;
                     return Err(e.into());

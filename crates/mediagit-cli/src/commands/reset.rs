@@ -100,7 +100,7 @@ impl ResetCmd {
         mode: ResetMode,
     ) -> Result<()> {
         let storage = create_storage_backend(repo_root).await?;
-        let odb = ObjectDatabase::new(storage.clone(), 10000);
+        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 10000);
         let refs = RefDatabase::new(storage_path);
         let reflog = Reflog::new(storage_path);
 
