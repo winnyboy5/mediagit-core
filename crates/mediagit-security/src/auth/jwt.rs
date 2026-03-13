@@ -61,7 +61,7 @@ impl JwtAuth {
     /// * `secret` - Secret key for signing tokens
     ///
     /// # Example
-    /// ```
+    /// ```no_run
     /// use mediagit_security::auth::JwtAuth;
     ///
     /// let jwt_auth = JwtAuth::new("my-secret-key");

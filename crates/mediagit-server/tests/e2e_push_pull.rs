@@ -215,6 +215,7 @@ async fn test_e2e_push_workflow() {
 
 /// Test end-to-end pull workflow with proper commit objects
 #[tokio::test]
+#[allow(deprecated)]
 async fn test_e2e_pull_workflow() {
     // Setup temporary directories
     let server_temp = TempDir::new().unwrap();
@@ -294,6 +295,7 @@ async fn test_e2e_pull_workflow() {
 
 /// Test push-then-pull roundtrip with proper commit objects
 #[tokio::test]
+#[allow(deprecated)]
 async fn test_e2e_push_then_pull_roundtrip() {
     // Setup temporary directories
     let server_temp = TempDir::new().unwrap();

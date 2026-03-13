@@ -54,12 +54,14 @@ MediaGit-Core is designed for teams and individuals working with large binary fi
 
 | Feature | MediaGit-Core | Git-LFS | Perforce |
 |---------|--------------|---------|----------|
-| Branch Switch Speed | <100ms | 30-60 min | 5-10 min |
-| Storage Compression | 70-90% | 0% | 0% |
-| Multi-Backend Support | 7 backends | GitHub only | Proprietary |
+| Architecture | Standalone native VCS | Git extension + server | Centralized VCS |
+| Branch Switch Speed | Instant (ref-based) | Instant (Git handles) | ⚠️ Copy-based |
+| Storage Savings (avg) | ~30% (compression + dedup + delta) | ~0% (full copies) | ~10-20% (RCS deltas) |
+| Deduplication | ✅ Content-addressable | ❌ None | ✅ Server-side |
+| Multi-Backend Support | 7 backends | Server-dependent | Proprietary |
 | Media-Aware Merging | ✅ Yes | ❌ No | ⚠️ Limited |
+| Offline Commits | ✅ Full DVCS | ✅ (Git handles) | ❌ Server required |
 | Open Source | ✅ AGPL-3.0 | ✅ MIT | ❌ No |
-| Cost (1TB storage) | ~$60/mo | ~$500/mo | ~$1000/mo |
 
 ## Quick Example
 

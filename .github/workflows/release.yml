@@ -325,9 +325,9 @@ jobs:
           SHA-256 checksums are provided for all archives (`.sha256` files).
 
           ### Documentation
-          - [User Guide](https://docs.mediagit.dev)
-          - [CLI Reference](https://docs.mediagit.dev/cli)
-          - [Quick Start](https://docs.mediagit.dev/quickstart)
+          - [User Guide](https://winnyboy5.github.io/mediagit-core)
+          - [CLI Reference](https://winnyboy5.github.io/mediagit-core/cli)
+          - [Quick Start](https://winnyboy5.github.io/mediagit-core/quickstart)
           EOF
 
           echo "notes-file=release-notes.md" >> "$GITHUB_OUTPUT"

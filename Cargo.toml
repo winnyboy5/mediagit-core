@@ -18,14 +18,14 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.2.1-beta.2"
+version = "0.2.3-beta.1"
 edition = "2021"
 rust-version = "1.92.0"
 license = "AGPL-3.0"
 authors = ["MediaGit Contributors"]
 repository = "https://github.com/winnyboy5/mediagit-core"
 homepage = "https://mediagit.dev"
-documentation = "https://docs.mediagit.dev"
+documentation = "https://winnyboy5.github.io/mediagit-core"
 
 [workspace.dependencies]
 # Async Runtime

@@ -269,7 +269,8 @@ impl PullCmd {
 
             // Pull using streaming protocol (memory-efficient for large files)
             // Pass local OIDs to avoid downloading objects we already have
-            let download_pb = progress.download_bar("Receiving objects");
+            // Use spinner: total bytes unknown, pull_streaming has no progress callback
+            let download_pb = progress.spinner("Receiving objects...");
 
             // Use streaming pull - objects are written directly to ODB as they're received
             let chunked_oids = client.pull_streaming(&odb, &remote_ref, local_have).await?;
@@ -288,21 +289,24 @@ impl PullCmd {
                     );
                 }
             }
-            download_pb.finish_with_message("Download complete");
+            download_pb.finish_with_message("Received objects");
 
             // Download chunked objects (large files)
             if !chunked_oids.is_empty() {
-                let chunk_pb =
-                    progress.object_bar("Downloading large files", chunked_oids.len() as u64);
+                // Total is unknown until Phase 1 (manifest download) completes;
+                // set_length is called on the first progress callback.
+                let chunk_pb = progress.object_bar("Downloading large files", 0);
 
                 let chunk_pb_ref = chunk_pb.clone();
                 let chunks_downloaded = client
-                    .download_chunked_objects(&odb, &chunked_oids, move |current, _total, _msg| {
+                    .download_chunked_objects(&odb, &chunked_oids, move |current, total, msg| {
+                        chunk_pb_ref.set_length(total as u64);
                         chunk_pb_ref.set_position(current as u64);
+                        chunk_pb_ref.set_message(msg.to_string());
                     })
                     .await?;
 
-                chunk_pb.finish_with_message("Download complete");
+                chunk_pb.finish_with_message(format!("Downloaded {} chunks", chunks_downloaded));
 
                 stats.objects_received += chunks_downloaded as u64;
 

@@ -29,6 +29,10 @@ const DELTA_MAGIC: &[u8; 5] = b"DELTA";
 #[allow(dead_code)]
 const CHECKSUM_SIZE: usize = 32;
 
+/// Maximum allowed size for a single pack object (2 GB).
+/// Prevents OOM from corrupted or malicious pack data advertising huge sizes.
+const MAX_PACK_OBJECT_SIZE: usize = 2 * 1024 * 1024 * 1024;
+
 /// Streaming pack reader that processes objects incrementally
 pub struct StreamingPackReader<R: AsyncRead + Unpin> {
     reader: R,
@@ -100,8 +104,26 @@ impl<R: AsyncRead + Unpin> StreamingPackReader<R> {
         let size = u32::from_le_bytes([header_buf[1], header_buf[2], header_buf[3], header_buf[4]])
             as usize;
 
-        // Read object data
-        let mut obj_data = vec![0u8; size];
+        // Validate size before allocation to prevent OOM
+        if size > MAX_PACK_OBJECT_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Pack object size {} exceeds maximum {} bytes",
+                    size, MAX_PACK_OBJECT_SIZE
+                ),
+            ));
+        }
+
+        // Use try_reserve to handle allocation failure gracefully
+        let mut obj_data = Vec::new();
+        obj_data.try_reserve(size).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                format!("Failed to allocate {} bytes for pack object: {}", size, e),
+            )
+        })?;
+        obj_data.resize(size, 0);
         self.reader.read_exact(&mut obj_data).await?;
         self.hasher.update(&obj_data);
 

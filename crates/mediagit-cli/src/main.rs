@@ -241,7 +241,7 @@ async fn async_main(cli: Cli) -> Result<()> {
 
     // Initialize structured logging
     if !cli.quiet && !machine_readable {
-        let level = if cli.verbose { "debug" } else { "info" };
+        let level = if cli.verbose { "info" } else { "warn" };
         let format = LogFormat::Pretty; // Pretty format for CLI output
 
         // Initialize with appropriate log level

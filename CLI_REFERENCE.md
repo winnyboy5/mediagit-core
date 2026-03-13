@@ -325,7 +325,8 @@ mediagit branch <SUBCOMMAND>
 | `create` | `branch create <NAME> [START]` | Create branch |
 | `switch` | `branch switch <BRANCH>` | Switch branch |
 | `delete` | `branch delete <BRANCHES>...` | Delete branches |
-| `rename` | `branch rename <NEW> [OLD]` | Rename branch |
+| `rename` | `branch rename <OLD> <NEW>` | Rename specific branch |
+| `rename` | `branch rename <NEW>` | Rename current branch to NEW |
 | `show` | `branch show [BRANCH]` | Show info |
 | `merge` | `branch merge <BRANCH>` | Merge branch |
 | `protect` | `branch protect <BRANCH>` | Protect branch |
@@ -352,6 +353,8 @@ mediagit branch switch develop
 mediagit branch delete -D old-branch
 mediagit branch delete -r origin/stale-branch   # Delete local remote-tracking ref
 mediagit branch merge feature/complete --no-ff
+mediagit branch rename feature/old-name feature/new-name   # Rename specific branch
+mediagit branch rename new-name                            # Rename current branch
 ```
 
 ---

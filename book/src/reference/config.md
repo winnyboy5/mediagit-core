@@ -81,7 +81,7 @@ Used when creating commits. Override with `MEDIAGIT_AUTHOR_NAME` / `MEDIAGIT_AUT
 
 ## `[storage]` — Storage Backend
 
-The storage backend is selected with the `backend` key. Each backend has its own sub-keys.
+The storage backend is selected with the `backend` key. All backend-specific fields are placed **directly in `[storage]`** alongside `backend` — there are no nested `[storage.s3]` or `[storage.filesystem]` subsections.
 
 ### Local Filesystem (default)
 
@@ -168,19 +168,22 @@ prefix = ""
 
 ---
 
-## `[compression]` — Compression Settings
+## `[compression]` — Compression Settings (Informational)
+
+> **Note**: MediaGit uses `SmartCompressor` which automatically selects the optimal algorithm and level per file type. The values in this section are written to `config.toml` by `mediagit init` for reference but are **not read at runtime** — compression behavior is determined entirely by file type, not these settings.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `enabled` | bool | `true` | Enable compression |
-| `algorithm` | string | `"zstd"` | Algorithm: `"zstd"`, `"brotli"`, `"none"` |
-| `level` | integer | `3` | Compression level (zstd: 1–22, brotli: 1–11) |
-| `min_size` | integer | `1024` | Min file size in bytes to compress |
+| `enabled` | bool | `true` | (Informational) SmartCompressor is always active |
+| `algorithm` | string | `"zstd"` | (Informational) Actual algorithm selected per file type |
+| `level` | integer | `3` | (Informational) Actual level selected per file type |
+| `min_size` | integer | `1024` | (Informational) Not currently enforced |
 
-**Algorithm selection by file type** (automatic, overrides `algorithm` setting):
+**Automatic algorithm selection by file type** (always active, cannot be overridden via config):
 - Already-compressed formats (JPEG, MP4, ZIP, docx, AI, PDF): stored as-is (`none`)
-- PSD, raw formats, 3D models: `zstd` at `Best` level
-- Text, JSON, TOML: `zstd` at `Default` level
+- PSD, raw formats, 3D models: `zstd` at `Best` level (level 22)
+- Text, JSON, TOML: `zstd` at `Default` level (level 3)
+- ML checkpoints: `zstd` at `Fast` level (level 1)
 
 ---
 

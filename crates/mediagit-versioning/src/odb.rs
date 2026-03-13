@@ -1179,7 +1179,8 @@ impl ObjectDatabase {
     /// # let odb: ObjectDatabase = todo!();
     /// let oid = odb.write_chunked_from_file(
     ///     "/path/to/large_video.mp4",
-    ///     "large_video.mp4"
+    ///     "large_video.mp4",
+    ///     None,
     /// ).await?;
     /// println!("Stored file with OID: {}", oid);
     /// # Ok(())
@@ -1189,6 +1190,7 @@ impl ObjectDatabase {
         &self,
         path: P,
         filename: &str,
+        on_progress: Option<Arc<dyn Fn(u64) + Send + Sync>>,
     ) -> anyhow::Result<Oid> {
         use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1211,6 +1213,10 @@ impl ObjectDatabase {
             .await?
         {
             debug!("File already exists in storage: {}", file_oid);
+            // Report full file size so progress bar stays accurate
+            if let Some(ref cb) = on_progress {
+                cb(file_size);
+            }
             return Ok(file_oid);
         }
 
@@ -1246,6 +1252,7 @@ impl ObjectDatabase {
             let similarity_detector = self.similarity_detector.clone();
             let chunks_w = chunks_written.clone();
             let bytes_w = bytes_written.clone();
+            let on_progress = on_progress.clone();
 
             let handle = tokio::spawn(async move {
                 let mut results: Vec<(usize, ChunkRef)> = Vec::new();
@@ -1266,6 +1273,9 @@ impl ObjectDatabase {
 
                     if chunk_exists || delta_exists {
                         debug!(chunk_id = %chunk.id, "Streaming parallel: chunk deduplicated");
+                        if let Some(ref cb) = on_progress {
+                            cb(chunk.size as u64);
+                        }
                         results.push((seq_id, chunk_ref));
                         continue;
                     }
@@ -1389,6 +1399,9 @@ impl ObjectDatabase {
 
                     chunks_w.fetch_add(1, Ordering::Relaxed);
                     bytes_w.fetch_add(chunk.size as u64, Ordering::Relaxed);
+                    if let Some(ref cb) = on_progress {
+                        cb(chunk.size as u64);
+                    }
 
                     results.push((seq_id, chunk_ref));
                 }
@@ -2476,6 +2489,15 @@ impl ObjectDatabase {
             storage_data
         };
 
+        // Validate decompressed size to prevent OOM from corrupted data
+        if data.len() as u64 > MAX_OBJECT_SIZE {
+            anyhow::bail!(
+                "Decompressed object size {} exceeds maximum {} bytes",
+                data.len(),
+                MAX_OBJECT_SIZE
+            );
+        }
+
         // Verify integrity on UNCOMPRESSED data
         let computed_oid = Oid::hash(&data);
         if computed_oid != *oid {
@@ -2673,6 +2695,15 @@ impl ObjectDatabase {
                         .map_err(|e| anyhow::anyhow!("Failed to parse chunk delta: {}", e))?;
                     let reconstructed = DeltaDecoder::apply(&base_data, &delta)
                         .map_err(|e| anyhow::anyhow!("Failed to apply chunk delta: {}", e))?;
+
+                    // Validate reconstructed size
+                    if reconstructed.len() as u64 > MAX_OBJECT_SIZE {
+                        anyhow::bail!(
+                            "Reconstructed chunk size {} exceeds maximum {} bytes",
+                            reconstructed.len(),
+                            MAX_OBJECT_SIZE
+                        );
+                    }
 
                     tracing::debug!(
                         chunk_id = %chunk_id,

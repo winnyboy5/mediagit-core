@@ -12,7 +12,9 @@
 // GNU Affero General Public License for more details.
 
 use anyhow::{Context, Result};
-use mediagit_versioning::{Commit, FileMode, ObjectDatabase, ObjectType, Oid, PackWriter, Tree};
+use mediagit_versioning::{
+    chunking::ChunkManifest, Commit, FileMode, ObjectDatabase, ObjectType, Oid, PackWriter, Tree,
+};
 use std::collections::{HashSet, VecDeque};
 
 use crate::types::{
@@ -351,6 +353,8 @@ impl ProtocolClient {
     /// If empty, all objects reachable from the remote ref will be downloaded.
     ///
     /// Returns (pack_data, chunked_oids)
+    #[deprecated(note = "Use pull_streaming() instead for memory-efficient downloads")]
+    #[allow(deprecated)]
     pub async fn pull_with_have(
         &self,
         _odb: &ObjectDatabase,
@@ -376,7 +380,9 @@ impl ProtocolClient {
 
     /// Pull objects from a remote ref (backwards compatible, downloads all objects)
     ///
-    /// For incremental pulls, use `pull_with_have` instead.
+    /// For incremental pulls, use `pull_streaming` instead.
+    #[deprecated(note = "Use pull_streaming() instead for memory-efficient downloads")]
+    #[allow(deprecated)]
     pub async fn pull(
         &self,
         odb: &ObjectDatabase,
@@ -412,6 +418,7 @@ impl ProtocolClient {
     /// Download a pack file from the server
     ///
     /// Returns (pack_data, chunked_oids) - chunked objects need separate transfer
+    #[deprecated(note = "Use download_pack_streaming() instead for memory-efficient downloads")]
     pub async fn download_pack(
         &self,
         want: Vec<String>,
@@ -1072,10 +1079,7 @@ impl ProtocolClient {
     // ========================================================================
 
     /// Download a manifest from the remote server
-    pub async fn download_manifest(
-        &self,
-        oid: &Oid,
-    ) -> Result<mediagit_versioning::chunking::ChunkManifest> {
+    pub async fn download_manifest(&self, oid: &Oid) -> Result<ChunkManifest> {
         let url = format!("{}/manifests/{}", self.base_url, oid.to_hex());
 
         let response = self
@@ -1121,7 +1125,9 @@ impl ProtocolClient {
 
     /// Download all chunks for chunked objects with parallel downloads
     ///
-    /// Uses 8 concurrent downloads for optimal throughput (>100MB/s target)
+    /// Uses 8 concurrent downloads for optimal throughput (>100MB/s target).
+    /// Progress callback receives `(chunks_done, total_manifest_chunks, msg)` for
+    /// smooth chunk-level ETA (avoids "211y" caused by object-level reporting).
     pub async fn download_chunked_objects<F>(
         &self,
         odb: &ObjectDatabase,
@@ -1137,87 +1143,139 @@ impl ProtocolClient {
             return Ok(0);
         }
 
-        let mut total_chunks_downloaded = 0;
         // Lower concurrency on Windows to avoid IOCP kernel handle exhaustion
         // (OS error 1450 / ERROR_NO_SYSTEM_RESOURCES). Spawning all tasks
         // upfront with a semaphore-inside pattern registers all N futures with
         // the IOCP driver at once; buffer_unordered limits active futures to N.
         let concurrent_downloads: usize = if cfg!(target_os = "windows") { 4 } else { 8 };
+        let n_objects = chunked_oids.len();
 
-        for (obj_idx, oid) in chunked_oids.iter().enumerate() {
-            // Download manifest first
+        // ── Phase 1: manifests (fast — small metadata payloads) ──────────────
+        // Download all manifests upfront to know total_chunks before any data
+        // transfer. Manifests are tiny (list of chunk IDs + sizes); storing them
+        // all is at most ~KB total even for large repos.
+        struct ObjectWork {
+            oid: Oid,
+            manifest: ChunkManifest,
+            missing_chunks: Vec<Oid>,
+        }
+
+        let mut object_work: Vec<ObjectWork> = Vec::with_capacity(n_objects);
+        let mut total_manifest_chunks: usize = 0;
+
+        for oid in chunked_oids.iter() {
             let manifest = self.download_manifest(oid).await?;
-            let total_chunks = manifest.chunks.len();
+            let obj_total = manifest.chunks.len();
+            total_manifest_chunks += obj_total;
 
-            on_progress(
-                obj_idx + 1,
-                chunked_oids.len(),
-                &format!(
-                    "Object {}/{}: {} chunks",
-                    obj_idx + 1,
-                    chunked_oids.len(),
-                    total_chunks
-                ),
-            );
-
-            // Check which chunks we already have locally
-            let mut missing_chunks: Vec<Oid> = Vec::new();
+            let mut missing: Vec<Oid> = Vec::new();
             for chunk_ref in &manifest.chunks {
                 if !odb.chunk_exists(&chunk_ref.id).await.unwrap_or(false) {
-                    missing_chunks.push(chunk_ref.id);
+                    missing.push(chunk_ref.id);
                 }
             }
 
-            if missing_chunks.is_empty() {
+            if missing.is_empty() {
                 tracing::debug!(oid = %oid, "All chunks already exist locally");
             } else {
                 tracing::info!(
                     oid = %oid,
-                    missing = missing_chunks.len(),
-                    total = total_chunks,
+                    missing = missing.len(),
+                    total = obj_total,
                     "Downloading missing chunks"
                 );
+            }
 
+            object_work.push(ObjectWork {
+                oid: *oid,
+                manifest,
+                missing_chunks: missing,
+            });
+        }
+
+        // Signal total upfront so the progress bar initialises with correct length.
+        on_progress(
+            0,
+            total_manifest_chunks,
+            &format!(
+                "{} objects, {} total chunks",
+                n_objects, total_manifest_chunks
+            ),
+        );
+
+        // ── Phase 2: chunk download — streaming write, O(concurrent × chunk) RAM
+        // Writing each chunk as it arrives (while let Some) instead of collect()
+        // means peak RAM = concurrent_downloads × max_chunk_size (≤64 KB on
+        // Windows) rather than accumulating every result before any disk write.
+        let mut total_chunks_downloaded = 0usize;
+        let mut chunks_done: usize = 0;
+
+        for (
+            obj_idx,
+            ObjectWork {
+                oid,
+                manifest,
+                missing_chunks,
+            },
+        ) in object_work.into_iter().enumerate()
+        {
+            let already_local = manifest.chunks.len() - missing_chunks.len();
+
+            if !missing_chunks.is_empty() {
                 // Download missing chunks with bounded concurrency.
                 // buffer_unordered keeps at most `concurrent_downloads` futures
                 // active at once, preventing Windows IOCP handle exhaustion
                 // that occurs when all tasks are spawned upfront.
-                let results: Vec<anyhow::Result<(Oid, Vec<u8>)>> =
-                    futures::stream::iter(missing_chunks)
-                        .map(|chunk_id| {
-                            let client = self.client.clone();
-                            let base_url = self.base_url.clone();
-                            async move {
-                                let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
-                                let response = client.get(&url).send().await.map_err(|e| {
-                                    anyhow::anyhow!("Failed to download chunk {}: {}", chunk_id, e)
-                                })?;
-                                if !response.status().is_success() {
-                                    anyhow::bail!(
-                                        "GET /chunks/{} failed with status: {}",
-                                        chunk_id,
-                                        response.status()
-                                    );
-                                }
-                                let data = response.bytes().await.map_err(|e| {
-                                    anyhow::anyhow!("Failed to read chunk {}: {}", chunk_id, e)
-                                })?;
-                                Ok::<_, anyhow::Error>((chunk_id, data.to_vec()))
+                let mut stream = futures::stream::iter(missing_chunks.into_iter())
+                    .map(|chunk_id| {
+                        let client = self.client.clone();
+                        let base_url = self.base_url.clone();
+                        async move {
+                            let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
+                            let response = client.get(&url).send().await.map_err(|e| {
+                                anyhow::anyhow!("Failed to download chunk {}: {}", chunk_id, e)
+                            })?;
+                            if !response.status().is_success() {
+                                anyhow::bail!(
+                                    "GET /chunks/{} failed with status: {}",
+                                    chunk_id,
+                                    response.status()
+                                );
                             }
-                        })
-                        .buffer_unordered(concurrent_downloads)
-                        .collect()
-                        .await;
+                            let data = response.bytes().await.map_err(|e| {
+                                anyhow::anyhow!("Failed to read chunk {}: {}", chunk_id, e)
+                            })?;
+                            Ok::<_, anyhow::Error>((chunk_id, data.to_vec()))
+                        }
+                    })
+                    .buffer_unordered(concurrent_downloads);
 
-                for result in results {
+                // Write each chunk as it arrives — no buffering of completed results.
+                while let Some(result) = stream.next().await {
                     let (chunk_id, chunk_data) = result?;
                     odb.put_compressed_chunk(&chunk_id, &chunk_data).await?;
                     total_chunks_downloaded += 1;
+                    chunks_done += 1;
+                    on_progress(
+                        chunks_done,
+                        total_manifest_chunks,
+                        &format!("Object {}/{}", obj_idx + 1, n_objects),
+                    );
                 }
             }
 
+            // Advance bar for chunks that were already local (dedup / re-clone).
+            if already_local > 0 {
+                chunks_done += already_local;
+                on_progress(
+                    chunks_done,
+                    total_manifest_chunks,
+                    &format!("Object {}/{}", obj_idx + 1, n_objects),
+                );
+            }
+
             // Store manifest locally
-            odb.put_manifest(oid, &manifest).await?;
+            odb.put_manifest(&oid, &manifest).await?;
 
             tracing::debug!(oid = %oid, "Chunked object downloaded");
         }
