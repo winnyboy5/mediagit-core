@@ -14,7 +14,7 @@ description = "Configuration management system for MediaGit Core"
 # Serialization and Config
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-toml = { version = "0.8", features = ["preserve_order"] }
+toml = { version = "1.0", features = ["preserve_order"] }
 serde_yaml = "0.9"
 
 # Error Handling
