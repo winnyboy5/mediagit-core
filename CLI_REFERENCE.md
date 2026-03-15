@@ -8,7 +8,7 @@ Complete command reference for MediaGit — Git for Media Files.
 
 | Category | Commands |
 |----------|----------|
-| **Setup** | `init`, `clone`, `install`, `remote` |
+| **Setup** | `init`, `clone`, `remote` |
 | **Basic** | `add`, `commit`, `status`, `log`, `diff`, `show` |
 | **Branching** | `branch`, `merge`, `rebase`, `cherry-pick` |
 | **Remote** | `push`, `pull`, `fetch` |
@@ -17,7 +17,6 @@ Complete command reference for MediaGit — Git for Media Files.
 | **History** | `reset`, `revert`, `reflog` |
 | **Debugging** | `bisect` |
 | **Maintenance** | `gc`, `fsck`, `verify`, `stats` |
-| **Advanced** | `filter`, `track`, `untrack` |
 | **Meta** | `version`, `completions` |
 
 ### Global Flags
@@ -80,22 +79,6 @@ mediagit clone http://server:3000/project
 mediagit clone http://server:3000/project my-copy
 mediagit clone -b develop http://server:3000/project
 ```
-
----
-
-### `mediagit install`
-
-Install MediaGit filter driver for Git integration.
-
-```bash
-mediagit install
-```
-
-| Flag | Description |
-|------|-------------|
-| `-f, --force` | Overwrite existing config |
-| `-r, --repo <PATH>` | Install for specific repository |
-| `-g, --global` | Install globally |
 
 ---
 
@@ -228,8 +211,10 @@ mediagit status --porcelain     # For scripting
 Show commit history.
 
 ```bash
-mediagit log [REVISION] [PATHS]...
+mediagit log [REVISION] [-- PATHS]...
 ```
+
+`REVISION` accepts a branch name, tag, full OID, or abbreviated OID (≥4 hex chars).
 
 | Flag | Description |
 |------|-------------|
@@ -599,7 +584,8 @@ mediagit stash <SUBCOMMAND>
 
 | Subcommand | Usage | Description |
 |------------|-------|-------------|
-| `save` | `stash save [MESSAGE]` | Save changes |
+| `save` | `stash save [-m MSG] [-u] [PATHS...]` | Save changes |
+| `push` | `stash push [-m MSG] [-u] [PATHS...]` | Save changes (git-compatible alias for `save`) |
 | `apply` | `stash apply [STASH]` | Apply stash |
 | `list` | `stash list` | List stashes |
 | `show` | `stash show [STASH]` | Show stash |
@@ -833,7 +819,7 @@ mediagit fsck --repair --dry-run
 Quick integrity verification.
 
 ```bash
-mediagit verify
+mediagit verify [COMMIT]
 ```
 
 | Flag | Description |
@@ -877,62 +863,6 @@ mediagit stats
 mediagit stats --all
 mediagit stats --storage --compression
 mediagit stats --json > stats.json
-```
-
----
-
-## Git Integration
-
-### `mediagit filter`
-
-Git filter driver (clean/smudge). Used internally by Git when MediaGit filter is installed.
-
-```bash
-mediagit filter <SUBCOMMAND>
-```
-
-**Subcommands:**
-
-| Subcommand | Usage | Description |
-|------------|-------|-------------|
-| `clean` | `filter clean [FILE]` | Convert to pointer (on `git add`) |
-| `smudge` | `filter smudge [FILE]` | Restore from pointer (on `git checkout`) |
-
----
-
-### `mediagit track`
-
-Register file patterns for MediaGit tracking via `.gitattributes`.
-
-```bash
-mediagit track [PATTERN]
-```
-
-| Flag | Description |
-|------|-------------|
-| `-l, --list` | List tracked patterns |
-
-**Examples:**
-```bash
-mediagit track "*.psd"
-mediagit track "*.mp4"
-mediagit track --list
-```
-
----
-
-### `mediagit untrack`
-
-Remove a file pattern from MediaGit tracking.
-
-```bash
-mediagit untrack <PATTERN>
-```
-
-**Examples:**
-```bash
-mediagit untrack "*.psd"
-mediagit untrack "*.mp4"
 ```
 
 ---

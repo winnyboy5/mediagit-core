@@ -5,6 +5,91 @@ All notable changes to MediaGit will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `/health` route alias added alongside `/healthz` in both `create_router` and
+  `create_router_with_rate_limit`. Kubernetes liveness probes, load balancers, and uptime
+  monitors that probe `/health` (without the `z`) now get a 200 response.
+  (`crates/mediagit-server/src/lib.rs`)
+- `bisect replay` now executes scripted bisect sessions: parses the log file format
+  (`YYYY-MM-DD HH:MM:SS: command: args`), strips the timestamp prefix, and dispatches
+  `good`/`bad`/`skip`/`start` entries to the existing async bisect handlers. Previously
+  the command printed log lines without acting on them.
+  (`crates/mediagit-cli/src/commands/bisect.rs`)
+- `log <REVISION>` now resolves branch names, tags, and abbreviated OIDs via `resolve_revision`,
+  so `mediagit log main` or `mediagit log feat/my-branch` shows that branch's history.
+  (`crates/mediagit-cli/src/commands/log.rs`)
+- Standalone test suite passes 173/173 tests (release build, Windows/WSL2). Covers all
+  active CLI commands, MinIO S3 backend, and push/pull/clone over local HTTP server.
+- HTTP/2 adaptive window tuning (`http2_adaptive_window`, 2 MB stream window, 8 MB connection
+  window) in the protocol client for 2-4× throughput improvement on WAN connections.
+  (`crates/mediagit-protocol/src/client.rs`)
+- Server TLS config now advertises HTTP/2 via ALPN (`h2`, `http/1.1`), enabling HTTP/2
+  negotiation over TLS. Plaintext HTTP/1.1 connections (local dev, CI) are unaffected.
+  (`crates/mediagit-server/src/main.rs`)
+- Raw file serving endpoints on the HTTP server: `GET /{repo}/files/{*path}` streams a file
+  at a given path from any commit ref, and `GET /{repo}/tree[/{*path}]` lists tree entries
+  as JSON. (`crates/mediagit-server/src/handlers.rs`, `crates/mediagit-server/src/lib.rs`)
+- Abbreviated OID resolution: `show`, `revert`, `verify`, and all other revision-accepting
+  commands now accept shortened commit hashes (≥4 hex chars), matching `git log --oneline`
+  output. Prefix-scans the object store; errors on ambiguous matches.
+  (`crates/mediagit-versioning/src/odb.rs`, `crates/mediagit-versioning/src/revision.rs`)
+- `stash push` subcommand as a git-compatible alias for `stash save`. Accepts `-m/--message`
+  flag and positional paths, identical to `stash save`. (`crates/mediagit-cli/src/commands/stash.rs`)
+- `verify [COMMIT]` optional positional argument: pass a commit OID, abbreviated hash,
+  branch name, or `HEAD` to verify a specific commit and its reachable objects rather than
+  the full repository. (`crates/mediagit-cli/src/commands/verify.rs`)
+
+### Fixed
+- `show <short-hash>` now resolves abbreviated OIDs instead of failing with "OID hex string
+  must be 64 characters". (shared fix: abbreviated OID resolution in `revision.rs`)
+- `revert <short-hash>` now resolves abbreviated OIDs instead of failing with the same error.
+- `verify HEAD` and `verify <short-hash>` no longer fail with "unexpected argument". The
+  `verify` command now accepts an optional `[COMMIT]` positional argument.
+- `stash push -m "msg"` now works — previously rejected as an unrecognised subcommand.
+- `verify` `resolve_commit` now uses `refdb.resolve()` (which follows symbolic refs like HEAD)
+  instead of `refdb.read()`, so `verify HEAD` correctly resolves to the HEAD commit.
+
+### Removed
+- Removed `filter`, `install`, `track`, and `untrack` commands — git migration tooling is a
+  future milestone. The `mediagit-git` crate remains in the workspace and compiles
+  independently for when the migration milestone arrives.
+- Removed `mediagit-git` dependency from the CLI binary.
+
+## [0.2.3-beta.1] - 2026-03-13
+
+### Fixed
+- `add` command: ETA showed wildly incorrect values (e.g. "eta 2d") when most files were
+  unchanged. Skipped (stat-cache / HEAD-match) files now advance the byte progress counter
+  so `indicatif`'s ETA calculation is based on total work, not just newly staged bytes.
+  (`crates/mediagit-cli/src/commands/add.rs`)
+- `add` command: Speed dropped to "0 B/s" and ETA reached astronomical values (e.g.
+  "eta 11710991569y") while staging large files (≥100 MB). Added a per-chunk `on_progress`
+  callback to `ObjectDatabase::write_chunked_from_file` that fires after every chunk
+  (deduped, delta, or full), giving continuous byte-level progress updates during multi-GB
+  file ingestion. (`crates/mediagit-versioning/src/odb.rs`,
+  `crates/mediagit-cli/src/commands/add.rs`)
+
+### Changed
+- `ObjectDatabase::write_chunked_from_file` now accepts an optional
+  `on_progress: Option<Arc<dyn Fn(u64) + Send + Sync>>` callback for incremental byte
+  reporting. Pass `None` to retain previous behaviour.
+
+### Security
+- Upgraded `quinn-proto` from 0.11.13 → 0.11.14 (RUSTSEC-2026-0037, CVSS 8.7 — DoS in
+  Quinn QUIC endpoints). Transitive dependency via `reqwest → quinn → quinn-proto`.
+  Only `Cargo.lock` updated; no `Cargo.toml` changes required.
+
+### Code Quality
+- `crates/mediagit-cli/src/commands/log.rs`: Changed `walk_tree` parameter from
+  `&'a PathBuf` to `&'a Path` (clippy `ptr_arg` warning).
+- `crates/mediagit-cli/src/commands/show.rs`: Same `&PathBuf` → `&Path` fix.
+- `crates/mediagit-security/src/auth/jwt.rs`: Marked `JwtAuth::new` doctest as `no_run`
+  to prevent Avast false-positive (`rust_out.exe` blocked on Windows) from failing CI.
+- `crates/mediagit-versioning/src/odb.rs`: Updated `write_chunked_from_file` doctest to
+  pass the new `None` argument.
+
 ## [0.2.1-beta.2]
 
 ### Fixed
@@ -87,7 +172,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dependency security audits in CI
 - Encryption at rest with Argon2 key derivation
 
-[Unreleased]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.1-beta.1...HEAD
+[v0.2.3-beta.1]:https://github.com/winnyboy5/mediagit-core/compare/v0.2.1-beta.2...v0.2.3-beta.1
+[v0.2.1-beta.2]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.1-beta.1...v0.2.1-beta.2
 [0.2.1-beta.1]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.0...v0.2.1-beta.1
 [0.2.0]: https://github.com/winnyboy5/mediagit-core/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/winnyboy5/mediagit-core/releases/tag/v0.1.0

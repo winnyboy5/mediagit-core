@@ -19,7 +19,8 @@ use clap::Parser;
 use console::style;
 use mediagit_storage::StorageBackend;
 use mediagit_versioning::{
-    Commit, FsckChecker, FsckOptions, IssueSeverity, ObjectDatabase, Oid, RefDatabase,
+    resolve_revision, Commit, FsckChecker, FsckOptions, IssueSeverity, ObjectDatabase, Oid,
+    RefDatabase,
 };
 use std::collections::HashSet;
 use std::path::Path;
@@ -57,6 +58,11 @@ VERIFY vs FSCK:
 SEE ALSO:
     mediagit-fsck(1)")]
 pub struct VerifyCmd {
+    /// Commit to verify (OID, abbreviated hash, branch name, or HEAD).
+    /// When provided, verifies the specific commit and its reachable objects.
+    #[arg(value_name = "COMMIT")]
+    pub commit: Option<String>,
+
     /// Verify file integrity (checksums)
     #[arg(long)]
     pub file_integrity: bool,
@@ -113,8 +119,8 @@ impl VerifyCmd {
             .await
             .context("Failed to open repository. Is this a MediaGit repository?")?;
 
-        // Handle commit range verification
-        if self.start.is_some() || self.end.is_some() {
+        // Handle commit range verification (or single-commit verify via positional arg)
+        if self.commit.is_some() || self.start.is_some() || self.end.is_some() {
             return self
                 .verify_commit_range(&mediagit_dir, storage.clone())
                 .await;
@@ -235,14 +241,16 @@ impl VerifyCmd {
 
         // Resolve start commit (defaults to root)
         let start_oid = if let Some(ref start) = self.start {
-            self.resolve_commit(&refdb, start).await?
+            self.resolve_commit(&refdb, &odb, start).await?
         } else {
             None
         };
 
-        // Resolve end commit (defaults to HEAD)
+        // Resolve end commit: --end flag > positional COMMIT arg > HEAD
         let end_oid = if let Some(ref end) = self.end {
-            self.resolve_commit(&refdb, end).await?
+            self.resolve_commit(&refdb, &odb, end).await?
+        } else if let Some(ref commit) = self.commit {
+            self.resolve_commit(&refdb, &odb, commit).await?
         } else {
             // Default to HEAD
             let head = refdb.read("HEAD").await?;
@@ -365,25 +373,20 @@ impl VerifyCmd {
         Ok(())
     }
 
-    /// Resolve a commit reference to an OID
-    async fn resolve_commit(&self, refdb: &RefDatabase, spec: &str) -> Result<Option<Oid>> {
-        // Try as hex OID first
-        if let Ok(oid) = Oid::from_hex(spec) {
-            return Ok(Some(oid));
-        }
-
-        // Try as reference
-        if let Ok(r) = refdb.read(spec).await {
-            return Ok(r.oid);
-        }
-
-        // Try with refs/heads/ prefix
-        let with_prefix = format!("refs/heads/{}", spec);
-        if let Ok(r) = refdb.read(&with_prefix).await {
-            return Ok(r.oid);
-        }
-
-        anyhow::bail!("Cannot resolve commit: {}", spec)
+    /// Resolve a commit reference to an OID.
+    ///
+    /// Delegates to `resolve_revision` which handles: full OIDs, abbreviated OIDs,
+    /// symbolic refs (HEAD), branch names, and parent notation (HEAD~N, branch~N).
+    async fn resolve_commit(
+        &self,
+        refdb: &RefDatabase,
+        odb: &ObjectDatabase,
+        spec: &str,
+    ) -> Result<Option<Oid>> {
+        resolve_revision(spec, refdb, odb)
+            .await
+            .map(Some)
+            .with_context(|| format!("Cannot resolve commit: {}", spec))
     }
 
     /// Collect commits between start and end (walking back from end to start)

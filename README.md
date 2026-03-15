@@ -759,27 +759,9 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] `branch rename` argument order aligned with git semantics (`OLD NEW`)
 - [x] Validated on Linux + Windows; all 32 commands stable across both platforms
 
-### v0.3.0 (Planned)
-*Developer experience and ecosystem*
+### v0.3.0 and beyond
 
-- [ ] `mediagit diff` with media-aware visual diffing (image pixel diff, audio waveform)
-- [ ] Conflict markers for PSD/Blend/FBX with editor integrations
-- [ ] Shallow clone (`--depth N`) for large repositories
-- [ ] Partial/sparse checkout (pull only specific asset subdirectories)
-- [ ] `mediagit migrate` — import from Git-LFS repositories
-- [ ] Chocolatey and Homebrew package managers
-- [ ] Official VS Code extension (file status, staging UI)
-
-### v1.0.0 (Stable Release)
-*Production-grade enterprise features*
-
-- [ ] Stable API and wire protocol (v1 guarantee)
-- [ ] SSO integration (OIDC/SAML) for enterprise auth
-- [ ] Multi-region active-active replication
-- [ ] Audit log export (compliance — SOC 2, GDPR)
-- [ ] Plugin system for custom media type handlers
-- [ ] Web UI for repository browsing and review workflows
-- [ ] Commercial support tiers
+See [FUTURE_TODOS.md](./FUTURE_TODOS.md) for planned features.
 
 ---
 

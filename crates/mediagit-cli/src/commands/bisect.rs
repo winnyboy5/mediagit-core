@@ -362,10 +362,51 @@ impl BisectCmd {
                 continue;
             }
 
-            // Parse and execute bisect command
-            if let Some(cmd) = trimmed.strip_prefix("git bisect ") {
-                println!("  Executing: {}", cmd);
-                // TODO: Parse and execute individual bisect commands
+            // Log format: "YYYY-MM-DD HH:MM:SS: command: args"
+            // Strip the timestamp prefix (everything up to and including the first ": ")
+            let cmd_part = if let Some(pos) = trimmed.find(": ") {
+                trimmed[pos + 2..].trim()
+            } else {
+                trimmed
+            };
+
+            println!("  {} {}", style("→").cyan(), style(cmd_part).dim());
+
+            if let Some(hex) = cmd_part.strip_prefix("good: ") {
+                self.good(&GoodOpts {
+                    commit: Some(hex.trim().to_string()),
+                })
+                .await?;
+            } else if let Some(hex) = cmd_part.strip_prefix("bad: ") {
+                self.bad(&BadOpts {
+                    commit: Some(hex.trim().to_string()),
+                })
+                .await?;
+            } else if let Some(hex) = cmd_part.strip_prefix("skip: ") {
+                self.skip(&SkipOpts {
+                    commit: Some(hex.trim().to_string()),
+                })
+                .await?;
+            } else if let Some(stripped) = cmd_part.strip_prefix("start:") {
+                // Parse "start: bad=<hex>, good=<hex>" or "start: bad=<hex>"
+                let mut bad = None;
+                let mut good = None;
+                for part in stripped.split(',') {
+                    let part = part.trim();
+                    if let Some(h) = part.strip_prefix("bad=") {
+                        bad = Some(h.to_string());
+                    } else if let Some(h) = part.strip_prefix("good=") {
+                        good = Some(h.to_string());
+                    }
+                }
+                self.start(&StartOpts {
+                    bad,
+                    good,
+                    reset: true,
+                })
+                .await?;
+            } else {
+                println!("  {} Unknown log entry: {}", style("⚠").yellow(), cmd_part);
             }
         }
 

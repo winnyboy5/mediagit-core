@@ -3164,6 +3164,61 @@ impl ObjectDatabase {
         Ok(stats)
     }
 
+    /// Resolve an abbreviated OID prefix to a full OID.
+    ///
+    /// Scans loose objects for keys matching the given hex prefix.
+    /// Returns an error if zero or more than one object matches.
+    pub async fn resolve_abbreviated_oid(&self, abbrev: &str) -> anyhow::Result<Oid> {
+        if abbrev.len() < 4 {
+            anyhow::bail!(
+                "Abbreviated OID must be at least 4 characters, got {}",
+                abbrev.len()
+            );
+        }
+        if abbrev.len() == 64 {
+            return Oid::from_hex(abbrev).map_err(|e| anyhow::anyhow!("Invalid OID: {}", e));
+        }
+
+        // Validate it looks like a hex prefix
+        if !abbrev.chars().all(|c| c.is_ascii_hexdigit()) {
+            anyhow::bail!("Not a valid OID prefix: {}", abbrev);
+        }
+
+        // Prefix-scan the storage for matching keys
+        let keys = self.storage.list_objects(abbrev).await?;
+
+        let mut matches: Vec<Oid> = Vec::new();
+        for key in keys {
+            // Skip non-object namespaces
+            if key.starts_with("packs/")
+                || key.starts_with("deltas/")
+                || key.starts_with("chunk-deltas/")
+                || key.starts_with("manifests/")
+            {
+                continue;
+            }
+            if key.starts_with(abbrev) {
+                if let Ok(oid_bytes) = hex::decode(&key) {
+                    if oid_bytes.len() == 32 {
+                        let mut bytes = [0u8; 32];
+                        bytes.copy_from_slice(&oid_bytes);
+                        matches.push(Oid::from(bytes));
+                    }
+                }
+            }
+        }
+
+        match matches.len() {
+            0 => anyhow::bail!("No object matches abbreviated OID: {}", abbrev),
+            1 => Ok(matches.remove(0)),
+            n => anyhow::bail!(
+                "Ambiguous abbreviated OID '{}' — {} objects match",
+                abbrev,
+                n
+            ),
+        }
+    }
+
     /// List all loose objects in the object database
     ///
     /// Scans the objects/ directory and returns OIDs of all loose objects.
