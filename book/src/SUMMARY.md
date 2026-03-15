@@ -26,7 +26,6 @@
   - [log](./cli/log.md)
   - [diff](./cli/diff.md)
   - [show](./cli/show.md)
-  - [track](./cli/track.md)
 - [Branch Management](./cli/branch-management.md)
   - [branch](./cli/branch.md)
   - [merge](./cli/merge.md)
@@ -49,8 +48,6 @@
   - [verify](./cli/verify.md)
   - [stats](./cli/stats.md)
   - [reflog](./cli/reflog.md)
-  - [filter](./cli/filter.md)
-  - [install](./cli/install.md)
 
 # Architecture
 

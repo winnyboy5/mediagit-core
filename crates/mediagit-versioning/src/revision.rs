@@ -60,9 +60,17 @@ pub async fn resolve_revision(
         return walk_parents(base_oid, count, odb).await;
     }
 
-    // Try as direct OID
+    // Try as direct OID (full 64-char hex)
     if let Ok(oid) = Oid::from_hex(revision) {
         return Ok(oid);
+    }
+
+    // Try as abbreviated OID (4-63 hex chars)
+    if revision.len() >= 4 && revision.len() < 64 && revision.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        if let Ok(oid) = odb.resolve_abbreviated_oid(revision).await {
+            return Ok(oid);
+        }
     }
 
     // Try to resolve as reference (handles symbolic refs like HEAD)

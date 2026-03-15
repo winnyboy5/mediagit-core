@@ -9,13 +9,13 @@
 
 ```mermaid
 graph TD
-    subgraph CLI["mediagit-cli (32 commands)"]
+    subgraph CLI["mediagit-cli (28 commands)"]
         ADD["add"]
         COMMIT["commit"]
         PUSH["push"]
         PULL["pull"]
         CLONE["clone"]
-        OTHER["27+ more..."]
+        OTHER["23+ more..."]
     end
 
     subgraph Core["Core Libraries"]
@@ -57,7 +57,7 @@ graph TD
 
 | Crate | Role | Key Modules |
 |-------|------|-------------|
-| **mediagit-cli** | CLI binary (32 commands) | `commands/`, main entry |
+| **mediagit-cli** | CLI binary (28 commands) | `commands/`, main entry |
 | **mediagit-versioning** | Core VCS engine | ODB, index, refs, tree, commit, chunking, delta, similarity, packs, streaming |
 | **mediagit-compression** | Smart compression | Zstd, Brotli, Zlib, Store; `SmartCompressor` with type+size awareness |
 | **mediagit-media** | Media parsing & merging | Image, PSD, Video, Audio, 3D, VFX parsers & merge strategies |
@@ -74,7 +74,7 @@ graph TD
 
 ---
 
-## CLI Commands (32)
+## CLI Commands (28)
 
 ### Core Workflow
 | Command | Description |
@@ -124,13 +124,9 @@ graph TD
 | `completions` | Generate shell completions |
 | `version` | Show version information |
 
-### Git Integration
-| Command | Description |
-|---------|-------------|
-| `install` | Install MediaGit filter driver for Git integration |
-| `filter` | Git filter driver operations (clean/smudge) |
-| `track` | Register file patterns for MediaGit tracking |
-| `untrack` | Remove file patterns from MediaGit tracking |
+### Git Interop Crate
+The `mediagit-git` crate (workspace member) provides Git/git-lfs migration tooling.
+It is **not** wired into the CLI binary — migration commands are a future milestone.
 
 ---
 

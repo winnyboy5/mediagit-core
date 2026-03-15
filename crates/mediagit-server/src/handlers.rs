@@ -25,7 +25,8 @@ use mediagit_protocol::{
 use mediagit_security::auth::AuthUser;
 use mediagit_storage::{AzureBackend, GcsBackend, LocalBackend, MinIOBackend, StorageBackend};
 use mediagit_versioning::{
-    Commit, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, StreamingPackWriter, Tree,
+    resolve_revision, Commit, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase,
+    StreamingPackWriter, Tree,
 };
 use std::path::Path as StdPath;
 use std::sync::Arc;
@@ -1059,4 +1060,319 @@ pub async fn download_manifest(
         [("Content-Type", "application/octet-stream")],
         manifest_data,
     ))
+}
+
+// ============================================================================
+// Raw File Serving Endpoints — HTTP "Download Raw" equivalent
+// ============================================================================
+
+/// Query parameters shared by file and tree endpoints
+#[derive(serde::Deserialize)]
+pub struct RefQueryParams {
+    #[serde(rename = "ref", default = "default_ref_head")]
+    ref_name: String,
+}
+
+fn default_ref_head() -> String {
+    "HEAD".to_string()
+}
+
+/// Validate a file path component for security (no path traversal, no absolute paths)
+fn validate_file_path(path: &str) -> Result<(), StatusCode> {
+    if path.starts_with('/') {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    for component in path.split('/') {
+        if component == ".." || component == "." || component.contains('\0') {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+    Ok(())
+}
+
+/// Walk the commit tree to resolve a file path to its blob OID.
+async fn resolve_path_to_blob(
+    odb: &ObjectDatabase,
+    refdb: &RefDatabase,
+    ref_str: &str,
+    file_path: &str,
+) -> Result<Oid, StatusCode> {
+    let commit_oid = resolve_revision(ref_str, refdb, odb)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    let commit_data = odb
+        .read(&commit_oid)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let commit =
+        Commit::deserialize(&commit_data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut current_oid = commit.tree;
+    let components: Vec<&str> = file_path.split('/').filter(|s| !s.is_empty()).collect();
+    if components.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    for (i, component) in components.iter().enumerate() {
+        let tree_data = odb
+            .read(&current_oid)
+            .await
+            .map_err(|_| StatusCode::NOT_FOUND)?;
+        let tree = Tree::deserialize(&tree_data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let entry = tree.entries.get(*component).ok_or(StatusCode::NOT_FOUND)?;
+
+        if i == components.len() - 1 {
+            if entry.is_tree() {
+                // Path points to a directory, not a file
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            return Ok(entry.oid);
+        } else {
+            if !entry.is_tree() {
+                return Err(StatusCode::NOT_FOUND);
+            }
+            current_oid = entry.oid;
+        }
+    }
+    Err(StatusCode::NOT_FOUND)
+}
+
+/// Walk the commit tree to resolve a directory path to its Tree object.
+/// Empty `dir_path` returns the root tree.
+async fn resolve_path_to_tree(
+    odb: &ObjectDatabase,
+    refdb: &RefDatabase,
+    ref_str: &str,
+    dir_path: &str,
+) -> Result<(Oid, Tree), StatusCode> {
+    let commit_oid = resolve_revision(ref_str, refdb, odb)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    let commit_data = odb
+        .read(&commit_oid)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let commit =
+        Commit::deserialize(&commit_data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut current_oid = commit.tree;
+    let components: Vec<&str> = dir_path.split('/').filter(|s| !s.is_empty()).collect();
+
+    for component in &components {
+        let tree_data = odb
+            .read(&current_oid)
+            .await
+            .map_err(|_| StatusCode::NOT_FOUND)?;
+        let tree = Tree::deserialize(&tree_data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let entry = tree.entries.get(*component).ok_or(StatusCode::NOT_FOUND)?;
+        if !entry.is_tree() {
+            return Err(StatusCode::NOT_FOUND);
+        }
+        current_oid = entry.oid;
+    }
+
+    let tree_data = odb
+        .read(&current_oid)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    let tree = Tree::deserialize(&tree_data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok((commit_oid, tree))
+}
+
+/// JSON shape for a single entry in a tree listing response
+#[derive(serde::Serialize)]
+pub struct TreeEntryResponse {
+    name: String,
+    mode: String,
+    oid: String,
+    #[serde(rename = "type")]
+    entry_type: String,
+}
+
+/// JSON response body for `GET /{repo}/tree[/{path}]`
+#[derive(serde::Serialize)]
+pub struct TreeListResponse {
+    #[serde(rename = "ref")]
+    ref_name: String,
+    commit: String,
+    path: String,
+    entries: Vec<TreeEntryResponse>,
+}
+
+/// GET /{repo}/files/{*path}?ref=HEAD
+///
+/// Download a file from committed state. Streams chunked blobs via O(64KB) duplex
+/// channel — memory usage is independent of file size.
+pub async fn download_file_by_path(
+    Path((repo, file_path)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    axum::extract::Query(params): axum::extract::Query<RefQueryParams>,
+) -> Result<axum::response::Response<axum::body::Body>, StatusCode> {
+    tracing::info!("GET /{}/files/{} ref={}", repo, file_path, params.ref_name);
+
+    crate::security::validate_repo_name(&repo).map_err(|_| StatusCode::BAD_REQUEST)?;
+    validate_file_path(&file_path)?;
+    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+
+    let repo_path = state.repos_dir.join(&repo);
+    if !repo_path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let storage = create_storage_backend(&repo_path).await?;
+    let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
+    let refdb = RefDatabase::new(repo_path.join(".mediagit"));
+
+    let blob_oid = resolve_path_to_blob(&odb, &refdb, &params.ref_name, &file_path).await?;
+    let filename = file_path
+        .split('/')
+        .next_back()
+        .unwrap_or("file")
+        .to_string();
+
+    let manifest_opt = odb
+        .get_chunk_manifest(&blob_oid)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    use axum::http::header;
+    use axum::response::Response;
+
+    if let Some(manifest) = manifest_opt {
+        // Chunked blob: stream via duplex channel — O(64KB) memory regardless of file size.
+        let total_size = manifest.total_size;
+        let (writer, reader) = duplex(64 * 1024);
+        let odb_clone = Arc::clone(&odb);
+
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let mut w = writer;
+            for chunk_ref in &manifest.chunks {
+                match odb_clone.get_chunk(&chunk_ref.id).await {
+                    Ok(data) => {
+                        if w.write_all(&data).await.is_err() {
+                            tracing::warn!("Client disconnected during chunked file download");
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            chunk_id = %chunk_ref.id,
+                            "Failed to read chunk during file download"
+                        );
+                        return;
+                    }
+                }
+            }
+            // Dropping writer closes the duplex channel, signalling EOF to reader.
+        });
+
+        let stream = ReaderStream::new(reader);
+        let body = axum::body::Body::from_stream(stream);
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::CONTENT_LENGTH, total_size)
+            .header(
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", filename),
+            )
+            .header("X-MediaGit-OID", blob_oid.to_hex())
+            .header("X-MediaGit-Chunked", "true")
+            .body(body)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    } else {
+        // Non-chunked blob: read fully (fits in memory by definition — not chunked).
+        let data = odb
+            .read(&blob_oid)
+            .await
+            .map_err(|_| StatusCode::NOT_FOUND)?;
+        let size = data.len();
+        let body = axum::body::Body::from(bytes::Bytes::from(data));
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::CONTENT_LENGTH, size)
+            .header(
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", filename),
+            )
+            .header("X-MediaGit-OID", blob_oid.to_hex())
+            .header("X-MediaGit-Chunked", "false")
+            .body(body)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    }
+}
+
+/// Shared logic for tree listing (used by both `list_tree` and `list_tree_root`)
+async fn list_tree_impl(
+    repo: String,
+    dir_path: String,
+    state: Arc<AppState>,
+    auth_user: Option<Extension<AuthUser>>,
+    ref_name: String,
+) -> Result<Json<TreeListResponse>, StatusCode> {
+    crate::security::validate_repo_name(&repo).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if !dir_path.is_empty() {
+        validate_file_path(&dir_path)?;
+    }
+    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+
+    let repo_path = state.repos_dir.join(&repo);
+    if !repo_path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let storage = create_storage_backend(&repo_path).await?;
+    let odb = ObjectDatabase::with_smart_compression(storage, 1000);
+    let refdb = RefDatabase::new(repo_path.join(".mediagit"));
+
+    let (commit_oid, tree) = resolve_path_to_tree(&odb, &refdb, &ref_name, &dir_path).await?;
+
+    let entries = tree
+        .iter()
+        .map(|entry| TreeEntryResponse {
+            name: entry.name.clone(),
+            mode: entry.mode.to_string(),
+            oid: entry.oid.to_hex(),
+            entry_type: if entry.is_tree() {
+                "tree".to_string()
+            } else {
+                "blob".to_string()
+            },
+        })
+        .collect();
+
+    Ok(Json(TreeListResponse {
+        ref_name,
+        commit: commit_oid.to_hex(),
+        path: dir_path,
+        entries,
+    }))
+}
+
+/// GET /{repo}/tree/{*path}?ref=HEAD — List directory contents at path
+pub async fn list_tree(
+    Path((repo, dir_path)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    axum::extract::Query(params): axum::extract::Query<RefQueryParams>,
+) -> Result<Json<TreeListResponse>, StatusCode> {
+    tracing::info!("GET /{}/tree/{} ref={}", repo, dir_path, params.ref_name);
+    list_tree_impl(repo, dir_path, state, auth_user, params.ref_name).await
+}
+
+/// GET /{repo}/tree?ref=HEAD — List root tree contents
+pub async fn list_tree_root(
+    Path(repo): Path<String>,
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    axum::extract::Query(params): axum::extract::Query<RefQueryParams>,
+) -> Result<Json<TreeListResponse>, StatusCode> {
+    tracing::info!("GET /{}/tree ref={}", repo, params.ref_name);
+    list_tree_impl(repo, String::new(), state, auth_user, params.ref_name).await
 }

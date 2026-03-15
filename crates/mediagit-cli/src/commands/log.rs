@@ -15,7 +15,7 @@ use super::super::repo::{create_storage_backend, find_repo_root};
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
-use mediagit_versioning::{Commit, ObjectDatabase, Oid, RefDatabase, Tree};
+use mediagit_versioning::{resolve_revision, Commit, ObjectDatabase, Oid, RefDatabase, Tree};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -123,18 +123,9 @@ impl LogCmd {
 
         // Get starting commit OID
         let start_oid = if let Some(revision) = &self.revision {
-            // Try to resolve revision as a reference
-            let ref_result = refdb.read(revision).await;
-            match ref_result {
-                Ok(r) => r
-                    .oid
-                    .ok_or_else(|| anyhow::anyhow!("Revision {} has no commit", revision))?,
-                Err(_) => {
-                    // Try to parse as OID
-                    Oid::from_hex(revision)
-                        .map_err(|_| anyhow::anyhow!("Invalid revision: {}", revision))?
-                }
-            }
+            resolve_revision(revision, &refdb, &odb)
+                .await
+                .with_context(|| format!("Invalid revision: {}", revision))?
         } else {
             // Use HEAD
             match refdb.read("HEAD").await {

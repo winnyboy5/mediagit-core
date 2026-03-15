@@ -137,19 +137,6 @@ enum Commands {
     /// Revert commits by creating inverse commits
     Revert(RevertCmd),
 
-    /// Git filter driver operations (clean/smudge)
-    #[command(subcommand)]
-    Filter(FilterCmd),
-
-    /// Install MediaGit filter driver
-    Install(InstallCmd),
-
-    /// Track patterns with MediaGit
-    Track(TrackCmd),
-
-    /// Untrack patterns
-    Untrack(UntrackCmd),
-
     /// Show version information
     Version,
 
@@ -161,36 +148,98 @@ enum Commands {
     },
 }
 
-/// Preprocess CLI arguments to support git-style -N shorthand for `log` command.
-/// Converts `mediagit log -5` → `mediagit log -n 5`.
+/// Preprocess CLI arguments for git-compatibility shims:
+///
+/// 1. `mediagit checkout [-b] <ref>` → `mediagit branch switch [-c] <ref>`
+/// 2. `mediagit log -5` → `mediagit log -n 5`
 fn preprocess_args(args: Vec<String>) -> Vec<String> {
-    // Find the position of the 'log' subcommand (first non-flag arg after the binary name)
-    let log_pos = args
+    // Find the first non-flag positional arg (the subcommand), skipping the binary name.
+    let subcmd_pos = args
         .iter()
         .enumerate()
         .skip(1)
-        .find(|(_, arg)| *arg == "log")
+        .find(|(_, arg)| !arg.starts_with('-'))
         .map(|(i, _)| i);
 
-    if let Some(log_idx) = log_pos {
-        let mut result = Vec::with_capacity(args.len() + 2);
-        for (i, arg) in args.into_iter().enumerate() {
-            if i > log_idx {
-                // After 'log' subcommand: convert bare -N to -n N
-                if let Some(rest) = arg.strip_prefix('-') {
-                    if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
-                        result.push("-n".to_string());
-                        result.push(rest.to_string());
-                        continue;
-                    }
+    if let Some(pos) = subcmd_pos {
+        let subcmd = args[pos].as_str();
+
+        // 1. `checkout` / `co` → `branch switch`
+        if subcmd == "checkout" || subcmd == "co" {
+            let mut result = Vec::with_capacity(args.len() + 2);
+            result.extend_from_slice(&args[..pos]); // binary name + any leading flags
+            result.push("branch".to_string());
+            result.push("switch".to_string());
+            for arg in &args[pos + 1..] {
+                // git uses -b / --branch to create-and-switch; branch switch uses -c / --create
+                if arg == "-b" || arg == "--branch" {
+                    result.push("-c".to_string());
+                } else {
+                    result.push(arg.clone());
                 }
             }
-            result.push(arg);
+            return result;
         }
-        result
-    } else {
-        args
+
+        // 2. `log -N` / `reflog -N` shorthand → `log -n N` / `reflog -n N`
+        if subcmd == "log" || subcmd == "reflog" {
+            let cmd_idx = pos;
+            let mut result = Vec::with_capacity(args.len() + 2);
+            for (i, arg) in args.into_iter().enumerate() {
+                if i > cmd_idx {
+                    if let Some(rest) = arg.strip_prefix('-') {
+                        if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+                            result.push("-n".to_string());
+                            result.push(rest.to_string());
+                            continue;
+                        }
+                    }
+                }
+                result.push(arg);
+            }
+            return result;
+        }
+
+        // 3. Bare subcommands that should default to their `list` action.
+        //    `branch` → `branch list`, `tag` → `tag list`, `remote` → `remote list`
+        let list_default: Option<(&str, &[&str])> = match subcmd {
+            "branch" => Some((
+                "branch",
+                &[
+                    "list", "create", "delete", "rename", "show", "switch", "checkout", "co",
+                    "merge", "protect", "help",
+                ][..],
+            )),
+            "tag" => Some((
+                "tag",
+                &["list", "create", "delete", "show", "verify", "help"][..],
+            )),
+            "remote" => Some((
+                "remote",
+                &["list", "add", "remove", "rename", "show", "set-url", "help"][..],
+            )),
+            _ => None,
+        };
+        if let Some((_cmd, known_subcmds)) = list_default {
+            let next_positional = args[pos + 1..]
+                .iter()
+                .find(|a| !a.starts_with('-'))
+                .map(|s| s.as_str());
+            let needs_default = match next_positional {
+                None => true,
+                Some(s) => !known_subcmds.contains(&s),
+            };
+            if needs_default {
+                let mut result = Vec::with_capacity(args.len() + 1);
+                result.extend_from_slice(&args[..pos + 1]); // include the subcommand
+                result.push("list".to_string());
+                result.extend(args[pos + 1..].iter().cloned());
+                return result;
+            }
+        }
     }
+
+    args
 }
 
 fn main() {
@@ -306,10 +355,6 @@ async fn async_main(cli: Cli) -> Result<()> {
         Some(Commands::Reflog(cmd)) => cmd.execute().await,
         Some(Commands::Reset(cmd)) => cmd.execute().await,
         Some(Commands::Revert(cmd)) => cmd.execute().await,
-        Some(Commands::Filter(cmd)) => cmd.execute(),
-        Some(Commands::Install(cmd)) => cmd.execute(),
-        Some(Commands::Track(cmd)) => cmd.execute(),
-        Some(Commands::Untrack(cmd)) => cmd.execute(),
         Some(Commands::Version) => {
             print_version();
             Ok(())
@@ -347,12 +392,6 @@ async fn async_main(cli: Cli) -> Result<()> {
             println!("  fsck         Check repository integrity");
             println!("  verify       Verify commits and signatures");
             println!("  stats        Show repository statistics");
-            println!();
-            println!("Git Integration:");
-            println!("  filter       Git filter driver operations (clean/smudge)");
-            println!("  install      Install MediaGit filter driver");
-            println!("  track        Track file patterns with MediaGit");
-            println!("  untrack      Untrack file patterns");
             println!();
             println!("Run 'mediagit <COMMAND> --help' for command-specific help");
             Ok(())

@@ -30,6 +30,9 @@ pub struct StashCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum StashSubcommand {
+    /// Save changes to stash (git-compatible alias for `save`)
+    Push(SaveOpts),
+
     /// Save changes to stash
     Save(SaveOpts),
 
@@ -144,6 +147,7 @@ pub struct ClearOpts {
 impl StashCmd {
     pub async fn execute(&self) -> Result<()> {
         match &self.command {
+            StashSubcommand::Push(opts) => self.save(opts).await,
             StashSubcommand::Save(opts) => self.save(opts).await,
             StashSubcommand::Apply(opts) => self.apply(opts).await,
             StashSubcommand::List(opts) => self.list(opts).await,
