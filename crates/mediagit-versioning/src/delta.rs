@@ -22,14 +22,19 @@
 //! - Copy instruction: `C offset length` (copy `length` bytes from base at `offset`)
 //! - Insert instruction: `I data` (insert raw data)
 
-use std::cmp;
-use std::collections::HashMap;
+use sacabase::StringIndex;
 
-/// Minimum match length to consider for delta encoding
-const MIN_MATCH_LENGTH: usize = 4;
+/// Minimum match length to consider for delta encoding.
+/// 3 is safe with suffix arrays (no hash collision risk).
+/// A Copy instruction for length-3 is ~4 bytes, same as 3 literal bytes.
+const MIN_MATCH_LENGTH: usize = 3;
 
-/// Sliding window size for matching
-const WINDOW_SIZE: usize = 32768; // 32 KB
+/// Below this base size, skip suffix array construction and emit Insert(target) directly
+const SA_MIN_BASE_SIZE: usize = 16;
+
+/// After this many consecutive unmatched bytes, switch to stride-4 querying
+/// to reduce worst-case query count by ~75% for non-matching regions
+const LITERAL_STRIDE_THRESHOLD: usize = 256;
 
 /// Delta instruction for reconstruction
 #[derive(Debug, Clone)]
@@ -154,70 +159,83 @@ impl DeltaEncoder {
     /// Delta that can reconstruct target from base
     pub fn encode(base: &[u8], target: &[u8]) -> Delta {
         let mut instructions = Vec::new();
-        let mut target_pos = 0;
 
-        // Build hash table of base sequences
-        let mut hash_table: HashMap<&[u8], Vec<usize>> = HashMap::new();
-        for i in 0..base.len().saturating_sub(MIN_MATCH_LENGTH) {
-            let seq = &base[i..cmp::min(i + MIN_MATCH_LENGTH, base.len())];
-            hash_table.entry(seq).or_default().push(i);
+        // Fast path: empty target
+        if target.is_empty() {
+            return Delta {
+                base_size: base.len(),
+                result_size: 0,
+                compression_ratio: 0.0,
+                instructions,
+            };
         }
 
+        // Trivial path: base too small for suffix array — just emit Insert(target)
+        if base.len() < SA_MIN_BASE_SIZE {
+            instructions.push(DeltaInstruction::Insert(target.to_vec()));
+            return Delta {
+                base_size: base.len(),
+                result_size: target.len(),
+                compression_ratio: (target.len() + 2) as f64 / target.len() as f64,
+                instructions,
+            };
+        }
+
+        // Build suffix array from base — O(n log n) via divsufsort
+        let sa = divsufsort::sort(base);
+
+        let mut target_pos = 0;
+
         while target_pos < target.len() {
-            let mut best_match_length = 0;
-            let mut best_match_offset = 0;
+            // Query longest match at current position
+            let m = sa.longest_substring_match(&target[target_pos..]);
 
-            // Try to find a match in the base
-            if target_pos + MIN_MATCH_LENGTH <= target.len() {
-                let target_seq =
-                    &target[target_pos..cmp::min(target_pos + MIN_MATCH_LENGTH, target.len())];
-
-                if let Some(positions) = hash_table.get(target_seq) {
-                    for &base_pos in positions {
-                        let max_len = cmp::min(
-                            cmp::min(base.len() - base_pos, target.len() - target_pos),
-                            WINDOW_SIZE,
-                        );
-
-                        let mut match_length = 0;
-                        while match_length < max_len
-                            && base[base_pos + match_length] == target[target_pos + match_length]
-                        {
-                            match_length += 1;
-                        }
-
-                        if match_length > best_match_length {
-                            best_match_length = match_length;
-                            best_match_offset = base_pos;
-                        }
-
-                        if best_match_length >= WINDOW_SIZE {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if best_match_length >= MIN_MATCH_LENGTH {
-                // Emit copy instruction
+            if m.len >= MIN_MATCH_LENGTH {
+                // Emit Copy instruction
                 instructions.push(DeltaInstruction::Copy {
-                    offset: best_match_offset,
-                    length: best_match_length,
+                    offset: m.start,
+                    length: m.len,
                 });
-                target_pos += best_match_length;
+                target_pos += m.len;
             } else {
-                // Collect literal bytes until next match
+                // Collect literal bytes until next match found
                 let mut literal = Vec::new();
+                let mut consecutive_misses: usize = 0;
+
                 while target_pos < target.len() {
                     literal.push(target[target_pos]);
                     target_pos += 1;
+                    consecutive_misses += 1;
 
-                    // Check if we can start a match
-                    if target_pos + MIN_MATCH_LENGTH <= target.len() {
-                        let target_seq = &target
-                            [target_pos..cmp::min(target_pos + MIN_MATCH_LENGTH, target.len())];
-                        if hash_table.contains_key(target_seq) {
-                            break;
+                    // Check if we can start a match at the new position
+                    if target_pos < target.len() {
+                        // Stride optimization: after many misses, check every 4th byte
+                        let should_check = if consecutive_misses >= LITERAL_STRIDE_THRESHOLD {
+                            consecutive_misses.is_multiple_of(4)
+                        } else {
+                            true
+                        };
+
+                        if should_check {
+                            let m = sa.longest_substring_match(&target[target_pos..]);
+                            if m.len >= MIN_MATCH_LENGTH {
+                                // If we were striding, backtrack to find exact match start
+                                if consecutive_misses >= LITERAL_STRIDE_THRESHOLD {
+                                    // Check up to 3 positions before for a better start
+                                    let backtrack = std::cmp::min(3, literal.len());
+                                    for b in (1..=backtrack).rev() {
+                                        let check_pos = target_pos - b;
+                                        let bm = sa.longest_substring_match(&target[check_pos..]);
+                                        if bm.len >= MIN_MATCH_LENGTH + b {
+                                            // Found a longer match starting earlier
+                                            target_pos = check_pos;
+                                            literal.truncate(literal.len() - b);
+                                            break;
+                                        }
+                                    }
+                                }
+                                break;
+                            }
                         }
                     }
                 }
@@ -459,6 +477,148 @@ mod tests {
         let delta = DeltaEncoder::encode(&base, &target);
         let reconstructed = DeltaDecoder::apply(&base, &delta).unwrap();
 
+        assert_eq!(reconstructed, target);
+    }
+
+    #[test]
+    fn test_sa_short_matches() {
+        // Verify 3-byte matches are found (was 4 minimum with HashMap)
+        let base = b"xxxABCxxxxxxxxxxxxxxxxxxx"; // 3-byte pattern "ABC"
+        let target = b"yyyyABCyyy"; // contains the same 3-byte pattern
+        let delta = DeltaEncoder::encode(base, target);
+        let reconstructed = DeltaDecoder::apply(base, &delta).unwrap();
+        assert_eq!(reconstructed, target);
+
+        // Should have at least one Copy instruction for the "ABC" match
+        let has_copy = delta
+            .instructions
+            .iter()
+            .any(|i| matches!(i, DeltaInstruction::Copy { length, .. } if *length >= 3));
+        assert!(has_copy, "Should find 3-byte match with suffix array");
+    }
+
+    #[test]
+    fn test_sa_no_window_limit() {
+        // Create a base where the matching data is beyond the old 32KB window limit
+        let mut base = vec![0xAAu8; 40000]; // 40KB of filler
+        base.extend_from_slice(b"UNIQUE_PATTERN_HERE"); // match at offset ~40000
+
+        let mut target = vec![0xBBu8; 100]; // different filler
+        target.extend_from_slice(b"UNIQUE_PATTERN_HERE"); // same pattern
+
+        let delta = DeltaEncoder::encode(&base, &target);
+        let reconstructed = DeltaDecoder::apply(&base, &delta).unwrap();
+        assert_eq!(reconstructed, target);
+
+        // Should find the match at offset > 32768 (old WINDOW_SIZE limit)
+        let has_far_copy = delta.instructions.iter().any(
+            |i| matches!(i, DeltaInstruction::Copy { offset, length } if *offset > 32768 && *length >= 10),
+        );
+        assert!(
+            has_far_copy,
+            "Should find match beyond old 32KB window limit"
+        );
+    }
+
+    #[test]
+    fn test_sa_scattered_matches() {
+        // Simulate CDC chunk pattern: many small matches at arbitrary offsets
+        // in otherwise different data (like ZIP container chunks from AI files)
+        let mut base = Vec::with_capacity(4096);
+        let mut target = Vec::with_capacity(4096);
+
+        // Create base with known patterns scattered throughout
+        for i in 0..64 {
+            base.extend_from_slice(&[i as u8; 32]); // 32 bytes of each value
+            base.extend_from_slice(b"MATCH"); // 5-byte marker every 37 bytes
+            base.extend_from_slice(&[(i * 7 + 3) as u8; 26]); // different filler
+        }
+
+        // Create target with different filler but same markers at different positions
+        for i in 0..64 {
+            target.extend_from_slice(&[(255 - i) as u8; 20]); // different filler
+            target.extend_from_slice(b"MATCH"); // same 5-byte marker
+            target.extend_from_slice(&[(i * 13 + 7) as u8; 38]); // different filler
+        }
+
+        let delta = DeltaEncoder::encode(&base, &target);
+        let reconstructed = DeltaDecoder::apply(&base, &delta).unwrap();
+        assert_eq!(reconstructed, target);
+
+        // Should have found the scattered "MATCH" patterns
+        let copy_count = delta
+            .instructions
+            .iter()
+            .filter(|i| matches!(i, DeltaInstruction::Copy { .. }))
+            .count();
+        assert!(
+            copy_count >= 10,
+            "Should find many scattered matches, found {}",
+            copy_count
+        );
+    }
+
+    #[test]
+    fn test_sa_trivial_base() {
+        // Base < SA_MIN_BASE_SIZE should take trivial path (just Insert)
+        let base = b"tiny";
+        let target = b"also tiny but different";
+        let delta = DeltaEncoder::encode(base, target);
+        let reconstructed = DeltaDecoder::apply(base, &delta).unwrap();
+        assert_eq!(reconstructed, target);
+
+        // Should be a single Insert instruction (trivial path)
+        assert_eq!(delta.instructions.len(), 1);
+        assert!(matches!(
+            &delta.instructions[0],
+            DeltaInstruction::Insert(_)
+        ));
+    }
+
+    #[test]
+    fn test_sa_empty_inputs() {
+        // Empty target
+        let base = b"some data";
+        let delta = DeltaEncoder::encode(base, b"");
+        let reconstructed = DeltaDecoder::apply(base, &delta).unwrap();
+        assert_eq!(reconstructed, b"");
+
+        // Empty base
+        let delta = DeltaEncoder::encode(b"", b"some target");
+        let reconstructed = DeltaDecoder::apply(b"", &delta).unwrap();
+        assert_eq!(reconstructed, b"some target");
+    }
+
+    #[test]
+    fn test_sa_full_base_copy() {
+        // Target is exact copy of entire base — should produce single Copy
+        let base = vec![42u8; 10000];
+        let delta = DeltaEncoder::encode(&base, &base);
+        let reconstructed = DeltaDecoder::apply(&base, &delta).unwrap();
+        assert_eq!(reconstructed, base);
+
+        // Should be a single Copy spanning the entire base
+        let total_copy_len: usize = delta
+            .instructions
+            .iter()
+            .filter_map(|i| match i {
+                DeltaInstruction::Copy { length, .. } => Some(*length),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(total_copy_len, base.len());
+    }
+
+    #[test]
+    fn test_sa_serialize_roundtrip() {
+        // Verify serialize/deserialize still works with suffix-array-generated deltas
+        let base = b"The quick brown fox jumps over the lazy dog";
+        let target = b"The slow brown cat jumps over the lazy dog today";
+        let delta = DeltaEncoder::encode(base, target);
+
+        let bytes = delta.to_bytes();
+        let decoded = Delta::from_bytes(&bytes).unwrap();
+        let reconstructed = DeltaDecoder::apply(base, &decoded).unwrap();
         assert_eq!(reconstructed, target);
     }
 }

@@ -1004,12 +1004,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bsdiff"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6709158fe6ca66c1f32eb27b4ae5997c67b0df350ae185831233af3e7a91213"
-
-[[package]]
 name = "bstr"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1524,6 +1518,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "divsufsort"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e57e36c45fe0b4ef9bc690e53cce2f46dc193f7be3bc93bb7d23ca6dc1be820"
+dependencies = [
+ "sacabase",
 ]
 
 [[package]]
@@ -3029,7 +3032,6 @@ dependencies = [
  "anyhow",
  "blake3",
  "brotli",
- "bsdiff",
  "criterion",
  "flate2",
  "proptest",
@@ -3247,6 +3249,7 @@ dependencies = [
  "async-channel 2.5.0",
  "chrono",
  "criterion",
+ "divsufsort",
  "fastcdc",
  "hex",
  "mediagit-compression",
@@ -3255,6 +3258,7 @@ dependencies = [
  "num_cpus",
  "postcard",
  "proptest",
+ "sacabase",
  "serde",
  "serde_json",
  "sha2",
@@ -4570,6 +4574,15 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "sacabase"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9883fc3d6ce3d78bb54d908602f8bc1f7b5f983afe601dabe083009d86267a84"
+dependencies = [
+ "num-traits",
+]
 
 [[package]]
 name = "same-file"
