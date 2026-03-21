@@ -29,6 +29,8 @@ uuid = { version = "1.11", features = ["v4"] }
 fastcdc = "3.2"
 num_cpus = "1.16"
 async-channel = "2.3"
+divsufsort = "2.0"
+sacabase = "2.0"
 
 [dev-dependencies]
 proptest.workspace = true
