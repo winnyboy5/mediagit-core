@@ -9,13 +9,13 @@
 
 ```mermaid
 graph TD
-    subgraph CLI["mediagit-cli (32 commands)"]
+    subgraph CLI["mediagit-cli (28 commands)"]
         ADD["add"]
         COMMIT["commit"]
         PUSH["push"]
         PULL["pull"]
         CLONE["clone"]
-        OTHER["27+ more..."]
+        OTHER["23+ more..."]
     end
 
     subgraph Core["Core Libraries"]
@@ -57,7 +57,7 @@ graph TD
 
 | Crate | Role | Key Modules |
 |-------|------|-------------|
-| **mediagit-cli** | CLI binary (32 commands) | `commands/`, main entry |
+| **mediagit-cli** | CLI binary (28 commands) | `commands/`, main entry |
 | **mediagit-versioning** | Core VCS engine | ODB, index, refs, tree, commit, chunking, delta, similarity, packs, streaming |
 | **mediagit-compression** | Smart compression | Zstd, Brotli, Zlib, Store; `SmartCompressor` with type+size awareness |
 | **mediagit-media** | Media parsing & merging | Image, PSD, Video, Audio, 3D, VFX parsers & merge strategies |
@@ -74,7 +74,7 @@ graph TD
 
 ---
 
-## CLI Commands (32)
+## CLI Commands (28)
 
 ### Core Workflow
 | Command | Description |
@@ -124,13 +124,9 @@ graph TD
 | `completions` | Generate shell completions |
 | `version` | Show version information |
 
-### Git Integration
-| Command | Description |
-|---------|-------------|
-| `install` | Install MediaGit filter driver for Git integration |
-| `filter` | Git filter driver operations (clean/smudge) |
-| `track` | Register file patterns for MediaGit tracking |
-| `untrack` | Remove file patterns from MediaGit tracking |
+### Git Interop Crate
+The `mediagit-git` crate (workspace member) provides Git/git-lfs migration tooling.
+It is **not** wired into the CLI binary — migration commands are a future milestone.
 
 ---
 
@@ -418,13 +414,15 @@ The `get_chunk_params(file_size)` function selects FastCDC parameters:
 
 ## Delta Compression
 
-**Crate**: `mediagit-versioning` · **Key files**: `delta.rs` (448 lines), `similarity.rs` (524 lines)
+**Crate**: `mediagit-versioning` · **Key files**: `delta.rs` (~290 lines), `similarity.rs` (524 lines)
 
-### Delta Encoder
-- **Algorithm**: Sliding-window pattern matching
-- **Instructions**: `Copy { offset, length }` and `Insert(Vec<u8>)`
-- **Serialization**: Custom varint-based binary format
+### Delta Encoder — Zstd Dictionary Mode
+- **Algorithm**: Zstd dictionary compression — base chunk serves as the raw dictionary
+- **Encoder**: `zstd::bulk::Compressor::with_dictionary(19, base_bytes)`
+- **Decoder**: `zstd::bulk::Decompressor::with_dictionary(base_bytes)`
+- **Wire format**: `[0x5A, 0x44]` magic ("ZD") + varint(base_size) + varint(result_size) + zstd-compressed bytes
 - **Max chain depth**: 10 (then re-stored as full object)
+- **Note**: Delta bytes are already zstd-compressed, so outer `compress_typed()` in ODB falls back to Store
 
 ### Similarity Detection
 
@@ -442,8 +440,8 @@ graph TD
     I -->|OK| J["Compute similarity<br/>score = samples×0.7 + size×0.3"]
     J --> K{"Score ≥ type-aware<br/>threshold?"}
     K -->|"Below threshold"| H
-    K -->|"Match found!"| L["DeltaEncoder.encode()<br/>(sliding window)"]
-    L --> M["Store as delta<br/>(base_oid + instructions)"]
+    K -->|"Match found!"| L["DeltaEncoder.encode()<br/>(zstd dictionary)"]
+    L --> M["Store as delta<br/>(base_oid + zstd bytes)"]
 
     style D fill:#7B68EE,color:#fff
     style L fill:#7B68EE,color:#fff

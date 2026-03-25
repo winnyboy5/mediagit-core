@@ -206,11 +206,12 @@ fn build_axum_rustls_config(
     let private_key: PrivateKeyDer<'static> = PrivateKeyDer::from_pem_slice(key_pem)
         .map_err(|e| anyhow::anyhow!("Failed to parse private key: {}", e))?;
 
-    // Build rustls ServerConfig
-    let rustls_config = rustls::ServerConfig::builder()
+    // Build rustls ServerConfig with ALPN to enable HTTP/2 negotiation
+    let mut rustls_config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, private_key)
         .map_err(|e| anyhow::anyhow!("Failed to build TLS config: {}", e))?;
+    rustls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     // Convert to axum-server RustlsConfig
     Ok(RustlsConfig::from_config(Arc::new(rustls_config)))

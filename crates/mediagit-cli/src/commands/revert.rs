@@ -491,6 +491,18 @@ impl RevertCmd {
             return Ok(oid);
         }
 
-        Oid::from_hex(spec).with_context(|| format!("Unknown revision: {}", spec))
+        // Try full OID
+        if let Ok(oid) = Oid::from_hex(spec) {
+            return Ok(oid);
+        }
+
+        // Try abbreviated OID (prefix scan)
+        if spec.len() >= 4 && spec.len() < 64 && spec.chars().all(|c| c.is_ascii_hexdigit()) {
+            if let Ok(oid) = odb.resolve_abbreviated_oid(spec).await {
+                return Ok(oid);
+            }
+        }
+
+        anyhow::bail!("Unknown revision: {}", spec)
     }
 }

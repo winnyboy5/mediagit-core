@@ -193,12 +193,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arrayref"
-version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb"
-
-[[package]]
 name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -346,9 +340,9 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.16.1"
+version = "1.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94bffc006df10ac2a68c83692d734a465f8ee6c5b384d8545a636f81d858f4bf"
+checksum = "a054912289d18629dc78375ba2c3726a3afe3ff71b4edba9dedfca0e3446d1fc"
 dependencies = [
  "aws-lc-sys",
  "zeroize",
@@ -356,9 +350,9 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-sys"
-version = "0.38.0"
+version = "0.39.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4321e568ed89bb5a7d291a7f37997c2c0df89809d7b6d12062c81ddb54aa782e"
+checksum = "1fa7e52a4c5c547c741610a2c6f123f3881e409b714cd27e6798ef020c514f0a"
 dependencies = [
  "cc",
  "cmake",
@@ -950,20 +944,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "blake3"
-version = "1.8.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2468ef7d57b3fb7e16b576e8377cdbde2320c60e1491e961d11da40fc4f02a2d"
-dependencies = [
- "arrayref",
- "arrayvec",
- "cc",
- "cfg-if",
- "constant_time_eq",
- "cpufeatures",
-]
-
-[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1002,12 +982,6 @@ dependencies = [
  "alloc-no-stdlib",
  "alloc-stdlib",
 ]
-
-[[package]]
-name = "bsdiff"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6709158fe6ca66c1f32eb27b4ae5997c67b0df350ae185831233af3e7a91213"
 
 [[package]]
 name = "bstr"
@@ -1241,12 +1215,6 @@ name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
-
-[[package]]
-name = "constant_time_eq"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "core-foundation"
@@ -2991,7 +2959,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-cli"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3005,7 +2973,6 @@ dependencies = [
  "husky-rs",
  "indicatif",
  "mediagit-config",
- "mediagit-git",
  "mediagit-observability",
  "mediagit-protocol",
  "mediagit-storage",
@@ -3025,12 +2992,10 @@ dependencies = [
 
 [[package]]
 name = "mediagit-compression"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "anyhow",
- "blake3",
  "brotli",
- "bsdiff",
  "criterion",
  "flate2",
  "proptest",
@@ -3043,7 +3008,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-config"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "anyhow",
  "num_cpus",
@@ -3059,7 +3024,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-git"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "git2",
  "hex",
@@ -3074,7 +3039,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-media"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "image",
  "image_hasher",
@@ -3092,7 +3057,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-metrics"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3106,7 +3071,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-migration"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3122,7 +3087,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-observability"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "anyhow",
  "thiserror 2.0.18",
@@ -3133,7 +3098,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-protocol"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "anyhow",
  "futures",
@@ -3148,7 +3113,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-security"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3177,7 +3142,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-server"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3208,7 +3173,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-storage"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3232,7 +3197,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-test-utils"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "assert_cmd",
  "dunce",
@@ -3242,7 +3207,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-versioning"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -3264,6 +3229,7 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
+ "zstd",
 ]
 
 [[package]]
@@ -4316,6 +4282,7 @@ dependencies = [
  "encoding_rs",
  "futures-core",
  "futures-util",
+ "h2 0.4.13",
  "http 1.4.0",
  "http-body 1.0.1",
  "http-body-util",
@@ -4498,7 +4465,7 @@ dependencies = [
  "once_cell",
  "ring",
  "rustls-pki-types",
- "rustls-webpki 0.103.9",
+ "rustls-webpki 0.103.10",
  "subtle",
  "zeroize",
 ]
@@ -4537,9 +4504,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.9"
+version = "0.103.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7df23109aa6c1567d1c575b9952556388da57401e4ace1d15f79eedad0d8f53"
+checksum = "df33b2b81ac578cabaf06b89b0631153a3f416b0a886e8a7a1707fb51abbd1ef"
 dependencies = [
  "aws-lc-rs",
  "ring",

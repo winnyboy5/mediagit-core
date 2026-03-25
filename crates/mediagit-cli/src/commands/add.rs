@@ -67,7 +67,7 @@ pub struct AddCmd {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Force add even if listed in .gitignore
+    /// Force add even if listed in .mediagitignore
     #[arg(short, long)]
     pub force: bool,
 

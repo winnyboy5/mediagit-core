@@ -100,6 +100,13 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/{repo}/manifests/{oid}",
             get(handlers::download_manifest).put(handlers::upload_manifest),
         )
+        // Raw file serving endpoints (read-only, repo:read permission)
+        .route(
+            "/{repo}/files/{*path}",
+            get(handlers::download_file_by_path),
+        )
+        .route("/{repo}/tree/{*path}", get(handlers::list_tree))
+        .route("/{repo}/tree", get(handlers::list_tree_root))
         .with_state(Arc::clone(&state));
 
     // Apply authentication middleware to Git routes if enabled
@@ -132,7 +139,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     router = router.layer(middleware::from_fn(security::path_validation_middleware));
 
     // Health check is merged AFTER all middleware so it bypasses auth + rate-limiting
-    router = router.merge(Router::new().route("/healthz", get(health_handler)));
+    router = router.merge(
+        Router::new()
+            .route("/healthz", get(health_handler))
+            .route("/health", get(health_handler)),
+    );
 
     router
 }
@@ -220,6 +231,13 @@ pub fn create_router_with_rate_limit(
             "/{repo}/manifests/{oid}",
             get(handlers::download_manifest).put(handlers::upload_manifest),
         )
+        // Raw file serving endpoints (read-only, repo:read permission)
+        .route(
+            "/{repo}/files/{*path}",
+            get(handlers::download_file_by_path),
+        )
+        .route("/{repo}/tree/{*path}", get(handlers::list_tree))
+        .route("/{repo}/tree", get(handlers::list_tree_root))
         .with_state(Arc::clone(&state));
 
     // Apply middleware layers
@@ -247,7 +265,11 @@ pub fn create_router_with_rate_limit(
     router = router.layer(middleware::from_fn(security::path_validation_middleware));
 
     // Health check is merged AFTER all middleware so it bypasses auth + rate-limiting
-    router = router.merge(Router::new().route("/healthz", get(health_handler)));
+    router = router.merge(
+        Router::new()
+            .route("/healthz", get(health_handler))
+            .route("/health", get(health_handler)),
+    );
 
     (router, cleanup_task)
 }

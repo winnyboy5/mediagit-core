@@ -91,7 +91,6 @@
 
 pub mod adaptive;
 pub mod brotli_compressor;
-pub mod delta;
 pub mod error;
 pub mod metrics;
 pub mod per_type_compressor;
