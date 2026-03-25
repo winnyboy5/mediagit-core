@@ -53,7 +53,7 @@ axum = { workspace = true, optional = true }
 http = { version = "1.0", optional = true }
 
 # TLS/Certificate management (optional)
-rcgen = { version = "0.13", features = ["pem"], optional = true }
+rcgen = { version = "0.14", features = ["pem"], optional = true }
 time = { version = "0.3", features = ["macros"], optional = true }
 
 [features]
