@@ -15,7 +15,7 @@
 //!
 //! Provides secure API key generation and validation using SHA-256 hashing.
 
-use rand::Rng;
+use rand::RngExt;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use tokio::sync::RwLock;
