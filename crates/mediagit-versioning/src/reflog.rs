@@ -224,6 +224,7 @@ impl Reflog {
         file.write_all(line.as_bytes())
             .await
             .context("Failed to write reflog entry")?;
+        file.flush().await.context("Failed to flush reflog entry")?;
 
         Ok(())
     }

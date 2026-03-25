@@ -97,7 +97,7 @@ pub use chunking::{
 pub use commit::{Commit, Signature};
 pub use config::{ChunkingStrategyConfig, StorageConfig};
 pub use conflict::{Conflict, ConflictDetector, ConflictSide, ConflictStats, ConflictType};
-pub use delta::{Delta, DeltaDecoder, DeltaEncoder, DeltaInstruction};
+pub use delta::{Delta, DeltaDecoder, DeltaEncoder};
 pub use diff::{ModifiedEntry, ThreeWayDiff, TreeDiff, TreeDiffer};
 pub use index::{Index, IndexEntry};
 pub use lca::{LcaFinder, LcaResult};

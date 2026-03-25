@@ -80,6 +80,9 @@ impl ProtocolClient {
                 // connections exhaust kernel handles (OS error 1450).
                 .pool_max_idle_per_host(if cfg!(target_os = "windows") { 4 } else { 8 })
                 .tcp_keepalive(std::time::Duration::from_secs(30))
+                .http2_adaptive_window(true)
+                .http2_initial_stream_window_size(2 * 1024 * 1024)
+                .http2_initial_connection_window_size(8 * 1024 * 1024)
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
         }

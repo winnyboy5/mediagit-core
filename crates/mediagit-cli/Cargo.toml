@@ -15,7 +15,6 @@ description = "Version control CLI purpose-built for media files"
 mediagit-config = { path = "../mediagit-config" }
 mediagit-storage = { path = "../mediagit-storage", features = ["all"] }
 mediagit-versioning = { path = "../mediagit-versioning" }
-mediagit-git = { path = "../mediagit-git" }
 mediagit-observability = { path = "../mediagit-observability" }
 mediagit-protocol = { path = "../mediagit-protocol" }
 

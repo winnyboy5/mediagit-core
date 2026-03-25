@@ -5,13 +5,15 @@ Verify integrity of specific objects or files.
 ## Synopsis
 
 ```bash
-mediagit verify [OPTIONS] <object>...
+mediagit verify [COMMIT]
 mediagit verify [OPTIONS] --path <file>...
 ```
 
 ## Description
 
-Verifies the integrity of specific objects, files, or commits. Unlike `fsck` which checks the entire repository, `verify` focuses on individual objects or files for quick validation.
+Verifies the integrity of a commit and its reachable objects, or specific files. Unlike `fsck`
+which checks the entire repository, `verify` can target a single commit (OID, abbreviated hash,
+branch name, or `HEAD`) or individual files for quick validation.
 
 Useful for:
 - Verifying specific media files after download

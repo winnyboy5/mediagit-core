@@ -17,10 +17,8 @@ flate2.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-bsdiff = "0.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
-blake3 = { workspace = true }
 
 [dev-dependencies]
 criterion.workspace = true

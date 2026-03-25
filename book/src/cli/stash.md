@@ -6,6 +6,7 @@ Save and restore uncommitted changes.
 
 ```bash
 mediagit stash save [-m <MESSAGE>] [-u] [PATHS...]
+mediagit stash push [-m <MESSAGE>] [-u] [PATHS...]
 mediagit stash list
 mediagit stash show [<STASH>]
 mediagit stash apply [<STASH>]
@@ -23,9 +24,10 @@ Stash entries are stored in `.mediagit/stash/` as numbered entries.
 
 ## Subcommands
 
-### `save`
+### `save` / `push`
 
-Save current changes to the stash.
+Save current changes to the stash. `push` is a git-compatible alias for `save` and accepts
+identical flags and arguments.
 
 ```bash
 mediagit stash save [-m <MESSAGE>] [-u] [PATHS...]
