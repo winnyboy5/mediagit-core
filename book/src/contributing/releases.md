@@ -6,7 +6,7 @@ The MediaGit release process for maintainers. Releases are driven by GitHub Acti
 
 Semantic versioning: `MAJOR.MINOR.PATCH[-prerelease]`
 
-- `v0.2.3-beta.1` — stable release
+- `v0.2.4-beta.1` — stable release
 - `v0.3.0-alpha.1` — pre-release (alpha/beta/rc in version → `is-prerelease: true`)
 
 ## Pre-Release Checklist
@@ -18,7 +18,7 @@ Before creating a release tag:
 # 2. Update CHANGELOG.md with the new version entry
 # 3. Bump version in workspace Cargo.toml [workspace.package]
 #    (all crates inherit version.workspace = true)
-sed -i 's/^version = ".*"/version = "0.2.3-beta.1"/' Cargo.toml
+sed -i 's/^version = ".*"/version = "0.2.4-beta.1"/' Cargo.toml
 
 # 4. Update Cargo.lock
 cargo generate-lockfile
@@ -34,7 +34,7 @@ cargo +1.92.0 check --workspace --all-features
 
 # 8. Commit and push
 git add Cargo.toml Cargo.lock CHANGELOG.md
-git commit -m "chore: release v0.2.3-beta.1"
+git commit -m "chore: release v0.2.4-beta.1"
 git push origin main
 ```
 
@@ -42,12 +42,12 @@ git push origin main
 
 ```bash
 # Stable release
-git tag -a v0.2.3-beta.1 -m "Release v0.2.3-beta.1"
-git push origin v0.2.3-beta.1
+git tag -a v0.2.4-beta.1 -m "Release v0.2.4-beta.1"
+git push origin v0.2.4-beta.1
 
 # Pre-release (alpha/beta/rc)
-git tag -a v0.2.3-beta.1-alpha.1 -m "Pre-release v0.2.3-beta.1-alpha.1"
-git push origin v0.2.3-beta.1-alpha.1
+git tag -a v0.2.4-beta.1-alpha.1 -m "Pre-release v0.2.4-beta.1-alpha.1"
+git push origin v0.2.4-beta.1-alpha.1
 ```
 
 Pushing the tag automatically triggers the `release.yml` workflow.
@@ -128,7 +128,7 @@ For critical bug fixes on a stable release:
 
 ```bash
 # Create hotfix branch from the tag
-git checkout -b hotfix/v0.2.2 v0.2.3-beta.1
+git checkout -b hotfix/v0.2.2 v0.2.4-beta.1
 
 # Apply the fix, test, commit
 # ...

@@ -9,7 +9,7 @@
 
 ## 🎯 Status
 
-**Version**: v0.2.3-beta.1
+**Version**: v0.2.4-beta.1
 **Status**: 🚧 **BETA**
 **Features**: 100% complete (all P0–P3 items implemented)
 **Last Validated**: March 2026 — Linux & Windows, release build
@@ -110,19 +110,19 @@ curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/instal
 
 **Linux x86_64 — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.3-beta.1/mediagit-0.2.3-beta.1-x86_64-linux.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.4-beta.1/mediagit-0.2.4-beta.1-x86_64-linux.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **macOS Apple Silicon — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.3-beta.1/mediagit-0.2.3-beta.1-aarch64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.4-beta.1/mediagit-0.2.4-beta.1-aarch64-macos.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **Windows x86_64 (PowerShell):**
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.3-beta.1/mediagit-0.2.3-beta.1-x86_64-windows.zip" -OutFile mediagit.zip
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.4-beta.1/mediagit-0.2.4-beta.1-x86_64-windows.zip" -OutFile mediagit.zip
 Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 # Add to PATH:
 [Environment]::SetEnvironmentVariable("Path", "$env:Path;$env:LOCALAPPDATA\MediaGit\bin", "User")
@@ -131,8 +131,8 @@ Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 #### Docker
 
 ```bash
-docker pull ghcr.io/winnyboy5/mediagit-core:0.2.3-beta.1
-docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.3-beta.1 mediagit --version
+docker pull ghcr.io/winnyboy5/mediagit-core:0.2.4-beta.1
+docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.4-beta.1 mediagit --version
 ```
 
 #### From Source
@@ -152,11 +152,11 @@ cargo build --release
 
 | Platform | Archive |
 |----------|---------|
-| Linux x86_64 | `mediagit-0.2.3-beta.1-x86_64-linux.tar.gz` |
-| Linux ARM64 | `mediagit-0.2.3-beta.1-aarch64-linux.tar.gz` |
-| macOS Intel | `mediagit-0.2.3-beta.1-x86_64-macos.tar.gz` |
-| macOS Apple Silicon | `mediagit-0.2.3-beta.1-aarch64-macos.tar.gz` |
-| Windows x86_64 | `mediagit-0.2.3-beta.1-x86_64-windows.zip` |
+| Linux x86_64 | `mediagit-0.2.4-beta.1-x86_64-linux.tar.gz` |
+| Linux ARM64 | `mediagit-0.2.4-beta.1-aarch64-linux.tar.gz` |
+| macOS Intel | `mediagit-0.2.4-beta.1-x86_64-macos.tar.gz` |
+| macOS Apple Silicon | `mediagit-0.2.4-beta.1-aarch64-macos.tar.gz` |
+| Windows x86_64 | `mediagit-0.2.4-beta.1-x86_64-windows.zip` |
 
 Each archive includes `mediagit` (CLI) and `mediagit-server` binaries, plus a `.sha256` checksum file.
 
@@ -867,4 +867,4 @@ Special thanks to:
 
 **Made with 🦀 and ❤️ by the MediaGit Contributors**
 
-**Status**: Beta | **Version**: v0.2.3-beta.1 | **Updated**: March 12, 2026
+**Status**: Beta | **Version**: v0.2.4-beta.1 | **Updated**: March 12, 2026

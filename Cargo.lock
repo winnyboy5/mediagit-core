@@ -193,12 +193,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arrayref"
-version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb"
-
-[[package]]
 name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -950,20 +944,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "blake3"
-version = "1.8.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2468ef7d57b3fb7e16b576e8377cdbde2320c60e1491e961d11da40fc4f02a2d"
-dependencies = [
- "arrayref",
- "arrayvec",
- "cc",
- "cfg-if",
- "constant_time_eq",
- "cpufeatures",
-]
-
-[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1235,12 +1215,6 @@ name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
-
-[[package]]
-name = "constant_time_eq"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "core-foundation"
@@ -2985,7 +2959,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-cli"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3018,10 +2992,9 @@ dependencies = [
 
 [[package]]
 name = "mediagit-compression"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "anyhow",
- "blake3",
  "brotli",
  "criterion",
  "flate2",
@@ -3035,7 +3008,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-config"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "anyhow",
  "num_cpus",
@@ -3051,7 +3024,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-git"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "git2",
  "hex",
@@ -3066,7 +3039,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-media"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "image",
  "image_hasher",
@@ -3084,7 +3057,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-metrics"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3098,7 +3071,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-migration"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3114,7 +3087,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-observability"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "anyhow",
  "thiserror 2.0.18",
@@ -3125,7 +3098,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-protocol"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "anyhow",
  "futures",
@@ -3140,7 +3113,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-security"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3169,7 +3142,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-server"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3200,7 +3173,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-storage"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3224,7 +3197,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-test-utils"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "assert_cmd",
  "dunce",
@@ -3234,7 +3207,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-versioning"
-version = "0.2.3-beta.1"
+version = "0.2.4-beta.1"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",

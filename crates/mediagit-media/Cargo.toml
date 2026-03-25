@@ -39,4 +39,7 @@ serde_json.workspace = true
 # Regex for metadata parsing
 regex-lite = "0.1"
 
+[package.metadata.cargo-machete]
+ignored = ["kamadak-exif"]  # used via `exif::` re-export
+
 [dev-dependencies]
