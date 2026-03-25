@@ -11,39 +11,27 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
 
-//! Delta compression for similar objects
+//! Delta compression using zstd dictionary mode
 //!
-//! Implements efficient delta encoding for objects that are similar.
-//! Uses a sliding window approach to identify matching sequences.
+//! Uses the base object as a zstd dictionary to compress the target object.
+//! This produces compact deltas for similar binary data (media file chunks)
+//! while being significantly faster than suffix-array approaches.
 //!
-//! # Delta Format
+//! # Wire Format
 //!
-//! Delta instructions:
-//! - Copy instruction: `C offset length` (copy `length` bytes from base at `offset`)
-//! - Insert instruction: `I data` (insert raw data)
+//! ```text
+//! [0x5A, 0x44] magic ("ZD")
+//! varint(base_size)
+//! varint(result_size)
+//! [zstd-compressed target using base as raw dictionary]
+//! ```
 
-use sacabase::StringIndex;
+/// Magic bytes identifying zstd-dict delta format
+const ZSTD_DICT_MAGIC: [u8; 2] = [0x5A, 0x44]; // "ZD"
 
-/// Minimum match length to consider for delta encoding.
-/// 3 is safe with suffix arrays (no hash collision risk).
-/// A Copy instruction for length-3 is ~4 bytes, same as 3 literal bytes.
-const MIN_MATCH_LENGTH: usize = 3;
-
-/// Below this base size, skip suffix array construction and emit Insert(target) directly
-const SA_MIN_BASE_SIZE: usize = 16;
-
-/// After this many consecutive unmatched bytes, switch to stride-4 querying
-/// to reduce worst-case query count by ~75% for non-matching regions
-const LITERAL_STRIDE_THRESHOLD: usize = 256;
-
-/// Delta instruction for reconstruction
-#[derive(Debug, Clone)]
-pub enum DeltaInstruction {
-    /// Copy from base object at offset with length
-    Copy { offset: usize, length: usize },
-    /// Insert literal bytes
-    Insert(Vec<u8>),
-}
+/// Zstd compression level for delta encoding.
+/// Level 19 gives excellent ratio for dictionary mode without extreme CPU cost.
+const ZSTD_DICT_LEVEL: i32 = 19;
 
 /// Delta encoding result
 #[derive(Debug, Clone)]
@@ -54,217 +42,82 @@ pub struct Delta {
     pub result_size: usize,
     /// Compression ratio of delta vs original
     pub compression_ratio: f64,
-    /// Instructions to apply to base
-    pub instructions: Vec<DeltaInstruction>,
+    /// Zstd-dict compressed data
+    zstd_data: Vec<u8>,
 }
 
 impl Delta {
     /// Serialize delta to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-
-        // Write sizes
+        let mut bytes = Vec::with_capacity(4 + self.zstd_data.len());
+        bytes.extend_from_slice(&ZSTD_DICT_MAGIC);
         encode_varint(&mut bytes, self.base_size as u32);
         encode_varint(&mut bytes, self.result_size as u32);
-
-        // Write instructions
-        for instruction in &self.instructions {
-            match instruction {
-                DeltaInstruction::Copy { offset, length } => {
-                    // Instruction format: 0x80 | size_bits, then offset, then length
-                    let op_byte = 0x80; // Copy operation marker
-                    bytes.push(op_byte);
-                    encode_varint(&mut bytes, *offset as u32);
-                    encode_varint(&mut bytes, *length as u32);
-                }
-                DeltaInstruction::Insert(data) => {
-                    // Instruction format: 0x00-0x7F, size, then data
-                    if data.len() > 127 {
-                        bytes.push(127);
-                        bytes.extend_from_slice(&data[0..127]);
-
-                        for chunk in data[127..].chunks(127) {
-                            bytes.push(chunk.len() as u8);
-                            bytes.extend_from_slice(chunk);
-                        }
-                    } else {
-                        bytes.push(data.len() as u8);
-                        bytes.extend_from_slice(data);
-                    }
-                }
-            }
-        }
-
+        bytes.extend_from_slice(&self.zstd_data);
         bytes
     }
 
     /// Deserialize delta from bytes
     pub fn from_bytes(data: &[u8]) -> anyhow::Result<Self> {
-        let mut pos = 0;
-
-        let base_size = decode_varint(data, &mut pos)? as usize;
-        let result_size = decode_varint(data, &mut pos)? as usize;
-
-        let mut instructions = Vec::new();
-
-        while pos < data.len() {
-            let op_byte = data[pos];
-            pos += 1;
-
-            if op_byte & 0x80 != 0 {
-                // Copy instruction
-                let offset = decode_varint(data, &mut pos)? as usize;
-                let length = decode_varint(data, &mut pos)? as usize;
-                instructions.push(DeltaInstruction::Copy { offset, length });
-            } else {
-                // Insert instruction
-                let insert_len = op_byte as usize;
-                if pos + insert_len > data.len() {
-                    anyhow::bail!("Delta instruction overflow");
-                }
-                let insert_data = data[pos..pos + insert_len].to_vec();
-                pos += insert_len;
-                instructions.push(DeltaInstruction::Insert(insert_data));
-            }
+        if data.len() < 2 || data[0] != ZSTD_DICT_MAGIC[0] || data[1] != ZSTD_DICT_MAGIC[1] {
+            anyhow::bail!("Invalid delta format: missing ZD magic bytes");
         }
 
-        let compression_ratio = data.len() as f64 / result_size as f64;
+        let mut pos = 2; // skip magic
+        let base_size = decode_varint(data, &mut pos)? as usize;
+        let result_size = decode_varint(data, &mut pos)? as usize;
+        let zstd_data = data[pos..].to_vec();
+        let compression_ratio = data.len() as f64 / result_size.max(1) as f64;
 
         Ok(Self {
             base_size,
             result_size,
             compression_ratio,
-            instructions,
+            zstd_data,
         })
     }
 }
 
-/// Delta encoder using sliding window algorithm
+/// Delta encoder using zstd dictionary compression
 pub struct DeltaEncoder;
 
 impl DeltaEncoder {
-    /// Encode a target object relative to a base object
+    /// Encode a target object relative to a base object using zstd dictionary mode.
     ///
-    /// Uses sliding window pattern matching to find similar sequences
-    /// between base and target, creating a delta that can reconstruct
-    /// target from base.
-    ///
-    /// # Arguments
-    ///
-    /// * `base` - Base object data
-    /// * `target` - Target object to encode as delta
-    ///
-    /// # Returns
-    ///
-    /// Delta that can reconstruct target from base
+    /// Uses the base as a raw zstd dictionary to compress the target.
     pub fn encode(base: &[u8], target: &[u8]) -> Delta {
-        let mut instructions = Vec::new();
-
-        // Fast path: empty target
         if target.is_empty() {
             return Delta {
                 base_size: base.len(),
                 result_size: 0,
                 compression_ratio: 0.0,
-                instructions,
+                zstd_data: Vec::new(),
             };
         }
 
-        // Trivial path: base too small for suffix array — just emit Insert(target)
-        if base.len() < SA_MIN_BASE_SIZE {
-            instructions.push(DeltaInstruction::Insert(target.to_vec()));
-            return Delta {
-                base_size: base.len(),
-                result_size: target.len(),
-                compression_ratio: (target.len() + 2) as f64 / target.len() as f64,
-                instructions,
-            };
-        }
-
-        // Build suffix array from base — O(n log n) via divsufsort
-        let sa = divsufsort::sort(base);
-
-        let mut target_pos = 0;
-
-        while target_pos < target.len() {
-            // Query longest match at current position
-            let m = sa.longest_substring_match(&target[target_pos..]);
-
-            if m.len >= MIN_MATCH_LENGTH {
-                // Emit Copy instruction
-                instructions.push(DeltaInstruction::Copy {
-                    offset: m.start,
-                    length: m.len,
-                });
-                target_pos += m.len;
-            } else {
-                // Collect literal bytes until next match found
-                let mut literal = Vec::new();
-                let mut consecutive_misses: usize = 0;
-
-                while target_pos < target.len() {
-                    literal.push(target[target_pos]);
-                    target_pos += 1;
-                    consecutive_misses += 1;
-
-                    // Check if we can start a match at the new position
-                    if target_pos < target.len() {
-                        // Stride optimization: after many misses, check every 4th byte
-                        let should_check = if consecutive_misses >= LITERAL_STRIDE_THRESHOLD {
-                            consecutive_misses.is_multiple_of(4)
-                        } else {
-                            true
-                        };
-
-                        if should_check {
-                            let m = sa.longest_substring_match(&target[target_pos..]);
-                            if m.len >= MIN_MATCH_LENGTH {
-                                // If we were striding, backtrack to find exact match start
-                                if consecutive_misses >= LITERAL_STRIDE_THRESHOLD {
-                                    // Check up to 3 positions before for a better start
-                                    let backtrack = std::cmp::min(3, literal.len());
-                                    for b in (1..=backtrack).rev() {
-                                        let check_pos = target_pos - b;
-                                        let bm = sa.longest_substring_match(&target[check_pos..]);
-                                        if bm.len >= MIN_MATCH_LENGTH + b {
-                                            // Found a longer match starting earlier
-                                            target_pos = check_pos;
-                                            literal.truncate(literal.len() - b);
-                                            break;
-                                        }
-                                    }
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                if !literal.is_empty() {
-                    instructions.push(DeltaInstruction::Insert(literal));
-                }
+        let zstd_data = match Self::compress_with_dict(base, target) {
+            Ok(data) => data,
+            Err(_) => {
+                // Fallback: store target as-is (uncompressed)
+                target.to_vec()
             }
-        }
-
-        let compression_ratio = if !target.is_empty() {
-            let encoded_size = instructions
-                .iter()
-                .map(|instr| match instr {
-                    DeltaInstruction::Copy { .. } => 10, // Rough estimate
-                    DeltaInstruction::Insert(data) => data.len() + 2,
-                })
-                .sum::<usize>();
-            encoded_size as f64 / target.len() as f64
-        } else {
-            0.0
         };
+
+        let compression_ratio = zstd_data.len() as f64 / target.len() as f64;
 
         Delta {
             base_size: base.len(),
             result_size: target.len(),
             compression_ratio,
-            instructions,
+            zstd_data,
         }
+    }
+
+    /// Compress target using base as zstd dictionary
+    fn compress_with_dict(base: &[u8], target: &[u8]) -> anyhow::Result<Vec<u8>> {
+        let mut encoder = zstd::bulk::Compressor::with_dictionary(ZSTD_DICT_LEVEL, base)?;
+        let compressed = encoder.compress(target)?;
+        Ok(compressed)
     }
 }
 
@@ -272,19 +125,9 @@ impl DeltaEncoder {
 pub struct DeltaDecoder;
 
 impl DeltaDecoder {
-    /// Apply delta to base object to reconstruct target
-    ///
-    /// # Arguments
-    ///
-    /// * `base` - Base object data
-    /// * `delta` - Delta instructions
-    ///
-    /// # Returns
-    ///
-    /// Reconstructed target object
+    /// Apply delta to base object to reconstruct target.
     pub fn apply(base: &[u8], delta: &Delta) -> anyhow::Result<Vec<u8>> {
-        // Validate result_size before allocation to prevent OOM from corrupted deltas
-        const MAX_DELTA_RESULT_SIZE: usize = 16 * 1024 * 1024 * 1024; // 16 GB (matches MAX_OBJECT_SIZE)
+        const MAX_DELTA_RESULT_SIZE: usize = 16 * 1024 * 1024 * 1024; // 16 GB
         if delta.result_size > MAX_DELTA_RESULT_SIZE {
             anyhow::bail!(
                 "Delta result_size {} exceeds maximum {} bytes",
@@ -293,28 +136,14 @@ impl DeltaDecoder {
             );
         }
 
-        let mut result = Vec::new();
-        result.try_reserve(delta.result_size).map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to allocate {} bytes for delta result: {}",
-                delta.result_size,
-                e
-            )
-        })?;
-
-        for instruction in &delta.instructions {
-            match instruction {
-                DeltaInstruction::Copy { offset, length } => {
-                    if *offset + *length > base.len() {
-                        anyhow::bail!("Delta copy out of bounds");
-                    }
-                    result.extend_from_slice(&base[*offset..offset + length]);
-                }
-                DeltaInstruction::Insert(data) => {
-                    result.extend_from_slice(data);
-                }
-            }
+        if delta.zstd_data.is_empty() {
+            return Ok(Vec::new());
         }
+
+        let mut decoder = zstd::bulk::Decompressor::with_dictionary(base)?;
+        let result = decoder
+            .decompress(&delta.zstd_data, delta.result_size)
+            .map_err(|e| anyhow::anyhow!("Failed to decompress zstd-dict delta: {}", e))?;
 
         if result.len() != delta.result_size {
             anyhow::bail!(
@@ -380,24 +209,24 @@ mod tests {
 
     #[test]
     fn test_delta_encode_identical() {
-        let data = b"Hello, World!";
-        let delta = DeltaEncoder::encode(data, data);
+        let data: Vec<u8> = (0..4096).map(|i| (i % 256) as u8).collect();
+        let delta = DeltaEncoder::encode(&data, &data);
 
         assert_eq!(delta.base_size, data.len());
         assert_eq!(delta.result_size, data.len());
-        assert!(!delta.instructions.is_empty());
+
+        let bytes = delta.to_bytes();
+        assert!(bytes.len() < data.len());
     }
 
     #[test]
     fn test_delta_encode_similar() {
-        let base = b"The quick brown fox";
-        let target = b"The quick brown fox jumps";
+        let base = b"The quick brown fox jumps over the lazy dog";
+        let target = b"The quick brown cat jumps over the lazy dog today";
         let delta = DeltaEncoder::encode(base, target);
 
         assert_eq!(delta.base_size, base.len());
         assert_eq!(delta.result_size, target.len());
-        // Should have at least a copy and insert
-        assert!(!delta.instructions.is_empty());
     }
 
     #[test]
@@ -412,8 +241,8 @@ mod tests {
 
     #[test]
     fn test_delta_serialize_deserialize() {
-        let base = b"original";
-        let target = b"modified";
+        let base = b"original data here for testing purposes";
+        let target = b"modified data here for testing purposes today";
         let delta = DeltaEncoder::encode(base, target);
 
         let bytes = delta.to_bytes();
@@ -428,19 +257,19 @@ mod tests {
 
     #[test]
     fn test_delta_compression_ratio() {
-        let base = b"abcdefghij";
-        let target = b"abcdefghijabcdefghij"; // Repeat of base
-        let delta = DeltaEncoder::encode(base, target);
+        let base = vec![42u8; 10000];
+        let mut target = base.clone();
+        target[5000] = 99;
+        let delta = DeltaEncoder::encode(&base, &target);
 
-        // Verify the delta can reconstruct the target
-        let reconstructed = DeltaDecoder::apply(base, &delta).unwrap();
+        let reconstructed = DeltaDecoder::apply(&base, &delta).unwrap();
         assert_eq!(reconstructed, target);
 
-        // The compression ratio should be reasonable (may not always be < 1 for small objects)
-        // For this test, we just verify it produces a valid delta
+        let bytes = delta.to_bytes();
         assert!(
-            !delta.instructions.is_empty(),
-            "Delta should have instructions"
+            bytes.len() < target.len() / 2,
+            "Delta should be < 50% of target, was {}%",
+            bytes.len() * 100 / target.len()
         );
     }
 
@@ -465,8 +294,14 @@ mod tests {
 
         let delta = DeltaEncoder::encode(&base, &target);
         let reconstructed = DeltaDecoder::apply(&base, &delta).unwrap();
-
         assert_eq!(reconstructed, target);
+
+        let bytes = delta.to_bytes();
+        assert!(
+            bytes.len() < 1000,
+            "Delta of 100KB with 1 byte diff should be tiny, was {} bytes",
+            bytes.len()
+        );
     }
 
     #[test]
@@ -476,149 +311,91 @@ mod tests {
 
         let delta = DeltaEncoder::encode(&base, &target);
         let reconstructed = DeltaDecoder::apply(&base, &delta).unwrap();
-
         assert_eq!(reconstructed, target);
     }
 
     #[test]
-    fn test_sa_short_matches() {
-        // Verify 3-byte matches are found (was 4 minimum with HashMap)
-        let base = b"xxxABCxxxxxxxxxxxxxxxxxxx"; // 3-byte pattern "ABC"
-        let target = b"yyyyABCyyy"; // contains the same 3-byte pattern
-        let delta = DeltaEncoder::encode(base, target);
-        let reconstructed = DeltaDecoder::apply(base, &delta).unwrap();
-        assert_eq!(reconstructed, target);
-
-        // Should have at least one Copy instruction for the "ABC" match
-        let has_copy = delta
-            .instructions
-            .iter()
-            .any(|i| matches!(i, DeltaInstruction::Copy { length, .. } if *length >= 3));
-        assert!(has_copy, "Should find 3-byte match with suffix array");
-    }
-
-    #[test]
-    fn test_sa_no_window_limit() {
-        // Create a base where the matching data is beyond the old 32KB window limit
-        let mut base = vec![0xAAu8; 40000]; // 40KB of filler
-        base.extend_from_slice(b"UNIQUE_PATTERN_HERE"); // match at offset ~40000
-
-        let mut target = vec![0xBBu8; 100]; // different filler
-        target.extend_from_slice(b"UNIQUE_PATTERN_HERE"); // same pattern
-
-        let delta = DeltaEncoder::encode(&base, &target);
-        let reconstructed = DeltaDecoder::apply(&base, &delta).unwrap();
-        assert_eq!(reconstructed, target);
-
-        // Should find the match at offset > 32768 (old WINDOW_SIZE limit)
-        let has_far_copy = delta.instructions.iter().any(
-            |i| matches!(i, DeltaInstruction::Copy { offset, length } if *offset > 32768 && *length >= 10),
-        );
-        assert!(
-            has_far_copy,
-            "Should find match beyond old 32KB window limit"
-        );
-    }
-
-    #[test]
-    fn test_sa_scattered_matches() {
-        // Simulate CDC chunk pattern: many small matches at arbitrary offsets
-        // in otherwise different data (like ZIP container chunks from AI files)
-        let mut base = Vec::with_capacity(4096);
-        let mut target = Vec::with_capacity(4096);
-
-        // Create base with known patterns scattered throughout
-        for i in 0..64 {
-            base.extend_from_slice(&[i as u8; 32]); // 32 bytes of each value
-            base.extend_from_slice(b"MATCH"); // 5-byte marker every 37 bytes
-            base.extend_from_slice(&[(i * 7 + 3) as u8; 26]); // different filler
-        }
-
-        // Create target with different filler but same markers at different positions
-        for i in 0..64 {
-            target.extend_from_slice(&[(255 - i) as u8; 20]); // different filler
-            target.extend_from_slice(b"MATCH"); // same 5-byte marker
-            target.extend_from_slice(&[(i * 13 + 7) as u8; 38]); // different filler
-        }
-
-        let delta = DeltaEncoder::encode(&base, &target);
-        let reconstructed = DeltaDecoder::apply(&base, &delta).unwrap();
-        assert_eq!(reconstructed, target);
-
-        // Should have found the scattered "MATCH" patterns
-        let copy_count = delta
-            .instructions
-            .iter()
-            .filter(|i| matches!(i, DeltaInstruction::Copy { .. }))
-            .count();
-        assert!(
-            copy_count >= 10,
-            "Should find many scattered matches, found {}",
-            copy_count
-        );
-    }
-
-    #[test]
-    fn test_sa_trivial_base() {
-        // Base < SA_MIN_BASE_SIZE should take trivial path (just Insert)
-        let base = b"tiny";
-        let target = b"also tiny but different";
-        let delta = DeltaEncoder::encode(base, target);
-        let reconstructed = DeltaDecoder::apply(base, &delta).unwrap();
-        assert_eq!(reconstructed, target);
-
-        // Should be a single Insert instruction (trivial path)
-        assert_eq!(delta.instructions.len(), 1);
-        assert!(matches!(
-            &delta.instructions[0],
-            DeltaInstruction::Insert(_)
-        ));
-    }
-
-    #[test]
-    fn test_sa_empty_inputs() {
-        // Empty target
+    fn test_delta_empty_target() {
         let base = b"some data";
         let delta = DeltaEncoder::encode(base, b"");
         let reconstructed = DeltaDecoder::apply(base, &delta).unwrap();
         assert_eq!(reconstructed, b"");
+    }
 
-        // Empty base
+    #[test]
+    fn test_delta_empty_base() {
         let delta = DeltaEncoder::encode(b"", b"some target");
         let reconstructed = DeltaDecoder::apply(b"", &delta).unwrap();
         assert_eq!(reconstructed, b"some target");
     }
 
     #[test]
-    fn test_sa_full_base_copy() {
-        // Target is exact copy of entire base — should produce single Copy
-        let base = vec![42u8; 10000];
-        let delta = DeltaEncoder::encode(&base, &base);
-        let reconstructed = DeltaDecoder::apply(&base, &delta).unwrap();
-        assert_eq!(reconstructed, base);
-
-        // Should be a single Copy spanning the entire base
-        let total_copy_len: usize = delta
-            .instructions
-            .iter()
-            .filter_map(|i| match i {
-                DeltaInstruction::Copy { length, .. } => Some(*length),
-                _ => None,
-            })
-            .sum();
-        assert_eq!(total_copy_len, base.len());
-    }
-
-    #[test]
-    fn test_sa_serialize_roundtrip() {
-        // Verify serialize/deserialize still works with suffix-array-generated deltas
-        let base = b"The quick brown fox jumps over the lazy dog";
-        let target = b"The slow brown cat jumps over the lazy dog today";
+    fn test_format_magic_bytes() {
+        let base = b"test base data for format detection";
+        let target = b"test target data for format detection";
         let delta = DeltaEncoder::encode(base, target);
 
         let bytes = delta.to_bytes();
+        assert_eq!(bytes[0], 0x5A);
+        assert_eq!(bytes[1], 0x44);
+
         let decoded = Delta::from_bytes(&bytes).unwrap();
-        let reconstructed = DeltaDecoder::apply(base, &decoded).unwrap();
+        assert_eq!(decoded.base_size, base.len());
+        assert_eq!(decoded.result_size, target.len());
+    }
+
+    #[test]
+    fn test_zstd_dict_quality_scattered_matches() {
+        let mut base = Vec::with_capacity(4096);
+        let mut target = Vec::with_capacity(4096);
+
+        for i in 0u8..64 {
+            base.extend_from_slice(&[i; 32]);
+            base.extend_from_slice(b"MATCH");
+            base.extend_from_slice(&[i.wrapping_mul(7).wrapping_add(3); 26]);
+        }
+
+        for i in 0u8..64 {
+            target.extend_from_slice(&[255u8.wrapping_sub(i); 20]);
+            target.extend_from_slice(b"MATCH");
+            target.extend_from_slice(&[i.wrapping_mul(13).wrapping_add(7); 38]);
+        }
+
+        let delta = DeltaEncoder::encode(&base, &target);
+        let reconstructed = DeltaDecoder::apply(&base, &delta).unwrap();
         assert_eq!(reconstructed, target);
+
+        let bytes = delta.to_bytes();
+        assert!(
+            bytes.len() < target.len(),
+            "Delta should be smaller than target: {} vs {}",
+            bytes.len(),
+            target.len()
+        );
+    }
+
+    #[test]
+    fn test_zstd_dict_media_chunk_simulation() {
+        let mut base = vec![0u8; 1024 * 1024]; // 1MB
+        for (i, byte) in base.iter_mut().enumerate() {
+            *byte = ((i * 31337 + 12345) % 256) as u8;
+        }
+
+        let mut target = base.clone();
+        for i in (0..target.len()).step_by(20) {
+            target[i] = target[i].wrapping_add(1);
+        }
+
+        let delta = DeltaEncoder::encode(&base, &target);
+        let reconstructed = DeltaDecoder::apply(&base, &delta).unwrap();
+        assert_eq!(reconstructed, target);
+
+        let bytes = delta.to_bytes();
+        let ratio = bytes.len() as f64 / target.len() as f64;
+        assert!(
+            ratio < 0.80,
+            "Delta of 95% similar 1MB chunks should be < 80%, was {:.1}%",
+            ratio * 100.0
+        );
     }
 }
