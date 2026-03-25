@@ -5,7 +5,14 @@ All notable changes to MediaGit will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v0.2.4-beta.1]
+
+### Changed
+- Delta encoder replaced: suffix-array (divsufsort/sacabase) sliding-window approach replaced
+  with **zstd dictionary compression**. Base chunk is used as a raw zstd dictionary at level 19
+  to compress target chunks. Wire format v2: `[0x5A, 0x44]` magic + varint sizes + zstd bytes.
+  Results: +1.3-2.1pp better savings on AI files, 1.4-2.4× faster throughput, 73% less code.
+  (`crates/mediagit-versioning/src/delta.rs`)
 
 ### Added
 - `/health` route alias added alongside `/healthz` in both `create_router` and

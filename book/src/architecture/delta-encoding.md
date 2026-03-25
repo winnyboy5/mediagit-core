@@ -29,18 +29,16 @@ MediaGit uses a **dual-layer** delta system:
 - **When**: Applied at `add` time for whole-file delta against previous version
 - **Efficiency**: 90%+ reduction for typical media workflows
 
-### Layer 2: Sliding-Window (Chunk-Level Delta)
-- **Crate**: `mediagit-versioning` — custom `DeltaEncoder` with Copy/Insert instructions
+### Layer 2: Zstd Dictionary (Chunk-Level Delta)
+- **Crate**: `mediagit-versioning` — `DeltaEncoder` using zstd dictionary compression
 - **When**: Applied by the ODB at chunk level for similar chunks
-- **Algorithm**: Hash-table based pattern matching with 32 KB sliding window
+- **Algorithm**: Base chunk serves as a raw zstd dictionary (level 19) to compress target chunk
 
 ### How It Works
-1. Compare new version with base version
-2. Build hash table of base sequences (4-byte minimum match)
-3. Scan target for matching sequences using the hash table
-4. Store only differences as delta instructions:
-   - **COPY**: reference offset + length from base
-   - **INSERT**: literal new bytes
+1. Compare new chunk with similar base chunk (via `SimilarityDetector`)
+2. Use base chunk as a zstd dictionary: `zstd::bulk::Compressor::with_dictionary(19, base)`
+3. Compress target chunk against the dictionary
+4. Store as wire format v2: `[0x5A, 0x44]` magic + varint(base_size) + varint(result_size) + zstd bytes
 
 ## Delta Chain Management
 
@@ -195,20 +193,20 @@ The similarity checking process:
 ### Process
 1. Read base version from ODB
 2. Read new version from working directory
-3. Generate delta (bsdiff at file level, sliding-window at chunk level)
+3. Generate delta (bsdiff at file level, zstd dictionary at chunk level)
 4. If delta < 80% of full object, store delta
 5. If delta larger, store full object (no benefit)
 
 ### Example (Chunk-Level Delta in ODB)
 ```rust
-// From odb.rs — chunk-level delta using sliding-window
-let delta = DeltaEncoder::encode(&base_data, &chunk.data);
+// From odb.rs — chunk-level delta using zstd dictionary
+let delta = DeltaEncoder::encode(&base_data, &chunk.data)?;
 let delta_bytes = delta.to_bytes();
 let delta_ratio = delta_bytes.len() as f64 / chunk.data.len() as f64;
 
 if delta_ratio < 0.80 {
-    // Store as delta (compressed with zstd)
-    backend.put(&delta_key, &compressed_delta).await?;
+    // Store as delta (already zstd-compressed via dictionary)
+    backend.put(&delta_key, &delta_bytes).await?;
 } else {
     // Store full chunk
     backend.put(&chunk_key, &compressed_chunk).await?;
@@ -225,8 +223,8 @@ if delta_ratio < 0.80 {
 
 ### Example (Chunk-Level Reconstruction)
 ```rust
-// From odb.rs — reconstruct from sliding-window delta
-let delta = Delta::from_bytes(&decompressed_delta)?;
+// From odb.rs — reconstruct from zstd dictionary delta
+let delta = Delta::from_bytes(&delta_bytes)?;
 let reconstructed = DeltaDecoder::apply(&base_data, &delta)?;
 
 // Verify integrity
