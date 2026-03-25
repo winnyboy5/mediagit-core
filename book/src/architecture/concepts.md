@@ -114,7 +114,7 @@ MediaGit employs intelligent compression based on file type:
 ### Compression Algorithms
 1. **zstd** (default): Fastest, good ratio for all file types
 2. **brotli**: Better ratio for text/code, slower
-3. **delta**: Dual-layer (bsdiff at file level, sliding-window at chunk level)
+3. **delta**: Dual-layer (bsdiff at file level, zstd dictionary at chunk level)
 
 ### Automatic Selection
 ```

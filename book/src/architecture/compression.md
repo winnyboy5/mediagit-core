@@ -16,7 +16,7 @@ MediaGit employs intelligent compression based on file type and size to minimize
 
 ### delta (Dual-Layer Delta Encoding)
 - **Layer 1**: bsdiff (whole-file delta via `mediagit-compression`)
-- **Layer 2**: Sliding-window Copy/Insert (chunk-level delta via `mediagit-versioning`)
+- **Layer 2**: Zstd dictionary compression (chunk-level delta via `mediagit-versioning`)
 - **Ratio**: 90%+ reduction for updated files
 - **Use**: Large files with small changes
 

@@ -414,13 +414,15 @@ The `get_chunk_params(file_size)` function selects FastCDC parameters:
 
 ## Delta Compression
 
-**Crate**: `mediagit-versioning` · **Key files**: `delta.rs` (448 lines), `similarity.rs` (524 lines)
+**Crate**: `mediagit-versioning` · **Key files**: `delta.rs` (~290 lines), `similarity.rs` (524 lines)
 
-### Delta Encoder
-- **Algorithm**: Sliding-window pattern matching
-- **Instructions**: `Copy { offset, length }` and `Insert(Vec<u8>)`
-- **Serialization**: Custom varint-based binary format
+### Delta Encoder — Zstd Dictionary Mode
+- **Algorithm**: Zstd dictionary compression — base chunk serves as the raw dictionary
+- **Encoder**: `zstd::bulk::Compressor::with_dictionary(19, base_bytes)`
+- **Decoder**: `zstd::bulk::Decompressor::with_dictionary(base_bytes)`
+- **Wire format**: `[0x5A, 0x44]` magic ("ZD") + varint(base_size) + varint(result_size) + zstd-compressed bytes
 - **Max chain depth**: 10 (then re-stored as full object)
+- **Note**: Delta bytes are already zstd-compressed, so outer `compress_typed()` in ODB falls back to Store
 
 ### Similarity Detection
 
@@ -438,8 +440,8 @@ graph TD
     I -->|OK| J["Compute similarity<br/>score = samples×0.7 + size×0.3"]
     J --> K{"Score ≥ type-aware<br/>threshold?"}
     K -->|"Below threshold"| H
-    K -->|"Match found!"| L["DeltaEncoder.encode()<br/>(sliding window)"]
-    L --> M["Store as delta<br/>(base_oid + instructions)"]
+    K -->|"Match found!"| L["DeltaEncoder.encode()<br/>(zstd dictionary)"]
+    L --> M["Store as delta<br/>(base_oid + zstd bytes)"]
 
     style D fill:#7B68EE,color:#fff
     style L fill:#7B68EE,color:#fff
