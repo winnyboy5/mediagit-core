@@ -47,7 +47,7 @@ use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
-use rand::RngCore;
+use rand::Rng;
 use secrecy::{ExposeSecret, SecretBox};
 use thiserror::Error;
 use tracing::debug;

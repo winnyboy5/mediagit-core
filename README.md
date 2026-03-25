@@ -13,6 +13,7 @@
 **Status**: 🚧 **BETA**
 **Features**: 100% complete (all P0–P3 items implemented)
 **Last Validated**: March 2026 — Linux & Windows, release build
+**🚨 WARNING 🚨**: This project is under active development. Be aware that large breaking changes may happen before 1.0 is reached.
 
 ✅ **32 CLI commands validated end-to-end** — 0 crashes, 0 data corruption
 ✅ **27+ file types tested** (58 GB dataset) across video, audio, 3D, image, design, ML
