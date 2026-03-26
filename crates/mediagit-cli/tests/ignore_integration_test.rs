@@ -24,7 +24,7 @@ fn setup_repo(ignore_content: &str, files: &[(&str, &str)]) -> TempDir {
     let root = dir.path();
 
     // init
-    std::process::Command::new("mediagit")
+    std::process::Command::new(assert_cmd::cargo::cargo_bin!("mediagit"))
         .args(["init"])
         .current_dir(root)
         .output()
@@ -50,7 +50,7 @@ fn setup_repo(ignore_content: &str, files: &[(&str, &str)]) -> TempDir {
 
 /// Run a mediagit command in the given directory and return (stdout, success)
 fn run(dir: &std::path::Path, args: &[&str]) -> (String, bool) {
-    let out = std::process::Command::new("mediagit")
+    let out = std::process::Command::new(assert_cmd::cargo::cargo_bin!("mediagit"))
         .args(args)
         .current_dir(dir)
         .output()
