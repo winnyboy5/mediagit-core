@@ -418,13 +418,7 @@ impl StatusCmd {
                     files.insert(normalized);
                 }
             } else if path.is_dir() {
-                self.scan_directory_recursive(
-                    repo_root,
-                    &path,
-                    matcher,
-                    ignored_files,
-                    files,
-                )?;
+                self.scan_directory_recursive(repo_root, &path, matcher, ignored_files, files)?;
             }
         }
         Ok(())

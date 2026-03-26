@@ -672,13 +672,25 @@ impl AddCmd {
 
         // If --all is set and no paths given, add entire repo root
         if self.all && self.paths.is_empty() {
-            self.collect_files_recursive(repo_root, repo_root, &mediagit_dir, &matcher, &mut files)?;
+            self.collect_files_recursive(
+                repo_root,
+                repo_root,
+                &mediagit_dir,
+                &matcher,
+                &mut files,
+            )?;
             return Ok(files);
         }
 
         // If --update (-u) is set, collect all tracked files that exist in working dir
         if self.update && self.paths.is_empty() {
-            self.collect_files_recursive(repo_root, repo_root, &mediagit_dir, &matcher, &mut files)?;
+            self.collect_files_recursive(
+                repo_root,
+                repo_root,
+                &mediagit_dir,
+                &matcher,
+                &mut files,
+            )?;
             return Ok(files);
         }
 
@@ -698,7 +710,10 @@ impl AddCmd {
                                             if let Ok(rel) = p.strip_prefix(repo_root) {
                                                 if m.is_ignored(rel, false) {
                                                     if self.verbose {
-                                                        output::detail("ignored (.mediagitignore)", &p.display().to_string());
+                                                        output::detail(
+                                                            "ignored (.mediagitignore)",
+                                                            &p.display().to_string(),
+                                                        );
                                                     }
                                                     continue;
                                                 }
@@ -796,7 +811,10 @@ impl AddCmd {
                     let is_dir = path.is_dir();
                     if m.is_ignored(rel, is_dir) {
                         if self.verbose {
-                            output::detail("ignored (.mediagitignore)", &path.display().to_string());
+                            output::detail(
+                                "ignored (.mediagitignore)",
+                                &path.display().to_string(),
+                            );
                         }
                         continue; // skip file OR prune entire directory
                     }

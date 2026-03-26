@@ -31,18 +31,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pattern), `--ignored` flag display, porcelain `!!` prefix, and no-file fallback.
   All 8 tests pass.
 
-- **Comprehensive standalone performance test suite v2** (`dev-tests/standalone-perf-test/run-perf-tests.ps1`):
-  - **Phase 5** — `.mediagitignore` smoke tests (7 scenarios, 10 assertions): glob, `--force`,
-    `build/` directory prune, negation, `--ignored` output, `!! ` porcelain prefix, no-file
-    fallback. All 10/10 pass.
-  - Extended format coverage: synthetic text/code (CSV, TXT, JSON, XML, YAML), ML binary
-    weights (`.bin`), and SQLite (`.db`) added to Phase 1.
-  - Extended Phase 2 deduplication: ML-BIN 8MB case added.
-  - Extended Phase 3 CLI coverage: `status --ignored`, `status --porcelain --ignored`,
-    `status --tracked`, `status --untracked` added.
-  - Total: 30 format tests (30/30 pass), 84 CLI tests (82/84 pass), 10 ignore tests
-    (10/10 pass). Overall 443 MB → 243 MB (45.2% savings). Zero fsck failures.
-
 ### Changed
 - `book/src/cli/add.md` — Options section corrected (removed non-existent `--chunk-size`;
   added `--no-chunking`, `--no-delta`, `--no-parallel`, `-j`). New `.mediagitignore` section

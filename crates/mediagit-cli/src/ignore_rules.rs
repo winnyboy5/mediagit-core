@@ -43,10 +43,7 @@ impl IgnoreMatcher {
         if ignore_path.exists() {
             // `add` returns an Option<ignore::Error>; we convert to anyhow::Error.
             if let Some(err) = builder.add(&ignore_path) {
-                return Err(anyhow::anyhow!(
-                    "Failed to parse .mediagitignore: {}",
-                    err
-                ));
+                return Err(anyhow::anyhow!("Failed to parse .mediagitignore: {}", err));
             }
         }
 
