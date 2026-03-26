@@ -22,14 +22,9 @@ Total: 108 MB (64% reduction!)
 
 ## Delta Algorithm
 
-MediaGit uses a **dual-layer** delta system:
+MediaGit uses **zstd dictionary compression** for chunk-level delta encoding:
 
-### Layer 1: bsdiff (Whole-File Delta)
-- **Crate**: `mediagit-compression` — uses `bsdiff::diff/patch` with zstd compression wrapper
-- **When**: Applied at `add` time for whole-file delta against previous version
-- **Efficiency**: 90%+ reduction for typical media workflows
-
-### Layer 2: Zstd Dictionary (Chunk-Level Delta)
+### Zstd Dictionary Mode (Chunk-Level Delta)
 - **Crate**: `mediagit-versioning` — `DeltaEncoder` using zstd dictionary compression
 - **When**: Applied by the ODB at chunk level for similar chunks
 - **Algorithm**: Base chunk serves as a raw zstd dictionary (level 19) to compress target chunk
@@ -182,18 +177,18 @@ The similarity checking process:
 
 | File Size | Detection Time | Typical Savings |
 |-----------|----------------|-----------------|
-| 10 MB     | 0.1s          | 70-90%          |
-| 100 MB    | 0.5s          | 80-95%          |
-| 1 GB      | 2-3s          | 85-98%          |
+| 10 MB     | 0.1s          | 15–45%          |
+| 100 MB    | 0.5s          | 20–50%          |
+| 1 GB      | 2-3s          | 25–65%          |
 
-**Trade-off**: Small detection cost for massive storage savings
+**Trade-off**: Small detection cost for significant storage savings
 
 ## Delta Generation
 
 ### Process
 1. Read base version from ODB
 2. Read new version from working directory
-3. Generate delta (bsdiff at file level, zstd dictionary at chunk level)
+3. Generate delta (zstd dictionary at chunk level)
 4. If delta < 80% of full object, store delta
 5. If delta larger, store full object (no benefit)
 
@@ -278,19 +273,19 @@ Base (v12) → Δ1 → ... → Δ5 (depth 5, rebalanced)
 ### Typical Scenarios
 
 **PSD Files** (Photoshop documents):
-- Layer additions: 80-95% savings
-- Small edits: 95-99% savings
-- Complete redesign: 0-20% savings
+- Layer additions: 35–65% savings
+- Small edits: 37–64% savings (validated: 37% on 71 MB, 64% on 181 MB)
+- Complete redesign: 0–10% savings
 
-**Blender Files** (3D scenes):
-- Mesh tweaks: 85-95% savings
-- Material changes: 90-98% savings
-- New scene: 0-10% savings
+**3D Models** (GLB, FBX, STL, PLY, DAE):
+- Mesh tweaks: 33–83% savings (validated: GLB 33–52%, FBX 47%, STL 70%, PLY 73%, DAE 83%)
+- Material changes: 20–45% savings
+- New scene: 0–10% savings
 
-**Audio Files** (WAV, AIF):
-- Clip edits: 70-90% savings
-- Effects applied: 50-80% savings
-- Re-recording: 0-5% savings
+**Audio Files** (WAV, FLAC):
+- Clip edits: 20–55% savings (validated: WAV 54%)
+- Effects applied: 15–30% savings
+- Re-recording: 0–5% savings
 
 ## Related Documentation
 

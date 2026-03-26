@@ -19,6 +19,8 @@ use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::ignore_rules::IgnoreMatcher;
+
 /// Show the working tree status
 ///
 /// Displays the state of the working directory and staging area, showing which
@@ -138,8 +140,11 @@ impl StatusCmd {
         let index = Index::load(&repo_root)?;
         let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
 
-        // Scan working directory
-        let working_files = self.scan_working_directory(&repo_root)?;
+        // Scan working directory, collecting ignored files separately
+        let mut ignored_files: HashSet<PathBuf> = HashSet::new();
+        let matcher = IgnoreMatcher::new(&repo_root).ok();
+        let working_files =
+            self.scan_working_directory(&repo_root, &matcher, &mut ignored_files)?;
 
         // Get HEAD commit tree for comparison (index is cleared after commit)
         let mut head_files: HashMap<PathBuf, Oid> = HashMap::new();
@@ -227,10 +232,13 @@ impl StatusCmd {
             }
         }
 
-        // Detect untracked files (in working dir, not in HEAD, not in index)
+        // Detect untracked files (in working dir, not in HEAD, not in index, not ignored)
         let mut untracked_files = Vec::new();
         for path in &working_files {
-            if !head_files.contains_key(path) && !index_files.contains_key(path) {
+            if !head_files.contains_key(path)
+                && !index_files.contains_key(path)
+                && !ignored_files.contains(path)
+            {
                 untracked_files.push(path.clone());
             }
         }
@@ -257,6 +265,14 @@ impl StatusCmd {
             // Untracked files
             for path in &untracked_files {
                 println!("?? {}", path.display());
+            }
+            // Ignored files (shown with !! prefix when --ignored is set)
+            if self.ignored {
+                let mut ignored_sorted: Vec<&PathBuf> = ignored_files.iter().collect();
+                ignored_sorted.sort();
+                for path in ignored_sorted {
+                    println!("!! {}", path.display());
+                }
             }
             return Ok(());
         }
@@ -314,7 +330,20 @@ impl StatusCmd {
             println!();
         }
 
-        // Display clean status (ISS-005 fix)
+        // Display ignored files (only when --ignored flag is set)
+        let mut ignored_sorted: Vec<&PathBuf> = ignored_files.iter().collect();
+        ignored_sorted.sort();
+        if self.ignored && !ignored_sorted.is_empty() && !self.quiet {
+            output::header("Ignored files:");
+            println!("  (add .mediagitignore negation '!<pattern>' to un-ignore)");
+            println!();
+            for path in &ignored_sorted {
+                println!("  {}", path.display());
+            }
+            println!();
+        }
+
+        // Display clean status
         if !self.quiet {
             if index.is_empty()
                 && modified_files.is_empty()
@@ -336,9 +365,14 @@ impl StatusCmd {
     }
 
     // ISS-005 fix: Helper function to scan working directory
-    fn scan_working_directory(&self, repo_root: &Path) -> Result<HashSet<PathBuf>> {
+    fn scan_working_directory(
+        &self,
+        repo_root: &Path,
+        matcher: &Option<IgnoreMatcher>,
+        ignored_files: &mut HashSet<PathBuf>,
+    ) -> Result<HashSet<PathBuf>> {
         let mut files = HashSet::new();
-        self.scan_directory_recursive(repo_root, repo_root, &mut files)?;
+        self.scan_directory_recursive(repo_root, repo_root, matcher, ignored_files, &mut files)?;
         Ok(files)
     }
 
@@ -347,6 +381,8 @@ impl StatusCmd {
         &self,
         repo_root: &Path,
         current_dir: &Path,
+        matcher: &Option<IgnoreMatcher>,
+        ignored_files: &mut HashSet<PathBuf>,
         files: &mut HashSet<PathBuf>,
     ) -> Result<()> {
         for entry in std::fs::read_dir(current_dir)? {
@@ -358,6 +394,23 @@ impl StatusCmd {
                 continue;
             }
 
+            // Check .mediagitignore
+            if let Some(ref m) = matcher {
+                if let Ok(rel) = path.strip_prefix(repo_root) {
+                    let is_dir = path.is_dir();
+                    if m.is_ignored(rel, is_dir) {
+                        if path.is_file() {
+                            // Track ignored files for --ignored output
+                            let normalized =
+                                PathBuf::from(rel.to_string_lossy().replace('\\', "/"));
+                            ignored_files.insert(normalized);
+                        }
+                        // For dirs: prune entire subtree silently (don't enumerate children)
+                        continue;
+                    }
+                }
+            }
+
             if path.is_file() {
                 // Store as relative path with normalized separators
                 if let Ok(rel_path) = path.strip_prefix(repo_root) {
@@ -365,7 +418,7 @@ impl StatusCmd {
                     files.insert(normalized);
                 }
             } else if path.is_dir() {
-                self.scan_directory_recursive(repo_root, &path, files)?;
+                self.scan_directory_recursive(repo_root, &path, matcher, ignored_files, files)?;
             }
         }
         Ok(())

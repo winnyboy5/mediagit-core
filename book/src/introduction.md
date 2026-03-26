@@ -8,9 +8,9 @@ MediaGit-Core is an open-source version control system designed specifically for
 
 ## Key Features
 
-### Lightning-Fast Performance
-- **Instant branch switching**: <100ms vs 30+ minutes with Git-LFS
-- **Efficient storage**: 70-90% compression with intelligent delta encoding
+### High Performance
+- **Fast staging**: 25–240 MB/s for large files (release build)
+- **Efficient storage**: ~30–46% average savings via compression + dedup + delta encoding
 - **Parallel operations**: Optimized for modern multi-core systems
 
 ### Multi-Backend Storage
@@ -56,7 +56,7 @@ MediaGit-Core is designed for teams and individuals working with large binary fi
 |---------|--------------|---------|----------|
 | Architecture | Standalone native VCS | Git extension + server | Centralized VCS |
 | Branch Switch Speed | Instant (ref-based) | Instant (Git handles) | ⚠️ Copy-based |
-| Storage Savings (avg) | ~30% (compression + dedup + delta) | ~0% (full copies) | ~10-20% (RCS deltas) |
+| Storage Savings (avg) | ~30–46% (compression + dedup + delta) | ~0% (no dedup/delta) | ~10-20% (RCS deltas) |
 | Deduplication | ✅ Content-addressable | ❌ None | ✅ Server-side |
 | Multi-Backend Support | 7 backends | Server-dependent | Proprietary |
 | Media-Aware Merging | ✅ Yes | ❌ No | ⚠️ Limited |
@@ -92,17 +92,19 @@ Ready to get started? Head to the [Installation](./installation/README.md) guide
 
 ## License
 
-MediaGit-Core is dual-licensed:
-- **AGPL-3.0** for community use (individuals, open-source projects, education)
-- **Commercial License** for enterprise use requiring proprietary modifications
+MediaGit-Core is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
+
+- ✅ Free to use, modify, and distribute
+- ✅ Source code must be made available
+- ✅ Network use requires source disclosure (AGPL provision)
+- ✅ Commercial use allowed with license compliance
 
 See the [LICENSE](https://github.com/winnyboy5/mediagit-core/blob/main/LICENSE) file for details.
 
 ## Community and Support
 
 - **GitHub**: [winnyboy5/mediagit-core](https://github.com/winnyboy5/mediagit-core)
-- **Documentation**: [https://mediagit.dev/docs](https://mediagit.dev/docs)
-- **Discord**: [Join our community](https://discord.gg/mediagit)
+- **Documentation**: [https://winnyboy5.github.io/mediagit-core](https://winnyboy5.github.io/mediagit-core)
 - **Issues**: [GitHub Issues](https://github.com/winnyboy5/mediagit-core/issues)
 
 ## What's Next?
