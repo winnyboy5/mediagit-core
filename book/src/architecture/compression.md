@@ -14,11 +14,11 @@ MediaGit employs intelligent compression based on file type and size to minimize
 - **Ratio**: 3-5x for binaries, 10-20x for text
 - **Use**: Text and code files when size matters more than speed
 
-### delta (Dual-Layer Delta Encoding)
-- **Layer 1**: bsdiff (whole-file delta via `mediagit-compression`)
-- **Layer 2**: Zstd dictionary compression (chunk-level delta via `mediagit-versioning`)
-- **Ratio**: 90%+ reduction for updated files
-- **Use**: Large files with small changes
+### delta (Zstd Dictionary Delta Encoding)
+- **Algorithm**: Zstd dictionary compression (chunk-level delta via `mediagit-versioning`)
+- **How**: Base chunk serves as a raw zstd dictionary (level 19) to compress target chunk
+- **Ratio**: 33–83% reduction for updated files (type-dependent; validated March 2026)
+- **Use**: Large files with incremental changes
 
 ## Algorithm Selection
 

@@ -86,12 +86,12 @@ graph LR
 
 ## Delta Encoding
 
-MediaGit uses a dual-layer delta system to store only differences between versions:
+MediaGit uses zstd dictionary-based delta encoding to store only differences between versions:
 
 ### When Deltas Are Used
 - **Scenario**: Large file with small changes
 - **Strategy**: Store base version + delta to new version
-- **Benefit**: Massive storage savings (90%+ reduction common)
+- **Benefit**: Significant storage savings (33–83% reduction depending on format; validated March 2026)
 
 ### Delta Chain Example
 ```
@@ -114,7 +114,7 @@ MediaGit employs intelligent compression based on file type:
 ### Compression Algorithms
 1. **zstd** (default): Fastest, good ratio for all file types
 2. **brotli**: Better ratio for text/code, slower
-3. **delta**: Dual-layer (bsdiff at file level, zstd dictionary at chunk level)
+3. **delta**: Zstd dictionary compression (chunk-level)
 
 ### Automatic Selection
 ```

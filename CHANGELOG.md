@@ -5,7 +5,55 @@ All notable changes to MediaGit will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v0.2.4-beta.1]
+## [v0.2.5-beta.1] - 2026-03-26
+
+### Added
+- **`.mediagitignore` support** in `add` and `status` commands — `.gitignore`-compatible
+  pattern matching using the `ignore` crate (`v0.4.25` / `globset v0.4.18`).
+  - `add`: files and directories matching `.mediagitignore` are silently skipped during
+    file discovery. Entire ignored directories are pruned (no recursion), preventing
+    unnecessary I/O. Explicit named paths that are ignored print a warning; `--force`
+    bypasses all ignore rules entirely. `--verbose` logs each skipped path.
+  - `status`: ignored files are hidden from the "Untracked files:" section by default.
+    `--ignored` flag activates a new "Ignored files:" section listing all excluded files.
+    `--porcelain --ignored` uses the `!! path` prefix, matching Git convention.
+  - Graceful fallback: missing `.mediagitignore` is a no-op; malformed file logs a warning
+    and continues without rules.
+  - Pattern syntax: full `.gitignore` semantics — globs (`*.tmp`), directory markers
+    (`build/`), negation (`!important.log`), comments (`#`), anchored paths (`/src`).
+  - New module: `crates/mediagit-cli/src/ignore_rules.rs` — `IgnoreMatcher` struct wrapping
+    the `ignore` crate for consistent use across commands.
+  - `crates/mediagit-cli/Cargo.toml` — added `ignore = "0.4"` dependency.
+  - (`crates/mediagit-cli/src/commands/add.rs`, `crates/mediagit-cli/src/commands/status.rs`)
+
+- **Integration test suite for `.mediagitignore`** (`crates/mediagit-cli/tests/ignore_integration_test.rs`):
+  8 tests covering basic glob ignore, `--force` override, directory pruning, negation (`!`
+  pattern), `--ignored` flag display, porcelain `!!` prefix, and no-file fallback.
+  All 8 tests pass.
+
+- **Comprehensive standalone performance test suite v2** (`dev-tests/standalone-perf-test/run-perf-tests.ps1`):
+  - **Phase 5** — `.mediagitignore` smoke tests (7 scenarios, 10 assertions): glob, `--force`,
+    `build/` directory prune, negation, `--ignored` output, `!! ` porcelain prefix, no-file
+    fallback. All 10/10 pass.
+  - Extended format coverage: synthetic text/code (CSV, TXT, JSON, XML, YAML), ML binary
+    weights (`.bin`), and SQLite (`.db`) added to Phase 1.
+  - Extended Phase 2 deduplication: ML-BIN 8MB case added.
+  - Extended Phase 3 CLI coverage: `status --ignored`, `status --porcelain --ignored`,
+    `status --tracked`, `status --untracked` added.
+  - Total: 30 format tests (30/30 pass), 84 CLI tests (82/84 pass), 10 ignore tests
+    (10/10 pass). Overall 443 MB → 243 MB (45.2% savings). Zero fsck failures.
+
+### Changed
+- `book/src/cli/add.md` — Options section corrected (removed non-existent `--chunk-size`;
+  added `--no-chunking`, `--no-delta`, `--no-parallel`, `-j`). New `.mediagitignore` section
+  with full syntax reference, ignore example, and `--force` override example.
+- `book/src/cli/status.md` — `--ignored` option corrected from mode-based description to
+  simple boolean flag matching the implementation. Updated example shows real output format
+  with "Ignored files:" section. Added `--porcelain --ignored` example with `!! path` prefix.
+  Notes section updated to reference `.mediagitignore` properly.
+
+## [v0.2.4-beta.1] - 2026-03-26
+
 
 ### Changed
 - Delta encoder replaced: suffix-array (divsufsort/sacabase) sliding-window approach replaced
@@ -179,6 +227,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dependency security audits in CI
 - Encryption at rest with Argon2 key derivation
 
+[v0.2.4-beta.1]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.3-beta.1...v0.2.4-beta.1
 [v0.2.3-beta.1]:https://github.com/winnyboy5/mediagit-core/compare/v0.2.1-beta.2...v0.2.3-beta.1
 [v0.2.1-beta.2]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.1-beta.1...v0.2.1-beta.2
 [0.2.1-beta.1]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.0...v0.2.1-beta.1
