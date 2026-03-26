@@ -9,8 +9,6 @@ Repository maintenance and health check commands.
 - [verify](./verify.md) - Verify object integrity
 - [stats](./stats.md) - Repository statistics
 - [reflog](./reflog.md) - History of HEAD and branch movements
-- [filter](./filter.md) - Git filter driver (clean/smudge) for migration use
-- [install](./install.md) - Install MediaGit filter driver into a Git repository
 
 ## Recommended Schedule
 

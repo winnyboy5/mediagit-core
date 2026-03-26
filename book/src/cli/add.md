@@ -42,11 +42,17 @@ Show detailed information about added files.
 ### `-f, --force`
 Add files even if they match `.mediagitignore` patterns.
 
-### `--chunk-size <SIZE>`
-Override default chunk size for large files.
+### `--no-chunking`
+Disable automatic chunking for large files.
 
-- **Format**: `10MB`, `100MB`, `1GB`
-- **Default**: `4MB`
+### `--no-delta`
+Disable delta compression (delta encoding is enabled by default).
+
+### `--no-parallel`
+Process files sequentially (default is parallel using all CPU cores).
+
+### `-j, --jobs <N>`
+Number of parallel worker threads (default: CPU count, max 8).
 
 ## Examples
 
@@ -181,6 +187,58 @@ MediaGit optimizes storage through:
 2. **Compression**: Zstd or Brotli compression
 3. **Delta encoding**: Store differences for similar files
 4. **Chunking**: Efficient handling of large files
+
+## `.mediagitignore`
+
+Create a `.mediagitignore` file in the repository root to prevent certain files from ever being staged. Uses the same glob syntax as `.gitignore`:
+
+```
+# .mediagitignore
+
+# Ignore temporary files
+*.tmp
+*.bak
+*.swp
+
+# Ignore build output directories
+build/
+dist/
+__pycache__/
+
+# Ignore OS artifacts
+.DS_Store
+Thumbs.db
+
+# Negation: un-ignore a specific file matching a broader pattern
+!important.tmp
+```
+
+### Ignoring files example
+
+```bash
+$ cat .mediagitignore
+*.tmp
+build/
+
+$ mediagit add --all
+✓ Staged 5 file(s)
+# file.tmp and build/ contents silently skipped
+
+$ mediagit add --all --verbose
+✓ Staged 5 file(s)
+  ignored (.mediagitignore): file.tmp
+  ignored (.mediagitignore): build/output.bin
+```
+
+### Force-adding an ignored file
+
+```bash
+$ mediagit add important.tmp
+Warning: 'important.tmp' is ignored by .mediagitignore — use --force to override
+
+$ mediagit add --force important.tmp
+✓ Staged 1 file(s)
+```
 
 ## See Also
 

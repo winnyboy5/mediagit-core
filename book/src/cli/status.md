@@ -14,8 +14,8 @@ Shows the status of the working tree, displaying:
 - Files staged for commit (in the index)
 - Files with modifications not staged
 - Untracked files not yet added
-- Current branch and tracking information
-- Storage statistics and compression metrics
+- Ignored files (when `--ignored` is set)
+- Current branch information
 
 MediaGit status provides enhanced insights compared to traditional version control:
 - Real-time compression savings preview
@@ -53,11 +53,9 @@ Show untracked files:
 - **normal**: Show untracked files and directories (default)
 - **all**: Show individual files in untracked directories
 
-### `--ignored[=<mode>]`
-Show ignored files:
-- **traditional**: Show ignored files and directories
-- **matching**: Show ignored files matching ignore patterns
-- **no**: Show no ignored files (default)
+### `--ignored`
+Show files excluded by `.mediagitignore` in an "Ignored files:" section.
+Ignored files are always hidden from the "Untracked files:" list; this flag makes them visible.
 
 ## Status Indicators
 
@@ -184,18 +182,32 @@ Storage Backend: AWS S3 (us-west-2)
 ### Show ignored files
 
 ```bash
+$ cat .mediagitignore
+*.tmp
+build/
+
 $ mediagit status --ignored
-On branch main
+Repository Status
 
 Untracked files:
-        new_asset.mp4
+  (use "mediagit add <file>..." to include in what will be committed)
+
+  new_asset.mp4
 
 Ignored files:
-        .DS_Store
-        Thumbs.db
-        *.tmp
-        cache/
-        node_modules/
+  (add .mediagitignore negation '!<pattern>' to un-ignore)
+
+  cache.tmp
+  render.tmp
+```
+
+### Porcelain output with ignored
+
+```bash
+$ mediagit status --porcelain --ignored
+?? new_asset.mp4
+!! cache.tmp
+!! render.tmp
 ```
 
 ### Machine-readable output
@@ -379,7 +391,8 @@ backend = true
 
 - Use `--short` for faster output in scripts
 - Use `--porcelain` for machine parsing
-- Add frequently-checked paths to `.mediagitignore`
+- Use `.mediagitignore` to permanently exclude build artifacts and temp files from appearing as untracked
+- Use `--ignored` to audit which files are currently excluded by `.mediagitignore`
 - Enable status caching for very large repositories
 
 ### Media File Tracking
