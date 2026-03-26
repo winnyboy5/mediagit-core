@@ -11,7 +11,6 @@ Essential commands for daily MediaGit workflows.
 - [log](./log.md) - Show commit history
 - [diff](./diff.md) - Show differences between versions
 - [show](./show.md) - Show object details (commits, blobs, trees)
-- [track](./track.md) - Configure file tracking patterns (for Git interop)
 
 ## Typical Workflow
 

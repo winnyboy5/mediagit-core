@@ -4,7 +4,7 @@ Consolidated and **priority-ordered** registry of planned features, code-level T
 known limitations for MediaGit. Items are sourced from documentation, source code, and
 historical claudedocs analyses.
 
-> Last updated: 2026-03-24 | Items 1-21 sequentially numbered; items 5 & 6 promoted to P1
+> Last updated: 2026-03-26 | v0.2.5-beta.1 released | Item 1 (.mediagitignore) **DONE**
 
 **Priority levels:**
 - **P0** — Quick win or active blocker — ≤1 day effort, implement immediately
@@ -18,7 +18,7 @@ historical claudedocs analyses.
 
 | # | Item | Priority | Effort | Blocks / Enables |
 |---|------|----------|--------|-----------------|
-| 1 | `.mediagitignore` support in `add` + `status` | **P1** | 2-3 days | Referenced in docs, not implemented |
+| 1 | `.mediagitignore` support in `add` + `status` | ~~**P1**~~ **✅ DONE** | 2-3 days | Shipped in v0.2.5-beta.1 |
 | 2 | Pack negotiation / bitmap index | **P1** | 1 wk | Incremental fetch (currently full-pack always) |
 | 3 | Parallel object I/O during checkout | **P1** | 1 wk | Branch switch latency |
 | 4 | Streaming format-aware chunker (MKV/MP4, S1-S6) | **P1** | 8-12 days | TB-scale files, format-aware dedup |
@@ -44,19 +44,16 @@ historical claudedocs analyses.
 
 ## P1 — High Priority (Next Milestone)
 
-### 1. `.mediagitignore` Support in `add` and `status`
-*Source: book docs `book/src/cli/add.md:43`, `book/src/cli/status.md:382`**
+### ~~1. `.mediagitignore` Support in `add` and `status`~~ ✅ DONE — v0.2.5-beta.1
+*Source: book docs `book/src/cli/add.md:43`, `book/src/cli/status.md:382`*
 
-MediaGit docs reference `.mediagitignore` but it is **not implemented**. The `add` and
-`status` commands both describe it but silently ignore it.
+**Implemented** in v0.2.5-beta.1 using the `ignore` crate. Full `.gitignore`-compatible
+pattern matching: globs, directory markers, negation (`!`), comments. `add --force` bypasses
+rules. `status --ignored` shows the ignored files section. Porcelain `!! path` prefix.
+Integration test suite: 8 tests, all pass.
 
-**What's needed:**
-- Parse `.mediagitignore` in project root (and parent dirs, like `.gitignore`)
-- `add`: skip files matching `.mediagitignore` patterns (unless `--force`)
-- `status`: mark matched files as `ignored` in output
-- Pattern syntax: same as `.gitignore` (glob patterns, negation with `!`, `#` comments)
-
-Effort: **2-3 days**.
+See `crates/mediagit-cli/src/ignore_rules.rs`, `add.rs`, `status.rs`,
+`tests/ignore_integration_test.rs`.
 
 ---
 
@@ -461,7 +458,7 @@ fetch requires computing the local have-set before negotiation.
 
 | # | Priority | Area | Description | Source |
 |---|----------|------|-------------|--------|
-| 1 | P1 | **`.mediagitignore`** | Referenced in docs, not implemented | `add.md:43` |
+| 1 | ~~P1~~ ✅ | **`.mediagitignore`** | **DONE** — v0.2.5-beta.1. `ignore` crate integration in `add` + `status` | `add.md:43` |
 | 2 | P1 | **Pack negotiation** | Pull/fetch always downloads full pack (no incremental negotiation) | `client.rs:122` |
 | 3 | P1 | **Parallel checkout I/O** | Checkout reads blobs sequentially; no parallel fetch | `checkout.rs` |
 | 4 | P1 | **TB-scale chunking** | Files ≥100MB get generic FastCDC; no MKV/MP4 structural chunking | R&D 2026-03 |

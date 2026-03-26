@@ -50,7 +50,7 @@ graph TB
 - **Location**: `crates/mediagit-storage/`
 
 ### 4. Compression Layer
-- **Algorithms**: zstd (default), brotli, delta (bsdiff + zstd dictionary)
+- **Algorithms**: zstd (default), brotli, delta (zstd dictionary)
 - **Strategy**: Automatic algorithm selection based on file type
 - **Performance**: Async compression with tokio runtime
 - **Location**: `crates/mediagit-compression/`
@@ -183,7 +183,7 @@ sequenceDiagram
 - **Language**: Rust 1.92.0
 - **Async Runtime**: Tokio 1.40+
 - **CLI Framework**: Clap 4.5+
-- **Compression**: zstd, brotli, delta (bsdiff + zstd dictionary)
+- **Compression**: zstd, brotli, delta (zstd dictionary)
 - **Cloud SDKs**: aws-sdk-s3, azure_storage, google-cloud-storage
 - **Testing**: proptest (property-based), criterion (benchmarking)
 

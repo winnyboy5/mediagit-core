@@ -647,24 +647,38 @@ impl AddCmd {
 
     /// Expand paths (globs, directories) into a list of files to add
     fn expand_paths(&self, repo_root: &Path) -> Result<Vec<PathBuf>> {
+        use crate::ignore_rules::IgnoreMatcher;
         use crate::output;
 
         let mut files = Vec::new();
         let mediagit_dir = dunce::canonicalize(repo_root.join(".mediagit"))
             .unwrap_or_else(|_| repo_root.join(".mediagit"));
 
+        // Build ignore matcher unless --force is set.
+        // A missing .mediagitignore produces a no-op matcher (no error).
+        let matcher = if !self.force {
+            match IgnoreMatcher::new(repo_root) {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    if !self.quiet {
+                        output::warning(&format!("Could not load .mediagitignore: {}", e));
+                    }
+                    None
+                }
+            }
+        } else {
+            None // --force bypasses .mediagitignore
+        };
+
         // If --all is set and no paths given, add entire repo root
         if self.all && self.paths.is_empty() {
-            self.collect_files_recursive(repo_root, &mediagit_dir, &mut files)?;
+            self.collect_files_recursive(repo_root, repo_root, &mediagit_dir, &matcher, &mut files)?;
             return Ok(files);
         }
 
         // If --update (-u) is set, collect all tracked files that exist in working dir
         if self.update && self.paths.is_empty() {
-            // Walk through the working directory and collect files that exist
-            // (tracked files that have been modified or exist will be picked up;
-            // the actual change detection happens in process_single_file)
-            self.collect_files_recursive(repo_root, &mediagit_dir, &mut files)?;
+            self.collect_files_recursive(repo_root, repo_root, &mediagit_dir, &matcher, &mut files)?;
             return Ok(files);
         }
 
@@ -679,6 +693,17 @@ impl AddCmd {
                             match entry {
                                 Ok(p) => {
                                     if p.is_file() && Self::is_outside_mediagit(&p, &mediagit_dir) {
+                                        // Check .mediagitignore for explicit glob results
+                                        if let Some(ref m) = matcher {
+                                            if let Ok(rel) = p.strip_prefix(repo_root) {
+                                                if m.is_ignored(rel, false) {
+                                                    if self.verbose {
+                                                        output::detail("ignored (.mediagitignore)", &p.display().to_string());
+                                                    }
+                                                    continue;
+                                                }
+                                            }
+                                        }
                                         if let Ok(abs_path) = dunce::canonicalize(&p) {
                                             files.push(abs_path);
                                         } else {
@@ -711,27 +736,45 @@ impl AddCmd {
             }
 
             if path.is_file() && Self::is_outside_mediagit(path, &mediagit_dir) {
+                // Check .mediagitignore for explicitly-named files
+                if let Some(ref m) = matcher {
+                    if let Ok(rel) = path.strip_prefix(repo_root) {
+                        if m.is_ignored(rel, false) {
+                            if !self.quiet {
+                                output::warning(&format!(
+                                    "'{}' is ignored by .mediagitignore — use --force to override",
+                                    path_str
+                                ));
+                            }
+                            continue;
+                        }
+                    }
+                }
                 if let Ok(abs_path) = dunce::canonicalize(path) {
                     files.push(abs_path);
                 } else {
                     files.push(path.to_path_buf());
                 }
             } else if path.is_dir() {
-                self.collect_files_recursive(path, &mediagit_dir, &mut files)?;
+                self.collect_files_recursive(path, repo_root, &mediagit_dir, &matcher, &mut files)?;
             }
         }
 
         Ok(files)
     }
 
-    /// Recursively collect all files from a directory
+    /// Recursively collect all files from a directory, respecting .mediagitignore.
     #[allow(clippy::only_used_in_recursion)]
     fn collect_files_recursive(
         &self,
         dir: &Path,
+        repo_root: &Path,
         mediagit_dir: &Path,
+        matcher: &Option<crate::ignore_rules::IgnoreMatcher>,
         files: &mut Vec<PathBuf>,
     ) -> Result<()> {
+        use crate::output;
+
         if !Self::is_outside_mediagit(dir, mediagit_dir) {
             return Ok(());
         }
@@ -747,6 +790,19 @@ impl AddCmd {
                 continue;
             }
 
+            // Check .mediagitignore before descending into dirs or staging files
+            if let Some(ref m) = matcher {
+                if let Ok(rel) = path.strip_prefix(repo_root) {
+                    let is_dir = path.is_dir();
+                    if m.is_ignored(rel, is_dir) {
+                        if self.verbose {
+                            output::detail("ignored (.mediagitignore)", &path.display().to_string());
+                        }
+                        continue; // skip file OR prune entire directory
+                    }
+                }
+            }
+
             if path.is_file() {
                 if let Ok(abs_path) = dunce::canonicalize(&path) {
                     files.push(abs_path);
@@ -754,7 +810,7 @@ impl AddCmd {
                     files.push(path);
                 }
             } else if path.is_dir() {
-                self.collect_files_recursive(&path, mediagit_dir, files)?;
+                self.collect_files_recursive(&path, repo_root, mediagit_dir, matcher, files)?;
             }
         }
 

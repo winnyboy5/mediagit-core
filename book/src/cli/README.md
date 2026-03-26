@@ -13,7 +13,6 @@ Essential commands for daily workflows:
 - [log](./log.md) - Show commit history
 - [diff](./diff.md) - Show differences
 - [show](./show.md) - Show object details
-- [track](./track.md) - Configure file tracking patterns
 
 ### Branch Management
 Working with branches:
@@ -45,10 +44,6 @@ Repository maintenance:
 - [fsck](./fsck.md) - File system check
 - [verify](./verify.md) - Verify object integrity
 - [stats](./stats.md) - Repository statistics
-- [filter](./filter.md) - Apply filter-driver transformations
-
-### Setup and Installation
-- [install](./install.md) - Install MediaGit hooks and filter drivers
 
 ## Global Options
 

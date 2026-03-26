@@ -17,13 +17,14 @@ mediagit add --jobs 16 assets/
 mediagit add --no-parallel assets/
 ```
 
-**Expected throughput** (validated benchmarks):
-| File type | Sequential | Parallel (16 cores) |
-|-----------|-----------|---------------------|
-| PSD (71 MB) | ~2 MB/s | ~35 MB/s |
-| MP4 (500 MB) | ~3 MB/s | ~20 MB/s |
-| CSV/text | ~5 MB/s | ~50 MB/s |
-| Pre-compressed (JPEG, zip) | ~80 MB/s | ~200 MB/s |
+**Expected throughput** (validated benchmarks, release build):
+| File type | Throughput | Notes |
+|-----------|-----------|-------|
+| PSD (72–181 MB) | 72–119 MB/s | Zstd Best; layer data compresses well |
+| MP4/MOV (5–398 MB) | 146–174 MB/s | Pre-compressed; store-mode, zero CPU overhead |
+| GLB (14–25 MB) | 3.0–5.2 MB/s | GLB parser + CDC chunking + Zstd |
+| WAV (55–57 MB) | 2.1–3.6 MB/s | RIFF parser + chunking (CPU-bound) |
+| Pre-compressed (JPEG, USDZ) | 25–182 MB/s | Direct write, no chunking |
 
 ## Compression Strategy
 

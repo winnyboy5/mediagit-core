@@ -2097,6 +2097,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
+name = "globset"
+version = "0.4.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52dfc19153a48bde0cbd630453615c8151bce3a5adfac7a0aebfbf0a1e1f57e3"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "google-cloud-auth"
 version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2718,6 +2731,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ignore"
+version = "0.4.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3d782a365a015e0f5c04902246139249abf769125006fbe7649e2ee88169b4a"
+dependencies = [
+ "crossbeam-deque",
+ "globset",
+ "log",
+ "memchr",
+ "regex-automata",
+ "same-file",
+ "walkdir",
+ "winapi-util",
+]
+
+[[package]]
 name = "image"
 version = "0.25.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3039,7 +3068,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-cli"
-version = "0.2.4-beta.1"
+version = "0.2.5-beta.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3051,6 +3080,7 @@ dependencies = [
  "dunce",
  "glob",
  "husky-rs",
+ "ignore",
  "indicatif",
  "mediagit-config",
  "mediagit-observability",
@@ -3072,7 +3102,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-compression"
-version = "0.2.4-beta.1"
+version = "0.2.5-beta.1"
 dependencies = [
  "anyhow",
  "brotli",
@@ -3088,7 +3118,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-config"
-version = "0.2.4-beta.1"
+version = "0.2.5-beta.1"
 dependencies = [
  "anyhow",
  "num_cpus",
@@ -3104,7 +3134,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-git"
-version = "0.2.4-beta.1"
+version = "0.2.5-beta.1"
 dependencies = [
  "git2",
  "hex",
@@ -3119,7 +3149,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-media"
-version = "0.2.4-beta.1"
+version = "0.2.5-beta.1"
 dependencies = [
  "image",
  "image_hasher",
@@ -3137,7 +3167,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-metrics"
-version = "0.2.4-beta.1"
+version = "0.2.5-beta.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3151,7 +3181,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-migration"
-version = "0.2.4-beta.1"
+version = "0.2.5-beta.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3167,7 +3197,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-observability"
-version = "0.2.4-beta.1"
+version = "0.2.5-beta.1"
 dependencies = [
  "anyhow",
  "thiserror 2.0.18",
@@ -3178,7 +3208,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-protocol"
-version = "0.2.4-beta.1"
+version = "0.2.5-beta.1"
 dependencies = [
  "anyhow",
  "futures",
@@ -3193,7 +3223,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-security"
-version = "0.2.4-beta.1"
+version = "0.2.5-beta.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3222,7 +3252,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-server"
-version = "0.2.4-beta.1"
+version = "0.2.5-beta.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3253,7 +3283,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-storage"
-version = "0.2.4-beta.1"
+version = "0.2.5-beta.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3277,7 +3307,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-test-utils"
-version = "0.2.4-beta.1"
+version = "0.2.5-beta.1"
 dependencies = [
  "assert_cmd",
  "dunce",
@@ -3287,7 +3317,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-versioning"
-version = "0.2.4-beta.1"
+version = "0.2.5-beta.1"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",

@@ -9,13 +9,13 @@
 
 ## 🎯 Status
 
-**Version**: v0.2.4-beta.1
+**Version**: v0.2.5-beta.1
 **Status**: 🚧 **BETA**
 **Features**: 100% complete (all P0–P3 items implemented)
 **Last Validated**: March 2026 — Linux & Windows, release build
 **🚨 WARNING 🚨**: This project is under active development. Be aware that large breaking changes may happen before 1.0 is reached.
 
-✅ **32 CLI commands validated end-to-end** — 0 crashes, 0 data corruption
+✅ **28 CLI commands validated end-to-end** — 0 crashes, 0 data corruption
 ✅ **27+ file types tested** (58 GB dataset) across video, audio, 3D, image, design, ML
 ✅ **All storage backends validated** — local, MinIO S3, push / pull / clone / fetch
 ✅ **Files up to 398 MB** staged and transferred; single-file scalability to 6 GB tested
@@ -32,9 +32,9 @@
 | **Exact dedup (CAS): exact duplicate** | 99.9% savings (CAS hit, 0.7 KB overhead) |
 | **Exact dedup (CAS): 3× identical MP4** | 66% savings |
 | **Exact dedup (CAS): small edit to large file** | 70–95% chunk reuse via CDC + CAS |
-| **Similarity delta: STL/OBJ text mesh** | 40–65% savings |
-| **Similarity delta: GLB/FBX binary** | 20–45% savings |
-| **Similarity delta: PSD/WAV** | 15–40% savings |
+| **Similarity delta: STL/OBJ text mesh** | 40–70% savings |
+| **Similarity delta: GLB/FBX binary** | 20–52% savings |
+| **Similarity delta: PSD/WAV** | 35–65% savings |
 
 ---
 
@@ -47,7 +47,7 @@ MediaGit is a Git-like version control system optimized for large media files. B
 Traditional Git struggles with large binary files. MediaGit solves this with:
 
 - **Intelligent Chunking**: Split large files for efficient storage and transfer
-- **Smart Compression**: Type-aware compression — lossless audio/RAW up to 40%, text/JSON up to 70%, pre-compressed video/JPEG stored as-is
+- **Smart Compression**: Type-aware compression — lossless audio/RAW up to 55%, text/JSON up to 70%, pre-compressed video/JPEG stored as-is
 - **Cloud-Native**: AWS S3, Azure Blob, Google Cloud Storage, MinIO
 - **Media Intelligence**: PSD layer merging, video timeline parsing, audio track handling
 - **High Performance**: 80–240 MB/s staging throughput for large files (release build)
@@ -111,19 +111,19 @@ curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/instal
 
 **Linux x86_64 — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.4-beta.1/mediagit-0.2.4-beta.1-x86_64-linux.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.5-beta.1/mediagit-0.2.5-beta.1-x86_64-linux.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **macOS Apple Silicon — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.4-beta.1/mediagit-0.2.4-beta.1-aarch64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.5-beta.1/mediagit-0.2.5-beta.1-aarch64-macos.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **Windows x86_64 (PowerShell):**
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.4-beta.1/mediagit-0.2.4-beta.1-x86_64-windows.zip" -OutFile mediagit.zip
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.5-beta.1/mediagit-0.2.5-beta.1-x86_64-windows.zip" -OutFile mediagit.zip
 Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 # Add to PATH:
 [Environment]::SetEnvironmentVariable("Path", "$env:Path;$env:LOCALAPPDATA\MediaGit\bin", "User")
@@ -132,8 +132,8 @@ Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 #### Docker
 
 ```bash
-docker pull ghcr.io/winnyboy5/mediagit-core:0.2.4-beta.1
-docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.4-beta.1 mediagit --version
+docker pull ghcr.io/winnyboy5/mediagit-core:0.2.5-beta.1
+docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.5-beta.1 mediagit --version
 ```
 
 #### From Source
@@ -153,11 +153,11 @@ cargo build --release
 
 | Platform | Archive |
 |----------|---------|
-| Linux x86_64 | `mediagit-0.2.4-beta.1-x86_64-linux.tar.gz` |
-| Linux ARM64 | `mediagit-0.2.4-beta.1-aarch64-linux.tar.gz` |
-| macOS Intel | `mediagit-0.2.4-beta.1-x86_64-macos.tar.gz` |
-| macOS Apple Silicon | `mediagit-0.2.4-beta.1-aarch64-macos.tar.gz` |
-| Windows x86_64 | `mediagit-0.2.4-beta.1-x86_64-windows.zip` |
+| Linux x86_64 | `mediagit-0.2.5-beta.1-x86_64-linux.tar.gz` |
+| Linux ARM64 | `mediagit-0.2.5-beta.1-aarch64-linux.tar.gz` |
+| macOS Intel | `mediagit-0.2.5-beta.1-x86_64-macos.tar.gz` |
+| macOS Apple Silicon | `mediagit-0.2.5-beta.1-aarch64-macos.tar.gz` |
+| Windows x86_64 | `mediagit-0.2.5-beta.1-x86_64-windows.zip` |
 
 Each archive includes `mediagit` (CLI) and `mediagit-server` binaries, plus a `.sha256` checksum file.
 
@@ -197,7 +197,7 @@ mediagit-server --config server.toml
 
 ## CLI Reference
 
-All 32 MediaGit commands, grouped by workflow:
+All 28 MediaGit commands, grouped by workflow:
 
 ### Repository Setup
 | Command | Description |
@@ -257,14 +257,8 @@ All 32 MediaGit commands, grouped by workflow:
 | `mediagit fsck` | Check repository integrity — detect corruption or missing objects |
 | `mediagit verify <commit>` | Verify commit signatures and data integrity |
 
-### Git Interop (Migration)
-| Command | Description |
-|---------|-------------|
-| `mediagit filter clean` | Filter driver: stage files through MediaGit on `git add` |
-| `mediagit filter smudge` | Filter driver: restore files through MediaGit on `git checkout` |
-| `mediagit install` | Install MediaGit as a Git filter driver in `.gitattributes` |
-| `mediagit track <pattern>` | Configure a file pattern to be managed by MediaGit |
-| `mediagit untrack <pattern>` | Stop managing a file pattern with MediaGit |
+> **Git Interop**: Migration commands (`filter`, `install`, `track`, `untrack`) were removed in v0.2.4.
+> The `mediagit-git` crate remains in the workspace for a future migration milestone.
 
 ### Utility
 | Command | Description |
@@ -398,13 +392,13 @@ Compression strategy is selected automatically per file type. Pre-compressed for
 | Office documents | DOCX, XLSX, PPTX, ODT | Store | ~0% | ZIP containers with compressed XML |
 | Creative (PDF containers) | AI, INDD | Store | ~0% | PDF-based; recompression expands |
 | ML columnar data | Parquet, Arrow, Feather, ORC | Store | ~0% | Already columnar-compressed |
-| Audio (lossless) | WAV, AIFF, ALAC | Zstd Best | 20–40% | Uncompressed PCM; content-dependent |
-| Audio (FLAC) | FLAC | Zstd Best | 5–15% | FLAC already compressed; limited gain |
+| Audio (lossless) | WAV, AIFF, ALAC | Zstd Best | 20–55% | Uncompressed PCM; content-dependent |
+| Audio (FLAC) | FLAC | Zstd Best | 0–15% | FLAC already compressed; limited gain |
 | Raw images | TIFF, BMP, EXR, HDR, RAW | Zstd Best | 30–60% | Uncompressed raster; compresses well |
-| 3D models (mesh) | STL, OBJ, PLY | Zstd Best | 40–65% | Triangle soup; float data compresses well |
-| 3D models (binary) | FBX, GLB, GLTF, DAE | Zstd Best | 20–45% | Mixed binary+metadata |
-| PSD / PSB | PSD, PSB | Zstd Best | 15–35% | Layer data + compressed internal streams |
-| Documents | PDF, SVG, EPS | Zstd Default | 20–50% | Mixed binary/text |
+| 3D models (mesh) | STL, OBJ, PLY | Zstd Best | 40–73% | Triangle soup; float data compresses well |
+| 3D models (binary) | FBX, GLB, GLTF, DAE | Zstd Best | 20–83% | Mixed binary+metadata; DAE (XML) compresses very well |
+| PSD / PSB | PSD, PSB | Zstd Best | 35–65% | Layer data + compressed internal streams |
+| Documents | PDF, SVG, EPS | Zstd Default | 20–81% | Mixed binary/text; vector formats compress very well |
 | DCC project files | AEP, PRPROJ, BLEND, MA, MB, C4D | Zstd Default | 10–35% | Binary project data |
 | Audio projects | .als, .ptx, .logic, .flp | Zstd Default | 10–30% | DAW project files |
 | Game projects | .unity, .uasset, .tscn | Zstd Default | 10–35% | Game engine formats |
@@ -412,7 +406,7 @@ Compression strategy is selected automatically per file type. Pre-compressed for
 | ML checkpoints | .ckpt, .pt, .pth | Zstd Fast | 5–20% | Training weights |
 | Text / Code / Data | TXT, JSON, XML, YAML, TOML, CSV | Brotli Default | 50–75% | Best for structured text |
 
-> **Average across a mixed media project: ~30% storage reduction.** Results vary by content — text-heavy projects save more, video-heavy projects less.
+> **Average across a mixed media project: ~30–46% storage reduction.** Results vary by content — text-heavy and 3D-heavy projects save more, video-heavy projects less.
 
 ### Comparison with Git LFS and Perforce
 
@@ -735,7 +729,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 ### v0.2.0 ✅ — March 5, 2026
 *Major features — storage efficiency and security*
 
-- [x] Dual-layer delta encoding (bsdiff + sliding-window)
+- [x] Delta encoding with zstd dictionary compression
 - [x] Delta chain depth cap (MAX_DELTA_DEPTH=10) — prevents read-amplification
 - [x] Adaptive chunk sizes (1–8 MB) — replaces fixed 64 MB chunks
 - [x] Per-type similarity thresholds for delta compression
@@ -747,7 +741,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] S3/MinIO bucket auto-create on first use
 - [x] 194 tests passing on release build (0 failures)
 
-### v0.2.1 (Current Beta) — March 2026
+### v0.2.1 ✅ — March 2026
 *Stability and distribution*
 
 - [x] Pre-built release binaries on GitHub Releases (5 platforms)
@@ -758,7 +752,28 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] Full documentation sync: book, architecture, CLI reference
 - [x] Security audit clean (`cargo audit`)
 - [x] `branch rename` argument order aligned with git semantics (`OLD NEW`)
-- [x] Validated on Linux + Windows; all 32 commands stable across both platforms
+- [x] Validated on Linux + Windows; all commands stable across both platforms
+
+### v0.2.3 ✅ — March 2026
+*Progress reporting and chunked staging improvements*
+
+- [x] Fixed `add` ETA/speed reporting for skipped and large files
+- [x] Per-chunk `on_progress` callback for continuous byte-level progress during multi-GB ingestion
+- [x] Security: upgraded `quinn-proto` (RUSTSEC-2026-0037)
+
+### v0.2.5-beta.1 (Current Beta) — March 2026
+*Delta engine rewrite, CLI refinements, server improvements*
+
+- [x] Delta encoder replaced: suffix-array sliding-window → **zstd dictionary compression** (+1.3–2.1pp savings, 1.4–2.4× faster, 73% less code)
+- [x] Removed `filter`, `install`, `track`, `untrack` commands (git migration deferred)
+- [x] `bisect replay` executes scripted bisect sessions from log files
+- [x] `log <REVISION>` resolves branch names, tags, and abbreviated OIDs
+- [x] `stash push` as git-compatible alias for `stash save`
+- [x] `verify [COMMIT]` optional positional argument for targeted verification
+- [x] Abbreviated OID resolution across `show`, `revert`, `verify`, and all revision-accepting commands
+- [x] HTTP/2 adaptive window tuning (2–4× WAN throughput)
+- [x] Raw file serving endpoints (`GET /{repo}/files/{*path}`, `GET /{repo}/tree`)
+- [x] `/health` route alias alongside `/healthz`
 
 ### v0.3.0 and beyond
 
@@ -801,7 +816,7 @@ aws iam get-user-policy --user-name mediagit-user --policy-name MediaGitS3Policy
 ```bash
 # The /releases/latest API returns 404 when only pre-releases exist.
 # Pass the version explicitly:
-VERSION=0.2.1-beta.1 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
+VERSION=0.2.5-beta.1 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 
 # Or on Windows PowerShell:
 iwr -UseBasicParsing https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.ps1 | iex
@@ -868,4 +883,4 @@ Special thanks to:
 
 **Made with 🦀 and ❤️ by the MediaGit Contributors**
 
-**Status**: Beta | **Version**: v0.2.4-beta.1 | **Updated**: March 12, 2026
+**Status**: Beta | **Version**: v0.2.5-beta.1 | **Updated**: March 26, 2026

@@ -14,6 +14,7 @@
 #![allow(missing_docs)] // binary crate — documentation is in book/ not rustdoc
 
 mod commands;
+mod ignore_rules;
 mod output;
 mod progress;
 mod repo;
