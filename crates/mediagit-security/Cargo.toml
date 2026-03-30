@@ -46,7 +46,7 @@ chrono.workspace = true
 # Authentication (optional)
 jsonwebtoken = { version = "10.3", features = ["rust_crypto"], optional = true }
 bcrypt = { version = "0.19", optional = true }
-uuid = { version = "1.10", features = ["v4", "serde"], optional = true }
+uuid = { version = "1.23", features = ["v4", "serde"], optional = true }
 
 # HTTP/Web framework (for middleware)
 axum = { workspace = true, optional = true }
