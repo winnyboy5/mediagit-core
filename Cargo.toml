@@ -77,7 +77,7 @@ chrono = { version = "0.4.44", features = ["serde"] }
 # AWS SDK (using ring crypto backend to avoid aws-lc-sys build issues on Windows)
 # rt-tokio feature provides tokio sleep implementation for async operations
 aws-config = { version = "1.8", default-features = false, features = ["behavior-version-latest", "rustls", "rt-tokio"] }
-aws-sdk-s3 = { version = "1.124", default-features = false, features = ["behavior-version-latest", "rustls", "rt-tokio"] }
+aws-sdk-s3 = { version = "1.126", default-features = false, features = ["behavior-version-latest", "rustls", "rt-tokio"] }
 
 # HTTP Client
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "http2"] }
