@@ -3,7 +3,7 @@
 
 [app]
 name = "mediagit"
-version = "0.2.5-beta.1"
+version = "0.2.6-beta.1"
 environment = "development"  # development, staging, production
 port = 8080
 host = "127.0.0.1"

@@ -421,6 +421,6 @@ Part of the MediaGit project. See LICENSE in repository root.
 
 ---
 
-**Version**: 0.2.5-beta.1
+**Version**: 0.2.6-beta.1
 **Last Updated**: 2026-03-06
 **Status**: Production Ready

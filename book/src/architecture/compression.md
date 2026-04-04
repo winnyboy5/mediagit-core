@@ -66,13 +66,19 @@ fn select_algorithm(path: &Path, size: u64) -> CompressionAlgorithm {
 
 ## Performance Benchmarks
 
-| File Type | Size | Algorithm | Ratio | Time |
-|-----------|------|-----------|-------|------|
-| PSD (Photoshop) | 100 MB | zstd-3 | 2.8x | 1.2s |
-| Blend (Blender) | 50 MB | zstd-3 | 3.1x | 0.6s |
-| MP4 (Video) | 200 MB | none | 1.0x | 0.1s |
-| TXT (Code) | 10 MB | brotli-6 | 12x | 2.5s |
-| WAV (Audio) | 80 MB | zstd-3 | 1.9x | 0.9s |
+> Verified via standalone deep test suite (v0.2.6-beta.1, 2026-04-03).
+
+| File Type | Size | Algorithm | Savings | Throughput |
+|-----------|------|-----------|---------|------------|
+| PSD-xl (Photoshop) | 213 MB | zstd-19 | 70.9% (3.44x) | 4.0 MB/s |
+| FBX-ascii (3D) | 16 MB | zstd/brotli | 81.0% (5.27x) | 0.27 MB/s |
+| DAE (Collada 3D) | 8.6 MB | zstd/brotli | 81.4% (5.37x) | 0.39 MB/s |
+| SVG (Vector) | 496 KB | brotli | 80.8% (5.20x) | 1.90 MB/s |
+| WAV (Uncompressed Audio) | 54 MB | zstd-19 | 54.1% (2.18x) | 1.04 MB/s |
+| GLB (3D Binary) | 13 MB | zstd | 50.6% (2.03x) | 0.77 MB/s |
+| MP4 (Video) | 4.9 MB | Store | 0% (1.00x) | 27 MB/s |
+| FLAC (Audio) | 37 MB | Store | 0% (1.00x) | 1.28 MB/s |
+| ZIP (Archive) | 656 MB | Store | 0% (1.00x) | 6.62 MB/s |
 
 ## Configuration
 
