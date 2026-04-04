@@ -5,6 +5,108 @@ All notable changes to MediaGit will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.2.6-beta.1] - 2026-04-03
+
+
+### Changed
+- **`STREAMING_THRESHOLD` lowered 100MB → 5MB** (S4, phase 4 of item #4) — `add` and
+  `status` now route all files ≥ 5MB through `write_chunked_from_file()`, which uses
+  mmap + `chunk_media_aware()` for structure-aware deduplication. Previously only files
+  ≥ 100MB got format-aware chunking; the 5-100MB range received generic CDC with no
+  structural parsing. Both constants updated together to prevent OID mismatches between
+  the two commands. (`crates/mediagit-cli/src/commands/add.rs:507`,
+  `crates/mediagit-cli/src/commands/status.rs:199`)
+- **GLB BIN large-payload CDC sub-chunking** (S5, phase 5 of item #4) — `chunk_glb()`
+  now emits each GLB section header (8 bytes) as a stable `Metadata` chunk, then
+  CDC-subdivides BIN payloads \> 4MB using FastCDC (1MB avg / 512KB min / 4MB max),
+  matching the MKV large-Cluster pattern. Small BIN chunks (≤ 4MB) and all JSON chunks
+  remain as single chunks. Common for scanned meshes, photogrammetry, and terrain models
+  where the binary buffer is 20-200MB. (`crates/mediagit-versioning/src/chunking.rs`)
+- **mmap-based format-aware chunking for all file sizes** — `collect_file_chunks_blocking()`
+  now memory-maps files of any size and routes them through `chunk_media_aware()`, eliminating
+  the previous StreamCDC fallback that made files ≥100 MB get generic CDC chunking with no
+  format awareness. mmap fails gracefully to StreamCDC on network/FUSE filesystems and 32-bit
+  targets. (`crates/mediagit-versioning/src/chunking.rs`)
+- **MP4 mdat CDC sub-chunking** — `chunk_mp4()` emits the `mdat` atom header as a stable
+  `Metadata` chunk, then CDC-subdivides the payload using FastCDC (2MB avg / 1MB min / 8MB max)
+  to produce byte-exact `VideoStream` chunks. Fragmented MP4 (DASH/fMP4, detected by `moof`
+  atoms) follows the same path. (`crates/mediagit-versioning/src/chunking.rs`)
+- **MKV Cluster CDC sub-chunking** — `chunk_matroska()` emits each Cluster header as a stable
+  `Metadata` chunk, then CDC-subdivides the cluster payload using FastCDC (2MB avg / 1MB min /
+  8MB max) for byte-exact `VideoStream` chunks. Removes the earlier per-stream block-walking
+  approach which violated the reconstruction invariant for interleaved A/V data.
+  (`crates/mediagit-versioning/src/chunking.rs`)
+- **Adaptive CDC params for video content** — FastCDC subdivision within `mdat` and Cluster
+  now uses video-optimized parameters (2 MB avg / 1 MB min / 8 MB max) instead of the generic
+  1 MB / 512 KB / 4 MB, improving delta dictionary matching for large video sub-elements.
+  (`crates/mediagit-versioning/src/chunking.rs`)
+- **Lower parallel processing threshold** — `write_chunked_parallel()` activates parallel
+  chunk I/O at 2 chunks instead of 4; even 2-chunk files now benefit from concurrent storage
+  writes. (`crates/mediagit-versioning/src/odb.rs`)
+- **Delta encoding skip for pre-compressed VideoStream chunks** — streaming workers skip the
+  delta-encode attempt for `ChunkType::VideoStream` chunks when the file type uses
+  `CompressionStrategy::Store` (MP4, MOV, AVI, MKV, WebM, FLV, WMV, MPEG). Saves CPU on
+  futile delta attempts against already-compressed H.264/H.265 frames; audio and metadata
+  chunks are unaffected. (`crates/mediagit-versioning/src/odb.rs`)
+- **Matroska EBML chunking: per-element metadata splitting** — each top-level metadata
+  element (Info, Tracks, SeekHead, Cues, Chapters, Tags) now gets its own chunk instead
+  of being grouped into one monolithic metadata blob. Re-tagging a video only invalidates
+  the Tags chunk, not the entire metadata block. Consistent with MP4's per-atom approach.
+  (`crates/mediagit-versioning/src/chunking.rs`)
+- **Matroska large Cluster CDC subdivision** — Clusters > 4MB are now sub-chunked using
+  FastCDC (1MB avg / 512KB min / 4MB max), matching the MP4 `mdat` subdivision strategy.
+  Cluster header emitted separately for stable dedup across re-muxes.
+  (`crates/mediagit-versioning/src/chunking.rs`)
+- **AVI/RIFF chunking rewrite: movi CDC descent + OpenDML AVIX support** — rewrote
+  `chunk_avi()` to walk at the RIFF-block level, handling both AVI 1.0 (`RIFF/AVI `) and
+  AVI 2.0 OpenDML (`RIFF/AVIX`) extension blocks. Descends into `LIST/movi` and CDC-subdivides
+  its payload using FastCDC (2MB avg / 1MB min / 8MB max) for byte-exact `VideoStream` chunks.
+  Structural chunks (`LIST/hdrl`, `LIST/INFO`, `idx1`, `JUNK`) emitted as `Metadata`.
+  (`crates/mediagit-versioning/src/chunking.rs`)
+
+### Added
+- **GLB unit tests** (6 tests) — `test_glb_small_bin_single_chunk`,
+  `test_glb_large_bin_is_subdivided`, `test_glb_json_chunk_always_single_metadata`,
+  `test_glb_large_bin_different_data_different_chunk_ids`, `test_glb_no_bin_sections_ok`,
+  `test_glb_invalid_data_falls_back`. (`crates/mediagit-versioning/src/chunking.rs`)
+- **Matroska chunking tests** — `test_chunk_matroska_metadata_splitting` verifies each
+  metadata element (Info, Tracks, Tags) is emitted as its own chunk with distinct hashes.
+  `test_chunk_matroska_large_cluster_subdivision` verifies 5MB Clusters get CDC-subdivided
+  into multiple chunks. (`crates/mediagit-versioning/src/chunking.rs`)
+- **AVI chunking tests** — `test_chunk_avi_movi_descends_into_subchunks` verifies movi
+  payload is CDC-subdivided into `VideoStream` chunks and reconstruction is byte-exact.
+  (`crates/mediagit-versioning/src/chunking.rs`)
+
+### Fixed
+- **Branch switch reconstruction size mismatch** — `branch switch` produced
+  `Reconstructed size mismatch` errors (extra or missing bytes) for AVI, MP4, and MKV files.
+  Root cause: per-stream batching helpers (`chunk_mdat_by_tracks`, `chunk_cluster_by_tracks`,
+  `parse_avi_movi_subchunks`) accumulated non-contiguous interleaved bytes but stored
+  `(offset, size)` as if contiguous; `fill_coverage_gaps` then re-read those byte ranges
+  from the file, duplicating them (+22MB for a 228MB AVI). Fixed by replacing all
+  per-stream batching with CDC (`chunk_fastcdc`, 2MB/1MB/8MB) which guarantees
+  `chunk.data == file[offset..offset+size]`. Added `fill_coverage_gaps` as a free function
+  called at the end of all three container parsers to patch EBML Void/CRC-32 and other
+  structural gaps that format parsers intentionally skip. Covers all video/audio containers:
+  AVI, MP4/MOV/M4V/M4A/3GP, MKV/WebM/MKA/MK3D. (`crates/mediagit-versioning/src/chunking.rs`)
+- **`mka`/`mk3d` missing from ObjectType** — Matroska Audio (`.mka`) and Matroska 3D
+  (`.mk3d`) extensions now map to `ObjectType::Mkv` in the smart compressor, ensuring
+  they receive `CompressionStrategy::Store` instead of wastefully compressing
+  pre-compressed media data. (`crates/mediagit-compression/src/smart_compressor.rs`)
+- **AVI LIST chunk type detection was dead code** — the old `chunk_avi()` matched on
+  `b"movi"` and `b"hdrl"` as FourCC values, but RIFF LIST chunks always have FourCC
+  `b"LIST"` with the list type at offset +8. The match arms never fired, causing the
+  entire `movi` LIST (all interleaved A/V data) to be stored as one opaque chunk with
+  zero dedup potential. Now correctly reads the list type field.
+  (`crates/mediagit-versioning/src/chunking.rs`)
+- **AVI chunk size overflow on 32-bit targets** — `block_end` / `data_end` calculations
+  used plain addition that could wrap on 32-bit `usize` with crafted RIFF headers.
+  Switched to `saturating_add()` in all three AVI parsing functions.
+  (`crates/mediagit-versioning/src/chunking.rs`)
+
+
+---
+
 ## [v0.2.5-beta.1] - 2026-03-26
 
 ### Added
@@ -215,6 +317,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dependency security audits in CI
 - Encryption at rest with Argon2 key derivation
 
+[Unreleased]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.6-beta.3...HEAD
+[v0.2.6-beta.3]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.6-beta.2...v0.2.6-beta.3
+[v0.2.6-beta.2]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.6-beta.1...v0.2.6-beta.2
+[v0.2.6-beta.1]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.5-beta.1...v0.2.6-beta.1
+[v0.2.5-beta.1]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.4-beta.1...v0.2.5-beta.1
 [v0.2.4-beta.1]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.3-beta.1...v0.2.4-beta.1
 [v0.2.3-beta.1]:https://github.com/winnyboy5/mediagit-core/compare/v0.2.1-beta.2...v0.2.3-beta.1
 [v0.2.1-beta.2]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.1-beta.1...v0.2.1-beta.2

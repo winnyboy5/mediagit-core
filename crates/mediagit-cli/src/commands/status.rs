@@ -196,7 +196,9 @@ impl StatusCmd {
                 // OPTIMIZATION 1: Size-based quick check and streaming for large files
                 if let Ok(metadata) = std::fs::metadata(&full_path) {
                     let file_size = metadata.len();
-                    const STREAMING_THRESHOLD: u64 = 100 * 1024 * 1024; // 100MB
+                    // 5MB: matches add.rs STREAMING_THRESHOLD — both commands must agree on the
+                    // hash path for every file to avoid false "modified" reports.
+                    const STREAMING_THRESHOLD: u64 = 5 * 1024 * 1024; // 5MB
 
                     // Compute hash - use streaming for large files
                     let working_oid = if file_size >= STREAMING_THRESHOLD {

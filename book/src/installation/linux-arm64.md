@@ -20,8 +20,8 @@ The script auto-detects ARM64 architecture and downloads the correct binary from
 sudo apt update && sudo apt upgrade
 
 # Install MediaGit
-wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.5-beta.1/mediagit-0.2.5-beta.1-aarch64-linux.tar.gz
-tar -xzf mediagit-0.2.5-beta.1-aarch64-linux.tar.gz
+wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.6-beta.1/mediagit-0.2.6-beta.1-aarch64-linux.tar.gz
+tar -xzf mediagit-0.2.6-beta.1-aarch64-linux.tar.gz
 sudo mv mediagit /usr/local/bin/
 sudo chmod +x /usr/local/bin/mediagit
 
@@ -60,10 +60,10 @@ sudo apt install mediagit-core
 
 ```bash
 # Download ARM64 build
-wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.5-beta.1/mediagit-0.2.5-beta.1-aarch64-linux.tar.gz
+wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.6-beta.1/mediagit-0.2.6-beta.1-aarch64-linux.tar.gz
 
 # Install
-tar -xzf mediagit-0.2.5-beta.1-aarch64-linux.tar.gz
+tar -xzf mediagit-0.2.6-beta.1-aarch64-linux.tar.gz
 sudo mv mediagit /usr/local/bin/
 sudo chmod +x /usr/local/bin/mediagit
 ```
@@ -102,10 +102,10 @@ curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/instal
 
 ```bash
 # Download ARM64 binary
-wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.5-beta.1/mediagit-0.2.5-beta.1-aarch64-linux.tar.gz
+wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.6-beta.1/mediagit-0.2.6-beta.1-aarch64-linux.tar.gz
 
 # Extract and install
-tar -xzf mediagit-0.2.5-beta.1-aarch64-linux.tar.gz
+tar -xzf mediagit-0.2.6-beta.1-aarch64-linux.tar.gz
 sudo mv mediagit /usr/local/bin/
 sudo chmod +x /usr/local/bin/mediagit
 

@@ -107,8 +107,6 @@ struct AuthorStat {
 #[derive(Debug, Default)]
 struct FileStats {
     total_files: u64,
-    #[allow(dead_code)]
-    total_size_estimate: u64,
     media_files: u64,
     text_files: u64,
     other_files: u64,

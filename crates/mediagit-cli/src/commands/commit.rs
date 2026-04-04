@@ -218,17 +218,18 @@ impl CommitCmd {
             }
         } else {
             let name = std::env::var("MEDIAGIT_AUTHOR_NAME").unwrap_or_else(|_| {
-                // config.toml [author].name takes priority over generic $USER
+                // Priority: config.toml [author].name > $USER > fallback
                 config.author.name.clone().unwrap_or_else(|| {
                     std::env::var("USER").unwrap_or_else(|_| "Unknown".to_string())
                 })
             });
             let email = std::env::var("MEDIAGIT_AUTHOR_EMAIL").unwrap_or_else(|_| {
-                config
-                    .author
-                    .email
-                    .clone()
-                    .unwrap_or_else(|| "unknown@localhost".to_string())
+                config.author.email.clone().unwrap_or_else(|| {
+                    // Derive email from $USER@localhost if available
+                    std::env::var("USER")
+                        .map(|u| format!("{}@localhost", u))
+                        .unwrap_or_else(|_| "unknown@localhost".to_string())
+                })
             });
             (name, email)
         };

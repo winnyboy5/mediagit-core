@@ -49,6 +49,7 @@ coverage/
 # Documentation
 # mdBook build output (generated HTML) - exclude built docs
 book/book/
+PROJECT_INDEX.md
 
 # Other documentation build artifacts
 docs/_build/

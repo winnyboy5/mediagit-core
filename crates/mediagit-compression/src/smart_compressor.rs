@@ -41,6 +41,7 @@ pub enum ObjectType {
     Raw,
     Exr,
     Hdr,
+    Dpx,  // DPX digital intermediate (uncompressed frames, VFX)
 
     // Video formats (typically already compressed)
     Mp4,
@@ -51,6 +52,7 @@ pub enum ObjectType {
     Flv,
     Wmv,
     Mpg,
+    Mxf,  // MXF container (broadcast/VFX professional)
 
     // Audio formats (compressed)
     Mp3,
@@ -181,31 +183,47 @@ impl ObjectType {
             "bmp" | "dib" => ObjectType::Bmp,
             "psd" | "psb" => ObjectType::AdobePhotoshop, // Moved to creative projects
             "raw" | "cr2" | "cr3" | "nef" | "arw" | "dng" | "orf" | "rw2" => ObjectType::Raw,
+            // Cinema camera RAW (VFX/broadcast)
+            "braw" | "r3d" | "ari" | "arriraw" | "cine" | "crm" => ObjectType::Raw,
             "exr" => ObjectType::Exr,
             "hdr" | "pic" => ObjectType::Hdr,
+            "dpx" => ObjectType::Dpx,
 
             // Video
             "mp4" | "m4v" => ObjectType::Mp4,
             "mov" | "qt" => ObjectType::Mov,
             "avi" => ObjectType::Avi,
-            "mkv" => ObjectType::Mkv,
+            "mkv" | "mk3d" => ObjectType::Mkv,
             "webm" => ObjectType::Webm,
+            "mka" => ObjectType::Mkv,
             "flv" | "f4v" => ObjectType::Flv,
             "wmv" | "asf" => ObjectType::Wmv,
             "mpg" | "mpeg" | "m2v" => ObjectType::Mpg,
+            "mxf" => ObjectType::Mxf,
+            // MPEG transport streams and legacy compressed video → Store
+            // Note: .ts/.mts are also TypeScript extensions; .m2ts/.vob are unambiguously video
+            "m2ts" | "vob" | "m2p" => ObjectType::Mpg,
+            // Mobile video containers → Store
+            "3gp" | "3g2" | "3gpp" | "3gpp2" => ObjectType::Mp4,
+            // Legacy compressed video → Store
+            "rm" | "rmvb" | "rv" => ObjectType::Flv,
 
             // Audio (compressed)
             "mp3" => ObjectType::Mp3,
             "aac" => ObjectType::Aac,
-            "m4a" => ObjectType::Aac, // Default m4a to AAC
+            "m4a" | "m4b" | "m4r" => ObjectType::Aac, // AAC in MPEG-4 container
             "ogg" | "oga" => ObjectType::Ogg,
             "opus" => ObjectType::Opus,
+            // Additional compressed audio formats → Store
+            "wma" | "amr" | "awb" => ObjectType::Aac,
 
             // Audio (uncompressed/lossless)
             "flac" => ObjectType::Flac,
             "wav" => ObjectType::Wav,
             "aiff" | "aif" | "aifc" => ObjectType::Aiff,
             "alac" => ObjectType::Alac,
+            // Additional lossless audio → Zstd Best
+            "ape" | "wv" | "wvp" => ObjectType::Flac,
 
             // Documents
             "pdf" => ObjectType::Pdf,
@@ -229,6 +247,14 @@ impl ObjectType {
             "gz" | "gzip" => ObjectType::Gz,
             "7z" => ObjectType::SevenZ,
             "rar" => ObjectType::Rar,
+            // Additional compressed archive formats → Store
+            "bz2" | "bzip2" | "xz" | "lzma" | "lz4" | "zst" | "zstd" | "lz" | "z" | "br" => {
+                ObjectType::Gz
+            }
+            // ZIP-based app packages and installers → Store
+            "whl" | "egg" | "apk" | "ipa" | "aab" | "jar" | "war" | "ear" | "crx" | "xpi" => {
+                ObjectType::Zip
+            }
 
             // ML/Data formats (internally compressed)
             "parquet" | "arrow" | "feather" | "orc" | "avro" => ObjectType::Parquet,
@@ -335,9 +361,14 @@ impl ObjectType {
             return ObjectType::Gif;
         }
 
-        // WEBP: RIFF....WEBP
-        if data.len() >= 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP" {
-            return ObjectType::Webp;
+        // RIFF container: dispatch by subtype at bytes 8-11
+        if data.len() >= 12 && data.starts_with(b"RIFF") {
+            return match &data[8..12] {
+                b"WEBP" => ObjectType::Webp,
+                b"WAVE" => ObjectType::Wav,
+                b"AVI " => ObjectType::Avi,
+                _ => ObjectType::Unknown,
+            };
         }
 
         // TIFF: 49 49 2A 00 (little-endian) or 4D 4D 00 2A (big-endian)
@@ -374,6 +405,66 @@ impl ObjectType {
             return ObjectType::Gz;
         }
 
+        // MKV/WebM: EBML header (Matroska container)
+        if data.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+            return ObjectType::Mkv;
+        }
+
+        // FLAC: "fLaC"
+        if data.starts_with(b"fLaC") {
+            return ObjectType::Flac;
+        }
+
+        // EXR: OpenEXR magic
+        if data.starts_with(&[0x76, 0x2F, 0x31, 0x01]) {
+            return ObjectType::Exr;
+        }
+
+        // PSD/PSB: "8BPS"
+        if data.starts_with(&[0x38, 0x42, 0x50, 0x53]) {
+            return ObjectType::AdobePhotoshop;
+        }
+
+        // 7-Zip: 37 7A BC AF 27 1C
+        if data.len() >= 6 && data.starts_with(&[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C]) {
+            return ObjectType::SevenZ;
+        }
+
+        // RAR5: "Rar!\x1A\x07"
+        if data.len() >= 6 && data.starts_with(&[0x52, 0x61, 0x72, 0x21, 0x1A, 0x07]) {
+            return ObjectType::Rar;
+        }
+
+        // XZ: FD 37 7A 58 5A 00
+        if data.len() >= 6 && data.starts_with(&[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00]) {
+            return ObjectType::Gz;
+        }
+
+        // Bzip2: "BZh"
+        if data.starts_with(&[0x42, 0x5A, 0x68]) {
+            return ObjectType::Gz;
+        }
+
+        // Zstd frame: 28 B5 2F FD
+        if data.starts_with(&[0x28, 0xB5, 0x2F, 0xFD]) {
+            return ObjectType::Gz;
+        }
+
+        // LZ4 frame: 04 22 4D 18
+        if data.starts_with(&[0x04, 0x22, 0x4D, 0x18]) {
+            return ObjectType::Gz;
+        }
+
+        // MP3: ID3 tag at start
+        if data.starts_with(b"ID3") {
+            return ObjectType::Mp3;
+        }
+
+        // MP3: sync word (conservative: require >32 bytes + valid sync bits)
+        if data.len() > 32 && data[0] == 0xFF && (data[1] & 0xE0) == 0xE0 {
+            return ObjectType::Mp3;
+        }
+
         ObjectType::Unknown
     }
 
@@ -396,6 +487,7 @@ impl ObjectType {
                 | ObjectType::Flv
                 | ObjectType::Wmv
                 | ObjectType::Mpg
+                | ObjectType::Mxf
                 | ObjectType::Mp3
                 | ObjectType::Aac
                 | ObjectType::Ogg
@@ -431,7 +523,8 @@ impl ObjectType {
             | ObjectType::Bmp
             | ObjectType::Raw
             | ObjectType::Exr
-            | ObjectType::Hdr => ObjectCategory::Image,
+            | ObjectType::Hdr
+            | ObjectType::Dpx => ObjectCategory::Image,
 
             ObjectType::Mp4
             | ObjectType::Mov
@@ -440,7 +533,8 @@ impl ObjectType {
             | ObjectType::Webm
             | ObjectType::Flv
             | ObjectType::Wmv
-            | ObjectType::Mpg => ObjectCategory::Video,
+            | ObjectType::Mpg
+            | ObjectType::Mxf => ObjectCategory::Video,
 
             ObjectType::Mp3
             | ObjectType::Aac
@@ -577,13 +671,16 @@ impl CompressionStrategy {
             | ObjectType::GpuTexture => CompressionStrategy::Store,
 
             // Uncompressed images: Zstd best compression
+            // DPX: 10/12/16-bit uncompressed frames, highly compressible
             ObjectType::Tiff
             | ObjectType::Bmp
             | ObjectType::Raw
             | ObjectType::Exr
-            | ObjectType::Hdr => CompressionStrategy::Zstd(CompressionLevel::Best),
+            | ObjectType::Hdr
+            | ObjectType::Dpx => CompressionStrategy::Zstd(CompressionLevel::Best),
 
             // Already compressed video: store without recompression
+            // MXF wraps compressed codecs (XDCAM, DNxHD, H.264) in professional environments
             ObjectType::Mp4
             | ObjectType::Mov
             | ObjectType::Avi
@@ -591,7 +688,8 @@ impl CompressionStrategy {
             | ObjectType::Webm
             | ObjectType::Flv
             | ObjectType::Wmv
-            | ObjectType::Mpg => CompressionStrategy::Store,
+            | ObjectType::Mpg
+            | ObjectType::Mxf => CompressionStrategy::Store,
 
             // Already compressed audio: store without recompression
             ObjectType::Mp3 | ObjectType::Aac | ObjectType::Ogg | ObjectType::Opus => {
@@ -715,6 +813,71 @@ impl CompressionStrategy {
     }
 }
 
+/// Codec-level compression strategy for individual chunks inside video containers.
+///
+/// Unlike file-level strategy (which treats the whole container as pre-compressed),
+/// this picks optimal compression per demuxed stream chunk based on the actual codec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ChunkCodecHint {
+    /// High-entropy lossy video (H.264, H.265, VP9, AV1) — already compressed
+    HighEntropyVideo,
+    /// Low-entropy / intra-only video (ProRes, DNxHR, JPEG2000) — moderate compressibility
+    IntraOnlyVideo,
+    /// Raw / uncompressed video — highly compressible
+    RawVideo,
+    /// Lossy compressed audio (AAC, Opus, MP3, Vorbis) — already compressed
+    CompressedAudio,
+    /// Lossless / uncompressed audio (PCM, FLAC, ALAC) — compressible
+    LosslessAudio,
+    /// Text subtitles — highly compressible
+    TextSubtitle,
+    /// Bitmap subtitles (PGS, VobSub) — moderately compressible
+    BitmapSubtitle,
+    /// Container metadata — compressible
+    Metadata,
+    /// Unknown codec — use file-level strategy
+    Unknown,
+}
+
+impl CompressionStrategy {
+    /// Select compression strategy for a demuxed chunk based on its codec.
+    ///
+    /// Returns `None` if the codec hint is `Unknown`, meaning the caller should
+    /// fall back to file-level strategy.
+    pub fn for_codec_hint(hint: ChunkCodecHint) -> Option<Self> {
+        match hint {
+            // Already compressed — store as-is
+            ChunkCodecHint::HighEntropyVideo | ChunkCodecHint::CompressedAudio => {
+                Some(CompressionStrategy::Store)
+            }
+            // Intra-only video (ProRes/DNxHR) — light Zstd for ~10-20% savings
+            ChunkCodecHint::IntraOnlyVideo => {
+                Some(CompressionStrategy::Zstd(CompressionLevel::Fast))
+            }
+            // Raw video — excellent Zstd compression
+            ChunkCodecHint::RawVideo => Some(CompressionStrategy::Zstd(CompressionLevel::Default)),
+            // PCM/FLAC/ALAC — Zstd default for ~40-65% savings
+            ChunkCodecHint::LosslessAudio => {
+                Some(CompressionStrategy::Zstd(CompressionLevel::Default))
+            }
+            // Text subtitles — Brotli for best ratio (~80% savings)
+            ChunkCodecHint::TextSubtitle => {
+                Some(CompressionStrategy::Brotli(CompressionLevel::Best))
+            }
+            // Bitmap subtitles — Zstd default
+            ChunkCodecHint::BitmapSubtitle => {
+                Some(CompressionStrategy::Zstd(CompressionLevel::Default))
+            }
+            // Container metadata — Zstd default
+            ChunkCodecHint::Metadata => {
+                Some(CompressionStrategy::Zstd(CompressionLevel::Default))
+            }
+            // Unknown — let caller use file-level strategy
+            ChunkCodecHint::Unknown => None,
+        }
+    }
+}
+
 /// Type-aware compressor trait
 pub trait TypeAwareCompressor: Send + Sync {
     /// Compress with automatic strategy selection
@@ -762,6 +925,19 @@ impl SmartCompressor {
             zstd_best: ZstdCompressor::new(CompressionLevel::Best),
             brotli_best: BrotliCompressor::new(CompressionLevel::Best),
         }
+    }
+
+    /// Compress a demuxed chunk using codec-aware strategy.
+    ///
+    /// Returns `None` if the codec hint is `Unknown` (caller should fall back to
+    /// file-level `compress_typed_with_size`).
+    pub fn compress_by_codec(
+        &self,
+        data: &[u8],
+        codec_hint: ChunkCodecHint,
+    ) -> Option<CompressionResult<Vec<u8>>> {
+        let strategy = CompressionStrategy::for_codec_hint(codec_hint)?;
+        Some(self.compress_with_strategy(data, strategy))
     }
 
     /// Compress with explicit strategy
@@ -854,7 +1030,23 @@ impl TypeAwareCompressor for SmartCompressor {
         data: &[u8],
         obj_type: ObjectType,
     ) -> CompressionResult<Vec<u8>> {
-        let strategy = self.strategy_for_type_with_size(obj_type, data.len());
+        let strategy = if obj_type == ObjectType::Unknown {
+            // For Unknown types, use entropy analysis to pick a smarter strategy.
+            // Sample at most 64KB to bound CPU cost on large files.
+            let sample = &data[..data.len().min(65_536)];
+            let entropy = crate::calculate_entropy(sample);
+            let entropy_class = crate::EntropyClass::classify(entropy);
+
+            match entropy_class {
+                crate::EntropyClass::High => CompressionStrategy::Store,
+                crate::EntropyClass::VeryLow | crate::EntropyClass::Low => {
+                    CompressionStrategy::Brotli(CompressionLevel::Best)
+                }
+                crate::EntropyClass::Medium => CompressionStrategy::Zstd(CompressionLevel::Default),
+            }
+        } else {
+            self.strategy_for_type_with_size(obj_type, data.len())
+        };
         self.compress_with_strategy(data, strategy)
     }
 
@@ -1102,11 +1294,140 @@ mod tests {
             .compress_typed(&data, ObjectType::Unknown)
             .unwrap();
 
-        // Unknown should use Zstd default
+        // Unknown uses entropy-adaptive strategy (low-entropy data → Brotli)
         assert!(compressed.len() < data.len());
 
         let decompressed = compressor.decompress_typed(&compressed).unwrap();
         assert_eq!(decompressed, data);
+    }
+
+    #[test]
+    fn test_unknown_type_entropy_fallback() {
+        let compressor = SmartCompressor::new();
+
+        // High entropy (pseudo-random) → Store (0x00 prefix)
+        let high_entropy: Vec<u8> = (0..10000).map(|i| ((i * 7 + 13) % 256) as u8).collect();
+        let compressed = compressor
+            .compress_typed_with_size(&high_entropy, ObjectType::Unknown)
+            .unwrap();
+        assert_eq!(compressed[0], 0x00);
+        assert_eq!(&compressed[1..], &high_entropy[..]);
+
+        // Low entropy (repetitive) → Brotli Best (compresses well)
+        let low_entropy = b"aaaa".repeat(5000);
+        let compressed = compressor
+            .compress_typed_with_size(&low_entropy, ObjectType::Unknown)
+            .unwrap();
+        assert!(compressed.len() < low_entropy.len());
+        let decompressed = compressor.decompress_typed(&compressed).unwrap();
+        assert_eq!(decompressed, low_entropy);
+
+        // Medium entropy → Zstd Default (compresses and roundtrips)
+        let medium_entropy: Vec<u8> = (0..5000)
+            .map(|i| {
+                let base = (i % 64) as u8;
+                base.wrapping_add((i / 64) as u8)
+            })
+            .collect();
+        let compressed = compressor
+            .compress_typed_with_size(&medium_entropy, ObjectType::Unknown)
+            .unwrap();
+        let decompressed = compressor.decompress_typed(&compressed).unwrap();
+        assert_eq!(decompressed, medium_entropy);
+    }
+
+    #[test]
+    fn test_from_magic_bytes_riff_dispatcher() {
+        // WebP (existing behavior preserved)
+        let webp = b"RIFF\x00\x00\x00\x00WEBP";
+        assert_eq!(ObjectType::from_magic_bytes(webp), ObjectType::Webp);
+
+        // WAV
+        let wav = b"RIFF\x00\x00\x00\x00WAVE";
+        assert_eq!(ObjectType::from_magic_bytes(wav), ObjectType::Wav);
+
+        // AVI
+        let avi = b"RIFF\x00\x00\x00\x00AVI ";
+        assert_eq!(ObjectType::from_magic_bytes(avi), ObjectType::Avi);
+
+        // Unknown RIFF subtype
+        let unknown_riff = b"RIFF\x00\x00\x00\x00XXXX";
+        assert_eq!(ObjectType::from_magic_bytes(unknown_riff), ObjectType::Unknown);
+    }
+
+    #[test]
+    fn test_from_magic_bytes_new_formats() {
+        // MKV/WebM (EBML)
+        assert_eq!(
+            ObjectType::from_magic_bytes(&[0x1A, 0x45, 0xDF, 0xA3, 0x00]),
+            ObjectType::Mkv
+        );
+
+        // FLAC
+        assert_eq!(ObjectType::from_magic_bytes(b"fLaC\x00"), ObjectType::Flac);
+
+        // EXR
+        assert_eq!(
+            ObjectType::from_magic_bytes(&[0x76, 0x2F, 0x31, 0x01, 0x00]),
+            ObjectType::Exr
+        );
+
+        // PSD
+        assert_eq!(
+            ObjectType::from_magic_bytes(b"8BPS\x00\x01"),
+            ObjectType::AdobePhotoshop
+        );
+
+        // 7-Zip
+        assert_eq!(
+            ObjectType::from_magic_bytes(&[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C, 0x00]),
+            ObjectType::SevenZ
+        );
+
+        // RAR
+        assert_eq!(
+            ObjectType::from_magic_bytes(&[0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00]),
+            ObjectType::Rar
+        );
+
+        // XZ
+        assert_eq!(
+            ObjectType::from_magic_bytes(&[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00, 0x00]),
+            ObjectType::Gz
+        );
+
+        // Bzip2
+        assert_eq!(
+            ObjectType::from_magic_bytes(&[0x42, 0x5A, 0x68, 0x39, 0x00]),
+            ObjectType::Gz
+        );
+
+        // Zstd
+        assert_eq!(
+            ObjectType::from_magic_bytes(&[0x28, 0xB5, 0x2F, 0xFD, 0x00]),
+            ObjectType::Gz
+        );
+
+        // LZ4
+        assert_eq!(
+            ObjectType::from_magic_bytes(&[0x04, 0x22, 0x4D, 0x18, 0x00]),
+            ObjectType::Gz
+        );
+
+        // MP3 with ID3
+        assert_eq!(
+            ObjectType::from_magic_bytes(b"ID3\x04\x00"),
+            ObjectType::Mp3
+        );
+
+        // MP3 sync word (must be >32 bytes)
+        let mut mp3_sync = vec![0xFF, 0xFB];
+        mp3_sync.extend(vec![0x00u8; 40]);
+        assert_eq!(ObjectType::from_magic_bytes(&mp3_sync), ObjectType::Mp3);
+
+        // MP3 sync word too short (<= 32 bytes) should NOT match
+        let short_mp3 = [0xFF, 0xFB, 0x00, 0x00];
+        assert_eq!(ObjectType::from_magic_bytes(&short_mp3), ObjectType::Unknown);
     }
 
     #[test]

@@ -26,8 +26,6 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tracing::{debug, trace};
 
 const DELTA_MAGIC: &[u8; 5] = b"DELTA";
-#[allow(dead_code)]
-const CHECKSUM_SIZE: usize = 32;
 
 /// Maximum allowed size for a single pack object (2 GB).
 /// Prevents OOM from corrupted or malicious pack data advertising huge sizes.
@@ -40,8 +38,6 @@ pub struct StreamingPackReader<R: AsyncRead + Unpin> {
     objects_processed: u32,
     expected_count: u32,
     hasher: Sha256,
-    #[allow(dead_code)]
-    buffer: Vec<u8>,
 }
 
 impl<R: AsyncRead + Unpin> StreamingPackReader<R> {
@@ -66,7 +62,6 @@ impl<R: AsyncRead + Unpin> StreamingPackReader<R> {
             objects_processed: 0,
             expected_count: header.object_count,
             hasher,
-            buffer: Vec::with_capacity(8192),
         })
     }
 
@@ -205,8 +200,6 @@ pub struct StreamingPackWriter<W: AsyncWrite + Unpin> {
     hasher: Sha256,
     index: Option<StreamingPackIndex>,
     current_offset: u64,
-    #[allow(dead_code)]
-    header_written: bool,
 }
 
 impl<W: AsyncWrite + Unpin> StreamingPackWriter<W> {
@@ -241,7 +234,6 @@ impl<W: AsyncWrite + Unpin> StreamingPackWriter<W> {
             hasher,
             index: Some(index),
             current_offset: 12, // After header
-            header_written: true,
         })
     }
 

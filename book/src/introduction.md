@@ -10,7 +10,7 @@ MediaGit-Core is an open-source version control system designed specifically for
 
 ### High Performance
 - **Fast staging**: 25–240 MB/s for large files (release build)
-- **Efficient storage**: ~30–46% average savings via compression + dedup + delta encoding
+- **Efficient storage**: Up to 81% savings via compression + dedup + delta encoding
 - **Parallel operations**: Optimized for modern multi-core systems
 
 ### Multi-Backend Storage
@@ -56,7 +56,7 @@ MediaGit-Core is designed for teams and individuals working with large binary fi
 |---------|--------------|---------|----------|
 | Architecture | Standalone native VCS | Git extension + server | Centralized VCS |
 | Branch Switch Speed | Instant (ref-based) | Instant (Git handles) | ⚠️ Copy-based |
-| Storage Savings (avg) | ~30–46% (compression + dedup + delta) | ~0% (no dedup/delta) | ~10-20% (RCS deltas) |
+| Storage Savings (avg) | Up to 81% (compression + dedup + delta) | ~0% (no dedup/delta) | ~10-20% (RCS deltas) |
 | Deduplication | ✅ Content-addressable | ❌ None | ✅ Server-side |
 | Multi-Backend Support | 7 backends | Server-dependent | Proprietary |
 | Media-Aware Merging | ✅ Yes | ❌ No | ⚠️ Limited |
