@@ -504,7 +504,12 @@ impl AddCmd {
         ))?;
 
         let file_size = metadata.len();
-        const STREAMING_THRESHOLD: u64 = 100 * 1024 * 1024; // 100MB
+        // 5MB: aligns with should_use_chunking() minimum.
+        // Files ≥ 5MB go through write_chunked_from_file() which uses StreamCDC for
+        // most formats.  Only container formats with dedicated structure-aware parsers
+        // (MP4, MKV, AVI, GLB, FBX, …) use mmap + format-aware chunking; all others
+        // stay on StreamCDC for maximum delta-compressibility.
+        const STREAMING_THRESHOLD: u64 = 5 * 1024 * 1024; // 5MB
 
         let relative_path = file_path
             .strip_prefix(repo_root)
@@ -550,7 +555,7 @@ impl AddCmd {
 
         // Choose streaming vs in-memory based on file size
         let (_content_oid, oid) = if file_size >= STREAMING_THRESHOLD {
-            // STREAMING PATH: Files >= 100MB (parallel internally)
+            // STREAMING PATH: Files >= 5MB — format-aware chunking via mmap (parallel internally)
             let content_oid = Oid::from_file_async(file_path)
                 .await
                 .context(format!("Failed to hash file: {}", file_path.display()))?;
@@ -572,7 +577,7 @@ impl AddCmd {
 
             (content_oid, oid)
         } else {
-            // IN-MEMORY PATH: Files < 100MB
+            // IN-MEMORY PATH: Files < 5MB — read fully into memory, then hash/delta/write
             let content = tokio::fs::read(file_path)
                 .await
                 .context(format!("Failed to read file: {}", file_path.display()))?;

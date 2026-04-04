@@ -292,7 +292,7 @@ Auto-detects algorithm from magic bytes:
 
 ## Chunking Engine
 
-**Crate**: `mediagit-versioning` · **Key file**: `chunking.rs` (2,102 lines)
+**Crate**: `mediagit-versioning` · **Key file**: `chunking.rs`
 
 ### Chunking Strategy Decision
 
@@ -315,6 +315,7 @@ graph TD
 
     L --> N["fastcdc::v2020::FastCDC<br/>Gear table O(1)/byte"]
     F --> O["Chunk per atom<br/>(ftyp/moov/mdat)"]
+    H --> P["Chunk per EBML element<br/>(Info/Tracks/Tags/Clusters)"]
 
     style L fill:#E8A838,color:#fff
     style N fill:#E8A838,color:#fff
@@ -327,6 +328,44 @@ graph TD
     style C fill:#e74c3c,color:#fff
 ```
 
+### Structure-Aware Parsers
+
+Each media format has a dedicated parser that understands the container structure and creates semantically meaningful chunks:
+
+#### MP4 Atom Parser (`chunk_mp4`)
+- Parses MP4/MOV/M4V/M4A/3GP atom hierarchy
+- `ftyp` → single Metadata chunk
+- `moov` → parsed into nested sub-atoms (mvhd, trak, udta) for granular dedup
+- `mdat` header → stable `Metadata` chunk; payload CDC-subdivided with FastCDC (2MB avg / 1MB min / 8MB max) into `VideoStream` chunks
+- Fragmented MP4 (DASH/fMP4): `moof` atoms detected → same CDC path
+- `fill_coverage_gaps` called after parsing to patch any uncovered byte ranges (atom-size edge cases, unknown atoms) with `Generic` chunks, ensuring byte-exact reconstruction
+
+#### Matroska/EBML Parser (`chunk_matroska`)
+- Parses MKV/WebM/MKA/MK3D EBML element hierarchy using custom VINT parser
+- **Per-element metadata chunking**: each top-level metadata element (Info, Tracks, SeekHead, Cues, Chapters, Tags) becomes its own chunk — changing tags won't invalidate tracks or cues
+- Segment container → header-only chunk (children get individual chunks)
+- Cluster header → stable `Metadata` chunk; cluster payload CDC-subdivided with FastCDC (2MB avg / 1MB min / 8MB max) into `VideoStream` chunks
+- Attachments → separate `Generic` chunk
+- `fill_coverage_gaps` called after parsing to patch EBML Void (`0xEC`) and CRC-32 (`0xBF`) elements (skipped during structural parsing) with `Generic` chunks, ensuring byte-exact reconstruction
+- Fallback: invalid EBML data → fixed 4MB chunking
+
+#### AVI/RIFF Parser (`chunk_avi`)
+- Walks at RIFF-block level: handles both AVI 1.0 (`RIFF/AVI `) and OpenDML AVI 2.0 (`RIFF/AVIX`) extension blocks
+- `LIST/movi` payload CDC-subdivided with FastCDC (2MB avg / 1MB min / 8MB max) into `VideoStream` chunks
+- Structural chunks (`LIST/hdrl`, `LIST/INFO`, `idx1`, `JUNK`) emitted as `Metadata`
+- `fill_coverage_gaps` called after parsing to patch any uncovered ranges, ensuring byte-exact reconstruction
+
+#### GLB Parser (`chunk_glb`)
+- Parses binary glTF structure: 12-byte header + JSON chunk + BIN chunk(s)
+- Each GLB section header (8 bytes) emitted as a stable `Metadata` chunk
+- JSON chunk → always a single `Metadata` chunk (typically small)
+- BIN chunk ≤ 4MB → single `Generic` chunk
+- BIN chunk > 4MB → CDC-subdivided using FastCDC (1MB avg / 512KB min / 4MB max), matching the MKV large-Cluster pattern. Common for scanned meshes, photogrammetry, and terrain models where the binary buffer is 20–200MB.
+- Verified: 100% delta efficiency with 3–4 KB overhead on 13–24MB GLB files
+
+#### FBX Parser (`chunk_fbx`)
+- Parses binary FBX node tree structure
+
 ### FastCDC Integration
 
 MediaGit uses the **`fastcdc` crate v3.2** (specifically `fastcdc::v2020`, the 2020 algorithm revision) for all content-defined chunking. FastCDC replaces traditional rolling hash with a **gear table-based hash** that achieves **O(1) boundary detection per byte** — approximately **10× faster** than Buzhash or Rabin fingerprint.
@@ -335,8 +374,9 @@ MediaGit uses the **`fastcdc` crate v3.2** (specifically `fastcdc::v2020`, the 2
 
 | Mode | API | Used In | When |
 |------|-----|---------|------|
-| **In-memory** | `fastcdc::v2020::FastCDC::new(data, min, avg, max)` | `chunk_rolling()` | Files loaded into memory (default path via `chunk_media_aware`) |
-| **Streaming** | `fastcdc::v2020::StreamCDC::new(file, min, avg, max)` | `chunk_file_streaming()` | Large files streamed from disk (ODB streaming path) |
+| **In-memory** | `fastcdc::v2020::FastCDC::new(data, min, avg, max)` | `chunk_fastcdc()` | Files loaded into memory (default path via `chunk_media_aware`) |
+| **mmap (format-aware)** | `memmap2::Mmap` + `chunk_media_aware()` | `collect_file_chunks_blocking()` | All files including >100 MB — mmap gives `&[u8]` without loading into heap; falls back to StreamCDC on mmap failure |
+| **Streaming (fallback)** | `fastcdc::v2020::StreamCDC::new(file, min, avg, max)` | `collect_file_chunks_blocking()` | mmap unavailable (FUSE/network FS, 32-bit targets with >4 GB file) |
 
 #### FastCDC Data Flow
 
@@ -363,7 +403,7 @@ graph LR
 
 #### Where FastCDC Is Dispatched
 
-The `chunk_media_aware()` method dispatches to FastCDC (`chunk_rolling()`) for these format groups:
+The `chunk_media_aware()` method dispatches to FastCDC (`chunk_fastcdc()`) for these format groups:
 
 | Format Group | Extensions | Chunk Params |
 |--------------|-----------|--------------|
@@ -379,7 +419,9 @@ The `chunk_media_aware()` method dispatches to FastCDC (`chunk_rolling()`) for t
 | **3D Apps** | blend, max, ma, mb, c4d, hip, zpr, ztl | Adaptive by size |
 | **Unknown** | All unrecognized extensions | Adaptive by size |
 
-The `chunk_file_streaming()` method (ODB streaming path) also uses FastCDC's `StreamCDC` for streaming I/O on large files, reading directly from disk without loading the entire file into memory.
+The `collect_file_chunks_blocking()` method (ODB streaming path) memory-maps the file and routes it through `chunk_media_aware()`, giving all files — including those >100 MB — full format-aware parsing. `StreamCDC` is used only as a fallback when mmap fails.
+
+> **Note on structural parsers**: MP4 (`chunk_mp4`) and Matroska (`chunk_matroska`) use FastCDC internally for CDC-subdivision fallbacks with **video-optimized parameters** `(avg=2MB, min=1MB, max=8MB)` — larger than the generic 1 MB tier — to improve delta dictionary matching for video content.
 
 ### Chunk Sizing (Adaptive)
 
@@ -874,3 +916,42 @@ merge = "refs/heads/main"
 - **Distribution**: cargo-dist (v0.26.0) with GitHub CI
 - **Installers**: Shell, PowerShell, Homebrew, MSI
 - **Targets**: x86_64 + aarch64 for Linux, macOS, Windows
+
+---
+
+## Performance Benchmarks (v0.2.6-beta.1)
+
+> Measured via standalone deep test suite on Windows, debug build, 36 formats, 2026-04-03.
+
+### Storage Savings by Category
+
+| Category | Best Format | Savings | Ratio |
+|----------|-------------|---------|-------|
+| 3D Text (DAE/FBX-ascii) | FBX-ascii (16MB) | 81.0% | 5.27x |
+| Vector (SVG) | cave-model.svg | 80.8% | 5.20x |
+| Creative (PSD) | PSD-xl (213MB) | 70.9% | 3.44x |
+| 3D Mesh (PLY/STL) | PLY (2.3MB) | 72.9% | 3.69x |
+| Audio (uncompressed) | WAV (54MB) | 54.1% | 2.18x |
+| 3D Binary (GLB) | GLB (13MB) | 50.6% | 2.03x |
+| Video/Archive (compressed) | MP4/MKV/ZIP | 0% (Store) | 1.00x |
+
+### Delta Efficiency
+
+| Format | Delta Efficiency | Overhead |
+|--------|-----------------|----------|
+| GLB (13–24MB) | 100% | 3–4 KB |
+| AI-lg (123MB) | 100% | 4.5 KB |
+| PSD-xl (213MB) | 99.8% | 424 KB |
+| WAV (54MB) | 99.8% | 139 KB |
+| Archive ZIP (656MB) | 99.9% | 569 KB |
+
+### Test Coverage
+
+| Phase | Result |
+|-------|--------|
+| Format tests | 36/36 |
+| Video deep (MKV EBML, MOV Atom, ProRes+PCM) | 9/9 |
+| Audio deep (WAV, FLAC, OGG) | 3/3 |
+| CLI commands | 89/91 |
+| Server push/clone/fetch/pull | 4/4 |
+| .mediagitignore | 7/7 |

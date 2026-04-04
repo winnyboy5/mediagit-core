@@ -287,6 +287,21 @@ Base (v12) → Δ1 → ... → Δ5 (depth 5, rebalanced)
 - Effects applied: 15–30% savings
 - Re-recording: 0–5% savings
 
+### Delta Efficiency Benchmarks (v0.2.6-beta.1)
+
+> Measured via standalone deep test suite, 2026-04-03. All `fsck` verified.
+
+| Format | Delta Efficiency | Overhead |
+|--------|-----------------|----------|
+| GLB (13–24MB) | 100% | 3–4 KB |
+| AI-lg (123MB) | 100% | 4.5 KB |
+| PSD-xl (213MB) | 99.8% | 424 KB |
+| WAV (54MB) | 99.8% | 139 KB |
+| ZIP (656MB) | 99.9% | 569 KB |
+| FLAC (37MB) | 98.5% | 593 KB |
+| FBX-ascii (16MB) | 99.4% | 100 KB |
+| DAE (8.6MB) | 94.9% | 455 KB |
+
 ## Related Documentation
 
 - [Compression Strategy](./compression.md)

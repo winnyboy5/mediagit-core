@@ -92,7 +92,7 @@ pub use branch::{BranchInfo, BranchManager, DetachedHead};
 pub use checkout::{CheckoutManager, CheckoutStats};
 pub use chunking::{
     ChunkId, ChunkManifest, ChunkRef, ChunkStore, ChunkStoreStats, ChunkStrategy, ChunkType,
-    ContentChunk, ContentChunker,
+    CodecHint, ContentChunk, ContentChunker,
 };
 pub use commit::{Commit, Signature};
 pub use config::{ChunkingStrategyConfig, StorageConfig};

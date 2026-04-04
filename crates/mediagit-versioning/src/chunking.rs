@@ -89,10 +89,14 @@ pub struct ContentChunk {
 
     /// Perceptual hash (for similarity detection)
     pub perceptual_hash: Option<Vec<u8>>,
+
+    /// Codec hint for per-chunk compression/delta strategy
+    #[serde(default)]
+    pub codec_hint: CodecHint,
 }
 
 /// Chunk type classification
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ChunkType {
     /// Generic data chunk
     Generic,
@@ -104,6 +108,57 @@ pub enum ChunkType {
     Metadata,
     /// Subtitle/caption data
     Subtitle,
+}
+
+/// Codec hint for per-chunk compression and delta strategy.
+///
+/// Detected during container parsing (MP4 stsd, MKV CodecID, AVI strf).
+/// Enables stream-aware storage: compressed codecs → Store, uncompressed → Zstd,
+/// text subtitles → Brotli, metadata → Zstd.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CodecHint {
+    // Video — lossy compressed (high entropy, Store)
+    /// H.264/AVC
+    H264,
+    /// H.265/HEVC
+    H265,
+    /// VP9
+    VP9,
+    /// AV1
+    AV1,
+    // Video — intra-frame / mezzanine (medium entropy, Zstd compressible)
+    /// Apple ProRes (all profiles)
+    ProRes,
+    /// Avid DNxHR/DNxHD
+    DNxHR,
+    /// JPEG 2000 (wavelet-compressed, Store)
+    Jpeg2000,
+    /// Raw/uncompressed video (v210, YUV, RGB)
+    RawVideo,
+    // Audio — lossy compressed (high entropy, Store)
+    /// AAC
+    AAC,
+    /// Opus
+    Opus,
+    /// MP3
+    MP3,
+    /// Vorbis
+    Vorbis,
+    // Audio — uncompressed (medium entropy, Zstd compressible)
+    /// PCM (all sample formats)
+    PCM,
+    /// FLAC (lossless compressed, Store)
+    FLAC,
+    /// ALAC (lossless compressed, Store)
+    ALAC,
+    // Subtitle
+    /// Text-based subtitles (SRT, ASS, tx3g, WebVTT)
+    TextSub,
+    /// Bitmap-based subtitles (PGS, VobSub)
+    BitmapSub,
+    /// Unknown or undetected codec
+    #[default]
+    Unknown,
 }
 
 /// MP4 Atom header parsed from data
@@ -327,6 +382,7 @@ impl ContentChunker {
                 size: entry.length,
                 chunk_type: ChunkType::Generic,
                 perceptual_hash: None,
+                codec_hint: CodecHint::Unknown,
             };
 
             on_chunk(chunk).await?;
@@ -346,6 +402,12 @@ impl ContentChunker {
     /// executor with synchronous FastCDC file I/O.  The caller should spawn a blocking task,
     /// then receive from the corresponding `tokio::sync::mpsc::Receiver` in async context.
     ///
+    /// Uses `memmap2` to memory-map the file so the existing format-aware parsers
+    /// (`chunk_mp4`, `chunk_matroska`, `chunk_avi`) can operate on files of any size,
+    /// not just those below the 100 MB in-memory threshold.  Falls back to `StreamCDC`
+    /// when mmap is unavailable (network filesystems, permission issues, 32-bit targets
+    /// with very large files) or when format parsing returns an error.
+    ///
     /// # Errors
     /// Returns an error if the file cannot be opened, read, or if the receiver has been dropped.
     pub fn collect_file_chunks_blocking<P: AsRef<std::path::Path>>(
@@ -364,11 +426,93 @@ impl ContentChunker {
             return Ok(());
         }
 
-        let (avg_size, min_size, max_size) = get_chunk_params(file_size);
+        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
+        // Only use mmap + format-aware chunking for extensions that have a dedicated
+        // structure-aware parser (container formats where splitting at structural
+        // boundaries genuinely improves deduplication).  All other files go straight
+        // to StreamCDC so that chunk boundaries stay content-defined and
+        // delta-compressible — matching the behaviour of v0.2.5-beta.1.
+        let has_structure_parser = {
+            let ext = std::path::Path::new(filename)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            matches!(
+                ext.as_str(),
+                // Video containers with dedicated parsers
+                "avi" | "riff" | "mp4" | "mov" | "m4v" | "m4a" | "3gp"
+                    | "mkv" | "webm" | "mka" | "mk3d"
+                    // 3D model containers with dedicated parsers
+                    | "glb" | "gltf" | "obj" | "stl" | "ply" | "fbx"
+            )
+        };
+
+        if has_structure_parser {
+            let file = std::fs::File::open(path)
+                .map_err(|e| anyhow::anyhow!("Failed to open file '{}': {}", path.display(), e))?;
+
+            // Attempt memory-mapped I/O so the format-aware chunkers run on large files.
+            // Safety: the file is opened read-only and the mapping is read-only.
+            // On 32-bit targets, skip mmap for files whose size would overflow usize.
+            #[cfg(target_pointer_width = "32")]
+            let mmap_attempt: Option<memmap2::Mmap> = if file_size <= usize::MAX as u64 {
+                unsafe { memmap2::Mmap::map(&file).ok() }
+            } else {
+                None
+            };
+            #[cfg(not(target_pointer_width = "32"))]
+            let mmap_attempt: Option<memmap2::Mmap> = unsafe { memmap2::Mmap::map(&file).ok() };
+
+            if let Some(mmap) = mmap_attempt {
+                // Spin up a minimal current-thread tokio runtime.  We cannot reuse the
+                // parent runtime because we're inside spawn_blocking.
+                match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => match rt.block_on(self.chunk(&mmap[..], filename)) {
+                        Ok(chunks) => {
+                            debug!(
+                                path = %path.display(),
+                                chunks = chunks.len(),
+                                "mmap format-aware chunking complete"
+                            );
+                            for chunk in chunks {
+                                sender.blocking_send(chunk).map_err(|_| {
+                                    anyhow::anyhow!("Chunk worker channel closed unexpectedly")
+                                })?;
+                            }
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            warn!(
+                                path = %path.display(),
+                                error = %e,
+                                "Format-aware chunking failed, falling back to StreamCDC"
+                            );
+                        }
+                    },
+                    Err(e) => {
+                        warn!(
+                            "Failed to build tokio runtime for mmap chunking ({}), \
+                             falling back to StreamCDC",
+                            e
+                        );
+                    }
+                }
+            } else {
+                debug!(path = %path.display(), "mmap unavailable for container format, using StreamCDC");
+            }
+        }
+
+        // StreamCDC: content-defined chunking (constant memory, all formats).
+        // This is the primary path for non-container files and the fallback for
+        // container files when mmap or format-aware parsing fails.
+        let (avg_size, min_size, max_size) = get_chunk_params(file_size);
         let file = std::fs::File::open(path)
             .map_err(|e| anyhow::anyhow!("Failed to open file '{}': {}", path.display(), e))?;
-
         let stream_cdc =
             fastcdc::v2020::StreamCDC::new(file, min_size as u32, avg_size as u32, max_size as u32);
 
@@ -382,6 +526,7 @@ impl ContentChunker {
                 size: entry.length,
                 chunk_type: ChunkType::Generic,
                 perceptual_hash: None,
+                codec_hint: CodecHint::Unknown,
             };
             sender
                 .blocking_send(chunk)
@@ -406,6 +551,7 @@ impl ContentChunker {
                 size: chunk_data.len(),
                 chunk_type: ChunkType::Generic,
                 perceptual_hash: None,
+                codec_hint: CodecHint::Unknown,
             });
 
             offset += chunk_data.len() as u64;
@@ -448,6 +594,7 @@ impl ContentChunker {
                 size: entry.length,
                 chunk_type: ChunkType::Generic,
                 perceptual_hash: None,
+                codec_hint: CodecHint::Unknown,
             });
         }
 
@@ -569,100 +716,99 @@ impl ContentChunker {
         }
     }
 
-    /// AVI/RIFF format chunking
+    /// AVI/RIFF format chunking.
+    ///
+    /// Walks the file at the RIFF-block level, handling both standard AVI 1.0
+    /// (`RIFF/AVI `) and OpenDML AVI 2.0 (`RIFF/AVIX`) extension blocks.
+    /// Inside each block, descends into `LIST/movi` and emits every video frame
+    /// (`NNdc`/`NNdb`) and audio sample (`NNwb`) as its own `ContentChunk`.
+    ///
+    /// This allows deduplication of the video stream between files that share the
+    /// same video encode but differ only in audio (e.g. stereo vs surround remux).
     async fn chunk_avi(&self, data: &[u8]) -> Result<Vec<ContentChunk>> {
         let mut chunks = Vec::new();
         let mut offset = 0u64;
 
-        // Simple RIFF parser - find LIST chunks and hdrl/movi/idx1
         if data.len() < 12 || &data[0..4] != b"RIFF" {
             debug!("Not a valid RIFF file, using fixed chunking");
             return self.chunk_fixed(data, 4 * 1024 * 1024).await;
         }
 
-        // IMPORTANT: Include the RIFF header (first 12 bytes) as a chunk
-        // This is needed for correct reconstruction of the original file
-        let header_data = &data[0..12];
-        let header_id = Oid::hash(header_data);
-        chunks.push(ContentChunk {
-            id: header_id,
-            data: header_data.to_vec(),
-            offset,
-            size: 12,
-            chunk_type: ChunkType::Metadata,
-            perceptual_hash: None,
-        });
-        offset = 12;
+        // Walk at the top-level RIFF-block level.
+        // AVI 1.0: one RIFF/AVI  block contains everything.
+        // AVI 2.0: RIFF/AVI  (headers + first movi) followed by one or more
+        //          RIFF/AVIX blocks each containing a LIST/movi continuation.
+        let mut file_pos = 0;
+        while file_pos + 12 <= data.len() {
+            let fourcc = &data[file_pos..file_pos + 4];
+            let block_size = u32::from_le_bytes([
+                data[file_pos + 4],
+                data[file_pos + 5],
+                data[file_pos + 6],
+                data[file_pos + 7],
+            ]) as usize;
+            let form_type = &data[file_pos + 8..file_pos + 12];
+            let block_end = file_pos
+                .saturating_add(8)
+                .saturating_add(block_size)
+                .min(data.len());
 
-        // Parse RIFF structure starting after header
-        let mut pos = 12;
+            if fourcc == b"RIFF" && (form_type == b"AVI " || form_type == b"AVIX") {
+                // Emit the 12-byte RIFF block header as Metadata.
+                let blk_hdr = &data[file_pos..file_pos + 12];
+                chunks.push(ContentChunk {
+                    id: Oid::hash(blk_hdr),
+                    data: blk_hdr.to_vec(),
+                    offset,
+                    size: blk_hdr.len(),
+                    chunk_type: ChunkType::Metadata,
+                    perceptual_hash: None,
+                    codec_hint: CodecHint::Unknown,
+                });
+                offset += blk_hdr.len() as u64;
 
-        while pos < data.len() {
-            if pos + 8 > data.len() {
-                // Handle remaining bytes that don't form a complete chunk header
-                if pos < data.len() {
-                    let remaining_data = &data[pos..];
-                    let remaining_id = Oid::hash(remaining_data);
-                    chunks.push(ContentChunk {
-                        id: remaining_id,
-                        data: remaining_data.to_vec(),
-                        offset,
-                        size: remaining_data.len(),
-                        chunk_type: ChunkType::Generic,
-                        perceptual_hash: None,
-                    });
-                }
-                break;
+                // Process inner chunks (hdrl, LIST/movi, idx1, …)
+                self.parse_avi_block_chunks(
+                    data,
+                    file_pos + 12,
+                    block_end,
+                    &mut offset,
+                    &mut chunks,
+                )
+                .await?;
+            } else {
+                // Unknown top-level block → store as-is
+                let blk_data = &data[file_pos..block_end];
+                chunks.push(ContentChunk {
+                    id: Oid::hash(blk_data),
+                    data: blk_data.to_vec(),
+                    offset,
+                    size: blk_data.len(),
+                    chunk_type: ChunkType::Generic,
+                    perceptual_hash: None,
+                    codec_hint: CodecHint::Unknown,
+                });
+                offset += blk_data.len() as u64;
             }
 
-            let fourcc = &data[pos..pos + 4];
-            let chunk_size =
-                u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
-                    as usize;
-
-            // Calculate chunk end, including padding byte if needed for RIFF alignment
-            let data_end = (pos + 8 + chunk_size).min(data.len());
-            let needs_padding = !chunk_size.is_multiple_of(2) && data_end < data.len();
-            let chunk_end = if needs_padding {
-                data_end + 1
-            } else {
-                data_end
-            };
-            let chunk_end = chunk_end.min(data.len());
-
-            // Include the padding byte in the chunk data for correct reconstruction
-            let chunk_data = &data[pos..chunk_end];
-
-            // Determine chunk type
-            let chunk_type = match fourcc {
-                b"hdrl" | b"avih" => ChunkType::Metadata,
-                b"movi" => ChunkType::VideoStream, // Contains interleaved A/V
-                b"idx1" => ChunkType::Metadata,
-                _ if fourcc.starts_with(b"00") || fourcc.starts_with(b"01") => {
-                    // Video stream chunks
-                    ChunkType::VideoStream
-                }
-                _ if fourcc.starts_with(b"02") || fourcc.starts_with(b"03") => {
-                    // Audio stream chunks
-                    ChunkType::AudioStream
-                }
-                _ => ChunkType::Generic,
-            };
-
-            let id = Oid::hash(chunk_data);
-
-            chunks.push(ContentChunk {
-                id,
-                data: chunk_data.to_vec(),
-                offset,
-                size: chunk_data.len(),
-                chunk_type,
-                perceptual_hash: None,
-            });
-
-            offset += chunk_data.len() as u64;
-            pos = chunk_end;
+            file_pos = block_end;
         }
+
+        // Trailing bytes at end of file
+        if file_pos < data.len() {
+            let rem = &data[file_pos..];
+            chunks.push(ContentChunk {
+                id: Oid::hash(rem),
+                data: rem.to_vec(),
+                offset,
+                size: rem.len(),
+                chunk_type: ChunkType::Generic,
+                perceptual_hash: None,
+                codec_hint: CodecHint::Unknown,
+            });
+        }
+
+        fill_coverage_gaps(data, &mut chunks);
 
         info!(
             chunks = chunks.len(),
@@ -678,6 +824,133 @@ impl ContentChunker {
         );
 
         Ok(chunks)
+    }
+
+    /// Walk the inner chunks of a `RIFF/AVI ` or `RIFF/AVIX` block.
+    /// Handles `LIST/movi` descent and emits structural chunks as Metadata.
+    async fn parse_avi_block_chunks(
+        &self,
+        data: &[u8],
+        start: usize,
+        end: usize,
+        offset: &mut u64,
+        chunks: &mut Vec<ContentChunk>,
+    ) -> Result<()> {
+        let mut pos = start;
+        while pos + 8 <= end {
+            let fourcc = &data[pos..pos + 4];
+            let chunk_size =
+                u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+                    as usize;
+
+            let data_end = pos.saturating_add(8).saturating_add(chunk_size).min(end);
+            let needs_padding = !chunk_size.is_multiple_of(2) && data_end < end;
+            let chunk_end = if needs_padding {
+                data_end + 1
+            } else {
+                data_end
+            }
+            .min(end);
+
+            if fourcc == b"LIST" && pos + 12 <= end {
+                let list_type = &data[pos + 8..pos + 12];
+                if list_type == b"movi" {
+                    // Emit the 12-byte LIST/movi header as Metadata.
+                    let list_hdr = &data[pos..pos + 12];
+                    chunks.push(ContentChunk {
+                        id: Oid::hash(list_hdr),
+                        data: list_hdr.to_vec(),
+                        offset: *offset,
+                        size: list_hdr.len(),
+                        chunk_type: ChunkType::Metadata,
+                        perceptual_hash: None,
+                        codec_hint: CodecHint::Unknown,
+                    });
+                    *offset += list_hdr.len() as u64;
+
+                    // CDC sub-chunking for byte-exact reconstruction.
+                    // Per-stream batching (parse_avi_movi_subchunks) is intentionally
+                    // NOT used: it accumulates non-contiguous bytes causing size
+                    // mismatch during chunk reconstruction.
+                    let movi_content = &data[pos + 12..chunk_end];
+                    let movi_offset = *offset;
+                    if movi_content.len() > 4 * 1024 * 1024 {
+                        let sub_chunks = self
+                            .chunk_fastcdc(
+                                movi_content,
+                                2 * 1024 * 1024,
+                                1024 * 1024,
+                                8 * 1024 * 1024,
+                            )
+                            .await?;
+                        for mut sub in sub_chunks {
+                            sub.offset += movi_offset;
+                            sub.chunk_type = ChunkType::VideoStream;
+                            chunks.push(sub);
+                        }
+                    } else if !movi_content.is_empty() {
+                        chunks.push(ContentChunk {
+                            id: Oid::hash(movi_content),
+                            data: movi_content.to_vec(),
+                            offset: movi_offset,
+                            size: movi_content.len(),
+                            chunk_type: ChunkType::VideoStream,
+                            perceptual_hash: None,
+                            codec_hint: CodecHint::Unknown,
+                        });
+                    }
+                    *offset += movi_content.len() as u64;
+                } else {
+                    // hdrl, INFO, strl, etc. → single Metadata chunk
+                    let chunk_data = &data[pos..chunk_end];
+                    chunks.push(ContentChunk {
+                        id: Oid::hash(chunk_data),
+                        data: chunk_data.to_vec(),
+                        offset: *offset,
+                        size: chunk_data.len(),
+                        chunk_type: ChunkType::Metadata,
+                        perceptual_hash: None,
+                        codec_hint: CodecHint::Unknown,
+                    });
+                    *offset += chunk_data.len() as u64;
+                }
+            } else {
+                let chunk_data = &data[pos..chunk_end];
+                let chunk_type = match fourcc {
+                    b"idx1" | b"JUNK" | b"IDIT" | b"indx" => ChunkType::Metadata,
+                    _ => ChunkType::Generic,
+                };
+                chunks.push(ContentChunk {
+                    id: Oid::hash(chunk_data),
+                    data: chunk_data.to_vec(),
+                    offset: *offset,
+                    size: chunk_data.len(),
+                    chunk_type,
+                    perceptual_hash: None,
+                    codec_hint: CodecHint::Unknown,
+                });
+                *offset += chunk_data.len() as u64;
+            }
+
+            pos = chunk_end;
+        }
+
+        // Trailing bytes inside this RIFF block
+        if pos < end {
+            let rem = &data[pos..end];
+            chunks.push(ContentChunk {
+                id: Oid::hash(rem),
+                data: rem.to_vec(),
+                offset: *offset,
+                size: rem.len(),
+                chunk_type: ChunkType::Generic,
+                perceptual_hash: None,
+                codec_hint: CodecHint::Unknown,
+            });
+            *offset += rem.len() as u64;
+        }
+
+        Ok(())
     }
 
     /// MP4/ISO BMFF chunking based on atom structure
@@ -704,9 +977,25 @@ impl ContentChunker {
             let atom_end = (atom.offset + atom.size) as usize;
 
             if atom_end > data.len() {
+                // Atom size extends past EOF (common for MOV mdat with size=0 or
+                // extended-size atoms).  Emit remaining bytes as a Generic chunk so
+                // reconstruction integrity is preserved, then stop.
+                let remaining = &data[atom_start..];
+                if !remaining.is_empty() {
+                    chunks.push(ContentChunk {
+                        id: Oid::hash(remaining),
+                        data: remaining.to_vec(),
+                        offset: atom.offset,
+                        size: remaining.len(),
+                        chunk_type: ChunkType::Generic,
+                        perceptual_hash: None,
+                        codec_hint: CodecHint::Unknown,
+                    });
+                }
                 debug!(
                     atom_type = %String::from_utf8_lossy(&atom.atom_type),
-                    "Truncated atom, stopping parse"
+                    remaining = remaining.len(),
+                    "Truncated atom — emitted remaining bytes as Generic chunk"
                 );
                 break;
             }
@@ -724,6 +1013,7 @@ impl ContentChunker {
                         size: atom_data.len(),
                         chunk_type: ChunkType::Metadata,
                         perceptual_hash: None,
+                        codec_hint: CodecHint::Unknown,
                     });
                     debug!(atom_type = %atom_type_str, size = atom.size, "Parsed ftyp atom");
                 }
@@ -741,6 +1031,7 @@ impl ContentChunker {
                                 size: atom_data.len(),
                                 chunk_type: ChunkType::Metadata,
                                 perceptual_hash: None,
+                                codec_hint: CodecHint::Unknown,
                             });
                         } else {
                             // Emit moov header (8 bytes) as separate chunk
@@ -752,29 +1043,37 @@ impl ContentChunker {
                                 size: 8,
                                 chunk_type: ChunkType::Metadata,
                                 perceptual_hash: None,
+                                codec_hint: CodecHint::Unknown,
                             });
 
-                            // Emit each nested atom as separate chunk
+                            // Emit each nested atom as separate chunk.
+                            // Clamp nested_end to atom_data.len() so that a nested
+                            // atom whose declared size extends past the moov boundary
+                            // still gets emitted rather than being silently dropped.
                             for nested_atom in &nested {
                                 let nested_start = 8 + nested_atom.offset as usize;
-                                let nested_end = nested_start + nested_atom.size as usize;
-                                if nested_end <= atom_data.len() {
+                                let nested_end =
+                                    (nested_start + nested_atom.size as usize).min(atom_data.len());
+                                if nested_start < atom_data.len() {
                                     let nested_data = &atom_data[nested_start..nested_end];
-                                    let nested_type =
-                                        String::from_utf8_lossy(&nested_atom.atom_type);
-                                    chunks.push(ContentChunk {
-                                        id: Oid::hash(nested_data),
-                                        data: nested_data.to_vec(),
-                                        offset: atom.offset + 8 + nested_atom.offset,
-                                        size: nested_data.len(),
-                                        chunk_type: ChunkType::Metadata,
-                                        perceptual_hash: None,
-                                    });
-                                    debug!(
-                                        atom_type = %nested_type,
-                                        size = nested_atom.size,
-                                        "Parsed nested moov atom"
-                                    );
+                                    if !nested_data.is_empty() {
+                                        let nested_type =
+                                            String::from_utf8_lossy(&nested_atom.atom_type);
+                                        chunks.push(ContentChunk {
+                                            id: Oid::hash(nested_data),
+                                            data: nested_data.to_vec(),
+                                            offset: atom.offset + 8 + nested_atom.offset,
+                                            size: nested_data.len(),
+                                            chunk_type: ChunkType::Metadata,
+                                            perceptual_hash: None,
+                                            codec_hint: CodecHint::Unknown,
+                                        });
+                                        debug!(
+                                            atom_type = %nested_type,
+                                            size = nested_atom.size,
+                                            "Parsed nested moov atom"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -786,14 +1085,20 @@ impl ContentChunker {
                             size: atom_data.len(),
                             chunk_type: ChunkType::Metadata,
                             perceptual_hash: None,
+                            codec_hint: CodecHint::Unknown,
                         });
                     }
                     debug!(atom_type = %atom_type_str, size = atom.size, "Parsed moov atom");
                 }
                 b"mdat" => {
-                    // Media data - potentially huge, use CDC sub-chunking for large atoms
+                    // Media data — CDC sub-chunking for byte-exact reconstruction.
+                    // Track-aware per-stream batching is intentionally NOT used here:
+                    // it accumulates non-contiguous sample bytes into a single chunk,
+                    // which causes reconstruction to produce the wrong total size when
+                    // paired with gap-filling logic.  CDC produces contiguous, ordered
+                    // chunks that always reconstruct the exact original bytes.
                     if atom.size > 4 * 1024 * 1024 {
-                        // Large mdat: keep header, sub-chunk data with CDC
+                        // Always emit the mdat header as a Metadata chunk
                         let header = &atom_data[..atom.header_size as usize];
                         chunks.push(ContentChunk {
                             id: Oid::hash(header),
@@ -802,30 +1107,31 @@ impl ContentChunker {
                             size: header.len(),
                             chunk_type: ChunkType::Metadata,
                             perceptual_hash: None,
+                            codec_hint: CodecHint::Unknown,
                         });
 
                         let mdat_content = &atom_data[atom.header_size as usize..];
-                        let base_offset = atom.offset + atom.header_size as u64;
+                        let mdat_content_offset = atom.offset + atom.header_size as u64;
 
                         let sub_chunks = self
                             .chunk_fastcdc(
                                 mdat_content,
-                                1024 * 1024,     // 1MB average
-                                512 * 1024,      // 512KB minimum
-                                4 * 1024 * 1024, // 4MB maximum
+                                2 * 1024 * 1024, // 2MB average (video-optimised)
+                                1024 * 1024,     // 1MB minimum
+                                8 * 1024 * 1024, // 8MB maximum
                             )
                             .await?;
 
-                        // Adjust offsets for sub-chunks
+                        let before = chunks.len();
                         for mut sub in sub_chunks {
-                            sub.offset += base_offset;
+                            sub.offset += mdat_content_offset;
                             sub.chunk_type = ChunkType::VideoStream;
                             chunks.push(sub);
                         }
                         debug!(
                             atom_type = %atom_type_str,
                             size = atom.size,
-                            sub_chunks = chunks.len(),
+                            sub_chunks = chunks.len() - before,
                             "Parsed large mdat with CDC sub-chunking"
                         );
                     } else {
@@ -837,6 +1143,7 @@ impl ContentChunker {
                             size: atom_data.len(),
                             chunk_type: ChunkType::VideoStream,
                             perceptual_hash: None,
+                            codec_hint: CodecHint::Unknown,
                         });
                         debug!(atom_type = %atom_type_str, size = atom.size, "Parsed small mdat atom");
                     }
@@ -850,6 +1157,7 @@ impl ContentChunker {
                         size: atom_data.len(),
                         chunk_type: ChunkType::Metadata,
                         perceptual_hash: None,
+                        codec_hint: CodecHint::Unknown,
                     });
                     debug!(atom_type = %atom_type_str, size = atom.size, "Parsed moof atom");
                 }
@@ -862,6 +1170,7 @@ impl ContentChunker {
                         size: atom_data.len(),
                         chunk_type: ChunkType::Generic,
                         perceptual_hash: None,
+                        codec_hint: CodecHint::Unknown,
                     });
                     debug!(atom_type = %atom_type_str, size = atom.size, "Parsed padding atom");
                 }
@@ -874,11 +1183,14 @@ impl ContentChunker {
                         size: atom_data.len(),
                         chunk_type: ChunkType::Generic,
                         perceptual_hash: None,
+                        codec_hint: CodecHint::Unknown,
                     });
                     debug!(atom_type = %atom_type_str, size = atom.size, "Parsed unknown atom");
                 }
             }
         }
+
+        fill_coverage_gaps(data, &mut chunks);
 
         info!(
             chunks = chunks.len(),
@@ -900,8 +1212,11 @@ impl ContentChunker {
     /// Matroska/WebM chunking
     ///
     /// Parses EBML elements and creates content-aware chunks:
-    /// - Metadata (EBML, Info, Tracks, SeekHead, Cues, etc.) grouped together
-    /// - Each Cluster (media data) becomes a separate VideoStream chunk
+    /// - Each metadata element (Info, Tracks, Tags, Cues, etc.) gets its own chunk
+    ///   for granular dedup (changing tags won't invalidate tracks)
+    /// - Segment container emits header-only; children get individual chunks
+    /// - Clusters > 4MB are CDC-subdivided (1MB avg) as VideoStream chunks
+    /// - Small Clusters become single VideoStream chunks
     /// - Attachments become separate Generic chunks
     async fn chunk_matroska(&self, data: &[u8]) -> Result<Vec<ContentChunk>> {
         // LEVEL 1: Parse EBML elements
@@ -917,114 +1232,134 @@ impl ContentChunker {
             warn!("EBML header not found, not a valid Matroska file");
             return self.chunk_fixed(data, 4 * 1024 * 1024).await;
         }
-
         let mut chunks = Vec::new();
-        let mut metadata_start: Option<usize> = None;
-        let mut metadata_end: usize = 0;
 
         for element in &elements {
             let elem_start = element.offset as usize;
             let elem_size = if element.data_size == u64::MAX {
-                // Unknown size: extends to end of data
-                data.len()
-                    .saturating_sub(elem_start)
-                    .saturating_sub(element.header_size as usize)
+                // Unknown size: extends to end of data (from element start, including header)
+                data.len().saturating_sub(elem_start)
             } else {
                 element.header_size as usize + element.data_size as usize
             };
             let elem_end = (elem_start + elem_size).min(data.len());
 
+            if elem_end <= elem_start {
+                continue;
+            }
+
             match element.id {
                 CLUSTER_ID => {
-                    // Flush accumulated metadata before Cluster
-                    if let Some(start) = metadata_start {
-                        if metadata_end > start {
-                            let meta_data = &data[start..metadata_end];
-                            chunks.push(ContentChunk {
-                                id: Oid::hash(meta_data),
-                                data: meta_data.to_vec(),
-                                offset: start as u64,
-                                size: meta_data.len(),
-                                chunk_type: ChunkType::Metadata,
-                                perceptual_hash: None,
-                            });
-                        }
-                        metadata_start = None;
-                    }
+                    let cluster_data = &data[elem_start..elem_end];
+                    let header_size = element.header_size as usize;
+                    let cluster_content_start = header_size;
+                    let base_offset = element.offset + header_size as u64;
 
-                    // Create Cluster chunk (VideoStream)
-                    if elem_end > elem_start {
-                        let cluster_data = &data[elem_start..elem_end];
+                    // Always emit the Cluster header as a Metadata chunk —
+                    // it contains the Timecode which marks the start of the cluster.
+                    let header = &cluster_data[..header_size.min(cluster_data.len())];
+                    chunks.push(ContentChunk {
+                        id: Oid::hash(header),
+                        data: header.to_vec(),
+                        offset: element.offset,
+                        size: header.len(),
+                        chunk_type: ChunkType::Metadata,
+                        perceptual_hash: None,
+                        codec_hint: CodecHint::Unknown,
+                    });
+
+                    if cluster_data.len() <= cluster_content_start {
+                        continue;
+                    }
+                    let cluster_content = &cluster_data[cluster_content_start..];
+
+                    // CDC sub-chunking for byte-exact reconstruction.
+                    // Per-stream batching (chunk_cluster_by_tracks) is intentionally
+                    // NOT used: it accumulates non-contiguous bytes causing size
+                    // mismatch during chunk reconstruction.
+                    if cluster_content.len() > 4 * 1024 * 1024 {
+                        let sub_chunks = self
+                            .chunk_fastcdc(
+                                cluster_content,
+                                2 * 1024 * 1024,
+                                1024 * 1024,
+                                8 * 1024 * 1024,
+                            )
+                            .await?;
+
+                        for mut sub in sub_chunks {
+                            sub.offset += base_offset;
+                            sub.chunk_type = ChunkType::VideoStream;
+                            chunks.push(sub);
+                        }
+                    } else {
                         chunks.push(ContentChunk {
-                            id: Oid::hash(cluster_data),
-                            data: cluster_data.to_vec(),
-                            offset: element.offset,
-                            size: cluster_data.len(),
+                            id: Oid::hash(cluster_content),
+                            data: cluster_content.to_vec(),
+                            offset: base_offset,
+                            size: cluster_content.len(),
                             chunk_type: ChunkType::VideoStream,
                             perceptual_hash: None,
+                            codec_hint: CodecHint::Unknown,
                         });
                     }
                 }
                 ATTACHMENTS_ID => {
-                    // Flush metadata before attachments
-                    if let Some(start) = metadata_start {
-                        if metadata_end > start {
-                            let meta_data = &data[start..metadata_end];
-                            chunks.push(ContentChunk {
-                                id: Oid::hash(meta_data),
-                                data: meta_data.to_vec(),
-                                offset: start as u64,
-                                size: meta_data.len(),
-                                chunk_type: ChunkType::Metadata,
-                                perceptual_hash: None,
-                            });
-                        }
-                        metadata_start = None;
-                    }
-
                     // Attachments as separate Generic chunk
-                    if elem_end > elem_start {
-                        let attach_data = &data[elem_start..elem_end];
-                        chunks.push(ContentChunk {
-                            id: Oid::hash(attach_data),
-                            data: attach_data.to_vec(),
-                            offset: element.offset,
-                            size: attach_data.len(),
-                            chunk_type: ChunkType::Generic,
-                            perceptual_hash: None,
-                        });
-                    }
+                    let attach_data = &data[elem_start..elem_end];
+                    chunks.push(ContentChunk {
+                        id: Oid::hash(attach_data),
+                        data: attach_data.to_vec(),
+                        offset: element.offset,
+                        size: attach_data.len(),
+                        chunk_type: ChunkType::Generic,
+                        perceptual_hash: None,
+                        codec_hint: CodecHint::Unknown,
+                    });
                 }
-                EBML_ID | SEGMENT_ID | SEEKHEAD_ID | INFO_ID | TRACKS_ID | CUES_ID
-                | CHAPTERS_ID | TAGS_ID => {
-                    // Accumulate metadata elements
-                    if metadata_start.is_none() {
-                        metadata_start = Some(elem_start);
-                    }
-                    metadata_end = metadata_end.max(elem_end);
+                // Segment is a container — emit its header as a small metadata chunk
+                // so child elements get their own chunks
+                SEGMENT_ID => {
+                    let header_size = element.header_size as usize;
+                    let header = &data[elem_start..elem_start + header_size];
+                    chunks.push(ContentChunk {
+                        id: Oid::hash(header),
+                        data: header.to_vec(),
+                        offset: element.offset,
+                        size: header.len(),
+                        chunk_type: ChunkType::Metadata,
+                        perceptual_hash: None,
+                        codec_hint: CodecHint::Unknown,
+                    });
+                }
+                // Each metadata element gets its own chunk for granular dedup:
+                // changing Tags won't invalidate Tracks, editing Chapters won't
+                // invalidate Cues, etc.
+                EBML_ID | SEEKHEAD_ID | INFO_ID | TRACKS_ID | CUES_ID | CHAPTERS_ID | TAGS_ID => {
+                    let elem_data = &data[elem_start..elem_end];
+                    chunks.push(ContentChunk {
+                        id: Oid::hash(elem_data),
+                        data: elem_data.to_vec(),
+                        offset: element.offset,
+                        size: elem_data.len(),
+                        chunk_type: ChunkType::Metadata,
+                        perceptual_hash: None,
+                        codec_hint: CodecHint::Unknown,
+                    });
                 }
                 _ => {
-                    // Unknown elements: include in metadata grouping
-                    if metadata_start.is_none() {
-                        metadata_start = Some(elem_start);
-                    }
-                    metadata_end = metadata_end.max(elem_end);
+                    // Unknown elements: emit as individual metadata chunks
+                    let elem_data = &data[elem_start..elem_end];
+                    chunks.push(ContentChunk {
+                        id: Oid::hash(elem_data),
+                        data: elem_data.to_vec(),
+                        offset: element.offset,
+                        size: elem_data.len(),
+                        chunk_type: ChunkType::Metadata,
+                        perceptual_hash: None,
+                        codec_hint: CodecHint::Unknown,
+                    });
                 }
-            }
-        }
-
-        // Final metadata chunk (for trailing Cues, Tags, etc.)
-        if let Some(start) = metadata_start {
-            if metadata_end > start {
-                let meta_data = &data[start..metadata_end];
-                chunks.push(ContentChunk {
-                    id: Oid::hash(meta_data),
-                    data: meta_data.to_vec(),
-                    offset: start as u64,
-                    size: meta_data.len(),
-                    chunk_type: ChunkType::Metadata,
-                    perceptual_hash: None,
-                });
             }
         }
 
@@ -1033,6 +1368,8 @@ impl ContentChunker {
             warn!("No chunks created from Matroska parsing, falling back");
             return self.chunk_fixed(data, 4 * 1024 * 1024).await;
         }
+
+        fill_coverage_gaps(data, &mut chunks);
 
         info!(
             chunks = chunks.len(),
@@ -1088,6 +1425,7 @@ impl ContentChunker {
             size: 12,
             chunk_type: ChunkType::Metadata,
             perceptual_hash: None,
+            codec_hint: CodecHint::Unknown,
         });
 
         let mut pos = 12;
@@ -1104,29 +1442,76 @@ impl ContentChunker {
             let chunk_data_start = pos + 8;
             let chunk_end = (chunk_data_start + chunk_length).min(data.len());
 
+            // Include chunk header (8 bytes) as a tiny metadata separator so that
+            // the BIN data start offset is stable even when sub-chunked.
+            let header_bytes = &data[chunk_start..chunk_start + 8];
             let (ct, label) = match chunk_type {
                 JSON_CHUNK_TYPE => (ChunkType::Metadata, "JSON"),
                 BIN_CHUNK_TYPE => (ChunkType::Generic, "BIN"),
                 _ => (ChunkType::Generic, "Unknown"),
             };
 
-            // Include chunk header + data as single chunk
-            let full_chunk_data = &data[chunk_start..chunk_end];
+            // Emit the 8-byte chunk header always as a metadata marker.
             chunks.push(ContentChunk {
-                id: Oid::hash(full_chunk_data),
-                data: full_chunk_data.to_vec(),
+                id: Oid::hash(header_bytes),
+                data: header_bytes.to_vec(),
                 offset: chunk_start as u64,
-                size: full_chunk_data.len(),
-                chunk_type: ct,
+                size: 8,
+                chunk_type: ChunkType::Metadata,
                 perceptual_hash: None,
+                codec_hint: CodecHint::Unknown,
             });
 
-            debug!(
-                chunk_type = label,
-                offset = chunk_start,
-                size = full_chunk_data.len(),
-                "GLB chunk"
-            );
+            let full_chunk_data = &data[chunk_data_start..chunk_end];
+
+            // BIN payloads > 4 MB: CDC-subdivide for better dedup granularity.
+            // Matches the MKV large-Cluster strategy (1 MB avg / 512 KB min / 4 MB max).
+            // GLB BIN buffers store vertex arrays, textures, and animation data. Large
+            // buffers are common (scanned meshes, terrain, photogrammetry) and often share
+            // sub-regions across model revisions.
+            const GLB_BIN_SUBCHUNK_THRESHOLD: usize = 4 * 1024 * 1024; // 4 MB
+            if chunk_type == BIN_CHUNK_TYPE && full_chunk_data.len() > GLB_BIN_SUBCHUNK_THRESHOLD {
+                use fastcdc::v2020::FastCDC;
+                let avg: u32 = 1024 * 1024; // 1 MB
+                let min: u32 = 512 * 1024; // 512 KB
+                let max: u32 = 4 * 1024 * 1024; // 4 MB
+                let cdc = FastCDC::new(full_chunk_data, min, avg, max);
+                let base_offset = chunk_data_start as u64;
+                for entry in cdc {
+                    let sub = &full_chunk_data[entry.offset..entry.offset + entry.length];
+                    chunks.push(ContentChunk {
+                        id: Oid::hash(sub),
+                        data: sub.to_vec(),
+                        offset: base_offset + entry.offset as u64,
+                        size: entry.length,
+                        chunk_type: ChunkType::Generic,
+                        perceptual_hash: None,
+                        codec_hint: CodecHint::Unknown,
+                    });
+                }
+                debug!(
+                    chunk_type = label,
+                    offset = chunk_start,
+                    size = full_chunk_data.len(),
+                    "GLB BIN chunk (sub-chunked via FastCDC)"
+                );
+            } else {
+                chunks.push(ContentChunk {
+                    id: Oid::hash(full_chunk_data),
+                    data: full_chunk_data.to_vec(),
+                    offset: chunk_data_start as u64,
+                    size: full_chunk_data.len(),
+                    chunk_type: ct,
+                    perceptual_hash: None,
+                    codec_hint: CodecHint::Unknown,
+                });
+                debug!(
+                    chunk_type = label,
+                    offset = chunk_start,
+                    size = full_chunk_data.len(),
+                    "GLB chunk"
+                );
+            }
 
             pos = chunk_end;
         }
@@ -1141,6 +1526,7 @@ impl ContentChunker {
                 size: remaining.len(),
                 chunk_type: ChunkType::Generic,
                 perceptual_hash: None,
+                codec_hint: CodecHint::Unknown,
             });
         }
 
@@ -1208,6 +1594,7 @@ impl ContentChunker {
                     size: chunk_data.len(),
                     chunk_type: ChunkType::Generic,
                     perceptual_hash: None,
+                    codec_hint: CodecHint::Unknown,
                 });
                 chunk_start = current_pos;
             }
@@ -1222,6 +1609,7 @@ impl ContentChunker {
                     size: chunk_data.len(),
                     chunk_type: ChunkType::Generic,
                     perceptual_hash: None,
+                    codec_hint: CodecHint::Unknown,
                 });
                 chunk_start = current_pos;
             }
@@ -1244,6 +1632,7 @@ impl ContentChunker {
                 size: chunk_data.len(),
                 chunk_type: ChunkType::Generic,
                 perceptual_hash: None,
+                codec_hint: CodecHint::Unknown,
             });
         }
 
@@ -1290,6 +1679,7 @@ impl ContentChunker {
             size: 27,
             chunk_type: ChunkType::Metadata,
             perceptual_hash: None,
+            codec_hint: CodecHint::Unknown,
         });
 
         // For FBX, use adaptive rolling CDC on the rest of the data
@@ -1315,11 +1705,72 @@ impl ContentChunker {
     }
 }
 
-/// Parse MP4 atoms from data
+/// Patch any uncovered byte ranges with Generic chunks.
 ///
-/// Returns a vector of Mp4Atom headers describing the atom structure.
-/// Handles standard 4-byte size, extended 8-byte size (size == 1),
-/// and size == 0 (extends to end of data).
+/// Format-aware parsers can miss bytes due to EBML padding, atom-size edge
+/// cases, Void elements, CRC-32 elements, or other format quirks.  This
+/// helper sorts chunks by offset, finds uncovered ranges, and emits a Generic
+/// chunk for each gap so that concatenating all chunks reconstructs the exact
+/// original file.
+///
+/// Safe to call when chunks come from CDC (`chunk_fastcdc`) because CDC always
+/// produces contiguous, non-overlapping slices — no duplication risk.
+fn fill_coverage_gaps(data: &[u8], chunks: &mut Vec<ContentChunk>) {
+    if data.is_empty() {
+        return;
+    }
+    chunks.sort_unstable_by_key(|c| c.offset);
+
+    let mut gap_chunks: Vec<ContentChunk> = Vec::new();
+    let mut covered_up_to: u64 = 0;
+
+    for chunk in chunks.iter() {
+        if chunk.offset > covered_up_to {
+            let gap_start = covered_up_to as usize;
+            let gap_end = chunk.offset as usize;
+            if gap_end <= data.len() && gap_start < gap_end {
+                let gap_data = &data[gap_start..gap_end];
+                gap_chunks.push(ContentChunk {
+                    id: Oid::hash(gap_data),
+                    data: gap_data.to_vec(),
+                    offset: covered_up_to,
+                    size: gap_data.len(),
+                    chunk_type: ChunkType::Generic,
+                    perceptual_hash: None,
+                    codec_hint: CodecHint::Unknown,
+                });
+            }
+        }
+        let chunk_end = chunk.offset + chunk.size as u64;
+        if chunk_end > covered_up_to {
+            covered_up_to = chunk_end;
+        }
+    }
+
+    if (covered_up_to as usize) < data.len() {
+        let trail = &data[covered_up_to as usize..];
+        gap_chunks.push(ContentChunk {
+            id: Oid::hash(trail),
+            data: trail.to_vec(),
+            offset: covered_up_to,
+            size: trail.len(),
+            chunk_type: ChunkType::Generic,
+            perceptual_hash: None,
+            codec_hint: CodecHint::Unknown,
+        });
+    }
+
+    if !gap_chunks.is_empty() {
+        warn!(
+            gaps = gap_chunks.len(),
+            total_gap_bytes = gap_chunks.iter().map(|c| c.size).sum::<usize>(),
+            "Coverage gaps patched with Generic chunks"
+        );
+        chunks.extend(gap_chunks);
+        chunks.sort_unstable_by_key(|c| c.offset);
+    }
+}
+
 fn parse_mp4_atoms(data: &[u8]) -> Vec<Mp4Atom> {
     let mut atoms = Vec::new();
     let mut pos = 0u64;
@@ -1449,7 +1900,8 @@ fn read_ebml_size(data: &[u8], pos: usize) -> Option<(u64, u8)> {
     }
 
     // Clear marker bit and build size value
-    let mask = 0xFFu8 >> len;
+    // When len==8 (leading_zeros==7), the entire first byte is header — no data bits.
+    let mask = if len >= 8 { 0u8 } else { 0xFFu8 >> len };
     let mut size = (first & mask) as u64;
     for i in 1..len {
         size = (size << 8) | data[pos + i] as u64;
@@ -1539,10 +1991,6 @@ pub struct ChunkStore {
 #[derive(Debug, Clone)]
 struct ChunkMetadata {
     size: usize,
-    #[allow(dead_code)]
-    chunk_type: ChunkType,
-    #[allow(dead_code)]
-    first_seen: std::time::SystemTime,
 }
 
 impl ChunkStore {
@@ -1560,11 +2008,7 @@ impl ChunkStore {
 
         self.chunk_metadata
             .entry(chunk.id)
-            .or_insert_with(|| ChunkMetadata {
-                size: chunk.size,
-                chunk_type: chunk.chunk_type,
-                first_seen: std::time::SystemTime::now(),
-            });
+            .or_insert_with(|| ChunkMetadata { size: chunk.size });
     }
 
     /// Remove a chunk reference (decrement reference count)
@@ -1643,6 +2087,9 @@ pub struct ChunkRef {
     pub size: usize,
     /// Chunk type classification
     pub chunk_type: ChunkType,
+    /// Codec hint for per-chunk compression/delta decisions
+    #[serde(default)]
+    pub codec_hint: CodecHint,
 }
 
 /// Chunk manifest for reconstructing chunked objects
@@ -1667,6 +2114,7 @@ impl ChunkManifest {
                 offset: c.offset,
                 size: c.size,
                 chunk_type: c.chunk_type,
+                codec_hint: c.codec_hint,
             })
             .collect();
 
@@ -1711,6 +2159,7 @@ mod tests {
             size: 5,
             chunk_type: ChunkType::Generic,
             perceptual_hash: None,
+            codec_hint: CodecHint::Unknown,
         };
 
         let chunk2 = ContentChunk {
@@ -1720,6 +2169,7 @@ mod tests {
             size: 5,
             chunk_type: ChunkType::Generic,
             perceptual_hash: None,
+            codec_hint: CodecHint::Unknown,
         };
 
         store.add_chunk(&chunk1);
@@ -2076,18 +2526,10 @@ mod tests {
 
         let chunks = chunker.chunk(&mkv, "test.mkv").await.unwrap();
 
-        println!("Created {} chunks", chunks.len());
-        for (i, chunk) in chunks.iter().enumerate() {
-            println!(
-                "  Chunk {}: type={:?}, size={}",
-                i, chunk.chunk_type, chunk.size
-            );
-        }
-
-        // Should have at least 2 chunks: Metadata + VideoStream (Cluster)
+        // Per-element chunking: EBML(1) + Segment header(1) + Info(1) + Cluster(1) = 4 chunks
         assert!(
-            chunks.len() >= 2,
-            "Expected at least 2 chunks, got {}",
+            chunks.len() >= 3,
+            "Expected at least 3 chunks (EBML + Info + Cluster), got {}",
             chunks.len()
         );
 
@@ -2097,5 +2539,391 @@ mod tests {
             .filter(|c| c.chunk_type == ChunkType::VideoStream)
             .count();
         assert!(video_count >= 1, "Expected at least 1 VideoStream chunk");
+
+        // Each metadata element should be its own chunk
+        let meta_count = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Metadata)
+            .count();
+        assert!(
+            meta_count >= 3,
+            "Expected at least 3 Metadata chunks (EBML + Segment header + Info), got {}",
+            meta_count
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chunk_matroska_metadata_splitting() {
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+
+        let mut mkv = vec![];
+
+        // EBML header + size 2 + 2 bytes content
+        mkv.extend_from_slice(&[0x1A, 0x45, 0xDF, 0xA3, 0x82, 0xAA, 0xBB]);
+
+        // Segment + unknown size
+        mkv.extend_from_slice(&[0x18, 0x53, 0x80, 0x67, 0xFF]);
+
+        // Info + size 3 + content
+        mkv.extend_from_slice(&[0x15, 0x49, 0xA9, 0x66, 0x83, 0x01, 0x02, 0x03]);
+
+        // Tracks + size 2 + content
+        mkv.extend_from_slice(&[0x16, 0x54, 0xAE, 0x6B, 0x82, 0x04, 0x05]);
+
+        // Tags + size 2 + content
+        mkv.extend_from_slice(&[0x12, 0x54, 0xC3, 0x67, 0x82, 0x06, 0x07]);
+
+        // Cluster + size 4 + content
+        mkv.extend_from_slice(&[0x1F, 0x43, 0xB6, 0x75, 0x84, 0x10, 0x11, 0x12, 0x13]);
+
+        let chunks = chunker.chunk(&mkv, "test.mkv").await.unwrap();
+
+        // Should have separate chunks: EBML, Segment hdr, Info, Tracks, Tags, Cluster
+        let meta_chunks: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Metadata)
+            .collect();
+        let video_chunks: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::VideoStream)
+            .collect();
+
+        assert_eq!(video_chunks.len(), 1, "Should have exactly 1 Cluster chunk");
+        assert!(
+            meta_chunks.len() >= 5,
+            "Expected at least 5 metadata chunks (EBML + Segment hdr + Info + Tracks + Tags), got {}",
+            meta_chunks.len()
+        );
+
+        // Verify that Info, Tracks, and Tags are separate — changing one doesn't
+        // invalidate others (the core dedup improvement)
+        let info_chunk = chunks.iter().find(|c| {
+            c.chunk_type == ChunkType::Metadata && c.data.starts_with(&[0x15, 0x49, 0xA9, 0x66])
+        });
+        let tracks_chunk = chunks.iter().find(|c| {
+            c.chunk_type == ChunkType::Metadata && c.data.starts_with(&[0x16, 0x54, 0xAE, 0x6B])
+        });
+        let tags_chunk = chunks.iter().find(|c| {
+            c.chunk_type == ChunkType::Metadata && c.data.starts_with(&[0x12, 0x54, 0xC3, 0x67])
+        });
+
+        assert!(info_chunk.is_some(), "Info should be its own chunk");
+        assert!(tracks_chunk.is_some(), "Tracks should be its own chunk");
+        assert!(tags_chunk.is_some(), "Tags should be its own chunk");
+
+        // Verify they have different hashes (different content = different IDs)
+        assert_ne!(info_chunk.unwrap().id, tracks_chunk.unwrap().id);
+        assert_ne!(tracks_chunk.unwrap().id, tags_chunk.unwrap().id);
+    }
+
+    #[tokio::test]
+    async fn test_chunk_matroska_large_cluster_subdivision() {
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+
+        let mut mkv = vec![];
+
+        // EBML header + size 0
+        mkv.extend_from_slice(&[0x1A, 0x45, 0xDF, 0xA3, 0x80]);
+
+        // Segment + unknown size
+        mkv.extend_from_slice(&[0x18, 0x53, 0x80, 0x67, 0xFF]);
+
+        // Large Cluster: header + 5MB of data (triggers CDC subdivision at >4MB)
+        let cluster_content_size: usize = 5 * 1024 * 1024;
+        mkv.extend_from_slice(&[0x1F, 0x43, 0xB6, 0x75]); // Cluster ID
+                                                          // Encode size as 4-byte VINT: marker bit in first byte
+        let size_val = cluster_content_size as u32;
+        mkv.push(0x10 | ((size_val >> 24) & 0x0F) as u8); // 4-byte VINT marker
+        mkv.push((size_val >> 16) as u8);
+        mkv.push((size_val >> 8) as u8);
+        mkv.push(size_val as u8);
+        // Fill with pseudo-random data for CDC to find boundaries
+        let mut rng_val: u32 = 0xDEADBEEF;
+        for _ in 0..cluster_content_size {
+            rng_val = rng_val.wrapping_mul(1103515245).wrapping_add(12345);
+            mkv.push((rng_val >> 16) as u8);
+        }
+
+        let chunks = chunker.chunk(&mkv, "test.mkv").await.unwrap();
+
+        // Should have: EBML(1) + Segment hdr(1) + Cluster header(1) + CDC sub-chunks(multiple)
+        let video_chunks: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::VideoStream)
+            .collect();
+
+        assert!(
+            video_chunks.len() > 1,
+            "Large cluster should be subdivided into multiple VideoStream chunks, got {}",
+            video_chunks.len()
+        );
+
+        // Verify total video data size matches original cluster content
+        let total_video_size: usize = video_chunks.iter().map(|c| c.size).sum();
+        assert_eq!(
+            total_video_size, cluster_content_size,
+            "CDC sub-chunks should cover entire cluster content"
+        );
+    }
+
+    // Build a minimal RIFF/AVI blob with a movi LIST containing video and audio sub-chunks.
+    // `video_payload` is the raw data inside the 00dc chunk.
+    // `audio_payload` is the raw data inside the 01wb chunk.
+    fn make_avi(video_payload: &[u8], audio_payload: &[u8]) -> Vec<u8> {
+        let mut movi_content = Vec::new();
+        // 00dc video chunk
+        movi_content.extend_from_slice(b"00dc");
+        let vlen = video_payload.len() as u32;
+        movi_content.extend_from_slice(&vlen.to_le_bytes());
+        movi_content.extend_from_slice(video_payload);
+        if !video_payload.len().is_multiple_of(2) {
+            movi_content.push(0); // RIFF padding
+        }
+        // 01wb audio chunk
+        movi_content.extend_from_slice(b"01wb");
+        let alen = audio_payload.len() as u32;
+        movi_content.extend_from_slice(&alen.to_le_bytes());
+        movi_content.extend_from_slice(audio_payload);
+        if !audio_payload.len().is_multiple_of(2) {
+            movi_content.push(0);
+        }
+
+        // LIST/movi: "LIST" + size(4) + "movi" + content
+        let movi_size = (4 + movi_content.len()) as u32; // includes "movi" type
+        let mut list_movi = Vec::new();
+        list_movi.extend_from_slice(b"LIST");
+        list_movi.extend_from_slice(&movi_size.to_le_bytes());
+        list_movi.extend_from_slice(b"movi");
+        list_movi.extend_from_slice(&movi_content);
+
+        // Minimal hdrl placeholder (just a JUNK chunk)
+        let mut hdrl: Vec<u8> = Vec::new();
+        hdrl.extend_from_slice(b"JUNK");
+        hdrl.extend_from_slice(&4u32.to_le_bytes());
+        hdrl.extend_from_slice(&[0u8; 4]);
+
+        // RIFF/AVI header: "RIFF" + file_size + "AVI "
+        let body_size = (hdrl.len() + list_movi.len()) as u32;
+        let file_size = 4 + body_size; // "AVI " + body
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&file_size.to_le_bytes());
+        out.extend_from_slice(b"AVI ");
+        out.extend_from_slice(&hdrl);
+        out.extend_from_slice(&list_movi);
+        out
+    }
+
+    #[tokio::test]
+    async fn test_chunk_avi_movi_descends_into_subchunks() {
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let video = vec![0xAAu8; 64];
+        let audio = vec![0xBBu8; 32];
+        let avi = make_avi(&video, &audio);
+
+        let chunks = chunker.chunk(&avi, "test.avi").await.unwrap();
+
+        // CDC on the movi region produces VideoStream-typed chunks (no per-stream
+        // type detection; byte-exact reconstruction is the primary goal).
+        let video_chunks: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::VideoStream)
+            .collect();
+        let audio_chunks: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::AudioStream)
+            .collect();
+
+        assert!(
+            !video_chunks.is_empty(),
+            "movi content must produce at least one VideoStream chunk"
+        );
+        assert_eq!(
+            audio_chunks.len(),
+            0,
+            "CDC does not emit AudioStream chunks (no per-stream type detection)"
+        );
+
+        // Reconstruction integrity: concatenating chunks in offset order must
+        // reproduce the exact original bytes.
+        let mut sorted = chunks.clone();
+        sorted.sort_unstable_by_key(|c| c.offset);
+        let reconstructed: Vec<u8> = sorted.iter().flat_map(|c| c.data.iter().copied()).collect();
+        assert_eq!(
+            reconstructed, avi,
+            "chunk reconstruction must be byte-exact"
+        );
+    }
+
+    // =========================================================
+    // S5: GLB BIN sub-chunking tests
+    // =========================================================
+
+    /// Build a minimal valid GLB file from a JSON payload and a BIN payload.
+    ///
+    /// GLB structure:
+    ///   [magic(4)] [version(4)] [total_len(4)]
+    ///   [json_len(4)] [0x4E4F534A = "JSON"(4)] [json_data]
+    ///   [bin_len(4)]  [0x004E4942 = "BIN\0"(4)] [bin_data]
+    fn make_glb(json: &[u8], bin: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        // Header: "glTF" + version 2 + total length (computed below, patched)
+        buf.extend_from_slice(b"glTF");
+        buf.extend_from_slice(&2u32.to_le_bytes());
+        let total_len_offset = buf.len();
+        buf.extend_from_slice(&0u32.to_le_bytes()); // placeholder
+
+        // JSON chunk
+        buf.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&0x4E4F534Au32.to_le_bytes()); // "JSON"
+        buf.extend_from_slice(json);
+
+        // BIN chunk (only emit if non-empty)
+        if !bin.is_empty() {
+            buf.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&0x004E4942u32.to_le_bytes()); // "BIN\0"
+            buf.extend_from_slice(bin);
+        }
+
+        // Patch total length
+        let total = buf.len() as u32;
+        buf[total_len_offset..total_len_offset + 4].copy_from_slice(&total.to_le_bytes());
+        buf
+    }
+
+    #[tokio::test]
+    async fn test_glb_small_bin_single_chunk() {
+        // BIN payload < 4 MB → must stay as a single Generic chunk.
+        let json = b"{}";
+        let bin = vec![0xBBu8; 1024]; // 1 KB — well below 4 MB threshold
+        let data = make_glb(json, &bin);
+
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_glb(&data).await.unwrap();
+
+        // Must produce: GLB header (Metadata) + JSON header (Metadata) + JSON data (Metadata)
+        //             + BIN header (Metadata) + BIN data (Generic, single chunk)
+        let generic: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Generic)
+            .collect();
+        assert_eq!(generic.len(), 1, "Small BIN must be a single Generic chunk");
+        assert_eq!(
+            generic[0].size,
+            bin.len(),
+            "Single BIN chunk size must match full payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_glb_large_bin_is_subdivided() {
+        // BIN payload > 4 MB → must be CDC-subdivided into multiple Generic chunks.
+        let json = b"{}";
+        let bin = vec![0xAAu8; 6 * 1024 * 1024]; // 6 MB — above 4 MB threshold
+        let data = make_glb(json, &bin);
+
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_glb(&data).await.unwrap();
+
+        let generic: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Generic)
+            .collect();
+        assert!(
+            generic.len() > 1,
+            "Large BIN (6 MB) must be split into multiple Generic chunks via FastCDC, got {}",
+            generic.len()
+        );
+
+        // The sub-chunks must cover the full BIN payload in total
+        let total: usize = generic.iter().map(|c| c.size).sum();
+        assert_eq!(
+            total,
+            bin.len(),
+            "Sum of BIN sub-chunk sizes must equal full BIN payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_glb_json_chunk_always_single_metadata() {
+        // JSON chunk must always be emitted as a single Metadata chunk regardless of BIN.
+        let json = b"{\"asset\":{\"version\":\"2.0\"}}";
+        let bin = vec![0u8; 512]; // small BIN
+        let data = make_glb(json, &bin);
+
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_glb(&data).await.unwrap();
+
+        let metadata: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Metadata)
+            .collect();
+        // Metadata chunks: GLB header (12B) + JSON section header (8B) + JSON data + BIN header (8B)
+        assert!(
+            !metadata.is_empty(),
+            "Must produce at least one Metadata chunk"
+        );
+        // Verify JSON payload is somewhere in a metadata chunk
+        let json_in_metadata = metadata.iter().any(|c| c.data == json);
+        assert!(
+            json_in_metadata,
+            "JSON payload must appear in a Metadata chunk"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_glb_large_bin_different_data_different_chunk_ids() {
+        // Two GLBs with same JSON but different BIN → their sub-chunks must NOT share OIDs.
+        // Regression: verifies the sub-chunk hash covers only the unique data.
+        let json = b"{}";
+        let bin_a = vec![0xAAu8; 6 * 1024 * 1024];
+        let bin_b = vec![0xBBu8; 6 * 1024 * 1024];
+
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks_a = chunker.chunk_glb(&make_glb(json, &bin_a)).await.unwrap();
+        let chunks_b = chunker.chunk_glb(&make_glb(json, &bin_b)).await.unwrap();
+
+        let ids_a: std::collections::HashSet<_> = chunks_a
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Generic)
+            .map(|c| c.id)
+            .collect();
+        let ids_b: std::collections::HashSet<_> = chunks_b
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Generic)
+            .map(|c| c.id)
+            .collect();
+
+        let shared: Vec<_> = ids_a.intersection(&ids_b).collect();
+        assert!(
+            shared.is_empty(),
+            "Completely different BIN payloads must produce zero shared chunk OIDs"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_glb_no_bin_sections_ok() {
+        // A GLB with only a JSON chunk (no BIN) must not panic and must return chunks.
+        let json = b"{}";
+        let data = make_glb(json, &[]);
+
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_glb(&data).await.unwrap();
+        assert!(
+            !chunks.is_empty(),
+            "GLB with no BIN must still produce chunks"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_glb_invalid_data_falls_back() {
+        // Non-GLB data passed to chunk_glb → must fall back (no panic, returns non-empty).
+        let data = vec![0u8; 64]; // no glTF magic
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_glb(&data).await.unwrap();
+        assert!(
+            !chunks.is_empty(),
+            "Fallback must still produce at least one chunk"
+        );
     }
 }

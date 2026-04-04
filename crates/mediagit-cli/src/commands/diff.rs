@@ -16,10 +16,11 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_versioning::{
-    resolve_revision, Commit, Index, ObjectDatabase, Oid, RefDatabase, Tree,
+    resolve_revision, Commit, Index, ObjectDatabase, Oid, RefDatabase, Tree, TreeDiffer,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Show changes between commits
 ///
@@ -95,7 +96,7 @@ impl DiffCmd {
         let storage_path = repo_root.join(".mediagit");
         let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
-        let odb = ObjectDatabase::with_smart_compression(storage, 1000);
+        let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
 
         // If no revisions specified and not --cached, compare working tree vs HEAD
         if self.from.is_none() && self.to.is_none() && !self.cached {
@@ -133,21 +134,43 @@ impl DiffCmd {
         );
         println!();
 
-        // Basic tree comparison
+        // Tree diff using TreeDiffer
         if from_commit.tree == to_commit.tree {
             println!("{}", style("No changes between commits").dim());
-        } else {
-            println!("{}", style("Trees differ:").bold());
-            println!("  From tree: {}", from_commit.tree);
-            println!("  To tree:   {}", to_commit.tree);
-            println!();
+            return Ok(());
+        }
+
+        let differ = TreeDiffer::new(odb.clone());
+        let diff = differ
+            .diff_trees(&from_commit.tree, &to_commit.tree)
+            .await
+            .context("Failed to diff trees")?;
+
+        let total = diff.added.len() + diff.deleted.len() + diff.modified.len();
+        if total == 0 {
+            println!("{}", style("No changes between commits").dim());
+            return Ok(());
+        }
+
+        for entry in &diff.added {
+            println!("  {}      {}", style("added:").green(), entry.name);
+        }
+        for entry in &diff.modified {
+            println!("  {} {}", style("modified:").yellow(), entry.path);
+        }
+        for entry in &diff.deleted {
+            println!("  {}    {}", style("deleted:").red(), entry.name);
+        }
+
+        println!();
+        if self.stat || self.summary {
             println!(
-                "{}",
-                style("Full diff functionality requires tree traversal and comparison").dim()
-            );
-            println!(
-                "{}",
-                style("This feature will be enhanced in a future release").dim()
+                "{} {} file(s) changed: {} added, {} modified, {} deleted",
+                style("Summary:").bold(),
+                total,
+                diff.added.len(),
+                diff.modified.len(),
+                diff.deleted.len()
             );
         }
 

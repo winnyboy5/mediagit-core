@@ -718,6 +718,14 @@ impl ProtocolClient {
             // Walk the "have" graph to mark all reachable objects as visited
             while let Some((oid, obj_type)) = have_queue.pop_front() {
                 // Don't add to result - we're just marking as visited
+                // OPTIMIZATION: Skip reading blobs entirely. Blobs are leaf nodes
+                // with no child references to traverse. Reading them is wasteful,
+                // especially for chunked objects (large video/audio files) where
+                // odb.read() must reassemble the entire file from chunks.
+                if obj_type == ObjectType::Blob {
+                    continue;
+                }
+
                 if let Ok(obj_data) = odb.read(&oid).await {
                     match obj_type {
                         ObjectType::Commit => {
@@ -749,7 +757,8 @@ impl ProtocolClient {
                                 }
                             }
                         }
-                        ObjectType::Blob => {}
+                        // Blob is filtered above; this arm satisfies exhaustiveness.
+                        _ => {}
                     }
                 }
             }
@@ -912,30 +921,6 @@ impl ProtocolClient {
             .json::<Vec<String>>()
             .await
             .context("Failed to parse chunks check response")
-    }
-
-    /// Upload a single chunk to the remote server
-    #[allow(dead_code)]
-    async fn upload_single_chunk(&self, chunk_id: &str, data: &[u8]) -> Result<()> {
-        let url = format!("{}/chunks/{}", self.base_url, chunk_id);
-
-        let response = self
-            .client
-            .put(&url)
-            .body(data.to_vec())
-            .send()
-            .await
-            .context(format!("Failed to PUT /chunks/{}", chunk_id))?;
-
-        if !response.status().is_success() {
-            anyhow::bail!(
-                "PUT /chunks/{} failed with status: {}",
-                chunk_id,
-                response.status()
-            );
-        }
-
-        Ok(())
     }
 
     /// Upload a manifest to the remote server

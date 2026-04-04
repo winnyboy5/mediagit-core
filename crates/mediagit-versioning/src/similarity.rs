@@ -69,8 +69,39 @@ pub fn get_similarity_threshold(filename: Option<&str>) -> f64 {
             // Audio: Medium threshold
             "wav" | "aiff" | "mp3" | "flac" => 0.65,
 
-            // 3D models: Medium threshold
-            "obj" | "fbx" | "blend" | "gltf" | "glb" => 0.70,
+            // 3D models: Medium threshold (interchange formats)
+            "obj" | "fbx" | "gltf" | "glb" => 0.70,
+
+            // Blender scene files (binary, heavy per-edit diffs)
+            "blend" | "blend1" => 0.40,
+
+            // Maya files
+            "ma" | "mb" => 0.50,
+
+            // Houdini
+            "hip" | "hipnc" | "hiplc" => 0.35,
+
+            // Cinema4D
+            "c4d" => 0.40,
+
+            // NLE projects (heavy per-edit diffs)
+            "drp" | "fcpbundle" | "avb" | "avp" => 0.25,
+
+            // DAW projects
+            "ptx" | "ptf" | "als" | "flp" | "logic" | "logicx" => 0.55,
+
+            // CAD
+            "dwg" | "dxf" => 0.45,
+
+            // Revit (BIM)
+            "rvt" | "rfa" => 0.30,
+
+            // Game engine assets
+            "uasset" | "umap" => 0.35,
+            "unity" | "prefab" => 0.40,
+
+            // ML weights (rarely similar between versions)
+            "safetensors" | "gguf" | "ggml" => 0.15,
 
             // Unknown: Use default
             _ => MIN_SIMILARITY_THRESHOLD,
@@ -109,6 +140,14 @@ pub fn get_size_ratio_threshold(filename: Option<&str>) -> f64 {
             "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" => 0.60,
             // Video: allow 30% size difference
             "mp4" | "mov" | "avi" | "mkv" => 0.70,
+            // NLE projects: allow 40% size difference
+            "drp" | "fcpbundle" | "avb" | "avp" => 0.60,
+            // 3D scenes: allow 30% size difference
+            "blend" | "blend1" | "ma" | "mb" | "hip" | "hipnc" | "hiplc" | "c4d" => 0.70,
+            // Game engine: allow 30% size difference
+            "uasset" | "umap" | "unity" | "prefab" => 0.70,
+            // ML weights: allow 50% size difference (large structural changes)
+            "safetensors" | "gguf" | "ggml" => 0.50,
             // Default: 80% (20% max difference)
             _ => 0.80,
         }
