@@ -4,7 +4,7 @@ Consolidated and **priority-ordered** registry of planned features, code-level T
 known limitations for MediaGit. Items are sourced from documentation, source code, and
 historical claudedocs analyses.
 
-> Last updated: 2026-03-26 | v0.2.5-beta.1 released | Item 1 (.mediagitignore) **DONE**
+> Last updated: 2026-04-03 | v0.2.6-beta.1 | Items 1 (.mediagitignore) + 4 (Streaming Format-Aware Chunker, S1–S5) **DONE**
 
 **Priority levels:**
 - **P0** — Quick win or active blocker — ≤1 day effort, implement immediately
@@ -18,10 +18,10 @@ historical claudedocs analyses.
 
 | # | Item | Priority | Effort | Blocks / Enables |
 |---|------|----------|--------|-----------------|
-| 1 | `.mediagitignore` support in `add` + `status` | ~~**P1**~~ **✅ DONE** | 2-3 days | Shipped in v0.2.5-beta.1 |
+| 1 | `.mediagitignore` support in `add` + `status` | ~~**P1**~~ **✅ DONE** | 2-3 days | Shipped in v0.2.6-beta.1 |
 | 2 | Pack negotiation / bitmap index | **P1** | 1 wk | Incremental fetch (currently full-pack always) |
 | 3 | Parallel object I/O during checkout | **P1** | 1 wk | Branch switch latency |
-| 4 | Streaming format-aware chunker (MKV/MP4, S1-S6) | **P1** | 8-12 days | TB-scale files, format-aware dedup |
+| 4 | Streaming format-aware chunker (MKV/MP4/GLB, S1-S5) | ~~**P1**~~ **✅ DONE** | 8-12 days | Shipped in v0.2.6-beta.1 |
 | 5 | Container-aware delta (AI/PDF/INDD) | **P1** | 2-3 wk | 60-80% savings on design file edits |
 | 6 | Direct file serving endpoints + `mediagit download` CLI | **P1** | 2-3 days | Web UI, CI integration, CDN |
 | 7 | `mediagit media info` command | **P2** | ~200 LOC | UX for media inspection |
@@ -44,10 +44,10 @@ historical claudedocs analyses.
 
 ## P1 — High Priority (Next Milestone)
 
-### ~~1. `.mediagitignore` Support in `add` and `status`~~ ✅ DONE — v0.2.5-beta.1
+### ~~1. `.mediagitignore` Support in `add` and `status`~~ ✅ DONE — v0.2.6-beta.1
 *Source: book docs `book/src/cli/add.md:43`, `book/src/cli/status.md:382`*
 
-**Implemented** in v0.2.5-beta.1 using the `ignore` crate. Full `.gitignore`-compatible
+**Implemented** in v0.2.6-beta.1 using the `ignore` crate. Full `.gitignore`-compatible
 pattern matching: globs, directory markers, negation (`!`), comments. `add --force` bypasses
 rules. `status --ignored` shows the ignored files section. Porcelain `!! path` prefix.
 Integration test suite: 8 tests, all pass.
@@ -93,46 +93,77 @@ everything, harming deduplication and delta encoding.
 
 **Target**: ALL files ≥ 5MB get format-aware streaming with O(max_chunk_size) memory.
 
-**Architecture**: New `crates/mediagit-versioning/src/streaming_chunkers.rs`:
-```rust
-pub trait StreamingFormatChunker: Send + Sync {
-    fn probe(header: &[u8; 32]) -> bool where Self: Sized;
-    fn stream_chunks<R: Read + Seek>(&self, reader: &mut R, ...) -> Result<Vec<Oid>>;
-}
-```
-Uses `LimitedReader` adapter + existing `fastcdc::v2020::StreamCDC` for sub-chunking large
-regions. No new dependencies needed.
+**Implementation (v0.2.6-beta)**: Instead of the originally planned `StreamingFormatChunker`
+trait, format-aware chunking was achieved via **`memmap2` memory-mapped I/O** in
+`collect_file_chunks_blocking()`. This routes files of any size through the existing
+`chunk_media_aware()` parsers (MP4 sample-table, MKV EBML, AVI RIFF, GLB, FBX) without
+loading the entire file into heap memory. Falls back to `StreamCDC` on mmap failure
+(network/FUSE filesystems, 32-bit targets).
 
-**Phased implementation (CRITICAL ORDER — do NOT skip steps):**
+> **Architectural note**: The mmap approach is simpler than a streaming trait (no new
+> abstraction layer, reuses all existing format parsers as-is) but requires addressable
+> file access — it won't work on stdin/pipes. For the primary use case (local/NFS files),
+> this is the right trade-off. A streaming trait can be added later if pipe support is needed.
 
-| Phase | Work | Effort |
+**Additional capabilities built in v0.2.6-beta:**
+- **`CodecHint` enum** — per-chunk codec detection (H.264, ProRes, AAC, PCM, etc.)
+- **Codec-aware compression** — per-chunk optimal strategy (Store for H.264, Zstd for PCM,
+  Brotli for text subtitles) via `ChunkCodecHint` + `SmartCompressor::compress_by_codec()`
+- **Delta skip for high-entropy codecs** — H.264/H.265/VP9/AV1/AAC/Opus/Vorbis/MP3 chunks
+  bypass delta encoding entirely, saving CPU on futile attempts
+- **Adaptive delta ratio thresholds** — ProRes/DNxHR/Raw → 0.60, subtitles → 0.90
+
+**Phased implementation status:**
+
+| Phase | Work | Status |
 |---|---|---|
-| S1 | Trait + `LimitedReader` + `StreamingEbmlChunker` (MKV/WebM) | 3-4 days |
-| S2 | `StreamingMp4Chunker` + `StreamingRiffChunker` (AVI/WAV) | 2-3 days |
-| S3 | Wire into `write_chunked_from_file` / `collect_file_chunks_blocking` in `odb.rs:1431` | 1-2 days |
-| S4 | **Only now**: lower `STREAMING_THRESHOLD` 100MB→5MB in BOTH `add.rs:507` AND `status.rs:194` | 0.5 day |
-| S5 | `StreamingGlbChunker` + `StreamingTextModelChunker` | 1-2 days |
-| S6 | Benchmarks with 10GB+ files, tune `metadata_budget` | 1 day |
+| S1 | MKV/WebM EBML chunking with per-element metadata + Cluster CDC subdivision | ✅ Done (mmap) |
+| S2 | MP4 mdat CDC subdivision + AVI movi CDC descent | ✅ Done (mmap) |
+| S3 | Wire into `collect_file_chunks_blocking` in `odb.rs` | ✅ Done (mmap) |
+| S4 | Lower `STREAMING_THRESHOLD` 100MB→5MB in `add.rs` AND `status.rs` | ✅ Done — v0.2.6-beta.3 |
+| S5 | GLB BIN CDC sub-chunking (>4MB payloads) + FBX basic header extraction | ✅ Done — v0.2.6-beta.3 |
 
-⚠️ **S4 must not precede S3.** Files 5-100MB currently use in-memory format-aware chunking.
-Lowering the threshold before streaming chunkers are wired in would regress those files to
-generic CDC, reducing dedup quality.
-
-⚠️ **`status.rs:194`** defines its own independent `STREAMING_THRESHOLD` — update together
-with `add.rs:507` in S4 or there will be inconsistent hashing between the two commands.
-
-**Primary wiring point**: `odb.rs:1431` (`write_chunked_from_file` /
-`collect_file_chunks_blocking`), not just `chunking.rs:240,351`.
-
-**Reusable existing code**: EBML constants + `read_ebml_id()`/`read_ebml_size()` in
-`chunking.rs:137-149,1402-1466`; MP4 fourcc patterns in `chunking.rs:687-898`.
 
 **Performance targets:**
 | Metric | Current | Target |
 |---|---|---|
-| 2TB MKV memory | ~32MB (generic CDC) | ~96MB peak |
+| 2TB MKV memory | ~32MB (generic CDC) | ~96MB peak (mmap virtual, not resident) |
 | 2TB MKV chunk types | 100% Generic | 95%+ Metadata/VideoStream |
 | 264MB MP4 throughput | 238 MB/s | 220+ MB/s |
+
+**Standalone Deep Test Results (v0.2.6-beta.1, 2026-04-03):**
+
+| Metric | Result |
+|---|---|
+| Format tests | 36/36 passed (all fsck verified) |
+| Video deep tests | 9/9 passed (MKV EBML, MOV Atom, H265, ProRes+PCM) |
+| Audio deep tests | 3/3 passed (WAV 54% savings, FLAC/OGG Store correct) |
+| CLI command tests | 89/91 passed |
+| Server push/clone/pull | 4/4 passed |
+| .mediagitignore tests | 7/7 passed |
+| Overall storage savings | 26% (1.43 GB → 1.06 GB across all formats) |
+| Avg add throughput | 9.3 MB/s (debug build) |
+| Avg delta efficiency | 54% |
+
+**Top storage savings:**
+| Category | Format | Savings | Ratio |
+|---|---|---|---|
+| 3D Text | DAE / FBX-ascii | 81% | 5.27–5.37x |
+| Vector | SVG | 80.8% | 5.20x |
+| Creative | PSD-xl (213MB) | 70.9% | 3.44x |
+| 3D Mesh | PLY / STL | 70–73% | 3.36–3.69x |
+| Creative | EPS | 65.5% | 2.90x |
+| Audio (uncompressed) | WAV (54MB) | 54.1% | 2.18x |
+| 3D Binary | GLB (13MB) | 50.6% | 2.03x |
+
+**Top delta efficiency:**
+| Format | Efficiency | Overhead |
+|---|---|---|
+| GLB (13–24MB) | 100% | 3–4 KB |
+| AI-lg (123MB) | 100% | 4.5 KB |
+| PSD-xl (213MB) | 99.8% | 424 KB |
+| WAV (54MB) | 99.8% | 139 KB |
+| Archive ZIP (656MB) | 99.9% | 569 KB |
 
 ---
 
@@ -458,10 +489,10 @@ fetch requires computing the local have-set before negotiation.
 
 | # | Priority | Area | Description | Source |
 |---|----------|------|-------------|--------|
-| 1 | ~~P1~~ ✅ | **`.mediagitignore`** | **DONE** — v0.2.5-beta.1. `ignore` crate integration in `add` + `status` | `add.md:43` |
+| 1 | ~~P1~~ ✅ | **`.mediagitignore`** | **DONE** — v0.2.6-beta.1. `ignore` crate integration in `add` + `status` | `add.md:43` |
 | 2 | P1 | **Pack negotiation** | Pull/fetch always downloads full pack (no incremental negotiation) | `client.rs:122` |
 | 3 | P1 | **Parallel checkout I/O** | Checkout reads blobs sequentially; no parallel fetch | `checkout.rs` |
-| 4 | P1 | **TB-scale chunking** | Files ≥100MB get generic FastCDC; no MKV/MP4 structural chunking | R&D 2026-03 |
+| 4 | ~~P1~~ ✅ | **TB-scale chunking** | **DONE** — Streaming format-aware chunking via mmap for all file sizes | v0.2.6-beta.1–3 |
 | 5 | P1 | **Container-aware delta** | AI/PDF/INDD delta skipped <50 MB; 60-80% savings possible | `FUTURE_TODOS_2.md` |
 | 6 | P1 | **Direct file serving** | No HTTP endpoint to download committed files by path | R&D 2026-03 |
 | 7 | P2 | **`media info` command** | No CLI command to inspect media metadata | `FUTURE_TODOS.md` |

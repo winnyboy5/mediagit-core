@@ -109,7 +109,8 @@ pub use error::{CompressionError, CompressionResult};
 pub use metrics::{AggregatedStats, CompressionMetrics, MetricsAggregator};
 pub use per_type_compressor::{CompressionProfile, PerObjectTypeCompressor, PerTypeStats};
 pub use smart_compressor::{
-    CompressionStrategy, ObjectCategory, ObjectType, SmartCompressor, TypeAwareCompressor,
+    ChunkCodecHint, CompressionStrategy, ObjectCategory, ObjectType, SmartCompressor,
+    TypeAwareCompressor,
 };
 pub use zlib_compressor::ZlibCompressor;
 pub use zstd_compressor::ZstdCompressor;

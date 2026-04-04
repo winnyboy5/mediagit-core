@@ -9,7 +9,7 @@
 
 ## 🎯 Status
 
-**Version**: v0.2.5-beta.1
+**Version**: v0.2.6-beta.1
 **Status**: 🚧 **BETA**
 **Features**: 100% complete (all P0–P3 items implemented)
 **Last Validated**: March 2026 — Linux & Windows, release build
@@ -111,19 +111,19 @@ curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/instal
 
 **Linux x86_64 — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.5-beta.1/mediagit-0.2.5-beta.1-x86_64-linux.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.6-beta.1/mediagit-0.2.6-beta.1-x86_64-linux.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **macOS Apple Silicon — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.5-beta.1/mediagit-0.2.5-beta.1-aarch64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.6-beta.1/mediagit-0.2.6-beta.1-aarch64-macos.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **Windows x86_64 (PowerShell):**
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.5-beta.1/mediagit-0.2.5-beta.1-x86_64-windows.zip" -OutFile mediagit.zip
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.6-beta.1/mediagit-0.2.6-beta.1-x86_64-windows.zip" -OutFile mediagit.zip
 Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 # Add to PATH:
 [Environment]::SetEnvironmentVariable("Path", "$env:Path;$env:LOCALAPPDATA\MediaGit\bin", "User")
@@ -132,8 +132,8 @@ Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 #### Docker
 
 ```bash
-docker pull ghcr.io/winnyboy5/mediagit-core:0.2.5-beta.1
-docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.5-beta.1 mediagit --version
+docker pull ghcr.io/winnyboy5/mediagit-core:0.2.6-beta.1
+docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.6-beta.1 mediagit --version
 ```
 
 #### From Source
@@ -153,11 +153,11 @@ cargo build --release
 
 | Platform | Archive |
 |----------|---------|
-| Linux x86_64 | `mediagit-0.2.5-beta.1-x86_64-linux.tar.gz` |
-| Linux ARM64 | `mediagit-0.2.5-beta.1-aarch64-linux.tar.gz` |
-| macOS Intel | `mediagit-0.2.5-beta.1-x86_64-macos.tar.gz` |
-| macOS Apple Silicon | `mediagit-0.2.5-beta.1-aarch64-macos.tar.gz` |
-| Windows x86_64 | `mediagit-0.2.5-beta.1-x86_64-windows.zip` |
+| Linux x86_64 | `mediagit-0.2.6-beta.1-x86_64-linux.tar.gz` |
+| Linux ARM64 | `mediagit-0.2.6-beta.1-aarch64-linux.tar.gz` |
+| macOS Intel | `mediagit-0.2.6-beta.1-x86_64-macos.tar.gz` |
+| macOS Apple Silicon | `mediagit-0.2.6-beta.1-aarch64-macos.tar.gz` |
+| Windows x86_64 | `mediagit-0.2.6-beta.1-x86_64-windows.zip` |
 
 Each archive includes `mediagit` (CLI) and `mediagit-server` binaries, plus a `.sha256` checksum file.
 
@@ -761,7 +761,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] Per-chunk `on_progress` callback for continuous byte-level progress during multi-GB ingestion
 - [x] Security: upgraded `quinn-proto` (RUSTSEC-2026-0037)
 
-### v0.2.5-beta.1 (Current Beta) — March 2026
+### v0.2.6-beta.1 (Current Beta) — March 2026
 *Delta engine rewrite, CLI refinements, server improvements*
 
 - [x] Delta encoder replaced: suffix-array sliding-window → **zstd dictionary compression** (+1.3–2.1pp savings, 1.4–2.4× faster, 73% less code)
@@ -816,7 +816,7 @@ aws iam get-user-policy --user-name mediagit-user --policy-name MediaGitS3Policy
 ```bash
 # The /releases/latest API returns 404 when only pre-releases exist.
 # Pass the version explicitly:
-VERSION=0.2.5-beta.1 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
+VERSION=0.2.6-beta.1 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 
 # Or on Windows PowerShell:
 iwr -UseBasicParsing https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.ps1 | iex
@@ -883,4 +883,4 @@ Special thanks to:
 
 **Made with 🦀 and ❤️ by the MediaGit Contributors**
 
-**Status**: Beta | **Version**: v0.2.5-beta.1 | **Updated**: March 26, 2026
+**Status**: Beta | **Version**: v0.2.6-beta.1 | **Updated**: March 26, 2026

@@ -131,16 +131,6 @@ pub fn find_repo_root_from(start: &std::path::Path) -> Result<PathBuf> {
     }
 }
 
-/// Get the .mediagit directory path for the current repository.
-///
-/// # Returns
-/// - `Ok(PathBuf)` - Path to `.mediagit` directory
-/// - `Err` - If not inside a MediaGit repository
-#[allow(dead_code)] // Reserved for direct .mediagit access patterns
-pub fn get_mediagit_dir() -> Result<PathBuf> {
-    Ok(find_repo_root()?.join(".mediagit"))
-}
-
 /// Create the appropriate storage backend based on repository config.
 ///
 /// Reads `.mediagit/config.toml` to determine backend type (filesystem, S3, Azure, GCS).

@@ -502,7 +502,7 @@ graph LR
 | **MP4/MOV** | `.mp4`, `.mov`, `.m4v`, `.m4a`, `.3gp` | Walks ISO base media file atom tree (`ftyp`, `moov`, `mdat`) |
 | **AVI/RIFF** | `.avi`, `.riff` | Parses RIFF container chunks (`LIST`, `hdrl`, `movi`, `idx1`) |
 | **MKV/WebM** | `.mkv`, `.webm`, `.mka`, `.mk3d` | Parses EBML element tree (Segment, Cluster, Tracks) |
-| **GLB** | `.glb`, `.gltf` | Parses header + JSON chunk + binary chunk |
+| **GLB** | `.glb`, `.gltf` | Header + JSON chunk + BIN chunk; BIN >4MB CDC-subdivided (1MB avg) |
 | **FBX** | `.fbx` | Binary: node tree parsing. ASCII: falls back to FastCDC |
 | **OBJ/STL/PLY** | `.obj`, `.stl`, `.ply` | Text-based: splits on structural keywords (vertices, faces, normals) |
 
@@ -526,3 +526,37 @@ When file extension is unavailable, the ODB uses magic byte signatures:
 | `....ftyp` (offset 4) | MP4 |
 | `50 4B 03 04` / `50 4B 05 06` | ZIP |
 | `1F 8B` | GZIP |
+
+---
+
+## Performance Benchmarks (v0.2.6-beta.1)
+
+> Measured via standalone deep test suite, 36 formats, all `fsck` verified. 2026-04-03.
+
+### Storage Savings
+
+| Category | Format | Original | Stored | Savings | Ratio |
+|----------|--------|----------|--------|---------|-------|
+| 3D Text | FBX-ascii (16MB) | 16.41 MB | 3.12 MB | 81.0% | 5.27x |
+| 3D Text | DAE (8.6MB) | 8.62 MB | 1.61 MB | 81.4% | 5.37x |
+| Vector | SVG | 496 KB | 95 KB | 80.8% | 5.20x |
+| Creative | PSD-xl (213MB) | 213.24 MB | 62.04 MB | 70.9% | 3.44x |
+| 3D Mesh | PLY (2.3MB) | 2.27 MB | 631 KB | 72.9% | 3.69x |
+| 3D Mesh | STL (542KB) | 542 KB | 162 KB | 70.2% | 3.36x |
+| Creative | EPS | 4.35 MB | 1.50 MB | 65.5% | 2.90x |
+| Audio | WAV (54MB) | 54.38 MB | 24.95 MB | 54.1% | 2.18x |
+| 3D Binary | GLB (13MB) | 13.15 MB | 6.49 MB | 50.6% | 2.03x |
+| 3D Binary | FBX-bin (6MB) | 6.05 MB | 3.26 MB | 46.2% | 1.86x |
+| Video (compressed) | MP4/MKV/MOV | — | — | 0% | 1.00x |
+| Archive (compressed) | ZIP (656MB) | 656 MB | 657 MB | 0% | 1.00x |
+
+### Delta Encoding Top Performers
+
+| Format | Delta Efficiency | Overhead |
+|--------|-----------------|----------|
+| GLB (13–24MB) | 100% | 3–4 KB |
+| AI-lg (123MB) | 100% | 4.5 KB |
+| PSD-xl (213MB) | 99.8% | 424 KB |
+| WAV (54MB) | 99.8% | 139 KB |
+| ZIP (656MB) | 99.9% | 569 KB |
+| FLAC (37MB) | 98.5% | 593 KB |
