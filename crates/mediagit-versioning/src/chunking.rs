@@ -748,7 +748,10 @@ impl ContentChunker {
                 data[file_pos + 7],
             ]) as usize;
             let form_type = &data[file_pos + 8..file_pos + 12];
-            let block_end = file_pos.saturating_add(8).saturating_add(block_size).min(data.len());
+            let block_end = file_pos
+                .saturating_add(8)
+                .saturating_add(block_size)
+                .min(data.len());
 
             if fourcc == b"RIFF" && (form_type == b"AVI " || form_type == b"AVIX") {
                 // Emit the 12-byte RIFF block header as Metadata.
@@ -836,16 +839,18 @@ impl ContentChunker {
         let mut pos = start;
         while pos + 8 <= end {
             let fourcc = &data[pos..pos + 4];
-            let chunk_size = u32::from_le_bytes([
-                data[pos + 4],
-                data[pos + 5],
-                data[pos + 6],
-                data[pos + 7],
-            ]) as usize;
+            let chunk_size =
+                u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+                    as usize;
 
             let data_end = pos.saturating_add(8).saturating_add(chunk_size).min(end);
             let needs_padding = !chunk_size.is_multiple_of(2) && data_end < end;
-            let chunk_end = if needs_padding { data_end + 1 } else { data_end }.min(end);
+            let chunk_end = if needs_padding {
+                data_end + 1
+            } else {
+                data_end
+            }
+            .min(end);
 
             if fourcc == b"LIST" && pos + 12 <= end {
                 let list_type = &data[pos + 8..pos + 12];
@@ -1047,8 +1052,8 @@ impl ContentChunker {
                             // still gets emitted rather than being silently dropped.
                             for nested_atom in &nested {
                                 let nested_start = 8 + nested_atom.offset as usize;
-                                let nested_end = (nested_start + nested_atom.size as usize)
-                                    .min(atom_data.len());
+                                let nested_end =
+                                    (nested_start + nested_atom.size as usize).min(atom_data.len());
                                 if nested_start < atom_data.len() {
                                     let nested_data = &atom_data[nested_start..nested_end];
                                     if !nested_data.is_empty() {
@@ -1330,8 +1335,7 @@ impl ContentChunker {
                 // Each metadata element gets its own chunk for granular dedup:
                 // changing Tags won't invalidate Tracks, editing Chapters won't
                 // invalidate Cues, etc.
-                EBML_ID | SEEKHEAD_ID | INFO_ID | TRACKS_ID | CUES_ID
-                | CHAPTERS_ID | TAGS_ID => {
+                EBML_ID | SEEKHEAD_ID | INFO_ID | TRACKS_ID | CUES_ID | CHAPTERS_ID | TAGS_ID => {
                     let elem_data = &data[elem_start..elem_end];
                     chunks.push(ContentChunk {
                         id: Oid::hash(elem_data),
@@ -1468,9 +1472,9 @@ impl ContentChunker {
             const GLB_BIN_SUBCHUNK_THRESHOLD: usize = 4 * 1024 * 1024; // 4 MB
             if chunk_type == BIN_CHUNK_TYPE && full_chunk_data.len() > GLB_BIN_SUBCHUNK_THRESHOLD {
                 use fastcdc::v2020::FastCDC;
-                let avg: u32 = 1024 * 1024;      // 1 MB
-                let min: u32 = 512 * 1024;        // 512 KB
-                let max: u32 = 4 * 1024 * 1024;  // 4 MB
+                let avg: u32 = 1024 * 1024; // 1 MB
+                let min: u32 = 512 * 1024; // 512 KB
+                let max: u32 = 4 * 1024 * 1024; // 4 MB
                 let cdc = FastCDC::new(full_chunk_data, min, avg, max);
                 let base_offset = chunk_data_start as u64;
                 for entry in cdc {
@@ -2627,7 +2631,7 @@ mod tests {
         // Large Cluster: header + 5MB of data (triggers CDC subdivision at >4MB)
         let cluster_content_size: usize = 5 * 1024 * 1024;
         mkv.extend_from_slice(&[0x1F, 0x43, 0xB6, 0x75]); // Cluster ID
-        // Encode size as 4-byte VINT: marker bit in first byte
+                                                          // Encode size as 4-byte VINT: marker bit in first byte
         let size_val = cluster_content_size as u32;
         mkv.push(0x10 | ((size_val >> 24) & 0x0F) as u8); // 4-byte VINT marker
         mkv.push((size_val >> 16) as u8);
@@ -2735,7 +2739,8 @@ mod tests {
             "movi content must produce at least one VideoStream chunk"
         );
         assert_eq!(
-            audio_chunks.len(), 0,
+            audio_chunks.len(),
+            0,
             "CDC does not emit AudioStream chunks (no per-stream type detection)"
         );
 
@@ -2744,7 +2749,10 @@ mod tests {
         let mut sorted = chunks.clone();
         sorted.sort_unstable_by_key(|c| c.offset);
         let reconstructed: Vec<u8> = sorted.iter().flat_map(|c| c.data.iter().copied()).collect();
-        assert_eq!(reconstructed, avi, "chunk reconstruction must be byte-exact");
+        assert_eq!(
+            reconstructed, avi,
+            "chunk reconstruction must be byte-exact"
+        );
     }
 
     // =========================================================
@@ -2857,7 +2865,10 @@ mod tests {
         );
         // Verify JSON payload is somewhere in a metadata chunk
         let json_in_metadata = metadata.iter().any(|c| c.data == json);
-        assert!(json_in_metadata, "JSON payload must appear in a Metadata chunk");
+        assert!(
+            json_in_metadata,
+            "JSON payload must appear in a Metadata chunk"
+        );
     }
 
     #[tokio::test]
@@ -2898,7 +2909,10 @@ mod tests {
 
         let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
         let chunks = chunker.chunk_glb(&data).await.unwrap();
-        assert!(!chunks.is_empty(), "GLB with no BIN must still produce chunks");
+        assert!(
+            !chunks.is_empty(),
+            "GLB with no BIN must still produce chunks"
+        );
     }
 
     #[tokio::test]
@@ -2907,6 +2921,9 @@ mod tests {
         let data = vec![0u8; 64]; // no glTF magic
         let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
         let chunks = chunker.chunk_glb(&data).await.unwrap();
-        assert!(!chunks.is_empty(), "Fallback must still produce at least one chunk");
+        assert!(
+            !chunks.is_empty(),
+            "Fallback must still produce at least one chunk"
+        );
     }
 }

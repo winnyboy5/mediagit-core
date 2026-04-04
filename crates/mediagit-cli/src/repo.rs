@@ -131,7 +131,6 @@ pub fn find_repo_root_from(start: &std::path::Path) -> Result<PathBuf> {
     }
 }
 
-
 /// Create the appropriate storage backend based on repository config.
 ///
 /// Reads `.mediagit/config.toml` to determine backend type (filesystem, S3, Azure, GCS).
