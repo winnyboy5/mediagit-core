@@ -47,7 +47,10 @@ use mediagit_storage::StorageBackend;
 /// - Intra-only video (ProRes/DNxHR): tighter threshold — delta is very effective
 /// - Subtitles/metadata: generous threshold — small chunks, high similarity
 /// - Default (PCM, FLAC, unknown): standard 0.80
-fn delta_ratio_threshold(codec: crate::chunking::CodecHint, chunk_type: crate::chunking::ChunkType) -> f64 {
+fn delta_ratio_threshold(
+    codec: crate::chunking::CodecHint,
+    chunk_type: crate::chunking::ChunkType,
+) -> f64 {
     use crate::chunking::{ChunkType, CodecHint};
     match codec {
         CodecHint::ProRes | CodecHint::DNxHR | CodecHint::Jpeg2000 | CodecHint::RawVideo => 0.60,
@@ -1106,15 +1109,12 @@ impl ObjectDatabase {
                                     let delta_ratio =
                                         delta_bytes.len() as f64 / chunk.data.len() as f64;
 
-                                    let threshold = delta_ratio_threshold(
-                                        chunk.codec_hint,
-                                        chunk.chunk_type,
-                                    );
+                                    let threshold =
+                                        delta_ratio_threshold(chunk.codec_hint, chunk.chunk_type);
                                     if delta_ratio < threshold {
                                         let delta_key =
                                             format!("chunk-deltas/{}", chunk.id.to_hex());
-                                        let compressed_delta = if let Some(ref smart) = smart_comp
-                                        {
+                                        let compressed_delta = if let Some(ref smart) = smart_comp {
                                             smart
                                                 .compress_typed(
                                                     &delta_bytes,
@@ -1133,15 +1133,8 @@ impl ObjectDatabase {
                                         if let Err(e) =
                                             storage.put(&delta_key, &compressed_delta).await
                                         {
-                                            if !storage
-                                                .exists(&delta_key)
-                                                .await
-                                                .unwrap_or(false)
-                                            {
-                                                return Err(anyhow::anyhow!(
-                                                    "Store delta: {}",
-                                                    e
-                                                ));
+                                            if !storage.exists(&delta_key).await.unwrap_or(false) {
+                                                return Err(anyhow::anyhow!("Store delta: {}", e));
                                             }
                                         }
 
@@ -1415,25 +1408,24 @@ impl ObjectDatabase {
                             | crate::chunking::CodecHint::MP3
                     );
                     // Fall back to old heuristic when codec is unknown
-                    let is_store_video_chunk = if chunk.codec_hint
-                        == crate::chunking::CodecHint::Unknown
-                    {
-                        chunk.chunk_type == crate::chunking::ChunkType::VideoStream
-                            && matches!(
-                                comp_type,
-                                CompressionObjectType::Mp4
-                                    | CompressionObjectType::Mov
-                                    | CompressionObjectType::Avi
-                                    | CompressionObjectType::Mkv
-                                    | CompressionObjectType::Webm
-                                    | CompressionObjectType::Flv
-                                    | CompressionObjectType::Wmv
-                                    | CompressionObjectType::Mpg
-                                    | CompressionObjectType::Mxf
-                            )
-                    } else {
-                        is_high_entropy_codec
-                    };
+                    let is_store_video_chunk =
+                        if chunk.codec_hint == crate::chunking::CodecHint::Unknown {
+                            chunk.chunk_type == crate::chunking::ChunkType::VideoStream
+                                && matches!(
+                                    comp_type,
+                                    CompressionObjectType::Mp4
+                                        | CompressionObjectType::Mov
+                                        | CompressionObjectType::Avi
+                                        | CompressionObjectType::Mkv
+                                        | CompressionObjectType::Webm
+                                        | CompressionObjectType::Flv
+                                        | CompressionObjectType::Wmv
+                                        | CompressionObjectType::Mpg
+                                        | CompressionObjectType::Mxf
+                                )
+                        } else {
+                            is_high_entropy_codec
+                        };
                     let mut stored_as_delta = false;
                     if delta_enabled && chunk.data.len() >= 4096 && !is_store_video_chunk {
                         let mut chunk_meta = crate::similarity::ObjectMetadata::new(
@@ -1541,14 +1533,12 @@ impl ObjectDatabase {
                     // Brotli for subtitles, Store for H.264).  Falls back to file-level
                     // strategy when codec is unknown.
                     if !stored_as_delta {
-                        let codec_hint =
-                            to_chunk_codec_hint(chunk.codec_hint, chunk.chunk_type);
+                        let codec_hint = to_chunk_codec_hint(chunk.codec_hint, chunk.chunk_type);
                         let data_to_store = if let Some(ref smart) = smart_comp {
                             // Try codec-aware compression first
                             if let Some(result) = smart.compress_by_codec(&chunk.data, codec_hint) {
-                                result.map_err(|e| {
-                                    anyhow::anyhow!("Compress chunk (codec): {}", e)
-                                })?
+                                result
+                                    .map_err(|e| anyhow::anyhow!("Compress chunk (codec): {}", e))?
                             } else {
                                 // Unknown codec → fall back to file-level strategy
                                 smart
@@ -3421,8 +3411,6 @@ impl ObjectDatabase {
         debug!(count = oids.len(), "Listed loose objects");
         Ok(oids)
     }
-
-
 }
 
 /// Statistics from a repack operation

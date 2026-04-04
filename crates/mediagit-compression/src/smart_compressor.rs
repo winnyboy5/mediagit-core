@@ -41,7 +41,7 @@ pub enum ObjectType {
     Raw,
     Exr,
     Hdr,
-    Dpx,  // DPX digital intermediate (uncompressed frames, VFX)
+    Dpx, // DPX digital intermediate (uncompressed frames, VFX)
 
     // Video formats (typically already compressed)
     Mp4,
@@ -52,7 +52,7 @@ pub enum ObjectType {
     Flv,
     Wmv,
     Mpg,
-    Mxf,  // MXF container (broadcast/VFX professional)
+    Mxf, // MXF container (broadcast/VFX professional)
 
     // Audio formats (compressed)
     Mp3,
@@ -869,9 +869,7 @@ impl CompressionStrategy {
                 Some(CompressionStrategy::Zstd(CompressionLevel::Default))
             }
             // Container metadata — Zstd default
-            ChunkCodecHint::Metadata => {
-                Some(CompressionStrategy::Zstd(CompressionLevel::Default))
-            }
+            ChunkCodecHint::Metadata => Some(CompressionStrategy::Zstd(CompressionLevel::Default)),
             // Unknown — let caller use file-level strategy
             ChunkCodecHint::Unknown => None,
         }
@@ -1352,7 +1350,10 @@ mod tests {
 
         // Unknown RIFF subtype
         let unknown_riff = b"RIFF\x00\x00\x00\x00XXXX";
-        assert_eq!(ObjectType::from_magic_bytes(unknown_riff), ObjectType::Unknown);
+        assert_eq!(
+            ObjectType::from_magic_bytes(unknown_riff),
+            ObjectType::Unknown
+        );
     }
 
     #[test]
@@ -1427,7 +1428,10 @@ mod tests {
 
         // MP3 sync word too short (<= 32 bytes) should NOT match
         let short_mp3 = [0xFF, 0xFB, 0x00, 0x00];
-        assert_eq!(ObjectType::from_magic_bytes(&short_mp3), ObjectType::Unknown);
+        assert_eq!(
+            ObjectType::from_magic_bytes(&short_mp3),
+            ObjectType::Unknown
+        );
     }
 
     #[test]
