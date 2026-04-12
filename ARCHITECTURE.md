@@ -68,7 +68,7 @@ graph TD
 | **mediagit-config** | Configuration | TOML config file management |
 | **mediagit-observability** | Logging/tracing | Structured tracing with env-filter |
 | **mediagit-metrics** | Prometheus metrics | Operation stats, dedup ratios |
-| **mediagit-git** | Git interop | Git repository integration |
+| **mediagit-git** | Git interop | FUTURE MILESTONE — git/git-lfs → MediaGit migration (not wired to CLI) |
 | **mediagit-migration** | Migration tools | Git → MediaGit migration |
 | **mediagit-test-utils** | Test utilities | Shared test helpers |
 

@@ -101,7 +101,7 @@ your-project/
 └── config.toml          ← Optional: storage backend config
 ```
 
-**Contains**: Commits, branches, refs, Git-compatible metadata
+**Contains**: Commits, branches, refs, MediaGit metadata
 
 **Always stored**: Locally on your machine
 
@@ -646,7 +646,7 @@ Create IAM policy with minimum required permissions:
 
 ```json
 {
-  "Version": "20.2.6-beta.10-17",
+  "Version": "2012-10-17",
   "Statement": [
     {
       "Effect": "Allow",
