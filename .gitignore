@@ -50,6 +50,7 @@ coverage/
 # mdBook build output (generated HTML) - exclude built docs
 book/book/
 PROJECT_INDEX.md
+PROJECT_INDEX.json
 
 # Other documentation build artifacts
 docs/_build/
