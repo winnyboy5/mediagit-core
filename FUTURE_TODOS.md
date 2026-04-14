@@ -22,7 +22,6 @@ historical claudedocs analyses.
 | 2 | Pack negotiation / bitmap index | **P1** | 1 wk | Incremental fetch (currently full-pack always) |
 | 3 | Parallel object I/O during checkout | **P1** | 1 wk | Branch switch latency |
 | 4 | Streaming format-aware chunker (MKV/MP4/GLB, S1-S5) | ~~**P1**~~ **✅ DONE** | 8-12 days | Shipped in v0.2.6-beta.1 |
-| 5 | Container-aware delta (AI/PDF/INDD) | **P2** ⚠️ attempted+reverted | 4-6 wk (new approach) | 60-80% savings — AI files require stream-by-stream delta, not whole-file normalization |
 | 6 | Direct file serving endpoints + `mediagit download` CLI | **P1** | 2-3 days | Web UI, CI integration, CDN |
 | 7 | `mediagit media info` command | **P2** | ~200 LOC | UX for media inspection |
 | 8 | Sparse checkout | **P2** | ~500 LOC | Large repos, partial working trees |
@@ -517,7 +516,6 @@ fetch requires computing the local have-set before negotiation.
 | 2 | P1 | **Pack negotiation** | Pull/fetch always downloads full pack (no incremental negotiation) | `client.rs:122` |
 | 3 | P1 | **Parallel checkout I/O** | Checkout reads blobs sequentially; no parallel fetch | `checkout.rs` |
 | 4 | ~~P1~~ ✅ | **TB-scale chunking** | **DONE** — Streaming format-aware chunking via mmap for all file sizes | v0.2.6-beta.1–3 |
-| 5 | P2 ⚠️ | **Container-aware delta** | Attempted+reverted 2026-04-07. AI files all-opaque (Adobe DEFLATE). Needs stream-by-stream delta matching, not whole-file normalization. | `FUTURE_TODOS.md §5` |
 | 6 | P1 | **Direct file serving** | No HTTP endpoint to download committed files by path | R&D 2026-03 |
 | 7 | P2 | **`media info` command** | No CLI command to inspect media metadata | `FUTURE_TODOS.md` |
 | 8 | P2 | **Sparse checkout** | Full tree checkout required; no partial working tree support | `FUTURE_TODOS.md` |
