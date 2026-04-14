@@ -432,6 +432,7 @@ pub async fn download_pack(
         }
     };
     let want_list = want_entry.want_list;
+    let have_list = want_entry.have_list;
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -442,18 +443,41 @@ pub async fn download_pack(
     let storage = create_storage_backend(&repo_path).await?;
     let odb = ObjectDatabase::with_smart_compression(storage, 1000);
 
+    // Expand the client's `have` set into the full object closure the client
+    // is known to already have. Any OID in this set — including entire
+    // subtrees and blobs reachable from a parent commit — is pruned from the
+    // pack walk below. Unknown haves (stale or forged) are silently skipped
+    // by `walk_reachable`, which is the whole point of having it be lenient.
+    let have_oids: Vec<Oid> = have_list
+        .iter()
+        .filter_map(|s| Oid::from_hex(s).ok())
+        .collect();
+    let empty: std::collections::HashSet<Oid> = std::collections::HashSet::new();
+    let stop_at = mediagit_versioning::walk_reachable(&odb, have_oids, &empty)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to expand have-closure: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    tracing::info!(
+        "Have-closure: {} objects reachable from {} have OIDs",
+        stop_at.len(),
+        have_list.len()
+    );
+
     // Collect all objects recursively (commit -> tree -> blobs)
     // Use HashSet for O(1) contains checks, Vec for maintaining insertion order
     let mut objects_to_pack: Vec<Oid> = Vec::new();
     let mut seen_objects: std::collections::HashSet<Oid> = std::collections::HashSet::new();
 
-    // Recursively collect all objects reachable from wanted OIDs
-    // This properly handles nested trees (subdirectories) and parent commits (history)
+    // Recursively collect all objects reachable from wanted OIDs, pruning
+    // anything the client already has (via `stop_at`). This is what turns a
+    // full-history pack into a delta pack.
     for oid_str in &want_list {
         let oid = Oid::from_hex(oid_str).map_err(|_| StatusCode::BAD_REQUEST)?;
 
         // Use recursive collection to get all commits, trees, and blobs
-        collect_objects_recursive(&odb, oid, &mut objects_to_pack, &mut seen_objects)
+        collect_objects_recursive(&odb, oid, &stop_at, &mut objects_to_pack, &mut seen_objects)
             .await
             .map_err(|e| {
                 tracing::error!("Failed to collect objects from {}: {}", oid, e);
@@ -462,9 +486,10 @@ pub async fn download_pack(
     }
 
     tracing::info!(
-        "Collecting {} objects for pack (from {} requested)",
+        "Collecting {} objects for pack (from {} requested, {} pruned via have)",
         objects_to_pack.len(),
-        want_list.len()
+        want_list.len(),
+        stop_at.len()
     );
 
     // Filter out chunked objects - they'll be transferred separately
@@ -561,12 +586,23 @@ pub async fn download_pack(
 
 /// Recursively collect an object and its children (for commits and trees).
 /// Used by download_pack to ensure all nested objects are included in packs.
+///
+/// `stop_at` is the closure of objects the client already has — any OID in
+/// this set is neither added to the pack nor recursed into. This is the
+/// primary mechanism that turns full-history packs into delta packs during
+/// incremental fetch.
 async fn collect_objects_recursive(
     odb: &ObjectDatabase,
     oid: Oid,
+    stop_at: &std::collections::HashSet<Oid>,
     collected: &mut Vec<Oid>,
     visited: &mut std::collections::HashSet<Oid>,
 ) -> Result<(), anyhow::Error> {
+    // Client already has this object (and everything reachable from it).
+    if stop_at.contains(&oid) {
+        return Ok(());
+    }
+
     // Skip if already visited
     if visited.contains(&oid) {
         return Ok(());
@@ -604,6 +640,7 @@ async fn collect_objects_recursive(
                 Box::pin(collect_objects_recursive(
                     odb,
                     commit.tree,
+                    stop_at,
                     collected,
                     visited,
                 ))
@@ -611,7 +648,10 @@ async fn collect_objects_recursive(
 
                 // Collect parent commits (REQUIRED for complete history)
                 for parent in &commit.parents {
-                    Box::pin(collect_objects_recursive(odb, *parent, collected, visited)).await?;
+                    Box::pin(collect_objects_recursive(
+                        odb, *parent, stop_at, collected, visited,
+                    ))
+                    .await?;
                 }
             }
         }
@@ -620,7 +660,7 @@ async fn collect_objects_recursive(
             if let Ok(tree) = Tree::deserialize(&obj_data) {
                 for entry in tree.iter() {
                     Box::pin(collect_objects_recursive(
-                        odb, entry.oid, collected, visited,
+                        odb, entry.oid, stop_at, collected, visited,
                     ))
                     .await?;
                 }
@@ -656,10 +696,13 @@ pub async fn request_objects(
     // Generate unique request ID to prevent race conditions between concurrent clients
     let request_id = crate::state::generate_request_id();
 
-    // Store the want list in cache keyed by request_id (not repo name)
+    // Store the want list in cache keyed by request_id (not repo name).
+    // `have` is retained so download_pack can prune objects already on the
+    // client — this is the incremental-fetch path. Empty `have` gives the
+    // clone-equivalent full pack.
     {
         let mut want_cache = state.want_cache.lock().await;
-        want_cache.insert(request_id.clone(), repo, want_req.want);
+        want_cache.insert(request_id.clone(), repo, want_req.want, want_req.have);
     }
 
     Ok(Json(WantResponse { request_id }))
