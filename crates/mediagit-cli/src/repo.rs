@@ -17,6 +17,8 @@
 
 use anyhow::{Context, Result};
 use mediagit_storage::StorageBackend;
+use mediagit_versioning::RefDatabase;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -236,6 +238,47 @@ pub async fn create_storage_backend(repo_root: &Path) -> Result<Arc<dyn StorageB
             anyhow::bail!("Multi-backend storage is not yet implemented");
         }
     }
+}
+
+/// Collect the tip OIDs of every local ref (heads, tags, remotes) as a
+/// deduplicated list of hex strings suitable for use as the `have` field in a
+/// pack-negotiation request.
+///
+/// This is the *small* shape of have-set negotiation: rather than shipping
+/// the full object closure across the wire, we send only ref tips (tens of
+/// OIDs even for large repos) and let the server expand the closure locally
+/// from its own ODB. Any symbolic refs are resolved to their underlying OID;
+/// any refs that fail to read are skipped silently — stale or corrupted
+/// local state must not block a fetch.
+///
+/// Used by `fetch` and `pull` to enable incremental object transfer.
+pub async fn collect_local_have(refdb: &RefDatabase) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+
+    // Walk every namespace that can plausibly mirror objects on the server:
+    // - heads: local branches the user may have pushed
+    // - remotes: tracking refs (guaranteed to exist on the server modulo race)
+    // - tags: lightweight + annotated tag tips
+    for namespace in ["heads", "remotes", "tags"] {
+        let ref_names = match refdb.list(namespace).await {
+            Ok(names) => names,
+            Err(_) => continue,
+        };
+
+        for name in ref_names {
+            // Prefer `resolve` so symbolic refs (HEAD → refs/heads/main) get
+            // followed to their direct OID.
+            if let Ok(oid) = refdb.resolve(&name).await {
+                let hex = oid.to_hex();
+                if seen.insert(hex.clone()) {
+                    out.push(hex);
+                }
+            }
+        }
+    }
+
+    out
 }
 
 #[cfg(test)]

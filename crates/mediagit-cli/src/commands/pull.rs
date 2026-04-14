@@ -11,7 +11,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
 
-use super::super::repo::{create_storage_backend, find_repo_root};
+use super::super::repo::{collect_local_have, create_storage_backend, find_repo_root};
 use super::rebase::RebaseCmd;
 use crate::progress::{OperationStats, ProgressTracker};
 use anyhow::{Context, Result};
@@ -260,12 +260,11 @@ impl PullCmd {
             // ================================================================
             // STEP 2: Pull the specific branch's objects
             // ================================================================
-            // Build the "have" list from local ref state for incremental pull
-            let local_have: Vec<String> = local_ref
-                .as_ref()
-                .and_then(|r| r.oid.as_ref())
-                .map(|oid| vec![oid.to_hex()])
-                .unwrap_or_default();
+            // Build the "have" list from ALL local ref state for incremental
+            // pull. Sending every local tip (branches, tags, remote tracking
+            // refs) lets the server prune anything we already have from the
+            // pack walk — not just the current branch's tip.
+            let local_have = collect_local_have(&refdb).await;
 
             // Pull using streaming protocol (memory-efficient for large files)
             // Pass local OIDs to avoid downloading objects we already have

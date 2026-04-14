@@ -38,6 +38,9 @@ pub fn generate_request_id() -> String {
 pub struct WantEntry {
     pub repo: String,
     pub want_list: Vec<String>,
+    /// Objects the client claims to already have — used to prune the server's
+    /// pack walk so fetches only ship the delta.
+    pub have_list: Vec<String>,
     pub created_at: Instant,
 }
 
@@ -65,7 +68,13 @@ impl WantCache {
     }
 
     /// Insert a want entry, evicting oldest if at capacity
-    pub fn insert(&mut self, request_id: String, repo: String, want_list: Vec<String>) {
+    pub fn insert(
+        &mut self,
+        request_id: String,
+        repo: String,
+        want_list: Vec<String>,
+        have_list: Vec<String>,
+    ) {
         // Evict oldest entry if at capacity
         if self.entries.len() >= self.max_entries {
             if let Some((oldest_key, _)) = self
@@ -84,6 +93,7 @@ impl WantCache {
             WantEntry {
                 repo,
                 want_list,
+                have_list,
                 created_at: Instant::now(),
             },
         );
