@@ -229,6 +229,24 @@ fn get_chunk_params(file_size: u64) -> (usize, usize, usize) {
     }
 }
 
+/// Chunk params for creative-container formats (AI/PSD/INDD/EPS/PDF).
+///
+/// These files embed zlib-compressed streams and an xref/directory table at
+/// the end. Minor content changes (adding a layer/object) insert new streams
+/// mid-file and rewrite the trailing table, which byte-shifts everything
+/// after the insertion point. FastCDC re-syncs via rolling hash, but with
+/// tier-2+ params (1–8 MB chunks) the re-sync window is too wide — large
+/// chunks cross shifted boundaries and hash differently.
+///
+/// Capping at tier-1 params (avg 1 MB, max 4 MB) keeps chunks small enough
+/// to realign quickly after a shift, recovering dedup on the unchanged
+/// portions of the file. This matters most for delta_ai_lg /
+/// delta_psd / delta_indd at 100 MB+.
+fn get_creative_chunk_params(_file_size: u64) -> (usize, usize, usize) {
+    const MB: usize = 1024 * 1024;
+    (MB, 512 * 1024, 4 * MB)
+}
+
 /// Content-based chunker
 pub struct ContentChunker {
     strategy: ChunkStrategy,
@@ -680,15 +698,24 @@ impl ContentChunker {
                 self.chunk_fastcdc(data, avg, min, max).await
             }
 
-            // Documents - Rolling CDC
-            "pdf" | "svg" | "eps" | "ai" => {
+            // Documents - Rolling CDC with creative-container params for
+            // formats with embedded compressed streams + trailing xref
+            // (AI/PDF/EPS). Smaller chunks improve boundary re-sync after
+            // insertions, unlocking dedup across versions. SVG is plain
+            // text XML, so it uses generic tier params.
+            "svg" => {
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
                 self.chunk_fastcdc(data, avg, min, max).await
             }
+            "pdf" | "eps" | "ai" | "psd" | "psb" => {
+                let (avg, min, max) = get_creative_chunk_params(data.len() as u64);
+                self.chunk_fastcdc(data, avg, min, max).await
+            }
 
-            // Design tools - Rolling CDC for incremental design changes
+            // Design tools - creative containers (Fig/Sketch/XD/INDD) use
+            // the same small-chunk params for cross-version dedup.
             "fig" | "sketch" | "xd" | "indd" | "indt" => {
-                let (avg, min, max) = get_chunk_params(data.len() as u64);
+                let (avg, min, max) = get_creative_chunk_params(data.len() as u64);
                 self.chunk_fastcdc(data, avg, min, max).await
             }
 
@@ -2925,5 +2952,27 @@ mod tests {
             !chunks.is_empty(),
             "Fallback must still produce at least one chunk"
         );
+    }
+
+    #[test]
+    fn test_creative_chunk_params_stable_across_tiers() {
+        // Guards the BUG-003 / v6 fix: creative containers (AI/PDF/PSD/INDD)
+        // must use the small-chunk params (1 MB avg, 512 KB min, 4 MB max)
+        // regardless of file size. Drifting back to tier-2+ params would
+        // regress delta_psd past the 35 % workspace target
+        // (see dev-tests/standalone-deep-v6/reports/verification-plan-v6.md).
+        const MB: usize = 1024 * 1024;
+        for &size in &[
+            1u64,
+            50 * 1024 * 1024,         // tier-1
+            500 * 1024 * 1024,        // tier-2 territory
+            50 * 1024 * 1024 * 1024,  // tier-3 territory
+            500 * 1024 * 1024 * 1024, // tier-4 territory
+        ] {
+            let (avg, min, max) = get_creative_chunk_params(size);
+            assert_eq!(avg, MB, "creative avg drifted at size={}", size);
+            assert_eq!(min, 512 * 1024, "creative min drifted at size={}", size);
+            assert_eq!(max, 4 * MB, "creative max drifted at size={}", size);
+        }
     }
 }

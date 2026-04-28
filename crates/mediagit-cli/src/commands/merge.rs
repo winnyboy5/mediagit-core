@@ -16,8 +16,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_versioning::{
-    CheckoutManager, Commit, MergeEngine, MergeStrategy, ObjectDatabase, ObjectType, Oid, Ref,
-    RefDatabase, Reflog, ReflogEntry, Signature,
+    apply_merge_to_workdir, CheckoutManager, Commit, Index, MergeEngine, MergeStrategy,
+    ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Reflog, ReflogEntry, Signature,
 };
 use std::sync::Arc;
 
@@ -208,6 +208,29 @@ impl MergeCmd {
 
         // Check for conflicts
         if !result.conflicts.is_empty() {
+            // Load the ours/theirs trees so apply_merge_to_workdir can write clean paths
+            let ours_commit = mediagit_versioning::Commit::read(&odb, &our_oid).await?;
+            let theirs_commit = mediagit_versioning::Commit::read(&odb, &their_oid).await?;
+            let ours_tree = mediagit_versioning::Tree::read(&odb, &ours_commit.tree).await?;
+            let theirs_tree = mediagit_versioning::Tree::read(&odb, &theirs_commit.tree).await?;
+
+            let mut index = Index::load(&repo_root)?;
+
+            apply_merge_to_workdir(
+                &result,
+                &ours_tree,
+                &theirs_tree,
+                &odb,
+                &repo_root,
+                &mut index,
+                their_oid,
+                our_oid,
+            )
+            .await
+            .context("Failed to apply merge to working directory")?;
+
+            index.save(&repo_root)?;
+
             println!(
                 "{} Merge conflicts detected in {} file(s):",
                 style("⚠").yellow().bold(),
@@ -219,9 +242,11 @@ impl MergeCmd {
                     println!("    Type: {:?}", conflict.conflict_type);
                 }
             }
-            anyhow::bail!(
-                "Automatic merge failed. Fix conflicts and run 'mediagit merge --continue'"
+            println!(
+                "\n{} Conflict markers written. Resolve conflicts then run 'mediagit merge --continue'",
+                style("→").cyan()
             );
+            std::process::exit(1);
         }
 
         // No conflicts - create merge commit

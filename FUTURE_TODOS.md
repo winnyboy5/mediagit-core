@@ -56,19 +56,39 @@ See `crates/mediagit-cli/src/ignore_rules.rs`, `add.rs`, `status.rs`,
 
 ---
 
-### 2. Pack Negotiation / Bitmap Index
+### ~~2. Pack Negotiation~~ ✅ DONE — v0.2.6-beta.1
 *Source: `crates/mediagit-protocol/src/client.rs:122`; `claudedocs/` optimization roadmap*
 
-Pull/fetch sends an **empty have-set**, so the server always sends a full pack. For repos
-with many commits, this means downloading all objects on every fetch even when the client
-already has 99% of them.
+**Implemented** in v0.2.6-beta.1. Full have-set negotiation pipeline across all crates:
+
+- **Client**: `collect_local_have(refdb)` walks heads/remotes/tags, resolves symbolic refs,
+  deduplicates. Used by `fetch.rs` (once per fetch) and `pull.rs` (before streaming).
+  `clone.rs` correctly sends empty have for full clone.
+- **Wire protocol**: `WantRequest{want, have}` in `types.rs`, sent via `download_pack_streaming`.
+- **Server**: `download_pack` expands have-closure via `walk_reachable` (BFS object-graph
+  walker in `reachability.rs`), then prunes the want-walk via `collect_objects_recursive(stop_at)`.
+  Lenient error handling for stale/unknown have OIDs.
+- **Deterministic delta**: Producer-side similarity detection ensures reproducible chunk
+  storage for consistent have-set comparison.
+
+See `crates/mediagit-cli/src/repo.rs` (`collect_local_have`),
+`crates/mediagit-versioning/src/reachability.rs` (`walk_reachable` + 5 unit tests),
+`crates/mediagit-server/src/handlers.rs` (`download_pack`, `collect_objects_recursive`).
+
+---
+
+### 2b. Bitmap Index (Follow-up Optimization)
+*Depends on: ~~Pack Negotiation~~ (done)*
+
+The current `walk_reachable` does a full BFS traversal — O(objects) per fetch. For repos
+with <1K commits this is fast enough. At 10K+ commits, BFS dominates server latency.
 
 **What's needed:**
-- Compute local have-set (all reachable OIDs from local refs) before fetch negotiation
-- Send have-set to server; server computes the minimal pack to send
-- Optional: bitmap index over refs for fast "what's missing" detection
+- Roaring bitmap index over refs for fast reachability queries
+- Bitmap generation on push / GC / repack
+- Bitmap-accelerated "what's missing" detection in `download_pack`
 
-Effort: **~1 week**. Enables efficient incremental sync for teams.
+Effort: **~3–4 days**. Becomes valuable only at scale (10K+ commits).
 
 ---
 
@@ -170,6 +190,20 @@ loading the entire file into heap memory. Falls back to `StreamCDC` on mmap fail
 *Source: `docs/FUTURE_TODOS_2.md` — recorded 2026-03-01*
 
 > **⚠️ ATTEMPTED 2026-04-07 — REVERTED. See post-mortem below before re-attempting.**
+>
+> **Status 2026-04-18 (v6 verification, aka FEAT-001):** Re-confirmed out-of-scope.
+> `delta_ai_lg` measured 73.4 % growth on the `test-label-org.ai` → `test-label-alt.ai`
+> pair (129 MB → 215 MB — +86 MB genuinely new content, theoretical floor ~40 %).
+> The v6 creative-chunk-params fix (1 MB / 4 MB FastCDC on ai/pdf/eps/psd/indd)
+> landed `delta_psd` at **21.4 %** but AI held at 73.4 %, matching the 2026-04-07
+> finding that Illustrator's proprietary DEFLATE makes whole-file normalization
+> produce *worse* results than baseline.
+>
+> **Decision:** Not scheduled. Closing AI < 35 % requires the per-stream OID +
+> custom delta codec path (4–6 weeks, "What would be needed" below). AI is
+> intentionally **not** a gating criterion in
+> `dev-tests/standalone-deep-v6/reports/verification-plan-v6.md`. PSD < 35 %
+> remains the regression target and is protected by workspace tests.
 
 **Problem**: Adobe Illustrator (`.ai`), InDesign (`.indd`), PDF (`.pdf`) files are
 PDF/ZIP containers with DEFLATE-compressed inner streams. A single-byte change causes

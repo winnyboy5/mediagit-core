@@ -18,6 +18,7 @@ use axum::{
     Extension, Json,
 };
 use bytes::Bytes;
+use futures::stream::StreamExt;
 use mediagit_protocol::{
     RefInfo, RefUpdateRequest, RefUpdateResponse, RefUpdateResult, RefsResponse, WantRequest,
     WantResponse,
@@ -25,8 +26,8 @@ use mediagit_protocol::{
 use mediagit_security::auth::AuthUser;
 use mediagit_storage::{AzureBackend, GcsBackend, LocalBackend, MinIOBackend, StorageBackend};
 use mediagit_versioning::{
-    resolve_revision, Commit, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase,
-    StreamingPackWriter, Tree,
+    resolve_revision, Commit, LcaFinder, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Reflog,
+    ReflogEntry, StreamingPackWriter, Tree,
 };
 use std::path::Path as StdPath;
 use std::sync::Arc;
@@ -62,10 +63,33 @@ fn check_permission(
     }
 }
 
-/// Helper function to create storage backend based on repository configuration
-async fn create_storage_backend(
+/// Per-handler entry: returns the cached storage backend for this repo,
+/// constructing it on first use. Constructing a backend (especially Azure/S3)
+/// is expensive — TLS handshake plus a bucket/container existence RTT — so we
+/// build it once per repo per server lifetime and reuse the `Arc` from then on.
+async fn get_or_init_storage(
+    state: &AppState,
     repo_path: &StdPath,
 ) -> Result<Arc<dyn StorageBackend>, StatusCode> {
+    let key = repo_path.to_path_buf();
+
+    // Fast path: cached backend.
+    if let Some(backend) = state.storage_backends.read().await.get(&key).cloned() {
+        return Ok(backend);
+    }
+
+    // Slow path: take the write lock, double-check, build, insert.
+    let mut map = state.storage_backends.write().await;
+    if let Some(backend) = map.get(&key).cloned() {
+        return Ok(backend);
+    }
+    let backend = build_storage_backend(repo_path).await?;
+    map.insert(key, Arc::clone(&backend));
+    Ok(backend)
+}
+
+/// Helper function to create storage backend based on repository configuration
+async fn build_storage_backend(repo_path: &StdPath) -> Result<Arc<dyn StorageBackend>, StatusCode> {
     // Load repository configuration
     let config = mediagit_config::Config::load(repo_path)
         .await
@@ -98,19 +122,24 @@ async fn create_storage_backend(
         }
         mediagit_config::StorageConfig::S3(s3_config) => {
             // Use MinIOBackend for custom endpoints (MinIO, DigitalOcean Spaces, etc.)
-            // Use S3Backend for AWS S3
+            // Use S3Backend for AWS S3.
+            // Both paths thread `s3_config.prefix` through so multiple repos
+            // can share one bucket without colliding on identical OIDs (see
+            // C-BUG-AZURE-PREFIX — same shape, mirrored fix).
             if let Some(endpoint) = &s3_config.endpoint {
                 tracing::info!(
-                    "Using MinIO/S3-compatible backend: bucket={}, endpoint={}",
+                    "Using MinIO/S3-compatible backend: bucket={}, endpoint={}, prefix='{}'",
                     s3_config.bucket,
-                    endpoint
+                    endpoint,
+                    s3_config.prefix
                 );
 
-                let storage = MinIOBackend::new(
+                let storage = MinIOBackend::new_with_prefix(
                     endpoint,
                     &s3_config.bucket,
                     s3_config.access_key_id.as_deref().unwrap_or(""),
                     s3_config.secret_access_key.as_deref().unwrap_or(""),
+                    &s3_config.prefix,
                 )
                 .await
                 .map_err(|e| {
@@ -119,18 +148,23 @@ async fn create_storage_backend(
                 })?;
                 Arc::new(storage)
             } else {
-                tracing::info!("Using AWS S3 storage backend: bucket={}", s3_config.bucket);
+                tracing::info!(
+                    "Using AWS S3 storage backend: bucket={}, prefix='{}'",
+                    s3_config.bucket,
+                    s3_config.prefix
+                );
 
                 // For AWS S3 without custom endpoint, we use MinIOBackend with the AWS S3 endpoint
                 // This avoids setting global environment variables which could cause race conditions
                 // in concurrent requests.
                 let aws_endpoint = format!("https://s3.{}.amazonaws.com", s3_config.region);
 
-                let storage = MinIOBackend::new(
+                let storage = MinIOBackend::new_with_prefix(
                     &aws_endpoint,
                     &s3_config.bucket,
                     s3_config.access_key_id.as_deref().unwrap_or(""),
                     s3_config.secret_access_key.as_deref().unwrap_or(""),
+                    &s3_config.prefix,
                 )
                 .await
                 .map_err(|e| {
@@ -142,26 +176,36 @@ async fn create_storage_backend(
         }
         mediagit_config::StorageConfig::Azure(azure_config) => {
             tracing::info!(
-                "Using Azure storage backend: container={}",
-                azure_config.container
+                "Using Azure storage backend: container={} prefix='{}'",
+                azure_config.container,
+                azure_config.prefix
             );
 
-            // Use connection string if provided, otherwise use account key
+            // Use connection string if provided, otherwise use account key.
+            // Both paths now thread the configured `prefix` through so that
+            // multiple repos sharing one container don't collide on identical
+            // OIDs. (Pre-fix, prefix was silently ignored on put/get/exists/
+            // delete and only honoured on list_objects — see C-BUG-AZURE-PREFIX.)
             let storage = if let Some(conn_str) = &azure_config.connection_string {
-                AzureBackend::with_connection_string(&azure_config.container, conn_str)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!(
-                            "Failed to initialize Azure backend with connection string: {}",
-                            e
-                        );
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })?
+                AzureBackend::with_connection_string_and_prefix(
+                    &azure_config.container,
+                    conn_str,
+                    &azure_config.prefix,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        "Failed to initialize Azure backend with connection string: {}",
+                        e
+                    );
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?
             } else if let Some(account_key) = &azure_config.account_key {
-                AzureBackend::with_account_key(
+                AzureBackend::with_account_key_and_prefix(
                     &azure_config.account_name,
                     &azure_config.container,
                     account_key,
+                    &azure_config.prefix,
                 )
                 .await
                 .map_err(|e| {
@@ -249,7 +293,7 @@ pub async fn get_refs(
     }
 
     // Initialize storage and refdb
-    let _storage = create_storage_backend(&repo_path).await?;
+    let _storage = get_or_init_storage(&state, &repo_path).await?;
     let refdb = RefDatabase::new(repo_path.join(".mediagit"));
 
     // List all refs by scanning refs directory
@@ -329,7 +373,7 @@ pub async fn upload_pack(
     }
 
     // Initialize storage and ODB for proper compression and storage
-    let storage = create_storage_backend(&repo_path).await?;
+    let storage = get_or_init_storage(&state, &repo_path).await?;
     let odb = ObjectDatabase::with_smart_compression(storage, 1000);
 
     // Convert body to AsyncRead stream
@@ -348,34 +392,77 @@ pub async fn upload_pack(
             StatusCode::BAD_REQUEST
         })?;
 
-    tracing::info!("Processing streaming pack upload");
+    // Reader is sequential (a pack is one byte stream) but writes can overlap.
+    // Bound concurrent ODB writes with a sliding window so a slow backend PUT
+    // never blocks the reader from queuing the next object.
+    let workers_n: usize = std::env::var("MEDIAGIT_PACK_WORKERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n: &usize| *n > 0)
+        .unwrap_or(8);
 
-    // Process objects incrementally using ODB (proper compression + storage paths)
-    let mut object_count = 0;
-    while let Some(result) = reader.next_object().await {
-        let (oid, obj_type, data) = result.map_err(|e| {
-            tracing::error!("Failed to read object from pack stream: {}", e);
-            StatusCode::BAD_REQUEST
-        })?;
+    tracing::info!(
+        "Processing streaming pack upload (concurrent writes: {})",
+        workers_n
+    );
 
-        // Write through ODB which handles compression and correct storage paths
-        let stored_oid = odb.write(obj_type, &data).await.map_err(|e| {
-            tracing::error!("Failed to write object {} to ODB: {}", oid, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    use futures::stream::FuturesUnordered;
 
-        if stored_oid != oid {
-            tracing::warn!(
-                expected = %oid,
-                actual = %stored_oid,
-                "OID mismatch during pack upload (object may have different content)"
-            );
+    let mut in_flight: FuturesUnordered<_> = FuturesUnordered::new();
+    let mut object_count: usize = 0;
+
+    // Helper: drain one completed write and bump the counter.
+    async fn drain_one(
+        in_flight: &mut FuturesUnordered<
+            impl std::future::Future<Output = anyhow::Result<(Oid, Oid)>>,
+        >,
+        object_count: &mut usize,
+    ) -> Result<(), StatusCode> {
+        if let Some(res) = in_flight.next().await {
+            let (expected, stored) = res.map_err(|e| {
+                tracing::error!("Failed to write object to ODB: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+            if stored != expected {
+                tracing::warn!(
+                    expected = %expected,
+                    actual = %stored,
+                    "OID mismatch during pack upload (object may have different content)"
+                );
+            }
+            *object_count += 1;
+            if (*object_count).is_multiple_of(100) {
+                tracing::debug!("Processed {} objects", *object_count);
+            }
+        }
+        Ok(())
+    }
+
+    loop {
+        // Apply back-pressure: only fetch a new object once we have a worker slot.
+        while in_flight.len() >= workers_n {
+            drain_one(&mut in_flight, &mut object_count).await?;
         }
 
-        object_count += 1;
-        if object_count % 100 == 0 {
-            tracing::debug!("Processed {} objects", object_count);
+        match reader.next_object().await {
+            Some(Ok((oid, obj_type, data))) => {
+                let odb_clone = odb.clone();
+                in_flight.push(async move {
+                    let stored = odb_clone.write(obj_type, &data).await?;
+                    Ok::<_, anyhow::Error>((oid, stored))
+                });
+            }
+            Some(Err(e)) => {
+                tracing::error!("Failed to read object from pack stream: {}", e);
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            None => break,
         }
+    }
+
+    // Drain remaining writes.
+    while !in_flight.is_empty() {
+        drain_one(&mut in_flight, &mut object_count).await?;
     }
 
     tracing::info!(
@@ -432,6 +519,7 @@ pub async fn download_pack(
         }
     };
     let want_list = want_entry.want_list;
+    let have_list = want_entry.have_list;
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -439,42 +527,89 @@ pub async fn download_pack(
     }
 
     // Initialize storage and odb
-    let storage = create_storage_backend(&repo_path).await?;
+    let storage = get_or_init_storage(&state, &repo_path).await?;
     let odb = ObjectDatabase::with_smart_compression(storage, 1000);
 
-    // Collect all objects recursively (commit -> tree -> blobs)
-    // Use HashSet for O(1) contains checks, Vec for maintaining insertion order
-    let mut objects_to_pack: Vec<Oid> = Vec::new();
-    let mut seen_objects: std::collections::HashSet<Oid> = std::collections::HashSet::new();
-
-    // Recursively collect all objects reachable from wanted OIDs
-    // This properly handles nested trees (subdirectories) and parent commits (history)
-    for oid_str in &want_list {
-        let oid = Oid::from_hex(oid_str).map_err(|_| StatusCode::BAD_REQUEST)?;
-
-        // Use recursive collection to get all commits, trees, and blobs
-        collect_objects_recursive(&odb, oid, &mut objects_to_pack, &mut seen_objects)
+    // Expand the client's `have` set into the full object closure the client
+    // is known to already have. Any OID in this set — including entire
+    // subtrees and blobs reachable from a parent commit — is pruned from the
+    // pack walk below. Unknown haves (stale or forged) are silently skipped
+    // by `walk_reachable`, which is the whole point of having it be lenient.
+    let have_oids: Vec<Oid> = have_list
+        .iter()
+        .filter_map(|s| Oid::from_hex(s).ok())
+        .collect();
+    // Fast path: empty have-set (clone) skips the expensive BFS expansion.
+    let stop_at = if have_oids.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        let empty: std::collections::HashSet<Oid> = std::collections::HashSet::new();
+        mediagit_versioning::walk_reachable(&odb, have_oids, &empty)
             .await
             .map_err(|e| {
-                tracing::error!("Failed to collect objects from {}: {}", oid, e);
+                tracing::error!("Failed to expand have-closure: {}", e);
                 StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-    }
-
+            })?
+    };
     tracing::info!(
-        "Collecting {} objects for pack (from {} requested)",
-        objects_to_pack.len(),
-        want_list.len()
+        "Have-closure: {} objects reachable from {} have OIDs",
+        stop_at.len(),
+        have_list.len()
     );
 
-    // Filter out chunked objects - they'll be transferred separately
+    // Collect all objects reachable from wanted OIDs via iterative BFS,
+    // pruning anything the client already has (via `stop_at`).
+    // Strict: reject request if any want OID is malformed.
+    let want_oids: Vec<Oid> = want_list
+        .iter()
+        .map(|s| Oid::from_hex(s).map_err(|_| StatusCode::BAD_REQUEST))
+        .collect::<Result<_, _>>()?;
+    let objects_to_pack = collect_objects_bfs(&odb, want_oids, &stop_at)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to collect objects: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    tracing::info!(
+        "Collecting {} objects for pack (from {} requested, {} pruned via have)",
+        objects_to_pack.len(),
+        want_list.len(),
+        stop_at.len()
+    );
+
+    // Filter out chunked objects — they'll be transferred separately.
+    // Also prune any chunked OIDs the client already has (in stop_at)
+    // to avoid unnecessary manifest download requests.
+    //
+    // Probe `is_chunked` in parallel: each probe is one backend HEAD on cloud
+    // storage, and the sequential version made pack generation O(N × RTT).
+    use futures::stream::StreamExt;
+    let probes = futures::stream::iter(objects_to_pack.iter().copied())
+        .map(|oid| {
+            let odb_ref = &odb;
+            async move {
+                let chunked = odb_ref.is_chunked(&oid).await.unwrap_or(false);
+                (oid, chunked)
+            }
+        })
+        .buffer_unordered(8)
+        .collect::<Vec<(Oid, bool)>>()
+        .await;
+
     let mut chunked_objects: Vec<String> = Vec::new();
     let mut non_chunked_objects: Vec<Oid> = Vec::new();
-
+    // Re-bucket in original order for deterministic pack output.
+    let probe_lookup: std::collections::HashMap<Oid, bool> = probes.into_iter().collect();
     for oid in &objects_to_pack {
-        if odb.is_chunked(oid).await.unwrap_or(false) {
-            tracing::debug!(oid = %oid, "Skipping chunked blob in pack generation");
-            chunked_objects.push(oid.to_hex());
+        let chunked = probe_lookup.get(oid).copied().unwrap_or(false);
+        if chunked {
+            if !stop_at.contains(oid) {
+                tracing::debug!(oid = %oid, "Chunked blob — separate transfer");
+                chunked_objects.push(oid.to_hex());
+            } else {
+                tracing::debug!(oid = %oid, "Chunked blob already on client — skipping");
+            }
         } else {
             non_chunked_objects.push(*oid);
         }
@@ -559,79 +694,112 @@ pub async fn download_pack(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-/// Recursively collect an object and its children (for commits and trees).
-/// Used by download_pack to ensure all nested objects are included in packs.
-async fn collect_objects_recursive(
+/// Iteratively collect an object and all reachable children (commits, trees,
+/// blobs) using BFS. Objects already in `stop_at` are pruned — neither added
+/// nor recursed into — which turns full-history packs into delta packs during
+/// incremental fetch.
+///
+/// Uses `VecDeque`-based BFS instead of recursive `Box::pin` to avoid heap
+/// allocations per traversal step in deep histories.
+async fn collect_objects_bfs(
     odb: &ObjectDatabase,
-    oid: Oid,
-    collected: &mut Vec<Oid>,
-    visited: &mut std::collections::HashSet<Oid>,
-) -> Result<(), anyhow::Error> {
-    // Skip if already visited
-    if visited.contains(&oid) {
-        return Ok(());
-    }
-    visited.insert(oid);
+    roots: impl IntoIterator<Item = Oid>,
+    stop_at: &std::collections::HashSet<Oid>,
+) -> Result<Vec<Oid>, anyhow::Error> {
+    use futures::stream::StreamExt;
 
-    // Check if this is a chunked object BEFORE reading - avoids massive memory allocation
-    // Chunked objects will be streamed separately, not included in pack
-    if odb.is_chunked(&oid).await.unwrap_or(false) {
-        tracing::debug!(oid = %oid, "Object is chunked - adding to collection without reading content");
-        collected.push(oid);
-        return Ok(()); // Chunked blobs have no children to recurse into
-    }
+    let mut visited = std::collections::HashSet::new();
+    let mut collected: Vec<Oid> = Vec::new();
+    let mut frontier: Vec<Oid> = Vec::new();
 
-    // Try to read the object - only for non-chunked objects
-    let obj_data = match odb.read(&oid).await {
-        Ok(data) => data,
-        Err(e) => {
-            tracing::warn!("Object {} not found: {}", oid, e);
-            return Ok(()); // Skip missing objects
+    for oid in roots {
+        if stop_at.contains(&oid) || !visited.insert(oid) {
+            continue;
         }
-    };
+        frontier.push(oid);
+    }
 
-    // Add this object to collection
-    collected.push(oid);
+    let parallelism: usize = std::env::var("MEDIAGIT_BFS_PARALLELISM")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n: &usize| *n > 0)
+        .unwrap_or(16);
 
-    // Determine type and recursively collect children
-    let obj_type = detect_object_type(&obj_data).unwrap_or(ObjectType::Blob);
+    // Level-by-level parallel BFS: at each step we read every object in the
+    // current frontier concurrently (capped by `parallelism`), then expand the
+    // next frontier sequentially. The previous serial implementation made one
+    // Azure GET per object — for a 3-object clone that was 18 s of real
+    // round-trip stalls. With parallelism=16 a tree of 100 entries finishes
+    // in ~7 batches instead of 100 sequential reads.
+    while !frontier.is_empty() {
+        let batch: Vec<Oid> = frontier.split_off(0);
 
-    match obj_type {
-        ObjectType::Commit => {
-            // Parse commit to get tree OID and parent commits using Commit's own deserializer
-            if let Ok(commit) = Commit::deserialize(&obj_data) {
-                // Collect the tree
-                Box::pin(collect_objects_recursive(
-                    odb,
-                    commit.tree,
-                    collected,
-                    visited,
-                ))
-                .await?;
-
-                // Collect parent commits (REQUIRED for complete history)
-                for parent in &commit.parents {
-                    Box::pin(collect_objects_recursive(odb, *parent, collected, visited)).await?;
+        // Probe + read each oid concurrently. is_chunked + read for chunked
+        // blobs is short-circuited because chunked manifests don't recurse.
+        let mut probe_stream = futures::stream::iter(batch.into_iter().map(|oid| {
+            async move {
+                let chunked = odb.is_chunked(&oid).await.unwrap_or(false);
+                if chunked {
+                    (oid, true, None)
+                } else {
+                    let read = odb.read(&oid).await.ok();
+                    (oid, false, read)
                 }
             }
+        }))
+        .buffer_unordered(parallelism);
+
+        // Re-collect results so output order is deterministic-ish (stable
+        // wrt the order they entered the frontier — for a clone we sort
+        // before pack generation anyway, so out-of-order completion is fine).
+        let mut batch_results: Vec<(Oid, bool, Option<Vec<u8>>)> = Vec::new();
+        while let Some(item) = probe_stream.next().await {
+            batch_results.push(item);
         }
-        ObjectType::Tree => {
-            // Parse tree to get entry OIDs using Tree's own deserializer
-            if let Ok(tree) = Tree::deserialize(&obj_data) {
-                for entry in tree.iter() {
-                    Box::pin(collect_objects_recursive(
-                        odb, entry.oid, collected, visited,
-                    ))
-                    .await?;
-                }
+
+        for (oid, chunked, read) in batch_results {
+            if chunked {
+                collected.push(oid);
+                continue;
             }
-        }
-        ObjectType::Blob => {
-            // Blobs have no children
+            let obj_data = match read {
+                Some(d) => d,
+                None => {
+                    tracing::warn!("Object {} not found", oid);
+                    continue;
+                }
+            };
+            collected.push(oid);
+
+            let obj_type = detect_object_type(&obj_data).unwrap_or(ObjectType::Blob);
+            match obj_type {
+                ObjectType::Commit => {
+                    if let Ok(commit) = Commit::deserialize(&obj_data) {
+                        if !stop_at.contains(&commit.tree) && visited.insert(commit.tree) {
+                            frontier.push(commit.tree);
+                        }
+                        for parent in commit.parents {
+                            if !stop_at.contains(&parent) && visited.insert(parent) {
+                                frontier.push(parent);
+                            }
+                        }
+                    }
+                }
+                ObjectType::Tree => {
+                    if let Ok(tree) = Tree::deserialize(&obj_data) {
+                        for entry in tree.iter() {
+                            if !stop_at.contains(&entry.oid) && visited.insert(entry.oid) {
+                                frontier.push(entry.oid);
+                            }
+                        }
+                    }
+                }
+                ObjectType::Blob => { /* leaf */ }
+            }
         }
     }
 
-    Ok(())
+    Ok(collected)
 }
 
 /// POST /:repo/objects/want - Request specific objects
@@ -656,10 +824,13 @@ pub async fn request_objects(
     // Generate unique request ID to prevent race conditions between concurrent clients
     let request_id = crate::state::generate_request_id();
 
-    // Store the want list in cache keyed by request_id (not repo name)
+    // Store the want list in cache keyed by request_id (not repo name).
+    // `have` is retained so download_pack can prune objects already on the
+    // client — this is the incremental-fetch path. Empty `have` gives the
+    // clone-equivalent full pack.
     {
         let mut want_cache = state.want_cache.lock().await;
-        want_cache.insert(request_id.clone(), repo, want_req.want);
+        want_cache.insert(request_id.clone(), repo, want_req.want, want_req.have);
     }
 
     Ok(Json(WantResponse { request_id }))
@@ -683,8 +854,10 @@ pub async fn update_refs(
     }
 
     // Initialize storage and refdb
-    let _storage = create_storage_backend(&repo_path).await?;
+    let storage = get_or_init_storage(&state, &repo_path).await?;
     let refdb = RefDatabase::new(repo_path.join(".mediagit"));
+    let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
+    let reflog = Reflog::new(repo_path.join(".mediagit"));
 
     let mut results = Vec::new();
     let mut all_success = true;
@@ -788,7 +961,7 @@ pub async fn update_refs(
                         results.push(RefUpdateResult {
                             ref_name: update.name.clone(),
                             success: false,
-                            error: Some("not fast-forward".to_string()),
+                            error: Some("non-fast-forward".to_string()),
                         });
                         all_success = false;
                         continue;
@@ -797,6 +970,53 @@ pub async fn update_refs(
             }
         }
 
+        // Ancestry check: when force=false and the ref already exists, require
+        // that the new commit is a descendant of the current tip (fast-forward only).
+        if !req.force && !update.delete {
+            if let Ok(current_ref) = refdb.read(&update.name).await {
+                if let Some(current_oid) = &current_ref.oid {
+                    let new_oid_parsed =
+                        Oid::from_hex(&update.new_oid).map_err(|_| StatusCode::BAD_REQUEST)?;
+                    let lca = LcaFinder::new(Arc::clone(&odb));
+                    match lca.is_ancestor(current_oid, &new_oid_parsed).await {
+                        Ok(true) => {} // fast-forward: current is ancestor of new — allowed
+                        Ok(false) => {
+                            tracing::warn!(
+                                "Non-fast-forward push rejected for '{}': {} is not ancestor of {}",
+                                update.name,
+                                current_oid.to_hex(),
+                                update.new_oid
+                            );
+                            results.push(RefUpdateResult {
+                                ref_name: update.name.clone(),
+                                success: false,
+                                error: Some("non-fast-forward".to_string()),
+                            });
+                            all_success = false;
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::error!("Ancestry check failed for '{}': {}", update.name, e);
+                            results.push(RefUpdateResult {
+                                ref_name: update.name.clone(),
+                                success: false,
+                                error: Some(format!("ancestry check failed: {}", e)),
+                            });
+                            all_success = false;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Capture the pre-write OID for reflog
+        let pre_write_oid = if let Ok(current_ref) = refdb.read(&update.name).await {
+            current_ref.oid
+        } else {
+            None
+        };
+
         // Update the ref
         let new_oid = Oid::from_hex(&update.new_oid).map_err(|_| StatusCode::BAD_REQUEST)?;
         let ref_update = Ref::new_direct(update.name.clone(), new_oid);
@@ -804,6 +1024,24 @@ pub async fn update_refs(
         match refdb.write(&ref_update).await {
             Ok(_) => {
                 tracing::info!("Updated {} to {}", update.name, update.new_oid);
+
+                // Append reflog entry for every successful ref write
+                let old_oid_for_log = pre_write_oid.unwrap_or_else(|| Oid::from_bytes([0u8; 32]));
+                let (actor_name, actor_email) = auth_user
+                    .as_ref()
+                    .map(|u| (u.user_id.clone(), format!("{}@local", u.user_id)))
+                    .unwrap_or_else(|| ("server".to_string(), "server@local".to_string()));
+                let msg = if req.force {
+                    "push (force)".to_string()
+                } else {
+                    "push".to_string()
+                };
+                let entry =
+                    ReflogEntry::now(old_oid_for_log, new_oid, &actor_name, &actor_email, &msg);
+                if let Err(e) = reflog.append(&update.name, &entry).await {
+                    tracing::warn!("Failed to write reflog for '{}': {}", update.name, e);
+                }
+
                 results.push(RefUpdateResult {
                     ref_name: update.name,
                     success: true,
@@ -873,25 +1111,44 @@ pub async fn check_chunks_exist(
     }
 
     // Create storage backend
-    let storage = create_storage_backend(&repo_path).await?;
+    let storage = get_or_init_storage(&state, &repo_path).await?;
 
-    // Check each chunk and collect missing ones
-    let mut missing = Vec::new();
-    for chunk_id_hex in chunk_ids {
-        let chunk_key = format!("chunks/{}", chunk_id_hex);
-        match storage.exists(&chunk_key).await {
-            Ok(exists) => {
-                if !exists {
-                    missing.push(chunk_id_hex);
+    // Check chunks concurrently — up to 50 in-flight existence checks.
+    // storage is Arc<dyn StorageBackend> (Send+Sync), cheap to clone.
+    //
+    // A chunk counts as "present" if either `chunks/<id>` or `chunk-deltas/<id>.meta`
+    // exists: the delta sidecar is a valid storage form and the reader path
+    // handles both. Otherwise a re-push would rematerialize existing deltas
+    // into full chunks and undo the storage savings.
+    let missing: Vec<String> = futures::stream::iter(chunk_ids)
+        .map(|chunk_id_hex| {
+            let storage = Arc::clone(&storage);
+            async move {
+                let chunk_key = format!("chunks/{}", chunk_id_hex);
+                let delta_meta_key = format!("chunk-deltas/{}.meta", chunk_id_hex);
+                let (full, delta) = futures::future::join(
+                    storage.exists(&chunk_key),
+                    storage.exists(&delta_meta_key),
+                )
+                .await;
+                let exists = matches!(full, Ok(true)) || matches!(delta, Ok(true));
+                if exists {
+                    None
+                } else {
+                    if let Err(ref e) = full {
+                        tracing::warn!(chunk = %chunk_id_hex, error = %e, "Error checking chunk (full)");
+                    }
+                    if let Err(ref e) = delta {
+                        tracing::warn!(chunk = %chunk_id_hex, error = %e, "Error checking chunk (delta)");
+                    }
+                    Some(chunk_id_hex)
                 }
             }
-            Err(e) => {
-                tracing::warn!(chunk = %chunk_id_hex, error = %e, "Error checking chunk");
-                // Assume missing on error
-                missing.push(chunk_id_hex);
-            }
-        }
-    }
+        })
+        .buffer_unordered(50)
+        .filter_map(|x| async { x })
+        .collect()
+        .await;
 
     tracing::debug!(
         repo = %repo,
@@ -914,11 +1171,12 @@ pub async fn upload_chunk(
     // Check write permission
     check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
 
-    tracing::debug!(
+    let upload_start = std::time::Instant::now();
+    tracing::info!(
         repo = %repo,
         chunk_id = %chunk_id,
         size = body.len(),
-        "Uploading chunk"
+        "PUT chunk"
     );
 
     // Resolve repository path
@@ -929,7 +1187,7 @@ pub async fn upload_chunk(
     }
 
     // Create storage backend
-    let storage = create_storage_backend(&repo_path).await?;
+    let storage = get_or_init_storage(&state, &repo_path).await?;
 
     // Store chunk directly (already compressed)
     let chunk_key = format!("chunks/{}", chunk_id);
@@ -938,7 +1196,12 @@ pub async fn upload_chunk(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    tracing::debug!(chunk = %chunk_id, "Chunk stored successfully");
+    tracing::info!(
+        chunk = %chunk_id,
+        size = body.len(),
+        elapsed_ms = upload_start.elapsed().as_millis() as u64,
+        "Chunk stored"
+    );
     Ok(StatusCode::OK)
 }
 
@@ -969,7 +1232,7 @@ pub async fn upload_manifest(
     }
 
     // Create storage backend
-    let storage = create_storage_backend(&repo_path).await?;
+    let storage = get_or_init_storage(&state, &repo_path).await?;
 
     // Store manifest
     let manifest_key = format!("manifests/{}", oid);
@@ -1007,7 +1270,7 @@ pub async fn download_chunk(
     }
 
     // Create storage backend
-    let storage = create_storage_backend(&repo_path).await?;
+    let storage = get_or_init_storage(&state, &repo_path).await?;
 
     // Read compressed chunk directly (no decompression)
     let chunk_key = format!("chunks/{}", chunk_id);
@@ -1022,6 +1285,200 @@ pub async fn download_chunk(
         [("Content-Type", "application/octet-stream")],
         chunk_data,
     ))
+}
+
+/// POST /:repo/chunk-deltas/check - Check which chunks exist as chunk-deltas
+///
+/// Body: JSON array of chunk IDs (hex strings).
+/// Response: JSON map { chunk_id_hex -> base_oid_hex } for chunks that have a
+/// `chunk-deltas/<id>.meta` sidecar. Chunks not in the response are either
+/// stored as full chunks (use `GET /chunks/<id>`) or absent.
+///
+/// This sidecar pattern lets clients receive deltas during clone/pull instead
+/// of inflated full chunks, without changing the manifest schema (which is
+/// postcard-encoded and not field-addition-tolerant).
+pub async fn check_chunk_deltas_exist(
+    Path(repo): Path<String>,
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    Json(chunk_ids): Json<Vec<String>>,
+) -> Result<Json<std::collections::HashMap<String, String>>, StatusCode> {
+    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+
+    tracing::debug!(repo = %repo, chunk_count = chunk_ids.len(), "Checking chunk-delta availability");
+
+    let repo_path = state.repos_dir.join(&repo);
+    if !repo_path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let storage = get_or_init_storage(&state, &repo_path).await?;
+    let mut deltas = std::collections::HashMap::new();
+
+    // Check chunk-deltas concurrently — up to 50 in-flight meta reads.
+    let delta_results: Vec<_> = futures::stream::iter(chunk_ids)
+        .map(|chunk_id_hex| {
+            let storage = Arc::clone(&storage);
+            async move {
+                let meta_key = format!("chunk-deltas/{}.meta", chunk_id_hex);
+                if let Ok(meta_bytes) = storage.get(&meta_key).await {
+                    if let Some(base_hex) = parse_chunk_delta_meta(&meta_bytes) {
+                        return Some((chunk_id_hex, base_hex));
+                    }
+                }
+                None
+            }
+        })
+        .buffer_unordered(50)
+        .filter_map(|x| async { x })
+        .collect()
+        .await;
+    for (chunk_id_hex, base_hex) in delta_results {
+        deltas.insert(chunk_id_hex, base_hex);
+    }
+
+    tracing::debug!(repo = %repo, delta_count = deltas.len(), "Chunk-delta check complete");
+    Ok(Json(deltas))
+}
+
+/// Parse a `chunk-deltas/<id>.meta` body of the form `base:<hex>` into the
+/// base OID hex. Returns `None` for malformed/empty meta.
+fn parse_chunk_delta_meta(meta_bytes: &[u8]) -> Option<String> {
+    let s = std::str::from_utf8(meta_bytes).ok()?;
+    let trimmed = s.trim();
+    let hex = trimmed.strip_prefix("base:")?;
+    if hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(hex.to_string())
+    } else {
+        None
+    }
+}
+
+/// GET /:repo/chunk-deltas/:chunk_id - Download a single chunk-delta payload.
+///
+/// Returns the raw compressed delta bytes from `chunk-deltas/<chunk_id>`.
+/// The base reference is obtained separately via the check endpoint above
+/// (which is invoked once per manifest, not once per chunk).
+pub async fn download_chunk_delta(
+    Path((repo, chunk_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+) -> Result<impl IntoResponse, StatusCode> {
+    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+
+    tracing::debug!(repo = %repo, chunk_id = %chunk_id, "Downloading chunk-delta");
+
+    let repo_path = state.repos_dir.join(&repo);
+    if !repo_path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let storage = get_or_init_storage(&state, &repo_path).await?;
+    let delta_key = format!("chunk-deltas/{}", chunk_id);
+    let delta_data = storage.get(&delta_key).await.map_err(|e| {
+        tracing::warn!(chunk = %chunk_id, error = %e, "Chunk-delta not found");
+        StatusCode::NOT_FOUND
+    })?;
+
+    Ok((
+        StatusCode::OK,
+        [("Content-Type", "application/octet-stream")],
+        delta_data,
+    ))
+}
+
+/// Header carrying the base chunk OID (hex) for a chunk-delta upload.
+pub const DELTA_BASE_HEADER: &str = "x-mediagit-delta-base";
+
+/// PUT /:repo/chunk-deltas/:chunk_id - Upload a single chunk-delta payload.
+///
+/// The delta payload is the request body (raw compressed bytes, same format
+/// as the server-side storage). The base chunk OID is carried in the
+/// `X-Mediagit-Delta-Base` header.
+///
+/// This exists so the push path can ship deltas verbatim instead of paying
+/// the rematerialize-and-re-upload cost through `/chunks/:id`, which was the
+/// regression that caused cloned repos to report near-zero compression
+/// savings (the server only ever saw full chunks and had no deltas to serve).
+///
+/// Writes both `chunk-deltas/<chunk_id>` (payload) and `chunk-deltas/<chunk_id>.meta`
+/// (body `base:<hex>`) — same on-disk layout as locally-encoded deltas, so
+/// downstream reads go through the existing `get_chunk` delta-reconstruction
+/// path without any schema change.
+pub async fn upload_chunk_delta(
+    Path((repo, chunk_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<StatusCode, StatusCode> {
+    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+
+    let base_hex = headers
+        .get(DELTA_BASE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    if base_hex.len() != 64 || !base_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        tracing::warn!(
+            repo = %repo,
+            chunk_id = %chunk_id,
+            base = %base_hex,
+            "Rejecting chunk-delta upload: base header is not a 64-char hex oid"
+        );
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    if chunk_id.len() != 64 || !chunk_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    if chunk_id == base_hex {
+        tracing::warn!(
+            repo = %repo,
+            chunk_id = %chunk_id,
+            "Rejecting chunk-delta self-loop"
+        );
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    if body.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let repo_path = state.repos_dir.join(&repo);
+    if !repo_path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let storage = get_or_init_storage(&state, &repo_path).await?;
+
+    let delta_key = format!("chunk-deltas/{}", chunk_id);
+    storage.put(&delta_key, &body).await.map_err(|e| {
+        tracing::error!(chunk = %chunk_id, error = %e, "Failed to persist chunk-delta payload");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let meta_key = format!("chunk-deltas/{}.meta", chunk_id);
+    let meta_body = format!("base:{}", base_hex);
+    storage
+        .put(&meta_key, meta_body.as_bytes())
+        .await
+        .map_err(|e| {
+            tracing::error!(chunk = %chunk_id, error = %e, "Failed to persist chunk-delta meta");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    tracing::debug!(
+        repo = %repo,
+        chunk_id = %chunk_id,
+        base = %base_hex,
+        bytes = body.len(),
+        "Chunk-delta uploaded"
+    );
+
+    Ok(StatusCode::CREATED)
 }
 
 /// GET /:repo/manifests/:oid - Download a chunk manifest
@@ -1045,7 +1502,7 @@ pub async fn download_manifest(
     }
 
     // Create storage backend
-    let storage = create_storage_backend(&repo_path).await?;
+    let storage = get_or_init_storage(&state, &repo_path).await?;
 
     // Read manifest
     let manifest_key = format!("manifests/{}", oid);
@@ -1222,7 +1679,7 @@ pub async fn download_file_by_path(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    let storage = create_storage_backend(&repo_path).await?;
+    let storage = get_or_init_storage(&state, &repo_path).await?;
     let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
     let refdb = RefDatabase::new(repo_path.join(".mediagit"));
 
@@ -1327,7 +1784,7 @@ async fn list_tree_impl(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    let storage = create_storage_backend(&repo_path).await?;
+    let storage = get_or_init_storage(&state, &repo_path).await?;
     let odb = ObjectDatabase::with_smart_compression(storage, 1000);
     let refdb = RefDatabase::new(repo_path.join(".mediagit"));
 

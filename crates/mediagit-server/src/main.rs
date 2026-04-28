@@ -80,6 +80,29 @@ async fn main() -> Result<()> {
 
     tracing::info!("Server configuration: {:?}", config);
 
+    // Startup summary banner — operators should see at a glance what's wired.
+    let bind_addr = if config.enable_tls {
+        format!("{}:{} (TLS)", config.host, config.tls_port)
+    } else {
+        format!("{}:{} (HTTP)", config.host, config.port)
+    };
+    let auth_state = if config.enable_auth { "ON" } else { "OFF" };
+    let rl_state = if config.enable_rate_limiting {
+        format!(
+            "ON ({} rps, burst {})",
+            config.rate_limit_rps, config.rate_limit_burst
+        )
+    } else {
+        "OFF".to_string()
+    };
+    tracing::info!(
+        "mediagit-server | listen={} | repos={} | auth={} | rate_limit={}",
+        bind_addr,
+        config.repos_dir.display(),
+        auth_state,
+        rl_state,
+    );
+
     // Create repos directory if it doesn't exist
     std::fs::create_dir_all(&config.repos_dir)?;
     tracing::info!("Repositories directory: {:?}", config.repos_dir);

@@ -481,6 +481,14 @@ impl AddCmd {
             }
         }
 
+        // Best-effort auto-gc after add. Re-staging a file before commit
+        // orphans the previous version's chunks immediately; the threshold
+        // gate (50 MiB or 100 orphans) makes trivial adds a no-op.
+        if !self.dry_run && added_count > 0 {
+            let _ =
+                crate::auto_gc::maybe_run(&repo_root, crate::auto_gc::TriggerMode::PostAdd).await;
+        }
+
         Ok(())
     }
 

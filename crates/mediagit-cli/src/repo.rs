@@ -17,6 +17,8 @@
 
 use anyhow::{Context, Result};
 use mediagit_storage::StorageBackend;
+use mediagit_versioning::{ObjectDatabase, RefDatabase};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -236,6 +238,92 @@ pub async fn create_storage_backend(repo_root: &Path) -> Result<Arc<dyn StorageB
             anyhow::bail!("Multi-backend storage is not yet implemented");
         }
     }
+}
+
+/// Collect the tip OIDs of every local ref (heads, tags, remotes) as a
+/// deduplicated list of hex strings suitable for use as the `have` field in a
+/// pack-negotiation request.
+///
+/// This is the *small* shape of have-set negotiation: rather than shipping
+/// the full object closure across the wire, we send only ref tips (tens of
+/// OIDs even for large repos) and let the server expand the closure locally
+/// from its own ODB. Any symbolic refs are resolved to their underlying OID;
+/// any refs that fail to read are skipped silently — stale or corrupted
+/// local state must not block a fetch.
+///
+/// Used by `fetch` and `pull` to enable incremental object transfer.
+///
+/// **BUG-008 correctness note:** every OID emitted here must be present in
+/// the local ODB. Clone pre-populates `refs/remotes/origin/<branch>` for
+/// **every** advertised branch but only ships objects reachable from the
+/// default branch. If we advertise an OID as "have" without verifying the
+/// object is actually present, the server will prune its closure and send
+/// nothing — leaving the user unable to pull the non-default branch.
+///
+/// We filter via [`ObjectDatabase::exists`] which does a cache probe plus
+/// a single storage-existence check (no content read), so the added cost
+/// is O(number_of_refs) cheap I/O with zero memory overhead.
+pub async fn collect_local_have(refdb: &RefDatabase, odb: &ObjectDatabase) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+
+    // Walk every namespace that can plausibly mirror objects on the server:
+    // - heads: local branches the user may have pushed
+    // - remotes: tracking refs (guaranteed to exist on the server modulo race)
+    // - tags: lightweight + annotated tag tips
+    for namespace in ["heads", "remotes", "tags"] {
+        let ref_names = match refdb.list(namespace).await {
+            Ok(names) => names,
+            Err(_) => continue,
+        };
+
+        for name in ref_names {
+            // Prefer `resolve` so symbolic refs (HEAD → refs/heads/main) get
+            // followed to their direct OID.
+            if let Ok(oid) = refdb.resolve(&name).await {
+                let hex = oid.to_hex();
+                if !seen.insert(hex.clone()) {
+                    continue;
+                }
+                // Only advertise as "have" if the object really is in our ODB.
+                // Skipping silently on `exists()` errors is deliberate: a
+                // transient storage hiccup should trigger a full re-download
+                // rather than claim to have data we can't read.
+                if odb.exists(&oid).await.unwrap_or(false) {
+                    out.push(hex);
+                }
+            }
+        }
+    }
+
+    out
+}
+
+/// Like [`collect_local_have`] but skips the object-presence filter.
+///
+/// Useful for push paths where the client has just written the objects
+/// locally and is trying to tell the server which ones not to send back.
+/// Fetch/pull callers must use [`collect_local_have`] to avoid the
+/// advertised-but-missing remote-tracking OID problem described there.
+#[allow(dead_code)]
+pub async fn collect_local_have_unchecked(refdb: &RefDatabase) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for namespace in ["heads", "remotes", "tags"] {
+        let ref_names = match refdb.list(namespace).await {
+            Ok(names) => names,
+            Err(_) => continue,
+        };
+        for name in ref_names {
+            if let Ok(oid) = refdb.resolve(&name).await {
+                let hex = oid.to_hex();
+                if seen.insert(hex.clone()) {
+                    out.push(hex);
+                }
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

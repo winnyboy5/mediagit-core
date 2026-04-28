@@ -791,135 +791,150 @@ aws s3api put-bucket-lifecycle-configuration \
 
 ### 4. Azure Blob Storage Backend
 
-**Best for**: Azure-centric deployments, Microsoft ecosystem integration
+**Best for**: Azure-centric deployments, Microsoft ecosystem integration.
+
+> The Azure backend is selected per **server-side** repository — the
+> `[storage]` section in `<server-repos-dir>/<repo>/.mediagit/config.toml`
+> picks the backend that `mediagit-server` will use for that repo's objects.
+> Clients do not need any Azure credentials; they only talk to
+> `mediagit-server` over HTTP.
 
 #### Prerequisites
 
-1. **Azure Account**: https://azure.microsoft.com/
-2. **Azure CLI Installed**: See prerequisites section
-3. **Storage Account**: Create in Azure Portal
+1. **Azure subscription**: https://azure.microsoft.com/
+2. **Azure CLI**: `az login` already authenticated.
+3. `mediagit-server` and `mediagit` built with `--release` (the workspace
+   already enables `mediagit-storage/all`, which compiles in the Azure
+   backend — no extra cargo flags are needed).
 
-#### Create Storage Account and Container
+#### Provision Resource Group, Storage Account, and Container
 
 ```bash
-# Login to Azure
-az login
+# 1. Resource group
+az group create --name mediagit-dev-rg --location eastus
 
-# Create resource group
-az group create --name mediagit-rg --location eastus
-
-# Create storage account
+# 2. Storage account (account names: 3-24 lowercase alphanumeric, globally unique)
 az storage account create \
-  --name mediagitstorage \
-  --resource-group mediagit-rg \
+  --name mediagitdev$(openssl rand -hex 3) \
+  --resource-group mediagit-dev-rg \
   --location eastus \
-  --sku Standard_LRS
+  --sku Standard_LRS \
+  --kind StorageV2
 
-# Get connection string
-az storage account show-connection-string \
-  --name mediagitstorage \
-  --resource-group mediagit-rg \
-  --output tsv
-
-# Create container
+# 3. Container — record the account name you got from step 2
+ACCOUNT=mediagitdevXXXXXX   # replace with the actual name from step 2
 az storage container create \
-  --name mediagit-container \
-  --account-name mediagitstorage
+  --account-name "$ACCOUNT" \
+  --name mediagit-server-repos \
+  --auth-mode login
+
+# 4. Account key (kept server-side; never commit this anywhere)
+az storage account keys list \
+  --account-name "$ACCOUNT" \
+  --resource-group mediagit-dev-rg \
+  --query "[0].value" -o tsv
 ```
 
-#### Configuration
+#### Per-Repository Server Config
 
-**Option 1: Connection String (Development)**
+For each repo the server hosts, write its `.mediagit/config.toml` so the
+`[storage]` block selects Azure. The simplest flow is `mediagit init` on the
+server-side repo dir, then overwrite the `[storage]` section.
+
+```toml
+# <server-repos-dir>/<repo>/.mediagit/config.toml
+
+[storage]
+backend = "azure"
+account_name = "mediagitdevXXXXXX"
+container = "mediagit-server-repos"
+account_key = "<KEY_FROM_STEP_4_ABOVE>"
+# Optional: blob path prefix
+# prefix = "repo-objects/"
+```
+
+Alternative: instead of `account_key`, use a connection string:
 
 ```toml
 [storage]
 backend = "azure"
-account_name = "mediagitstorage"
-container = "mediagit-container"
-connection_string = "DefaultEndpointsProtocol=https;AccountName=mediagitstorage;AccountKey=<YOUR_KEY>;EndpointSuffix=core.windows.net"
-prefix = "files/"
+account_name = "mediagitdevXXXXXX"
+container = "mediagit-server-repos"
+connection_string = "DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;EndpointSuffix=core.windows.net"
 ```
 
-**Option 2: Account Key via Environment (Recommended)**
+Validation rules (enforced by `mediagit-config`):
+
+- `account_name`, `container` are required.
+- `container` must be 3-63 chars (Azure rule).
+- Either `account_key` **or** `connection_string` must be set (the current
+  code path does not auto-resolve from environment variables — the chosen
+  credential lives in the TOML on the server filesystem).
+
+#### Verified Manual Dev Test
+
+A working harness lives at `dev-tests/azure-manual-test/run_azure_dev_test.py`.
+It provisions a test repo, starts `mediagit-server` against the Azure
+container, pushes a 4 MiB blob from a fresh client, verifies the blobs
+landed in Azure, and clones into a second working tree to confirm a
+byte-identical roundtrip.
 
 ```bash
-# Get account key
-az storage account keys list \
-  --account-name mediagitstorage \
-  --resource-group mediagit-rg \
-  --output table
+# All three vars are required by the harness
+export MEDIAGIT_AZURE_ACCOUNT=mediagitdevXXXXXX
+export MEDIAGIT_AZURE_CONTAINER=mediagit-server-repos
+export MEDIAGIT_AZURE_KEY="<account_key>"
 
-# Set environment variable
-export MEDIAGIT_AZURE_ACCOUNT_KEY=<account_key>
+python dev-tests/azure-manual-test/run_azure_dev_test.py
 ```
 
-```toml
-[storage]
-backend = "azure"
-account_name = "mediagitstorage"
-container = "mediagit-container"
-# account_key loaded from MEDIAGIT_AZURE_ACCOUNT_KEY env var
-prefix = "files/"
+Expected tail of output on success:
+
+```text
+Azure container blobs after push: total=3, chunks/=0, chunk-deltas/=0, bare-oid=3
+$ mediagit clone http://127.0.0.1:8770/azuretest .../cloned
+✅ Cloned into ...
+=== PASS ===
+blobs uploaded to Azure: 3
+clone roundtrip byte-identical: yes
 ```
 
-**Option 3: Managed Identity (Production)**
+> **Note on object key layout:** for small / single-chunk objects (commits,
+> trees, blobs that don't trigger the chunking pipeline) the server stores
+> blobs at bare-OID keys (`<oid>`) via `ObjectDatabase::write_with_path`.
+> The `chunks/<oid>` and `chunk-deltas/<oid>` prefixes only appear for
+> multi-chunk media (e.g. PSDs, videos) that go through the chunked-write
+> path. Both layouts are valid and clones reconstruct cleanly.
 
-For Azure VM/App Service deployments, omit credentials entirely — the Azure SDK auto-detects the managed identity from the instance metadata service:
+#### Production: Managed Identity
 
-```toml
-[storage]
-backend = "azure"
-account_name = "mediagitstorage"
-container = "mediagit-container"
-# No account_key or connection_string — Azure SDK uses managed identity
-```
+For Azure VM / App Service deployments you typically don't want long-lived
+account keys on disk. The current `mediagit-storage::AzureBackend`
+constructors (`with_account_key`, `with_connection_string`,
+`with_sas_token`) require explicit credentials, so managed-identity
+authentication is **not yet wired** end-to-end through `mediagit-server`.
+For now, prefer rotating `account_key` and storing it in a secrets manager
+that templates the per-repo `config.toml` at server start.
 
-#### Rust Code Integration
+#### Backend API Reference
 
-MediaGit uses `azure-sdk-for-rust`:
+The server consumes the Azure backend via `mediagit_storage::AzureBackend`:
 
 ```rust
-// Automatically handled by MediaGit storage layer
-use azure_storage_blob::{BlobClient, BlobClientOptions};
-use azure_identity::DeveloperToolsCredential;
+use mediagit_storage::{AzureBackend, StorageBackend};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let credential = DeveloperToolsCredential::new(None)?;
-    let blob_client = BlobClient::new(
-        "https://mediagitstorage.blob.core.windows.net/",
-        "mediagit-container".to_string(),
-        "blob_name".to_string(),
-        credential,
-        Some(BlobClientOptions::default()),
-    )?;
+let backend = AzureBackend::with_account_key(
+    "mediagitdevXXXXXX",      // account_name
+    "mediagit-server-repos",  // container
+    "<account_key>",
+).await?;
 
-    // MediaGit handles blob operations
-    Ok(())
-}
+backend.put("commits/abc123", b"...").await?;
+let bytes = backend.get("commits/abc123").await?;
 ```
 
-#### Testing
-
-```bash
-# Test connection
-az storage blob list \
-  --account-name mediagitstorage \
-  --container-name mediagit-container
-
-# Initialize MediaGit repo
-./target/debug/mediagit init
-
-# Add and commit
-./target/debug/mediagit add test-file.psd
-./target/debug/mediagit commit -m "Test Azure backend"
-
-# Verify blobs
-az storage blob list \
-  --account-name mediagitstorage \
-  --container-name mediagit-container \
-  --prefix files/
-```
+The `StorageBackend` trait surface (`get` / `put` / `exists` / `delete` /
+`list_objects`) is identical across all backends.
 
 #### Access Tiers
 

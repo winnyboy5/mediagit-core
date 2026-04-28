@@ -31,6 +31,15 @@ pub const MAX_DELTA_DEPTH: u8 = 10;
 /// that may contain extremely large total_size values.
 pub const MAX_OBJECT_SIZE: u64 = 16 * 1024 * 1024 * 1024;
 
+/// Maximum object size to cache in the LRU cache (10 MB).
+/// Objects larger than this are typically read once (checkout, push) and rarely re-read,
+/// so caching them wastes memory without improving hit rate.
+const MAX_CACHEABLE_OBJECT_SIZE: usize = 10 * 1024 * 1024;
+
+/// Default maximum total cache size in bytes (512 MB).
+/// Uses Moka's weigher to bound by total byte size instead of entry count.
+const DEFAULT_CACHE_MAX_BYTES: u64 = 512 * 1024 * 1024;
+
 use crate::chunking::{ChunkManifest, ChunkRef, ChunkStrategy, ContentChunker};
 use crate::delta::{Delta, DeltaDecoder, DeltaEncoder};
 use crate::{ObjectType, OdbMetrics, Oid};
@@ -94,6 +103,67 @@ use moka::future::Cache;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
+
+/// Walk a chunk-delta chain on disk and report whether `target` appears.
+///
+/// Mirrors `ObjectDatabase::delta_chain_contains` for the `chunk-deltas/`
+/// namespace. Module-level so the parallel chunk-write paths (which capture
+/// `Arc<dyn StorageBackend>` rather than `&self`) can call it directly.
+///
+/// Returns `false` for any malformed/missing meta — the caller only cares
+/// about positive identification of the target on the chain.
+///
+/// Uses `storage.exists` before `storage.get` because the common case on
+/// fresh-add hot paths is "base is a full chunk, no meta exists" — and on
+/// LocalBackend `exists()` is a single stat() syscall whereas `get()` is
+/// open+read+close. For multi-GiB files with thousands of chunks this
+/// difference matters.
+async fn chunk_delta_chain_contains_impl(
+    storage: &dyn StorageBackend,
+    start: Oid,
+    target: Oid,
+) -> bool {
+    if start == target {
+        return true;
+    }
+    let mut current = start;
+    let mut visited = std::collections::HashSet::new();
+    for _ in 0..=MAX_DELTA_DEPTH {
+        if current == target {
+            return true;
+        }
+        if !visited.insert(current) {
+            // Existing cycle in stored data — not our concern here. We only
+            // need to answer "does the path lead to target?" Bail out so we
+            // don't loop forever.
+            return false;
+        }
+        let meta_key = format!("chunk-deltas/{}.meta", current.to_hex());
+        // Cheap probe first: if no meta, base is terminal (full chunk).
+        match storage.exists(&meta_key).await {
+            Ok(true) => {}
+            Ok(false) | Err(_) => return false,
+        }
+        let bytes = match storage.get(&meta_key).await {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+        let s = match std::str::from_utf8(&bytes) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let hex = match s.trim().strip_prefix("base:") {
+            Some(h) => h.trim(),
+            None => return false,
+        };
+        let next = match Oid::from_hex(hex) {
+            Ok(o) => o,
+            Err(_) => return false,
+        };
+        current = next;
+    }
+    false
+}
 
 /// Object Database with content-addressable storage
 ///
@@ -219,7 +289,12 @@ impl ObjectDatabase {
 
         Self {
             storage,
-            cache: Cache::new(cache_capacity),
+            cache: Cache::builder()
+                .max_capacity(DEFAULT_CACHE_MAX_BYTES)
+                .weigher(|_key: &Oid, value: &Arc<Vec<u8>>| -> u32 {
+                    value.len().try_into().unwrap_or(u32::MAX)
+                })
+                .build(),
             metrics: Arc::new(RwLock::new(OdbMetrics::new())),
             compressor: Arc::new(ZlibCompressor::default_level()),
             compression_enabled: true,
@@ -255,7 +330,12 @@ impl ObjectDatabase {
 
         Self {
             storage,
-            cache: Cache::new(cache_capacity),
+            cache: Cache::builder()
+                .max_capacity(DEFAULT_CACHE_MAX_BYTES)
+                .weigher(|_key: &Oid, value: &Arc<Vec<u8>>| -> u32 {
+                    value.len().try_into().unwrap_or(u32::MAX)
+                })
+                .build(),
             metrics: Arc::new(RwLock::new(OdbMetrics::new())),
             compressor,
             compression_enabled,
@@ -280,7 +360,12 @@ impl ObjectDatabase {
 
         Self {
             storage,
-            cache: Cache::new(cache_capacity),
+            cache: Cache::builder()
+                .max_capacity(DEFAULT_CACHE_MAX_BYTES)
+                .weigher(|_key: &Oid, value: &Arc<Vec<u8>>| -> u32 {
+                    value.len().try_into().unwrap_or(u32::MAX)
+                })
+                .build(),
             metrics: Arc::new(RwLock::new(OdbMetrics::new())),
             compressor: Arc::new(ZlibCompressor::default_level()),
             compression_enabled: true,
@@ -310,7 +395,12 @@ impl ObjectDatabase {
 
         Self {
             storage,
-            cache: Cache::new(cache_capacity),
+            cache: Cache::builder()
+                .max_capacity(DEFAULT_CACHE_MAX_BYTES)
+                .weigher(|_key: &Oid, value: &Arc<Vec<u8>>| -> u32 {
+                    value.len().try_into().unwrap_or(u32::MAX)
+                })
+                .build(),
             metrics: Arc::new(RwLock::new(OdbMetrics::new())),
             compressor: Arc::new(ZlibCompressor::default_level()),
             compression_enabled: true,
@@ -335,7 +425,12 @@ impl ObjectDatabase {
 
         Self {
             storage,
-            cache: Cache::new(cache_capacity),
+            cache: Cache::builder()
+                .max_capacity(DEFAULT_CACHE_MAX_BYTES)
+                .weigher(|_key: &Oid, value: &Arc<Vec<u8>>| -> u32 {
+                    value.len().try_into().unwrap_or(u32::MAX)
+                })
+                .build(),
             metrics: Arc::new(RwLock::new(OdbMetrics::new())),
             compressor: Arc::new(ZlibCompressor::default_level()),
             compression_enabled: false,
@@ -455,8 +550,10 @@ impl ObjectDatabase {
             metrics.record_write(data.len() as u64, true);
         }
 
-        // Cache the UNCOMPRESSED object for future reads
-        self.cache.insert(oid, Arc::new(data.to_vec())).await;
+        // Cache the UNCOMPRESSED object for future reads (skip large objects)
+        if data.len() <= MAX_CACHEABLE_OBJECT_SIZE {
+            self.cache.insert(oid, Arc::new(data.to_vec())).await;
+        }
 
         Ok(oid)
     }
@@ -555,8 +652,10 @@ impl ObjectDatabase {
             metrics.record_write(data.len() as u64, true);
         }
 
-        // Cache the UNCOMPRESSED object
-        self.cache.insert(oid, Arc::new(data.to_vec())).await;
+        // Cache the UNCOMPRESSED object (skip large objects)
+        if data.len() <= MAX_CACHEABLE_OBJECT_SIZE {
+            self.cache.insert(oid, Arc::new(data.to_vec())).await;
+        }
 
         Ok(oid)
     }
@@ -598,15 +697,32 @@ impl ObjectDatabase {
         drop(detector); // Release read lock
 
         if let Some((base_id, score)) = similar {
+            // Refuse self-loops and cycles. Without this, parallel adds of
+            // similar chunks can produce A→B and B→A on disk, which makes
+            // both unreadable (see chunk delta chain reconstruction).
+            if base_id == chunk.id
+                || chunk_delta_chain_contains_impl(&*self.storage, base_id, chunk.id).await
+            {
+                debug!(
+                    chunk_id = %chunk.id,
+                    base_id = %base_id,
+                    "Refusing chunk delta — would create cycle, falling back to full chunk"
+                );
+                let mut detector = self.similarity_detector.write().await;
+                detector.add_object(chunk_meta);
+                return Ok(false);
+            }
+
             // Try to load base chunk and create delta
             if let Ok(base_data) = self.get_chunk(&base_id).await {
                 // Create delta
                 let delta = DeltaEncoder::encode(&base_data, &chunk.data);
                 let delta_bytes = delta.to_bytes();
 
-                // Only use delta if beneficial (<80% of original)
+                // Only use delta if beneficial (codec-aware threshold)
                 let delta_ratio = delta_bytes.len() as f64 / chunk.data.len() as f64;
-                if delta_ratio < 0.80 {
+                let threshold = delta_ratio_threshold(chunk.codec_hint, chunk.chunk_type);
+                if delta_ratio < threshold {
                     // Store chunk delta
                     let delta_key = format!("chunk-deltas/{}", chunk.id.to_hex());
                     let compressed_delta = if let Some(smart_comp) = &self.smart_compressor {
@@ -799,17 +915,33 @@ impl ObjectDatabase {
 
                 // Store full chunk if delta wasn't beneficial
                 if !stored_as_delta {
+                    // For demuxed container chunks with a known codec, use per-chunk
+                    // codec-aware compression (matching the streaming/parallel path).
+                    let codec_hint = to_chunk_codec_hint(chunk.codec_hint, chunk.chunk_type);
                     let compressed = if let Some(smart_comp) = &self.smart_compressor {
-                        let chunk_comp_type = if !filename.is_empty() {
-                            CompressionObjectType::from_path(filename)
-                        } else {
-                            CompressionObjectType::Unknown
-                        };
-                        smart_comp
-                            .compress_typed_with_size(&chunk.data, chunk_comp_type)
-                            .map_err(|e| {
-                                anyhow::anyhow!("Failed to compress chunk {}: {}", chunk_key, e)
+                        // Try codec-aware compression first
+                        if let Some(result) = smart_comp.compress_by_codec(&chunk.data, codec_hint)
+                        {
+                            result.map_err(|e| {
+                                anyhow::anyhow!(
+                                    "Failed to compress chunk {} (codec): {}",
+                                    chunk_key,
+                                    e
+                                )
                             })?
+                        } else {
+                            // Unknown codec → fall back to file-level strategy
+                            let chunk_comp_type = if !filename.is_empty() {
+                                CompressionObjectType::from_path(filename)
+                            } else {
+                                CompressionObjectType::Unknown
+                            };
+                            smart_comp
+                                .compress_typed_with_size(&chunk.data, chunk_comp_type)
+                                .map_err(|e| {
+                                    anyhow::anyhow!("Failed to compress chunk {}: {}", chunk_key, e)
+                                })?
+                        }
                     } else {
                         self.compressor.compress(&chunk.data).map_err(|e| {
                             anyhow::anyhow!("Failed to compress chunk {}: {}", chunk_key, e)
@@ -978,13 +1110,101 @@ impl ObjectDatabase {
         }
 
         // --- Parallel pipeline ---
+        //
+        // Determinism note: similarity query + detector registration happen in
+        // the producer, in strict chunk-sequence order. This makes chunk-delta
+        // base selection a deterministic function of (prior-commit state, chunk
+        // bytes, chunk order) — independent of worker scheduling. Workers then
+        // run the expensive encode/compress/store step in parallel against a
+        // pre-selected `base_oid_opt`.
         let num_workers = num_cpus::get().min(num_chunks).max(2);
-        let (tx, rx) = async_channel::bounded::<(usize, crate::chunking::ContentChunk)>(64);
+        let (tx, rx) =
+            async_channel::bounded::<(usize, crate::chunking::ContentChunk, Option<Oid>)>(64);
 
-        // Send all chunks to the channel with sequence IDs
+        // Producer: sequential similarity phase, then hand off to workers.
+        let producer_similarity_detector = self.similarity_detector.clone();
+        let producer_delta_enabled = self.delta_enabled;
+        let producer_base_chunk_cache = self.base_chunk_cache.clone();
         let producer = tokio::spawn(async move {
             for (seq_id, chunk) in chunks.into_iter().enumerate() {
-                if tx.send((seq_id, chunk)).await.is_err() {
+                // Replicate the worker's "should attempt delta" predicate.
+                let is_high_entropy_codec = matches!(
+                    chunk.codec_hint,
+                    crate::chunking::CodecHint::H264
+                        | crate::chunking::CodecHint::H265
+                        | crate::chunking::CodecHint::VP9
+                        | crate::chunking::CodecHint::AV1
+                        | crate::chunking::CodecHint::AAC
+                        | crate::chunking::CodecHint::Opus
+                        | crate::chunking::CodecHint::Vorbis
+                        | crate::chunking::CodecHint::MP3
+                );
+                let is_store_video_chunk =
+                    if chunk.codec_hint == crate::chunking::CodecHint::Unknown {
+                        chunk.chunk_type == crate::chunking::ChunkType::VideoStream
+                            && matches!(
+                                comp_type,
+                                CompressionObjectType::Mp4
+                                    | CompressionObjectType::Mov
+                                    | CompressionObjectType::Avi
+                                    | CompressionObjectType::Mkv
+                                    | CompressionObjectType::Webm
+                                    | CompressionObjectType::Flv
+                                    | CompressionObjectType::Wmv
+                                    | CompressionObjectType::Mpg
+                                    | CompressionObjectType::Mxf
+                            )
+                    } else {
+                        is_high_entropy_codec
+                    };
+
+                let base_oid_opt: Option<Oid> = if producer_delta_enabled
+                    && chunk.data.len() >= 4096
+                    && !is_store_video_chunk
+                {
+                    let mut chunk_meta = crate::similarity::ObjectMetadata::new(
+                        chunk.id,
+                        chunk.data.len(),
+                        crate::ObjectType::Blob,
+                        None,
+                    );
+                    chunk_meta.generate_samples(&chunk.data);
+
+                    let detector = producer_similarity_detector.read().await;
+                    let similar = detector.find_similar_with_size_ratio(
+                        &chunk_meta,
+                        min_similarity,
+                        size_ratio_threshold,
+                    );
+                    drop(detector);
+
+                    let base_oid = similar.map(|(oid, _)| oid);
+                    // Optimistic marking: we don't know yet if the worker will
+                    // succeed at delta encoding (ratio gate may reject it).
+                    // Marking `is_delta = true` pessimistically would shrink the
+                    // base pool for later chunks.  Keep it `false` so every
+                    // registered chunk remains available as a future base.
+                    // Shallow depth-2 chains are bounded and were already
+                    // possible in the old concurrent pipeline.
+                    chunk_meta.is_delta = false;
+
+                    let mut detector = producer_similarity_detector.write().await;
+                    detector.add_object(chunk_meta);
+                    drop(detector);
+
+                    base_oid
+                } else {
+                    None
+                };
+
+                // Pre-cache the chunk's raw data so that workers looking for
+                // this chunk as a delta base can find it even before it has been
+                // compressed and stored to the backend.
+                producer_base_chunk_cache
+                    .insert(chunk.id, Arc::new(chunk.data.clone()))
+                    .await;
+
+                if tx.send((seq_id, chunk, base_oid_opt)).await.is_err() {
                     break; // receivers dropped
                 }
             }
@@ -998,14 +1218,12 @@ impl ObjectDatabase {
             let storage = self.storage.clone();
             let compressor = self.compressor.clone();
             let smart_comp = self.smart_compressor.clone();
-            let similarity_detector = self.similarity_detector.clone();
-            let delta_enabled = self.delta_enabled;
             let base_chunk_cache = self.base_chunk_cache.clone();
 
             let handle = tokio::spawn(async move {
                 let mut results: Vec<(usize, ChunkRef)> = Vec::new();
 
-                while let Ok((seq_id, chunk)) = rx.recv().await {
+                while let Ok((seq_id, chunk, base_oid_opt)) = rx.recv().await {
                     let chunk_ref = ChunkRef {
                         id: chunk.id,
                         offset: chunk.offset,
@@ -1027,64 +1245,28 @@ impl ObjectDatabase {
                         continue;
                     }
 
-                    // 2. Delta encoding attempt
-                    let is_high_entropy_codec = matches!(
-                        chunk.codec_hint,
-                        crate::chunking::CodecHint::H264
-                            | crate::chunking::CodecHint::H265
-                            | crate::chunking::CodecHint::VP9
-                            | crate::chunking::CodecHint::AV1
-                            | crate::chunking::CodecHint::AAC
-                            | crate::chunking::CodecHint::Opus
-                            | crate::chunking::CodecHint::Vorbis
-                            | crate::chunking::CodecHint::MP3
-                    );
-                    let is_store_video_chunk =
-                        if chunk.codec_hint == crate::chunking::CodecHint::Unknown {
-                            chunk.chunk_type == crate::chunking::ChunkType::VideoStream
-                                && matches!(
-                                    comp_type,
-                                    CompressionObjectType::Mp4
-                                        | CompressionObjectType::Mov
-                                        | CompressionObjectType::Avi
-                                        | CompressionObjectType::Mkv
-                                        | CompressionObjectType::Webm
-                                        | CompressionObjectType::Flv
-                                        | CompressionObjectType::Wmv
-                                        | CompressionObjectType::Mpg
-                                        | CompressionObjectType::Mxf
-                                )
-                        } else {
-                            is_high_entropy_codec
-                        };
+                    // 2. Delta encoding using the base pre-selected by the
+                    //    producer (deterministic: same chunk order every run).
                     let mut stored_as_delta = false;
-                    if delta_enabled && chunk.data.len() >= 4096 && !is_store_video_chunk {
-                        let mut chunk_meta = crate::similarity::ObjectMetadata::new(
-                            chunk.id,
-                            chunk.data.len(),
-                            crate::ObjectType::Blob,
-                            None,
-                        );
-                        chunk_meta.generate_samples(&chunk.data);
-
-                        // Read-lock: concurrent with other workers
-                        let detector = similarity_detector.read().await;
-                        let similar = detector.find_similar_with_size_ratio(
-                            &chunk_meta,
-                            min_similarity,
-                            size_ratio_threshold,
-                        );
-                        drop(detector);
-
-                        if let Some((base_id, score)) = similar {
-                            // Delta chains are prevented by is_delta flag in
-                            // SimilarityDetector::find_similar_with_size_ratio()
-                            {
-                                let base_key = format!("chunks/{}", base_id.to_hex());
-                                // Check decompressed base chunk cache before hitting storage
-                                let base_data_arc = if let Some(cached) =
-                                    base_chunk_cache.get(&base_id).await
-                                {
+                    if let Some(base_id) = base_oid_opt {
+                        // Cycle prevention: refuse self-loop and any base whose
+                        // existing on-disk chain leads back to this chunk. Without
+                        // this guard, two parallel encoders processing similar
+                        // chunks can produce mutually-referencing deltas (A→B and
+                        // B→A) that fail to reconstruct on read.
+                        let cycle_risk = base_id == chunk.id
+                            || chunk_delta_chain_contains_impl(&*storage, base_id, chunk.id).await;
+                        if cycle_risk {
+                            debug!(
+                                chunk_id = %chunk.id,
+                                base_id = %base_id,
+                                "Parallel: refusing chunk delta to prevent cycle"
+                            );
+                        } else {
+                            let base_key = format!("chunks/{}", base_id.to_hex());
+                            // Check decompressed base chunk cache before hitting storage
+                            let base_data_arc =
+                                if let Some(cached) = base_chunk_cache.get(&base_id).await {
                                     Some(cached)
                                 } else if let Ok(base_compressed) = storage.get(&base_key).await {
                                     let decompressed = if let Some(ref smart) = smart_comp {
@@ -1103,74 +1285,57 @@ impl ObjectDatabase {
                                     None
                                 };
 
-                                if let Some(base_data) = base_data_arc {
-                                    let delta = DeltaEncoder::encode(&base_data, &chunk.data);
-                                    let delta_bytes = delta.to_bytes();
-                                    let delta_ratio =
-                                        delta_bytes.len() as f64 / chunk.data.len() as f64;
+                            if let Some(base_data) = base_data_arc {
+                                let delta = DeltaEncoder::encode(&base_data, &chunk.data);
+                                let delta_bytes = delta.to_bytes();
+                                let delta_ratio =
+                                    delta_bytes.len() as f64 / chunk.data.len() as f64;
 
-                                    let threshold =
-                                        delta_ratio_threshold(chunk.codec_hint, chunk.chunk_type);
-                                    if delta_ratio < threshold {
-                                        let delta_key =
-                                            format!("chunk-deltas/{}", chunk.id.to_hex());
-                                        let compressed_delta = if let Some(ref smart) = smart_comp {
-                                            smart
-                                                .compress_typed(
-                                                    &delta_bytes,
-                                                    CompressionObjectType::Unknown,
-                                                )
-                                                .map_err(|e| {
-                                                    anyhow::anyhow!("Compress delta: {}", e)
-                                                })?
-                                        } else {
-                                            compressor.compress(&delta_bytes).map_err(|e| {
-                                                anyhow::anyhow!("Compress delta: {}", e)
-                                            })?
-                                        };
+                                let threshold =
+                                    delta_ratio_threshold(chunk.codec_hint, chunk.chunk_type);
+                                if delta_ratio < threshold {
+                                    let delta_key = format!("chunk-deltas/{}", chunk.id.to_hex());
+                                    let compressed_delta = if let Some(ref smart) = smart_comp {
+                                        smart
+                                            .compress_typed(
+                                                &delta_bytes,
+                                                CompressionObjectType::Unknown,
+                                            )
+                                            .map_err(|e| anyhow::anyhow!("Compress delta: {}", e))?
+                                    } else {
+                                        compressor
+                                            .compress(&delta_bytes)
+                                            .map_err(|e| anyhow::anyhow!("Compress delta: {}", e))?
+                                    };
 
-                                        // Tolerate concurrent writes: if put fails but chunk exists, treat as dedup
-                                        if let Err(e) =
-                                            storage.put(&delta_key, &compressed_delta).await
-                                        {
-                                            if !storage.exists(&delta_key).await.unwrap_or(false) {
-                                                return Err(anyhow::anyhow!("Store delta: {}", e));
-                                            }
+                                    // Tolerate concurrent writes: if put fails but chunk exists, treat as dedup
+                                    if let Err(e) = storage.put(&delta_key, &compressed_delta).await
+                                    {
+                                        if !storage.exists(&delta_key).await.unwrap_or(false) {
+                                            return Err(anyhow::anyhow!("Store delta: {}", e));
                                         }
-
-                                        let meta_key =
-                                            format!("chunk-deltas/{}.meta", chunk.id.to_hex());
-                                        let meta_data = format!("base:{}", base_id.to_hex());
-                                        if let Err(e) =
-                                            storage.put(&meta_key, meta_data.as_bytes()).await
-                                        {
-                                            if !storage.exists(&meta_key).await.unwrap_or(false) {
-                                                return Err(anyhow::anyhow!(
-                                                    "Store delta meta: {}",
-                                                    e
-                                                ));
-                                            }
-                                        }
-
-                                        debug!(
-                                            chunk_id = %chunk.id,
-                                            base_id = %base_id,
-                                            delta_ratio,
-                                            similarity = score.score,
-                                            "Parallel: stored chunk as delta"
-                                        );
-                                        stored_as_delta = true;
                                     }
+
+                                    let meta_key =
+                                        format!("chunk-deltas/{}.meta", chunk.id.to_hex());
+                                    let meta_data = format!("base:{}", base_id.to_hex());
+                                    if let Err(e) =
+                                        storage.put(&meta_key, meta_data.as_bytes()).await
+                                    {
+                                        if !storage.exists(&meta_key).await.unwrap_or(false) {
+                                            return Err(anyhow::anyhow!("Store delta meta: {}", e));
+                                        }
+                                    }
+
+                                    debug!(
+                                        chunk_id = %chunk.id,
+                                        base_id = %base_id,
+                                        delta_ratio,
+                                        "Parallel: stored chunk as delta"
+                                    );
+                                    stored_as_delta = true;
                                 }
                             }
-                        }
-
-                        // Register for future similarity (write-lock, brief)
-                        // Mark as delta so it won't be used as a base candidate
-                        chunk_meta.is_delta = stored_as_delta;
-                        {
-                            let mut detector = similarity_detector.write().await;
-                            detector.add_object(chunk_meta);
                         }
                     }
 
@@ -1341,7 +1506,8 @@ impl ObjectDatabase {
 
         // --- Parallel pipeline: spawn workers FIRST, then produce chunks ---
         let num_workers = num_cpus::get().clamp(2, 16);
-        let (tx, rx) = async_channel::bounded::<(usize, crate::chunking::ContentChunk)>(64);
+        let (tx, rx) =
+            async_channel::bounded::<(usize, crate::chunking::ContentChunk, Option<Oid>)>(64);
 
         // Spawn worker tasks BEFORE producing chunks to avoid deadlock.
         // The producer (collect_file_chunks_blocking) uses mmap + format-aware chunking
@@ -1353,9 +1519,8 @@ impl ObjectDatabase {
             let storage = self.storage.clone();
             let compressor = self.compressor.clone();
             let smart_comp = self.smart_compressor.clone();
+            let base_chunk_cache = self.base_chunk_cache.clone();
             let compression_enabled = self.compression_enabled;
-            let delta_enabled = self.delta_enabled;
-            let similarity_detector = self.similarity_detector.clone();
             let chunks_w = chunks_written.clone();
             let bytes_w = bytes_written.clone();
             let on_progress = on_progress.clone();
@@ -1363,7 +1528,7 @@ impl ObjectDatabase {
             let handle = tokio::spawn(async move {
                 let mut results: Vec<(usize, ChunkRef)> = Vec::new();
 
-                while let Ok((seq_id, chunk)) = rx.recv().await {
+                while let Ok((seq_id, chunk, base_oid_opt)) = rx.recv().await {
                     let chunk_ref = ChunkRef {
                         id: chunk.id,
                         offset: chunk.offset,
@@ -1387,142 +1552,95 @@ impl ObjectDatabase {
                         continue;
                     }
 
-                    // 2. Delta encoding attempt
-                    //
-                    // Skip delta for high-entropy codec streams (H.264, H.265, VP9, AV1,
-                    // AAC, Opus, Vorbis, MP3).  These codecs produce near-random bitstreams
-                    // where delta encoding costs CPU but saves <5%.
-                    //
-                    // Allow delta for low-entropy / intra-only codecs (ProRes, DNxHR,
-                    // JPEG2000, RawVideo, PCM, FLAC, ALAC, subtitles) — these benefit
-                    // significantly from delta between versions.
-                    let is_high_entropy_codec = matches!(
-                        chunk.codec_hint,
-                        crate::chunking::CodecHint::H264
-                            | crate::chunking::CodecHint::H265
-                            | crate::chunking::CodecHint::VP9
-                            | crate::chunking::CodecHint::AV1
-                            | crate::chunking::CodecHint::AAC
-                            | crate::chunking::CodecHint::Opus
-                            | crate::chunking::CodecHint::Vorbis
-                            | crate::chunking::CodecHint::MP3
-                    );
-                    // Fall back to old heuristic when codec is unknown
-                    let is_store_video_chunk =
-                        if chunk.codec_hint == crate::chunking::CodecHint::Unknown {
-                            chunk.chunk_type == crate::chunking::ChunkType::VideoStream
-                                && matches!(
-                                    comp_type,
-                                    CompressionObjectType::Mp4
-                                        | CompressionObjectType::Mov
-                                        | CompressionObjectType::Avi
-                                        | CompressionObjectType::Mkv
-                                        | CompressionObjectType::Webm
-                                        | CompressionObjectType::Flv
-                                        | CompressionObjectType::Wmv
-                                        | CompressionObjectType::Mpg
-                                        | CompressionObjectType::Mxf
-                                )
-                        } else {
-                            is_high_entropy_codec
-                        };
+                    // 2. Delta encoding using the base pre-selected by the
+                    //    producer (deterministic: same chunk order every run).
                     let mut stored_as_delta = false;
-                    if delta_enabled && chunk.data.len() >= 4096 && !is_store_video_chunk {
-                        let mut chunk_meta = crate::similarity::ObjectMetadata::new(
-                            chunk.id,
-                            chunk.data.len(),
-                            crate::ObjectType::Blob,
-                            None,
-                        );
-                        chunk_meta.generate_samples(&chunk.data);
-
-                        let detector = similarity_detector.read().await;
-                        let similar = detector.find_similar_with_size_ratio(
-                            &chunk_meta,
-                            min_similarity,
-                            size_ratio_threshold,
-                        );
-                        drop(detector);
-
-                        if let Some((base_id, score)) = similar {
-                            let base_is_delta = storage
-                                .exists(&format!("chunk-deltas/{}.meta", base_id.to_hex()))
-                                .await
-                                .unwrap_or(false);
-
-                            if !base_is_delta {
-                                let base_key = format!("chunks/{}", base_id.to_hex());
-                                if let Ok(base_compressed) = storage.get(&base_key).await {
-                                    let base_data = if let Some(ref smart) = smart_comp {
+                    if let Some(base_id) = base_oid_opt {
+                        // Cycle prevention (see parallel non-streaming variant
+                        // above for full rationale): refuse self-loops and any
+                        // base whose chain leads back to this chunk.
+                        let cycle_risk = base_id == chunk.id
+                            || chunk_delta_chain_contains_impl(&*storage, base_id, chunk.id).await;
+                        if cycle_risk {
+                            debug!(
+                                chunk_id = %chunk.id,
+                                base_id = %base_id,
+                                "Streaming parallel: refusing chunk delta to prevent cycle"
+                            );
+                        } else {
+                            let base_key = format!("chunks/{}", base_id.to_hex());
+                            // Check decompressed base chunk cache before hitting storage
+                            let base_data_arc =
+                                if let Some(cached) = base_chunk_cache.get(&base_id).await {
+                                    Some(cached)
+                                } else if let Ok(base_compressed) = storage.get(&base_key).await {
+                                    let decompressed = if let Some(ref smart) = smart_comp {
                                         smart.decompress_typed(&base_compressed).ok()
                                     } else {
                                         compressor.decompress(&base_compressed).ok()
                                     };
+                                    if let Some(data) = decompressed {
+                                        let arc = Arc::new(data);
+                                        base_chunk_cache.insert(base_id, arc.clone()).await;
+                                        Some(arc)
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                };
 
-                                    if let Some(base_data) = base_data {
-                                        let delta = DeltaEncoder::encode(&base_data, &chunk.data);
-                                        let delta_bytes = delta.to_bytes();
-                                        let delta_ratio =
-                                            delta_bytes.len() as f64 / chunk.data.len() as f64;
+                            if let Some(base_data) = base_data_arc {
+                                let delta = DeltaEncoder::encode(&base_data, &chunk.data);
+                                let delta_bytes = delta.to_bytes();
+                                let delta_ratio =
+                                    delta_bytes.len() as f64 / chunk.data.len() as f64;
 
-                                        let threshold = delta_ratio_threshold(
-                                            chunk.codec_hint,
-                                            chunk.chunk_type,
-                                        );
-                                        if delta_ratio < threshold {
-                                            let delta_key =
-                                                format!("chunk-deltas/{}", chunk.id.to_hex());
-                                            let compressed_delta = if let Some(ref smart) =
-                                                smart_comp
-                                            {
-                                                smart
-                                                    .compress_typed(
-                                                        &delta_bytes,
-                                                        CompressionObjectType::Unknown,
-                                                    )
-                                                    .map_err(|e| {
-                                                        anyhow::anyhow!("Compress delta: {}", e)
-                                                    })?
-                                            } else {
-                                                compressor.compress(&delta_bytes).map_err(|e| {
-                                                    anyhow::anyhow!("Compress delta: {}", e)
-                                                })?
-                                            };
+                                let threshold =
+                                    delta_ratio_threshold(chunk.codec_hint, chunk.chunk_type);
+                                if delta_ratio < threshold {
+                                    let delta_key = format!("chunk-deltas/{}", chunk.id.to_hex());
+                                    let compressed_delta = if let Some(ref smart) = smart_comp {
+                                        smart
+                                            .compress_typed(
+                                                &delta_bytes,
+                                                CompressionObjectType::Unknown,
+                                            )
+                                            .map_err(|e| anyhow::anyhow!("Compress delta: {}", e))?
+                                    } else {
+                                        compressor
+                                            .compress(&delta_bytes)
+                                            .map_err(|e| anyhow::anyhow!("Compress delta: {}", e))?
+                                    };
 
-                                            storage
-                                                .put(&delta_key, &compressed_delta)
-                                                .await
-                                                .map_err(|e| {
-                                                    anyhow::anyhow!("Store delta: {}", e)
-                                                })?;
-
-                                            let meta_key =
-                                                format!("chunk-deltas/{}.meta", chunk.id.to_hex());
-                                            let meta_data = format!("base:{}", base_id.to_hex());
-                                            storage
-                                                .put(&meta_key, meta_data.as_bytes())
-                                                .await
-                                                .map_err(|e| {
-                                                    anyhow::anyhow!("Store delta meta: {}", e)
-                                                })?;
-
-                                            debug!(
-                                                chunk_id = %chunk.id,
-                                                base_id = %base_id,
-                                                delta_ratio,
-                                                similarity = score.score,
-                                                "Streaming parallel: stored chunk as delta"
-                                            );
-                                            stored_as_delta = true;
+                                    // Tolerate concurrent writes: if put fails but chunk exists, treat as dedup
+                                    if let Err(e) = storage.put(&delta_key, &compressed_delta).await
+                                    {
+                                        if !storage.exists(&delta_key).await.unwrap_or(false) {
+                                            return Err(anyhow::anyhow!("Store delta: {}", e));
                                         }
                                     }
+
+                                    let meta_key =
+                                        format!("chunk-deltas/{}.meta", chunk.id.to_hex());
+                                    let meta_data = format!("base:{}", base_id.to_hex());
+                                    if let Err(e) =
+                                        storage.put(&meta_key, meta_data.as_bytes()).await
+                                    {
+                                        if !storage.exists(&meta_key).await.unwrap_or(false) {
+                                            return Err(anyhow::anyhow!("Store delta meta: {}", e));
+                                        }
+                                    }
+
+                                    debug!(
+                                        chunk_id = %chunk.id,
+                                        base_id = %base_id,
+                                        delta_ratio,
+                                        "Streaming parallel: stored chunk as delta"
+                                    );
+                                    stored_as_delta = true;
                                 }
                             }
-                        }
-
-                        if !stored_as_delta {
-                            let mut detector = similarity_detector.write().await;
-                            detector.add_object(chunk_meta);
                         }
                     }
 
@@ -1553,10 +1671,12 @@ impl ObjectDatabase {
                             chunk.data.clone()
                         };
 
-                        storage
-                            .put(&chunk_key, &data_to_store)
-                            .await
-                            .map_err(|e| anyhow::anyhow!("Store chunk: {}", e))?;
+                        // Tolerate concurrent writes
+                        if let Err(e) = storage.put(&chunk_key, &data_to_store).await {
+                            if !storage.exists(&chunk_key).await.unwrap_or(false) {
+                                return Err(anyhow::anyhow!("Store chunk: {}", e));
+                            }
+                        }
                     }
 
                     chunks_w.fetch_add(1, Ordering::Relaxed);
@@ -1593,10 +1713,90 @@ impl ObjectDatabase {
             chunker_inner.collect_file_chunks_blocking(&path_owned, blocking_tx)
         });
 
-        // Forward chunks from the blocking thread to the async worker channel
+        // Forward chunks from the blocking thread to the async worker channel.
+        // Run similarity detection HERE (on the single-threaded producer path)
+        // so base selection is deterministic — independent of worker scheduling.
+        let producer_similarity_detector = self.similarity_detector.clone();
+        let producer_delta_enabled = self.delta_enabled;
+        let producer_base_chunk_cache = self.base_chunk_cache.clone();
         while let Some(chunk) = blocking_rx.recv().await {
             let seq_id = seq_counter.fetch_add(1, Ordering::SeqCst) as usize;
-            tx.send((seq_id, chunk))
+
+            // Producer-side similarity: replicate the delta-eligibility predicate,
+            // then query the detector for the best base.
+            let base_oid_opt = if producer_delta_enabled && chunk.data.len() >= 4096 {
+                let is_high_entropy_codec = matches!(
+                    chunk.codec_hint,
+                    crate::chunking::CodecHint::H264
+                        | crate::chunking::CodecHint::H265
+                        | crate::chunking::CodecHint::VP9
+                        | crate::chunking::CodecHint::AV1
+                        | crate::chunking::CodecHint::AAC
+                        | crate::chunking::CodecHint::Opus
+                        | crate::chunking::CodecHint::Vorbis
+                        | crate::chunking::CodecHint::MP3
+                );
+                let is_store_video_chunk =
+                    if chunk.codec_hint == crate::chunking::CodecHint::Unknown {
+                        chunk.chunk_type == crate::chunking::ChunkType::VideoStream
+                            && matches!(
+                                comp_type,
+                                CompressionObjectType::Mp4
+                                    | CompressionObjectType::Mov
+                                    | CompressionObjectType::Avi
+                                    | CompressionObjectType::Mkv
+                                    | CompressionObjectType::Webm
+                                    | CompressionObjectType::Flv
+                                    | CompressionObjectType::Wmv
+                                    | CompressionObjectType::Mpg
+                                    | CompressionObjectType::Mxf
+                            )
+                    } else {
+                        is_high_entropy_codec
+                    };
+
+                if !is_store_video_chunk {
+                    let mut chunk_meta = crate::similarity::ObjectMetadata::new(
+                        chunk.id,
+                        chunk.data.len(),
+                        crate::ObjectType::Blob,
+                        None,
+                    );
+                    chunk_meta.generate_samples(&chunk.data);
+
+                    let detector = producer_similarity_detector.read().await;
+                    let similar = detector.find_similar_with_size_ratio(
+                        &chunk_meta,
+                        min_similarity,
+                        size_ratio_threshold,
+                    );
+                    drop(detector);
+
+                    let base_oid = similar.map(|(oid, _)| oid);
+                    // Optimistic marking: keep is_delta=false so this chunk
+                    // remains available as a future base candidate.
+                    chunk_meta.is_delta = false;
+
+                    let mut detector = producer_similarity_detector.write().await;
+                    detector.add_object(chunk_meta);
+                    drop(detector);
+
+                    base_oid
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // Pre-cache the chunk's raw data so that workers looking for
+            // this chunk as a delta base can find it even before it has been
+            // compressed and stored to the backend.
+            producer_base_chunk_cache
+                .insert(chunk.id, Arc::new(chunk.data.clone()))
+                .await;
+
+            tx.send((seq_id, chunk, base_oid_opt))
                 .await
                 .map_err(|_| anyhow::anyhow!("Worker channel closed unexpectedly"))?;
         }
@@ -1807,8 +2007,10 @@ impl ObjectDatabase {
                                 let mut metrics = self.metrics.write().await;
                                 metrics.record_write(data.len() as u64, true);
 
-                                // Cache original data
-                                self.cache.insert(oid, Arc::new(data.to_vec())).await;
+                                // Cache original data (skip large objects)
+                                if data.len() <= MAX_CACHEABLE_OBJECT_SIZE {
+                                    self.cache.insert(oid, Arc::new(data.to_vec())).await;
+                                }
 
                                 // Add to similarity detector for future matching
                                 let mut detector = self.similarity_detector.write().await;
@@ -1952,6 +2154,22 @@ impl ObjectDatabase {
         Ok(false)
     }
 
+    /// Check whether `target` appears in the on-disk chunk-delta chain starting
+    /// at `start`. Used to prevent writing a chunk-delta whose base chain
+    /// already leads back to the new chunk (which would produce the 2-cycle
+    /// observed in parallel add workflows).
+    ///
+    /// Bounded by `MAX_DELTA_DEPTH`; treats malformed meta / missing base as
+    /// "not in chain" (terminal) — we are only interested in *our* OID
+    /// appearing on the path.
+    pub async fn chunk_delta_chain_contains(
+        &self,
+        start: &Oid,
+        target: &Oid,
+    ) -> anyhow::Result<bool> {
+        Ok(chunk_delta_chain_contains_impl(&*self.storage, *start, *target).await)
+    }
+
     /// List all pack files in the database
     ///
     /// Returns a list of pack file keys
@@ -2040,9 +2258,11 @@ impl ObjectDatabase {
                                         continue; // Try next pack
                                     }
 
-                                    // Cache the decompressed data
-                                    let arc_data = Arc::new(data.clone());
-                                    self.cache.insert(*oid, arc_data).await;
+                                    // Cache the decompressed data (skip large objects)
+                                    if data.len() <= MAX_CACHEABLE_OBJECT_SIZE {
+                                        let arc_data = Arc::new(data.clone());
+                                        self.cache.insert(*oid, arc_data).await;
+                                    }
 
                                     info!(
                                         oid = %oid,
@@ -2132,7 +2352,18 @@ impl ObjectDatabase {
                 )
             })?;
 
-            // Verify chunk size matches manifest
+            // Verify chunk integrity (hash + size)
+            let computed_chunk_oid = Oid::hash(&decompressed);
+            if computed_chunk_oid != chunk_ref.id {
+                anyhow::bail!(
+                    "Chunk integrity check failed for chunk {} (index {}): expected {}, computed {}",
+                    chunk_ref.id.to_hex(),
+                    idx,
+                    chunk_ref.id,
+                    computed_chunk_oid
+                );
+            }
+
             if decompressed.len() != chunk_ref.size {
                 anyhow::bail!(
                     "Chunk size mismatch for chunk {}: expected {}, got {}",
@@ -2184,9 +2415,13 @@ impl ObjectDatabase {
             "Successfully reconstructed chunked object"
         );
 
-        // Cache reconstructed data for future reads
-        let arc_data = Arc::new(reconstructed.clone());
-        self.cache.insert(*oid, arc_data).await;
+        // Cache reconstructed data for future reads (skip large objects to
+        // avoid pinning multi-GB media files in memory)
+        if reconstructed.len() <= MAX_CACHEABLE_OBJECT_SIZE {
+            self.cache
+                .insert(*oid, Arc::new(reconstructed.clone()))
+                .await;
+        }
 
         Ok(reconstructed)
     }
@@ -2288,9 +2523,12 @@ impl ObjectDatabase {
             "Successfully reconstructed delta-encoded object"
         );
 
-        // Cache reconstructed data
-        let arc_data = Arc::new(reconstructed.clone());
-        self.cache.insert(*oid, arc_data).await;
+        // Cache reconstructed data (skip large objects)
+        if reconstructed.len() <= MAX_CACHEABLE_OBJECT_SIZE {
+            self.cache
+                .insert(*oid, Arc::new(reconstructed.clone()))
+                .await;
+        }
 
         Ok(reconstructed)
     }
@@ -2404,7 +2642,9 @@ impl ObjectDatabase {
                         .unwrap_or(storage_data)
                 };
 
-                self.cache.insert(oid, Arc::new(data.clone())).await;
+                if data.len() <= MAX_CACHEABLE_OBJECT_SIZE {
+                    self.cache.insert(oid, Arc::new(data.clone())).await;
+                }
                 return Ok(data);
             }
 
@@ -2479,7 +2719,17 @@ impl ObjectDatabase {
                     anyhow::anyhow!("Failed to read chunk {}: {}", chunk_ref.id.to_hex(), e)
                 })?;
 
-                // Verify chunk size
+                // Verify chunk integrity (hash + size)
+                let computed_chunk_oid = Oid::hash(&decompressed);
+                if computed_chunk_oid != chunk_ref.id {
+                    anyhow::bail!(
+                        "Chunk integrity check failed for {}: expected {}, computed {}",
+                        chunk_ref.id.to_hex(),
+                        chunk_ref.id,
+                        computed_chunk_oid
+                    );
+                }
+
                 if decompressed.len() != chunk_ref.size {
                     anyhow::bail!(
                         "Chunk size mismatch for {}: expected {}, got {}",
@@ -2675,9 +2925,11 @@ impl ObjectDatabase {
             );
         }
 
-        // Cache UNCOMPRESSED data for future reads
-        let arc_data = Arc::new(data.clone());
-        self.cache.insert(*oid, arc_data).await;
+        // Cache UNCOMPRESSED data for future reads (skip large objects)
+        if data.len() <= MAX_CACHEABLE_OBJECT_SIZE {
+            let arc_data = Arc::new(data.clone());
+            self.cache.insert(*oid, arc_data).await;
+        }
 
         Ok(data)
     }
@@ -2715,7 +2967,17 @@ impl ObjectDatabase {
             return Ok(cached.len());
         }
 
-        // Not cached - we need to read the object to get its size
+        // For chunked objects, read the manifest to get size without
+        // reconstructing the entire file (avoids loading multi-GB files)
+        let manifest_key = format!("manifests/{}", oid.to_hex());
+        if self.storage.exists(&manifest_key).await? {
+            let manifest_data = self.storage.get(&manifest_key).await?;
+            let manifest: ChunkManifest = crate::format::deserialize(&manifest_data)
+                .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
+            return Ok(manifest.total_size as usize);
+        }
+
+        // Not cached and not chunked - read the object to get its size
         // This will populate the cache for subsequent operations
         let data = self.read(oid).await?;
         Ok(data.len())
@@ -2795,7 +3057,28 @@ impl ObjectDatabase {
     /// to be chunked (< 5 MB). After calling this with the previous version's OID,
     /// the next `write_with_delta` call can find a similar base and produce a delta.
     pub async fn seed_similarity_from_blob(&self, oid: &Oid, filename: &str) -> anyhow::Result<()> {
+        // Cheap guard: if this OID is actually a chunked manifest, skip. Otherwise
+        // self.read() would reconstruct the entire file into memory (hundreds of
+        // MB for large creative assets). Callers should try seed_similarity_from_manifest
+        // first; this is defence-in-depth.
+        let manifest_key = format!("manifests/{}", oid.to_hex());
+        if self.storage.exists(&manifest_key).await.unwrap_or(false) {
+            debug!(oid = %oid, "Skipping seed_similarity_from_blob: chunked object");
+            return Ok(());
+        }
         let data = self.read(oid).await?;
+        // Size cap: this path is intended for blobs < 5 MB. Bail on anything larger
+        // to avoid burning memory + CPU sampling a huge blob whose size-ratio
+        // would preclude a similarity match anyway.
+        const MAX_SEED_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
+        if data.len() > MAX_SEED_BYTES {
+            debug!(
+                oid = %oid,
+                size = data.len(),
+                "Skipping seed_similarity_from_blob: oversized blob"
+            );
+            return Ok(());
+        }
         let mut meta = crate::similarity::ObjectMetadata::new(
             *oid,
             data.len(),
@@ -2821,91 +3104,110 @@ impl ObjectDatabase {
     /// Reads and decompresses a single chunk, reconstructing from delta if needed.
     /// Supports ALL file types: AI/ML models, creative projects, 3D, text, etc.
     pub async fn get_chunk(&self, chunk_id: &Oid) -> anyhow::Result<Vec<u8>> {
-        // First check if this chunk is stored as a delta
-        let delta_meta_key = format!("chunk-deltas/{}.meta", chunk_id.to_hex());
-        if let Ok(meta_bytes) = self.storage.get(&delta_meta_key).await {
-            // Parse base reference from meta
-            let meta_str = String::from_utf8_lossy(&meta_bytes);
-            if let Some(base_hex) = meta_str.strip_prefix("base:") {
-                if let Ok(base_id) = Oid::from_hex(base_hex.trim()) {
-                    // Load base chunk (recursive call handles nested deltas)
-                    let base_data = Box::pin(self.get_chunk(&base_id)).await?;
-
-                    // Load delta
-                    let delta_key = format!("chunk-deltas/{}", chunk_id.to_hex());
-                    let compressed_delta = self
-                        .storage
-                        .get(&delta_key)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("Failed to load chunk delta: {}", e))?;
-
-                    // Decompress delta
-                    let delta_bytes = if let Some(smart_comp) = &self.smart_compressor {
-                        smart_comp
-                            .decompress_typed(&compressed_delta)
-                            .map_err(|e| {
-                                anyhow::anyhow!("Failed to decompress chunk delta: {}", e)
-                            })?
-                    } else {
-                        self.compressor.decompress(&compressed_delta).map_err(|e| {
-                            anyhow::anyhow!("Failed to decompress chunk delta: {}", e)
-                        })?
-                    };
-
-                    // Apply delta to reconstruct chunk
-                    let delta = Delta::from_bytes(&delta_bytes)
-                        .map_err(|e| anyhow::anyhow!("Failed to parse chunk delta: {}", e))?;
-                    let reconstructed = DeltaDecoder::apply(&base_data, &delta)
-                        .map_err(|e| anyhow::anyhow!("Failed to apply chunk delta: {}", e))?;
-
-                    // Validate reconstructed size
-                    if reconstructed.len() as u64 > MAX_OBJECT_SIZE {
-                        anyhow::bail!(
-                            "Reconstructed chunk size {} exceeds maximum {} bytes",
-                            reconstructed.len(),
-                            MAX_OBJECT_SIZE
-                        );
-                    }
-
-                    tracing::debug!(
-                        chunk_id = %chunk_id,
-                        base_id = %base_id,
-                        reconstructed_size = reconstructed.len(),
-                        "Reconstructed chunk from delta"
-                    );
-
-                    return Ok(reconstructed);
+        // Walk the delta chain iteratively (no async recursion) to bound stack
+        // usage regardless of chain length and to detect cycles. Each iteration
+        // reads a tiny meta record; the heavy work (base read + delta apply)
+        // happens after the full chain is known.
+        const MAX_CHUNK_DELTA_DEPTH: usize = MAX_DELTA_DEPTH as usize;
+        let mut chain: Vec<Oid> = Vec::new(); // leaf-first order
+        let mut visited: std::collections::HashSet<Oid> = std::collections::HashSet::new();
+        let mut cur = *chunk_id;
+        let base_id = loop {
+            if !visited.insert(cur) {
+                anyhow::bail!(
+                    "Circular reference detected in chunk delta chain at {}",
+                    cur
+                );
+            }
+            if chain.len() > MAX_CHUNK_DELTA_DEPTH {
+                anyhow::bail!(
+                    "Chunk delta chain too deep (> {}): chain starting at {}",
+                    MAX_CHUNK_DELTA_DEPTH,
+                    chunk_id
+                );
+            }
+            let meta_key = format!("chunk-deltas/{}.meta", cur.to_hex());
+            match self.storage.get(&meta_key).await {
+                Ok(meta_bytes) => {
+                    let meta_str = String::from_utf8_lossy(&meta_bytes);
+                    let base_hex = meta_str
+                        .strip_prefix("base:")
+                        .ok_or_else(|| anyhow::anyhow!("Invalid chunk delta meta: {}", meta_str))?
+                        .trim();
+                    let next = Oid::from_hex(base_hex).map_err(|e| {
+                        anyhow::anyhow!("Invalid base OID in chunk delta meta: {}", e)
+                    })?;
+                    chain.push(cur);
+                    cur = next;
+                }
+                Err(_) => {
+                    // No meta => `cur` is the terminal (non-delta) base chunk
+                    break cur;
                 }
             }
-        }
+        };
 
-        // Not a delta chunk - read directly
-        let chunk_key = format!("chunks/{}", chunk_id.to_hex());
-        let compressed = self.storage.get(&chunk_key).await?;
-
-        // Decompress using auto-detection
-        if let Some(smart_comp) = &self.smart_compressor {
+        // Read the base chunk (non-delta) once
+        let base_key = format!("chunks/{}", base_id.to_hex());
+        let compressed_base = self.storage.get(&base_key).await?;
+        let mut current = if let Some(smart_comp) = &self.smart_compressor {
             smart_comp
-                .decompress_typed(&compressed)
-                .map_err(|e| anyhow::anyhow!("Failed to decompress chunk: {}", e))
+                .decompress_typed(&compressed_base)
+                .map_err(|e| anyhow::anyhow!("Failed to decompress base chunk: {}", e))?
         } else {
-            // Fallback: use auto-detection to handle Store (raw) chunks
-            let algo = CompressionAlgorithm::detect(&compressed);
+            let algo = CompressionAlgorithm::detect(&compressed_base);
             match algo {
-                CompressionAlgorithm::None => Ok(compressed.to_vec()),
-                CompressionAlgorithm::Zstd => {
-                    use mediagit_compression::ZstdCompressor;
-                    let zstd = ZstdCompressor::new(mediagit_compression::CompressionLevel::Default);
-                    Ok(zstd
-                        .decompress(&compressed)
-                        .unwrap_or_else(|_| compressed.to_vec()))
-                }
-                _ => Ok(self
+                CompressionAlgorithm::None => compressed_base.to_vec(),
+                _ => self
                     .compressor
-                    .decompress(&compressed)
-                    .unwrap_or_else(|_| compressed.to_vec())),
+                    .decompress(&compressed_base)
+                    .unwrap_or_else(|_| compressed_base.to_vec()),
+            }
+        };
+
+        // Apply deltas from base->leaf (chain is leaf-first, so reverse)
+        for delta_oid in chain.iter().rev() {
+            let delta_key = format!("chunk-deltas/{}", delta_oid.to_hex());
+            let compressed_delta = self
+                .storage
+                .get(&delta_key)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to load chunk delta: {}", e))?;
+            let delta_bytes = if let Some(smart_comp) = &self.smart_compressor {
+                smart_comp
+                    .decompress_typed(&compressed_delta)
+                    .map_err(|e| anyhow::anyhow!("Failed to decompress chunk delta: {}", e))?
+            } else {
+                self.compressor
+                    .decompress(&compressed_delta)
+                    .map_err(|e| anyhow::anyhow!("Failed to decompress chunk delta: {}", e))?
+            };
+            let delta = Delta::from_bytes(&delta_bytes)
+                .map_err(|e| anyhow::anyhow!("Failed to parse chunk delta: {}", e))?;
+            current = DeltaDecoder::apply(&current, &delta)
+                .map_err(|e| anyhow::anyhow!("Failed to apply chunk delta: {}", e))?;
+            if current.len() as u64 > MAX_OBJECT_SIZE {
+                anyhow::bail!(
+                    "Reconstructed chunk size {} exceeds maximum {} bytes",
+                    current.len(),
+                    MAX_OBJECT_SIZE
+                );
             }
         }
+
+        if !chain.is_empty() {
+            tracing::debug!(
+                chunk_id = %chunk_id,
+                base_id = %base_id,
+                chain_depth = chain.len(),
+                reconstructed_size = current.len(),
+                "Reconstructed chunk from delta chain (iterative)"
+            );
+            return Ok(current);
+        }
+
+        // Not a delta chunk - return what we already read as the raw chunk
+        Ok(current)
     }
 
     /// Get raw compressed chunk data for network transfer
@@ -2994,6 +3296,112 @@ impl ObjectDatabase {
         // Also check for delta-encoded chunk
         let delta_key = format!("chunk-deltas/{}.meta", chunk_id.to_hex());
         self.storage.exists(&delta_key).await
+    }
+
+    /// Check whether a chunk-delta is present locally for the given chunk id.
+    ///
+    /// Used by the clone/fetch path to skip re-downloading delta payloads we
+    /// already have. Looks at the `.meta` sidecar (presence of meta implies
+    /// delta storage; the payload file is written first, so meta is the
+    /// authoritative marker).
+    pub async fn chunk_delta_exists(&self, chunk_id: &Oid) -> anyhow::Result<bool> {
+        let meta_key = format!("chunk-deltas/{}.meta", chunk_id.to_hex());
+        self.storage.exists(&meta_key).await
+    }
+
+    /// Persist a chunk-delta received from the wire.
+    ///
+    /// `compressed_delta_bytes` is the raw payload as the server sent it
+    /// (already compressed by the server's storage path). `base_id` is the
+    /// chunk this delta is encoded against. Caller is responsible for
+    /// ensuring the base chunk is locally present before this delta is
+    /// stored — otherwise reads will fail until the base arrives.
+    ///
+    /// Refuses self-loops and writes that would create a cycle in the local
+    /// chunk-delta chain — caller should fall back to fetching the full
+    /// chunk via `chunks/<id>` in that case.
+    ///
+    /// Stores the payload at `chunk-deltas/<chunk_id>` and the metadata
+    /// (`base:<hex>`) at `chunk-deltas/<chunk_id>.meta`. Tolerates concurrent
+    /// writers: if a put races and the key already exists, treats as dedup.
+    pub async fn write_chunk_delta(
+        &self,
+        chunk_id: &Oid,
+        base_id: &Oid,
+        compressed_delta_bytes: &[u8],
+    ) -> anyhow::Result<()> {
+        if chunk_id == base_id
+            || chunk_delta_chain_contains_impl(&*self.storage, *base_id, *chunk_id).await
+        {
+            anyhow::bail!(
+                "would create chunk delta cycle: chunk {} base {}",
+                chunk_id,
+                base_id
+            );
+        }
+
+        let delta_key = format!("chunk-deltas/{}", chunk_id.to_hex());
+        if let Err(e) = self.storage.put(&delta_key, compressed_delta_bytes).await {
+            if !self.storage.exists(&delta_key).await.unwrap_or(false) {
+                return Err(anyhow::anyhow!("Failed to store chunk delta: {}", e));
+            }
+        }
+
+        let meta_key = format!("chunk-deltas/{}.meta", chunk_id.to_hex());
+        let meta_data = format!("base:{}", base_id.to_hex());
+        if let Err(e) = self.storage.put(&meta_key, meta_data.as_bytes()).await {
+            if !self.storage.exists(&meta_key).await.unwrap_or(false) {
+                return Err(anyhow::anyhow!("Failed to store chunk delta meta: {}", e));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Read a locally stored chunk-delta as raw compressed bytes + its base OID,
+    /// without rematerializing the full chunk.
+    ///
+    /// Used by the push path to ship deltas over the wire (via
+    /// `PUT /chunk-deltas/:id`) instead of paying the rematerialize-and-upload
+    /// cost through `get_compressed_chunk` → `/chunks/:id`, which was the
+    /// regression that made cloned repos report near-zero compression savings.
+    ///
+    /// Returns `Ok(None)` when the chunk is not stored as a delta locally.
+    /// Returns `Err` only when the `.meta` sidecar is present but malformed
+    /// or the payload file cannot be read — both are corruption signals that
+    /// the caller should surface rather than paper over.
+    pub async fn get_local_chunk_delta_raw(
+        &self,
+        chunk_id: &Oid,
+    ) -> anyhow::Result<Option<(Oid, Vec<u8>)>> {
+        let meta_key = format!("chunk-deltas/{}.meta", chunk_id.to_hex());
+        let meta_bytes = match self.storage.get(&meta_key).await {
+            Ok(b) => b,
+            Err(_) => return Ok(None),
+        };
+        let meta_str = std::str::from_utf8(&meta_bytes).map_err(|e| {
+            anyhow::anyhow!("chunk-delta meta for {} is not valid utf8: {}", chunk_id, e)
+        })?;
+        let base_hex = meta_str.trim().strip_prefix("base:").ok_or_else(|| {
+            anyhow::anyhow!("chunk-delta meta for {} missing 'base:' prefix", chunk_id)
+        })?;
+        let base_id = Oid::from_hex(base_hex).map_err(|e| {
+            anyhow::anyhow!(
+                "chunk-delta meta for {} has invalid base hex: {}",
+                chunk_id,
+                e
+            )
+        })?;
+
+        let delta_key = format!("chunk-deltas/{}", chunk_id.to_hex());
+        let delta_bytes = self.storage.get(&delta_key).await.map_err(|e| {
+            anyhow::anyhow!(
+                "chunk-delta meta present but payload missing for {}: {}",
+                chunk_id,
+                e
+            )
+        })?;
+        Ok(Some((base_id, delta_bytes)))
     }
 
     /// Check if an object exists in the database
@@ -3500,6 +3908,38 @@ mod tests {
 
         let non_existent = Oid::hash(b"does not exist");
         assert!(!odb.exists(&non_existent).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_abbreviated_oid_basic_and_errors() {
+        // Guard for BUG-002: short OIDs must resolve when unique and
+        // error loudly on too-short / non-hex / unknown prefixes.
+        let storage = Arc::new(MockBackend::new());
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let oid_a = odb
+            .write(ObjectType::Blob, b"resolve-abbrev-fixture-A")
+            .await
+            .unwrap();
+
+        let full = oid_a.to_hex();
+        let abbrev = &full[..8];
+        let resolved = odb.resolve_abbreviated_oid(abbrev).await.unwrap();
+        assert_eq!(resolved, oid_a);
+
+        // Too-short prefix
+        let err = odb
+            .resolve_abbreviated_oid("abc")
+            .await
+            .expect_err("<4 char prefix must bail");
+        assert!(err.to_string().contains("at least 4"));
+
+        // Non-hex
+        let err = odb
+            .resolve_abbreviated_oid("zzzz")
+            .await
+            .expect_err("non-hex must bail");
+        assert!(err.to_string().to_lowercase().contains("prefix"));
     }
 
     #[tokio::test]

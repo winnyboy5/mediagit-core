@@ -51,8 +51,8 @@ impl Delta {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(4 + self.zstd_data.len());
         bytes.extend_from_slice(&ZSTD_DICT_MAGIC);
-        encode_varint(&mut bytes, self.base_size as u32);
-        encode_varint(&mut bytes, self.result_size as u32);
+        encode_varint(&mut bytes, self.base_size as u64);
+        encode_varint(&mut bytes, self.result_size as u64);
         bytes.extend_from_slice(&self.zstd_data);
         bytes
     }
@@ -157,8 +157,8 @@ impl DeltaDecoder {
     }
 }
 
-/// Helper function to encode variable-length integer
-fn encode_varint(bytes: &mut Vec<u8>, mut value: u32) {
+/// Helper function to encode variable-length integer (u64 to support objects > 4GB)
+fn encode_varint(bytes: &mut Vec<u8>, mut value: u64) {
     loop {
         let mut byte = (value & 0x7f) as u8;
         value >>= 7;
@@ -175,9 +175,9 @@ fn encode_varint(bytes: &mut Vec<u8>, mut value: u32) {
     }
 }
 
-/// Helper function to decode variable-length integer
-fn decode_varint(data: &[u8], pos: &mut usize) -> anyhow::Result<u32> {
-    let mut result: u32 = 0;
+/// Helper function to decode variable-length integer (u64 to support objects > 4GB)
+fn decode_varint(data: &[u8], pos: &mut usize) -> anyhow::Result<u64> {
+    let mut result: u64 = 0;
     let mut shift = 0;
 
     loop {
@@ -185,7 +185,7 @@ fn decode_varint(data: &[u8], pos: &mut usize) -> anyhow::Result<u32> {
             anyhow::bail!("Varint decode overflow");
         }
 
-        let byte = data[*pos] as u32;
+        let byte = data[*pos] as u64;
         *pos += 1;
 
         result |= (byte & 0x7f) << shift;
@@ -195,7 +195,7 @@ fn decode_varint(data: &[u8], pos: &mut usize) -> anyhow::Result<u32> {
             break;
         }
 
-        if shift >= 32 {
+        if shift >= 64 {
             anyhow::bail!("Varint too large");
         }
     }

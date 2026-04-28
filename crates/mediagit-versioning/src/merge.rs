@@ -16,8 +16,12 @@
 //! This module orchestrates LCA finding, tree diffing, and conflict detection
 //! to perform complete merge operations with various strategies.
 
-use crate::{Commit, Conflict, ConflictDetector, LcaFinder, ObjectDatabase, Oid, Tree, TreeDiffer};
-use anyhow::{anyhow, Result};
+use crate::{
+    Commit, Conflict, ConflictDetector, Index, IndexEntry, LcaFinder, ObjectDatabase, ObjectType,
+    Oid, Tree, TreeDiffer,
+};
+use anyhow::{anyhow, Context, Result};
+use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, instrument, trace};
 
@@ -157,6 +161,37 @@ impl MergeEngine {
         let theirs_tree = Tree::read(&self.odb, &theirs_commit.tree).await?;
 
         // Perform 3-way merge
+        self.three_way_merge(&base_tree, &ours_tree, &theirs_tree, strategy)
+            .await
+    }
+
+    /// Perform a 3-way merge with explicit tree OIDs (no LCA computation)
+    ///
+    /// Unlike `merge()` which takes commit OIDs and automatically computes
+    /// the merge base (LCA), this method takes explicit tree OIDs for
+    /// base, ours, and theirs. This is required for operations like `revert`
+    /// where the merge base is known and must not be auto-computed.
+    ///
+    /// For `revert <commit>`:
+    /// - **base** = tree of the commit being reverted
+    /// - **ours** = tree of HEAD  
+    /// - **theirs** = tree of the commit's parent
+    pub async fn merge_trees(
+        &self,
+        base_tree_oid: &Oid,
+        ours_tree_oid: &Oid,
+        theirs_tree_oid: &Oid,
+        strategy: MergeStrategy,
+    ) -> Result<MergeResult> {
+        debug!(
+            "merge_trees: base={}, ours={}, theirs={}",
+            base_tree_oid, ours_tree_oid, theirs_tree_oid
+        );
+
+        let base_tree = Tree::read(&self.odb, base_tree_oid).await?;
+        let ours_tree = Tree::read(&self.odb, ours_tree_oid).await?;
+        let theirs_tree = Tree::read(&self.odb, theirs_tree_oid).await?;
+
         self.three_way_merge(&base_tree, &ours_tree, &theirs_tree, strategy)
             .await
     }
@@ -470,6 +505,194 @@ impl MergeEngine {
             return Ok(true);
         }
         self.lca_finder.is_ancestor(from, to).await
+    }
+}
+
+/// Apply a merge result to the working directory.
+///
+/// For clean paths (not conflicting): writes the merged blob from `theirs_tree`/`ours_tree`
+/// to the workdir and stages it at index stage 0.
+///
+/// For conflicting paths: writes a conflict-marker file and stores all three
+/// blobs in the index at stages 1 (base), 2 (ours), 3 (theirs) per Git convention.
+///
+/// Also writes `.mediagit/MERGE_HEAD`, `MERGE_MSG`, and `ORIG_HEAD`.
+#[allow(clippy::too_many_arguments)]
+pub async fn apply_merge_to_workdir(
+    result: &MergeResult,
+    ours_tree: &Tree,
+    theirs_tree: &Tree,
+    odb: &Arc<ObjectDatabase>,
+    workdir: &Path,
+    index: &mut Index,
+    theirs_tip: Oid,
+    orig_head: Oid,
+) -> Result<()> {
+    let mediagit_dir = workdir.join(".mediagit");
+
+    // Collect conflict paths for fast lookup
+    let conflict_paths: std::collections::HashSet<&str> =
+        result.conflicts.iter().map(|c| c.path.as_str()).collect();
+
+    // --- Write clean (non-conflicting) paths from union of ours+theirs trees ---
+    let mut all_clean_paths = std::collections::HashSet::new();
+    for path in ours_tree.entries.keys() {
+        if !conflict_paths.contains(path.as_str()) {
+            all_clean_paths.insert(path.clone());
+        }
+    }
+    for path in theirs_tree.entries.keys() {
+        if !conflict_paths.contains(path.as_str()) {
+            all_clean_paths.insert(path.clone());
+        }
+    }
+
+    for path_str in &all_clean_paths {
+        // Prefer theirs if they have it (their addition), else use ours
+        let entry = theirs_tree
+            .entries
+            .get(path_str)
+            .or_else(|| ours_tree.entries.get(path_str));
+        let entry = match entry {
+            Some(e) => e,
+            None => continue,
+        };
+
+        // Read blob content
+        let content = odb
+            .read(&entry.oid)
+            .await
+            .with_context(|| format!("Failed to read blob for {}", path_str))?;
+
+        // Write to workdir
+        let dest = workdir.join(path_str);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create dirs for {}", path_str))?;
+        }
+        std::fs::write(&dest, &content).with_context(|| format!("Failed to write {}", path_str))?;
+
+        // Stage at index stage 0
+        let size = content.len() as u64;
+        let index_entry = IndexEntry::new(
+            std::path::PathBuf::from(path_str),
+            entry.oid,
+            entry.mode.as_u32(),
+            size,
+            None,
+        );
+        index.add_entry(index_entry);
+    }
+
+    // --- Write conflict marker files and multi-stage index entries ---
+    for conflict in &result.conflicts {
+        let path_str = &conflict.path;
+
+        // Read each side's blob content (may be absent for delete conflicts)
+        let base_bytes = read_blob_opt(odb, conflict.base.as_ref().map(|s| s.oid)).await?;
+        let ours_bytes = read_blob_opt(odb, conflict.ours.as_ref().map(|s| s.oid)).await?;
+        let theirs_bytes = read_blob_opt(odb, conflict.theirs.as_ref().map(|s| s.oid)).await?;
+
+        // Build conflict marker content
+        let mut marker = Vec::new();
+        marker.extend_from_slice(b"<<<<<<< ours\n");
+        if let Some(ref ob) = ours_bytes {
+            marker.extend_from_slice(ob);
+            if !ob.ends_with(b"\n") {
+                marker.push(b'\n');
+            }
+        }
+        marker.extend_from_slice(b"=======\n");
+        if let Some(ref tb) = theirs_bytes {
+            marker.extend_from_slice(tb);
+            if !tb.ends_with(b"\n") {
+                marker.push(b'\n');
+            }
+        }
+        marker.extend_from_slice(b">>>>>>> theirs\n");
+
+        // Write marker file to workdir
+        let dest = workdir.join(path_str);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create dirs for {}", path_str))?;
+        }
+        std::fs::write(&dest, &marker)
+            .with_context(|| format!("Failed to write conflict file {}", path_str))?;
+
+        // Write the conflict blob to ODB so we can reference it
+        let conflict_oid = odb.write(ObjectType::Blob, &marker).await?;
+
+        // Stage the conflict blob at stage 0 (the marker file itself)
+        let index_entry = IndexEntry::new(
+            std::path::PathBuf::from(path_str),
+            conflict_oid,
+            0o100644,
+            marker.len() as u64,
+            None,
+        );
+        index.add_entry(index_entry);
+
+        // Stage base/ours/theirs at stages 1/2/3 by writing each as index entries
+        // (Index currently only supports one entry per path; we model stages 1-3 via
+        //  synthetic paths with a stage suffix for conflict tracking purposes)
+        if let (Some(ref cs), Some(ref ob)) = (&conflict.base, &base_bytes) {
+            let stage_path = format!("{}::stage1", path_str);
+            let e = IndexEntry::new(
+                std::path::PathBuf::from(&stage_path),
+                cs.oid,
+                cs.mode,
+                ob.len() as u64,
+                None,
+            );
+            index.add_entry(e);
+        }
+        if let (Some(ref cs), Some(ref ob)) = (&conflict.ours, &ours_bytes) {
+            let stage_path = format!("{}::stage2", path_str);
+            let e = IndexEntry::new(
+                std::path::PathBuf::from(&stage_path),
+                cs.oid,
+                cs.mode,
+                ob.len() as u64,
+                None,
+            );
+            index.add_entry(e);
+        }
+        if let (Some(ref cs), Some(ref tb)) = (&conflict.theirs, &theirs_bytes) {
+            let stage_path = format!("{}::stage3", path_str);
+            let e = IndexEntry::new(
+                std::path::PathBuf::from(&stage_path),
+                cs.oid,
+                cs.mode,
+                tb.len() as u64,
+                None,
+            );
+            index.add_entry(e);
+        }
+    }
+
+    // --- Write MERGE_HEAD, MERGE_MSG, ORIG_HEAD ---
+    std::fs::write(mediagit_dir.join("MERGE_HEAD"), theirs_tip.to_hex())
+        .context("Failed to write MERGE_HEAD")?;
+    std::fs::write(mediagit_dir.join("MERGE_MSG"), "Merge branch 'theirs'\n")
+        .context("Failed to write MERGE_MSG")?;
+    std::fs::write(mediagit_dir.join("ORIG_HEAD"), orig_head.to_hex())
+        .context("Failed to write ORIG_HEAD")?;
+
+    Ok(())
+}
+
+/// Helper: read a blob from ODB by OID, returning None if the OID is absent.
+async fn read_blob_opt(odb: &Arc<ObjectDatabase>, oid: Option<Oid>) -> Result<Option<Vec<u8>>> {
+    match oid {
+        None => Ok(None),
+        Some(o) => {
+            let data = odb
+                .read(&o)
+                .await
+                .with_context(|| format!("Failed to read blob {}", o))?;
+            Ok(Some(data))
+        }
     }
 }
 

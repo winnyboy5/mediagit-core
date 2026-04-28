@@ -75,14 +75,27 @@ impl ProtocolClient {
         Self {
             base_url: base_url.into(),
             client: reqwest::Client::builder()
-                // Cap idle connections per host to match max concurrent downloads.
-                // On Windows, each socket registers with IOCP; unbounded idle
-                // connections exhaust kernel handles (OS error 1450).
-                .pool_max_idle_per_host(if cfg!(target_os = "windows") { 4 } else { 8 })
+                // Pool sized to keep parallel uploaders/downloaders from
+                // tearing down + re-handshaking TLS on every burst. 32 is well
+                // under the IOCP/kernel-handle threshold on Windows but big
+                // enough that pipelined push/pull keeps connections warm.
+                .pool_max_idle_per_host(32)
+                .pool_idle_timeout(std::time::Duration::from_secs(90))
                 .tcp_keepalive(std::time::Duration::from_secs(30))
+                .tcp_nodelay(true)
                 .http2_adaptive_window(true)
-                .http2_initial_stream_window_size(2 * 1024 * 1024)
-                .http2_initial_connection_window_size(8 * 1024 * 1024)
+                // Larger HTTP/2 windows reduce flow-control stalls when bulk
+                // media chunks ride concurrent streams over one connection.
+                .http2_initial_stream_window_size(8 * 1024 * 1024)
+                .http2_initial_connection_window_size(32 * 1024 * 1024)
+                .http2_keep_alive_interval(Some(std::time::Duration::from_secs(20)))
+                // No per-request timeout: large chunked-blob PUTs to Azure/S3
+                // (single object up to several hundred MB) can legitimately run
+                // for minutes — the server side ships block-by-block to cloud.
+                // tcp_keepalive (30s) already detects truly dead peers; a hard
+                // request ceiling here causes spurious "error sending request"
+                // failures on healthy slow uploads. See dev-tests/azure-manual-
+                // test for the regression that motivated removing this.
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
         }
@@ -674,6 +687,23 @@ impl ProtocolClient {
             .context("Failed to parse ref update response")
     }
 
+    /// Upload a single loose object (any type) to the server.
+    ///
+    /// Wraps the raw bytes in a minimal pack and POSTs it to `/objects/pack`.
+    /// Use this for blobs that are not reachable from any commit graph (e.g.
+    /// annotated-tag `.meta` sidecars stored as bare blobs).
+    pub async fn upload_loose_object(
+        &self,
+        oid: Oid,
+        obj_type: ObjectType,
+        data: &[u8],
+    ) -> Result<()> {
+        let mut pack_writer = PackWriter::new();
+        pack_writer.add_object(oid, obj_type, data);
+        let pack_data = pack_writer.finalize();
+        self.upload_pack(&pack_data).await
+    }
+
     /// Collect all NEW objects reachable from given commit OIDs
     ///
     /// Performs depth-first graph traversal to collect commits, trees, and blobs.
@@ -892,6 +922,41 @@ impl ProtocolClient {
     // Chunk Transfer Methods - For efficient large file push
     // ========================================================================
 
+    /// Upload a single chunk-delta to the remote server.
+    ///
+    /// Writes via `PUT /:repo/chunk-deltas/:chunk_id` with the compressed
+    /// delta payload as the body and the base chunk OID as the
+    /// `X-Mediagit-Delta-Base` header. Called by `upload_chunked_objects`
+    /// in its delta pass, after the base chunk has been confirmed present
+    /// on the remote — otherwise the server would hold an orphaned delta
+    /// that cannot be reconstructed.
+    pub async fn upload_chunk_delta(
+        &self,
+        chunk_id: &Oid,
+        base_id: &Oid,
+        compressed_delta_bytes: Vec<u8>,
+    ) -> Result<()> {
+        let url = format!("{}/chunk-deltas/{}", self.base_url, chunk_id.to_hex());
+        let response = self
+            .client
+            .put(&url)
+            .header("x-mediagit-delta-base", base_id.to_hex())
+            .body(compressed_delta_bytes)
+            .send()
+            .await
+            .context(format!("Failed to PUT /chunk-deltas/{}", chunk_id))?;
+
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "PUT /chunk-deltas/{} failed with status: {}",
+                chunk_id,
+                response.status()
+            );
+        }
+
+        Ok(())
+    }
+
     /// Check which chunks exist on the remote server
     ///
     /// Returns list of chunk IDs that are MISSING (need to be uploaded)
@@ -965,11 +1030,19 @@ impl ProtocolClient {
         }
 
         let mut total_chunks_uploaded = 0;
-        // Lower concurrency on Windows to avoid IOCP kernel handle exhaustion
-        // (OS error 1450 / ERROR_NO_SYSTEM_RESOURCES). Spawning all tasks
-        // upfront with a semaphore-inside pattern registers all N futures with
-        // the IOCP driver at once; buffer_unordered limits active futures to N.
-        let concurrent_uploads: usize = if cfg!(target_os = "windows") { 4 } else { 8 };
+        // Concurrency for parallel chunk uploads. buffer_unordered keeps at
+        // most N futures active. Default 32 measured 37% faster than 16 on a
+        // 2-Mbps upstream to Azure West EU (561s -> 353s for 150 MB cold
+        // push). c=64 regressed to 399s on the same link — too many parallel
+        // TLS handshakes / TCP slow-starts contend. 32 is the sweet spot.
+        // Memory cost: ~chunk_size × N peak buffered. At ~4 MB/chunk × 32 =
+        // ~128 MB transient peak per push session.
+        // Override via env when bandwidth or backend tolerates more.
+        let concurrent_uploads: usize = std::env::var("MEDIAGIT_UPLOAD_CONCURRENCY")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|n: &usize| *n > 0)
+            .unwrap_or(32);
 
         for (obj_idx, oid) in chunked_oids.iter().enumerate() {
             // Get manifest for this object
@@ -996,8 +1069,42 @@ impl ProtocolClient {
             // Get all chunk IDs
             let chunk_ids: Vec<String> = manifest.chunks.iter().map(|c| c.id.to_hex()).collect();
 
-            // Check which chunks the remote needs
-            let missing_chunks = self.check_chunks_exist(&chunk_ids).await?;
+            // Pre-discover local delta info for every manifest chunk. This is
+            // a local DB lookup per chunk — cheap compared to a network RTT —
+            // and lets us fold the chunk-existence check and the delta-base
+            // existence check into ONE POST (down from two sequential RTTs).
+            // We cache the delta payloads here so Pass A/C don't re-read them.
+            let mut local_delta_lookup: std::collections::HashMap<Oid, (Oid, Vec<u8>)> =
+                std::collections::HashMap::new();
+            let mut speculative_base_hexes: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for c in &manifest.chunks {
+                if let Some((base_id, delta_bytes)) = odb.get_local_chunk_delta_raw(&c.id).await? {
+                    speculative_base_hexes.insert(base_id.to_hex());
+                    local_delta_lookup.insert(c.id, (base_id, delta_bytes));
+                }
+            }
+
+            // Combined existence check: manifest chunks + speculative delta bases.
+            let mut combined_check: Vec<String> = chunk_ids.clone();
+            let chunk_id_set: std::collections::HashSet<&String> = chunk_ids.iter().collect();
+            for base_hex in &speculative_base_hexes {
+                if !chunk_id_set.contains(base_hex) {
+                    combined_check.push(base_hex.clone());
+                }
+            }
+            let combined_missing: std::collections::HashSet<String> = self
+                .check_chunks_exist(&combined_check)
+                .await?
+                .into_iter()
+                .collect();
+
+            // Missing manifest chunks = subset of combined_missing.
+            let missing_chunks: Vec<String> = chunk_ids
+                .iter()
+                .filter(|h| combined_missing.contains(*h))
+                .cloned()
+                .collect();
 
             if missing_chunks.is_empty() {
                 tracing::debug!(oid = %oid, "All chunks already exist on remote");
@@ -1009,10 +1116,6 @@ impl ProtocolClient {
                     "Uploading missing chunks"
                 );
 
-                // Upload missing chunks with bounded concurrency.
-                // buffer_unordered keeps at most `concurrent_uploads` futures
-                // active at once, preventing Windows IOCP handle exhaustion
-                // that occurs when all tasks are spawned upfront.
                 let missing_set: std::collections::HashSet<String> =
                     missing_chunks.into_iter().collect();
                 let chunks_to_upload: Vec<Oid> = manifest
@@ -1022,32 +1125,202 @@ impl ProtocolClient {
                     .map(|c| c.id)
                     .collect();
 
-                let results: Vec<anyhow::Result<()>> = futures::stream::iter(chunks_to_upload)
-                    .map(|chunk_id| {
-                        let client = self.client.clone();
-                        let base_url = self.base_url.clone();
-                        let odb = odb.clone();
-                        async move {
-                            let chunk_data = odb.get_compressed_chunk(&chunk_id).await?;
-                            let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
-                            client
-                                .put(&url)
-                                .body(chunk_data)
-                                .send()
-                                .await
-                                .map(|_| ())
-                                .map_err(|e| {
-                                    anyhow::anyhow!("Failed to upload chunk {}: {}", chunk_id, e)
-                                })
+                // Partition into locally-delta chunks (ship as deltas) and
+                // plain full chunks. Reuses the pre-computed local_delta_lookup,
+                // avoiding a second pass over odb.get_local_chunk_delta_raw.
+                let mut full_chunks: Vec<Oid> = Vec::new();
+                let mut delta_chunks: Vec<(Oid, Oid, Vec<u8>)> = Vec::new();
+                for chunk_id in &chunks_to_upload {
+                    match local_delta_lookup.remove(chunk_id) {
+                        Some((base_id, delta_bytes)) => {
+                            delta_chunks.push((*chunk_id, base_id, delta_bytes));
                         }
-                    })
-                    .buffer_unordered(concurrent_uploads)
-                    .collect()
-                    .await;
+                        None => full_chunks.push(*chunk_id),
+                    }
+                }
 
-                for result in results {
-                    result?;
-                    total_chunks_uploaded += 1;
+                // A base is considered "landing this push" if it's any chunk in
+                // chunks_to_upload — regardless of whether it lands as a full or
+                // as a delta. A chunk-delta can be a base for another chunk-delta
+                // (depth-2 chain); the server reconstructs the chain from the
+                // .meta sidecars. Restricting this set to `full_chunks` would
+                // force depth-2 chains to degrade to full uploads, silently
+                // shrinking clone-side savings.
+                let bases_landing_this_push: std::collections::HashSet<Oid> =
+                    chunks_to_upload.iter().copied().collect();
+
+                // ── Pass A: full chunks (must land before any delta whose
+                // base is in this push) ──────────────────────────────────
+                if !full_chunks.is_empty() {
+                    let mut stream = futures::stream::iter(full_chunks.clone())
+                        .map(|chunk_id| {
+                            let client = self.client.clone();
+                            let base_url = self.base_url.clone();
+                            let odb = odb.clone();
+                            async move {
+                                let chunk_data = odb.get_compressed_chunk(&chunk_id).await?;
+                                let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
+                                client
+                                    .put(&url)
+                                    .body(chunk_data)
+                                    .send()
+                                    .await
+                                    .map(|_| ())
+                                    .map_err(|e| {
+                                        anyhow::anyhow!(
+                                            "Failed to upload chunk {}: {}",
+                                            chunk_id,
+                                            e
+                                        )
+                                    })
+                            }
+                        })
+                        .buffer_unordered(concurrent_uploads);
+
+                    while let Some(result) = stream.next().await {
+                        result?;
+                        total_chunks_uploaded += 1;
+                        on_progress(
+                            obj_idx + 1,
+                            chunked_oids.len(),
+                            &format!(
+                                "Object {}/{}: {}/{} chunks",
+                                obj_idx + 1,
+                                chunked_oids.len(),
+                                total_chunks_uploaded,
+                                total_chunks
+                            ),
+                        );
+                    }
+                }
+
+                // ── Pass B: verify out-of-push bases actually exist server-side;
+                // any delta whose base is still missing must degrade to a full
+                // upload so the server never ends up with an orphaned delta.
+                let out_of_push_base_hexes: Vec<String> = {
+                    let mut seen = std::collections::HashSet::new();
+                    delta_chunks
+                        .iter()
+                        .map(|(_, b, _)| *b)
+                        .filter(|b| !bases_landing_this_push.contains(b))
+                        .filter(|b| seen.insert(*b))
+                        .map(|b| b.to_hex())
+                        .collect()
+                };
+
+                // Reuse the combined existence result from the single fused
+                // POST above instead of issuing a second /chunks/check round-trip.
+                // `combined_missing` already covers every speculative base hex
+                // we discovered before Pass A.
+                let still_missing_bases: std::collections::HashSet<Oid> = out_of_push_base_hexes
+                    .iter()
+                    .filter(|h| combined_missing.contains(*h))
+                    .filter_map(|h| Oid::from_hex(h).ok())
+                    .collect();
+
+                let (uploadable_deltas, degraded_to_full): (Vec<_>, Vec<_>) = delta_chunks
+                    .into_iter()
+                    .partition(|(_, base, _)| !still_missing_bases.contains(base));
+
+                if !degraded_to_full.is_empty() {
+                    tracing::warn!(
+                        oid = %oid,
+                        count = degraded_to_full.len(),
+                        "Delta base not on server; degrading to full-chunk upload"
+                    );
+                    let degraded_ids: Vec<Oid> =
+                        degraded_to_full.into_iter().map(|(c, _, _)| c).collect();
+                    let mut stream = futures::stream::iter(degraded_ids)
+                        .map(|chunk_id| {
+                            let client = self.client.clone();
+                            let base_url = self.base_url.clone();
+                            let odb = odb.clone();
+                            async move {
+                                let chunk_data = odb.get_compressed_chunk(&chunk_id).await?;
+                                let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
+                                client
+                                    .put(&url)
+                                    .body(chunk_data)
+                                    .send()
+                                    .await
+                                    .map(|_| ())
+                                    .map_err(|e| {
+                                        anyhow::anyhow!(
+                                            "Failed to upload chunk {}: {}",
+                                            chunk_id,
+                                            e
+                                        )
+                                    })
+                            }
+                        })
+                        .buffer_unordered(concurrent_uploads);
+
+                    while let Some(result) = stream.next().await {
+                        result?;
+                        total_chunks_uploaded += 1;
+                        on_progress(
+                            obj_idx + 1,
+                            chunked_oids.len(),
+                            &format!(
+                                "Object {}/{}: {}/{} chunks",
+                                obj_idx + 1,
+                                chunked_oids.len(),
+                                total_chunks_uploaded,
+                                total_chunks
+                            ),
+                        );
+                    }
+                }
+
+                // ── Pass C: ship deltas as deltas (verbatim; no rematerialize) ─
+                if !uploadable_deltas.is_empty() {
+                    let mut stream = futures::stream::iter(uploadable_deltas)
+                        .map(|(chunk_id, base_id, delta_bytes)| {
+                            let client = self.client.clone();
+                            let base_url = self.base_url.clone();
+                            async move {
+                                let url =
+                                    format!("{}/chunk-deltas/{}", base_url, chunk_id.to_hex());
+                                let resp = client
+                                    .put(&url)
+                                    .header("x-mediagit-delta-base", base_id.to_hex())
+                                    .body(delta_bytes)
+                                    .send()
+                                    .await
+                                    .map_err(|e| {
+                                        anyhow::anyhow!(
+                                            "Failed to upload chunk-delta {}: {}",
+                                            chunk_id,
+                                            e
+                                        )
+                                    })?;
+                                if !resp.status().is_success() {
+                                    anyhow::bail!(
+                                        "PUT /chunk-deltas/{} failed with status: {}",
+                                        chunk_id,
+                                        resp.status()
+                                    );
+                                }
+                                Ok::<(), anyhow::Error>(())
+                            }
+                        })
+                        .buffer_unordered(concurrent_uploads);
+
+                    while let Some(result) = stream.next().await {
+                        result?;
+                        total_chunks_uploaded += 1;
+                        on_progress(
+                            obj_idx + 1,
+                            chunked_oids.len(),
+                            &format!(
+                                "Object {}/{}: {}/{} chunks",
+                                obj_idx + 1,
+                                chunked_oids.len(),
+                                total_chunks_uploaded,
+                                total_chunks
+                            ),
+                        );
+                    }
                 }
             }
 
@@ -1111,11 +1384,69 @@ impl ProtocolClient {
         Ok(response.bytes().await?.to_vec())
     }
 
+    /// Ask the server which of the given chunk IDs exist as chunk-deltas.
+    ///
+    /// Returns a map `chunk_id → base_chunk_id` (both as `Oid`). Chunks not
+    /// in the response are stored as full chunks (use `download_chunk`).
+    ///
+    /// On 404 (old server without the endpoint) or any error, returns an
+    /// empty map — the caller falls back to full-chunk downloads. This keeps
+    /// new clients compatible with old servers.
+    async fn check_chunk_deltas(&self, chunk_ids: &[Oid]) -> std::collections::HashMap<Oid, Oid> {
+        let mut empty = std::collections::HashMap::new();
+        if chunk_ids.is_empty() {
+            return empty;
+        }
+
+        let url = format!("{}/chunk-deltas/check", self.base_url);
+        let payload: Vec<String> = chunk_ids.iter().map(|o| o.to_hex()).collect();
+
+        let response = match self.client.post(&url).json(&payload).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!(error = %e, "chunk-deltas/check failed (treating as no deltas)");
+                return empty;
+            }
+        };
+
+        if !response.status().is_success() {
+            // 404 means old server — silently fall back. Other statuses also
+            // fall back (best-effort optimization, never blocks the clone).
+            tracing::debug!(
+                status = %response.status(),
+                "chunk-deltas/check non-success (treating as no deltas)"
+            );
+            return empty;
+        }
+
+        let map: std::collections::HashMap<String, String> = match response.json().await {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::debug!(error = %e, "chunk-deltas/check parse failed");
+                return empty;
+            }
+        };
+
+        for (id_hex, base_hex) in map {
+            if let (Ok(id), Ok(base)) = (Oid::from_hex(&id_hex), Oid::from_hex(&base_hex)) {
+                empty.insert(id, base);
+            }
+        }
+        empty
+    }
+
     /// Download all chunks for chunked objects with parallel downloads
     ///
     /// Uses 8 concurrent downloads for optimal throughput (>100MB/s target).
     /// Progress callback receives `(chunks_done, total_manifest_chunks, msg)` for
     /// smooth chunk-level ETA (avoids "211y" caused by object-level reporting).
+    ///
+    /// Delta-aware: for each manifest, asks the server which chunks exist as
+    /// chunk-deltas via `POST /chunk-deltas/check`. Chunks present as deltas
+    /// are downloaded via `GET /chunk-deltas/<id>` and persisted via
+    /// `odb.write_chunk_delta`, preserving the storage savings the server has.
+    /// Falls back to full-chunk downloads for any chunk the server doesn't
+    /// report as a delta, and for old servers that don't expose the endpoint.
     pub async fn download_chunked_objects<F>(
         &self,
         odb: &ObjectDatabase,
@@ -1131,11 +1462,17 @@ impl ProtocolClient {
             return Ok(0);
         }
 
-        // Lower concurrency on Windows to avoid IOCP kernel handle exhaustion
-        // (OS error 1450 / ERROR_NO_SYSTEM_RESOURCES). Spawning all tasks
-        // upfront with a semaphore-inside pattern registers all N futures with
-        // the IOCP driver at once; buffer_unordered limits active futures to N.
-        let concurrent_downloads: usize = if cfg!(target_os = "windows") { 4 } else { 8 };
+        // Concurrency for parallel chunk downloads. Default 32 matches the
+        // upload side. Residential downlink typically has more headroom than
+        // upstream so c=64 also helped (clone 92 -> 57s in measurements), but
+        // 32 is the safer cross-platform default; high-downstream users can
+        // env-override. HTTP/1.1 keep-alive + pool_max_idle_per_host=32 in
+        // ProtocolClient::new keeps connections warm.
+        let concurrent_downloads: usize = std::env::var("MEDIAGIT_DOWNLOAD_CONCURRENCY")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|n: &usize| *n > 0)
+            .unwrap_or(32);
         let n_objects = chunked_oids.len();
 
         // ── Phase 1: manifests (fast — small metadata payloads) ──────────────
@@ -1210,45 +1547,158 @@ impl ProtocolClient {
             let already_local = manifest.chunks.len() - missing_chunks.len();
 
             if !missing_chunks.is_empty() {
-                // Download missing chunks with bounded concurrency.
-                // buffer_unordered keeps at most `concurrent_downloads` futures
-                // active at once, preventing Windows IOCP handle exhaustion
-                // that occurs when all tasks are spawned upfront.
-                let mut stream = futures::stream::iter(missing_chunks.into_iter())
-                    .map(|chunk_id| {
-                        let client = self.client.clone();
-                        let base_url = self.base_url.clone();
-                        async move {
-                            let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
-                            let response = client.get(&url).send().await.map_err(|e| {
-                                anyhow::anyhow!("Failed to download chunk {}: {}", chunk_id, e)
-                            })?;
-                            if !response.status().is_success() {
-                                anyhow::bail!(
-                                    "GET /chunks/{} failed with status: {}",
-                                    chunk_id,
-                                    response.status()
-                                );
-                            }
-                            let data = response.bytes().await.map_err(|e| {
-                                anyhow::anyhow!("Failed to read chunk {}: {}", chunk_id, e)
-                            })?;
-                            Ok::<_, anyhow::Error>((chunk_id, data.to_vec()))
-                        }
-                    })
-                    .buffer_unordered(concurrent_downloads);
+                // Ask the server which of these chunks are stored as deltas.
+                // Best-effort: empty map on old servers / errors.
+                let delta_map = self.check_chunk_deltas(&missing_chunks).await;
 
-                // Write each chunk as it arrives — no buffering of completed results.
-                while let Some(result) = stream.next().await {
-                    let (chunk_id, chunk_data) = result?;
-                    odb.put_compressed_chunk(&chunk_id, &chunk_data).await?;
-                    total_chunks_downloaded += 1;
-                    chunks_done += 1;
-                    on_progress(
-                        chunks_done,
-                        total_manifest_chunks,
-                        &format!("Object {}/{}", obj_idx + 1, n_objects),
-                    );
+                // Split into "full chunks" and "delta chunks" based on what the
+                // server actually stores. A chunk that the server reports as a
+                // delta MUST be downloaded via `/chunk-deltas/<id>` — hitting
+                // `/chunks/<id>` for it would 404 because no full copy exists.
+                // Delta chains (depth ≥ 2) are fine: all chunks in the chain
+                // land locally as deltas in this single pass; reads later
+                // follow the chain via the .meta sidecars.
+                //
+                // Cycle pre-filter still applies: if writing a chunk as a delta
+                // would create a cycle with the LOCAL on-disk chain (e.g. a
+                // prior partial clone), degrade that one to a full download.
+                // If the full endpoint also lacks the object the server is
+                // misconfigured — surface the error rather than mask it.
+                let mut full_chunks: Vec<Oid> = Vec::new();
+                let mut delta_chunks: Vec<Oid> = Vec::new();
+                for cid in &missing_chunks {
+                    if let Some(&base) = delta_map.get(cid) {
+                        let cycle_risk = base == *cid
+                            || odb
+                                .chunk_delta_chain_contains(&base, cid)
+                                .await
+                                .unwrap_or(false);
+                        if cycle_risk {
+                            tracing::debug!(
+                                chunk = %cid,
+                                base = %base,
+                                "Routing to full-chunk download (would create local cycle)"
+                            );
+                            full_chunks.push(*cid);
+                        } else {
+                            delta_chunks.push(*cid);
+                        }
+                    } else {
+                        full_chunks.push(*cid);
+                    }
+                }
+
+                tracing::debug!(
+                    full = full_chunks.len(),
+                    deltas = delta_chunks.len(),
+                    "Split chunk download: full first, then deltas"
+                );
+
+                // ── Pass A: full chunks (and any chunks needed as delta bases) ──
+                if !full_chunks.is_empty() {
+                    let mut stream = futures::stream::iter(full_chunks.into_iter())
+                        .map(|chunk_id| {
+                            let client = self.client.clone();
+                            let base_url = self.base_url.clone();
+                            async move {
+                                let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
+                                let response = client.get(&url).send().await.map_err(|e| {
+                                    anyhow::anyhow!("Failed to download chunk {}: {}", chunk_id, e)
+                                })?;
+                                if !response.status().is_success() {
+                                    anyhow::bail!(
+                                        "GET /chunks/{} failed with status: {}",
+                                        chunk_id,
+                                        response.status()
+                                    );
+                                }
+                                let data = response.bytes().await.map_err(|e| {
+                                    anyhow::anyhow!("Failed to read chunk {}: {}", chunk_id, e)
+                                })?;
+                                Ok::<_, anyhow::Error>((chunk_id, data.to_vec()))
+                            }
+                        })
+                        .buffer_unordered(concurrent_downloads);
+
+                    while let Some(result) = stream.next().await {
+                        let (chunk_id, chunk_data) = result?;
+                        odb.put_compressed_chunk(&chunk_id, &chunk_data).await?;
+                        total_chunks_downloaded += 1;
+                        chunks_done += 1;
+                        on_progress(
+                            chunks_done,
+                            total_manifest_chunks,
+                            &format!("Object {}/{}", obj_idx + 1, n_objects),
+                        );
+                    }
+                }
+
+                // ── Pass B: delta chunks (bases are now local) ────────────────
+                if !delta_chunks.is_empty() {
+                    let delta_map = std::sync::Arc::new(delta_map);
+                    let mut stream = futures::stream::iter(delta_chunks.into_iter())
+                        .map(|chunk_id| {
+                            let client = self.client.clone();
+                            let base_url = self.base_url.clone();
+                            let delta_map = std::sync::Arc::clone(&delta_map);
+                            async move {
+                                let url =
+                                    format!("{}/chunk-deltas/{}", base_url, chunk_id.to_hex());
+                                let response = client.get(&url).send().await.map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "Failed to download chunk-delta {}: {}",
+                                        chunk_id,
+                                        e
+                                    )
+                                })?;
+                                if !response.status().is_success() {
+                                    anyhow::bail!(
+                                        "GET /chunk-deltas/{} failed with status: {}",
+                                        chunk_id,
+                                        response.status()
+                                    );
+                                }
+                                let data = response.bytes().await.map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "Failed to read chunk-delta {}: {}",
+                                        chunk_id,
+                                        e
+                                    )
+                                })?;
+                                let base = delta_map.get(&chunk_id).copied().ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "Internal: chunk {} missing from delta_map",
+                                        chunk_id
+                                    )
+                                })?;
+                                Ok::<_, anyhow::Error>((chunk_id, base, data.to_vec()))
+                            }
+                        })
+                        .buffer_unordered(concurrent_downloads);
+
+                    while let Some(result) = stream.next().await {
+                        let (chunk_id, base_id, delta_bytes) = result?;
+                        if let Err(e) = odb
+                            .write_chunk_delta(&chunk_id, &base_id, &delta_bytes)
+                            .await
+                        {
+                            tracing::warn!(
+                                chunk = %chunk_id,
+                                base = %base_id,
+                                error = %e,
+                                "Delta write failed (cycle?), falling back to full chunk"
+                            );
+                            let full = self.download_chunk(&chunk_id).await?;
+                            odb.put_compressed_chunk(&chunk_id, &full).await?;
+                        }
+                        total_chunks_downloaded += 1;
+                        chunks_done += 1;
+                        on_progress(
+                            chunks_done,
+                            total_manifest_chunks,
+                            &format!("Object {}/{}", obj_idx + 1, n_objects),
+                        );
+                    }
                 }
             }
 
