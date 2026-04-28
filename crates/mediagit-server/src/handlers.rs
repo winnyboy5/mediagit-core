@@ -736,15 +736,13 @@ async fn collect_objects_bfs(
 
         // Probe + read each oid concurrently. is_chunked + read for chunked
         // blobs is short-circuited because chunked manifests don't recurse.
-        let mut probe_stream = futures::stream::iter(batch.into_iter().map(|oid| {
-            async move {
-                let chunked = odb.is_chunked(&oid).await.unwrap_or(false);
-                if chunked {
-                    (oid, true, None)
-                } else {
-                    let read = odb.read(&oid).await.ok();
-                    (oid, false, read)
-                }
+        let mut probe_stream = futures::stream::iter(batch.into_iter().map(|oid| async move {
+            let chunked = odb.is_chunked(&oid).await.unwrap_or(false);
+            if chunked {
+                (oid, true, None)
+            } else {
+                let read = odb.read(&oid).await.ok();
+                (oid, false, read)
             }
         }))
         .buffer_unordered(parallelism);
