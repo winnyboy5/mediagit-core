@@ -20,6 +20,7 @@ use mediagit_security::TlsConfig;
 
 /// Server configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     /// Port to listen on (HTTP)
     #[serde(default = "default_port")]
@@ -116,19 +117,37 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
-    /// Load configuration from the given path, or use defaults if the file does not exist
+    /// Load configuration from the given path, or use defaults if the file does not exist.
+    ///
+    /// If `config_path` differs from the default ("mediagit-server.toml") and the file
+    /// is missing, return an error instead of silently falling back — this prevents
+    /// operators from thinking their S3/TLS/auth config is wired when it isn't.
     pub fn load(config_path: &str) -> Result<Self> {
-        let config_path = PathBuf::from(config_path);
+        let path = PathBuf::from(config_path);
+        let is_default = config_path == "mediagit-server.toml";
 
-        if config_path.exists() {
-            let content =
-                std::fs::read_to_string(&config_path).context("Failed to read config file")?;
+        if path.exists() {
+            let content = std::fs::read_to_string(&path).context("Failed to read config file")?;
 
-            toml::from_str(&content).context("Failed to parse config file")
-        } else {
-            // Use defaults
-            tracing::info!("No config file found, using defaults");
+            toml::from_str(&content).with_context(|| {
+                format!(
+                    "Failed to parse config file {} (unknown keys are rejected; \
+                     check for typos or deprecated sections)",
+                    path.display()
+                )
+            })
+        } else if is_default {
+            tracing::warn!(
+                "No config file at '{}'; using built-in defaults \
+                 (port=3000, host=127.0.0.1, auth=off, rate_limit=off)",
+                path.display()
+            );
             Ok(Self::default())
+        } else {
+            anyhow::bail!(
+                "config file not found: {} (specified via --config)",
+                path.display()
+            )
         }
     }
 
@@ -182,5 +201,68 @@ impl ServerConfig {
             );
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rejects_unknown_top_level_keys() {
+        // Guard for BUG-004: unknown keys/sections must not be silently dropped.
+        let toml_str = r#"
+            port = 5061
+            [storage]
+            backend = "s3"
+        "#;
+        let err = toml::from_str::<ServerConfig>(toml_str)
+            .expect_err("unknown [storage] section must not parse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("storage") || msg.contains("unknown"),
+            "expected unknown-field rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_rejects_unknown_leaf_key() {
+        let toml_str = r#"
+            port = 5061
+            enable_s3 = true
+        "#;
+        let err = toml::from_str::<ServerConfig>(toml_str)
+            .expect_err("unknown `enable_s3` must not parse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("enable_s3") || msg.contains("unknown"),
+            "expected unknown-field rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_load_explicit_path_missing_bails() {
+        let err = ServerConfig::load("nonexistent-config-for-bug-004.toml")
+            .expect_err("explicit missing path must bail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found") || msg.contains("nonexistent-config-for-bug-004"),
+            "expected missing-path error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_load_default_path_missing_uses_defaults() {
+        // Default path "mediagit-server.toml" is allowed to be missing
+        // so first-run users get sensible defaults. Run from a temp dir
+        // to guarantee the default file is not present.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(tmp.path()).expect("chdir");
+        let result = ServerConfig::load("mediagit-server.toml");
+        std::env::set_current_dir(cwd).expect("restore cwd");
+        let cfg = result.expect("default path missing must fall back to defaults");
+        assert_eq!(cfg.port, 3000);
+        assert!(!cfg.enable_auth);
     }
 }

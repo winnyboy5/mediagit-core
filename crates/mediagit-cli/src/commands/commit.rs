@@ -98,6 +98,17 @@ impl CommitCmd {
     pub async fn execute(&self) -> Result<()> {
         use crate::output;
 
+        // The -a (--all) flag is not supported in MediaGit.
+        // MediaGit uses an explicit `add` → `commit` workflow by design,
+        // because `add` performs heavy processing (chunking, delta encoding,
+        // compression) that is inappropriate to silently trigger from commit.
+        if self.all {
+            return Err(anyhow::anyhow!(
+                "commit -a is not supported in MediaGit.\n\
+                 Use 'mediagit add .' followed by 'mediagit commit -m \"...\"' instead."
+            ));
+        }
+
         // Validate inputs
         if self.message.is_none() && !self.edit && self.file.is_none() {
             return Err(anyhow::anyhow!(
@@ -331,6 +342,11 @@ impl CommitCmd {
                 output::detail("Author", &format!("{} <{}>", author_name, author_email));
             }
         }
+
+        // Best-effort auto-gc: reclaims orphans from re-staged files.
+        // Thresholded internally, silent unless work was actually done.
+        let _ =
+            crate::auto_gc::maybe_run(&repo_root, crate::auto_gc::TriggerMode::PostCommit).await;
 
         Ok(())
     }

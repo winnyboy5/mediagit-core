@@ -107,6 +107,10 @@ pub struct LogCmd {
     /// Quiet mode
     #[arg(short, long)]
     pub quiet: bool,
+
+    /// Format commits using a template string
+    #[arg(long, value_name = "TMPL")]
+    pub format: Option<String>,
 }
 
 impl LogCmd {
@@ -240,7 +244,11 @@ impl LogCmd {
         }
 
         for (oid, commit) in commits_to_show {
-            if self.oneline {
+            if let Some(format_tmpl) = &self.format {
+                // Custom format template
+                let output = Self::format_commit(format_tmpl, &oid, &commit);
+                println!("{}", output);
+            } else if self.oneline {
                 // One-line format
                 let short_oid = &oid.to_string()[..7];
                 let short_msg = commit.message.lines().next().unwrap_or("");
@@ -334,6 +342,71 @@ impl LogCmd {
         }
 
         Ok(())
+    }
+
+    /// Format a commit using a template string
+    /// Supported placeholders:
+    /// %H - full commit OID hex
+    /// %h - first 7 hex chars of commit OID
+    /// %s - subject (first line of message)
+    /// %aN - author name
+    /// %an - author name (alias of %aN)
+    /// %ae - author email
+    /// %ad - author date
+    /// %n - literal newline
+    /// %% - literal %
+    fn format_commit(tmpl: &str, oid: &Oid, commit: &Commit) -> String {
+        let mut result = String::new();
+        let mut chars = tmpl.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '%' {
+                if let Some(&next_ch) = chars.peek() {
+                    chars.next(); // consume the next char
+                    match next_ch {
+                        'H' => result.push_str(&oid.to_string()),
+                        'h' => {
+                            let full_oid = oid.to_string();
+                            result.push_str(&full_oid[..7.min(full_oid.len())]);
+                        }
+                        's' => {
+                            let subject = commit.message.lines().next().unwrap_or("");
+                            result.push_str(subject);
+                        }
+                        'a' => {
+                            if let Some(&second) = chars.peek() {
+                                chars.next(); // consume the second char
+                                match second {
+                                    'N' | 'n' => result.push_str(&commit.author.name),
+                                    'e' => result.push_str(&commit.author.email),
+                                    'd' => result.push_str(&commit.author.timestamp.to_string()),
+                                    _ => {
+                                        result.push('%');
+                                        result.push('a');
+                                        result.push(second);
+                                    }
+                                }
+                            } else {
+                                result.push('%');
+                                result.push('a');
+                            }
+                        }
+                        'n' => result.push('\n'),
+                        '%' => result.push('%'),
+                        _ => {
+                            result.push('%');
+                            result.push(next_ch);
+                        }
+                    }
+                } else {
+                    result.push('%');
+                }
+            } else {
+                result.push(ch);
+            }
+        }
+
+        result
     }
 
     /// Helper to get a flat map of file paths to OIDs from a tree

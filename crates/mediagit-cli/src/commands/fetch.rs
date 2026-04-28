@@ -16,7 +16,7 @@
 //! The `fetch` command downloads objects and refs from a remote repository
 //! without integrating them into the local branches.
 
-use super::super::repo::{create_storage_backend, find_repo_root};
+use super::super::repo::{collect_local_have, create_storage_backend, find_repo_root};
 use crate::progress::{OperationStats, ProgressTracker};
 use anyhow::Result;
 use clap::Parser;
@@ -155,6 +155,16 @@ impl FetchCmd {
         let remotes_dir = storage_path.join("refs").join("remotes").join(remote);
         std::fs::create_dir_all(&remotes_dir)?;
 
+        // Compute the full local have-set ONCE for this fetch. Every branch
+        // we pull below uses the same haves; walking refs per-branch would
+        // be pointless work. This enables incremental fetch — the server
+        // expands these OIDs into a full object closure and prunes anything
+        // already on the client from the pack walk.
+        let local_have = collect_local_have(&refdb, &odb).await;
+        if self.verbose {
+            println!("  Local have-set: {} refs", local_have.len());
+        }
+
         let mut branches_updated = 0;
         let mut branches_uptodate = 0;
 
@@ -166,9 +176,33 @@ impl FetchCmd {
                 .unwrap_or(&branch_ref.name);
             let tracking_ref_name = format!("refs/remotes/{}/{}", remote, branch_name);
 
-            // Check if tracking ref is already up to date
+            // Check if tracking ref is already up to date.
+            //
+            // BUG-008: a matching tracking-ref OID is NOT sufficient — clone
+            // pre-populates tracking refs for every advertised branch but
+            // only ships objects reachable from the default branch, so
+            // `refs/remotes/origin/feat-*` can point at commits that are
+            // not yet in the local ODB. Without this check, a subsequent
+            // `fetch origin feat-x` would short-circuit on the matching
+            // OID and never download the missing objects, leaving the
+            // user unable to check out the branch.
+            //
+            // We use `ObjectDatabase::exists()` (cache-first + storage
+            // existence probe) so this adds one cheap I/O per branch
+            // without ever loading object content into memory.
             let needs_update = match refdb.read(&tracking_ref_name).await {
-                Ok(existing) => existing.oid.map(|o| o.to_hex()) != Some(branch_ref.oid.clone()),
+                Ok(existing) => {
+                    let oids_match =
+                        existing.oid.map(|o| o.to_hex()) == Some(branch_ref.oid.clone());
+                    if oids_match {
+                        match mediagit_versioning::Oid::from_hex(&branch_ref.oid) {
+                            Ok(oid) => !odb.exists(&oid).await.unwrap_or(false),
+                            Err(_) => true,
+                        }
+                    } else {
+                        true
+                    }
+                }
                 Err(_) => true, // Doesn't exist, needs update
             };
 
@@ -184,19 +218,11 @@ impl FetchCmd {
                 println!("  Fetching {}...", branch_name);
             }
 
-            // Get local "have" list for incremental fetch
-            let local_have: Vec<String> = refdb
-                .read(&tracking_ref_name)
-                .await
-                .ok()
-                .and_then(|r| r.oid)
-                .map(|oid| vec![oid.to_hex()])
-                .unwrap_or_default();
-
-            // Download objects using streaming (memory-efficient, writes directly to ODB)
+            // Download objects using streaming (memory-efficient, writes directly to ODB).
+            // Clone the shared have-set per branch — `pull_streaming` consumes it.
             let download_pb = progress.spinner(&format!("Fetching {}...", branch_name));
             let chunked_oids = client
-                .pull_streaming(&odb, &branch_ref.name, local_have)
+                .pull_streaming(&odb, &branch_ref.name, local_have.clone())
                 .await?;
             download_pb.finish_with_message(format!("Fetched {}", branch_name));
 

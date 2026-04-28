@@ -16,9 +16,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use mediagit_security::auth::{ApiKeyAuth, AuthLayer, AuthService, JwtAuth};
+use mediagit_storage::StorageBackend;
 
 /// Unique request ID generator
 static REQUEST_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -38,6 +39,9 @@ pub fn generate_request_id() -> String {
 pub struct WantEntry {
     pub repo: String,
     pub want_list: Vec<String>,
+    /// Objects the client claims to already have — used to prune the server's
+    /// pack walk so fetches only ship the delta.
+    pub have_list: Vec<String>,
     pub created_at: Instant,
 }
 
@@ -50,6 +54,9 @@ pub struct WantCache {
 impl WantCache {
     /// Default maximum entries
     pub const DEFAULT_MAX_ENTRIES: usize = 10_000;
+
+    /// Maximum age for want entries before automatic cleanup (5 minutes)
+    pub const ENTRY_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
     /// Create a new want cache with default capacity
     pub fn new() -> Self {
@@ -64,9 +71,22 @@ impl WantCache {
         }
     }
 
-    /// Insert a want entry, evicting oldest if at capacity
-    pub fn insert(&mut self, request_id: String, repo: String, want_list: Vec<String>) {
-        // Evict oldest entry if at capacity
+    /// Insert a want entry, cleaning up expired entries and evicting oldest if
+    /// still at capacity. TTL cleanup piggybacks on insert() to avoid needing
+    /// a background task.
+    pub fn insert(
+        &mut self,
+        request_id: String,
+        repo: String,
+        want_list: Vec<String>,
+        have_list: Vec<String>,
+    ) {
+        // Sweep expired entries first (TTL-based cleanup)
+        let now = Instant::now();
+        self.entries
+            .retain(|_, entry| now.duration_since(entry.created_at) < Self::ENTRY_TTL);
+
+        // Evict oldest entry if still at capacity after TTL sweep
         if self.entries.len() >= self.max_entries {
             if let Some((oldest_key, _)) = self
                 .entries
@@ -84,6 +104,7 @@ impl WantCache {
             WantEntry {
                 repo,
                 want_list,
+                have_list,
                 created_at: Instant::now(),
             },
         );
@@ -121,6 +142,14 @@ pub struct AppState {
     /// Bounded to prevent memory leaks from abandoned requests
     pub want_cache: Mutex<WantCache>,
 
+    /// Per-repo cache of constructed storage backends. Constructing a backend
+    /// (especially Azure/S3) is expensive — TLS handshake plus a container/bucket
+    /// existence round-trip — and naively rebuilding it on every handler call
+    /// turned tiny pushes into multi-minute operations against cloud storage.
+    /// Keyed by canonical repo path; a single fast-path read lock covers the
+    /// hot path, with a write-locked double-checked init on miss.
+    pub storage_backends: RwLock<HashMap<PathBuf, Arc<dyn StorageBackend>>>,
+
     /// Authentication layer (optional - can be disabled for development)
     pub auth_layer: Option<Arc<AuthLayer>>,
 
@@ -134,6 +163,7 @@ impl AppState {
         Self {
             repos_dir,
             want_cache: Mutex::new(WantCache::new()),
+            storage_backends: RwLock::new(HashMap::new()),
             auth_layer: None,
             auth_service: None,
         }
@@ -155,6 +185,7 @@ impl AppState {
         Self {
             repos_dir,
             want_cache: Mutex::new(WantCache::new()),
+            storage_backends: RwLock::new(HashMap::new()),
             auth_layer: Some(auth_layer),
             auth_service: Some(auth_service),
         }
@@ -172,6 +203,7 @@ impl AppState {
         Self {
             repos_dir,
             want_cache: Mutex::new(WantCache::new()),
+            storage_backends: RwLock::new(HashMap::new()),
             auth_layer: Some(auth_layer),
             auth_service: Some(auth_service),
         }

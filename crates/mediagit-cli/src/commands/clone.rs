@@ -68,6 +68,20 @@ impl CloneCmd {
     pub async fn execute(&self) -> Result<()> {
         let start_time = Instant::now();
 
+        // Validate URL scheme before reqwest/url gives an opaque "scheme is not allowed".
+        // MediaGit's clone protocol currently speaks HTTP(S) only.
+        if !(self.url.starts_with("http://") || self.url.starts_with("https://")) {
+            anyhow::bail!(
+                "unsupported remote URL '{}'.\n\n\
+                 `mediagit clone` currently supports http:// and https:// URLs only.\n\
+                 To clone a local repository, copy the directory directly:\n    \
+                 cp -r <src> <dst>\n\
+                 To serve a local repo over HTTP, run:\n    \
+                 mediagit-server -c mediagit-server.toml",
+                self.url
+            );
+        }
+
         // Determine target directory
         let target_dir = self.get_target_directory()?;
         let branch = self.branch.as_deref().unwrap_or("main");
@@ -172,7 +186,10 @@ url = "{}"
             let chunk_pb_ref = chunk_pb.clone();
             let chunks_downloaded = client
                 .download_chunked_objects(&odb, &chunked_oids, move |current, total, msg| {
-                    chunk_pb_ref.set_length(total as u64);
+                    if chunk_pb_ref.length() != Some(total as u64) {
+                        chunk_pb_ref.set_length(total as u64);
+                        chunk_pb_ref.reset_eta();
+                    }
                     chunk_pb_ref.set_position(current as u64);
                     chunk_pb_ref.set_message(msg.to_string());
                 })
@@ -199,7 +216,10 @@ url = "{}"
         // Step 8b: Create tracking refs for all remote branches (LAZY CLONE)
         // We only download objects for the default branch. Other branches' objects
         // will be fetched on-demand when user runs `pull origin branch` or `branch switch`.
+        // Also write tag refs (refs/tags/*) received from the server.
         let mut other_branches = Vec::new();
+        // Collect tag-meta refs for second pass after ODB objects are available
+        let mut tag_meta_refs: Vec<(String, String)> = Vec::new();
         for ref_info in &remote_refs.refs {
             if ref_info.name.starts_with("refs/heads/") {
                 let branch_name = ref_info
@@ -227,6 +247,47 @@ url = "{}"
                     // Track other branches for summary
                     if ref_info.name != remote_ref_name {
                         other_branches.push(branch_name.to_string());
+                    }
+                }
+            } else if ref_info.name.starts_with("refs/tags/") {
+                // Write tag ref directly
+                if let Ok(tag_oid) = mediagit_versioning::Oid::from_hex(&ref_info.oid) {
+                    let tag_ref =
+                        mediagit_versioning::Ref::new_direct(ref_info.name.clone(), tag_oid);
+                    refdb.write(&tag_ref).await?;
+                    if self.verbose {
+                        println!(
+                            "  Created tag ref: {} -> {}",
+                            ref_info.name,
+                            &ref_info.oid[..8]
+                        );
+                    }
+                }
+            } else if let Some(tag_name) = ref_info.name.strip_prefix("refs/tag-meta/") {
+                // Record for second pass: blob OID -> .meta file
+                tag_meta_refs.push((tag_name.to_string(), ref_info.oid.clone()));
+            }
+        }
+
+        // Restore annotated tag .meta sidecars from ODB blobs
+        for (tag_name, blob_oid_hex) in &tag_meta_refs {
+            if let Ok(blob_oid) = mediagit_versioning::Oid::from_hex(blob_oid_hex) {
+                match odb.read(&blob_oid).await {
+                    Ok(meta_bytes) => {
+                        let meta_dir = storage_path.join("refs").join("tags");
+                        if let Err(e) = tokio::fs::create_dir_all(&meta_dir).await {
+                            tracing::warn!("Failed to create tags dir: {}", e);
+                            continue;
+                        }
+                        let meta_path = meta_dir.join(format!("{}.meta", tag_name));
+                        if let Err(e) = tokio::fs::write(&meta_path, &meta_bytes).await {
+                            tracing::warn!("Failed to write tag meta for {}: {}", tag_name, e);
+                        } else if self.verbose {
+                            println!("  Restored annotated tag meta: {}.meta", tag_name);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to read tag meta blob {}: {}", blob_oid_hex, e);
                     }
                 }
             }
@@ -270,6 +331,11 @@ url = "{}"
         if let Err(e) = stats.save(&storage_path) {
             tracing::warn!("Failed to save operation stats: {}", e);
         }
+
+        // Best-effort auto-gc: clones can leave stale partial objects from
+        // failed transfers; this trims them silently when significant.
+        let _ =
+            crate::auto_gc::maybe_run(&target_dir, crate::auto_gc::TriggerMode::PostClone).await;
 
         Ok(())
     }

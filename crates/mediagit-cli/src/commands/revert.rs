@@ -130,7 +130,10 @@ impl RevertCmd {
         }
 
         let storage = create_storage_backend(&repo_root).await?;
-        let odb = Arc::new(ObjectDatabase::new(storage.clone(), 10000));
+        let odb = Arc::new(ObjectDatabase::with_smart_compression(
+            storage.clone(),
+            10000,
+        ));
         let refs = RefDatabase::new(&storage_path);
 
         let original_head = refs.resolve("HEAD").await?;
@@ -207,13 +210,22 @@ impl RevertCmd {
             ));
         }
 
-        // Use MergeEngine for 3-way merge
+        // Use MergeEngine for explicit 3-way merge with correct trees.
+        // For revert, the merge base must be the commit-to-revert's tree
+        // (not the auto-computed LCA which would return "already up to date"):
+        //   base   = tree of the commit being reverted
+        //   ours   = tree of HEAD (current state)
+        //   theirs = tree of the commit's parent (the state we want to reach)
         let merge_engine = MergeEngine::new(odb.clone());
+        let parent_commit = Commit::read(odb, parent_oid).await?;
 
-        // We need to merge: base=commit, ours=HEAD, theirs=parent
-        // This applies the inverse of the commit
         let merge_result = merge_engine
-            .merge(&head_oid, parent_oid, MergeStrategy::Recursive)
+            .merge_trees(
+                &commit.tree,        // base: the commit being reverted
+                &head_commit.tree,   // ours: current HEAD
+                &parent_commit.tree, // theirs: parent of reverted commit
+                MergeStrategy::Recursive,
+            )
             .await?;
 
         if merge_result.has_conflicts() {
@@ -323,7 +335,10 @@ impl RevertCmd {
         fs::remove_file(&state_file).await?;
 
         let storage = create_storage_backend(repo_root).await?;
-        let odb = Arc::new(ObjectDatabase::new(storage.clone(), 10000));
+        let odb = Arc::new(ObjectDatabase::with_smart_compression(
+            storage.clone(),
+            10000,
+        ));
         let refs = RefDatabase::new(storage_path);
 
         let index = Index::load(repo_root)?;
