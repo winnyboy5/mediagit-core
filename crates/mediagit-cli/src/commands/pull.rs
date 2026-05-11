@@ -142,8 +142,13 @@ impl PullCmd {
             println!("  Remote URL: {}", remote_url);
         }
 
-        // Initialize protocol client
-        let client = mediagit_protocol::ProtocolClient::new(remote_url);
+        // Initialize protocol client. Honour [performance] upload_concurrency
+        // from the repo config so users can tune parallel chunk fan-out
+        // without setting MEDIAGIT_UPLOAD_CONCURRENCY in the env.
+        let mut client = mediagit_protocol::ProtocolClient::new(remote_url);
+        if let Some(n) = config.performance.upload_concurrency {
+            client = client.with_concurrent_uploads(n);
+        }
 
         // Initialize ODB with smart compression for consistent read/write
         let odb = Arc::new(mediagit_versioning::ObjectDatabase::with_smart_compression(

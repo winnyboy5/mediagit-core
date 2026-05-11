@@ -110,6 +110,9 @@ pub struct MinIOConfig {
     /// multiple repos share one bucket without colliding on identical OIDs.
     pub prefix: String,
 
+    /// AWS region for SigV4 signing (default: "us-east-1" for MinIO/S3-compatible)
+    pub region: String,
+
     /// Use path-style addressing (default: true for MinIO)
     pub path_style: bool,
 
@@ -134,8 +137,9 @@ impl Default for MinIOConfig {
             access_key: String::new(),
             secret_key: String::new(),
             prefix: String::new(),
+            region: "us-east-1".to_string(),
             path_style: true,
-            part_size: 100 * 1024 * 1024, // 100MB default
+            part_size: 8 * 1024 * 1024, // 8MB default — switches to multipart early to avoid WAN timeout
             max_concurrent_parts: 8,
             max_retries: 3,
             initial_retry_delay_ms: 100,
@@ -377,11 +381,16 @@ impl MinIOBackend {
         // can cost ~30 s/attempt × default-3 retries = ~90 s/op, which on a
         // multi-endpoint push compounded to the 10–15 min outages we saw.
         // Our outer `with_retry` wrapper still provides our own retry budget.
+        // connect_timeout: fast failure if host is unreachable (5 s is enough for DNS + TCP).
+        // read_timeout: time between successive response bytes — keep short to detect stalled
+        //   HTTP responses; does NOT cap upload throughput.
+        // operation_attempt_timeout / operation_timeout: deliberately NOT set here.
+        //   Chunks can be 10s–100s MB; over a slow WAN link a 30-s cap kills legitimate
+        //   uploads. The connect_timeout (5 s) is the safety valve against dead servers.
+        //   The SDK retry_config (max_attempts=2) provides a second chance on transient errors.
         let timeout_config = TimeoutConfig::builder()
             .connect_timeout(Duration::from_secs(5))
-            .read_timeout(Duration::from_secs(30))
-            .operation_attempt_timeout(Duration::from_secs(30))
-            .operation_timeout(Duration::from_secs(60))
+            .read_timeout(Duration::from_secs(120))
             .build();
 
         let s3_config = aws_sdk_s3::config::Builder::new()
@@ -389,7 +398,7 @@ impl MinIOBackend {
             .endpoint_url(&config.endpoint)
             .credentials_provider(credentials)
             .force_path_style(config.path_style)
-            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .region(aws_sdk_s3::config::Region::new(config.region.clone()))
             .timeout_config(timeout_config)
             .retry_config(RetryConfig::standard().with_max_attempts(2))
             .build();
@@ -408,16 +417,21 @@ impl MinIOBackend {
                     .as_service_error()
                     .map(|se| se.is_not_found())
                     .unwrap_or(false);
-                if !not_found {
-                    // Some MinIO versions return non-standard error codes for
-                    // head_bucket — fall through to create_bucket which is
-                    // tolerant of "already exists".
-                    debug!(
-                        "head_bucket failed for '{}', falling back to create_bucket: {}",
-                        config.bucket, head_err
-                    );
+                // Log the real AWS error so the operator can diagnose auth/region/existence issues.
+                tracing::error!(
+                    "head_bucket '{}' (region={}, endpoint={}): not_found={} | {}",
+                    config.bucket, config.region, config.endpoint, not_found, head_err
+                );
+                let mut create_req = client.create_bucket().bucket(&config.bucket);
+                if config.region != "us-east-1" {
+                    use aws_sdk_s3::types::{BucketLocationConstraint, CreateBucketConfiguration};
+                    let constraint = BucketLocationConstraint::from(config.region.as_str());
+                    let cfg = CreateBucketConfiguration::builder()
+                        .location_constraint(constraint)
+                        .build();
+                    create_req = create_req.create_bucket_configuration(cfg);
                 }
-                match client.create_bucket().bucket(&config.bucket).send().await {
+                match create_req.send().await {
                     Ok(_) => {
                         debug!("MinIO bucket '{}' created successfully", config.bucket);
                     }
@@ -434,6 +448,10 @@ impl MinIOBackend {
                                 config.bucket
                             );
                         } else {
+                            tracing::error!(
+                                "create_bucket '{}' (region={}) failed: {}",
+                                config.bucket, config.region, e
+                            );
                             return Err(e).context(format!(
                                 "Failed to access or create MinIO bucket: {}",
                                 config.bucket

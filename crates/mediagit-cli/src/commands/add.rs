@@ -143,11 +143,16 @@ impl AddCmd {
         let storage = create_storage_backend(&repo_root).await?;
 
         let delta_enabled = !self.no_delta;
+        let chunk_strategy = if self.no_chunking {
+            None
+        } else {
+            Some(ChunkStrategy::MediaAware)
+        };
 
         let odb = ObjectDatabase::with_optimizations(
             storage,
             1000,
-            Some(ChunkStrategy::MediaAware),
+            chunk_strategy,
             delta_enabled,
         );
 

@@ -111,6 +111,10 @@ pub struct LogCmd {
     /// Format commits using a template string
     #[arg(long, value_name = "TMPL")]
     pub format: Option<String>,
+
+    /// Show commits from all branches
+    #[arg(long)]
+    pub all: bool,
 }
 
 impl LogCmd {
@@ -172,6 +176,20 @@ impl LogCmd {
         let mut commits_to_show = Vec::new();
         let mut visited = HashSet::new();
         let mut stack = vec![start_oid];
+
+        // When --all is requested, seed the stack with every branch tip
+        if self.all {
+            let branch_refs = refdb.list_branches().await.unwrap_or_default();
+            for branch_ref in &branch_refs {
+                if let Ok(r) = refdb.read(branch_ref).await {
+                    if let Some(oid) = r.oid {
+                        if !stack.contains(&oid) {
+                            stack.push(oid);
+                        }
+                    }
+                }
+            }
+        }
 
         while let Some(oid) = stack.pop() {
             if visited.contains(&oid) {
@@ -252,7 +270,25 @@ impl LogCmd {
                 // One-line format
                 let short_oid = &oid.to_string()[..7];
                 let short_msg = commit.message.lines().next().unwrap_or("");
-                println!("{} {}", style(short_oid).yellow(), short_msg);
+                if self.graph {
+                    println!("* {} {}", style(short_oid).yellow(), short_msg);
+                } else {
+                    println!("{} {}", style(short_oid).yellow(), short_msg);
+                }
+            } else if self.graph {
+                // Graph format
+                println!(
+                    "* {} {}",
+                    style("commit").yellow().bold(),
+                    style(oid).yellow()
+                );
+                println!("| Author: {} <{}>", commit.author.name, commit.author.email);
+                println!("| Date:   {}", commit.author.timestamp);
+                println!("|");
+                for line in commit.message.lines() {
+                    println!("|     {}", line);
+                }
+                println!("|");
             } else {
                 // Full format
                 println!(

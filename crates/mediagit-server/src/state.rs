@@ -20,6 +20,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use mediagit_security::auth::{ApiKeyAuth, AuthLayer, AuthService, JwtAuth};
 use mediagit_storage::StorageBackend;
+use mediagit_versioning::ObjectDatabase;
 
 /// Unique request ID generator
 static REQUEST_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -150,6 +151,12 @@ pub struct AppState {
     /// hot path, with a write-locked double-checked init on miss.
     pub storage_backends: RwLock<HashMap<PathBuf, Arc<dyn StorageBackend>>>,
 
+    /// Per-repo cache of ObjectDatabase templates. Handlers clone() from this
+    /// so all concurrent writers share the same Arc<delta_written_pairs> HashSet,
+    /// which is required for the TOCTOU circular-delta-chain prevention to work.
+    /// Without sharing, each handler has its own HashSet → guard is ineffective.
+    pub odb_cache: RwLock<HashMap<PathBuf, ObjectDatabase>>,
+
     /// Authentication layer (optional - can be disabled for development)
     pub auth_layer: Option<Arc<AuthLayer>>,
 
@@ -164,6 +171,7 @@ impl AppState {
             repos_dir,
             want_cache: Mutex::new(WantCache::new()),
             storage_backends: RwLock::new(HashMap::new()),
+            odb_cache: RwLock::new(HashMap::new()),
             auth_layer: None,
             auth_service: None,
         }
@@ -186,6 +194,7 @@ impl AppState {
             repos_dir,
             want_cache: Mutex::new(WantCache::new()),
             storage_backends: RwLock::new(HashMap::new()),
+            odb_cache: RwLock::new(HashMap::new()),
             auth_layer: Some(auth_layer),
             auth_service: Some(auth_service),
         }
@@ -204,6 +213,7 @@ impl AppState {
             repos_dir,
             want_cache: Mutex::new(WantCache::new()),
             storage_backends: RwLock::new(HashMap::new()),
+            odb_cache: RwLock::new(HashMap::new()),
             auth_layer: Some(auth_layer),
             auth_service: Some(auth_service),
         }

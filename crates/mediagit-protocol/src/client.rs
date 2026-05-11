@@ -64,6 +64,10 @@ pub struct PushProgress {
 pub struct ProtocolClient {
     base_url: String,
     client: reqwest::Client,
+    /// Optional override for parallel chunk-upload fan-out. Takes precedence
+    /// over the internal default (32) but is itself overridden by the
+    /// `MEDIAGIT_UPLOAD_CONCURRENCY` env var. Set via `with_concurrent_uploads`.
+    concurrent_uploads: Option<usize>,
 }
 
 impl ProtocolClient {
@@ -74,6 +78,7 @@ impl ProtocolClient {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
+            concurrent_uploads: None,
             client: reqwest::Client::builder()
                 // Pool sized to keep parallel uploaders/downloaders from
                 // tearing down + re-handshaking TLS on every burst. 32 is well
@@ -99,6 +104,16 @@ impl ProtocolClient {
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
         }
+    }
+
+    /// Override the parallel chunk-upload fan-out used by
+    /// `upload_chunked_objects`. Takes precedence over the internal default
+    /// of 32, but is still overridden by the `MEDIAGIT_UPLOAD_CONCURRENCY`
+    /// env var when that is set. Pass a value derived from
+    /// `[performance] upload_concurrency` in the repo config.
+    pub fn with_concurrent_uploads(mut self, n: usize) -> Self {
+        self.concurrent_uploads = if n > 0 { Some(n) } else { None };
+        self
     }
 
     /// Get all refs from the remote repository
@@ -194,7 +209,7 @@ impl ProtocolClient {
 
                 // Upload chunked objects (large files) if any
                 if !chunked_oids.is_empty() {
-                    self.upload_chunked_objects(odb, &chunked_oids, |_, _, _| {})
+                    self.upload_chunked_objects(odb, &chunked_oids, |_, _| {})
                         .await?;
                 }
             } else {
@@ -324,29 +339,15 @@ impl ProtocolClient {
 
             // Phase 4: Upload chunked objects (large files)
             if !chunked_oids.is_empty() {
-                on_progress(PushProgress {
-                    phase: PushPhase::Uploading,
-                    current: 0,
-                    total: chunked_oids.len() as u64,
-                    message: format!("Uploading {} chunked files...", chunked_oids.len()),
-                });
-
-                let chunks_uploaded = self
-                    .upload_chunked_objects(odb, &chunked_oids, |current, total, msg| {
-                        tracing::info!("Chunked upload: {}/{} - {}", current, total, msg);
-                    })
-                    .await?;
-
-                on_progress(PushProgress {
-                    phase: PushPhase::Uploading,
-                    current: chunked_oids.len() as u64,
-                    total: chunked_oids.len() as u64,
-                    message: format!(
-                        "Uploaded {} chunked files ({} chunks)",
-                        chunked_oids.len(),
-                        chunks_uploaded
-                    ),
-                });
+                self.upload_chunked_objects(odb, &chunked_oids, |bytes_done, bytes_total| {
+                    on_progress(PushProgress {
+                        phase: PushPhase::Uploading,
+                        current: bytes_done,
+                        total: bytes_total,
+                        message: String::new(),
+                    });
+                })
+                .await?;
             }
         } else {
             tracing::info!("No new objects to push");
@@ -1021,7 +1022,7 @@ impl ProtocolClient {
         mut on_progress: F,
     ) -> Result<usize>
     where
-        F: FnMut(usize, usize, &str),
+        F: FnMut(u64, u64),
     {
         use futures::stream::StreamExt;
 
@@ -1038,13 +1039,20 @@ impl ProtocolClient {
         // Memory cost: ~chunk_size × N peak buffered. At ~4 MB/chunk × 32 =
         // ~128 MB transient peak per push session.
         // Override via env when bandwidth or backend tolerates more.
+        // Priority: env var override > config override (set via
+        // `with_concurrent_uploads`) > internal default (32).
         let concurrent_uploads: usize = std::env::var("MEDIAGIT_UPLOAD_CONCURRENCY")
             .ok()
             .and_then(|s| s.parse().ok())
             .filter(|n: &usize| *n > 0)
+            .or(self.concurrent_uploads)
             .unwrap_or(32);
 
-        for (obj_idx, oid) in chunked_oids.iter().enumerate() {
+        let mut bytes_done: u64 = 0;
+        let mut bytes_total: u64 = 0;
+        on_progress(0, 0);
+
+        for oid in chunked_oids.iter() {
             // Get manifest for this object
             let manifest = match odb.get_chunk_manifest(oid).await? {
                 Some(m) => m,
@@ -1053,18 +1061,6 @@ impl ProtocolClient {
                     continue;
                 }
             };
-
-            let total_chunks = manifest.chunks.len();
-            on_progress(
-                obj_idx + 1,
-                chunked_oids.len(),
-                &format!(
-                    "Object {}/{}: {} chunks",
-                    obj_idx + 1,
-                    chunked_oids.len(),
-                    total_chunks
-                ),
-            );
 
             // Get all chunk IDs
             let chunk_ids: Vec<String> = manifest.chunks.iter().map(|c| c.id.to_hex()).collect();
@@ -1112,12 +1108,21 @@ impl ProtocolClient {
                 tracing::info!(
                     oid = %oid,
                     missing = missing_chunks.len(),
-                    total = total_chunks,
                     "Uploading missing chunks"
                 );
 
                 let missing_set: std::collections::HashSet<String> =
                     missing_chunks.into_iter().collect();
+
+                // Update total with this object's missing chunk bytes for accurate ETA
+                bytes_total += manifest
+                    .chunks
+                    .iter()
+                    .filter(|c| missing_set.contains(&c.id.to_hex()))
+                    .map(|c| c.size as u64)
+                    .sum::<u64>();
+                on_progress(bytes_done, bytes_total);
+
                 let chunks_to_upload: Vec<Oid> = manifest
                     .chunks
                     .iter()
@@ -1159,38 +1164,27 @@ impl ProtocolClient {
                             let odb = odb.clone();
                             async move {
                                 let chunk_data = odb.get_compressed_chunk(&chunk_id).await?;
+                                let chunk_size = chunk_data.len() as u64;
                                 let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
-                                client
+                                let resp = client
                                     .put(&url)
                                     .body(chunk_data)
                                     .send()
                                     .await
-                                    .map(|_| ())
-                                    .map_err(|e| {
-                                        anyhow::anyhow!(
-                                            "Failed to upload chunk {}: {}",
-                                            chunk_id,
-                                            e
-                                        )
-                                    })
+                                    .map_err(|e| anyhow::anyhow!("Failed to upload chunk {}: {}", chunk_id, e))?;
+                                if !resp.status().is_success() {
+                                    anyhow::bail!("PUT /chunks/{} failed with status: {}", chunk_id, resp.status());
+                                }
+                                Ok::<u64, anyhow::Error>(chunk_size)
                             }
                         })
                         .buffer_unordered(concurrent_uploads);
 
                     while let Some(result) = stream.next().await {
-                        result?;
+                        let chunk_bytes = result?;
                         total_chunks_uploaded += 1;
-                        on_progress(
-                            obj_idx + 1,
-                            chunked_oids.len(),
-                            &format!(
-                                "Object {}/{}: {}/{} chunks",
-                                obj_idx + 1,
-                                chunked_oids.len(),
-                                total_chunks_uploaded,
-                                total_chunks
-                            ),
-                        );
+                        bytes_done += chunk_bytes;
+                        on_progress(bytes_done, bytes_total);
                     }
                 }
 
@@ -1237,38 +1231,27 @@ impl ProtocolClient {
                             let odb = odb.clone();
                             async move {
                                 let chunk_data = odb.get_compressed_chunk(&chunk_id).await?;
+                                let chunk_size = chunk_data.len() as u64;
                                 let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
-                                client
+                                let resp = client
                                     .put(&url)
                                     .body(chunk_data)
                                     .send()
                                     .await
-                                    .map(|_| ())
-                                    .map_err(|e| {
-                                        anyhow::anyhow!(
-                                            "Failed to upload chunk {}: {}",
-                                            chunk_id,
-                                            e
-                                        )
-                                    })
+                                    .map_err(|e| anyhow::anyhow!("Failed to upload chunk {}: {}", chunk_id, e))?;
+                                if !resp.status().is_success() {
+                                    anyhow::bail!("PUT /chunks/{} failed with status: {}", chunk_id, resp.status());
+                                }
+                                Ok::<u64, anyhow::Error>(chunk_size)
                             }
                         })
                         .buffer_unordered(concurrent_uploads);
 
                     while let Some(result) = stream.next().await {
-                        result?;
+                        let chunk_bytes = result?;
                         total_chunks_uploaded += 1;
-                        on_progress(
-                            obj_idx + 1,
-                            chunked_oids.len(),
-                            &format!(
-                                "Object {}/{}: {}/{} chunks",
-                                obj_idx + 1,
-                                chunked_oids.len(),
-                                total_chunks_uploaded,
-                                total_chunks
-                            ),
-                        );
+                        bytes_done += chunk_bytes;
+                        on_progress(bytes_done, bytes_total);
                     }
                 }
 
@@ -1279,6 +1262,7 @@ impl ProtocolClient {
                             let client = self.client.clone();
                             let base_url = self.base_url.clone();
                             async move {
+                                let delta_size = delta_bytes.len() as u64;
                                 let url =
                                     format!("{}/chunk-deltas/{}", base_url, chunk_id.to_hex());
                                 let resp = client
@@ -1301,25 +1285,16 @@ impl ProtocolClient {
                                         resp.status()
                                     );
                                 }
-                                Ok::<(), anyhow::Error>(())
+                                Ok::<u64, anyhow::Error>(delta_size)
                             }
                         })
                         .buffer_unordered(concurrent_uploads);
 
                     while let Some(result) = stream.next().await {
-                        result?;
+                        let chunk_bytes = result?;
                         total_chunks_uploaded += 1;
-                        on_progress(
-                            obj_idx + 1,
-                            chunked_oids.len(),
-                            &format!(
-                                "Object {}/{}: {}/{} chunks",
-                                obj_idx + 1,
-                                chunked_oids.len(),
-                                total_chunks_uploaded,
-                                total_chunks
-                            ),
-                        );
+                        bytes_done += chunk_bytes;
+                        on_progress(bytes_done, bytes_total);
                     }
                 }
             }

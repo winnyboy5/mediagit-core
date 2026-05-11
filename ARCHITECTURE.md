@@ -112,7 +112,7 @@ graph TD
 | Command | Description |
 |---------|-------------|
 | `reset` | Unstage files or reset to a commit |
-| `revert` | Create a new commit that undoes changes |
+| `revert` | Create a new commit that undoes changes (working tree updated) |
 
 ### Administration
 | Command | Description |
@@ -921,7 +921,7 @@ merge = "refs/heads/main"
 
 ## Performance Benchmarks (v0.2.6-beta.1)
 
-> Measured via standalone deep test suite on Windows, debug build, 36 formats, 2026-04-03.
+> Measured via standalone deep test suite on Windows, release build, 36 formats. Last run: 2026-05-05 (GCS backend, 75/75 tests passing).
 
 ### Storage Savings by Category
 
@@ -949,9 +949,9 @@ merge = "refs/heads/main"
 
 | Phase | Result |
 |-------|--------|
+| GCS deep test (end-to-end) | 75/75 |
 | Format tests | 36/36 |
 | Video deep (MKV EBML, MOV Atom, ProRes+PCM) | 9/9 |
 | Audio deep (WAV, FLAC, OGG) | 3/3 |
-| CLI commands | 89/91 |
 | Server push/clone/fetch/pull | 4/4 |
 | .mediagitignore | 7/7 |

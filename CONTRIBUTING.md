@@ -23,7 +23,7 @@ This project adheres to a Code of Conduct that all contributors are expected to 
 
 ### Prerequisites
 
-- **Rust**: 1.91.0 or later
+- **Rust**: 1.92.0 or later
 - **Cargo**: Comes with Rust
 - **Git**: For version control
 - **Docker**: For integration tests (optional)

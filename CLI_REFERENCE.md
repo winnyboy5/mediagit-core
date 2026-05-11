@@ -651,6 +651,7 @@ mediagit reset file.txt          # Unstage a specific file
 ### `mediagit revert`
 
 Create new commits that undo changes from existing commits.
+The working directory is updated to reflect the reverted state after the commit is created.
 
 ```bash
 mediagit revert <COMMITS>...
@@ -925,6 +926,50 @@ mediagit completions powershell >> $PROFILE
 | `MEDIAGIT_REPO` | Repository path (set by `-C` flag) |
 | `MEDIAGIT_AUTHOR_NAME` | Default author name |
 | `MEDIAGIT_AUTHOR_EMAIL` | Default author email |
+
+---
+
+## Server Configuration (`mediagit-server`)
+
+The `mediagit-server` daemon provides remote repository access over HTTP/S. Repositories hosted by the server can store their actual data in alternative cloud storage backends like S3 or MinIO instead of the local filesystem.
+
+To configure a repository to use a cloud storage backend, you must edit its `.mediagit/config.toml` file.
+
+### S3 / MinIO Storage Backend
+
+The `s3` backend type covers two distinct modes selected by whether `endpoint` is set:
+
+| `endpoint` field | Mode | Used for |
+|---|---|---|
+| **Set** | MinIO-compatible | Self-hosted MinIO, DigitalOcean Spaces, Cloudflare R2, any S3-compatible service |
+| **Absent** | Native AWS S3 | Real AWS S3 — uses correct SigV4 region signing and virtual-hosted addressing |
+
+**Example: MinIO / S3-compatible service**
+```toml
+[storage]
+backend = "s3"
+endpoint = "http://localhost:9000"   # required for MinIO-compatible mode
+bucket = "mediagit-production"
+access_key_id = "your_access_key"
+secret_access_key = "your_secret_key"
+region = "us-east-1"
+```
+
+**Example: Real AWS S3**
+```toml
+[storage]
+backend = "s3"
+bucket = "my-mediagit-bucket"
+region = "ap-south-1"               # required: determines SigV4 signing region
+access_key_id = "AKIAIOSFODNN7EXAMPLE"
+secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+prefix = "media/"
+encryption = true
+encryption_algorithm = "AES256"
+# Do NOT set endpoint — omitting it activates native AWS S3 mode
+```
+
+> **Note**: The `backend = "minio"` variant is deprecated. Use `backend = "s3"` for all cases. Use `access_key_id`/`secret_access_key` (not `access_key`/`secret_key`).
 
 ---
 

@@ -531,7 +531,7 @@ When file extension is unavailable, the ODB uses magic byte signatures:
 
 ## Performance Benchmarks (v0.2.6-beta.1)
 
-> Measured via standalone deep test suite, 36 formats, all `fsck` verified. 2026-04-03.
+> Measured via standalone deep test suite, 36 formats, all `fsck` verified. Last run: 2026-05-05 (GCS backend, 75/75 tests passing).
 
 ### Storage Savings
 

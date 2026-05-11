@@ -104,8 +104,13 @@ impl FetchCmd {
             println!("  Remote URL: {}", remote_url);
         }
 
-        // Initialize protocol client and ODB
-        let client = mediagit_protocol::ProtocolClient::new(remote_url);
+        // Initialize protocol client and ODB. Honour [performance]
+        // upload_concurrency from the repo config so users can tune parallel
+        // chunk fan-out without setting MEDIAGIT_UPLOAD_CONCURRENCY in the env.
+        let mut client = mediagit_protocol::ProtocolClient::new(remote_url);
+        if let Some(n) = config.performance.upload_concurrency {
+            client = client.with_concurrent_uploads(n);
+        }
         let odb = Arc::new(ObjectDatabase::with_smart_compression(
             Arc::clone(&storage),
             1000,

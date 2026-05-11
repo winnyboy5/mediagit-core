@@ -45,6 +45,15 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // google-cloud-storage v1 enables aws-lc-rs by default; this crate already
+    // depends on rustls with the `ring` feature for inbound TLS. With both
+    // providers compiled in, rustls 0.23 refuses to pick automatically and
+    // panics on first TLS use ("Could not automatically determine the
+    // process-level CryptoProvider"). Install ring explicitly to match the
+    // existing inbound TLS path. `_ =` swallows the "already installed" error
+    // if some other entry point (e.g. test harness) raced us.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Parse CLI arguments
     let args = Args::parse();
 

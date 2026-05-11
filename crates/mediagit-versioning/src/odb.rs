@@ -101,7 +101,7 @@ fn to_chunk_codec_hint(
 }
 use moka::future::Cache;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 /// Walk a chunk-delta chain on disk and report whether `target` appears.
@@ -236,6 +236,10 @@ pub struct ObjectDatabase {
     /// LRU cache for decompressed base chunks used in delta encoding.
     /// Avoids re-reading and re-decompressing the same base chunk across workers.
     base_chunk_cache: Cache<Oid, Arc<Vec<u8>>>,
+
+    /// Tracks committed chunk-delta pairs (chunk_id, base_id) to prevent TOCTOU cycles.
+    /// In-memory O(1) check inside a short-held lock; all network IO happens outside the lock.
+    delta_written_pairs: Arc<Mutex<std::collections::HashSet<(Oid, Oid)>>>,
 }
 
 impl Clone for ObjectDatabase {
@@ -251,6 +255,7 @@ impl Clone for ObjectDatabase {
             delta_enabled: self.delta_enabled,
             similarity_detector: self.similarity_detector.clone(),
             base_chunk_cache: self.base_chunk_cache.clone(),
+            delta_written_pairs: self.delta_written_pairs.clone(),
         }
     }
 }
@@ -305,6 +310,7 @@ impl ObjectDatabase {
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
             ))),
             base_chunk_cache: Cache::new(64),
+            delta_written_pairs: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -346,6 +352,7 @@ impl ObjectDatabase {
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
             ))),
             base_chunk_cache: Cache::new(64),
+            delta_written_pairs: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -376,6 +383,7 @@ impl ObjectDatabase {
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
             ))),
             base_chunk_cache: Cache::new(64),
+            delta_written_pairs: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -411,6 +419,7 @@ impl ObjectDatabase {
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
             ))),
             base_chunk_cache: Cache::new(64),
+            delta_written_pairs: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -441,6 +450,7 @@ impl ObjectDatabase {
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
             ))),
             base_chunk_cache: Cache::new(64),
+            delta_written_pairs: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -740,24 +750,55 @@ impl ObjectDatabase {
                         .await
                         .map_err(|e| anyhow::anyhow!("Failed to store chunk delta: {}", e))?;
 
-                    // Store delta metadata (base reference)
-                    let meta_key = format!("chunk-deltas/{}.meta", chunk.id.to_hex());
-                    let meta_data = format!("base:{}", base_id.to_hex());
-                    self.storage
-                        .put(&meta_key, meta_data.as_bytes())
-                        .await
-                        .map_err(|e| anyhow::anyhow!("Failed to store chunk delta meta: {}", e))?;
+                    // TOCTOU guard: O(1) in-memory check inside a short-held lock.
+                    // The transitive chain check above is NOT atomic; two workers can
+                    // both pass it and then write A→B / B→A, creating a cycle on disk.
+                    // We prevent this by recording committed pairs in a HashSet.
+                    // Only the HashSet mutation is inside the lock — no network IO —
+                    // so the lock is held for microseconds rather than hundreds of ms.
+                    // (base_id, chunk.id) in the set means base is already a delta of
+                    // chunk; adding chunk→base now would form a direct cycle, so abort.
+                    let should_write_meta = {
+                        let mut pairs = self.delta_written_pairs.lock().await;
+                        if pairs.contains(&(base_id, chunk.id)) {
+                            false
+                        } else {
+                            pairs.insert((chunk.id, base_id));
+                            true
+                        }
+                    };
 
+                    if should_write_meta {
+                        let meta_key =
+                            format!("chunk-deltas/{}.meta", chunk.id.to_hex());
+                        let meta_data = format!("base:{}", base_id.to_hex());
+                        self.storage
+                            .put(&meta_key, meta_data.as_bytes())
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "Failed to store chunk delta meta: {}",
+                                    e
+                                )
+                            })?;
+                        debug!(
+                            chunk_id = %chunk.id,
+                            base_id = %base_id,
+                            original_size = chunk.data.len(),
+                            delta_size = delta_bytes.len(),
+                            ratio = delta_ratio,
+                            similarity = score.score,
+                            "Stored chunk as delta"
+                        );
+                        return Ok(true);
+                    }
+                    // Reverse pair already committed (TOCTOU race closed): orphaned
+                    // delta bytes are harmless — gc will remove them on next run.
                     debug!(
                         chunk_id = %chunk.id,
                         base_id = %base_id,
-                        original_size = chunk.data.len(),
-                        delta_size = delta_bytes.len(),
-                        ratio = delta_ratio,
-                        similarity = score.score,
-                        "Stored chunk as delta"
+                        "TOCTOU delta race: reverse pair already committed; degrading to full chunk"
                     );
-                    return Ok(true);
                 }
             }
         }
@@ -1219,6 +1260,7 @@ impl ObjectDatabase {
             let compressor = self.compressor.clone();
             let smart_comp = self.smart_compressor.clone();
             let base_chunk_cache = self.base_chunk_cache.clone();
+            let delta_pairs = self.delta_written_pairs.clone();
 
             let handle = tokio::spawn(async move {
                 let mut results: Vec<(usize, ChunkRef)> = Vec::new();
@@ -1316,24 +1358,47 @@ impl ObjectDatabase {
                                         }
                                     }
 
-                                    let meta_key =
-                                        format!("chunk-deltas/{}.meta", chunk.id.to_hex());
-                                    let meta_data = format!("base:{}", base_id.to_hex());
-                                    if let Err(e) =
-                                        storage.put(&meta_key, meta_data.as_bytes()).await
-                                    {
-                                        if !storage.exists(&meta_key).await.unwrap_or(false) {
-                                            return Err(anyhow::anyhow!("Store delta meta: {}", e));
+                                    // TOCTOU guard: the transitive chain check above is NOT
+                                    // atomic; two workers can both pass it and then write A→B
+                                    // / B→A, creating a cycle on disk. Prevent this by
+                                    // recording committed pairs in a HashSet. Only the
+                                    // HashSet mutation is inside the lock — no network IO.
+                                    let should_write_meta = {
+                                        let mut pairs = delta_pairs.lock().await;
+                                        if pairs.contains(&(base_id, chunk.id)) {
+                                            false
+                                        } else {
+                                            pairs.insert((chunk.id, base_id));
+                                            true
                                         }
-                                    }
+                                    };
 
-                                    debug!(
-                                        chunk_id = %chunk.id,
-                                        base_id = %base_id,
-                                        delta_ratio,
-                                        "Parallel: stored chunk as delta"
-                                    );
-                                    stored_as_delta = true;
+                                    if should_write_meta {
+                                        let meta_key =
+                                            format!("chunk-deltas/{}.meta", chunk.id.to_hex());
+                                        let meta_data = format!("base:{}", base_id.to_hex());
+                                        if let Err(e) =
+                                            storage.put(&meta_key, meta_data.as_bytes()).await
+                                        {
+                                            if !storage.exists(&meta_key).await.unwrap_or(false) {
+                                                return Err(anyhow::anyhow!("Store delta meta: {}", e));
+                                            }
+                                        }
+
+                                        debug!(
+                                            chunk_id = %chunk.id,
+                                            base_id = %base_id,
+                                            delta_ratio,
+                                            "Parallel: stored chunk as delta"
+                                        );
+                                        stored_as_delta = true;
+                                    } else {
+                                        debug!(
+                                            chunk_id = %chunk.id,
+                                            base_id = %base_id,
+                                            "Parallel: TOCTOU delta race — reverse pair committed; degrading to full chunk"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -1520,6 +1585,7 @@ impl ObjectDatabase {
             let compressor = self.compressor.clone();
             let smart_comp = self.smart_compressor.clone();
             let base_chunk_cache = self.base_chunk_cache.clone();
+            let delta_pairs = self.delta_written_pairs.clone();
             let compression_enabled = self.compression_enabled;
             let chunks_w = chunks_written.clone();
             let bytes_w = bytes_written.clone();
@@ -1621,24 +1687,47 @@ impl ObjectDatabase {
                                         }
                                     }
 
-                                    let meta_key =
-                                        format!("chunk-deltas/{}.meta", chunk.id.to_hex());
-                                    let meta_data = format!("base:{}", base_id.to_hex());
-                                    if let Err(e) =
-                                        storage.put(&meta_key, meta_data.as_bytes()).await
-                                    {
-                                        if !storage.exists(&meta_key).await.unwrap_or(false) {
-                                            return Err(anyhow::anyhow!("Store delta meta: {}", e));
+                                    // TOCTOU guard: the transitive chain check above is NOT
+                                    // atomic; two workers can both pass it and then write A→B
+                                    // / B→A, creating a cycle on disk. Prevent this by
+                                    // recording committed pairs in a HashSet. Only the
+                                    // HashSet mutation is inside the lock — no network IO.
+                                    let should_write_meta = {
+                                        let mut pairs = delta_pairs.lock().await;
+                                        if pairs.contains(&(base_id, chunk.id)) {
+                                            false
+                                        } else {
+                                            pairs.insert((chunk.id, base_id));
+                                            true
                                         }
-                                    }
+                                    };
 
-                                    debug!(
-                                        chunk_id = %chunk.id,
-                                        base_id = %base_id,
-                                        delta_ratio,
-                                        "Streaming parallel: stored chunk as delta"
-                                    );
-                                    stored_as_delta = true;
+                                    if should_write_meta {
+                                        let meta_key =
+                                            format!("chunk-deltas/{}.meta", chunk.id.to_hex());
+                                        let meta_data = format!("base:{}", base_id.to_hex());
+                                        if let Err(e) =
+                                            storage.put(&meta_key, meta_data.as_bytes()).await
+                                        {
+                                            if !storage.exists(&meta_key).await.unwrap_or(false) {
+                                                return Err(anyhow::anyhow!("Store delta meta: {}", e));
+                                            }
+                                        }
+
+                                        debug!(
+                                            chunk_id = %chunk.id,
+                                            base_id = %base_id,
+                                            delta_ratio,
+                                            "Streaming parallel: stored chunk as delta"
+                                        );
+                                        stored_as_delta = true;
+                                    } else {
+                                        debug!(
+                                            chunk_id = %chunk.id,
+                                            base_id = %base_id,
+                                            "Streaming parallel: TOCTOU delta race — reverse pair committed; degrading to full chunk"
+                                        );
+                                    }
                                 }
                             }
                         }

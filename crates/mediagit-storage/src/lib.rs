@@ -117,6 +117,7 @@ pub mod s3;
 
 use async_trait::async_trait;
 use std::fmt::Debug;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 #[cfg(feature = "azure")]
 pub use azure::AzureBackend;
@@ -367,6 +368,73 @@ pub trait StorageBackend: Send + Sync + Debug {
     /// # }
     /// ```
     async fn list_objects(&self, prefix: &str) -> anyhow::Result<Vec<String>>;
+
+    /// Retrieve an object with an optional caller-supplied size hint.
+    ///
+    /// Backends that support parallel range reads (e.g. GCS striped downloads)
+    /// may use the hint to issue concurrent ranged requests without an extra
+    /// metadata round-trip. Callers that already know the object size — for
+    /// example, chunk readers consulting a manifest that carries `size` — should
+    /// prefer this method over [`get`] for large objects.
+    ///
+    /// The default implementation ignores the hint and delegates to [`get`],
+    /// so backends that don't benefit from striping (filesystem, MinIO, mock)
+    /// remain unchanged. Backends that do override this method MUST be
+    /// byte-for-byte equivalent to [`get`] for the same key.
+    ///
+    /// # Arguments
+    ///
+    /// * `key`  - The object identifier (non-empty string).
+    /// * `size` - Optional total object size in bytes. `None` means the caller
+    ///            does not know the size; the backend MUST NOT issue an RPC to
+    ///            discover it (that probe was the regression that got the prior
+    ///            striped-get implementation reverted — keep the common path
+    ///            single-RPC).
+    async fn get_with_size_hint(
+        &self,
+        key: &str,
+        _size: Option<u64>,
+    ) -> anyhow::Result<Vec<u8>> {
+        self.get(key).await
+    }
+
+    /// Store an object by streaming bytes from `reader`.
+    ///
+    /// Backends that support true streaming uploads (e.g. GCS resumable
+    /// sessions, S3 multipart) MAY override this to pipe the reader directly
+    /// to the wire without buffering the whole payload in memory. The default
+    /// implementation drains the reader into a `Vec<u8>` (capacity hinted by
+    /// `len` when non-zero) and delegates to [`put`], so non-streaming
+    /// backends remain correct without code changes.
+    ///
+    /// `len` is an advisory upper bound used purely for buffer pre-sizing —
+    /// callers MAY pass `0` when the size is unknown. The reader is the
+    /// authoritative source of bytes; `len` is never trusted to truncate or
+    /// pad data.
+    ///
+    /// # Arguments
+    ///
+    /// * `key`    - The object identifier (non-empty string).
+    /// * `reader` - A boxed `AsyncRead` supplying the object body. Boxed +
+    ///              `Unpin` to keep the trait object-safe; concrete callers
+    ///              wrap their reader once at the boundary.
+    /// * `len`    - Advisory total length in bytes; `0` if unknown.
+    async fn put_streaming(
+        &self,
+        key: &str,
+        mut reader: Box<dyn AsyncRead + Send + Unpin>,
+        len: u64,
+    ) -> anyhow::Result<()> {
+        // Pre-size the buffer when the caller supplied a useful hint to avoid
+        // grow-by-doubling allocations on big uploads.
+        let mut buf = if len > 0 {
+            Vec::with_capacity(len as usize)
+        } else {
+            Vec::new()
+        };
+        reader.read_to_end(&mut buf).await?;
+        self.put(key, &buf).await
+    }
 }
 
 #[cfg(test)]
