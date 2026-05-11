@@ -19,7 +19,8 @@ use clap::Parser;
 use console::style;
 use mediagit_protocol::PushPhase;
 use mediagit_versioning::{LcaFinder, ObjectType, RefDatabase};
-use std::sync::Arc;
+use indicatif::ProgressBar;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// Update remote references and send objects
@@ -152,8 +153,13 @@ impl PushCmd {
             println!("  Remote URL: {}", remote_url);
         }
 
-        // Initialize protocol client
-        let client = mediagit_protocol::ProtocolClient::new(remote_url);
+        // Initialize protocol client. Honour [performance] upload_concurrency
+        // from the repo config so users can tune parallel chunk fan-out
+        // without setting MEDIAGIT_UPLOAD_CONCURRENCY in the env.
+        let mut client = mediagit_protocol::ProtocolClient::new(remote_url);
+        if let Some(n) = config.performance.upload_concurrency {
+            client = client.with_concurrent_uploads(n);
+        }
 
         // Initialize ODB with smart compression for consistent read/write
         let odb = Arc::new(mediagit_versioning::ObjectDatabase::with_smart_compression(
@@ -431,7 +437,7 @@ impl PushCmd {
 
         // BLOCK: Check for new branches without upstream (Git-like behavior)
         // For non-default branches, require explicit -u or --no-track
-        if !self.set_upstream && !self.no_track && self.refspec.is_empty() {
+        if !self.set_upstream && !self.no_track && self.refspec.is_empty() && !self.all {
             for update in &updates {
                 // Only check new branches (no old_oid means it doesn't exist on remote)
                 if update.old_oid.is_none() && update.name.starts_with("refs/heads/") {
@@ -474,65 +480,70 @@ impl PushCmd {
         }
 
         if !self.dry_run {
-            // Create progress bar for push using ProgressTracker
             let tracker = ProgressTracker::new(self.quiet);
-            let pb = if !self.quiet {
-                Some(tracker.spinner("Pushing..."))
+            // Spinner covers Collecting + Packing phases (no byte count yet)
+            let phase_spinner = if !self.quiet {
+                Some(tracker.spinner("Collecting objects..."))
             } else {
                 None
             };
+            // Bytes bar created on first Uploading callback; shared via Arc<Mutex>
+            let upload_pb: Arc<Mutex<Option<ProgressBar>>> = Arc::new(Mutex::new(None));
+            let upload_pb_cb = Arc::clone(&upload_pb);
 
-            // Push all refs with progress callback
             let (result, push_stats) = client
-                .push_with_progress(&odb, updates.clone(), self.force, |progress| {
-                    if let Some(ref pb) = pb {
-                        let msg = match progress.phase {
-                            PushPhase::Collecting => {
-                                if progress.total > 0 {
+                .push_with_progress(&odb, updates.clone(), self.force, move |progress| {
+                    match progress.phase {
+                        PushPhase::Collecting => {
+                            if let Some(ref sp) = phase_spinner {
+                                let msg = if progress.total > 0 {
                                     format!(
                                         "Collecting... {}/{} objects",
                                         progress.current, progress.total
                                     )
                                 } else {
                                     "Collecting objects...".to_string()
-                                }
+                                };
+                                sp.set_message(msg);
                             }
-                            PushPhase::Packing => {
-                                if progress.total > 0 {
+                        }
+                        PushPhase::Packing => {
+                            if let Some(ref sp) = phase_spinner {
+                                let msg = if progress.total > 0 {
                                     format!(
                                         "Packing... {}/{} objects",
                                         progress.current, progress.total
                                     )
                                 } else {
-                                    "Packing...".to_string()
-                                }
+                                    "Generating pack...".to_string()
+                                };
+                                sp.set_message(msg);
                             }
-                            PushPhase::Uploading => {
-                                if progress.total > 0 {
-                                    let bytes_str = if progress.total > 1024 * 1024 {
-                                        format!(
-                                            "{:.1} MiB",
-                                            progress.total as f64 / (1024.0 * 1024.0)
-                                        )
-                                    } else if progress.total > 1024 {
-                                        format!("{:.1} KiB", progress.total as f64 / 1024.0)
-                                    } else {
-                                        format!("{} B", progress.total)
-                                    };
-                                    format!("Uploading... {}", bytes_str)
-                                } else {
-                                    "Uploading...".to_string()
+                        }
+                        PushPhase::Uploading => {
+                            let mut guard = upload_pb_cb.lock().unwrap();
+                            if guard.is_none() {
+                                // Finish spinner, create bytes progress bar
+                                if let Some(ref sp) = phase_spinner {
+                                    sp.finish_and_clear();
                                 }
+                                *guard = Some(tracker.push_bar(progress.total));
                             }
-                        };
-                        pb.set_message(msg);
+                            if let Some(ref pb) = *guard {
+                                // Grow total dynamically as more objects are checked
+                                if progress.total > pb.length().unwrap_or(0) {
+                                    pb.set_length(progress.total);
+                                }
+                                pb.set_position(progress.current);
+                            }
+                        }
                     }
                 })
                 .await?;
 
-            // Finish progress bar
-            if let Some(pb) = pb {
-                pb.finish_and_clear();
+            // Clean up whichever bar is still active
+            if let Some(pb) = upload_pb.lock().unwrap().take() {
+                pb.finish_with_message("done");
             }
 
             // Push annotated tag .meta sidecars: write meta content as an ODB blob

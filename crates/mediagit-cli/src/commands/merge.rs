@@ -164,6 +164,71 @@ impl MergeCmd {
 
         // Handle merge result
         if let Some(ff_info) = &result.fast_forward {
+            if ff_info.is_fast_forward && self.squash {
+                // Squash merge on FF-eligible branch: create a single-parent commit
+                // using their tree rather than fast-forwarding, so the branch history
+                // is collapsed into one commit.
+                let their_commit = Commit::read(&odb, &their_oid).await?;
+                let config = mediagit_config::Config::load(&repo_root)
+                    .await
+                    .unwrap_or_default();
+                let author_name =
+                    std::env::var("MEDIAGIT_AUTHOR_NAME").unwrap_or_else(|_| {
+                        config.author.name.clone().unwrap_or_else(|| {
+                            std::env::var("USER").unwrap_or_else(|_| "Unknown".to_string())
+                        })
+                    });
+                let author_email =
+                    std::env::var("MEDIAGIT_AUTHOR_EMAIL").unwrap_or_else(|_| {
+                        config
+                            .author
+                            .email
+                            .clone()
+                            .unwrap_or_else(|| "unknown@localhost".to_string())
+                    });
+                let signature = Signature::now(author_name, author_email);
+                let message = self.message.clone().unwrap_or_else(|| {
+                    format!("Squash merge branch '{}' into HEAD", self.branch)
+                });
+                let squash_commit = Commit {
+                    tree: their_commit.tree,
+                    parents: vec![our_oid],
+                    author: signature.clone(),
+                    committer: signature,
+                    message,
+                };
+                let commit_data = squash_commit.serialize()?;
+                let commit_oid = odb.write(ObjectType::Commit, &commit_data).await?;
+                if let Some(ref target) = head_target {
+                    let new_ref = Ref::new_direct(target.clone(), commit_oid);
+                    refdb.write(&new_ref).await?;
+                } else {
+                    let new_ref = Ref::new_direct("HEAD".to_string(), commit_oid);
+                    refdb.write(&new_ref).await?;
+                }
+                let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
+                checkout_mgr
+                    .checkout_commit(&commit_oid)
+                    .await
+                    .context("Failed to update working directory after squash merge")?;
+                let reflog = Reflog::new(&storage_path);
+                let entry = ReflogEntry::now(
+                    our_oid,
+                    commit_oid,
+                    "user",
+                    "user@mediagit",
+                    &format!("merge {}: squash merge (ff)", self.branch),
+                );
+                let _ = reflog.append("HEAD", &entry).await;
+                if !self.quiet {
+                    println!(
+                        "{} Squash merge committed: {}",
+                        style("✓").green().bold(),
+                        &commit_oid.to_string()[..7]
+                    );
+                }
+                return Ok(());
+            }
             if ff_info.is_fast_forward {
                 if self.ff_only || !self.no_ff {
                     // Fast-forward merge
@@ -273,10 +338,13 @@ impl MergeCmd {
 
             let signature = Signature::now(author_name, author_email);
 
-            let message = self
-                .message
-                .clone()
-                .unwrap_or_else(|| format!("Merge branch '{}' into HEAD", self.branch));
+            let message = self.message.clone().unwrap_or_else(|| {
+                if self.squash {
+                    format!("Squash merge branch '{}' into HEAD", self.branch)
+                } else {
+                    format!("Merge branch '{}' into HEAD", self.branch)
+                }
+            });
 
             // Verify both parent commits exist in the object database
             // This prevents creating merge commits with invalid parent references
@@ -289,9 +357,16 @@ impl MergeCmd {
                 their_oid
             ))?;
 
+            // Squash merge: collapse their branch into a single commit with one parent.
+            let parents = if self.squash {
+                vec![our_oid]
+            } else {
+                vec![our_oid, their_oid]
+            };
+
             let merge_commit = Commit {
                 tree: tree_oid,
-                parents: vec![our_oid, their_oid],
+                parents,
                 author: signature.clone(),
                 committer: signature,
                 message,
@@ -318,14 +393,20 @@ impl MergeCmd {
 
             // Record reflog entry
             let reflog = Reflog::new(&storage_path);
-            let reflog_msg = format!("merge {}: merge commit", self.branch);
+            let reflog_msg = if self.squash {
+                format!("merge {}: squash merge", self.branch)
+            } else {
+                format!("merge {}: merge commit", self.branch)
+            };
             let entry = ReflogEntry::now(our_oid, commit_oid, "user", "user@mediagit", &reflog_msg);
             let _ = reflog.append("HEAD", &entry).await;
 
             if !self.quiet {
+                let label = if self.squash { "Squash merge committed" } else { "Merge committed" };
                 println!(
-                    "{} Merge committed: {}",
+                    "{} {}: {}",
                     style("✓").green().bold(),
+                    label,
                     &commit_oid.to_string()[..7]
                 );
             }

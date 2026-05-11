@@ -390,6 +390,16 @@ pub struct PerformanceConfig {
     #[serde(default = "default_max_concurrency")]
     pub max_concurrency: usize,
 
+    /// Override for client-side parallel chunk uploads. When None, falls back
+    /// to MEDIAGIT_UPLOAD_CONCURRENCY env var or the internal default (32).
+    #[serde(default)]
+    pub upload_concurrency: Option<usize>,
+
+    /// Override for server-side concurrent pack-write workers. When None,
+    /// falls back to MEDIAGIT_PACK_WORKERS env var or the internal default (8).
+    #[serde(default)]
+    pub pack_workers: Option<usize>,
+
     /// Buffer size for I/O operations (in bytes)
     #[serde(default = "default_buffer_size")]
     pub buffer_size: usize,
@@ -856,6 +866,8 @@ impl Default for PerformanceConfig {
     fn default() -> Self {
         PerformanceConfig {
             max_concurrency: default_max_concurrency(),
+            upload_concurrency: None,
+            pack_workers: None,
             buffer_size: 65536,
             cache: CacheConfig::default(),
             connection_pool: ConnectionPoolConfig::default(),

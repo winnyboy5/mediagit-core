@@ -88,6 +88,33 @@ async fn get_or_init_storage(
     Ok(backend)
 }
 
+/// Per-handler entry: returns a clone of the cached ObjectDatabase for this repo.
+/// All clones share the same Arc<delta_written_pairs> HashSet, which is required
+/// for the TOCTOU circular-delta-chain prevention guard to function correctly.
+/// Without sharing, each concurrent handler has its own HashSet and the guard
+/// is ineffective against parallel writers within the same pack upload.
+async fn get_or_init_odb(
+    state: &AppState,
+    repo_path: &StdPath,
+) -> Result<ObjectDatabase, StatusCode> {
+    let key = repo_path.to_path_buf();
+
+    // Fast path: cached ODB template — clone shares all Arc fields.
+    if let Some(odb) = state.odb_cache.read().await.get(&key).cloned() {
+        return Ok(odb);
+    }
+
+    // Slow path: build storage + ODB, double-checked.
+    let mut map = state.odb_cache.write().await;
+    if let Some(odb) = map.get(&key).cloned() {
+        return Ok(odb);
+    }
+    let storage = get_or_init_storage(state, repo_path).await?;
+    let odb = ObjectDatabase::with_smart_compression(storage, 1000);
+    map.insert(key, odb.clone());
+    Ok(odb)
+}
+
 /// Helper function to create storage backend based on repository configuration
 async fn build_storage_backend(repo_path: &StdPath) -> Result<Arc<dyn StorageBackend>, StatusCode> {
     // Load repository configuration
@@ -121,57 +148,10 @@ async fn build_storage_backend(repo_path: &StdPath) -> Result<Arc<dyn StorageBac
             Arc::new(storage)
         }
         mediagit_config::StorageConfig::S3(s3_config) => {
-            // Use MinIOBackend for custom endpoints (MinIO, DigitalOcean Spaces, etc.)
-            // Use S3Backend for AWS S3.
-            // Both paths thread `s3_config.prefix` through so multiple repos
-            // can share one bucket without colliding on identical OIDs (see
-            // C-BUG-AZURE-PREFIX — same shape, mirrored fix).
-            if let Some(endpoint) = &s3_config.endpoint {
-                tracing::info!(
-                    "Using MinIO/S3-compatible backend: bucket={}, endpoint={}, prefix='{}'",
-                    s3_config.bucket,
-                    endpoint,
-                    s3_config.prefix
-                );
-
-                let storage = MinIOBackend::new_with_prefix(
-                    endpoint,
-                    &s3_config.bucket,
-                    s3_config.access_key_id.as_deref().unwrap_or(""),
-                    s3_config.secret_access_key.as_deref().unwrap_or(""),
-                    &s3_config.prefix,
-                )
-                .await
-                .map_err(|e| {
-                    tracing::error!("Failed to initialize MinIO backend: {}", e);
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?;
-                Arc::new(storage)
+            if s3_config.endpoint.is_some() {
+                build_minio_compatible_storage(s3_config).await?
             } else {
-                tracing::info!(
-                    "Using AWS S3 storage backend: bucket={}, prefix='{}'",
-                    s3_config.bucket,
-                    s3_config.prefix
-                );
-
-                // For AWS S3 without custom endpoint, we use MinIOBackend with the AWS S3 endpoint
-                // This avoids setting global environment variables which could cause race conditions
-                // in concurrent requests.
-                let aws_endpoint = format!("https://s3.{}.amazonaws.com", s3_config.region);
-
-                let storage = MinIOBackend::new_with_prefix(
-                    &aws_endpoint,
-                    &s3_config.bucket,
-                    s3_config.access_key_id.as_deref().unwrap_or(""),
-                    s3_config.secret_access_key.as_deref().unwrap_or(""),
-                    &s3_config.prefix,
-                )
-                .await
-                .map_err(|e| {
-                    tracing::error!("Failed to initialize S3 backend: {}", e);
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?;
-                Arc::new(storage)
+                build_aws_s3_storage(s3_config).await?
             }
         }
         mediagit_config::StorageConfig::Azure(azure_config) => {
@@ -267,6 +247,60 @@ async fn build_storage_backend(repo_path: &StdPath) -> Result<Arc<dyn StorageBac
     };
 
     Ok(storage)
+}
+
+/// MinIO / S3-compatible storage (MinIO, DigitalOcean Spaces, Cloudflare R2, etc.).
+/// Used when the repo config has an explicit `endpoint` URL.
+async fn build_minio_compatible_storage(
+    s3_config: &mediagit_config::S3Storage,
+) -> Result<Arc<dyn StorageBackend>, StatusCode> {
+    let endpoint = s3_config.endpoint.as_deref().unwrap_or_default();
+    tracing::info!(
+        "Using MinIO/S3-compatible backend: bucket={}, endpoint={}, prefix='{}'",
+        s3_config.bucket, endpoint, s3_config.prefix
+    );
+    MinIOBackend::new_with_prefix(
+        endpoint,
+        &s3_config.bucket,
+        s3_config.access_key_id.as_deref().unwrap_or(""),
+        s3_config.secret_access_key.as_deref().unwrap_or(""),
+        &s3_config.prefix,
+    )
+    .await
+    .map(|b| Arc::new(b) as Arc<dyn StorageBackend>)
+    .map_err(|e| {
+        tracing::error!("Failed to initialize MinIO backend: {:#}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
+/// Native AWS S3 storage.
+/// Used when the repo config has no `endpoint` (i.e. real AWS, not an S3-compatible service).
+/// Passes the correct region for SigV4 signing and uses virtual-hosted-style addressing.
+async fn build_aws_s3_storage(
+    s3_config: &mediagit_config::S3Storage,
+) -> Result<Arc<dyn StorageBackend>, StatusCode> {
+    tracing::info!(
+        "Using AWS S3 backend: bucket={}, region={}, prefix='{}'",
+        s3_config.bucket, s3_config.region, s3_config.prefix
+    );
+    let aws_config = mediagit_storage::minio::MinIOConfig {
+        endpoint: format!("https://s3.{}.amazonaws.com", s3_config.region),
+        bucket: s3_config.bucket.clone(),
+        access_key: s3_config.access_key_id.as_deref().unwrap_or("").to_string(),
+        secret_key: s3_config.secret_access_key.as_deref().unwrap_or("").to_string(),
+        prefix: s3_config.prefix.clone(),
+        region: s3_config.region.clone(),
+        path_style: false,
+        ..mediagit_storage::minio::MinIOConfig::default()
+    };
+    MinIOBackend::with_config(aws_config)
+        .await
+        .map(|b| Arc::new(b) as Arc<dyn StorageBackend>)
+        .map_err(|e| {
+            tracing::error!("Failed to initialize AWS S3 backend: {:#}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
 }
 
 /// GET /:repo/info/refs - List all refs in the repository
@@ -372,9 +406,9 @@ pub async fn upload_pack(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Initialize storage and ODB for proper compression and storage
-    let storage = get_or_init_storage(&state, &repo_path).await?;
-    let odb = ObjectDatabase::with_smart_compression(storage, 1000);
+    // Initialize ODB (shared per-repo so delta_written_pairs HashSet is shared
+    // across concurrent handlers — required for TOCTOU cycle prevention).
+    let odb = get_or_init_odb(&state, &repo_path).await?;
 
     // Convert body to AsyncRead stream
     use futures::stream::TryStreamExt;
@@ -395,10 +429,19 @@ pub async fn upload_pack(
     // Reader is sequential (a pack is one byte stream) but writes can overlap.
     // Bound concurrent ODB writes with a sliding window so a slow backend PUT
     // never blocks the reader from queuing the next object.
+    //
+    // Priority: env var override > config override (`[performance]
+    // pack_workers` in the repo config) > internal default (8).
+    let config_pack_workers: Option<usize> = mediagit_config::Config::load(&repo_path)
+        .await
+        .ok()
+        .and_then(|c| c.performance.pack_workers)
+        .filter(|n| *n > 0);
     let workers_n: usize = std::env::var("MEDIAGIT_PACK_WORKERS")
         .ok()
         .and_then(|s| s.parse().ok())
         .filter(|n: &usize| *n > 0)
+        .or(config_pack_workers)
         .unwrap_or(8);
 
     tracing::info!(
@@ -526,9 +569,8 @@ pub async fn download_pack(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Initialize storage and odb
-    let storage = get_or_init_storage(&state, &repo_path).await?;
-    let odb = ObjectDatabase::with_smart_compression(storage, 1000);
+    // Initialize ODB (shared per-repo for TOCTOU guard effectiveness).
+    let odb = get_or_init_odb(&state, &repo_path).await?;
 
     // Expand the client's `have` set into the full object closure the client
     // is known to already have. Any OID in this set — including entire
@@ -851,10 +893,9 @@ pub async fn update_refs(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Initialize storage and refdb
-    let storage = get_or_init_storage(&state, &repo_path).await?;
+    // Initialize refdb and ODB (shared per-repo for TOCTOU guard effectiveness).
     let refdb = RefDatabase::new(repo_path.join(".mediagit"));
-    let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
+    let odb = Arc::new(get_or_init_odb(&state, &repo_path).await?);
     let reflog = Reflog::new(repo_path.join(".mediagit"));
 
     let mut results = Vec::new();
@@ -1677,8 +1718,7 @@ pub async fn download_file_by_path(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    let storage = get_or_init_storage(&state, &repo_path).await?;
-    let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
+    let odb = Arc::new(get_or_init_odb(&state, &repo_path).await?);
     let refdb = RefDatabase::new(repo_path.join(".mediagit"));
 
     let blob_oid = resolve_path_to_blob(&odb, &refdb, &params.ref_name, &file_path).await?;
@@ -1782,8 +1822,7 @@ async fn list_tree_impl(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    let storage = get_or_init_storage(&state, &repo_path).await?;
-    let odb = ObjectDatabase::with_smart_compression(storage, 1000);
+    let odb = get_or_init_odb(&state, &repo_path).await?;
     let refdb = RefDatabase::new(repo_path.join(".mediagit"));
 
     let (commit_oid, tree) = resolve_path_to_tree(&odb, &refdb, &ref_name, &dir_path).await?;

@@ -16,6 +16,7 @@ mediagit revert --skip
 Creates new commits that undo the changes introduced by the specified commits.
 Unlike `mediagit reset`, `revert` **preserves history** — the original commits
 remain, and new "revert" commits are added. Safe to use on pushed commits.
+The working directory is automatically updated to reflect the reverted state.
 
 Multiple commits are reverted in reverse order (newest first).
 

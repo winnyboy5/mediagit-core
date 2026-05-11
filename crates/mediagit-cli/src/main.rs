@@ -156,12 +156,25 @@ enum Commands {
 /// 2. `mediagit log -5` → `mediagit log -n 5`
 fn preprocess_args(args: Vec<String>) -> Vec<String> {
     // Find the first non-flag positional arg (the subcommand), skipping the binary name.
-    let subcmd_pos = args
-        .iter()
-        .enumerate()
-        .skip(1)
-        .find(|(_, arg)| !arg.starts_with('-'))
-        .map(|(i, _)| i);
+    // Value-taking global flags (-C, --repository, --color) each consume the next token too.
+    let subcmd_pos = {
+        let value_flags: &[&str] = &["-C", "--repository", "--color"];
+        let mut i = 1usize;
+        let mut found = None;
+        while i < args.len() {
+            let arg = args[i].as_str();
+            if value_flags.contains(&arg) {
+                i += 2; // skip flag + value
+                continue;
+            }
+            if !arg.starts_with('-') {
+                found = Some(i);
+                break;
+            }
+            i += 1;
+        }
+        found
+    };
 
     if let Some(pos) = subcmd_pos {
         let subcmd = args[pos].as_str();

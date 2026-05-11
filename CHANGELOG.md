@@ -103,6 +103,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   used plain addition that could wrap on 32-bit `usize` with crafted RIFF headers.
   Switched to `saturating_add()` in all three AVI parsing functions.
   (`crates/mediagit-versioning/src/chunking.rs`)
+- **`revert` did not update working directory after creating revert commit** — `revert_single_commit`
+  performed a 3-way merge and updated refs but never called `CheckoutManager::checkout_commit()`,
+  leaving the working tree out-of-sync with HEAD. Every other tree-modifying command (merge,
+  cherry-pick, branch switch, reset --hard, stash save) correctly updates the working directory.
+  Fixed by adding `checkout_commit()` in both the commit and no-commit paths, matching the
+  pattern used by merge and cherry-pick. This also resolves the cascading clone verification
+  failure (BUG-CLONE-01) where clone file counts appeared incorrect due to revert desync.
+  (`crates/mediagit-cli/src/commands/revert.rs`)
+- **`log -N` shorthand not active in release binary** — the `preprocess_args` fix that converts
+  `log -5` → `log -n 5` was present in source but the release binary had not been rebuilt.
+  Binary is now compiled with the fix active. (`crates/mediagit-cli/src/main.rs`)
 
 
 ---

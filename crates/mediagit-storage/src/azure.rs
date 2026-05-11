@@ -287,15 +287,16 @@ impl AzureBackend {
         // Cap the cloud roundtrip so unreachable accounts fail fast — the bare
         // call uses Azure-SDK defaults that can hang for tens of seconds. The
         // backend is cached in AppState (server-side), so this only runs once
-        // per repo per process anyway.
+        // per repo per process anyway.  30 s leaves room for cold DNS + TLS +
+        // Azure API on the first connection to high-latency regions.
         tokio::time::timeout(
-            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(30),
             backend.ensure_container_exists(),
         )
         .await
         .map_err(|_| {
             anyhow::anyhow!(
-                "Azure container check timed out after 10s for {}/{}",
+                "Azure container check timed out after 30s for {}/{}",
                 backend.account_name,
                 backend.container_name
             )
@@ -391,15 +392,16 @@ impl AzureBackend {
         // Cap the cloud roundtrip so unreachable accounts fail fast — the bare
         // call uses Azure-SDK defaults that can hang for tens of seconds. The
         // backend is cached in AppState (server-side), so this only runs once
-        // per repo per process anyway.
+        // per repo per process anyway.  30 s leaves room for cold DNS + TLS +
+        // Azure API on the first connection to high-latency regions.
         tokio::time::timeout(
-            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(30),
             backend.ensure_container_exists(),
         )
         .await
         .map_err(|_| {
             anyhow::anyhow!(
-                "Azure container check timed out after 10s for {}/{}",
+                "Azure container check timed out after 30s for {}/{}",
                 backend.account_name,
                 backend.container_name
             )
@@ -533,15 +535,16 @@ impl AzureBackend {
         // Cap the cloud roundtrip so unreachable accounts fail fast — the bare
         // call uses Azure-SDK defaults that can hang for tens of seconds. The
         // backend is cached in AppState (server-side), so this only runs once
-        // per repo per process anyway.
+        // per repo per process anyway.  30 s leaves room for cold DNS + TLS +
+        // Azure API on the first connection to high-latency regions.
         tokio::time::timeout(
-            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(30),
             backend.ensure_container_exists(),
         )
         .await
         .map_err(|_| {
             anyhow::anyhow!(
-                "Azure container check timed out after 10s for {}/{}",
+                "Azure container check timed out after 30s for {}/{}",
                 backend.account_name,
                 backend.container_name
             )

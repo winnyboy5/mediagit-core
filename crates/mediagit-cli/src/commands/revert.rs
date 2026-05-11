@@ -21,8 +21,8 @@ use std::sync::Arc;
 use tokio::fs;
 
 use mediagit_versioning::{
-    Commit, Index, IndexEntry, MergeEngine, MergeStrategy, ObjectDatabase, Oid, RefDatabase,
-    Reflog, ReflogEntry, Signature, Tree, TreeEntry,
+    CheckoutManager, Commit, Index, IndexEntry, MergeEngine, MergeStrategy, ObjectDatabase, Oid,
+    RefDatabase, Reflog, ReflogEntry, Signature, Tree, TreeEntry,
 };
 
 use super::super::output;
@@ -283,6 +283,14 @@ impl RevertCmd {
                     .await?;
             }
 
+            // Update working tree to match the reverted state.
+            // Without this, the working directory stays out-of-sync with HEAD.
+            let checkout_mgr = CheckoutManager::new(odb, repo_root);
+            checkout_mgr
+                .checkout_commit(&new_commit_oid)
+                .await
+                .context("Failed to update working directory after revert")?;
+
             if !self.quiet {
                 println!(
                     "{} Created revert commit: {}",
@@ -291,9 +299,26 @@ impl RevertCmd {
                 );
             }
         } else {
-            // No commit mode - save merged tree to index
+            // No commit mode - save merged tree to index and update working tree
             let merged_tree = Tree::read(odb, &new_tree_oid).await?;
             self.save_tree_to_index(repo_root, &merged_tree)?;
+
+            // Update working tree to match the reverted tree.
+            // Create a temporary commit so CheckoutManager can traverse the tree.
+            let temp_commit = Commit::with_parents(
+                new_tree_oid,
+                vec![head_oid],
+                Signature::now("MediaGit".to_string(), "mediagit@local".to_string()),
+                Signature::now("MediaGit".to_string(), "mediagit@local".to_string()),
+                "revert (no-commit)".to_string(),
+            );
+            let temp_oid = temp_commit.write(odb).await?;
+            let checkout_mgr = CheckoutManager::new(odb, repo_root);
+            checkout_mgr
+                .checkout_commit(&temp_oid)
+                .await
+                .context("Failed to update working directory after revert")?;
+
             if !self.quiet {
                 println!(
                     "{} Reverted {} (not committed)",

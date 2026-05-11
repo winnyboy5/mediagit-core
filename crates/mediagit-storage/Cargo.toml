@@ -12,7 +12,7 @@ description = "Unified async storage backend trait and implementations"
 
 [features]
 azure = ["dep:azure_storage", "dep:azure_storage_blobs", "dep:azure_core"]
-gcs = ["dep:google-cloud-storage", "dep:google-cloud-auth"]
+gcs = ["dep:google-cloud-storage", "dep:google-cloud-auth", "dep:google-cloud-gax"]
 all = ["azure", "gcs"]
 
 [dependencies]
@@ -30,8 +30,12 @@ futures = "0.3"
 azure_storage_blobs = { version = "0.21", optional = true }
 azure_storage = { version = "0.21", optional = true }
 azure_core = { version = "0.21", optional = true }
-google-cloud-storage = { version = "0.24", optional = true }
+google-cloud-storage = { version = "1.11", optional = true }
 google-cloud-auth = { version = "0.17", optional = true }
+# Direct dep for typed access to RPC error codes (Code::NotFound), needed
+# because google-cloud-storage's control plane is gRPC and HTTP-status-based
+# is_not_found checks miss those errors.
+google-cloud-gax = { version = "1.9", optional = true }
 serde_json.workspace = true
 
 [dev-dependencies]

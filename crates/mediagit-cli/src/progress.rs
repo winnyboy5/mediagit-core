@@ -32,6 +32,10 @@ mod templates {
     pub const OBJECTS: &str =
         "{spinner:.yellow} {msg} [{bar:40.yellow/blue}] {pos}/{len} chunks ({percent}%, {elapsed}) eta {eta}";
 
+    /// Bytes-based progress for push uploads with throughput and ETA.
+    pub const PUSH: &str =
+        "{spinner:.cyan} [{bar:40.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} (elapsed {elapsed}, eta {eta})";
+
     /// Indeterminate spinner for operations without a known total.
     pub const SPINNER: &str = "{spinner:.cyan} {msg} [{elapsed}]";
 }
@@ -87,6 +91,15 @@ impl ProgressTracker {
             return ProgressBar::hidden();
         }
         self.make_bar_impl(total, msg, templates::OBJECTS)
+    }
+
+    /// Create bytes progress bar for push uploads (real throughput + ETA).
+    /// `total_bytes` may be 0 initially and updated via `set_length` as chunks are discovered.
+    pub fn push_bar(&self, total_bytes: u64) -> ProgressBar {
+        if self.quiet {
+            return ProgressBar::hidden();
+        }
+        self.make_bar_impl(total_bytes, "Pushing", templates::PUSH)
     }
 
     /// Create spinner for indeterminate operations

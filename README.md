@@ -12,12 +12,12 @@
 **Version**: v0.2.6-beta.1
 **Status**: 🚧 **BETA**
 **Features**: 100% complete (all P0–P3 items implemented)
-**Last Validated**: March 2026 — Linux & Windows, release build
+**Last Validated**: May 2026 — Linux, Windows & GCS, release build
 **🚨 WARNING 🚨**: This project is under active development. Be aware that large breaking changes may happen before 1.0 is reached.
 
 ✅ **28 CLI commands validated end-to-end** — 0 crashes, 0 data corruption
 ✅ **27+ file types tested** (58 GB dataset) across video, audio, 3D, image, design, ML
-✅ **All storage backends validated** — local, MinIO S3, push / pull / clone / fetch
+✅ **All storage backends validated** — local, MinIO S3, GCS, push / pull / clone / fetch
 ✅ **Files up to 398 MB** staged and transferred; single-file scalability to 6 GB tested
 
 | Metric | Result |
@@ -761,7 +761,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] Per-chunk `on_progress` callback for continuous byte-level progress during multi-GB ingestion
 - [x] Security: upgraded `quinn-proto` (RUSTSEC-2026-0037)
 
-### v0.2.6-beta.1 (Current Beta) — March 2026
+### v0.2.6-beta.1 (Current Beta) — March–May 2026
 *Delta engine rewrite, CLI refinements, server improvements*
 
 - [x] Delta encoder replaced: suffix-array sliding-window → **zstd dictionary compression** (+1.3–2.1pp savings, 1.4–2.4× faster, 73% less code)
