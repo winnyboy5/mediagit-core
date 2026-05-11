@@ -420,7 +420,11 @@ impl MinIOBackend {
                 // Log the real AWS error so the operator can diagnose auth/region/existence issues.
                 tracing::error!(
                     "head_bucket '{}' (region={}, endpoint={}): not_found={} | {}",
-                    config.bucket, config.region, config.endpoint, not_found, head_err
+                    config.bucket,
+                    config.region,
+                    config.endpoint,
+                    not_found,
+                    head_err
                 );
                 let mut create_req = client.create_bucket().bucket(&config.bucket);
                 if config.region != "us-east-1" {
@@ -450,7 +454,9 @@ impl MinIOBackend {
                         } else {
                             tracing::error!(
                                 "create_bucket '{}' (region={}) failed: {}",
-                                config.bucket, config.region, e
+                                config.bucket,
+                                config.region,
+                                e
                             );
                             return Err(e).context(format!(
                                 "Failed to access or create MinIO bucket: {}",

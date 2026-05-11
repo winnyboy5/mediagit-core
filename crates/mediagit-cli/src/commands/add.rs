@@ -149,12 +149,7 @@ impl AddCmd {
             Some(ChunkStrategy::MediaAware)
         };
 
-        let odb = ObjectDatabase::with_optimizations(
-            storage,
-            1000,
-            chunk_strategy,
-            delta_enabled,
-        );
+        let odb = ObjectDatabase::with_optimizations(storage, 1000, chunk_strategy, delta_enabled);
 
         if !self.quiet && self.verbose {
             output::info("Auto-chunking enabled for large files");

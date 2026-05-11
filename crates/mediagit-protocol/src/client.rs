@@ -1166,14 +1166,21 @@ impl ProtocolClient {
                                 let chunk_data = odb.get_compressed_chunk(&chunk_id).await?;
                                 let chunk_size = chunk_data.len() as u64;
                                 let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
-                                let resp = client
-                                    .put(&url)
-                                    .body(chunk_data)
-                                    .send()
-                                    .await
-                                    .map_err(|e| anyhow::anyhow!("Failed to upload chunk {}: {}", chunk_id, e))?;
+                                let resp = client.put(&url).body(chunk_data).send().await.map_err(
+                                    |e| {
+                                        anyhow::anyhow!(
+                                            "Failed to upload chunk {}: {}",
+                                            chunk_id,
+                                            e
+                                        )
+                                    },
+                                )?;
                                 if !resp.status().is_success() {
-                                    anyhow::bail!("PUT /chunks/{} failed with status: {}", chunk_id, resp.status());
+                                    anyhow::bail!(
+                                        "PUT /chunks/{} failed with status: {}",
+                                        chunk_id,
+                                        resp.status()
+                                    );
                                 }
                                 Ok::<u64, anyhow::Error>(chunk_size)
                             }
@@ -1233,14 +1240,21 @@ impl ProtocolClient {
                                 let chunk_data = odb.get_compressed_chunk(&chunk_id).await?;
                                 let chunk_size = chunk_data.len() as u64;
                                 let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
-                                let resp = client
-                                    .put(&url)
-                                    .body(chunk_data)
-                                    .send()
-                                    .await
-                                    .map_err(|e| anyhow::anyhow!("Failed to upload chunk {}: {}", chunk_id, e))?;
+                                let resp = client.put(&url).body(chunk_data).send().await.map_err(
+                                    |e| {
+                                        anyhow::anyhow!(
+                                            "Failed to upload chunk {}: {}",
+                                            chunk_id,
+                                            e
+                                        )
+                                    },
+                                )?;
                                 if !resp.status().is_success() {
-                                    anyhow::bail!("PUT /chunks/{} failed with status: {}", chunk_id, resp.status());
+                                    anyhow::bail!(
+                                        "PUT /chunks/{} failed with status: {}",
+                                        chunk_id,
+                                        resp.status()
+                                    );
                                 }
                                 Ok::<u64, anyhow::Error>(chunk_size)
                             }

@@ -769,17 +769,13 @@ impl ObjectDatabase {
                     };
 
                     if should_write_meta {
-                        let meta_key =
-                            format!("chunk-deltas/{}.meta", chunk.id.to_hex());
+                        let meta_key = format!("chunk-deltas/{}.meta", chunk.id.to_hex());
                         let meta_data = format!("base:{}", base_id.to_hex());
                         self.storage
                             .put(&meta_key, meta_data.as_bytes())
                             .await
                             .map_err(|e| {
-                                anyhow::anyhow!(
-                                    "Failed to store chunk delta meta: {}",
-                                    e
-                                )
+                                anyhow::anyhow!("Failed to store chunk delta meta: {}", e)
                             })?;
                         debug!(
                             chunk_id = %chunk.id,
@@ -1381,7 +1377,10 @@ impl ObjectDatabase {
                                             storage.put(&meta_key, meta_data.as_bytes()).await
                                         {
                                             if !storage.exists(&meta_key).await.unwrap_or(false) {
-                                                return Err(anyhow::anyhow!("Store delta meta: {}", e));
+                                                return Err(anyhow::anyhow!(
+                                                    "Store delta meta: {}",
+                                                    e
+                                                ));
                                             }
                                         }
 
@@ -1710,7 +1709,10 @@ impl ObjectDatabase {
                                             storage.put(&meta_key, meta_data.as_bytes()).await
                                         {
                                             if !storage.exists(&meta_key).await.unwrap_or(false) {
-                                                return Err(anyhow::anyhow!("Store delta meta: {}", e));
+                                                return Err(anyhow::anyhow!(
+                                                    "Store delta meta: {}",
+                                                    e
+                                                ));
                                             }
                                         }
 

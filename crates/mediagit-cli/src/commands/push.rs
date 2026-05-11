@@ -17,9 +17,9 @@ use crate::progress::{OperationStats, ProgressTracker};
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
+use indicatif::ProgressBar;
 use mediagit_protocol::PushPhase;
 use mediagit_versioning::{LcaFinder, ObjectType, RefDatabase};
-use indicatif::ProgressBar;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
