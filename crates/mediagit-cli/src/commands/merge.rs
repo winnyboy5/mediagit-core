@@ -172,24 +172,23 @@ impl MergeCmd {
                 let config = mediagit_config::Config::load(&repo_root)
                     .await
                     .unwrap_or_default();
-                let author_name =
-                    std::env::var("MEDIAGIT_AUTHOR_NAME").unwrap_or_else(|_| {
-                        config.author.name.clone().unwrap_or_else(|| {
-                            std::env::var("USER").unwrap_or_else(|_| "Unknown".to_string())
-                        })
-                    });
-                let author_email =
-                    std::env::var("MEDIAGIT_AUTHOR_EMAIL").unwrap_or_else(|_| {
-                        config
-                            .author
-                            .email
-                            .clone()
-                            .unwrap_or_else(|| "unknown@localhost".to_string())
-                    });
-                let signature = Signature::now(author_name, author_email);
-                let message = self.message.clone().unwrap_or_else(|| {
-                    format!("Squash merge branch '{}' into HEAD", self.branch)
+                let author_name = std::env::var("MEDIAGIT_AUTHOR_NAME").unwrap_or_else(|_| {
+                    config.author.name.clone().unwrap_or_else(|| {
+                        std::env::var("USER").unwrap_or_else(|_| "Unknown".to_string())
+                    })
                 });
+                let author_email = std::env::var("MEDIAGIT_AUTHOR_EMAIL").unwrap_or_else(|_| {
+                    config
+                        .author
+                        .email
+                        .clone()
+                        .unwrap_or_else(|| "unknown@localhost".to_string())
+                });
+                let signature = Signature::now(author_name, author_email);
+                let message = self
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| format!("Squash merge branch '{}' into HEAD", self.branch));
                 let squash_commit = Commit {
                     tree: their_commit.tree,
                     parents: vec![our_oid],
@@ -402,7 +401,11 @@ impl MergeCmd {
             let _ = reflog.append("HEAD", &entry).await;
 
             if !self.quiet {
-                let label = if self.squash { "Squash merge committed" } else { "Merge committed" };
+                let label = if self.squash {
+                    "Squash merge committed"
+                } else {
+                    "Merge committed"
+                };
                 println!(
                     "{} {}: {}",
                     style("✓").green().bold(),

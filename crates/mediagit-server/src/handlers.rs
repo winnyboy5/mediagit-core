@@ -257,7 +257,9 @@ async fn build_minio_compatible_storage(
     let endpoint = s3_config.endpoint.as_deref().unwrap_or_default();
     tracing::info!(
         "Using MinIO/S3-compatible backend: bucket={}, endpoint={}, prefix='{}'",
-        s3_config.bucket, endpoint, s3_config.prefix
+        s3_config.bucket,
+        endpoint,
+        s3_config.prefix
     );
     MinIOBackend::new_with_prefix(
         endpoint,
@@ -282,13 +284,19 @@ async fn build_aws_s3_storage(
 ) -> Result<Arc<dyn StorageBackend>, StatusCode> {
     tracing::info!(
         "Using AWS S3 backend: bucket={}, region={}, prefix='{}'",
-        s3_config.bucket, s3_config.region, s3_config.prefix
+        s3_config.bucket,
+        s3_config.region,
+        s3_config.prefix
     );
     let aws_config = mediagit_storage::minio::MinIOConfig {
         endpoint: format!("https://s3.{}.amazonaws.com", s3_config.region),
         bucket: s3_config.bucket.clone(),
         access_key: s3_config.access_key_id.as_deref().unwrap_or("").to_string(),
-        secret_key: s3_config.secret_access_key.as_deref().unwrap_or("").to_string(),
+        secret_key: s3_config
+            .secret_access_key
+            .as_deref()
+            .unwrap_or("")
+            .to_string(),
         prefix: s3_config.prefix.clone(),
         region: s3_config.region.clone(),
         path_style: false,

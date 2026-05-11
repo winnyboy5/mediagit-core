@@ -390,11 +390,7 @@ pub trait StorageBackend: Send + Sync + Debug {
     ///            discover it (that probe was the regression that got the prior
     ///            striped-get implementation reverted — keep the common path
     ///            single-RPC).
-    async fn get_with_size_hint(
-        &self,
-        key: &str,
-        _size: Option<u64>,
-    ) -> anyhow::Result<Vec<u8>> {
+    async fn get_with_size_hint(&self, key: &str, _size: Option<u64>) -> anyhow::Result<Vec<u8>> {
         self.get(key).await
     }
 

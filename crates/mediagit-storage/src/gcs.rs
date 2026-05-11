@@ -459,9 +459,11 @@ impl StorageBackend for GcsBackend {
             })?;
 
         let mut buf = Vec::new();
-        while let Some(chunk) = resp.next().await.transpose().map_err(|e| {
-            anyhow::anyhow!("GCS read_object stream error for key '{}': {}", key, e)
-        })? {
+        while let Some(chunk) =
+            resp.next().await.transpose().map_err(|e| {
+                anyhow::anyhow!("GCS read_object stream error for key '{}': {}", key, e)
+            })?
+        {
             buf.extend_from_slice(&chunk);
         }
 
@@ -583,10 +585,7 @@ impl StorageBackend for GcsBackend {
         let mut page_token = String::new();
 
         loop {
-            let mut builder = self
-                .control
-                .list_objects()
-                .set_parent(&bucket_path);
+            let mut builder = self.control.list_objects().set_parent(&bucket_path);
 
             if !prefix.is_empty() {
                 builder = builder.set_prefix(prefix);
@@ -633,11 +632,7 @@ impl StorageBackend for GcsBackend {
     /// ≤ 16 MiB so they would never stripe anyway), and the regression got it
     /// reverted. If a caller has the size in a manifest, it should be passed
     /// through; otherwise this is a no-op vs `get`.
-    async fn get_with_size_hint(
-        &self,
-        key: &str,
-        size: Option<u64>,
-    ) -> anyhow::Result<Vec<u8>> {
+    async fn get_with_size_hint(&self, key: &str, size: Option<u64>) -> anyhow::Result<Vec<u8>> {
         if key.is_empty() {
             return Err(anyhow::anyhow!("key cannot be empty"));
         }
