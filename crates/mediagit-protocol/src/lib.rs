@@ -18,7 +18,10 @@
 //! network protocol, enabling push/pull operations between repositories.
 
 pub mod adaptive_config;
+pub mod bench;
 pub mod client;
+pub mod error_class;
+pub mod journal;
 pub mod streaming;
 pub mod types;
 

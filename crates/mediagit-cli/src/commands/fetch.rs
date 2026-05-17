@@ -97,7 +97,7 @@ impl FetchCmd {
         // Load config to get remote URL
         let config = mediagit_config::Config::load(&repo_root).await?;
         let remote_url = config
-            .get_remote_url(remote)
+            .resolve_remote_url(remote)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         if self.verbose {
@@ -110,6 +110,9 @@ impl FetchCmd {
         let mut client = mediagit_protocol::ProtocolClient::new(remote_url);
         if let Some(n) = config.performance.upload_concurrency {
             client = client.with_concurrent_uploads(n);
+        }
+        if let Some(n) = config.performance.download_concurrency {
+            client = client.with_concurrent_downloads(n);
         }
         let odb = Arc::new(ObjectDatabase::with_smart_compression(
             Arc::clone(&storage),

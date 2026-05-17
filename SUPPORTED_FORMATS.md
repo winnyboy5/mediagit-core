@@ -119,21 +119,28 @@ MediaGit uses the **`fastcdc` crate v3.2** (`fastcdc::v2020`) for all content-de
 
 ### Formats that use FastCDC
 
-FastCDC is dispatched by `chunk_media_aware()` → `chunk_rolling()` for formats that don't have a dedicated media parser:
+FastCDC is dispatched by `chunk_media_aware()` for formats that don't have a dedicated media parser.
 
-| Format Group | Extensions |
-|--------------|-----------|
-| Text/Code | csv, tsv, json, xml, html, txt, md, rs, py, js, ts, go, java, c, cpp, yaml, toml, sql, proto, ... |
-| ML Data | parquet, arrow, feather, orc, avro, hdf5, npy, npz, tfrecords, petastorm |
-| ML Models | pt, pth, ckpt, pb, safetensors, bin, pkl, joblib |
-| ML Deployment | onnx, gguf, ggml, tflite, mlmodel, coreml, keras, pte, llamafile |
-| Documents | pdf, svg, eps, ai |
-| Design Tools | fig, sketch, xd, indd |
-| Lossless Audio | flac, aiff, alac |
-| MPEG Streams | mpg, mpeg, vob, mts, m2ts |
-| USD/Alembic | usd, usda, usdc, usdz, abc |
-| 3D Apps | blend, max, ma, mb, c4d, hip, zpr, ztl |
-| Unknown | All unrecognized extensions |
+**Creative-container formats** (AI, PSD, PSB, PDF, EPS, Fig, Sketch, XD, InDesign) use
+**capped tier-1 params** (1 MB avg / 512 KB min / 4 MB max) regardless of file size.
+These formats embed zlib-compressed streams with a trailing xref/directory table; smaller
+chunks let FastCDC re-sync quickly after mid-file insertions, recovering dedup on
+unchanged portions.
+
+| Format Group | Extensions | Chunk Params |
+|--------------|-----------|--------------|
+| Text/Code | csv, tsv, json, xml, html, txt, md, rs, py, js, ts, go, java, c, cpp, yaml, toml, sql, proto, ... | Adaptive |
+| ML Data | parquet, arrow, feather, orc, avro, hdf5, npy, npz, tfrecords, petastorm | Adaptive |
+| ML Models | pt, pth, ckpt, pb, safetensors, bin, pkl, joblib | Adaptive |
+| ML Deployment | onnx, gguf, ggml, tflite, mlmodel, coreml, keras, pte, llamafile | Adaptive |
+| Documents/Creative | pdf, eps, ai, psd, psb | Creative (1 MB avg) |
+| Design Tools | fig, sketch, xd, indd, indt | Creative (1 MB avg) |
+| SVG | svg | Adaptive |
+| Lossless Audio | flac, aiff, alac | Adaptive |
+| MPEG Streams | mpg, mpeg, vob, mts, m2ts | Adaptive |
+| USD/Alembic | usd, usda, usdc, usdz, abc | Adaptive |
+| 3D Apps | blend, max, ma, mb, c4d, hip, zpr, ztl | Adaptive |
+| Unknown | All unrecognized extensions | Adaptive |
 
 ---
 

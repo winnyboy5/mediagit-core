@@ -110,6 +110,7 @@ pub mod cache;
 pub mod error;
 #[cfg(feature = "gcs")]
 pub mod gcs;
+pub(crate) mod http_pool;
 pub mod local;
 pub mod minio;
 pub mod mock;
@@ -169,6 +170,65 @@ pub use s3::S3Backend;
 ///     Ok(())
 /// }
 /// ```
+/// Metadata returned by [`StorageBackend::presign_put`] for direct-to-backend uploads.
+///
+/// The client performs `PUT url` with the required headers; the server never
+/// sees the chunk bytes. When the backend cannot issue presigned URLs (local
+/// filesystem, mock, or cloud backends without key-based credentials),
+/// `presign_put` returns `Ok(None)` and the caller falls back to the existing
+/// server-proxied PUT route.
+#[derive(Debug, Clone)]
+pub struct PresignedPut {
+    /// The presigned URL the client PUTs bytes to directly.
+    pub url: String,
+    /// HTTP method string — always "PUT" for all current backends.
+    pub method: String,
+    /// Headers the client MUST send verbatim (e.g. `x-amz-*` SigV4 headers).
+    pub required_headers: Vec<(String, String)>,
+    /// Absolute expiry instant; client should not attempt the URL after this.
+    pub expires_at: std::time::SystemTime,
+}
+
+/// Metadata returned by [`StorageBackend::presign_get`] for direct-from-backend downloads.
+///
+/// The client performs `GET url` with the required headers; the server never
+/// sees the chunk bytes. When the backend cannot issue presigned URLs,
+/// `presign_get` returns `Ok(None)` and the caller falls back to the existing
+/// server-proxied GET route.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PresignedDownload {
+    /// The presigned URL the client GETs bytes from directly.
+    pub url: String,
+    /// Headers the client MUST send verbatim with the GET request.
+    pub headers: Vec<(String, String)>,
+    /// TTL in seconds from the time the URL was minted.
+    pub expires_in_secs: u64,
+}
+
+/// Result of [`StorageBackend::create_presigned_mpu`]: one presigned `UploadPart`
+/// URL per part. The client PUTs each part directly, collects the `ETag` header,
+/// then calls the server's `chunks/mpu/complete` endpoint.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PresignedMpu {
+    pub upload_id: String,
+    pub parts: Vec<PresignedMpuPart>,
+    /// Recommended part size in bytes; the last part may be smaller.
+    pub part_size: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PresignedMpuPart {
+    pub part_number: i32,
+    pub url: String,
+}
+
+/// A completed part the client reports back to finalize a multipart upload.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MpuCompletedPart {
+    pub part_number: i32,
+    pub etag: String,
+}
+
 #[async_trait]
 pub trait StorageBackend: Send + Sync + Debug {
     /// Retrieve an object by its key
@@ -430,6 +490,69 @@ pub trait StorageBackend: Send + Sync + Debug {
         };
         reader.read_to_end(&mut buf).await?;
         self.put(key, &buf).await
+    }
+
+    /// Generate a presigned PUT URL for `key` valid for `ttl`.
+    ///
+    /// Returns `Ok(Some(PresignedPut))` when the backend can sign a URL so the
+    /// client may upload chunk bytes directly to the bucket, bypassing the
+    /// server entirely. Returns `Ok(None)` when presigning is not supported
+    /// (local filesystem, mock, or non-key-authenticated cloud backends) —
+    /// callers MUST fall back to the existing `PUT /chunks/:id` proxy route.
+    ///
+    /// Errors are restricted to SDK-level failures; transient errors also
+    /// return `Ok(None)` to trigger the same fallback rather than aborting
+    /// the upload.
+    async fn presign_put(
+        &self,
+        _key: &str,
+        _content_length: u64,
+        _ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<PresignedPut>> {
+        Ok(None)
+    }
+
+    /// Returns `Ok(Some(PresignedDownload))` when the backend can sign a URL so the
+    /// client may download chunk bytes directly from the bucket, bypassing the
+    /// server entirely. Returns `Ok(None)` when presigning is not supported —
+    /// callers MUST fall back to the existing `GET /chunks/:id` proxy route.
+    async fn presign_get(
+        &self,
+        _key: &str,
+        _ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<PresignedDownload>> {
+        Ok(None)
+    }
+
+    /// Initiate a server-side multipart upload and return presigned `UploadPart` URLs.
+    ///
+    /// Returns `Ok(Some(PresignedMpu))` on S3/MinIO where the SDK exposes
+    /// `upload_part().presigned()`. Returns `Ok(None)` for backends that do not
+    /// support client-side MPU (local, mock, azure, gcs).
+    async fn create_presigned_mpu(
+        &self,
+        _key: &str,
+        _total_size: u64,
+        _ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<PresignedMpu>> {
+        Ok(None)
+    }
+
+    /// Complete a presigned multipart upload by submitting the collected ETags.
+    /// Only called after a successful `create_presigned_mpu`.
+    async fn complete_presigned_mpu(
+        &self,
+        _key: &str,
+        _upload_id: &str,
+        _parts: Vec<MpuCompletedPart>,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("MPU not supported by this backend")
+    }
+
+    /// Abort a presigned multipart upload, releasing uncommitted parts.
+    /// Best-effort; returns `Ok(())` for backends that do not support MPU.
+    async fn abort_presigned_mpu(&self, _key: &str, _upload_id: &str) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 

@@ -59,6 +59,11 @@ pub struct ServerConfig {
     /// JWT secret key (required when enable_auth = true)
     pub jwt_secret: Option<String>,
 
+    /// TTL (seconds) for presigned PUT URLs issued to clients for direct-to-bucket uploads.
+    /// 12 hours by default; may need lowering if credentials use short-lived STS sessions.
+    #[serde(default = "default_presigned_url_ttl")]
+    pub presigned_url_ttl_seconds: u64,
+
     /// Enable rate limiting
     #[serde(default)]
     pub enable_rate_limiting: bool,
@@ -88,6 +93,10 @@ fn default_repos_dir() -> PathBuf {
     PathBuf::from("./repos")
 }
 
+fn default_presigned_url_ttl() -> u64 {
+    43200 // 12 hours
+}
+
 fn default_rate_limit_rps() -> u64 {
     10 // 10 requests per second
 }
@@ -109,6 +118,7 @@ impl Default for ServerConfig {
             tls_self_signed: false,
             enable_auth: false,
             jwt_secret: None,
+            presigned_url_ttl_seconds: default_presigned_url_ttl(),
             enable_rate_limiting: false,
             rate_limit_rps: default_rate_limit_rps(),
             rate_limit_burst: default_rate_limit_burst(),

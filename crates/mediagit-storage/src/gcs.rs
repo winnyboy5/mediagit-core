@@ -705,6 +705,19 @@ impl StorageBackend for GcsBackend {
         debug!(key = %key, size = out.len(), "Striped GCS download complete");
         Ok(out)
     }
+
+    async fn presign_put(
+        &self,
+        _key: &str,
+        _content_length: u64,
+        _ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<crate::PresignedPut>> {
+        // GCS V4 signed URL generation requires HMAC-SHA256 with service account
+        // private key material, which is not exposed by the google-cloud-storage
+        // v1.11 ADC-based Storage/StorageControl clients. Caller falls back to
+        // server-proxied PUT.
+        Ok(None)
+    }
 }
 
 #[cfg(test)]

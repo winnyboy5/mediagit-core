@@ -146,7 +146,7 @@ impl PushCmd {
         // Load config to get remote URL
         let config = mediagit_config::Config::load(&repo_root).await?;
         let remote_url = config
-            .get_remote_url(remote)
+            .resolve_remote_url(remote)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         if self.verbose {

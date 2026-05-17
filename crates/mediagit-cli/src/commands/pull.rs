@@ -135,7 +135,7 @@ impl PullCmd {
         // Load config to get remote URL
         let config = mediagit_config::Config::load(&repo_root).await?;
         let remote_url = config
-            .get_remote_url(remote)
+            .resolve_remote_url(remote)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         if self.verbose {
@@ -148,6 +148,9 @@ impl PullCmd {
         let mut client = mediagit_protocol::ProtocolClient::new(remote_url);
         if let Some(n) = config.performance.upload_concurrency {
             client = client.with_concurrent_uploads(n);
+        }
+        if let Some(n) = config.performance.download_concurrency {
+            client = client.with_concurrent_downloads(n);
         }
 
         // Initialize ODB with smart compression for consistent read/write
@@ -306,20 +309,23 @@ impl PullCmd {
 
             // Download chunked objects (large files)
             if !chunked_oids.is_empty() {
-                // Total is unknown until Phase 1 (manifest download) completes;
-                // set_length is called on the first progress callback.
-                let chunk_pb = progress.object_bar("Downloading large files", 0);
+                // Total bytes seeded from manifests in Phase 1 via first on_progress call.
+                let chunk_pb = progress.download_bar("Downloading large files", 0);
 
                 let chunk_pb_ref = chunk_pb.clone();
                 let chunks_downloaded = client
-                    .download_chunked_objects(&odb, &chunked_oids, move |current, total, msg| {
-                        if chunk_pb_ref.length() != Some(total as u64) {
-                            chunk_pb_ref.set_length(total as u64);
-                            chunk_pb_ref.reset_eta();
-                        }
-                        chunk_pb_ref.set_position(current as u64);
-                        chunk_pb_ref.set_message(msg.to_string());
-                    })
+                    .download_chunked_objects(
+                        &odb,
+                        &chunked_oids,
+                        move |bytes_done, bytes_total, msg| {
+                            if chunk_pb_ref.length() != Some(bytes_total) {
+                                chunk_pb_ref.set_length(bytes_total);
+                                chunk_pb_ref.reset_eta();
+                            }
+                            chunk_pb_ref.set_position(bytes_done);
+                            chunk_pb_ref.set_message(msg.to_string());
+                        },
+                    )
                     .await?;
 
                 chunk_pb.finish_with_message(format!("Downloaded {} chunks", chunks_downloaded));

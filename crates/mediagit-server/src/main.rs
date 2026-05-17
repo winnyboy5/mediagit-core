@@ -122,13 +122,16 @@ async fn main() -> Result<()> {
             anyhow::anyhow!("JWT secret is required when authentication is enabled")
         })?;
         tracing::info!("Authentication is ENABLED");
-        Arc::new(AppState::new_with_full_auth(
-            config.repos_dir.clone(),
-            jwt_secret,
-        ))
+        Arc::new(
+            AppState::new_with_full_auth(config.repos_dir.clone(), jwt_secret)
+                .with_presigned_ttl(config.presigned_url_ttl_seconds),
+        )
     } else {
         tracing::warn!("Authentication is DISABLED - not suitable for production!");
-        Arc::new(AppState::new(config.repos_dir.clone()))
+        Arc::new(
+            AppState::new(config.repos_dir.clone())
+                .with_presigned_ttl(config.presigned_url_ttl_seconds),
+        )
     };
 
     // Build router with optional rate limiting

@@ -646,7 +646,7 @@ pub trait StorageBackend: Send + Sync + Debug {
 
 **Crate**: `mediagit-server` · **Framework**: Axum · **Port**: Configurable
 
-#### Endpoints (11 routes)
+#### Endpoints (20 handler routes + auth)
 
 | Method | Path | Handler | Purpose |
 |--------|------|---------|---------|
@@ -654,12 +654,21 @@ pub trait StorageBackend: Send + Sync + Debug {
 | POST | `/:repo/refs/update` | `update_refs` | Update or delete refs |
 | POST | `/:repo/objects/want` | `request_objects` | Request specific objects |
 | GET | `/:repo/objects/pack` | `download_pack` | Download pack file |
-| POST | `/:repo/objects/pack` | `upload_pack` | Upload pack file |
+| POST | `/:repo/objects/pack` | `upload_pack` | Upload pack file (streaming) |
 | POST | `/:repo/chunks/check` | `check_chunks_exist` | Check which chunks exist |
-| PUT | `/:repo/chunks/:chunk_id` | `upload_chunk` | Upload a single chunk |
-| PUT | `/:repo/manifests/:oid` | `upload_manifest` | Upload chunk manifest |
+| POST | `/:repo/chunks/upload-urls` | `presign_chunk_uploads` | Get presigned upload URLs |
+| POST | `/:repo/chunks/complete` | `complete_chunk_uploads` | Confirm chunk uploads |
 | GET | `/:repo/chunks/:chunk_id` | `download_chunk` | Download a single chunk |
+| PUT | `/:repo/chunks/:chunk_id` | `upload_chunk` | Upload a single chunk |
+| POST | `/:repo/chunk-deltas/check` | `check_chunk_deltas_exist` | Check chunk delta availability |
+| GET | `/:repo/chunk-deltas/:chunk_id` | `download_chunk_delta` | Download chunk delta sidecar |
+| PUT | `/:repo/chunk-deltas/:chunk_id` | `upload_chunk_delta` | Upload chunk delta sidecar |
 | GET | `/:repo/manifests/:oid` | `download_manifest` | Download chunk manifest |
+| PUT | `/:repo/manifests/:oid` | `upload_manifest` | Upload chunk manifest |
+| GET | `/:repo/files/*path` | `download_file_by_path` | Stream file by path from any ref |
+| GET | `/:repo/tree/*path` | `list_tree` | List directory contents as JSON |
+| GET | `/:repo/tree` | `list_tree_root` | List root tree contents |
+| GET | `/health`, `/healthz` | `health_handler` | Health check (bypasses auth) |
 | — | `/auth/*` | Auth routes | Login, register, token refresh |
 
 #### Security Middleware Stack
@@ -670,7 +679,7 @@ graph TD
     PV --> RL["Rate Limiting<br/>(Governor, IP-based)"]
     RL --> AU["Audit Logging"]
     AU --> SH["Security Headers<br/>(HSTS, X-Content-Type)"]
-    SH --> RV["Request Validation<br/>(body size ≤ 2GB)"]
+    SH --> RV["Request Validation<br/>(body size ≤ 2 GiB)"]
     RV --> AUTH["Authentication<br/>(JWT / API Key)"]
     AUTH --> TR["Tracing<br/>(OpenTelemetry spans)"]
     TR --> HANDLER["Route Handler"]
@@ -949,7 +958,10 @@ merge = "refs/heads/main"
 
 | Phase | Result |
 |-------|--------|
+| Unit / integration tests | 1,529 |
 | GCS deep test (end-to-end) | 75/75 |
+| Azure deep test (end-to-end) | 75/75 |
+| MinIO deep test (end-to-end) | 62/62 |
 | Format tests | 36/36 |
 | Video deep (MKV EBML, MOV Atom, ProRes+PCM) | 9/9 |
 | Audio deep (WAV, FLAC, OGG) | 3/3 |
