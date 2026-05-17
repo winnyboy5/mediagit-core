@@ -1428,8 +1428,9 @@ impl ProtocolClient {
                                             .ok()
                                             .and_then(|v| v.parse().ok())
                                             .unwrap_or(16 * 1024 * 1024);
-                                    if use_mpu && chunk_size >= mpu_threshold {
-                                        if upload_chunk_mpu(
+                                    if use_mpu
+                                        && chunk_size >= mpu_threshold
+                                        && upload_chunk_mpu(
                                             &client,
                                             &direct_client,
                                             &base_url,
@@ -1437,9 +1438,8 @@ impl ProtocolClient {
                                             &chunk_data,
                                         )
                                         .await
-                                        {
-                                            direct_succeeded = true;
-                                        }
+                                    {
+                                        direct_succeeded = true;
                                     }
                                 }
                                 if !direct_succeeded {

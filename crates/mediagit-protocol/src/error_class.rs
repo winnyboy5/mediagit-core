@@ -1,3 +1,16 @@
+// MediaGit - Git for Media Files
+// Copyright (C) 2025 MediaGit Contributors
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+
 /// Outcome of classifying a failed direct-transfer HTTP response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransferOutcome {
@@ -117,9 +130,10 @@ pub fn classify_gcs(status: u16, body: &str) -> TransferOutcome {
 fn detect_backend(url: &str, content_type: &str) -> &'static str {
     if url.contains(".blob.core.windows.net") {
         "azure"
-    } else if url.contains("storage.googleapis.com") || url.contains("googleapis.com/storage") {
-        "gcs"
-    } else if content_type.contains("application/json") && url.contains("googleapis") {
+    } else if url.contains("storage.googleapis.com")
+        || url.contains("googleapis.com/storage")
+        || (content_type.contains("application/json") && url.contains("googleapis"))
+    {
         "gcs"
     } else {
         "s3"

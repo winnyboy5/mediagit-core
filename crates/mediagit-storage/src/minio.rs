@@ -189,7 +189,6 @@ impl MinIOStats {
 ///
 /// This implementation is `Send + Sync` and can be safely shared across threads
 /// and async tasks.
-
 /// Compute optimal MPU part size for MinIO (S3-API-compatible; same limits as S3).
 /// See `mpu_part_size_s3` in s3.rs for the same logic.
 fn mpu_part_size_minio(total_size: u64) -> u64 {
@@ -202,7 +201,7 @@ fn mpu_part_size_minio(total_size: u64) -> u64 {
     if let Some(v) = std::env::var("MEDIAGIT_MPU_PART_SIZE")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
-        .filter(|&n| n >= MIN_PART && n <= MAX_PART)
+        .filter(|&n| (MIN_PART..=MAX_PART).contains(&n))
     {
         return v;
     }
@@ -1194,7 +1193,7 @@ impl StorageBackend for MinIOBackend {
                 .to_string()
         }; // permit released here — presigning proceeds concurrently
 
-        let num_parts = ((total_size + part_size - 1) / part_size).max(1) as i32;
+        let num_parts = total_size.div_ceil(part_size).max(1) as i32;
         let presigning = aws_sdk_s3::presigning::PresigningConfig::expires_in(ttl)
             .map_err(|e| anyhow!("presigning config: {}", e))?;
         let mut parts = Vec::with_capacity(num_parts as usize);
