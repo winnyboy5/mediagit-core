@@ -138,6 +138,9 @@ pub struct AppState {
     /// Directory containing repositories
     pub repos_dir: PathBuf,
 
+    /// TTL (seconds) for presigned PUT URLs issued to clients.
+    pub presigned_url_ttl_secs: u64,
+
     /// Cache of objects wanted by clients (request_id -> WantEntry)
     /// Uses unique request IDs to prevent race conditions between concurrent clients
     /// Bounded to prevent memory leaks from abandoned requests
@@ -169,6 +172,7 @@ impl AppState {
     pub fn new(repos_dir: PathBuf) -> Self {
         Self {
             repos_dir,
+            presigned_url_ttl_secs: 43200,
             want_cache: Mutex::new(WantCache::new()),
             storage_backends: RwLock::new(HashMap::new()),
             odb_cache: RwLock::new(HashMap::new()),
@@ -192,6 +196,7 @@ impl AppState {
 
         Self {
             repos_dir,
+            presigned_url_ttl_secs: 43200,
             want_cache: Mutex::new(WantCache::new()),
             storage_backends: RwLock::new(HashMap::new()),
             odb_cache: RwLock::new(HashMap::new()),
@@ -211,12 +216,19 @@ impl AppState {
 
         Self {
             repos_dir,
+            presigned_url_ttl_secs: 43200,
             want_cache: Mutex::new(WantCache::new()),
             storage_backends: RwLock::new(HashMap::new()),
             odb_cache: RwLock::new(HashMap::new()),
             auth_layer: Some(auth_layer),
             auth_service: Some(auth_service),
         }
+    }
+
+    /// Override the presigned URL TTL (called from `main` after reading config).
+    pub fn with_presigned_ttl(mut self, secs: u64) -> Self {
+        self.presigned_url_ttl_secs = secs;
+        self
     }
 
     /// Check if authentication is enabled

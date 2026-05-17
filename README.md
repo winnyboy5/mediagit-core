@@ -869,18 +869,19 @@ Special thanks to:
 
 ## Statistics
 
-- **Lines of Code**: 78,000+ (Rust)
+- **Lines of Code**: 85,000+ (Rust, 218 source files across 14 crates)
 - **Features**: 100% complete (all P0–P3 items)
-- **Test Coverage**: 960 unit tests; 194 E2E tests (Linux) + 84 scenarios (Windows) validated
+- **Test Coverage**: 1,529 unit/integration tests; 194 E2E tests (Linux) + 84 scenarios (Windows) validated
 - **Staging Throughput**: 25–240 MB/s for small files; 1.9–5.2 MB/s for chunked large files
 - **Network Throughput**: 167 MB/s push, 100 MB/s clone (local server)
 - **Storage Savings**: ~30% average across mixed media projects (compression + dedup + delta)
 - **Stability**: 0 crashes, 0 data corruption across all validated test runs
 - **File Formats**: 70+ extensions (video, audio, image, 3D, DCC, ML, game engines, office)
+- **Server Endpoints**: 20 handler routes + auth
 - **Platforms**: Linux, macOS, Windows — x86_64 + ARM64
 
 ---
 
 **Made with 🦀 and ❤️ by the MediaGit Contributors**
 
-**Status**: Beta | **Version**: v0.2.6-beta.1 | **Updated**: March 26, 2026
+**Status**: Beta | **Version**: v0.2.6-beta.1 | **Updated**: May 12, 2026

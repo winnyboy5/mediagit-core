@@ -36,6 +36,10 @@ mod templates {
     pub const PUSH: &str =
         "{spinner:.cyan} [{bar:40.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} (elapsed {elapsed}, eta {eta})";
 
+    /// Bytes-based progress for chunk downloads — mirrors PUSH format.
+    pub const DOWNLOAD_BYTES: &str =
+        "{spinner:.cyan} [{bar:40.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} (elapsed {elapsed}, eta {eta}) {msg}";
+
     /// Indeterminate spinner for operations without a known total.
     pub const SPINNER: &str = "{spinner:.cyan} {msg} [{elapsed}]";
 }
@@ -100,6 +104,15 @@ impl ProgressTracker {
             return ProgressBar::hidden();
         }
         self.make_bar_impl(total_bytes, "Pushing", templates::PUSH)
+    }
+
+    /// Create bytes progress bar for chunk downloads — mirrors push bar format.
+    /// `total_bytes` is seeded from manifest sizes in Phase 1; updated via `set_length`.
+    pub fn download_bar(&self, msg: &str, total_bytes: u64) -> ProgressBar {
+        if self.quiet {
+            return ProgressBar::hidden();
+        }
+        self.make_bar_impl(total_bytes, msg, templates::DOWNLOAD_BYTES)
     }
 
     /// Create spinner for indeterminate operations

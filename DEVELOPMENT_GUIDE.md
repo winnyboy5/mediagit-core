@@ -1,6 +1,6 @@
 # MediaGit-Core Development Guide
 **Version**: 0.2.6-beta.1
-**Last Updated**: May 5, 2026
+**Last Updated**: May 12, 2026
 
 Complete setup guide for MediaGit development - from beginner setup to production deployment.
 

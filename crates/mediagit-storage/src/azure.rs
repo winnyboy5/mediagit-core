@@ -818,6 +818,93 @@ impl StorageBackend for AzureBackend {
 
         Ok(results)
     }
+
+    async fn presign_put(
+        &self,
+        key: &str,
+        _content_length: u64,
+        ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<crate::PresignedPut>> {
+        let wire_key = self.full_key(key);
+        let blob_client = self.client.blob_client(&wire_key);
+
+        let expiry = time::OffsetDateTime::now_utc()
+            + time::Duration::new(ttl.as_secs() as i64, ttl.subsec_nanos() as i32);
+
+        let permissions = BlobSasPermissions {
+            write: true,
+            create: true,
+            ..Default::default()
+        };
+
+        let sas = match blob_client
+            .shared_access_signature(permissions, expiry)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!(err = %e, "Azure SAS unavailable; using proxy PUT");
+                return Ok(None);
+            }
+        };
+
+        let url = match blob_client.generate_signed_blob_url(&sas) {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::debug!(err = %e, "Azure signed URL failed; using proxy PUT");
+                return Ok(None);
+            }
+        };
+
+        Ok(Some(crate::PresignedPut {
+            url: url.to_string(),
+            method: "PUT".to_string(),
+            required_headers: vec![("x-ms-blob-type".to_string(), "BlockBlob".to_string())],
+            expires_at: std::time::SystemTime::now() + ttl,
+        }))
+    }
+
+    async fn presign_get(
+        &self,
+        key: &str,
+        ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<crate::PresignedDownload>> {
+        let wire_key = self.full_key(key);
+        let blob_client = self.client.blob_client(&wire_key);
+
+        let expiry = time::OffsetDateTime::now_utc()
+            + time::Duration::new(ttl.as_secs() as i64, ttl.subsec_nanos() as i32);
+
+        let permissions = BlobSasPermissions {
+            read: true,
+            ..Default::default()
+        };
+
+        let sas = match blob_client
+            .shared_access_signature(permissions, expiry)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!(err = %e, "Azure SAS unavailable; using proxy GET");
+                return Ok(None);
+            }
+        };
+
+        let url = match blob_client.generate_signed_blob_url(&sas) {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::debug!(err = %e, "Azure signed URL failed; using proxy GET");
+                return Ok(None);
+            }
+        };
+
+        Ok(Some(crate::PresignedDownload {
+            url: url.to_string(),
+            headers: vec![],
+            expires_in_secs: ttl.as_secs(),
+        }))
+    }
 }
 
 impl AzureBackend {

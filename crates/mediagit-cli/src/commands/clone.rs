@@ -139,7 +139,8 @@ url = "{}"
         ));
         let refdb = RefDatabase::new(&storage_path);
 
-        // Initialize protocol client
+        // Initialize protocol client (no repo config yet for clone — use env
+        // MEDIAGIT_DOWNLOAD_CONCURRENCY to tune download concurrency).
         let client = mediagit_protocol::ProtocolClient::new(self.url.clone());
 
         // Step 5: Get remote refs
@@ -179,20 +180,23 @@ url = "{}"
 
         // Step 7: Download chunked objects (large files)
         if !chunked_oids.is_empty() {
-            // Total is unknown until Phase 1 (manifest download) completes;
-            // set_length is called on the first progress callback.
-            let chunk_pb = progress.object_bar("Downloading large files", 0);
+            // Total bytes seeded from manifests in Phase 1 via first on_progress call.
+            let chunk_pb = progress.download_bar("Downloading large files", 0);
 
             let chunk_pb_ref = chunk_pb.clone();
             let chunks_downloaded = client
-                .download_chunked_objects(&odb, &chunked_oids, move |current, total, msg| {
-                    if chunk_pb_ref.length() != Some(total as u64) {
-                        chunk_pb_ref.set_length(total as u64);
-                        chunk_pb_ref.reset_eta();
-                    }
-                    chunk_pb_ref.set_position(current as u64);
-                    chunk_pb_ref.set_message(msg.to_string());
-                })
+                .download_chunked_objects(
+                    &odb,
+                    &chunked_oids,
+                    move |bytes_done, bytes_total, msg| {
+                        if chunk_pb_ref.length() != Some(bytes_total) {
+                            chunk_pb_ref.set_length(bytes_total);
+                            chunk_pb_ref.reset_eta();
+                        }
+                        chunk_pb_ref.set_position(bytes_done);
+                        chunk_pb_ref.set_message(msg.to_string());
+                    },
+                )
                 .await?;
 
             chunk_pb.finish_with_message(format!("Downloaded {} chunks", chunks_downloaded));

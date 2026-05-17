@@ -60,3 +60,6 @@ mediagit-security = { path = "../mediagit-security", features = ["all"] }
 tempfile = { workspace = true }
 reqwest = { workspace = true }
 futures = "0.3"
+async-trait = { workspace = true }
+postcard = { workspace = true }
+serde_json = { workspace = true }

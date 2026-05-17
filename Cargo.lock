@@ -3578,6 +3578,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "tokio-util",
  "tracing",
@@ -3617,6 +3618,7 @@ name = "mediagit-server"
 version = "0.2.6-beta.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "axum-server",
  "bytes",
@@ -3628,6 +3630,7 @@ dependencies = [
  "mediagit-security",
  "mediagit-storage",
  "mediagit-versioning",
+ "postcard",
  "reqwest 0.12.28",
  "rustls 0.23.40",
  "serde",
@@ -3651,6 +3654,7 @@ dependencies = [
  "async-trait",
  "aws-config",
  "aws-sdk-s3",
+ "aws-smithy-http-client",
  "azure_core",
  "azure_storage",
  "azure_storage_blobs",
@@ -3661,9 +3665,11 @@ dependencies = [
  "google-cloud-gax",
  "google-cloud-storage",
  "memmap2",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "time",
  "tokio",
  "tracing",
 ]

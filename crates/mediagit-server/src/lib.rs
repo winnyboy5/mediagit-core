@@ -93,6 +93,21 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Chunk transfer endpoints for large files (push and pull/clone)
         .route("/{repo}/chunks/check", post(handlers::check_chunks_exist))
         .route(
+            "/{repo}/chunks/upload-urls",
+            post(handlers::presign_chunk_uploads),
+        )
+        .route(
+            "/{repo}/chunks/download-urls",
+            post(handlers::presign_chunk_downloads),
+        )
+        .route(
+            "/{repo}/chunks/complete",
+            post(handlers::complete_chunk_uploads),
+        )
+        .route("/{repo}/chunks/mpu/start", post(handlers::mpu_start))
+        .route("/{repo}/chunks/mpu/complete", post(handlers::mpu_complete))
+        .route("/{repo}/chunks/mpu/abort", post(handlers::mpu_abort))
+        .route(
             "/{repo}/chunks/{chunk_id}",
             get(handlers::download_chunk).put(handlers::upload_chunk),
         )
@@ -233,6 +248,21 @@ pub fn create_router_with_rate_limit(
         )
         // Chunk transfer endpoints for large files (push and pull/clone)
         .route("/{repo}/chunks/check", post(handlers::check_chunks_exist))
+        .route(
+            "/{repo}/chunks/upload-urls",
+            post(handlers::presign_chunk_uploads),
+        )
+        .route(
+            "/{repo}/chunks/download-urls",
+            post(handlers::presign_chunk_downloads),
+        )
+        .route(
+            "/{repo}/chunks/complete",
+            post(handlers::complete_chunk_uploads),
+        )
+        .route("/{repo}/chunks/mpu/start", post(handlers::mpu_start))
+        .route("/{repo}/chunks/mpu/complete", post(handlers::mpu_complete))
+        .route("/{repo}/chunks/mpu/abort", post(handlers::mpu_abort))
         .route(
             "/{repo}/chunks/{chunk_id}",
             get(handlers::download_chunk).put(handlers::upload_chunk),

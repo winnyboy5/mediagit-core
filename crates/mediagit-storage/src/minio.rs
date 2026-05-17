@@ -88,6 +88,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Semaphore;
 use tracing::{debug, warn};
 
 /// Configuration for the MinIO backend
@@ -116,16 +117,16 @@ pub struct MinIOConfig {
     /// Use path-style addressing (default: true for MinIO)
     pub path_style: bool,
 
-    /// Multipart upload part size in bytes (default: 100MB)
+    /// Multipart upload part size in bytes (default: 8MB)
     pub part_size: u64,
 
     /// Maximum number of concurrent parts to upload (default: 8)
     pub max_concurrent_parts: usize,
 
-    /// Maximum number of retries for failed operations (default: 3)
+    /// Maximum number of retries for failed operations (default: 5)
     pub max_retries: u32,
 
-    /// Initial retry delay in milliseconds (default: 100ms)
+    /// Initial retry delay in milliseconds (default: 1000ms)
     pub initial_retry_delay_ms: u64,
 }
 
@@ -139,10 +140,13 @@ impl Default for MinIOConfig {
             prefix: String::new(),
             region: "us-east-1".to_string(),
             path_style: true,
-            part_size: 8 * 1024 * 1024, // 8MB default — switches to multipart early to avoid WAN timeout
+            // 8MB: chunks larger than this use multipart so each HTTP part
+            // is small enough to complete reliably over a slow/lossy WAN
+            // connection (S3 resets TCP mid-body on large single PUTs).
+            part_size: 8 * 1024 * 1024,
             max_concurrent_parts: 8,
-            max_retries: 3,
-            initial_retry_delay_ms: 100,
+            max_retries: 5,
+            initial_retry_delay_ms: 1000,
         }
     }
 }
@@ -185,11 +189,37 @@ impl MinIOStats {
 ///
 /// This implementation is `Send + Sync` and can be safely shared across threads
 /// and async tasks.
+
+/// Compute optimal MPU part size for MinIO (S3-API-compatible; same limits as S3).
+/// See `mpu_part_size_s3` in s3.rs for the same logic.
+fn mpu_part_size_minio(total_size: u64) -> u64 {
+    const MIN_PART: u64 = 5 * 1024 * 1024;
+    const MAX_PART: u64 = 5 * 1024 * 1024 * 1024;
+    const MAX_PARTS: u64 = 10_000;
+    const TARGET_PARTS: u64 = 96;
+    const FLOOR: u64 = 16 * 1024 * 1024;
+
+    if let Some(v) = std::env::var("MEDIAGIT_MPU_PART_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n >= MIN_PART && n <= MAX_PART)
+    {
+        return v;
+    }
+
+    let by_count = total_size.div_ceil(MAX_PARTS).max(MIN_PART);
+    let by_target = total_size.div_ceil(TARGET_PARTS).max(MIN_PART);
+    FLOOR.max(by_count).max(by_target).min(MAX_PART)
+}
+
 #[derive(Clone)]
 pub struct MinIOBackend {
     client: Client,
     config: Arc<MinIOConfig>,
     stats: Arc<MinIOStats>,
+    // Limits concurrent create_multipart_upload calls to prevent overwhelming MinIO.
+    // Env: MEDIAGIT_MINIO_MPU_CONCURRENCY (default 16). Set to 0 to disable.
+    mpu_sem: Arc<Semaphore>,
     // Keep these for backward compatibility
     endpoint: String,
     bucket: String,
@@ -388,8 +418,19 @@ impl MinIOBackend {
         //   Chunks can be 10s–100s MB; over a slow WAN link a 30-s cap kills legitimate
         //   uploads. The connect_timeout (5 s) is the safety valve against dead servers.
         //   The SDK retry_config (max_attempts=2) provides a second chance on transient errors.
+        // F2: wider connect window for cross-region TLS handshakes; more attempts absorb
+        // transient S3 connection resets without surfacing 500s to the client.
+        // Env overrides: MEDIAGIT_AWS_CONNECT_TIMEOUT_SECS, MEDIAGIT_AWS_MAX_ATTEMPTS.
+        let connect_timeout_secs: u64 = std::env::var("MEDIAGIT_AWS_CONNECT_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10);
+        let max_attempts: u32 = std::env::var("MEDIAGIT_AWS_MAX_ATTEMPTS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
         let timeout_config = TimeoutConfig::builder()
-            .connect_timeout(Duration::from_secs(5))
+            .connect_timeout(Duration::from_secs(connect_timeout_secs))
             .read_timeout(Duration::from_secs(120))
             .build();
 
@@ -400,7 +441,10 @@ impl MinIOBackend {
             .force_path_style(config.path_style)
             .region(aws_sdk_s3::config::Region::new(config.region.clone()))
             .timeout_config(timeout_config)
-            .retry_config(RetryConfig::standard().with_max_attempts(2))
+            .retry_config(RetryConfig::standard().with_max_attempts(max_attempts))
+            // F1: share the process-wide warm connection pool so concurrent MPU calls
+            // reuse existing TCP+TLS sessions instead of opening new ones on every burst.
+            .http_client(crate::http_pool::shared())
             .build();
 
         let client = Client::from_conf(s3_config);
@@ -470,10 +514,40 @@ impl MinIOBackend {
 
         debug!("Successfully connected to MinIO bucket: {}", config.bucket);
 
+        // F3: pre-warm the shared HTTP pool so the first MPU burst finds warm TCP sessions.
+        // Fire-and-forget; failures are harmless — the pool will self-populate on first use.
+        // Env: MEDIAGIT_AWS_POOL_WARM (default 16). Set to 0 to disable.
+        let warm: usize = std::env::var("MEDIAGIT_AWS_POOL_WARM")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(16);
+        if warm > 0 {
+            let warm_client = client.clone();
+            let warm_bucket = config.bucket.clone();
+            tokio::spawn(async move {
+                let futs: Vec<_> = (0..warm)
+                    .map(|_| {
+                        let c = warm_client.clone();
+                        let b = warm_bucket.clone();
+                        async move {
+                            let _ = c.head_bucket().bucket(&b).send().await;
+                        }
+                    })
+                    .collect();
+                futures::future::join_all(futs).await;
+            });
+        }
+
+        let mpu_concurrency = std::env::var("MEDIAGIT_MINIO_MPU_CONCURRENCY")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(16)
+            .max(1);
         Ok(MinIOBackend {
             client,
             config: Arc::new(config.clone()),
             stats: Arc::new(MinIOStats::new()),
+            mpu_sem: Arc::new(Semaphore::new(mpu_concurrency)),
             endpoint: config.endpoint,
             bucket: config.bucket,
             _access_key: config.access_key,
@@ -523,7 +597,9 @@ impl MinIOBackend {
         Ok(())
     }
 
-    /// Perform operation with exponential backoff retry logic
+    /// Perform operation with exponential backoff retry logic.
+    /// Permanent errors (NoSuchKey, AccessDenied) are returned immediately
+    /// without retry — retrying them wastes time and hides the real cause.
     async fn with_retry<F, T>(&self, mut operation: F) -> Result<T>
     where
         F: FnMut() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send>>,
@@ -535,10 +611,21 @@ impl MinIOBackend {
             match operation().await {
                 Ok(result) => return Ok(result),
                 Err(e) => {
+                    let msg = e.to_string().to_lowercase();
+                    let is_permanent = msg.contains("nosuchkey")
+                        || msg.contains("no such key")
+                        || msg.contains("accessdenied")
+                        || msg.contains("access denied");
+                    if is_permanent {
+                        return Err(e);
+                    }
+
                     retry_count += 1;
                     if retry_count >= self.config.max_retries {
-                        return Err(e)
-                            .context(format!("Failed after {} retries", self.config.max_retries));
+                        return Err(e).context(format!(
+                            "Failed after {} retries; last error follows",
+                            self.config.max_retries
+                        ));
                     }
 
                     warn!(
@@ -548,8 +635,7 @@ impl MinIOBackend {
 
                     tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
 
-                    // Exponential backoff with jitter
-                    delay_ms = (delay_ms * 2).min(10000); // Cap at 10 seconds
+                    delay_ms = (delay_ms * 2).min(10000);
                 }
             }
         }
@@ -679,6 +765,7 @@ impl MinIOBackend {
 
         // Upload parts concurrently
         let mut part_handles = vec![];
+        let mut parts = vec![];
         let part_size = self.config.part_size as usize;
         let mut part_number = 1;
 
@@ -691,6 +778,8 @@ impl MinIOBackend {
             let chunk_data = chunk.to_vec();
             let part_num = part_number;
 
+            let max_retries = self.config.max_retries;
+            let initial_delay = self.config.initial_retry_delay_ms;
             let handle = tokio::spawn(async move {
                 debug!(
                     "Uploading part {} ({} bytes) for key: {}",
@@ -699,36 +788,60 @@ impl MinIOBackend {
                     key
                 );
 
-                let response = client
-                    .upload_part()
-                    .bucket(&bucket)
-                    .key(&key)
-                    .upload_id(&upload_id)
-                    .part_number(part_num)
-                    .body(Bytes::from(chunk_data.clone()).into())
-                    .send()
-                    .await
-                    .map_err(|e| anyhow!("Failed to upload part {}: {}", part_num, e))?;
-
-                let etag = response
-                    .e_tag()
-                    .ok_or_else(|| anyhow!("No ETag returned for part {}", part_num))?
-                    .to_string();
+                let mut retry = 0u32;
+                let mut delay_ms = initial_delay;
+                let (part_num_out, etag) = loop {
+                    let response = client
+                        .upload_part()
+                        .bucket(&bucket)
+                        .key(&key)
+                        .upload_id(&upload_id)
+                        .part_number(part_num)
+                        .body(Bytes::from(chunk_data.clone()).into())
+                        .send()
+                        .await;
+                    match response {
+                        Ok(r) => {
+                            let etag = r
+                                .e_tag()
+                                .ok_or_else(|| anyhow!("No ETag returned for part {}", part_num))?
+                                .to_string();
+                            break (part_num, etag);
+                        }
+                        Err(e) => {
+                            retry += 1;
+                            if retry >= max_retries {
+                                return Err(anyhow!(
+                                    "Failed to upload part {} after {} retries: {}",
+                                    part_num,
+                                    max_retries,
+                                    e
+                                ));
+                            }
+                            warn!(
+                                "Part {} upload failed (attempt {}/{}), retrying in {}ms: {}",
+                                part_num, retry, max_retries, delay_ms, e
+                            );
+                            tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                            delay_ms = (delay_ms * 2).min(10_000);
+                        }
+                    }
+                };
 
                 stats
                     .total_bytes_uploaded
                     .fetch_add(chunk_data.len() as u64, Ordering::Relaxed);
 
-                Ok::<_, anyhow::Error>((part_num, etag))
+                Ok::<_, anyhow::Error>((part_num_out, etag))
             });
 
             part_handles.push(handle);
 
             // Limit concurrent uploads
             if part_handles.len() >= self.config.max_concurrent_parts {
-                // Wait for one to complete before starting more
                 if let Some(handle) = part_handles.pop() {
-                    let _ = handle.await??;
+                    let (part_num, etag) = handle.await??;
+                    parts.push((part_num, etag));
                 }
             }
 
@@ -736,7 +849,6 @@ impl MinIOBackend {
         }
 
         // Wait for all remaining parts to complete
-        let mut parts = vec![];
         for handle in part_handles {
             let (part_num, etag) = handle.await??;
             parts.push((part_num, etag));
@@ -1000,6 +1112,164 @@ impl StorageBackend for MinIOBackend {
         );
         Ok(result)
     }
+
+    async fn presign_put(
+        &self,
+        key: &str,
+        _content_length: u64,
+        ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<crate::PresignedPut>> {
+        let wire_key = self.full_key(key);
+        let presigning = aws_sdk_s3::presigning::PresigningConfig::expires_in(ttl)
+            .map_err(|e| anyhow!("presigning config: {e}"))?;
+        let req = self
+            .client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(&wire_key)
+            .presigned(presigning)
+            .await
+            .map_err(|e| anyhow!("presign_put minio: {e}"))?;
+        Ok(Some(crate::PresignedPut {
+            url: req.uri().to_string(),
+            method: "PUT".to_string(),
+            required_headers: req
+                .headers()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            expires_at: std::time::SystemTime::now() + ttl,
+        }))
+    }
+
+    async fn presign_get(
+        &self,
+        key: &str,
+        ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<crate::PresignedDownload>> {
+        let wire_key = self.full_key(key);
+        let presigning = aws_sdk_s3::presigning::PresigningConfig::expires_in(ttl)
+            .map_err(|e| anyhow!("presigning config: {e}"))?;
+        let req = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(&wire_key)
+            .presigned(presigning)
+            .await
+            .map_err(|e| anyhow!("presign_get minio: {e}"))?;
+        Ok(Some(crate::PresignedDownload {
+            url: req.uri().to_string(),
+            headers: vec![],
+            expires_in_secs: ttl.as_secs(),
+        }))
+    }
+
+    async fn create_presigned_mpu(
+        &self,
+        key: &str,
+        total_size: u64,
+        ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<crate::PresignedMpu>> {
+        let part_size = mpu_part_size_minio(total_size);
+        let wire_key = self.full_key(key);
+        // Semaphore scope: only protect the TCP connection burst for create_multipart_upload.
+        // Released before presigning so the loop (local CPU work, no network) runs concurrently
+        // across all tasks. Holding it through presigning serialized 32 tasks and killed throughput.
+        let upload_id = {
+            let _permit = self
+                .mpu_sem
+                .acquire()
+                .await
+                .map_err(|e| anyhow!("mpu semaphore: {}", e))?;
+            let resp = self
+                .client
+                .create_multipart_upload()
+                .bucket(&self.config.bucket)
+                .key(&wire_key)
+                .send()
+                .await
+                .map_err(|e| anyhow!("create_multipart_upload minio: {}", e))?;
+            resp.upload_id()
+                .ok_or_else(|| anyhow!("no upload_id from MinIO"))?
+                .to_string()
+        }; // permit released here — presigning proceeds concurrently
+
+        let num_parts = ((total_size + part_size - 1) / part_size).max(1) as i32;
+        let presigning = aws_sdk_s3::presigning::PresigningConfig::expires_in(ttl)
+            .map_err(|e| anyhow!("presigning config: {}", e))?;
+        let mut parts = Vec::with_capacity(num_parts as usize);
+        for part_number in 1..=num_parts {
+            let req = self
+                .client
+                .upload_part()
+                .bucket(&self.config.bucket)
+                .key(&wire_key)
+                .upload_id(&upload_id)
+                .part_number(part_number)
+                .presigned(presigning.clone())
+                .await
+                .map_err(|e| anyhow!("presign upload_part {} minio: {}", part_number, e))?;
+            parts.push(crate::PresignedMpuPart {
+                part_number,
+                url: req.uri().to_string(),
+            });
+        }
+        Ok(Some(crate::PresignedMpu {
+            upload_id,
+            parts,
+            part_size,
+        }))
+    }
+
+    async fn complete_presigned_mpu(
+        &self,
+        key: &str,
+        upload_id: &str,
+        parts: Vec<crate::MpuCompletedPart>,
+    ) -> anyhow::Result<()> {
+        let wire_key = self.full_key(key);
+        let completed: Vec<_> = parts
+            .into_iter()
+            .map(|p| {
+                aws_sdk_s3::types::CompletedPart::builder()
+                    .part_number(p.part_number)
+                    .e_tag(p.etag)
+                    .build()
+            })
+            .collect();
+        let _permit = self
+            .mpu_sem
+            .acquire()
+            .await
+            .map_err(|e| anyhow!("mpu semaphore: {}", e))?;
+        self.client
+            .complete_multipart_upload()
+            .bucket(&self.config.bucket)
+            .key(&wire_key)
+            .upload_id(upload_id)
+            .multipart_upload(
+                aws_sdk_s3::types::CompletedMultipartUpload::builder()
+                    .set_parts(Some(completed))
+                    .build(),
+            )
+            .send()
+            .await
+            .map_err(|e| anyhow!("complete_multipart_upload minio: {}", e))?;
+        Ok(())
+    }
+
+    async fn abort_presigned_mpu(&self, key: &str, upload_id: &str) -> anyhow::Result<()> {
+        let wire_key = self.full_key(key);
+        let _ = self
+            .client
+            .abort_multipart_upload()
+            .bucket(&self.config.bucket)
+            .key(&wire_key)
+            .upload_id(upload_id)
+            .send()
+            .await;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1068,6 +1338,7 @@ mod tests {
             client,
             config: Arc::new(cfg.clone()),
             stats: Arc::new(MinIOStats::new()),
+            mpu_sem: Arc::new(Semaphore::new(16)),
             endpoint: cfg.endpoint,
             bucket: cfg.bucket,
             _access_key: cfg.access_key,
