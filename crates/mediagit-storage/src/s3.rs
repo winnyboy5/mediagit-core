@@ -156,7 +156,6 @@ impl Default for S3Config {
 ///
 /// This implementation is `Send + Sync` and can be safely shared across threads
 /// and async tasks.
-
 /// Compute the optimal MPU part size for a given object size on S3/MinIO/B2.
 ///
 /// S3 rules: ≥5 MiB per part (except last), ≤10 000 parts/object, ≤5 TiB/object.
@@ -175,7 +174,7 @@ fn mpu_part_size_s3(total_size: u64) -> u64 {
     if let Some(v) = std::env::var("MEDIAGIT_MPU_PART_SIZE")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
-        .filter(|&n| n >= MIN_PART && n <= MAX_PART)
+        .filter(|&n| (MIN_PART..=MAX_PART).contains(&n))
     {
         return v;
     }
@@ -862,7 +861,7 @@ impl StorageBackend for S3Backend {
             .ok_or_else(|| anyhow!("no upload_id from S3"))?
             .to_string();
 
-        let num_parts = ((total_size + part_size - 1) / part_size).max(1) as i32;
+        let num_parts = total_size.div_ceil(part_size).max(1) as i32;
         let presigning = aws_sdk_s3::presigning::PresigningConfig::expires_in(ttl)
             .map_err(|e| anyhow!("presigning config: {}", e))?;
         let mut parts = Vec::with_capacity(num_parts as usize);
