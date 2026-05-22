@@ -1,0 +1,1 @@
+[bench] bench_schema_version=2 op=download chunks=2500 total_bytes=116352664498 wall=62.72s active_sum=61.20s avg_chunk_mb=4.44 throughput_mbs=176.91 util_pct=3% manifest_to_first_byte_ms=76.6 knobs=MEDIAGIT_BENCH=1
