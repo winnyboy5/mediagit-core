@@ -141,9 +141,21 @@ pub struct GcsBackend {
     /// Control-plane client: get_object, delete_object, list_objects.
     control: Arc<StorageControl>,
     config: GcsConfig,
+    /// Caps concurrent write_object calls. GCS TCP connections time out after
+    /// ~20-25 s when too many concurrent uploads land on the same host.
+    /// Configurable via MEDIAGIT_GCS_UPLOAD_CONCURRENCY (default 4).
+    upload_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl GcsBackend {
+    fn build_upload_semaphore() -> Arc<tokio::sync::Semaphore> {
+        let n = std::env::var("MEDIAGIT_GCS_UPLOAD_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(4);
+        Arc::new(tokio::sync::Semaphore::new(n))
+    }
+
     /// Return the GCS resource path for the configured bucket.
     ///
     /// v1.11 requires the format `projects/_/buckets/{bucket_id}` for all
@@ -226,6 +238,7 @@ impl GcsBackend {
             storage: Arc::new(storage),
             control: Arc::new(control),
             config: gcs_config,
+            upload_semaphore: Self::build_upload_semaphore(),
         })
     }
 
@@ -266,6 +279,7 @@ impl GcsBackend {
             storage: Arc::new(storage),
             control: Arc::new(control),
             config,
+            upload_semaphore: Self::build_upload_semaphore(),
         })
     }
 
@@ -349,6 +363,7 @@ impl GcsBackend {
             storage: Arc::new(storage),
             control: Arc::new(control),
             config: gcs_config,
+            upload_semaphore: Self::build_upload_semaphore(),
         })
     }
 
@@ -495,6 +510,14 @@ impl StorageBackend for GcsBackend {
         // Single copy into an Arc-managed buffer; retries inside the SDK reuse
         // the same `Bytes` (cheap clone — Arc bump only).
         let payload = Bytes::copy_from_slice(data);
+
+        // Gate concurrent uploads: too many simultaneous write_object calls
+        // exhaust GCS TCP connections and trigger transport timeouts (~20-25 s).
+        let _permit = self
+            .upload_semaphore
+            .acquire()
+            .await
+            .map_err(|e| anyhow::anyhow!("GCS upload semaphore closed: {}", e))?;
 
         self.storage
             .write_object(&bucket_path, key, payload)

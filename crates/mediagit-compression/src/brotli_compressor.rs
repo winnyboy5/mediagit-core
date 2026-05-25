@@ -130,6 +130,22 @@ impl Compressor for BrotliCompressor {
 mod tests {
     use super::*;
 
+    /// R5/B6: corrupt brotli frame must surface as CompressionError, never panic.
+    #[test]
+    fn decompress_corrupt_brotli_frame_is_typed_error() {
+        let c = BrotliCompressor::new(CompressionLevel::Default);
+        let mut corrupt = b"BRT\x01".to_vec(); // brotli marker
+        corrupt.extend_from_slice(&[0xFFu8; 64]); // garbage body
+        let err = c
+            .decompress(&corrupt)
+            .expect_err("corrupt brotli frame must return Err");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("brotli") || msg.contains("decompression"),
+            "error must name brotli or decompression, got: {msg}"
+        );
+    }
+
     #[test]
     fn test_brotli_compress_decompress() {
         let compressor = BrotliCompressor::new(CompressionLevel::Default);

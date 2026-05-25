@@ -246,6 +246,33 @@ pub trait Compressor: Send + Sync + Debug {
     fn decompress(&self, data: &[u8]) -> CompressionResult<Vec<u8>>;
 }
 
+/// Decompress `data` using `spawn_blocking` when the payload exceeds the configured threshold.
+///
+/// Gated by `MEDIAGIT_DECOMPRESS_BLOCKING` (enabled unless set to `"0"`) and
+/// `MEDIAGIT_DECOMPRESS_BLOCKING_THRESHOLD` (default 262144 bytes / 256 KiB).
+/// Below the threshold a direct synchronous call avoids the dispatch overhead.
+pub async fn decompress_maybe_blocking(
+    compressor: std::sync::Arc<dyn Compressor>,
+    data: Vec<u8>,
+) -> CompressionResult<Vec<u8>> {
+    let enabled = std::env::var("MEDIAGIT_DECOMPRESS_BLOCKING")
+        .as_deref()
+        .unwrap_or("1")
+        != "0";
+    let threshold: usize = std::env::var("MEDIAGIT_DECOMPRESS_BLOCKING_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(262144);
+
+    if enabled && data.len() >= threshold {
+        tokio::task::spawn_blocking(move || compressor.decompress(&data))
+            .await
+            .map_err(|e| CompressionError::decompression_failed(e.to_string()))?
+    } else {
+        compressor.decompress(&data)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

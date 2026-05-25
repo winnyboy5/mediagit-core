@@ -266,6 +266,51 @@ pub trait StorageBackend: Send + Sync + Debug {
     /// ```
     async fn get(&self, key: &str) -> anyhow::Result<Vec<u8>>;
 
+    /// Stream an object as a sequence of `Bytes` chunks (B7).
+    ///
+    /// Default impl fetches the full object via `get` and emits it as a single chunk.
+    /// Backends may override with a native streaming implementation for better memory
+    /// efficiency on large objects. Gated by `MEDIAGIT_STORAGE_STREAMING=1` (OFF by default).
+    async fn get_streaming(
+        &self,
+        key: &str,
+    ) -> anyhow::Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+        >,
+    > {
+        let data = self.get(key).await?;
+        let stream = futures::stream::once(async move {
+            Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(data))
+        });
+        Ok(Box::pin(stream))
+    }
+
+    /// Stream a byte-range of an object (F5 — reserved for Track F cloud-pack Range GETs).
+    ///
+    /// Default impl returns `Unsupported`. S3/GCS/Azure native impls will be added in Track F.
+    async fn get_streaming_range(
+        &self,
+        _key: &str,
+        _range: std::ops::Range<u64>,
+    ) -> anyhow::Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+        >,
+    > {
+        anyhow::bail!("get_streaming_range is not yet implemented for this backend")
+    }
+
+    /// Store an object from a local temp file (B4 stream-to-disk).
+    ///
+    /// Default impl reads the file into memory and calls `put`. `LocalBackend`
+    /// overrides with an atomic rename so the data is never re-buffered in RAM.
+    /// Gated by `MEDIAGIT_STREAM_CHUNK_TO_DISK=1` in the protocol client.
+    async fn put_file(&self, key: &str, src: &std::path::Path) -> anyhow::Result<()> {
+        let data = tokio::fs::read(src).await?;
+        self.put(key, &data).await
+    }
+
     /// Store an object with the given key
     ///
     /// This operation is idempotent: calling it multiple times with the same key

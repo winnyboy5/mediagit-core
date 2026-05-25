@@ -61,6 +61,8 @@
 //! }
 //! ```
 
+pub mod hash;
+
 mod branch;
 mod checkout;
 pub mod chunking;
@@ -106,7 +108,7 @@ pub use merge::{apply_merge_to_workdir, FastForwardInfo, MergeEngine, MergeResul
 pub use metrics::OdbMetrics;
 pub use object::ObjectType;
 pub use odb::{ObjectDatabase, RepackStats};
-pub use oid::Oid;
+pub use oid::{Oid, StorageKey};
 pub use pack::{PackHeader, PackIndex, PackMetadata, PackObjectEntry, PackReader, PackWriter};
 pub use reachability::walk_reachable;
 pub use reflog::{Reflog, ReflogEntry};

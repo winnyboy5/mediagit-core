@@ -286,4 +286,21 @@ mod tests {
         let decompressed = compressor.decompress(&compressed).unwrap();
         assert_eq!(decompressed, git_blob);
     }
+
+    /// R5/B6: corrupt zlib frame must surface as CompressionError, never panic.
+    #[test]
+    fn decompress_corrupt_zlib_frame_is_typed_error() {
+        let c = ZlibCompressor::new(CompressionLevel::Default);
+        // 0x789C is a valid zlib header (CMF=0x78, FLG=0x9C, 0x78*256+0x9C == 30876, divisible by 31)
+        let mut corrupt = vec![0x78u8, 0x9c]; // valid zlib header
+        corrupt.extend_from_slice(&[0xFFu8; 64]); // garbage body
+        let err = c
+            .decompress(&corrupt)
+            .expect_err("corrupt zlib frame must return Err");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("zlib") || msg.contains("decompression"),
+            "error must name zlib or decompression, got: {msg}"
+        );
+    }
 }

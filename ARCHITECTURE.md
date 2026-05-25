@@ -141,7 +141,7 @@ The ODB is the core storage engine (`mediagit-versioning/src/odb.rs`, 3,576 line
 - **Tag** — Named pointer to any object
 
 ### Content-Addressable Storage
-- **Hashing**: SHA-256 (via `sha2` crate)
+- **Hashing**: BLAKE3 (via `blake3` crate)
 - **Deduplication**: Identical content → same OID, stored once
 - **LRU Cache**: Configurable in-memory cache for hot objects
 - **Metrics**: Tracks reads, writes, cache hits, bytes saved
@@ -595,7 +595,7 @@ Six format-specific merge strategies with automatic conflict detection:
 ```rust
 pub struct IndexEntry {
     pub path: PathBuf,      // Relative to repo root
-    pub oid: Oid,           // SHA-256 of staged content
+    pub oid: Oid,           // BLAKE3 of staged content
     pub mode: u32,          // File permissions
     pub size: u64,          // File size in bytes
     pub mtime: Option<u64>, // Modification time (stat-cache)
@@ -928,9 +928,9 @@ merge = "refs/heads/main"
 
 ---
 
-## Performance Benchmarks (v0.2.6-beta.1)
+## Performance Benchmarks (v0.2.7-beta.1)
 
-> Measured via standalone deep test suite on Windows, release build, 36 formats. Last run: 2026-05-05 (GCS backend, 75/75 tests passing).
+> Measured via deep test suite on Windows, release build, 23 formats, 459/459 tests. Last run: 2026-05-25 (AWS/Azure/GCS backends).
 
 ### Storage Savings by Category
 

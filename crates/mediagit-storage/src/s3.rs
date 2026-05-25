@@ -596,6 +596,72 @@ impl StorageBackend for S3Backend {
         .await
     }
 
+    /// Stream an object from S3 as a `Bytes` sequence (B7).
+    ///
+    /// When `MEDIAGIT_STORAGE_STREAMING=1`, drives the AWS SDK's `ByteStream` via
+    /// `into_async_read()` + `unfold` so the object body is never fully buffered.
+    /// Falls back to the default single-chunk impl when the knob is OFF.
+    /// No retry on the streaming path: mid-stream failures bubble up to the caller.
+    async fn get_streaming(
+        &self,
+        key: &str,
+    ) -> anyhow::Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+        >,
+    > {
+        // B7: default ON — AWS clone 15.8% faster (159.8s→134.5s) on ap-south-1 (2026-05-22).
+        // Set MEDIAGIT_STORAGE_STREAMING=0 to revert to Vec<u8> round-trip.
+        let streaming_enabled = std::env::var("MEDIAGIT_STORAGE_STREAMING")
+            .as_deref()
+            .unwrap_or("1")
+            == "1";
+        if !streaming_enabled {
+            let data = self.get(key).await?;
+            return Ok(Box::pin(futures::stream::once(async move {
+                Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(data))
+            })));
+        }
+
+        Self::validate_key(key)?;
+        let key_clone = key.to_string();
+        let client = self.client.clone();
+        let bucket = self.config.bucket.clone();
+        let stats = self.stats.clone();
+
+        let response = client
+            .get_object()
+            .bucket(&bucket)
+            .key(&key_clone)
+            .send()
+            .await
+            .map_err(|e| anyhow!("get_streaming {}: {}", key_clone, e))?;
+
+        // ByteStream does not implement futures::Stream directly; convert to
+        // tokio::io::AsyncRead and drive with unfold to yield 64 KiB Bytes chunks.
+        let reader = response.body.into_async_read();
+        let stream = futures::stream::unfold((reader, stats), |(mut rdr, stats)| async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf = vec![0u8; 65536];
+            match rdr.read(&mut buf).await {
+                Ok(0) => None,
+                Ok(n) => {
+                    buf.truncate(n);
+                    stats
+                        .total_bytes_downloaded
+                        .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                    Some((
+                        Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(buf)),
+                        (rdr, stats),
+                    ))
+                }
+                Err(e) => Some((Err(anyhow!("get_streaming chunk: {}", e)), (rdr, stats))),
+            }
+        });
+
+        Ok(Box::pin(stream))
+    }
+
     /// Store an object in S3
     ///
     /// For objects smaller than the configured part size, uses direct put_object.

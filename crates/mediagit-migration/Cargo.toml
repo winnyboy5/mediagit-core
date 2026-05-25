@@ -17,8 +17,9 @@ tokio = { workspace = true, features = ["full"] }
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
-sha2.workspace = true
+blake3.workspace = true
 hex.workspace = true
+mediagit-versioning = { path = "../mediagit-versioning" }
 tracing.workspace = true
 
 # MediaGit dependencies

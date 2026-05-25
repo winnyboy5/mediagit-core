@@ -11,6 +11,7 @@ documentation.workspace = true
 description = "Content-aware compression engine for media objects"
 
 [dependencies]
+tokio = { workspace = true, features = ["rt"] }
 zstd.workspace = true
 brotli.workspace = true
 flate2.workspace = true

@@ -4,7 +4,7 @@ Consolidated and **priority-ordered** registry of planned features, code-level T
 known limitations for MediaGit. Items are sourced from documentation, source code, and
 historical claudedocs analyses.
 
-> Last updated: 2026-04-03 | v0.2.6-beta.1 | Items 1 (.mediagitignore) + 4 (Streaming Format-Aware Chunker, S1–S5) **DONE**
+> Last updated: 2026-05-25 | v0.2.7-beta.1 | Items 1 (.mediagitignore) + 4 (Streaming Format-Aware Chunker, S1–S5) + Push Progress/Throughput fixes + BLAKE3 + B2/B4/B7 pipeline **DONE**
 
 **Priority levels:**
 - **P0** — Quick win or active blocker — ≤1 day effort, implement immediately
@@ -19,9 +19,10 @@ historical claudedocs analyses.
 | # | Item | Priority | Effort | Blocks / Enables |
 |---|------|----------|--------|-----------------|
 | 1 | `.mediagitignore` support in `add` + `status` | ~~**P1**~~ **✅ DONE** | 2-3 days | Shipped in v0.2.6-beta.1 |
-| 2 | Pack negotiation / bitmap index | **P1** | 1 wk | Incremental fetch (currently full-pack always) |
+| 2 | Pack negotiation / bitmap index | ~~**P1**~~ **✅ DONE** | — | Pack negotiation shipped v0.2.6-beta.1; bitmap index deferred (see §2b) |
 | 3 | Parallel object I/O during checkout | **P1** | 1 wk | Branch switch latency |
 | 4 | Streaming format-aware chunker (MKV/MP4/GLB, S1-S5) | ~~**P1**~~ **✅ DONE** | 8-12 days | Shipped in v0.2.6-beta.1 |
+| 5 | **Phase-3 Track F — Cloud-side pack objects** (xorb-style chunk bundling) | **P1** | 2-3 wks | 5-10× clone speedup; 10k S3 objects → ~100 per push/clone; design ready |
 | 6 | Direct file serving endpoints + `mediagit download` CLI | **P1** | 2-3 days | Web UI, CI integration, CDN |
 | 7 | `mediagit media info` command | **P2** | ~200 LOC | UX for media inspection |
 | 8 | Sparse checkout | **P2** | ~500 LOC | Large repos, partial working trees |
@@ -535,10 +536,12 @@ in the CLI but its test coverage is incomplete.
 
 ### `mediagit-protocol`
 
-**`crates/mediagit-protocol/src/client.rs:122`** *(→ item 2)*
+**`crates/mediagit-protocol/src/client.rs`** *(→ item 2 — ✅ DONE)*
 
-Pack negotiation have-set is empty — server always sends a full pack. Efficient incremental
-fetch requires computing the local have-set before negotiation.
+Pack negotiation implemented in v0.2.6-beta.1. `collect_local_have(refdb)` computes the
+have-set; server prunes the want-walk via `collect_objects_recursive(stop_at)`.
+Incremental fetch validated in deep tests (all backends). Bitmap index remains a future
+optimization (see §2b).
 
 ---
 
@@ -547,7 +550,7 @@ fetch requires computing the local have-set before negotiation.
 | # | Priority | Area | Description | Source |
 |---|----------|------|-------------|--------|
 | 1 | ~~P1~~ ✅ | **`.mediagitignore`** | **DONE** — v0.2.6-beta.1. `ignore` crate integration in `add` + `status` | `add.md:43` |
-| 2 | P1 | **Pack negotiation** | Pull/fetch always downloads full pack (no incremental negotiation) | `client.rs:122` |
+| 2 | ~~P1~~ ✅ | **Pack negotiation** | **DONE** — v0.2.6-beta.1. `collect_local_have` + `WantRequest{want,have}` + server `walk_reachable`; incremental fetch validated in deep tests | `client.rs` |
 | 3 | P1 | **Parallel checkout I/O** | Checkout reads blobs sequentially; no parallel fetch | `checkout.rs` |
 | 4 | ~~P1~~ ✅ | **TB-scale chunking** | **DONE** — Streaming format-aware chunking via mmap for all file sizes | v0.2.6-beta.1–3 |
 | 6 | P1 | **Direct file serving** | No HTTP endpoint to download committed files by path | R&D 2026-03 |

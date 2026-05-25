@@ -1,6 +1,6 @@
 # MediaGit-Core Development Guide
-**Version**: 0.2.6-beta.1
-**Last Updated**: May 12, 2026
+**Version**: 0.2.7-beta.1
+**Last Updated**: May 25, 2026
 
 Complete setup guide for MediaGit development - from beginner setup to production deployment.
 
@@ -309,7 +309,7 @@ ls -lh target/debug/mediagit-server
 
 # Test CLI
 ./target/debug/mediagit --version
-# Should output: mediagit 0.2.6-beta.1
+# Should output: mediagit 0.2.7-beta.1
 
 # Test server (optional)
 ./target/debug/mediagit-server --help
@@ -2007,6 +2007,33 @@ read = 30
 write = 30
 ```
 
+### Environment Variable Knobs (v0.2.7+)
+
+Fine-grained runtime tuning without rebuilding. All knobs are read at startup; restart the client or server to pick up changes.
+
+| Variable | Default | Tunes |
+|----------|---------|-------|
+| `MEDIAGIT_CONCURRENT_UPLOADS` | `32` | Total upload semaphore slots per push |
+| `MEDIAGIT_PUSH_OBJECT_CONCURRENCY` | `8` | Objects uploaded concurrently (B2 pipeline) |
+| `MEDIAGIT_PUSH_CHUNK_CONCURRENCY` | `(64/obj_conc).max(4)` | Per-object chunk concurrency; targets 64 total in-flight PUTs |
+| `MEDIAGIT_DOWNLOAD_CONCURRENCY` | `32` | Total chunk downloads during pull/clone |
+| `MEDIAGIT_FETCH_BRANCH_CONCURRENCY` | `4` | Branches fetched concurrently in `fetch --all` |
+| `MEDIAGIT_FETCH_DOWNLOAD_CONCURRENCY` | `max(32/br_conc,8)` | Per-branch download cap (prevents TCP pool exhaustion) |
+| `MEDIAGIT_GCS_UPLOAD_CONCURRENCY` | `4` | GCS concurrent `write_object` calls (lower = fewer 500s) |
+| `MEDIAGIT_HTTP_POOL_MAX` | `64` | Max idle TCP connections per host |
+| `MEDIAGIT_RANGE_PARALLEL` | `4` | Parallel byte-range GETs per chunk ≥ 64 MiB |
+| `MEDIAGIT_RANGE_PARALLEL_THRESHOLD` | `67108864` | Chunk size (bytes) triggering range-parallel GET |
+| `MEDIAGIT_STAGED_UPLOAD` | `0` | Set to `1` to enable S3/MinIO multipart upload (MPU) |
+| `MEDIAGIT_MPU_THRESHOLD_BYTES` | `16777216` | Min chunk size for MPU path (16 MiB) |
+| `MEDIAGIT_MPU_PART_SIZE` | adaptive | Override MPU part size (bytes) |
+| `MEDIAGIT_BENCH` | `0` | Set to `1` to emit `[bench]` throughput summary after push/pull |
+| `MEDIAGIT_HASH_PARALLEL` | `0` | Set to `1` to enable BLAKE3 tree-parallel hashing (~2.6× faster) |
+| `MEDIAGIT_PUSH_PIPELINE` | `1` | B2 parallel push pipeline (default ON) |
+| `MEDIAGIT_STREAM_CHUNK_TO_DISK` | `1` | B4 stream-to-disk during clone (default ON; prevents heap spike) |
+| `MEDIAGIT_STORAGE_STREAMING` | `1` | B7 backend streaming GET (default ON; 15.8% faster AWS clone) |
+
+**Tip:** For WAN pushes that stall at 0 B/s, reduce `MEDIAGIT_PUSH_OBJECT_CONCURRENCY` to 4 (→ 16 in-flight PUTs total) or set `MEDIAGIT_PUSH_CHUNK_CONCURRENCY` explicitly. Run with `MEDIAGIT_BENCH=1` to measure before/after.
+
 ### Cloud Backend Optimization
 
 #### AWS S3
@@ -2170,6 +2197,6 @@ find . -name "*.tmp" -o -name "*.log" -o -name "*~"
 
 ---
 
-**Version**: 0.2.6-beta.1
-**Last Updated**: April 28, 2026
+**Version**: 0.2.7-beta.1
+**Last Updated**: May 25, 2026
 **Maintained by**: MediaGit Core Team

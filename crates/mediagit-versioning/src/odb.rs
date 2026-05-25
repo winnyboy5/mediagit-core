@@ -99,6 +99,60 @@ fn to_chunk_codec_hint(
         },
     }
 }
+
+/// Decompress `data` via `spawn_blocking` for large payloads, inline otherwise.
+///
+/// Gated by `MEDIAGIT_DECOMPRESS_BLOCKING` (enabled unless `"0"`) and
+/// `MEDIAGIT_DECOMPRESS_BLOCKING_THRESHOLD` (default 262144 / 256 KiB).
+async fn decompress_blocking(
+    compressor: std::sync::Arc<dyn Compressor>,
+    data: Vec<u8>,
+) -> mediagit_compression::CompressionResult<Vec<u8>> {
+    let enabled = std::env::var("MEDIAGIT_DECOMPRESS_BLOCKING")
+        .as_deref()
+        .unwrap_or("1")
+        != "0";
+    let threshold: usize = std::env::var("MEDIAGIT_DECOMPRESS_BLOCKING_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(262144);
+
+    if enabled && data.len() >= threshold {
+        tokio::task::spawn_blocking(move || compressor.decompress(&data))
+            .await
+            .map_err(|e| {
+                mediagit_compression::CompressionError::decompression_failed(e.to_string())
+            })?
+    } else {
+        compressor.decompress(&data)
+    }
+}
+
+/// `decompress_typed` variant of `decompress_blocking` for `SmartCompressor`.
+async fn decompress_typed_blocking(
+    compressor: std::sync::Arc<SmartCompressor>,
+    data: Vec<u8>,
+) -> mediagit_compression::CompressionResult<Vec<u8>> {
+    let enabled = std::env::var("MEDIAGIT_DECOMPRESS_BLOCKING")
+        .as_deref()
+        .unwrap_or("1")
+        != "0";
+    let threshold: usize = std::env::var("MEDIAGIT_DECOMPRESS_BLOCKING_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(262144);
+
+    if enabled && data.len() >= threshold {
+        tokio::task::spawn_blocking(move || compressor.decompress_typed(&data))
+            .await
+            .map_err(|e| {
+                mediagit_compression::CompressionError::decompression_failed(e.to_string())
+            })?
+    } else {
+        compressor.decompress_typed(&data)
+    }
+}
+
 use moka::future::Cache;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -1308,9 +1362,13 @@ impl ObjectDatabase {
                                     Some(cached)
                                 } else if let Ok(base_compressed) = storage.get(&base_key).await {
                                     let decompressed = if let Some(ref smart) = smart_comp {
-                                        smart.decompress_typed(&base_compressed).ok()
+                                        decompress_typed_blocking(smart.clone(), base_compressed)
+                                            .await
+                                            .ok()
                                     } else {
-                                        compressor.decompress(&base_compressed).ok()
+                                        decompress_blocking(compressor.clone(), base_compressed)
+                                            .await
+                                            .ok()
                                     };
                                     if let Some(data) = decompressed {
                                         let arc = Arc::new(data);
@@ -1526,6 +1584,7 @@ impl ObjectDatabase {
         path: P,
         filename: &str,
         on_progress: Option<Arc<dyn Fn(u64) + Send + Sync>>,
+        precomputed_oid: Option<Oid>,
     ) -> anyhow::Result<Oid> {
         use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1538,8 +1597,11 @@ impl ObjectDatabase {
             file_size / (1024 * 1024)
         );
 
-        // Compute file OID using streaming hash (constant memory)
-        let file_oid = Oid::from_file_async(path).await?;
+        // Use caller-supplied OID when available to avoid a redundant full-file read.
+        let file_oid = match precomputed_oid {
+            Some(oid) => oid,
+            None => Oid::from_file_async(path).await?,
+        };
 
         // Check if we already have this file
         if self
@@ -1567,6 +1629,17 @@ impl ObjectDatabase {
         } else {
             CompressionObjectType::Unknown
         };
+
+        // MEDIAGIT_ADD_COMPRESS_BLOCKING: default ON. Set to "0" to disable.
+        // Chunks >= threshold bytes have their compression moved to a spawn_blocking
+        // thread so the async worker task stays free for I/O during compression.
+        let compress_blocking =
+            std::env::var("MEDIAGIT_ADD_COMPRESS_BLOCKING").as_deref() != Ok("0");
+        let compress_blocking_threshold: usize =
+            std::env::var("MEDIAGIT_ADD_COMPRESS_BLOCKING_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(262_144); // 256 KiB — below this, spawn overhead > compression cost
 
         // --- Parallel pipeline: spawn workers FIRST, then produce chunks ---
         let num_workers = num_cpus::get().clamp(2, 16);
@@ -1640,9 +1713,13 @@ impl ObjectDatabase {
                                     Some(cached)
                                 } else if let Ok(base_compressed) = storage.get(&base_key).await {
                                     let decompressed = if let Some(ref smart) = smart_comp {
-                                        smart.decompress_typed(&base_compressed).ok()
+                                        decompress_typed_blocking(smart.clone(), base_compressed)
+                                            .await
+                                            .ok()
                                     } else {
-                                        compressor.decompress(&base_compressed).ok()
+                                        decompress_blocking(compressor.clone(), base_compressed)
+                                            .await
+                                            .ok()
                                     };
                                     if let Some(data) = decompressed {
                                         let arc = Arc::new(data);
@@ -1743,7 +1820,38 @@ impl ObjectDatabase {
                     // strategy when codec is unknown.
                     if !stored_as_delta {
                         let codec_hint = to_chunk_codec_hint(chunk.codec_hint, chunk.chunk_type);
-                        let data_to_store = if let Some(ref smart) = smart_comp {
+                        let data_to_store = if compress_blocking
+                            && chunk.data.len() >= compress_blocking_threshold
+                        {
+                            // Offload CPU-heavy compression to a blocking thread so the async
+                            // worker task stays free for I/O while this chunk is compressed.
+                            let chunk_data = chunk.data.clone();
+                            let smart2 = smart_comp.clone();
+                            let compressor2 = compressor.clone();
+                            tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
+                                if let Some(ref smart) = smart2 {
+                                    if let Some(result) =
+                                        smart.compress_by_codec(&chunk_data, codec_hint)
+                                    {
+                                        result.map_err(|e| {
+                                            anyhow::anyhow!("Compress chunk (codec): {}", e)
+                                        })
+                                    } else {
+                                        smart
+                                            .compress_typed_with_size(&chunk_data, comp_type)
+                                            .map_err(|e| anyhow::anyhow!("Compress chunk: {}", e))
+                                    }
+                                } else if compression_enabled {
+                                    compressor2
+                                        .compress(&chunk_data)
+                                        .map_err(|e| anyhow::anyhow!("Compress chunk: {}", e))
+                                } else {
+                                    Ok(chunk_data)
+                                }
+                            })
+                            .await
+                            .map_err(|e| anyhow::anyhow!("Compression task panicked: {}", e))??
+                        } else if let Some(ref smart) = smart_comp {
                             // Try codec-aware compression first
                             if let Some(result) = smart.compress_by_codec(&chunk.data, codec_hint) {
                                 result
@@ -2315,11 +2423,21 @@ impl ObjectDatabase {
 
                                     // Decompress the object data (pack stores compressed data)
                                     let data = if let Some(smart_comp) = &self.smart_compressor {
-                                        match smart_comp.decompress_typed(&compressed_data) {
+                                        match decompress_typed_blocking(
+                                            smart_comp.clone(),
+                                            compressed_data.clone(),
+                                        )
+                                        .await
+                                        {
                                             Ok(d) => d,
                                             Err(_) => {
                                                 // Fallback to standard decompression
-                                                match self.compressor.decompress(&compressed_data) {
+                                                match decompress_blocking(
+                                                    self.compressor.clone(),
+                                                    compressed_data.clone(),
+                                                )
+                                                .await
+                                                {
                                                     Ok(d) => d,
                                                     Err(_) => compressed_data, // Use raw data as last resort
                                                 }
@@ -2329,7 +2447,12 @@ impl ObjectDatabase {
                                         || (compressed_data.len() >= 2
                                             && compressed_data[0] == 0x78)
                                     {
-                                        match self.compressor.decompress(&compressed_data) {
+                                        match decompress_blocking(
+                                            self.compressor.clone(),
+                                            compressed_data.clone(),
+                                        )
+                                        .await
+                                        {
                                             Ok(d) => d,
                                             Err(_) => compressed_data,
                                         }
@@ -2579,12 +2702,12 @@ impl ObjectDatabase {
 
         // Decompress delta
         let delta_bytes = if let Some(smart_comp) = &self.smart_compressor {
-            smart_comp
-                .decompress_typed(&compressed_delta)
+            decompress_typed_blocking(smart_comp.clone(), compressed_delta)
+                .await
                 .map_err(|e| anyhow::anyhow!("Failed to decompress delta: {}", e))?
         } else {
-            self.compressor
-                .decompress(&compressed_delta)
+            decompress_blocking(self.compressor.clone(), compressed_delta)
+                .await
                 .map_err(|e| anyhow::anyhow!("Failed to decompress delta: {}", e))?
         };
 
@@ -2698,9 +2821,9 @@ impl ObjectDatabase {
                 let delta_key = format!("deltas/{}", oid.to_hex());
                 let compressed_delta = self.storage.get(&delta_key).await?;
                 let delta_bytes = if let Some(smart_comp) = &self.smart_compressor {
-                    smart_comp.decompress_typed(&compressed_delta)?
+                    decompress_typed_blocking(smart_comp.clone(), compressed_delta).await?
                 } else {
-                    self.compressor.decompress(&compressed_delta)?
+                    decompress_blocking(self.compressor.clone(), compressed_delta).await?
                 };
 
                 let delta = Delta::from_bytes(&delta_bytes)?;
@@ -2724,13 +2847,14 @@ impl ObjectDatabase {
             let key = oid.to_hex();
             if let Ok(storage_data) = self.storage.get(&key).await {
                 let data = if let Some(smart_comp) = &self.smart_compressor {
-                    smart_comp
-                        .decompress_typed(&storage_data)
-                        .unwrap_or_else(|_| storage_data.clone())
-                } else {
-                    self.compressor
-                        .decompress(&storage_data)
+                    decompress_typed_blocking(smart_comp.clone(), storage_data.clone())
+                        .await
                         .unwrap_or(storage_data)
+                } else {
+                    let fallback = storage_data.clone();
+                    decompress_blocking(self.compressor.clone(), storage_data)
+                        .await
+                        .unwrap_or(fallback)
                 };
 
                 if data.len() <= MAX_CACHEABLE_OBJECT_SIZE {
@@ -2940,7 +3064,7 @@ impl ObjectDatabase {
         // Decompress data with smart decompression if available
         let data = if let Some(smart_comp) = &self.smart_compressor {
             // Use smart compressor for auto-detection of compression type
-            match smart_comp.decompress_typed(&storage_data) {
+            match decompress_typed_blocking(smart_comp.clone(), storage_data.clone()).await {
                 Ok(decompressed) => {
                     debug!(
                         oid = %oid,
@@ -2957,7 +3081,7 @@ impl ObjectDatabase {
                         "Smart decompression failed, trying fallback"
                     );
                     // Fallback to standard decompression
-                    match self.compressor.decompress(&storage_data) {
+                    match decompress_blocking(self.compressor.clone(), storage_data.clone()).await {
                         Ok(d) => d,
                         Err(_) => storage_data, // Use raw data as last resort
                     }
@@ -2965,7 +3089,7 @@ impl ObjectDatabase {
             }
         } else if self.compression_enabled || (storage_data.len() >= 2 && storage_data[0] == 0x78) {
             // Standard decompression path
-            match self.compressor.decompress(&storage_data) {
+            match decompress_blocking(self.compressor.clone(), storage_data.clone()).await {
                 Ok(decompressed) => {
                     debug!(
                         oid = %oid,
@@ -3242,17 +3366,19 @@ impl ObjectDatabase {
         let base_key = format!("chunks/{}", base_id.to_hex());
         let compressed_base = self.storage.get(&base_key).await?;
         let mut current = if let Some(smart_comp) = &self.smart_compressor {
-            smart_comp
-                .decompress_typed(&compressed_base)
+            decompress_typed_blocking(smart_comp.clone(), compressed_base)
+                .await
                 .map_err(|e| anyhow::anyhow!("Failed to decompress base chunk: {}", e))?
         } else {
             let algo = CompressionAlgorithm::detect(&compressed_base);
             match algo {
-                CompressionAlgorithm::None => compressed_base.to_vec(),
-                _ => self
-                    .compressor
-                    .decompress(&compressed_base)
-                    .unwrap_or_else(|_| compressed_base.to_vec()),
+                CompressionAlgorithm::None => compressed_base,
+                _ => {
+                    let fallback = compressed_base.clone();
+                    decompress_blocking(self.compressor.clone(), compressed_base)
+                        .await
+                        .unwrap_or(fallback)
+                }
             }
         };
 
@@ -3265,12 +3391,12 @@ impl ObjectDatabase {
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to load chunk delta: {}", e))?;
             let delta_bytes = if let Some(smart_comp) = &self.smart_compressor {
-                smart_comp
-                    .decompress_typed(&compressed_delta)
+                decompress_typed_blocking(smart_comp.clone(), compressed_delta)
+                    .await
                     .map_err(|e| anyhow::anyhow!("Failed to decompress chunk delta: {}", e))?
             } else {
-                self.compressor
-                    .decompress(&compressed_delta)
+                decompress_blocking(self.compressor.clone(), compressed_delta)
+                    .await
                     .map_err(|e| anyhow::anyhow!("Failed to decompress chunk delta: {}", e))?
             };
             let delta = Delta::from_bytes(&delta_bytes)
@@ -3359,6 +3485,23 @@ impl ObjectDatabase {
         let chunk_key = format!("chunks/{}", chunk_id.to_hex());
         self.storage
             .put(&chunk_key, data)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to store chunk {}: {}", chunk_id, e))
+    }
+
+    /// Store a compressed chunk from a local temp file (B4 stream-to-disk).
+    ///
+    /// Delegates to `StorageBackend::put_file`. On `LocalBackend` this is a
+    /// zero-copy atomic rename; cloud backends fall back to reading the file
+    /// and uploading.
+    pub async fn put_compressed_chunk_from_file(
+        &self,
+        chunk_id: &Oid,
+        path: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        let chunk_key = format!("chunks/{}", chunk_id.to_hex());
+        self.storage
+            .put_file(&chunk_key, path)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to store chunk {}: {}", chunk_id, e))
     }

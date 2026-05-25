@@ -51,6 +51,7 @@ coverage/
 book/book/
 PROJECT_INDEX.md
 PROJECT_INDEX.json
+CLAUDE.md
 
 # Other documentation build artifacts
 docs/_build/

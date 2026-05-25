@@ -21,6 +21,7 @@ use crate::progress::{OperationStats, ProgressTracker};
 use anyhow::Result;
 use clap::Parser;
 use console::style;
+use futures::StreamExt;
 use mediagit_versioning::{ObjectDatabase, Ref, RefDatabase};
 use std::sync::Arc;
 use std::time::Instant;
@@ -32,7 +33,7 @@ use std::time::Instant;
 /// modify local branches or working directory.
 #[derive(Parser, Debug)]
 #[command(after_help = "EXAMPLES:
-    # Fetch all branches from origin
+    # Fetch current branch from origin
     mediagit fetch
 
     # Fetch from a specific remote
@@ -41,7 +42,7 @@ use std::time::Instant;
     # Fetch a specific branch
     mediagit fetch origin main
 
-    # Fetch all branches explicitly
+    # Fetch all branches in parallel (up to MEDIAGIT_FETCH_BRANCH_CONCURRENCY=4)
     mediagit fetch --all
 
 SEE ALSO:
@@ -51,7 +52,7 @@ pub struct FetchCmd {
     #[arg(value_name = "REMOTE")]
     pub remote: Option<String>,
 
-    /// Branch to fetch (fetches all branches by default)
+    /// Branch to fetch (fetches current branch by default; use --all for all branches)
     #[arg(value_name = "BRANCH")]
     pub branch: Option<String>,
 
@@ -114,6 +115,8 @@ impl FetchCmd {
         if let Some(n) = config.performance.download_concurrency {
             client = client.with_concurrent_downloads(n);
         }
+        // Arc-wrap for the parallel --all path (pull_streaming/download_chunked_objects take &self).
+        let client = Arc::new(client);
         let odb = Arc::new(ObjectDatabase::with_smart_compression(
             Arc::clone(&storage),
             1000,
@@ -135,7 +138,11 @@ impl FetchCmd {
             println!("  Found {} remote branches", remote_branches.len());
         }
 
-        // Determine which branches to fetch
+        // Determine which branches to fetch.
+        //
+        // Default: current branch only — avoids unintentional multi-TB parallel
+        // download on a plain `mediagit fetch` in a large media repo.
+        // Use --all to explicitly fetch all branches in parallel.
         let branches_to_fetch: Vec<_> = if let Some(branch) = &self.branch {
             let full_ref = mediagit_versioning::normalize_ref_name(branch);
             remote_branches
@@ -143,9 +150,21 @@ impl FetchCmd {
                 .filter(|r| r.name == full_ref)
                 .copied()
                 .collect()
+        } else if self.all {
+            remote_branches.clone()
         } else {
-            // Fetch all branches
+            // Default: resolve HEAD symref → current branch ref name.
+            let current_ref = refdb
+                .read("HEAD")
+                .await
+                .ok()
+                .and_then(|h| h.target)
+                .unwrap_or_else(|| "refs/heads/main".to_string());
             remote_branches
+                .iter()
+                .filter(|r| r.name == current_ref)
+                .copied()
+                .collect()
         };
 
         if branches_to_fetch.is_empty() {
@@ -173,99 +192,238 @@ impl FetchCmd {
             println!("  Local have-set: {} refs", local_have.len());
         }
 
+        // Max parallel branch fetches for --all. Default 4.
+        // Set MEDIAGIT_FETCH_BRANCH_CONCURRENCY=1 to force sequential.
+        let branch_concurrency: usize = std::env::var("MEDIAGIT_FETCH_BRANCH_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4)
+            .max(1);
+
         let mut branches_updated = 0;
         let mut branches_uptodate = 0;
 
-        // Fetch each branch
-        for branch_ref in &branches_to_fetch {
-            let branch_name = branch_ref
-                .name
-                .strip_prefix("refs/heads/")
-                .unwrap_or(&branch_ref.name);
-            let tracking_ref_name = format!("refs/remotes/{}/{}", remote, branch_name);
+        if self.all && branches_to_fetch.len() > 1 && branch_concurrency > 1 {
+            // === Parallel --all path ===
+            // Phase 1: determine which branches need fetching (sequential — cheap local I/O).
+            // Phase 2: fan-out network fetch across branches concurrently.
+            // Phase 3: serialize ref writes (ref-write barrier — preserves ODB consistency).
+            //
+            // Large-file safety: per-branch chunk downloads are bounded by
+            // MEDIAGIT_DOWNLOAD_CONCURRENCY; B4 (MEDIAGIT_STREAM_CHUNK_TO_DISK) prevents
+            // RAM blowup when fetching multi-GB branches in parallel.
 
-            // Check if tracking ref is already up to date.
-            //
-            // BUG-008: a matching tracking-ref OID is NOT sufficient — clone
-            // pre-populates tracking refs for every advertised branch but
-            // only ships objects reachable from the default branch, so
-            // `refs/remotes/origin/feat-*` can point at commits that are
-            // not yet in the local ODB. Without this check, a subsequent
-            // `fetch origin feat-x` would short-circuit on the matching
-            // OID and never download the missing objects, leaving the
-            // user unable to check out the branch.
-            //
-            // We use `ObjectDatabase::exists()` (cache-first + storage
-            // existence probe) so this adds one cheap I/O per branch
-            // without ever loading object content into memory.
-            let needs_update = match refdb.read(&tracking_ref_name).await {
-                Ok(existing) => {
-                    let oids_match =
-                        existing.oid.map(|o| o.to_hex()) == Some(branch_ref.oid.clone());
-                    if oids_match {
-                        match mediagit_versioning::Oid::from_hex(&branch_ref.oid) {
-                            Ok(oid) => !odb.exists(&oid).await.unwrap_or(false),
-                            Err(_) => true,
+            struct PendingFetch {
+                ref_name: String,
+                oid_str: String,
+                tracking_ref_name: String,
+                branch_name: String,
+            }
+
+            let mut pending: Vec<PendingFetch> = Vec::new();
+            for branch_ref in &branches_to_fetch {
+                let branch_name = branch_ref
+                    .name
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(&branch_ref.name)
+                    .to_string();
+                let tracking_ref_name = format!("refs/remotes/{}/{}", remote, branch_name);
+                // BUG-008: OID match alone is insufficient — check ODB existence too.
+                let needs_update = match refdb.read(&tracking_ref_name).await {
+                    Ok(existing) => {
+                        let oids_match =
+                            existing.oid.map(|o| o.to_hex()) == Some(branch_ref.oid.clone());
+                        if oids_match {
+                            match mediagit_versioning::Oid::from_hex(&branch_ref.oid) {
+                                Ok(oid) => !odb.exists(&oid).await.unwrap_or(false),
+                                Err(_) => true,
+                            }
+                        } else {
+                            true
                         }
-                    } else {
-                        true
+                    }
+                    Err(_) => true,
+                };
+                if needs_update {
+                    pending.push(PendingFetch {
+                        ref_name: branch_ref.name.clone(),
+                        oid_str: branch_ref.oid.clone(),
+                        tracking_ref_name,
+                        branch_name,
+                    });
+                } else {
+                    branches_uptodate += 1;
+                    if self.verbose {
+                        println!("  {} is up to date", branch_name);
                     }
                 }
-                Err(_) => true, // Doesn't exist, needs update
-            };
-
-            if !needs_update {
-                branches_uptodate += 1;
-                if self.verbose {
-                    println!("  {} is up to date", branch_name);
-                }
-                continue;
             }
 
-            if self.verbose {
-                println!("  Fetching {}...", branch_name);
+            struct FetchResult {
+                tracking_ref_name: String,
+                remote_oid: mediagit_versioning::Oid,
+                branch_name: String,
+                oid_short: String,
             }
 
-            // Download objects using streaming (memory-efficient, writes directly to ODB).
-            // Clone the shared have-set per branch — `pull_streaming` consumes it.
-            let download_pb = progress.spinner(&format!("Fetching {}...", branch_name));
-            let chunked_oids = client
-                .pull_streaming(&odb, &branch_ref.name, local_have.clone())
-                .await?;
-            download_pb.finish_with_message(format!("Fetched {}", branch_name));
-
-            // Download chunked objects if any
-            if !chunked_oids.is_empty() {
-                let chunks_downloaded = client
-                    .download_chunked_objects(&odb, &chunked_oids, |_, _, _| {})
-                    .await?;
-                if self.verbose {
-                    println!("    Downloaded {} chunks", chunks_downloaded);
-                }
-            }
-
-            // Update remote tracking ref
-            let remote_oid = mediagit_versioning::Oid::from_hex(&branch_ref.oid)
-                .map_err(|e| anyhow::anyhow!("Invalid remote OID: {}", e))?;
-            let tracking_ref = Ref::new_direct(tracking_ref_name.clone(), remote_oid);
-            refdb.write(&tracking_ref).await?;
-
-            branches_updated += 1;
-
-            if !self.quiet {
+            if !self.quiet && !pending.is_empty() {
                 println!(
-                    "  {} {} -> {}",
-                    style("→").cyan(),
-                    branch_name,
-                    &branch_ref.oid[..8]
+                    "  Fetching {} branch(es) in parallel (concurrency {})",
+                    pending.len(),
+                    branch_concurrency
                 );
+            }
+
+            // Cap per-branch download concurrency so total in-flight stays bounded.
+            // Without a divisor, branch_concurrency × MEDIAGIT_DOWNLOAD_CONCURRENCY ×
+            // MEDIAGIT_RANGE_PARALLEL = 4 × 32 × 4 = 512 simultaneous TCP requests —
+            // same pool-exhaustion shape as the old B2 push bug. At defaults: 4 × 8 × 4 = 128.
+            // Single-branch path (branch_concurrency=1): cap = max(32/1,8)=32, identical to today.
+            // Override: MEDIAGIT_FETCH_DOWNLOAD_CONCURRENCY.
+            let base_dl_concurrency: usize = std::env::var("MEDIAGIT_DOWNLOAD_CONCURRENCY")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|n: &usize| *n > 0)
+                .unwrap_or(32);
+            let download_per_branch: usize = std::env::var("MEDIAGIT_FETCH_DOWNLOAD_CONCURRENCY")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or_else(|| (base_dl_concurrency / branch_concurrency).max(8));
+
+            let fetch_results: Vec<anyhow::Result<FetchResult>> = futures::stream::iter(pending)
+                .map(|p| {
+                    let client = Arc::new(client.with_download_cap(download_per_branch));
+                    let odb = Arc::clone(&odb);
+                    let local_have = local_have.clone();
+                    // Box::pin avoids large_futures lint; state machine lives on heap.
+                    Box::pin(async move {
+                        let chunked_oids =
+                            client.pull_streaming(&odb, &p.ref_name, local_have).await?;
+                        if !chunked_oids.is_empty() {
+                            client
+                                .download_chunked_objects(&odb, &chunked_oids, |_, _, _| {})
+                                .await?;
+                        }
+                        let remote_oid = mediagit_versioning::Oid::from_hex(&p.oid_str)
+                            .map_err(|e| anyhow::anyhow!("Invalid remote OID: {}", e))?;
+                        let oid_short = p.oid_str.get(..8).unwrap_or(&p.oid_str).to_string();
+                        Ok::<FetchResult, anyhow::Error>(FetchResult {
+                            tracking_ref_name: p.tracking_ref_name,
+                            remote_oid,
+                            branch_name: p.branch_name,
+                            oid_short,
+                        })
+                    })
+                })
+                .buffer_unordered(branch_concurrency)
+                .collect()
+                .await;
+
+            for result in fetch_results {
+                let f = result?;
+                let tracking_ref = Ref::new_direct(f.tracking_ref_name, f.remote_oid);
+                refdb.write(&tracking_ref).await?;
+                branches_updated += 1;
+                if !self.quiet {
+                    println!(
+                        "  {} {} -> {}",
+                        style("→").cyan(),
+                        f.branch_name,
+                        &f.oid_short
+                    );
+                }
+            }
+        } else {
+            // === Sequential path: single branch, or MEDIAGIT_FETCH_BRANCH_CONCURRENCY=1 ===
+            for branch_ref in &branches_to_fetch {
+                let branch_name = branch_ref
+                    .name
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(&branch_ref.name);
+                let tracking_ref_name = format!("refs/remotes/{}/{}", remote, branch_name);
+
+                // Check if tracking ref is already up to date.
+                //
+                // BUG-008: a matching tracking-ref OID is NOT sufficient — clone
+                // pre-populates tracking refs for every advertised branch but
+                // only ships objects reachable from the default branch, so
+                // `refs/remotes/origin/feat-*` can point at commits that are
+                // not yet in the local ODB. Without this check, a subsequent
+                // `fetch origin feat-x` would short-circuit on the matching
+                // OID and never download the missing objects, leaving the
+                // user unable to check out the branch.
+                //
+                // We use `ObjectDatabase::exists()` (cache-first + storage
+                // existence probe) so this adds one cheap I/O per branch
+                // without ever loading object content into memory.
+                let needs_update = match refdb.read(&tracking_ref_name).await {
+                    Ok(existing) => {
+                        let oids_match =
+                            existing.oid.map(|o| o.to_hex()) == Some(branch_ref.oid.clone());
+                        if oids_match {
+                            match mediagit_versioning::Oid::from_hex(&branch_ref.oid) {
+                                Ok(oid) => !odb.exists(&oid).await.unwrap_or(false),
+                                Err(_) => true,
+                            }
+                        } else {
+                            true
+                        }
+                    }
+                    Err(_) => true,
+                };
+
+                if !needs_update {
+                    branches_uptodate += 1;
+                    if self.verbose {
+                        println!("  {} is up to date", branch_name);
+                    }
+                    continue;
+                }
+
+                if self.verbose {
+                    println!("  Fetching {}...", branch_name);
+                }
+
+                let download_pb = progress.spinner(&format!("Fetching {}...", branch_name));
+                let chunked_oids = client
+                    .pull_streaming(&odb, &branch_ref.name, local_have.clone())
+                    .await?;
+                download_pb.finish_with_message(format!("Fetched {}", branch_name));
+
+                if !chunked_oids.is_empty() {
+                    let chunks_downloaded = client
+                        .download_chunked_objects(&odb, &chunked_oids, |_, _, _| {})
+                        .await?;
+                    if self.verbose {
+                        println!("    Downloaded {} chunks", chunks_downloaded);
+                    }
+                }
+
+                let remote_oid = mediagit_versioning::Oid::from_hex(&branch_ref.oid)
+                    .map_err(|e| anyhow::anyhow!("Invalid remote OID: {}", e))?;
+                let tracking_ref = Ref::new_direct(tracking_ref_name.clone(), remote_oid);
+                refdb.write(&tracking_ref).await?;
+
+                branches_updated += 1;
+
+                if !self.quiet {
+                    println!(
+                        "  {} {} -> {}",
+                        style("→").cyan(),
+                        branch_name,
+                        &branch_ref.oid[..8]
+                    );
+                }
             }
         }
 
-        // Prune stale tracking refs if requested
+        // Prune stale tracking refs if requested.
+        // Always compare against ALL remote branches (not just branches_to_fetch),
+        // so pruning works correctly when only fetching a subset of branches.
         if self.prune {
             let stale_count = self
-                .prune_stale_refs(&refdb, remote, &branches_to_fetch)
+                .prune_stale_refs(&refdb, remote, &remote_branches)
                 .await?;
             if stale_count > 0 && !self.quiet {
                 println!(

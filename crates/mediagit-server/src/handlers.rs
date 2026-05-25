@@ -1322,13 +1322,21 @@ pub async fn download_chunk(
     // Read compressed chunk directly (no decompression)
     let chunk_key = format!("chunks/{}", chunk_id);
     let chunk_data = storage.get(&chunk_key).await.map_err(|e| {
-        let msg = e.to_string().to_lowercase();
-        if msg.contains("nosuchkey") || msg.contains("no such key") || msg.contains("404") {
-            tracing::warn!(chunk = %chunk_id, key = %chunk_key, "Chunk not found in storage (NoSuchKey)");
+        // Check both the top-level message and the full cause chain (via {:#}) so that
+        // context-wrapped NoSuchKey errors (e.g. "Failed after N retries: NoSuchKey") still
+        // map to 404 rather than 503.
+        let chain = format!("{:#}", e).to_lowercase();
+        if chain.contains("nosuchkey") || chain.contains("no such key") || chain.contains("404")
+            || chain.contains("not found") || chain.contains("service error")
+        {
+            tracing::warn!(chunk = %chunk_id, key = %chunk_key, "Chunk not found in storage");
+            StatusCode::NOT_FOUND
         } else {
-            tracing::error!(chunk = %chunk_id, key = %chunk_key, error = %e, "Chunk storage error");
+            // dispatch failure, connection refused, timeout — storage backend unreachable.
+            // Return 503 so clients distinguish "chunk missing" (404) from "backend down" (503).
+            tracing::error!(chunk = %chunk_id, key = %chunk_key, error = %e, cause = %format!("{:#}", e), "Chunk storage error: backend unreachable");
+            StatusCode::SERVICE_UNAVAILABLE
         }
-        StatusCode::NOT_FOUND
     })?;
 
     tracing::debug!(chunk = %chunk_id, size = chunk_data.len(), "Chunk downloaded");
@@ -1616,7 +1624,7 @@ pub async fn presign_chunk_uploads(
         urls.insert(chunk_id_hex.clone(), entry);
     }
 
-    tracing::debug!(
+    tracing::info!(
         repo = %repo,
         count = req.chunk_ids.len(),
         "Presigned chunk upload URLs generated"
@@ -1835,7 +1843,7 @@ pub async fn mpu_start(
         .await
     {
         Ok(Some(mpu)) => {
-            tracing::debug!(
+            tracing::info!(
                 repo = %repo,
                 chunk = %req.chunk_id,
                 parts = mpu.parts.len(),
@@ -1863,8 +1871,18 @@ pub async fn mpu_start(
             Err(StatusCode::NOT_IMPLEMENTED)
         }
         Err(e) => {
-            tracing::warn!(repo = %repo, chunk = %req.chunk_id, err = %e, "mpu_start failed");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            let msg = e.to_string().to_lowercase();
+            let status = if msg.contains("dispatch failure")
+                || msg.contains("connection refused")
+                || msg.contains("timeout")
+            {
+                // Storage backend unreachable; client should fall back to single-PUT presigned URL.
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            tracing::warn!(repo = %repo, chunk = %req.chunk_id, err = %e, %status, "mpu_start failed");
+            Err(status)
         }
     }
 }
