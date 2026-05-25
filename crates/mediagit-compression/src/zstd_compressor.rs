@@ -69,14 +69,34 @@ impl Compressor for ZstdCompressor {
         }
 
         match zstd::encode_all(data, level) {
-            Ok(compressed) => {
-                // Prepend zstd magic bytes (already in zstd output, but ensure it's there)
-                Ok(compressed)
+            Ok(compressed) => Ok(compressed),
+            Err(e) => {
+                let msg = e.to_string();
+                // Zstd ultra levels (20-22) require ~1 GB per context.
+                // On memory-constrained systems this triggers an allocation error.
+                // Fall back to level 19 (highest normal level, ~128 MB) which
+                // produces nearly identical ratios for media data.
+                if level > 19
+                    && (msg.contains("Allocation error") || msg.contains("not enough memory"))
+                {
+                    tracing::warn!(
+                        requested_level = level,
+                        fallback_level = 19,
+                        "zstd ultra level OOM, falling back to level 19"
+                    );
+                    zstd::encode_all(data, 19).map_err(|e2| {
+                        CompressionError::zstd_error(format!(
+                            "zstd compression failed at fallback level 19: {}",
+                            e2
+                        ))
+                    })
+                } else {
+                    Err(CompressionError::zstd_error(format!(
+                        "zstd compression failed: {}",
+                        e
+                    )))
+                }
             }
-            Err(e) => Err(CompressionError::zstd_error(format!(
-                "zstd compression failed: {}",
-                e
-            ))),
         }
     }
 
