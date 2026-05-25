@@ -66,7 +66,7 @@ fn test_pointer_file_roundtrip() {
 #[test]
 fn test_pointer_file_detection() {
     let valid_pointer = "version https://mediagit.dev/spec/v1\n\
-                         oid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\n\
+                         oid blake3:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\n\
                          size 123456789\n";
 
     assert!(PointerFile::is_pointer(valid_pointer));
@@ -177,7 +177,7 @@ fn test_untrack_pattern() {
 fn test_pointer_file_format_validation() {
     // Test invalid version
     let invalid_version = "version https://wrong.com/spec/v1\n\
-                           oid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\n\
+                           oid blake3:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\n\
                            size 123456789\n";
     assert!(!PointerFile::is_pointer(invalid_version));
 
@@ -196,7 +196,7 @@ fn test_pointer_file_format_validation() {
 
     // Test invalid hash length
     let invalid_hash = "version https://mediagit.dev/spec/v1\n\
-                        oid sha256:tooshort\n\
+                        oid blake3:tooshort\n\
                         size 123456789\n";
     let result = PointerFile::parse(invalid_hash);
     assert!(result.is_err());

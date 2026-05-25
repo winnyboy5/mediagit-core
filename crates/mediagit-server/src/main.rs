@@ -60,8 +60,9 @@ async fn main() -> Result<()> {
     // Setup tracing
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "mediagit_server=debug,tower_http=debug".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "mediagit_server=debug,tower_http=debug,mediagit_storage=warn".into()
+            }),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();

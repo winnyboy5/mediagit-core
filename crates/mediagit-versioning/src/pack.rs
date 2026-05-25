@@ -19,22 +19,25 @@
 //! # Format
 //!
 //! ```text
-//! [Header: 12 bytes]
+//! [Header: 13 bytes]
 //!   - Signature: "PACK" (4 bytes)
 //!   - Version: u32 (4 bytes, currently 2)
 //!   - Object count: u32 (4 bytes)
+//!   - Kind: u8 (1 byte) — 0=Local, 1=CloudObject, 2=Reconstruction
 //! [Objects: variable]
 //!   - Object entries (variable size)
 //! [Index: variable]
 //!   - OID -> (offset, size) mapping
 //! [Checksum: 32 bytes]
-//!   - SHA-256 of pack content
+//!   - BLAKE3 of pack content
 //! ```
+//!
+//! Older packs without the kind byte are read as `PackKind::Local`.
 
 use crate::delta::{Delta, DeltaDecoder};
+use crate::hash::Hasher;
 use crate::{ObjectType, Oid};
 use serde::{Deserialize, Serialize};
-use sha2::Digest;
 use std::collections::BTreeMap;
 use std::io;
 use tracing::{debug, info, warn};
@@ -46,6 +49,32 @@ const PACK_SIGNATURE: &[u8; 4] = b"PACK";
 const PACK_VERSION: u32 = 2;
 const CHECKSUM_SIZE: usize = 32;
 
+/// Pack storage context. Byte 12 of the binary header (0 for packs written before this field).
+///
+/// New variants extend here — the wire value (u8) is stable once assigned.
+/// `#[doc = "Sole pack-kind entry point. New contexts extend here."]`
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[repr(u8)]
+pub enum PackKind {
+    /// Written to local ODB (default).
+    #[default]
+    Local = 0,
+    /// Uploaded as a single cloud storage object (Track F).
+    CloudObject = 1,
+    /// Server-side reconstruction plan for range-GET pull (Track F).
+    Reconstruction = 2,
+}
+
+impl PackKind {
+    fn from_byte(b: u8) -> Self {
+        match b {
+            1 => PackKind::CloudObject,
+            2 => PackKind::Reconstruction,
+            _ => PackKind::Local,
+        }
+    }
+}
+
 /// Pack file header
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackHeader {
@@ -53,27 +82,31 @@ pub struct PackHeader {
     pub version: u32,
     /// Total number of objects in pack
     pub object_count: u32,
+    /// Storage context for this pack (byte 12; defaults to Local for pre-kind packs)
+    pub kind: PackKind,
 }
 
 impl PackHeader {
-    /// Create a new pack header
+    /// Create a new pack header with `PackKind::Local`.
     pub fn new(object_count: u32) -> Self {
         Self {
             version: PACK_VERSION,
             object_count,
+            kind: PackKind::Local,
         }
     }
 
-    /// Serialize header to bytes
+    /// Serialize header to bytes (13 bytes: PACK + version u32 LE + count u32 LE + kind u8)
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(12);
+        let mut bytes = Vec::with_capacity(13);
         bytes.extend_from_slice(PACK_SIGNATURE);
         bytes.extend_from_slice(&self.version.to_le_bytes());
         bytes.extend_from_slice(&self.object_count.to_le_bytes());
+        bytes.push(self.kind as u8);
         bytes
     }
 
-    /// Deserialize header from bytes
+    /// Deserialize header from bytes. Accepts both 12-byte (pre-kind) and 13-byte formats.
     pub fn from_bytes(data: &[u8]) -> io::Result<Self> {
         if data.len() < 12 {
             return Err(io::Error::new(
@@ -91,6 +124,11 @@ impl PackHeader {
 
         let version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
         let object_count = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+        let kind = if data.len() >= 13 {
+            PackKind::from_byte(data[12])
+        } else {
+            PackKind::Local
+        };
 
         if version != PACK_VERSION {
             warn!(
@@ -103,6 +141,7 @@ impl PackHeader {
         Ok(Self {
             version,
             object_count,
+            kind,
         })
     }
 }
@@ -459,7 +498,9 @@ impl PackWriter {
         pack_data.extend_from_slice(&index_offset.to_le_bytes());
 
         // Calculate and write checksum for content (excluding checksum itself)
-        let checksum = sha2::Sha256::digest(&pack_data[..]);
+        let mut h = Hasher::new();
+        h.update(&pack_data[..]);
+        let checksum = h.finalize();
         pack_data.extend_from_slice(&checksum);
 
         debug!(
@@ -499,13 +540,15 @@ impl PackReader {
             ));
         }
 
-        // Verify header
-        PackHeader::from_bytes(&data[0..12])?;
+        // Verify header (pass up to 13 bytes so kind byte is included when present)
+        PackHeader::from_bytes(&data[0..data.len().min(13)])?;
 
         // Verify checksum (at end)
         let checksum_offset = data.len() - CHECKSUM_SIZE;
         let expected_checksum = &data[checksum_offset..];
-        let actual_checksum = sha2::Sha256::digest(&data[0..checksum_offset]);
+        let mut h = Hasher::new();
+        h.update(&data[0..checksum_offset]);
+        let actual_checksum = h.finalize();
 
         if actual_checksum[..] != expected_checksum[..] {
             return Err(io::Error::new(
@@ -740,11 +783,17 @@ mod tests {
     fn test_pack_header_roundtrip() {
         let header = PackHeader::new(42);
         let bytes = header.to_bytes();
-        assert_eq!(bytes.len(), 12);
+        assert_eq!(bytes.len(), 13);
         assert_eq!(&bytes[0..4], PACK_SIGNATURE);
+        assert_eq!(bytes[12], 0); // PackKind::Local
 
         let decoded = PackHeader::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.object_count, 42);
+        assert_eq!(decoded.kind, PackKind::Local);
+
+        // Backward compat: 12-byte header (pre-kind) defaults to Local
+        let decoded_old = PackHeader::from_bytes(&bytes[0..12]).unwrap();
+        assert_eq!(decoded_old.kind, PackKind::Local);
     }
 
     #[test]

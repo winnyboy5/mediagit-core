@@ -927,6 +927,34 @@ mediagit completions powershell >> $PROFILE
 | `MEDIAGIT_AUTHOR_NAME` | Default author name |
 | `MEDIAGIT_AUTHOR_EMAIL` | Default author email |
 
+### Performance & Concurrency
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEDIAGIT_CONCURRENT_UPLOADS` | `32` | Total upload semaphore slots for push operations |
+| `MEDIAGIT_PUSH_OBJECT_CONCURRENCY` | `8` | Number of objects uploaded concurrently during push |
+| `MEDIAGIT_PUSH_CHUNK_CONCURRENCY` | `(64 / push_object_concurrency).max(4)` | Per-object chunk upload concurrency. Targets 64 total in-flight PUTs across all concurrent objects. Override when tuning for specific cloud regions or connection profiles. |
+| `MEDIAGIT_DOWNLOAD_CONCURRENCY` | `32` | Total concurrent chunk downloads during pull/clone |
+| `MEDIAGIT_FETCH_BRANCH_CONCURRENCY` | `4` | Number of branches fetched concurrently during `fetch --all` |
+| `MEDIAGIT_FETCH_DOWNLOAD_CONCURRENCY` | `max(32 / branch_concurrency, 8)` | Per-branch download concurrency cap during `fetch --all`. Prevents TCP pool exhaustion (peak in-flight ≤ 128 at defaults). |
+| `MEDIAGIT_GCS_UPLOAD_CONCURRENCY` | `4` | Concurrent PUT slots for GCS backend (proxy path). Lower than S3 default to avoid 500s on shared TCP connections. |
+| `MEDIAGIT_RANGE_PARALLEL` | `4` | Parallel range-GET requests per chunk during download |
+
+### Throughput Pipeline (Phase 2)
+
+These knobs control the pipelined transfer engine shipped in v0.2.7-beta.1. All defaults are tuned for production use — override only when profiling specific backends or network conditions.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEDIAGIT_PULL_PIPELINE` | `1` (ON) | Enable pipelined pull — overlaps manifest fetch with chunk download |
+| `MEDIAGIT_PULL_MANIFEST_CONCURRENCY` | `8` | Number of manifests fetched concurrently via `buffer_unordered` during pull |
+| `MEDIAGIT_PUSH_PIPELINE` | `1` (ON) | Enable pipelined push — overlaps chunk upload with ODB reads |
+| `MEDIAGIT_STREAM_CHUNK_TO_DISK` | `1` (ON) | Stream downloaded chunks to disk during clone/pull instead of buffering in heap. Prevents OOM on large repos |
+| `MEDIAGIT_STORAGE_STREAMING` | `1` (ON) | Use streaming GET from S3/MinIO backends instead of buffered GET. 15.8% faster AWS clone measured |
+| `MEDIAGIT_DECOMPRESS_BLOCKING` | `1` (ON) | Offload decompression to `spawn_blocking` threadpool to avoid starving the async executor |
+| `MEDIAGIT_DECOMPRESS_BLOCKING_THRESHOLD` | `262144` | Minimum compressed size (bytes) before offloading to blocking threadpool. Below this, decompress inline |
+| `MEDIAGIT_HTTP_POOL_MAX` | `64` | Max idle TCP connections per host in the HTTP connection pool |
+
 ---
 
 ## Server Configuration (`mediagit-server`)
@@ -977,3 +1005,6 @@ encryption_algorithm = "AES256"
 
 - [Architecture](ARCHITECTURE.md)
 - [Supported Formats](SUPPORTED_FORMATS.md)
+- [Development Guide](DEVELOPMENT_GUIDE.md)
+- [Cloud Architecture](CLOUD_ARCHITECTURE.md)
+- [Future TODOs](FUTURE_TODOS.md)

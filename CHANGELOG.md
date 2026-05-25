@@ -5,6 +5,138 @@ All notable changes to MediaGit will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.2.7-beta.1] - 2026-05-25
+
+This release covers all Phase-2 work completed between 2026-04-03 and 2026-05-25,
+including the BLAKE3 migration, presigned-URL resilience, push/pull pipelining,
+throughput improvements, pack negotiation fixes, and several cloud-backend bug fixes.
+
+### Breaking Changes (beta — no backward-compat obligation)
+- **Chunk IDs now use BLAKE3** instead of SHA-256. Existing `.mediagit` repos created with
+  v0.2.6-beta.1 or earlier will need to be re-initialized or migrated. Pointer files now
+  carry the `blake3:` prefix. The `sha2` crate is retained in `mediagit-security` (KDF +
+  API key derivation) but removed from all storage/versioning/protocol crates.
+
+### Added
+
+#### BLAKE3 Migration (Track A — Phase-2)
+- **`crates/mediagit-versioning/src/hash.rs`** (NEW) — `hash::Hasher` shim over
+  `blake3::Hasher`; single call-site for all chunk-ID computation.
+- **BLAKE3 throughout versioning layer** — `oid.rs`, `pack.rs`, `streaming_pack.rs`,
+  `pointer.rs` (`blake3:` prefix), `filter.rs` (LFS clean-filter), `migration/verify.rs`.
+- **Tree-parallel hashing** — BLAKE3 hashes 1 KB leaf nodes in parallel across CPU cores;
+  10–20× faster than SHA-256 on non-SHA-NI hardware (ARM, older x86); 2–4× faster on
+  SHA-NI hosts. Enable with `MEDIAGIT_HASH_PARALLEL=1`.
+- **`sha2` removed** from `mediagit-versioning`, `mediagit-protocol`, `mediagit-git`,
+  `mediagit-migration`; kept in `mediagit-security` for KDF and API-key derivation.
+- **Bench schema** bumped to `BENCH_SCHEMA_VERSION=2`; `manifest_to_first_byte_ns` metric
+  added to bench output (`MEDIAGIT_BENCH=1`).
+
+#### Presigned URL Resilience
+- **`crates/mediagit-protocol/src/error_class.rs`** (NEW) — cross-cloud `UploadOutcome`
+  enum with `classify_auto()` / `classify_s3()` / `classify_azure()` / `classify_gcs()`.
+  Parses `<Code>` XML (S3/Azure) and `"reason"` JSON (GCS). 19 unit tests.
+- **Per-chunk 5-attempt retry with exponential backoff** — 1 s → 2 s → 4 s → 8 s, cap
+  30 s, with jitter. Replaces the former global `AtomicBool` that poisoned all remaining
+  chunks on one transient error.
+- **Dedicated `direct_client`** built with `pool_idle_timeout(15 s)` + `tcp_keepalive(45 s)`
+  + explicit `Content-Length` header on all direct PUTs. Defeats stale keep-alive 400s on
+  long WAN pushes.
+- **Configurable presigned URL TTL** — `presigned_url_ttl_seconds` in server config
+  (default 43 200 = 12 h). Propagated through `AppState` via `with_presigned_ttl()`.
+- **Multipart Upload (MPU) for S3/MinIO** (`MEDIAGIT_STAGED_UPLOAD=1`) — `upload_chunk_mpu()`
+  uploads parts with the same per-part 5-attempt retry loop. Adaptive part size
+  (`mpu_part_size_s3()` / `MEDIAGIT_MPU_PART_SIZE`): default floor 16 MiB, target ~96
+  parts, scales up to 64 MiB parts for large chunks. Falls through to single-PUT on failure.
+  Gated on `MEDIAGIT_MPU_THRESHOLD_BYTES` (default 16 MiB).
+
+#### Throughput Improvements (W1–W5 — 2026-05-15)
+- **W1 — Bench module** (`mediagit-protocol/src/bench.rs`) — `MEDIAGIT_BENCH=1` emits
+  `[bench]` summary with `throughput_mbs` and `util_pct`; decision gate: ≥80% util =
+  WAN-limited, ≥80% cpu = CPU-limited.
+- **W4 — HTTP client split** — control-plane keeps HTTP/2; upload/download `direct_client`
+  forced `http1_only()` + `tcp_nodelay(true)` + `pool_idle_timeout(60 s)`.
+  `MEDIAGIT_HTTP_POOL_MAX` (default 64) now has a single source of truth.
+- **W2 — Adaptive MPU part size** — `mpu_part_size_s3()` in `s3.rs` / `minio.rs`.
+  Override via `MEDIAGIT_MPU_PART_SIZE`.
+- **W5 — Range-parallel GET** — `download_chunk_ranged()`: chunks ≥ 64 MiB
+  (`MEDIAGIT_RANGE_PARALLEL_THRESHOLD`) download in `MEDIAGIT_RANGE_PARALLEL=4` parallel
+  byte-range GETs; falls back to single-stream on any failure.
+
+#### Push/Pull Pipeline — Track B (default ON as of 2026-05-22)
+- **B1 — Pull pipeline** `MEDIAGIT_PULL_PIPELINE=1` (ON) +
+  `MEDIAGIT_PULL_MANIFEST_CONCURRENCY=8` — `buffer_unordered` manifest processing.
+- **B2 — Push pipeline** `MEDIAGIT_PUSH_PIPELINE=1` (ON) — parallel object upload with
+  per-object semaphore; gated knob flipped ON after MinIO/AWS/Azure sign-off.
+- **B3 — Fetch branch concurrency** `MEDIAGIT_FETCH_BRANCH_CONCURRENCY=4` (ON).
+- **B4 — Stream-to-disk** `MEDIAGIT_STREAM_CHUNK_TO_DISK=1` (ON) — chunks streamed to a
+  temp file on download instead of buffering in heap; prevents RSS spike during large clones.
+- **B5 — `bytes::Bytes` refcount** in push hot loop — O(1) clone instead of memcpy
+  for chunk data shared across concurrent upload tasks.
+- **B6 — Decompress-blocking** `MEDIAGIT_DECOMPRESS_BLOCKING=1` (ON) +
+  `MEDIAGIT_DECOMPRESS_BLOCKING_THRESHOLD=262144`.
+- **B7 — Storage streaming** `MEDIAGIT_STORAGE_STREAMING=1` (ON) — `get_streaming` trait
+  with native impl in `minio.rs` and `s3.rs`; AWS clone 15.8% faster (159.8 s → 134.5 s).
+- **B8 — `MEDIAGIT_HTTP_POOL_MAX`** single source of truth at `client.rs`.
+- **B9 — `manifest_to_first_byte_ns`** metric added; `BENCH_SCHEMA_VERSION=2`.
+
+#### New Environment Knobs
+- **`MEDIAGIT_PUSH_CHUNK_CONCURRENCY`** — per-object chunk upload concurrency override
+  (default: `(64 / push_object_concurrency).max(4).min(concurrent_uploads)`; targets 64
+  total in-flight PUTs).
+- **`MEDIAGIT_FETCH_DOWNLOAD_CONCURRENCY`** — per-branch download concurrency cap during
+  `fetch --all` (default: `max(MEDIAGIT_DOWNLOAD_CONCURRENCY / branch_concurrency, 8)`).
+- **`MEDIAGIT_GCS_UPLOAD_CONCURRENCY`** — concurrent `write_object` slots for GCS backend
+  (default 4); prevents TCP transport timeouts under B2 pipeline load.
+
+### Fixed
+
+#### Pack Negotiation
+- **StreamingPack header offset** — `StreamingPackWriter` initialized `current_offset: 12`
+  but `PackHeader::to_bytes()` produces 13 bytes (signature 4 + version 4 + count 4 +
+  kind 1). Fixed to 13, resolving "Index data too short for entry count" on all
+  server-served packs after BLAKE3 migration. (`streaming_pack.rs`)
+
+#### Clone / Fetch
+- **MinIO `get()` retries "service error" indefinitely** — MinIO returns "service error"
+  (not "nosuchkey") for missing keys. Mapped to `NoSuchKey` so `with_retry` treats it as
+  a permanent failure immediately, not after 5 timeouts. (`minio.rs`)
+- **Server `download_chunk` returns 503 for missing chunks** — changed to 404 for missing
+  objects, allowing proper client error reporting. (`handlers.rs`)
+- **GCS B4 hash mismatch** — `MEDIAGIT_STREAM_CHUNK_TO_DISK` path incorrectly verified
+  `BLAKE3(compressed_bytes)` against `chunk_id = BLAKE3(uncompressed)`; removed the
+  broken check. GCS has no presigned URLs so all chunks hit this path. (`client.rs`)
+- **GCS concurrent upload 500s** — B2 pipeline's 8-concurrent uploads exhausted TCP
+  connections on the GCS proxy path; fixed with `upload_semaphore` (default 4,
+  `MEDIAGIT_GCS_UPLOAD_CONCURRENCY`) in `GcsBackend::put()`. (`gcs.rs`)
+
+#### Push Progress Display
+- **Progress bar overshoot** — `bytes_total_progress: Arc<AtomicU64>` added as a separate
+  denominator atomic published immediately after the chunk-existence check (not after
+  object completion). Retry pass no longer double-counts bytes. All increments unified to
+  manifest chunk sizes. Bar stays ≤ 100% at all times.
+- **Push throughput regression** — replaced per-object concurrency formula with
+  `TOTAL_IN_FLIGHT_TARGET = 64`, restoring ~2.1 MB/s to AWS ap-south-1 (was 32 in-flight
+  after the original B2 semaphore capped it).
+- **Fetch over-concurrency on `--all`** — per-branch cap: `max(download_concurrency /
+  branch_concurrency, 8)`; peak in-flight ≤ 128 (was 512). (`fetch.rs`)
+
+#### Tests & Scripts
+- **MinIO test: bucket not purged between runs** — added `aws s3 rm` purge at test
+  startup to prevent false dedup from prior runs. (`deep_test_minio.ps1`)
+- **Presigned tests read stdout instead of stderr** — test log reads changed to
+  `server_err.log` (tracing writes to stderr). (`deep_test_minio.ps1`)
+- **Scripts cleanup** — deleted `scripts/init-aws.sh` (LocalStack not used); updated
+  `scripts/start-test-services.sh`; overhauled `scripts/run_comprehensive_tests.sh`
+  (fixed ANSI color codes, corrected stale test names, added 8 new test suites).
+
+### Test Coverage
+- 459/459 deep tests pass across AWS S3 (ap-south-1), Azure Blob Storage (South India),
+  and GCS (us-central1 proxy). All 23 supported file types validated on all 3 backends.
+  +6 new concurrency-knob correctness tests.
+
+---
+
 ## [v0.2.6-beta.1] - 2026-04-03
 
 

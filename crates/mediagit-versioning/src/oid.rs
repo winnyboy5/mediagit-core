@@ -13,18 +13,18 @@
 
 //! Object Identifier (OID) for content-addressable storage
 //!
-//! An OID is a SHA-256 hash of an object's content, providing:
+//! An OID is a BLAKE3 hash of an object's content, providing:
 //! - Unique identification of objects
 //! - Automatic content deduplication
 //! - Content verification capability
 
+use crate::hash::Hasher;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::fmt;
 
-/// Object Identifier - SHA-256 hash of object content
+/// Object Identifier - BLAKE3 hash of object content
 ///
-/// The OID is a 32-byte (256-bit) SHA-256 hash that uniquely identifies
+/// The OID is a 32-byte (256-bit) BLAKE3 hash that uniquely identifies
 /// an object by its content. This provides automatic deduplication: identical
 /// content produces identical OIDs.
 ///
@@ -53,12 +53,9 @@ impl Oid {
     /// assert_eq!(oid.to_string().len(), 64); // 32 bytes = 64 hex chars
     /// ```
     pub fn hash(data: &[u8]) -> Self {
-        let mut hasher = Sha256::new();
+        let mut hasher = Hasher::new();
         hasher.update(data);
-        let result = hasher.finalize();
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(&result);
-        Oid(bytes)
+        Oid(hasher.finalize())
     }
 
     /// Compute OID from file using streaming hash (constant memory)
@@ -84,7 +81,7 @@ impl Oid {
         use std::io::Read;
 
         let mut file = std::fs::File::open(path.as_ref())?;
-        let mut hasher = Sha256::new();
+        let mut hasher = Hasher::new();
         let mut buffer = [0u8; 64 * 1024]; // 64KB buffer - stack allocated
 
         loop {
@@ -95,10 +92,7 @@ impl Oid {
             hasher.update(&buffer[..bytes_read]);
         }
 
-        let result = hasher.finalize();
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(&result);
-        Ok(Oid(bytes))
+        Ok(Oid(hasher.finalize()))
     }
 
     /// Compute OID from file using async streaming hash (constant memory)
@@ -126,7 +120,7 @@ impl Oid {
         use tokio::io::AsyncReadExt;
 
         let mut file = tokio::fs::File::open(path.as_ref()).await?;
-        let mut hasher = Sha256::new();
+        let mut hasher = Hasher::new();
         let mut buffer = vec![0u8; 64 * 1024]; // 64KB buffer - heap for async
 
         loop {
@@ -137,10 +131,24 @@ impl Oid {
             hasher.update(&buffer[..bytes_read]);
         }
 
-        let result = hasher.finalize();
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(&result);
-        Ok(Oid(bytes))
+        Ok(Oid(hasher.finalize()))
+    }
+
+    /// Compute OID using memory-mapped I/O and BLAKE3 tree-parallel hashing via rayon.
+    ///
+    /// Produces a byte-identical result to `from_file` / `from_file_async` — BLAKE3's
+    /// tree-hash spec guarantees sequential and parallel modes agree. On multi-core hardware
+    /// this is typically 2–4× faster than the sequential path for files ≥ 1 MiB.
+    ///
+    /// This is a blocking function; call it inside `tokio::task::spawn_blocking`.
+    /// Gated by `MEDIAGIT_HASH_PARALLEL=1` at the call site.
+    pub fn from_file_mmap_parallel<P: AsRef<std::path::Path>>(path: P) -> anyhow::Result<Self> {
+        let file = std::fs::File::open(path.as_ref())?;
+        // Safety: file opened read-only; mapping is read-only.
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        let mut hasher = Hasher::new();
+        hasher.update_rayon(&mmap[..]);
+        Ok(Oid(hasher.finalize()))
     }
 
     /// Create OID from raw bytes
@@ -264,6 +272,28 @@ impl From<Oid> for [u8; 32] {
     }
 }
 
+/// Cloud storage key — forward-compat type for Track F cloud packs.
+///
+/// Today every key is `Chunk(_)`. Track F adds `Pack(_,offset,len)` so
+/// server can bundle chunks into pack objects with Range-GET resolution.
+/// Call-sites use `Chunk` everywhere until Track F lands — no ODB changes needed now.
+#[doc = "Sole storage-key abstraction. New variants extend here for Track F."]
+pub enum StorageKey {
+    /// A single chunk stored as its own object (current default).
+    Chunk(Oid),
+    /// A byte range within a pack object (Track F / cloud-side packs).
+    Pack(Oid, u64, u64), // pack-oid, byte-offset, byte-length
+}
+
+impl StorageKey {
+    pub fn to_storage_path(&self) -> String {
+        match self {
+            StorageKey::Chunk(oid) => format!("chunks/{}", oid.to_hex()),
+            StorageKey::Pack(oid, _, _) => format!("packs/{}", oid.to_hex()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,7 +328,7 @@ mod tests {
     fn test_hex_length() {
         let oid = Oid::hash(b"test");
         let hex = oid.to_hex();
-        assert_eq!(hex.len(), 64, "SHA-256 hex should be 64 characters");
+        assert_eq!(hex.len(), 64, "BLAKE3 hex should be 64 characters");
     }
 
     #[test]

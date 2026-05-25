@@ -537,6 +537,30 @@ impl StorageBackend for LocalBackend {
         ))
     }
 
+    /// Atomic rename from a temp file (B4 stream-to-disk override).
+    ///
+    /// On same-filesystem paths this avoids reading the file back into RAM.
+    /// Falls back to copy + delete when rename crosses device boundaries
+    /// (e.g. system temp dir on a different drive from the ODB root on Windows).
+    async fn put_file(&self, key: &str, src: &std::path::Path) -> anyhow::Result<()> {
+        if key.is_empty() {
+            return Err(anyhow::anyhow!("key cannot be empty"));
+        }
+        let dest = self.object_path(key);
+        self.ensure_parent_dir(&dest).await?;
+        match fs::rename(src, &dest).await {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                // Cross-device rename (different filesystem / drive): copy then delete.
+                fs::copy(src, &dest)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("put_file copy: {}", e))?;
+                let _ = fs::remove_file(src).await;
+                Ok(())
+            }
+        }
+    }
+
     /// Check if an object exists
     ///
     /// # Arguments

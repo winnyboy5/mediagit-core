@@ -199,4 +199,20 @@ mod tests {
         assert!(debug_str.contains("ZstdCompressor"));
         assert!(debug_str.contains("Default"));
     }
+
+    /// R5/B6: corrupt zstd frame must surface as CompressionError, never panic.
+    #[test]
+    fn decompress_corrupt_zstd_frame_is_typed_error() {
+        let c = ZstdCompressor::new(CompressionLevel::Default);
+        let mut corrupt = vec![0x28u8, 0xb5, 0x2f, 0xfd]; // zstd magic
+        corrupt.extend_from_slice(&[0xFFu8; 64]); // garbage body
+        let err = c
+            .decompress(&corrupt)
+            .expect_err("corrupt zstd frame must return Err");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("zstd") || msg.contains("decompression"),
+            "error must name zstd or decompression, got: {msg}"
+        );
+    }
 }

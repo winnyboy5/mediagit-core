@@ -17,6 +17,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Schema version for the `[bench]` summary line. Increment when fields change.
+const BENCH_SCHEMA_VERSION: u8 = 2;
+
+/// Collect all `MEDIAGIT_*` env vars as a sorted `KEY=val,...` string.
+fn collect_knobs() -> String {
+    let mut pairs: Vec<(String, String)> = std::env::vars()
+        .filter(|(k, _)| k.starts_with("MEDIAGIT_"))
+        .collect();
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    pairs
+        .iter()
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 pub fn enabled() -> bool {
     std::env::var("MEDIAGIT_BENCH").as_deref() == Ok("1")
 }
@@ -28,6 +44,8 @@ pub struct BenchSession {
     bytes: AtomicU64,
     /// Sum of per-batch elapsed wall-ns (≈ combined active network time).
     phase_ns: AtomicU64,
+    /// Time from first manifest fetch start to first byte of chunk data received (B9).
+    manifest_to_first_byte_ns: AtomicU64,
     wall_start: Instant,
     concurrency: usize,
 }
@@ -39,9 +57,17 @@ impl BenchSession {
             chunks: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             phase_ns: AtomicU64::new(0),
+            manifest_to_first_byte_ns: AtomicU64::new(0),
             wall_start: Instant::now(),
             concurrency,
         })
+    }
+
+    /// Record time from first manifest fetch start to first chunk byte received.
+    /// Call once per pull/clone operation when the first chunk body byte arrives.
+    pub fn record_manifest_to_first_byte(&self, elapsed: Duration) {
+        self.manifest_to_first_byte_ns
+            .store(elapsed.as_nanos() as u64, Ordering::Relaxed);
     }
 
     /// Record one completed stream batch: N chunks, B bytes, D elapsed.
@@ -81,11 +107,22 @@ impl BenchSession {
         } else {
             0.0
         };
+        let manifest_to_first_byte_ms = {
+            let ns = self.manifest_to_first_byte_ns.load(Ordering::Relaxed);
+            if ns > 0 {
+                format!("{:.1}", ns as f64 / 1e6)
+            } else {
+                "n/a".to_string()
+            }
+        };
+        let knobs = collect_knobs();
         eprintln!(
-            "[bench] op={op} chunks={chunks} total_bytes={bytes} \
+            "[bench] bench_schema_version={schema} op={op} chunks={chunks} total_bytes={bytes} \
              wall={wall:.2}s active_sum={active:.2}s \
              avg_chunk_mb={avg:.2} throughput_mbs={mbs:.2} \
-             util_pct={util:.0}%",
+             util_pct={util:.0}% manifest_to_first_byte_ms={m2fb} \
+             knobs={knobs}",
+            schema = BENCH_SCHEMA_VERSION,
             op = self.op,
             chunks = chunks,
             bytes = bytes,
@@ -94,6 +131,12 @@ impl BenchSession {
             avg = avg_mb,
             mbs = bps_wall / (1024.0 * 1024.0),
             util = util_pct,
+            m2fb = manifest_to_first_byte_ms,
+            knobs = if knobs.is_empty() {
+                "none".to_string()
+            } else {
+                knobs
+            },
         );
     }
 }
@@ -105,4 +148,36 @@ pub fn maybe_start(op: &'static str, concurrency: usize) -> Option<Arc<BenchSess
     } else {
         None
     }
+}
+
+/// Emit a `[bench] op=add` summary line (A9).
+///
+/// Call once at the end of the `add` command with the wall-clock start time,
+/// the total bytes hashed (sum of all staged file sizes), and the file count.
+/// No-op when `MEDIAGIT_BENCH` is not set to `"1"`.
+pub fn emit_add_summary(wall_start: std::time::Instant, total_bytes: u64, files: u64) {
+    if !enabled() {
+        return;
+    }
+    let wall_s = wall_start.elapsed().as_secs_f64();
+    let mbs = if wall_s > 0.0 {
+        total_bytes as f64 / wall_s / (1024.0 * 1024.0)
+    } else {
+        0.0
+    };
+    let knobs = collect_knobs();
+    eprintln!(
+        "[bench] bench_schema_version={schema} op=add files={files} \
+         total_bytes={bytes} wall={wall:.2}s hash_mbs={mbs:.2} knobs={knobs}",
+        schema = BENCH_SCHEMA_VERSION,
+        files = files,
+        bytes = total_bytes,
+        wall = wall_s,
+        mbs = mbs,
+        knobs = if knobs.is_empty() {
+            "none".to_string()
+        } else {
+            knobs
+        },
+    );
 }

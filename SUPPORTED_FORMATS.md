@@ -72,7 +72,7 @@ graph TD
     I --> K["get_chunk_params(file_size)"]
     K --> L["FastCDC::new(data, min, avg, max)<br/>or StreamCDC::new(file, min, avg, max)"]
     L --> M["Iterator yields chunks"]
-    M --> N["SHA-256 hash → Oid"]
+    M --> N["BLAKE3 hash → Oid"]
     N --> O["Deduplicate + Compress + Store"]
 
     C --> O
@@ -536,9 +536,9 @@ When file extension is unavailable, the ODB uses magic byte signatures:
 
 ---
 
-## Performance Benchmarks (v0.2.6-beta.1)
+## Performance Benchmarks (v0.2.7-beta.1)
 
-> Measured via standalone deep test suite, 36 formats, all `fsck` verified. Last run: 2026-05-05 (GCS backend, 75/75 tests passing).
+> Measured via deep test suite, 23 formats, all `fsck` verified. Last run: 2026-05-25 (AWS/Azure/GCS backends, 459/459 tests passing).
 
 ### Storage Savings
 

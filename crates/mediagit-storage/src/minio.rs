@@ -925,7 +925,21 @@ impl StorageBackend for MinIOBackend {
                     .key(&key)
                     .send()
                     .await
-                    .map_err(|e| anyhow!("Failed to get object: {}", e))?;
+                    .map_err(|e| {
+                        let emsg = e.to_string().to_lowercase();
+                        // MinIO returns a generic "service error" for GET on non-existent
+                        // objects (unlike HEAD which returns a typed 404). Translate to a
+                        // nosuchkey message so with_retry treats it as permanent and stops
+                        // retrying a clearly missing object.
+                        if emsg.contains("service error")
+                            && !emsg.contains("timeout")
+                            && !emsg.contains("connect")
+                        {
+                            anyhow!("NoSuchKey: object not found: {}", key)
+                        } else {
+                            anyhow!("Failed to get object: {}", e)
+                        }
+                    })?;
 
                 let body = response
                     .body
@@ -942,6 +956,72 @@ impl StorageBackend for MinIOBackend {
             })
         })
         .await
+    }
+
+    /// Stream an object from MinIO as a `Bytes` sequence (B7).
+    ///
+    /// When `MEDIAGIT_STORAGE_STREAMING=1`, drives the S3 SDK's `ByteStream` via
+    /// `into_async_read()` + `unfold` so the object body is never fully buffered.
+    /// Falls back to the default single-chunk impl when the knob is OFF so other
+    /// backends remain unaffected.  No retry on the streaming path: mid-stream
+    /// failures bubble up to the caller's retry layer.
+    async fn get_streaming(
+        &self,
+        key: &str,
+    ) -> anyhow::Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+        >,
+    > {
+        // B7: default ON — AWS clone 15.8% faster (2026-05-22). Set MEDIAGIT_STORAGE_STREAMING=0 to revert.
+        let streaming_enabled = std::env::var("MEDIAGIT_STORAGE_STREAMING")
+            .as_deref()
+            .unwrap_or("1")
+            == "1";
+        if !streaming_enabled {
+            let data = self.get(key).await?;
+            return Ok(Box::pin(futures::stream::once(async move {
+                Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(data))
+            })));
+        }
+
+        Self::validate_key(key)?;
+        let key_wire = self.full_key(key);
+        let client = self.client.clone();
+        let bucket = self.config.bucket.clone();
+        let stats = self.stats.clone();
+
+        let response = client
+            .get_object()
+            .bucket(&bucket)
+            .key(&key_wire)
+            .send()
+            .await
+            .map_err(|e| anyhow!("get_streaming {}: {}", key_wire, e))?;
+
+        // ByteStream does not implement futures::Stream directly; convert to
+        // tokio::io::AsyncRead and drive with unfold to yield 64 KiB Bytes chunks.
+        let reader = response.body.into_async_read();
+        let stream = futures::stream::unfold((reader, stats), |(mut rdr, stats)| async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf = vec![0u8; 65536];
+            match rdr.read(&mut buf).await {
+                Ok(0) => None,
+                Ok(n) => {
+                    buf.truncate(n);
+                    stats
+                        .total_bytes_downloaded
+                        .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                    Some((
+                        Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(buf)),
+                        (rdr, stats),
+                    ))
+                }
+                Err(e) => Some((Err(anyhow!("get_streaming chunk: {}", e)), (rdr, stats))),
+            }
+        });
+
+        Ok(Box::pin(stream))
     }
 
     /// Store an object in MinIO

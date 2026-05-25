@@ -386,6 +386,9 @@ impl ContentChunker {
         let file =
             std::fs::File::open(path).map_err(|e| anyhow::anyhow!("Failed to open file: {}", e))?;
 
+        // A10/XET: fastcdc::v2020::StreamCDC implements gear-hash cut-point skip
+        // (advances min_size-window-1 bytes before testing the mask), matching
+        // the XET/HuggingFace CDC optimization. No hand-rolled skip needed.
         let chunker =
             fastcdc::v2020::StreamCDC::new(file, min_size as u32, avg_size as u32, max_size as u32);
 
@@ -528,6 +531,8 @@ impl ContentChunker {
         // StreamCDC: content-defined chunking (constant memory, all formats).
         // This is the primary path for non-container files and the fallback for
         // container files when mmap or format-aware parsing fails.
+        // A10/XET: cut-point skip is built into fastcdc::v2020::StreamCDC — no mask
+        // test runs until min_size bytes have been consumed per chunk.
         let (avg_size, min_size, max_size) = get_chunk_params(file_size);
         let file = std::fs::File::open(path)
             .map_err(|e| anyhow::anyhow!("Failed to open file '{}': {}", path.display(), e))?;

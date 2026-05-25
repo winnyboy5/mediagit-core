@@ -18,7 +18,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.2.6-beta.1"
+version = "0.2.7-beta.1"
 edition = "2021"
 rust-version = "1.92.0"
 license = "AGPL-3.0"
@@ -48,7 +48,7 @@ thiserror = "2.0.9"
 
 # Hashing
 sha2 = "0.10"
-blake3 = "1.5"
+blake3 = { version = "1.5", features = ["rayon"] }
 hex = "0.4"
 
 # Compression
@@ -81,6 +81,7 @@ aws-sdk-s3 = { version = "1.124", default-features = false, features = ["behavio
 
 # HTTP Client
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "http2"] }
+bytes = "1"
 
 # HTTP Framework
 axum = "0.8"
