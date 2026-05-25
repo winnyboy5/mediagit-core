@@ -39,7 +39,6 @@ google-cloud-auth = { version = "0.17", optional = true }
 # is_not_found checks miss those errors.
 google-cloud-gax = { version = "1.9", optional = true }
 serde.workspace = true
-serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -60,3 +59,6 @@ required-features = ["gcs"]
 [[bench]]
 name = "cache_bench"
 harness = false
+
+[package.metadata.cargo-machete]
+ignored = ["google-cloud-auth"]
