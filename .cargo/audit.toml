@@ -25,10 +25,29 @@
 # RUSTSEC-2024-0436: paste 1.0.15 (unmaintained)
 #   azure_core 0.21 → paste. Same root cause as RUSTSEC-2024-0384.
 #
-# Review date: 2026-03-04
+# RUSTSEC-2026-0098, -0099, -0104: rustls-webpki 0.101.7
+#   aws-smithy-http-client 1.x → rustls 0.21 → rustls-webpki 0.101.x
+#   The 0.101.x line has no patch; the fix requires >=0.103.12 which needs
+#   rustls 0.23+. aws-smithy-http-client vendors the old rustls 0.21 stack
+#   alongside the modern 0.23 stack. We updated 0.103.10→0.103.13 (the stack
+#   we actually use); the 0.101.7 copy is the legacy fallback that the AWS SDK
+#   bundles but our code never selects.
+#
+# RUSTSEC-2026-0097: rand 0.7.3 and 0.8.5 (unsound warning)
+#   rand 0.7.3 ← http-types ← azure_core 0.21 (transitive, optional azure feature)
+#   rand 0.8.5 ← jsonwebtoken / azure_core 0.21 (transitive, optional)
+#   The unsoundness requires a custom global logger calling rand::rng() —
+#   MediaGit uses tracing (not log) and never calls rand::rng() directly.
+#   Updated rand 0.9→0.9.4 and 0.10→0.10.1 (our direct deps).
+#
+# Review date: 2026-05-25
 ignore = [
     "RUSTSEC-2023-0071",
     "RUSTSEC-2023-0089",
     "RUSTSEC-2024-0384",
     "RUSTSEC-2024-0436",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+    "RUSTSEC-2026-0097",
 ]
