@@ -16,9 +16,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use mediagit_security::auth::{ApiKeyAuth, AuthLayer, AuthService, JwtAuth};
+use mediagit_storage::StorageBackend;
+use mediagit_versioning::ObjectDatabase;
 
 /// Unique request ID generator
 static REQUEST_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -38,6 +40,9 @@ pub fn generate_request_id() -> String {
 pub struct WantEntry {
     pub repo: String,
     pub want_list: Vec<String>,
+    /// Objects the client claims to already have — used to prune the server's
+    /// pack walk so fetches only ship the delta.
+    pub have_list: Vec<String>,
     pub created_at: Instant,
 }
 
@@ -50,6 +55,9 @@ pub struct WantCache {
 impl WantCache {
     /// Default maximum entries
     pub const DEFAULT_MAX_ENTRIES: usize = 10_000;
+
+    /// Maximum age for want entries before automatic cleanup (5 minutes)
+    pub const ENTRY_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
     /// Create a new want cache with default capacity
     pub fn new() -> Self {
@@ -64,9 +72,22 @@ impl WantCache {
         }
     }
 
-    /// Insert a want entry, evicting oldest if at capacity
-    pub fn insert(&mut self, request_id: String, repo: String, want_list: Vec<String>) {
-        // Evict oldest entry if at capacity
+    /// Insert a want entry, cleaning up expired entries and evicting oldest if
+    /// still at capacity. TTL cleanup piggybacks on insert() to avoid needing
+    /// a background task.
+    pub fn insert(
+        &mut self,
+        request_id: String,
+        repo: String,
+        want_list: Vec<String>,
+        have_list: Vec<String>,
+    ) {
+        // Sweep expired entries first (TTL-based cleanup)
+        let now = Instant::now();
+        self.entries
+            .retain(|_, entry| now.duration_since(entry.created_at) < Self::ENTRY_TTL);
+
+        // Evict oldest entry if still at capacity after TTL sweep
         if self.entries.len() >= self.max_entries {
             if let Some((oldest_key, _)) = self
                 .entries
@@ -84,6 +105,7 @@ impl WantCache {
             WantEntry {
                 repo,
                 want_list,
+                have_list,
                 created_at: Instant::now(),
             },
         );
@@ -116,10 +138,27 @@ pub struct AppState {
     /// Directory containing repositories
     pub repos_dir: PathBuf,
 
+    /// TTL (seconds) for presigned PUT URLs issued to clients.
+    pub presigned_url_ttl_secs: u64,
+
     /// Cache of objects wanted by clients (request_id -> WantEntry)
     /// Uses unique request IDs to prevent race conditions between concurrent clients
     /// Bounded to prevent memory leaks from abandoned requests
     pub want_cache: Mutex<WantCache>,
+
+    /// Per-repo cache of constructed storage backends. Constructing a backend
+    /// (especially Azure/S3) is expensive — TLS handshake plus a container/bucket
+    /// existence round-trip — and naively rebuilding it on every handler call
+    /// turned tiny pushes into multi-minute operations against cloud storage.
+    /// Keyed by canonical repo path; a single fast-path read lock covers the
+    /// hot path, with a write-locked double-checked init on miss.
+    pub storage_backends: RwLock<HashMap<PathBuf, Arc<dyn StorageBackend>>>,
+
+    /// Per-repo cache of ObjectDatabase templates. Handlers clone() from this
+    /// so all concurrent writers share the same Arc<delta_written_pairs> HashSet,
+    /// which is required for the TOCTOU circular-delta-chain prevention to work.
+    /// Without sharing, each handler has its own HashSet → guard is ineffective.
+    pub odb_cache: RwLock<HashMap<PathBuf, ObjectDatabase>>,
 
     /// Authentication layer (optional - can be disabled for development)
     pub auth_layer: Option<Arc<AuthLayer>>,
@@ -133,7 +172,10 @@ impl AppState {
     pub fn new(repos_dir: PathBuf) -> Self {
         Self {
             repos_dir,
+            presigned_url_ttl_secs: 43200,
             want_cache: Mutex::new(WantCache::new()),
+            storage_backends: RwLock::new(HashMap::new()),
+            odb_cache: RwLock::new(HashMap::new()),
             auth_layer: None,
             auth_service: None,
         }
@@ -154,7 +196,10 @@ impl AppState {
 
         Self {
             repos_dir,
+            presigned_url_ttl_secs: 43200,
             want_cache: Mutex::new(WantCache::new()),
+            storage_backends: RwLock::new(HashMap::new()),
+            odb_cache: RwLock::new(HashMap::new()),
             auth_layer: Some(auth_layer),
             auth_service: Some(auth_service),
         }
@@ -171,10 +216,19 @@ impl AppState {
 
         Self {
             repos_dir,
+            presigned_url_ttl_secs: 43200,
             want_cache: Mutex::new(WantCache::new()),
+            storage_backends: RwLock::new(HashMap::new()),
+            odb_cache: RwLock::new(HashMap::new()),
             auth_layer: Some(auth_layer),
             auth_service: Some(auth_service),
         }
+    }
+
+    /// Override the presigned URL TTL (called from `main` after reading config).
+    pub fn with_presigned_ttl(mut self, secs: u64) -> Self {
+        self.presigned_url_ttl_secs = secs;
+        self
     }
 
     /// Check if authentication is enabled

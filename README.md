@@ -9,26 +9,30 @@
 
 ## 🎯 Status
 
-**Version**: v0.2.6-beta.1
+**Version**: v0.2.7-beta.1
 **Status**: 🚧 **BETA**
 **Features**: 100% complete (all P0–P3 items implemented)
-**Last Validated**: March 2026 — Linux & Windows, release build
+**Last Validated**: May 25, 2026 — 459/459 deep tests on AWS S3, Azure Blob, GCS (release build, Windows 11)
 **🚨 WARNING 🚨**: This project is under active development. Be aware that large breaking changes may happen before 1.0 is reached.
 
-✅ **28 CLI commands validated end-to-end** — 0 crashes, 0 data corruption
+✅ **459/459 deep-tests passing** across AWS S3 (ap-south-1), Azure Blob (South India), Google Cloud Storage
+✅ **28 CLI commands validated end-to-end** — 0 crashes, 0 data corruption across all 3 cloud backends
 ✅ **27+ file types tested** (58 GB dataset) across video, audio, 3D, image, design, ML
-✅ **All storage backends validated** — local, MinIO S3, push / pull / clone / fetch
+✅ **26.5%+ storage savings** measured on mixed media corpus (compression + dedup + delta, validated May 2026)
 ✅ **Files up to 398 MB** staged and transferred; single-file scalability to 6 GB tested
 
 | Metric | Result |
 |--------|--------|
 | **Staging (small files < 5 MB)** | 25–182 MB/s |
 | **Staging (large video/PSD, no chunking)** | 80–240 MB/s |
-| **Staging (chunked files 5–60 MB)** | 3.6–5.2 MB/s |
-| **Network push** | 167 MB/s (150 MB over local server) |
-| **Network clone** | 100 MB/s (150 MB over local server) |
+| **Staging (chunked files 5–60 MB)** | 2.8–5.2 MB/s |
+| **Network push (local server, pack negotiation)** | **134–267 MB/s** (227 MB video, loopback) |
+| **Network push (cloud WAN, South Asia)** | ~1.0–2.1 MB/s (WAN-bound, ~260 MB corpus) |
+| **Network clone (local server)** | 100 MB/s (150 MB local server) |
+| **Network clone (cloud WAN, South Asia)** | 0.03–0.10 MB/s (WAN-bound) |
 | **Commit latency** | 30–52 ms (constant regardless of file size) |
-| **Average storage savings** | ~30% (compression + dedup + delta, mixed media) |
+| **Storage savings (validated, May 2026)** | **26.5%** across 3 cloud backends (AWS, Azure, GCS) |
+| **Storage savings (average mixed media)** | ~30% (compression + dedup + delta) |
 | **Exact dedup (CAS): exact duplicate** | 99.9% savings (CAS hit, 0.7 KB overhead) |
 | **Exact dedup (CAS): 3× identical MP4** | 66% savings |
 | **Exact dedup (CAS): small edit to large file** | 70–95% chunk reuse via CDC + CAS |
@@ -111,19 +115,19 @@ curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/instal
 
 **Linux x86_64 — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.6-beta.1/mediagit-0.2.6-beta.1-x86_64-linux.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.7-beta.1/mediagit-0.2.7-beta.1-x86_64-linux.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **macOS Apple Silicon — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.6-beta.1/mediagit-0.2.6-beta.1-aarch64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.7-beta.1/mediagit-0.2.7-beta.1-aarch64-macos.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **Windows x86_64 (PowerShell):**
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.6-beta.1/mediagit-0.2.6-beta.1-x86_64-windows.zip" -OutFile mediagit.zip
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.7-beta.1/mediagit-0.2.7-beta.1-x86_64-windows.zip" -OutFile mediagit.zip
 Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 # Add to PATH:
 [Environment]::SetEnvironmentVariable("Path", "$env:Path;$env:LOCALAPPDATA\MediaGit\bin", "User")
@@ -132,8 +136,8 @@ Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 #### Docker
 
 ```bash
-docker pull ghcr.io/winnyboy5/mediagit-core:0.2.6-beta.1
-docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.6-beta.1 mediagit --version
+docker pull ghcr.io/winnyboy5/mediagit-core:0.2.7-beta.1
+docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.7-beta.1 mediagit --version
 ```
 
 #### From Source
@@ -153,11 +157,11 @@ cargo build --release
 
 | Platform | Archive |
 |----------|---------|
-| Linux x86_64 | `mediagit-0.2.6-beta.1-x86_64-linux.tar.gz` |
-| Linux ARM64 | `mediagit-0.2.6-beta.1-aarch64-linux.tar.gz` |
-| macOS Intel | `mediagit-0.2.6-beta.1-x86_64-macos.tar.gz` |
-| macOS Apple Silicon | `mediagit-0.2.6-beta.1-aarch64-macos.tar.gz` |
-| Windows x86_64 | `mediagit-0.2.6-beta.1-x86_64-windows.zip` |
+| Linux x86_64 | `mediagit-0.2.7-beta.1-x86_64-linux.tar.gz` |
+| Linux ARM64 | `mediagit-0.2.7-beta.1-aarch64-linux.tar.gz` |
+| macOS Intel | `mediagit-0.2.7-beta.1-x86_64-macos.tar.gz` |
+| macOS Apple Silicon | `mediagit-0.2.7-beta.1-aarch64-macos.tar.gz` |
+| Windows x86_64 | `mediagit-0.2.7-beta.1-x86_64-windows.zip` |
 
 Each archive includes `mediagit` (CLI) and `mediagit-server` binaries, plus a `.sha256` checksum file.
 
@@ -408,24 +412,35 @@ Compression strategy is selected automatically per file type. Pre-compressed for
 
 > **Average across a mixed media project: ~30–46% storage reduction.** Results vary by content — text-heavy and 3D-heavy projects save more, video-heavy projects less.
 
-### Comparison with Git LFS and Perforce
+### Comparison with Competitors
 
-| Feature | **MediaGit** | **Git LFS** | **Perforce (Helix Core)** |
-|---------|:----------:|:---------:|:-----------------------:|
-| **Architecture** | Native VCS with built-in chunking | Git extension + external store | Centralized VCS |
-| **Install Complexity** | Single binary | Git + LFS extension + server | Server + client + license |
-| **Deduplication** | ✅ Content-addressable (SHA-256) | ❌ None | ✅ Server-side |
-| **Delta Compression** | ✅ Cross-version via similarity | ❌ None | ✅ RCS-style deltas |
-| **Chunking** | ✅ Content-defined (CDC) | ❌ Whole-file | ❌ Whole-file |
-| **Storage (100MB × 2 versions)** | ~75–80 MB (with delta) | ~200 MB (2 full copies) | ~110–120 MB |
-| **Small file add** (< 5 MB) | **20–45 ms** | ~50–100 ms | ~100–200 ms |
-| **Large file add** (129 MB) | **69 s** (local, with delta) | 5–30 s (HTTP upload) | 10–60 s |
-| **Clone 150 MB** | **1.5 s** (local server) | 5–20 s (HTTP chunked) | 10–30 s |
-| **Offline Commits** | ✅ Full local history | ✅ (Git handles) | ❌ Requires server |
-| **Branching Cost** | ✅ Instant (ref-based) | ✅ (Git handles) | ⚠️ Copy-based (expensive) |
-| **Lock Support** | ❌ Not yet | ✅ File locking | ✅ Exclusive checkout |
-| **Max File Size** | 16 GB+ (u64 offset) | Varies by server | Unlimited |
-| **Cost** | Free (AGPL-3.0) | Free + server costs | $$$ per-seat |
+> **See [comparison.md](comparison.md) for the full evidence-based comparison with storage measurements, throughput benchmarks, and pricing analysis.**
+
+| Feature | **MediaGit** | **Git LFS** | **Perforce** | **HF Xet** | **Diversion** |
+|---------|:----------:|:---------:|:----------:|:--------:|:-----------:|
+| **Architecture** | Native VCS + chunking | Git extension + external store | Centralized VCS | Cloud CDC store | Cloud LFS+delta |
+| **Install Complexity** | Single binary | Git + LFS + server | Server + client + license | Cloud only | Cloud only |
+| **Content-Defined Chunking** | ✅ FastCDC | ❌ | ❌ | ✅ Gearhash | ❌ LFS-based |
+| **Chunk-level Deduplication** | ✅ BLAKE3 CAS | ❌ | File-level only | ✅ BLAKE3 | Partial |
+| **Binary Delta** | ✅ Per-chunk zstd dict | ❌ | RCS file-level | ✅ Implicit | ✅ Delta sync |
+| **Built-in Compression** | ✅ Zstd+Brotli Smart | ❌ | ❌ | ❌ | ❌ |
+| **Storage Savings (validated)** | **26.5%** (459 tests, 3 clouds) | 0% extra | 0–5% RCS | Not published | Not published |
+| **Self-Hosted** | ✅ Primary mode | ✅ LFS server | ✅ Primary | ❌ Cloud-only | ❌ Cloud-only |
+| **Cloud Backends** | S3, Azure, GCS, MinIO, B2 | Any LFS server | None native | HF Hub only | Proprietary |
+| **Offline Commits** | ✅ | ✅ (Git) | ❌ | ❌ | Not documented |
+| **Branching Cost** | ✅ Instant ref-based | ✅ (Git) | ⚠️ Copy-based | N/A | N/A |
+| **File Locking** | ❌ Roadmap | ✅ | ✅ | ❌ | Not documented |
+| **Max File Size** | No limit (u64) | 5 GB (GitHub.com) | No limit | No limit | No limit |
+| **Price** | **Free (AGPL-3.0)** | Free + server | Free ≤5; $39/user/mo | Free tier + Enterprise | Beta TBD |
+
+**Storage comparison for 100 MB binary file × 2 versions:**
+
+| Tool | Storage Used | How |
+|------|------------|-----|
+| **MediaGit** | ~75–80 MB | CDC + per-chunk delta; only changed chunks stored |
+| Git LFS | 200 MB | 2 full copies, no dedup |
+| Perforce | 110–120 MB | File-level RCS delta (binary limited) |
+| HF Xet | Not published | CDC + BLAKE3 (cloud-only; no on-prem option) |
 
 ### Storage Reduction: Two Complementary Mechanisms
 
@@ -433,7 +448,7 @@ MediaGit achieves storage savings through two distinct layers that work together
 
 #### Layer 1 — Exact Deduplication (CAS)
 
-SHA-256 content-addressing means identical chunks are stored only once, no matter how many files, commits, or branches reference them. Before storing any chunk, the ODB checks `storage.exists(sha256_key)` — a hit skips the write entirely.
+BLAKE3 content-addressing means identical chunks are stored only once, no matter how many files, commits, or branches reference them. Before storing any chunk, the ODB checks `storage.exists(blake3_key)` — a hit skips the write entirely.
 
 | Scenario | Validated Result | How |
 |----------|-----------------|-----|
@@ -444,7 +459,7 @@ SHA-256 content-addressing means identical chunks are stored only once, no matte
 | Same asset across N team members | ~(N−1)/N savings | Single stored object, N refs |
 | Completely different content | 0% dedup | No shared chunks; compression only |
 
-> **CDC + CAS synergy**: Content-defined chunking (FastCDC) splits files at natural boundaries. When you version a large file, only the chunks that actually changed produce new SHA-256 hashes — all unchanged chunks are free CAS hits.
+> **CDC + CAS synergy**: Content-defined chunking (FastCDC) splits files at natural boundaries. When you version a large file, only the chunks that actually changed produce new BLAKE3 hashes — all unchanged chunks are free CAS hits.
 
 #### Layer 2 — Similarity-Based Delta Compression
 
@@ -545,6 +560,7 @@ gcloud auth login
 ### Guides
 - **[DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md)** - Complete setup for local, MinIO, AWS, Azure, GCS
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Project Architecture
+- **[comparison.md](comparison.md)** - Evidence-based comparison with Git LFS, Perforce, HF Xet, DVC, Diversion, and 6 other tools
 
 
 ### Examples
@@ -717,7 +733,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 *Initial public release — core infrastructure*
 
 - [x] Core CLI: `init`, `add`, `commit`, `status`, `log`, `branch`, `merge`, `push`, `pull`
-- [x] Content-addressed object database (SHA-256, CDC chunking)
+- [x] Content-addressed object database (BLAKE3, CDC chunking)
 - [x] Intelligent compression — Zstd, Brotli, per-type strategy (70+ file types)
 - [x] PSD layer-aware merge intelligence
 - [x] Multi-cloud storage: AWS S3, Azure Blob, GCS, MinIO, Backblaze B2, DO Spaces
@@ -761,7 +777,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] Per-chunk `on_progress` callback for continuous byte-level progress during multi-GB ingestion
 - [x] Security: upgraded `quinn-proto` (RUSTSEC-2026-0037)
 
-### v0.2.6-beta.1 (Current Beta) — March 2026
+### v0.2.7-beta.1 (Current Beta) — March–May 2026
 *Delta engine rewrite, CLI refinements, server improvements*
 
 - [x] Delta encoder replaced: suffix-array sliding-window → **zstd dictionary compression** (+1.3–2.1pp savings, 1.4–2.4× faster, 73% less code)
@@ -816,7 +832,7 @@ aws iam get-user-policy --user-name mediagit-user --policy-name MediaGitS3Policy
 ```bash
 # The /releases/latest API returns 404 when only pre-releases exist.
 # Pass the version explicitly:
-VERSION=0.2.6-beta.1 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
+VERSION=0.2.7-beta.1 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 
 # Or on Windows PowerShell:
 iwr -UseBasicParsing https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.ps1 | iex
@@ -869,18 +885,19 @@ Special thanks to:
 
 ## Statistics
 
-- **Lines of Code**: 78,000+ (Rust)
+- **Lines of Code**: 85,000+ (Rust, 218 source files across 14 crates)
 - **Features**: 100% complete (all P0–P3 items)
-- **Test Coverage**: 960 unit tests; 194 E2E tests (Linux) + 84 scenarios (Windows) validated
-- **Staging Throughput**: 25–240 MB/s for small files; 1.9–5.2 MB/s for chunked large files
-- **Network Throughput**: 167 MB/s push, 100 MB/s clone (local server)
-- **Storage Savings**: ~30% average across mixed media projects (compression + dedup + delta)
+- **Test Coverage**: 1,529 unit/integration tests; **459/459 deep-tests** across AWS S3, Azure Blob, GCS (validated 2026-05-25)
+- **Staging Throughput**: 25–240 MB/s for small files; 2.8–5.2 MB/s for chunked large files (WAV/PSD/GLB)
+- **Network Throughput**: 134–267 MB/s push (local server, pack negotiation); WAN-bound on cloud backends
+- **Storage Savings**: **26.5%** validated on 3 cloud backends (May 2026); ~30% average across mixed media projects
 - **Stability**: 0 crashes, 0 data corruption across all validated test runs
 - **File Formats**: 70+ extensions (video, audio, image, 3D, DCC, ML, game engines, office)
+- **Server Endpoints**: 20 handler routes + auth
 - **Platforms**: Linux, macOS, Windows — x86_64 + ARM64
 
 ---
 
 **Made with 🦀 and ❤️ by the MediaGit Contributors**
 
-**Status**: Beta | **Version**: v0.2.6-beta.1 | **Updated**: March 26, 2026
+**Status**: Beta | **Version**: v0.2.7-beta.1 | **Updated**: May 25, 2026 | **Cloud-Validated**: 459/459 tests ✅

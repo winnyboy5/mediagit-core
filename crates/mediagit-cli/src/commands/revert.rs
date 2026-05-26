@@ -21,8 +21,8 @@ use std::sync::Arc;
 use tokio::fs;
 
 use mediagit_versioning::{
-    Commit, Index, IndexEntry, MergeEngine, MergeStrategy, ObjectDatabase, Oid, RefDatabase,
-    Reflog, ReflogEntry, Signature, Tree, TreeEntry,
+    CheckoutManager, Commit, Index, IndexEntry, MergeEngine, MergeStrategy, ObjectDatabase, Oid,
+    RefDatabase, Reflog, ReflogEntry, Signature, Tree, TreeEntry,
 };
 
 use super::super::output;
@@ -130,7 +130,10 @@ impl RevertCmd {
         }
 
         let storage = create_storage_backend(&repo_root).await?;
-        let odb = Arc::new(ObjectDatabase::new(storage.clone(), 10000));
+        let odb = Arc::new(ObjectDatabase::with_smart_compression(
+            storage.clone(),
+            10000,
+        ));
         let refs = RefDatabase::new(&storage_path);
 
         let original_head = refs.resolve("HEAD").await?;
@@ -207,13 +210,22 @@ impl RevertCmd {
             ));
         }
 
-        // Use MergeEngine for 3-way merge
+        // Use MergeEngine for explicit 3-way merge with correct trees.
+        // For revert, the merge base must be the commit-to-revert's tree
+        // (not the auto-computed LCA which would return "already up to date"):
+        //   base   = tree of the commit being reverted
+        //   ours   = tree of HEAD (current state)
+        //   theirs = tree of the commit's parent (the state we want to reach)
         let merge_engine = MergeEngine::new(odb.clone());
+        let parent_commit = Commit::read(odb, parent_oid).await?;
 
-        // We need to merge: base=commit, ours=HEAD, theirs=parent
-        // This applies the inverse of the commit
         let merge_result = merge_engine
-            .merge(&head_oid, parent_oid, MergeStrategy::Recursive)
+            .merge_trees(
+                &commit.tree,        // base: the commit being reverted
+                &head_commit.tree,   // ours: current HEAD
+                &parent_commit.tree, // theirs: parent of reverted commit
+                MergeStrategy::Recursive,
+            )
             .await?;
 
         if merge_result.has_conflicts() {
@@ -271,6 +283,14 @@ impl RevertCmd {
                     .await?;
             }
 
+            // Update working tree to match the reverted state.
+            // Without this, the working directory stays out-of-sync with HEAD.
+            let checkout_mgr = CheckoutManager::new(odb, repo_root);
+            checkout_mgr
+                .checkout_commit(&new_commit_oid)
+                .await
+                .context("Failed to update working directory after revert")?;
+
             if !self.quiet {
                 println!(
                     "{} Created revert commit: {}",
@@ -279,9 +299,26 @@ impl RevertCmd {
                 );
             }
         } else {
-            // No commit mode - save merged tree to index
+            // No commit mode - save merged tree to index and update working tree
             let merged_tree = Tree::read(odb, &new_tree_oid).await?;
             self.save_tree_to_index(repo_root, &merged_tree)?;
+
+            // Update working tree to match the reverted tree.
+            // Create a temporary commit so CheckoutManager can traverse the tree.
+            let temp_commit = Commit::with_parents(
+                new_tree_oid,
+                vec![head_oid],
+                Signature::now("MediaGit".to_string(), "mediagit@local".to_string()),
+                Signature::now("MediaGit".to_string(), "mediagit@local".to_string()),
+                "revert (no-commit)".to_string(),
+            );
+            let temp_oid = temp_commit.write(odb).await?;
+            let checkout_mgr = CheckoutManager::new(odb, repo_root);
+            checkout_mgr
+                .checkout_commit(&temp_oid)
+                .await
+                .context("Failed to update working directory after revert")?;
+
             if !self.quiet {
                 println!(
                     "{} Reverted {} (not committed)",
@@ -323,7 +360,10 @@ impl RevertCmd {
         fs::remove_file(&state_file).await?;
 
         let storage = create_storage_backend(repo_root).await?;
-        let odb = Arc::new(ObjectDatabase::new(storage.clone(), 10000));
+        let odb = Arc::new(ObjectDatabase::with_smart_compression(
+            storage.clone(),
+            10000,
+        ));
         let refs = RefDatabase::new(storage_path);
 
         let index = Index::load(repo_root)?;

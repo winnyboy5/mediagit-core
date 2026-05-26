@@ -11,7 +11,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
 
-use super::super::repo::{create_storage_backend, find_repo_root};
+use super::super::repo::{collect_local_have, create_storage_backend, find_repo_root};
 use super::rebase::RebaseCmd;
 use crate::progress::{OperationStats, ProgressTracker};
 use anyhow::{Context, Result};
@@ -135,15 +135,23 @@ impl PullCmd {
         // Load config to get remote URL
         let config = mediagit_config::Config::load(&repo_root).await?;
         let remote_url = config
-            .get_remote_url(remote)
+            .resolve_remote_url(remote)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         if self.verbose {
             println!("  Remote URL: {}", remote_url);
         }
 
-        // Initialize protocol client
-        let client = mediagit_protocol::ProtocolClient::new(remote_url);
+        // Initialize protocol client. Honour [performance] upload_concurrency
+        // from the repo config so users can tune parallel chunk fan-out
+        // without setting MEDIAGIT_UPLOAD_CONCURRENCY in the env.
+        let mut client = mediagit_protocol::ProtocolClient::new(remote_url);
+        if let Some(n) = config.performance.upload_concurrency {
+            client = client.with_concurrent_uploads(n);
+        }
+        if let Some(n) = config.performance.download_concurrency {
+            client = client.with_concurrent_downloads(n);
+        }
 
         // Initialize ODB with smart compression for consistent read/write
         let odb = Arc::new(mediagit_versioning::ObjectDatabase::with_smart_compression(
@@ -248,11 +256,20 @@ impl PullCmd {
         ) {
             let local_oid_str = local.to_hex();
             if &local_oid_str == remote {
-                if !self.quiet {
-                    println!("{} Already up to date", style("✓").green());
-                    println!("  {} {}", style("→").cyan(), &remote[..8]);
+                // BUG-008 guard: matching OIDs are insufficient if the object
+                // isn't actually in the local ODB (can happen when a branch
+                // was fetched into a tracking ref but its objects were never
+                // downloaded — clone ships only default-branch objects).
+                let have_object = odb.exists(local).await.unwrap_or(false);
+                if have_object {
+                    if !self.quiet {
+                        println!("{} Already up to date", style("✓").green());
+                        println!("  {} {}", style("→").cyan(), &remote[..8]);
+                    }
+                    return Ok(());
                 }
-                return Ok(());
+                // Fall through to pull — we know the OID but don't have the
+                // object, so we need to download it.
             }
         }
 
@@ -260,12 +277,11 @@ impl PullCmd {
             // ================================================================
             // STEP 2: Pull the specific branch's objects
             // ================================================================
-            // Build the "have" list from local ref state for incremental pull
-            let local_have: Vec<String> = local_ref
-                .as_ref()
-                .and_then(|r| r.oid.as_ref())
-                .map(|oid| vec![oid.to_hex()])
-                .unwrap_or_default();
+            // Build the "have" list from ALL local ref state for incremental
+            // pull. Sending every local tip (branches, tags, remote tracking
+            // refs) lets the server prune anything we already have from the
+            // pack walk — not just the current branch's tip.
+            let local_have = collect_local_have(&refdb, &odb).await;
 
             // Pull using streaming protocol (memory-efficient for large files)
             // Pass local OIDs to avoid downloading objects we already have
@@ -293,17 +309,23 @@ impl PullCmd {
 
             // Download chunked objects (large files)
             if !chunked_oids.is_empty() {
-                // Total is unknown until Phase 1 (manifest download) completes;
-                // set_length is called on the first progress callback.
-                let chunk_pb = progress.object_bar("Downloading large files", 0);
+                // Total bytes seeded from manifests in Phase 1 via first on_progress call.
+                let chunk_pb = progress.download_bar("Downloading large files", 0);
 
                 let chunk_pb_ref = chunk_pb.clone();
                 let chunks_downloaded = client
-                    .download_chunked_objects(&odb, &chunked_oids, move |current, total, msg| {
-                        chunk_pb_ref.set_length(total as u64);
-                        chunk_pb_ref.set_position(current as u64);
-                        chunk_pb_ref.set_message(msg.to_string());
-                    })
+                    .download_chunked_objects(
+                        &odb,
+                        &chunked_oids,
+                        move |bytes_done, bytes_total, msg| {
+                            if chunk_pb_ref.length() != Some(bytes_total) {
+                                chunk_pb_ref.set_length(bytes_total);
+                                chunk_pb_ref.reset_eta();
+                            }
+                            chunk_pb_ref.set_position(bytes_done);
+                            chunk_pb_ref.set_message(msg.to_string());
+                        },
+                    )
                     .await?;
 
                 chunk_pb.finish_with_message(format!("Downloaded {} chunks", chunks_downloaded));
@@ -320,15 +342,11 @@ impl PullCmd {
                 }
             }
 
-            // Get remote ref OID
-            let remote_refs = client.get_refs().await?;
-            let remote_oid = remote_refs
-                .refs
-                .iter()
-                .find(|r| r.name == remote_ref)
-                .ok_or_else(|| anyhow::anyhow!("Remote ref '{}' not found", remote_ref))?
-                .oid
-                .clone();
+            // Reuse remote OID fetched at the top of the function (L180)
+            // instead of making a second get_refs() HTTP call.
+            let remote_oid = remote_oid_check
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Remote ref '{}' not found", remote_ref))?;
 
             // Update local ref to match remote
             let remote_oid_parsed = mediagit_versioning::Oid::from_hex(&remote_oid)
@@ -435,36 +453,18 @@ impl PullCmd {
                         println!("{} Rebased successfully", style("✓").green().bold());
                     }
                 } else {
-                    // No local commits, just update HEAD (fast-forward)
-                    let remote_oid_parsed = mediagit_versioning::Oid::from_hex(&remote_oid)
-                        .map_err(|e| anyhow::anyhow!("Invalid remote OID: {}", e))?;
-
-                    if let Some(target) = &head.target {
-                        let target_ref =
-                            mediagit_versioning::Ref::new_direct(target.clone(), remote_oid_parsed);
-                        refdb.write(&target_ref).await?;
-                    } else {
-                        let head_ref = mediagit_versioning::Ref::new_direct(
-                            "HEAD".to_string(),
-                            remote_oid_parsed,
-                        );
-                        refdb.write(&head_ref).await?;
-                    }
-
-                    // Checkout working directory to match new HEAD
-                    let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
-                    let files_count = checkout_mgr.checkout_commit(&remote_oid_parsed).await?;
-                    if self.verbose {
-                        println!("  Checked out {} files", files_count);
-                    }
-
-                    if !self.quiet {
-                        println!(
-                            "{} Fast-forwarded to {}",
-                            style("✓").green().bold(),
-                            &remote_oid[..8]
-                        );
-                    }
+                    // No local commits — fast-forward
+                    fast_forward_to(
+                        &refdb,
+                        &odb,
+                        &repo_root,
+                        &head,
+                        &remote_oid_parsed,
+                        &remote_oid,
+                        self.quiet,
+                        self.verbose,
+                    )
+                    .await?;
                 }
             } else {
                 // Merge integration - only for CURRENT branch
@@ -537,38 +537,18 @@ impl PullCmd {
                         anyhow::bail!("Merge failed: no tree result");
                     }
                 } else {
-                    // No local commits, just update HEAD (fast-forward)
-                    let remote_oid_parsed = mediagit_versioning::Oid::from_hex(&remote_oid)
-                        .map_err(|e| anyhow::anyhow!("Invalid remote OID: {}", e))?;
-
-                    if let Some(target) = &head.target {
-                        // HEAD is symbolic, update the target branch
-                        let target_ref =
-                            mediagit_versioning::Ref::new_direct(target.clone(), remote_oid_parsed);
-                        refdb.write(&target_ref).await?;
-                    } else {
-                        // HEAD is detached, update HEAD directly
-                        let head_ref = mediagit_versioning::Ref::new_direct(
-                            "HEAD".to_string(),
-                            remote_oid_parsed,
-                        );
-                        refdb.write(&head_ref).await?;
-                    }
-
-                    // Checkout working directory to match new HEAD
-                    let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
-                    let files_count = checkout_mgr.checkout_commit(&remote_oid_parsed).await?;
-                    if self.verbose {
-                        println!("  Checked out {} files", files_count);
-                    }
-
-                    if !self.quiet {
-                        println!(
-                            "{} Fast-forwarded to {}",
-                            style("✓").green().bold(),
-                            &remote_oid[..8]
-                        );
-                    }
+                    // No local commits — fast-forward
+                    fast_forward_to(
+                        &refdb,
+                        &odb,
+                        &repo_root,
+                        &head,
+                        &remote_oid_parsed,
+                        &remote_oid,
+                        self.quiet,
+                        self.verbose,
+                    )
+                    .await?;
                 }
             }
         } else if !self.quiet {
@@ -588,6 +568,54 @@ impl PullCmd {
             }
         }
 
+        // Best-effort auto-gc: reclaims stale objects from partial fetches
+        // and trim points changed by the pull. Skipped on dry-run.
+        if !self.dry_run {
+            let _ =
+                crate::auto_gc::maybe_run(&repo_root, crate::auto_gc::TriggerMode::PostPull).await;
+        }
+
         Ok(())
     }
+}
+
+/// Fast-forward HEAD to the given OID: update the ref (symbolic or direct),
+/// checkout the working directory, and print status messages.
+#[allow(clippy::too_many_arguments)]
+async fn fast_forward_to(
+    refdb: &RefDatabase,
+    odb: &std::sync::Arc<mediagit_versioning::ObjectDatabase>,
+    repo_root: &std::path::Path,
+    head: &mediagit_versioning::Ref,
+    oid: &mediagit_versioning::Oid,
+    oid_hex: &str,
+    quiet: bool,
+    verbose: bool,
+) -> Result<()> {
+    // Update the right ref — symbolic HEAD updates the target branch, detached
+    // HEAD updates HEAD directly.
+    if let Some(target) = &head.target {
+        let target_ref = mediagit_versioning::Ref::new_direct(target.clone(), *oid);
+        refdb.write(&target_ref).await?;
+    } else {
+        let head_ref = mediagit_versioning::Ref::new_direct("HEAD".to_string(), *oid);
+        refdb.write(&head_ref).await?;
+    }
+
+    // Checkout working directory to match new HEAD
+    let checkout_mgr = CheckoutManager::new(odb, repo_root);
+    let files_count = checkout_mgr.checkout_commit(oid).await?;
+    if verbose {
+        println!("  Checked out {} files", files_count);
+    }
+
+    if !quiet {
+        println!(
+            "{} Fast-forwarded to {}",
+            style("✓").green().bold(),
+            &oid_hex[..8]
+        );
+    }
+
+    Ok(())
 }

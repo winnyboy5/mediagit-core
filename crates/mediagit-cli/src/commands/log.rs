@@ -107,6 +107,14 @@ pub struct LogCmd {
     /// Quiet mode
     #[arg(short, long)]
     pub quiet: bool,
+
+    /// Format commits using a template string
+    #[arg(long, value_name = "TMPL")]
+    pub format: Option<String>,
+
+    /// Show commits from all branches
+    #[arg(long)]
+    pub all: bool,
 }
 
 impl LogCmd {
@@ -168,6 +176,20 @@ impl LogCmd {
         let mut commits_to_show = Vec::new();
         let mut visited = HashSet::new();
         let mut stack = vec![start_oid];
+
+        // When --all is requested, seed the stack with every branch tip
+        if self.all {
+            let branch_refs = refdb.list_branches().await.unwrap_or_default();
+            for branch_ref in &branch_refs {
+                if let Ok(r) = refdb.read(branch_ref).await {
+                    if let Some(oid) = r.oid {
+                        if !stack.contains(&oid) {
+                            stack.push(oid);
+                        }
+                    }
+                }
+            }
+        }
 
         while let Some(oid) = stack.pop() {
             if visited.contains(&oid) {
@@ -240,11 +262,33 @@ impl LogCmd {
         }
 
         for (oid, commit) in commits_to_show {
-            if self.oneline {
+            if let Some(format_tmpl) = &self.format {
+                // Custom format template
+                let output = Self::format_commit(format_tmpl, &oid, &commit);
+                println!("{}", output);
+            } else if self.oneline {
                 // One-line format
                 let short_oid = &oid.to_string()[..7];
                 let short_msg = commit.message.lines().next().unwrap_or("");
-                println!("{} {}", style(short_oid).yellow(), short_msg);
+                if self.graph {
+                    println!("* {} {}", style(short_oid).yellow(), short_msg);
+                } else {
+                    println!("{} {}", style(short_oid).yellow(), short_msg);
+                }
+            } else if self.graph {
+                // Graph format
+                println!(
+                    "* {} {}",
+                    style("commit").yellow().bold(),
+                    style(oid).yellow()
+                );
+                println!("| Author: {} <{}>", commit.author.name, commit.author.email);
+                println!("| Date:   {}", commit.author.timestamp);
+                println!("|");
+                for line in commit.message.lines() {
+                    println!("|     {}", line);
+                }
+                println!("|");
             } else {
                 // Full format
                 println!(
@@ -334,6 +378,71 @@ impl LogCmd {
         }
 
         Ok(())
+    }
+
+    /// Format a commit using a template string
+    /// Supported placeholders:
+    /// %H - full commit OID hex
+    /// %h - first 7 hex chars of commit OID
+    /// %s - subject (first line of message)
+    /// %aN - author name
+    /// %an - author name (alias of %aN)
+    /// %ae - author email
+    /// %ad - author date
+    /// %n - literal newline
+    /// %% - literal %
+    fn format_commit(tmpl: &str, oid: &Oid, commit: &Commit) -> String {
+        let mut result = String::new();
+        let mut chars = tmpl.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '%' {
+                if let Some(&next_ch) = chars.peek() {
+                    chars.next(); // consume the next char
+                    match next_ch {
+                        'H' => result.push_str(&oid.to_string()),
+                        'h' => {
+                            let full_oid = oid.to_string();
+                            result.push_str(&full_oid[..7.min(full_oid.len())]);
+                        }
+                        's' => {
+                            let subject = commit.message.lines().next().unwrap_or("");
+                            result.push_str(subject);
+                        }
+                        'a' => {
+                            if let Some(&second) = chars.peek() {
+                                chars.next(); // consume the second char
+                                match second {
+                                    'N' | 'n' => result.push_str(&commit.author.name),
+                                    'e' => result.push_str(&commit.author.email),
+                                    'd' => result.push_str(&commit.author.timestamp.to_string()),
+                                    _ => {
+                                        result.push('%');
+                                        result.push('a');
+                                        result.push(second);
+                                    }
+                                }
+                            } else {
+                                result.push('%');
+                                result.push('a');
+                            }
+                        }
+                        'n' => result.push('\n'),
+                        '%' => result.push('%'),
+                        _ => {
+                            result.push('%');
+                            result.push(next_ch);
+                        }
+                    }
+                } else {
+                    result.push('%');
+                }
+            } else {
+                result.push(ch);
+            }
+        }
+
+        result
     }
 
     /// Helper to get a flat map of file paths to OIDs from a tree

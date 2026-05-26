@@ -169,6 +169,13 @@ const AZURE_BLOCK_SIZE: usize = 4 * 1024 * 1024; // 4 MB, Azure maximum is 4GB
 pub struct AzureBackend {
     account_name: String,
     container_name: String,
+    /// Logical-key prefix applied to every blob name on the wire. Empty means
+    /// keys land at container root (legacy behaviour). Non-empty values let
+    /// multiple repos share one container without colliding on identical OIDs.
+    /// The prefix is hidden from callers — `put("k")` writes "<prefix>k" to
+    /// Azure but `get("k")` resolves it transparently, and `list_objects`
+    /// strips it before returning.
+    prefix: String,
     /// The actual Azure SDK client for blob operations
     client: Arc<ContainerClient>,
 }
@@ -178,7 +185,17 @@ impl fmt::Debug for AzureBackend {
         f.debug_struct("AzureBackend")
             .field("account_name", &self.account_name)
             .field("container_name", &self.container_name)
+            .field("prefix", &self.prefix)
             .finish()
+    }
+}
+
+/// Normalize a prefix so it ends with `/` (or is empty). Idempotent.
+fn normalize_prefix(p: &str) -> String {
+    if p.is_empty() || p.ends_with('/') {
+        p.to_string()
+    } else {
+        format!("{}/", p)
     }
 }
 
@@ -216,14 +233,27 @@ impl AzureBackend {
     ///     Ok(())
     /// }
     /// ```
+    /// Back-compat shim: equivalent to `with_sas_token_and_prefix(..., "")`.
     pub async fn with_sas_token(
         account_name: impl Into<String>,
         container_name: impl Into<String>,
         sas_token: impl Into<String>,
     ) -> anyhow::Result<Self> {
+        Self::with_sas_token_and_prefix(account_name, container_name, sas_token, "").await
+    }
+
+    /// Create an Azure backend authenticated by SAS token, with all blob keys
+    /// transparently prefixed. See struct-level `prefix` doc.
+    pub async fn with_sas_token_and_prefix(
+        account_name: impl Into<String>,
+        container_name: impl Into<String>,
+        sas_token: impl Into<String>,
+        prefix: impl Into<String>,
+    ) -> anyhow::Result<Self> {
         let account_name = account_name.into();
         let container_name = container_name.into();
         let sas_token = sas_token.into();
+        let prefix = normalize_prefix(&prefix.into());
 
         // Validate inputs
         if account_name.is_empty() {
@@ -250,11 +280,27 @@ impl AzureBackend {
         let backend = AzureBackend {
             account_name: account_name.clone(),
             container_name: container_name.clone(),
+            prefix,
             client: Arc::new(container_client),
         };
 
-        // Ensure container exists
-        backend.ensure_container_exists().await?;
+        // Cap the cloud roundtrip so unreachable accounts fail fast — the bare
+        // call uses Azure-SDK defaults that can hang for tens of seconds. The
+        // backend is cached in AppState (server-side), so this only runs once
+        // per repo per process anyway.  30 s leaves room for cold DNS + TLS +
+        // Azure API on the first connection to high-latency regions.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            backend.ensure_container_exists(),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Azure container check timed out after 30s for {}/{}",
+                backend.account_name,
+                backend.container_name
+            )
+        })??;
 
         Ok(backend)
     }
@@ -292,14 +338,27 @@ impl AzureBackend {
     ///     Ok(())
     /// }
     /// ```
+    /// Back-compat shim: equivalent to `with_account_key_and_prefix(..., "")`.
     pub async fn with_account_key(
         account_name: impl Into<String>,
         container_name: impl Into<String>,
         account_key: impl Into<String>,
     ) -> anyhow::Result<Self> {
+        Self::with_account_key_and_prefix(account_name, container_name, account_key, "").await
+    }
+
+    /// Create an Azure backend authenticated by account key, with all blob
+    /// keys transparently prefixed. See struct-level `prefix` doc.
+    pub async fn with_account_key_and_prefix(
+        account_name: impl Into<String>,
+        container_name: impl Into<String>,
+        account_key: impl Into<String>,
+        prefix: impl Into<String>,
+    ) -> anyhow::Result<Self> {
         let account_name = account_name.into();
         let container_name = container_name.into();
         let account_key = account_key.into();
+        let prefix = normalize_prefix(&prefix.into());
 
         // Validate inputs
         if account_name.is_empty() {
@@ -326,11 +385,27 @@ impl AzureBackend {
         let backend = AzureBackend {
             account_name: account_name.clone(),
             container_name: container_name.clone(),
+            prefix,
             client: Arc::new(container_client),
         };
 
-        // Ensure container exists
-        backend.ensure_container_exists().await?;
+        // Cap the cloud roundtrip so unreachable accounts fail fast — the bare
+        // call uses Azure-SDK defaults that can hang for tens of seconds. The
+        // backend is cached in AppState (server-side), so this only runs once
+        // per repo per process anyway.  30 s leaves room for cold DNS + TLS +
+        // Azure API on the first connection to high-latency regions.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            backend.ensure_container_exists(),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Azure container check timed out after 30s for {}/{}",
+                backend.account_name,
+                backend.container_name
+            )
+        })??;
 
         Ok(backend)
     }
@@ -368,12 +443,24 @@ impl AzureBackend {
     ///     Ok(())
     /// }
     /// ```
+    /// Back-compat shim: equivalent to `with_connection_string_and_prefix(..., "")`.
     pub async fn with_connection_string(
         container_name: impl Into<String>,
         connection_string: impl Into<String>,
     ) -> anyhow::Result<Self> {
+        Self::with_connection_string_and_prefix(container_name, connection_string, "").await
+    }
+
+    /// Create an Azure backend from a connection string, with all blob keys
+    /// transparently prefixed. See struct-level `prefix` doc.
+    pub async fn with_connection_string_and_prefix(
+        container_name: impl Into<String>,
+        connection_string: impl Into<String>,
+        prefix: impl Into<String>,
+    ) -> anyhow::Result<Self> {
         let container_name = container_name.into();
         let connection_string = connection_string.into();
+        let prefix = normalize_prefix(&prefix.into());
 
         // Validate inputs
         if container_name.is_empty() {
@@ -441,11 +528,27 @@ impl AzureBackend {
         let backend = AzureBackend {
             account_name: account_name.clone(),
             container_name: container_name.clone(),
+            prefix,
             client: Arc::new(container_client),
         };
 
-        // Ensure container exists
-        backend.ensure_container_exists().await?;
+        // Cap the cloud roundtrip so unreachable accounts fail fast — the bare
+        // call uses Azure-SDK defaults that can hang for tens of seconds. The
+        // backend is cached in AppState (server-side), so this only runs once
+        // per repo per process anyway.  30 s leaves room for cold DNS + TLS +
+        // Azure API on the first connection to high-latency regions.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            backend.ensure_container_exists(),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Azure container check timed out after 30s for {}/{}",
+                backend.account_name,
+                backend.container_name
+            )
+        })??;
 
         Ok(backend)
     }
@@ -456,6 +559,27 @@ impl AzureBackend {
             return Err(anyhow::anyhow!("key cannot be empty"));
         }
         Ok(())
+    }
+
+    /// Compose the on-wire blob name from a logical key. If `prefix` is empty
+    /// the logical key is used verbatim (legacy behaviour).
+    fn full_key(&self, key: &str) -> String {
+        if self.prefix.is_empty() {
+            key.to_string()
+        } else {
+            format!("{}{}", self.prefix, key)
+        }
+    }
+
+    /// Inverse of `full_key`: strip the prefix from a wire name to return the
+    /// logical key callers expect. If the wire name doesn't start with our
+    /// prefix it is returned unchanged (defensive against external writes).
+    fn strip_prefix<'a>(&self, full: &'a str) -> &'a str {
+        if self.prefix.is_empty() {
+            full
+        } else {
+            full.strip_prefix(self.prefix.as_str()).unwrap_or(full)
+        }
     }
 
     /// Map Azure errors to more meaningful error messages
@@ -544,13 +668,14 @@ impl StorageBackend for AzureBackend {
     async fn get(&self, key: &str) -> anyhow::Result<Vec<u8>> {
         Self::validate_key(key)?;
 
+        let wire_key = self.full_key(key);
         tracing::debug!(
             "Getting object from Azure Blob Storage: {}/{}",
             self.container_name,
-            key
+            wire_key
         );
 
-        let blob_client = self.client.blob_client(key);
+        let blob_client = self.client.blob_client(&wire_key);
 
         match blob_client.get_content().await {
             Ok(data) => {
@@ -591,12 +716,13 @@ impl StorageBackend for AzureBackend {
     async fn exists(&self, key: &str) -> anyhow::Result<bool> {
         Self::validate_key(key)?;
 
+        let wire_key = self.full_key(key);
         tracing::debug!(
             "Checking existence of object in Azure Blob Storage: {}",
-            key
+            wire_key
         );
 
-        let blob_client = self.client.blob_client(key);
+        let blob_client = self.client.blob_client(&wire_key);
 
         match blob_client.exists().await {
             Ok(exists) => {
@@ -624,9 +750,10 @@ impl StorageBackend for AzureBackend {
     async fn delete(&self, key: &str) -> anyhow::Result<()> {
         Self::validate_key(key)?;
 
-        tracing::debug!("Deleting object from Azure Blob Storage: {}", key);
+        let wire_key = self.full_key(key);
+        tracing::debug!("Deleting object from Azure Blob Storage: {}", wire_key);
 
-        let blob_client = self.client.blob_client(key);
+        let blob_client = self.client.blob_client(&wire_key);
 
         // Azure delete is idempotent - non-existent blobs return success
         match blob_client.delete().await {
@@ -648,17 +775,24 @@ impl StorageBackend for AzureBackend {
     }
 
     async fn list_objects(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+        // Compose the wire-side prefix: backend prefix + caller's logical
+        // prefix. Then strip the backend prefix off each result so callers see
+        // logical keys (the same ones they wrote via `put`).
+        let wire_prefix = self.full_key(prefix);
         tracing::debug!(
-            "Listing objects in Azure Blob Storage with prefix: '{}'",
-            prefix
+            "Listing objects in Azure Blob Storage with logical prefix '{}' (wire '{}')",
+            prefix,
+            wire_prefix
         );
 
         // Use streaming API to fetch all blobs
-        let prefix_owned = prefix.to_string(); // Clone prefix to satisfy 'static lifetime requirement
-        let mut stream = if prefix_owned.is_empty() {
+        let mut stream = if wire_prefix.is_empty() {
             self.client.list_blobs().into_stream()
         } else {
-            self.client.list_blobs().prefix(prefix_owned).into_stream()
+            self.client
+                .list_blobs()
+                .prefix(wire_prefix.clone())
+                .into_stream()
         };
 
         let mut results = Vec::new();
@@ -667,9 +801,8 @@ impl StorageBackend for AzureBackend {
             .await
             .map_err(|e| Self::map_error(e, &format!("listing with prefix '{}'", prefix)))?
         {
-            // Extract blob names from the response
             for blob in blob_list.blobs.blobs() {
-                results.push(blob.name.clone());
+                results.push(self.strip_prefix(&blob.name).to_string());
             }
         }
 
@@ -677,7 +810,7 @@ impl StorageBackend for AzureBackend {
         results.sort();
 
         tracing::debug!(
-            "Found {} objects with prefix '{}' in container {}",
+            "Found {} objects with logical prefix '{}' in container {}",
             results.len(),
             prefix,
             self.container_name
@@ -685,19 +818,107 @@ impl StorageBackend for AzureBackend {
 
         Ok(results)
     }
+
+    async fn presign_put(
+        &self,
+        key: &str,
+        _content_length: u64,
+        ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<crate::PresignedPut>> {
+        let wire_key = self.full_key(key);
+        let blob_client = self.client.blob_client(&wire_key);
+
+        let expiry = time::OffsetDateTime::now_utc()
+            + time::Duration::new(ttl.as_secs() as i64, ttl.subsec_nanos() as i32);
+
+        let permissions = BlobSasPermissions {
+            write: true,
+            create: true,
+            ..Default::default()
+        };
+
+        let sas = match blob_client
+            .shared_access_signature(permissions, expiry)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!(err = %e, "Azure SAS unavailable; using proxy PUT");
+                return Ok(None);
+            }
+        };
+
+        let url = match blob_client.generate_signed_blob_url(&sas) {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::debug!(err = %e, "Azure signed URL failed; using proxy PUT");
+                return Ok(None);
+            }
+        };
+
+        Ok(Some(crate::PresignedPut {
+            url: url.to_string(),
+            method: "PUT".to_string(),
+            required_headers: vec![("x-ms-blob-type".to_string(), "BlockBlob".to_string())],
+            expires_at: std::time::SystemTime::now() + ttl,
+        }))
+    }
+
+    async fn presign_get(
+        &self,
+        key: &str,
+        ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<crate::PresignedDownload>> {
+        let wire_key = self.full_key(key);
+        let blob_client = self.client.blob_client(&wire_key);
+
+        let expiry = time::OffsetDateTime::now_utc()
+            + time::Duration::new(ttl.as_secs() as i64, ttl.subsec_nanos() as i32);
+
+        let permissions = BlobSasPermissions {
+            read: true,
+            ..Default::default()
+        };
+
+        let sas = match blob_client
+            .shared_access_signature(permissions, expiry)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!(err = %e, "Azure SAS unavailable; using proxy GET");
+                return Ok(None);
+            }
+        };
+
+        let url = match blob_client.generate_signed_blob_url(&sas) {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::debug!(err = %e, "Azure signed URL failed; using proxy GET");
+                return Ok(None);
+            }
+        };
+
+        Ok(Some(crate::PresignedDownload {
+            url: url.to_string(),
+            headers: vec![],
+            expires_in_secs: ttl.as_secs(),
+        }))
+    }
 }
 
 impl AzureBackend {
     /// Internal method for direct (small file) uploads
     async fn put_direct(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
+        let wire_key = self.full_key(key);
         tracing::debug!(
             "Uploading {} bytes directly to {} in container {}",
             data.len(),
-            key,
+            wire_key,
             self.container_name
         );
 
-        let blob_client = self.client.blob_client(key);
+        let blob_client = self.client.blob_client(&wire_key);
         let data_vec = data.to_vec(); // Clone data to satisfy 'static lifetime requirement
 
         blob_client
@@ -710,51 +931,86 @@ impl AzureBackend {
 
     /// Internal method for chunked uploads of large files
     ///
-    /// Uploads large files as block blobs with multiple blocks.
-    /// This is more efficient than uploading the entire file at once
-    /// and allows for better handling of network interruptions.
+    /// Uploads large files as block blobs with multiple blocks. Each block
+    /// is shipped via `put_block` in **parallel** (bounded by
+    /// `MEDIAGIT_AZURE_PUT_BLOCK_CONCURRENCY`, default 8) and committed in
+    /// strict order via `put_block_list`. Block IDs are deterministic so the
+    /// final on-blob byte order matches the input regardless of completion
+    /// order. This is the Phase 7 perf path for single-object uploads larger
+    /// than `AZURE_BLOCK_SIZE` (4 MB).
     async fn put_chunked(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
+        use futures::stream::StreamExt;
+
         let chunk_count = data.len().div_ceil(CHUNK_SIZE);
+        let parallelism: usize = std::env::var("MEDIAGIT_AZURE_PUT_BLOCK_CONCURRENCY")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|n: &usize| *n > 0)
+            .unwrap_or(8);
+
         tracing::debug!(
-            "Uploading {} bytes in {} chunks to {} in container {}",
+            "Uploading {} bytes in {} chunks to {} in container {} (parallelism: {})",
             data.len(),
             chunk_count,
             key,
-            self.container_name
+            self.container_name,
+            parallelism
         );
 
-        let blob_client = self.client.blob_client(key);
-        let mut block_ids = Vec::new();
+        // Pre-compute block IDs so the final block_list ordering is independent
+        // of the put_block completion order.
+        let blocks: Vec<(usize, String, Vec<u8>)> = data
+            .chunks(CHUNK_SIZE)
+            .enumerate()
+            .map(|(i, chunk)| {
+                let block_id = format!("{:08}", i).into_bytes();
+                let block_id_b64 = azure_core::base64::encode(&block_id);
+                (i, block_id_b64, chunk.to_vec())
+            })
+            .collect();
 
-        // Upload each chunk as a separate block
-        for (i, chunk) in data.chunks(CHUNK_SIZE).enumerate() {
-            let block_id = format!("{:08}", i).into_bytes();
-            let block_id_b64 = azure_core::base64::encode(&block_id);
+        // Upload all blocks in parallel; collect block IDs by index to preserve
+        // commit order even when uploads finish out-of-order.
+        let wire_key = self.full_key(key);
+        let blob_client = self.client.blob_client(&wire_key);
+        let key_owned = key.to_string();
+        let mut put_results =
+            futures::stream::iter(blocks.into_iter().map(|(i, block_id_b64, chunk_vec)| {
+                let blob_client = blob_client.clone();
+                let key_for_err = key_owned.clone();
+                async move {
+                    let chunk_len = chunk_vec.len();
+                    blob_client
+                        .put_block(block_id_b64.clone(), chunk_vec)
+                        .await
+                        .map_err(|e| {
+                            Self::map_error(
+                                e,
+                                &format!(
+                                    "uploading chunk {} ({} bytes) of {} for {}",
+                                    i + 1,
+                                    chunk_len,
+                                    chunk_count,
+                                    key_for_err
+                                ),
+                            )
+                        })?;
+                    anyhow::Ok((i, block_id_b64))
+                }
+            }))
+            .buffer_unordered(parallelism);
 
-            tracing::trace!(
-                "Uploading chunk {}/{} ({} bytes) with block ID {}",
-                i + 1,
-                chunk_count,
-                chunk.len(),
-                block_id_b64
-            );
-
-            let chunk_vec = chunk.to_vec(); // Clone chunk to satisfy 'static lifetime requirement
-            blob_client
-                .put_block(block_id_b64.clone(), chunk_vec)
-                .await
-                .map_err(|e| {
-                    Self::map_error(e, &format!("uploading chunk {} of {}", i + 1, chunk_count))
-                })?;
-
-            block_ids.push(block_id_b64);
+        let mut indexed_ids: Vec<(usize, String)> = Vec::with_capacity(chunk_count);
+        while let Some(res) = put_results.next().await {
+            indexed_ids.push(res?);
         }
+        indexed_ids.sort_by_key(|(i, _)| *i);
 
-        // Commit all blocks to create the final blob
+        // Commit all blocks in input order to create the final blob.
         let block_list = BlockList {
-            blocks: block_ids
+            blocks: indexed_ids
                 .into_iter()
-                .map(BlobBlockType::new_uncommitted)
+                .map(|(_, id)| BlobBlockType::new_uncommitted(id))
                 .collect(),
         };
 
@@ -791,6 +1047,87 @@ mod tests {
     #[test]
     fn test_validate_key_with_special_chars() {
         assert!(AzureBackend::validate_key("key-with_special.chars").is_ok());
+    }
+
+    #[test]
+    fn test_normalize_prefix_empty() {
+        assert_eq!(normalize_prefix(""), "");
+    }
+
+    #[test]
+    fn test_normalize_prefix_no_slash() {
+        assert_eq!(normalize_prefix("repo-objects"), "repo-objects/");
+    }
+
+    #[test]
+    fn test_normalize_prefix_already_slashed() {
+        assert_eq!(normalize_prefix("repo-objects/"), "repo-objects/");
+    }
+
+    #[test]
+    fn test_normalize_prefix_idempotent() {
+        let once = normalize_prefix("p");
+        let twice = normalize_prefix(&once);
+        assert_eq!(once, twice);
+    }
+
+    /// Build a no-network backend instance directly so we can unit-test the
+    /// prefix helpers without touching Azure. The container_client is a
+    /// throwaway placeholder; we never call methods that hit the wire.
+    fn synthetic_backend(prefix: &str) -> AzureBackend {
+        let creds = StorageCredentials::access_key("acct".to_string(), "AAAA");
+        let client = ClientBuilder::new("acct".to_string(), creds).container_client("c");
+        AzureBackend {
+            account_name: "acct".to_string(),
+            container_name: "c".to_string(),
+            prefix: normalize_prefix(prefix),
+            client: Arc::new(client),
+        }
+    }
+
+    #[test]
+    fn test_full_key_empty_prefix_is_passthrough() {
+        let b = synthetic_backend("");
+        assert_eq!(b.full_key("chunks/abc"), "chunks/abc");
+    }
+
+    #[test]
+    fn test_full_key_with_prefix_prepends() {
+        let b = synthetic_backend("repo-objects");
+        assert_eq!(b.full_key("chunks/abc"), "repo-objects/chunks/abc");
+    }
+
+    #[test]
+    fn test_full_key_handles_already_slashed_prefix() {
+        let b = synthetic_backend("repo-objects/");
+        assert_eq!(b.full_key("chunks/abc"), "repo-objects/chunks/abc");
+    }
+
+    #[test]
+    fn test_strip_prefix_returns_logical_key() {
+        let b = synthetic_backend("repo-objects");
+        assert_eq!(b.strip_prefix("repo-objects/chunks/abc"), "chunks/abc");
+    }
+
+    #[test]
+    fn test_strip_prefix_no_match_returns_input() {
+        let b = synthetic_backend("repo-objects");
+        // Foreign keys (e.g. another tenant's data) pass through untouched.
+        assert_eq!(b.strip_prefix("other/key"), "other/key");
+    }
+
+    #[test]
+    fn test_strip_prefix_empty_prefix_is_passthrough() {
+        let b = synthetic_backend("");
+        assert_eq!(b.strip_prefix("chunks/abc"), "chunks/abc");
+    }
+
+    #[test]
+    fn test_full_key_strip_prefix_roundtrip() {
+        let b = synthetic_backend("multi-tenant/repo-42");
+        let logical = "manifests/deadbeef";
+        let wire = b.full_key(logical);
+        assert_eq!(b.strip_prefix(&wire), logical);
     }
 
     #[tokio::test]

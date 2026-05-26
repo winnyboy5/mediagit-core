@@ -13,6 +13,7 @@
 
 #![allow(missing_docs)] // binary crate — documentation is in book/ not rustdoc
 
+mod auto_gc;
 mod commands;
 mod ignore_rules;
 mod output;
@@ -155,12 +156,25 @@ enum Commands {
 /// 2. `mediagit log -5` → `mediagit log -n 5`
 fn preprocess_args(args: Vec<String>) -> Vec<String> {
     // Find the first non-flag positional arg (the subcommand), skipping the binary name.
-    let subcmd_pos = args
-        .iter()
-        .enumerate()
-        .skip(1)
-        .find(|(_, arg)| !arg.starts_with('-'))
-        .map(|(i, _)| i);
+    // Value-taking global flags (-C, --repository, --color) each consume the next token too.
+    let subcmd_pos = {
+        let value_flags: &[&str] = &["-C", "--repository", "--color"];
+        let mut i = 1usize;
+        let mut found = None;
+        while i < args.len() {
+            let arg = args[i].as_str();
+            if value_flags.contains(&arg) {
+                i += 2; // skip flag + value
+                continue;
+            }
+            if !arg.starts_with('-') {
+                found = Some(i);
+                break;
+            }
+            i += 1;
+        }
+        found
+    };
 
     if let Some(pos) = subcmd_pos {
         let subcmd = args[pos].as_str();
@@ -201,39 +215,47 @@ fn preprocess_args(args: Vec<String>) -> Vec<String> {
             return result;
         }
 
-        // 3. Bare subcommands that should default to their `list` action.
-        //    `branch` → `branch list`, `tag` → `tag list`, `remote` → `remote list`
-        let list_default: Option<(&str, &[&str])> = match subcmd {
+        // 3. Bare subcommands: `branch` → `branch list`, `tag` → `tag list`,
+        //    `remote` → `remote list` when invoked with no positional. When a
+        //    positional name is supplied (BUG-006), dispatch to `create` for
+        //    `branch` / `tag` — matching the muscle-memory `branch feat-a`
+        //    idiom. `remote` keeps list-default because `remote add`/`remove`
+        //    have distinct verbs without an obvious name-only sugar.
+        let default_action: Option<(&str, &[&str], &'static str)> = match subcmd {
             "branch" => Some((
                 "branch",
                 &[
                     "list", "create", "delete", "rename", "show", "switch", "checkout", "co",
                     "merge", "protect", "help",
                 ][..],
+                "create",
             )),
             "tag" => Some((
                 "tag",
                 &["list", "create", "delete", "show", "verify", "help"][..],
+                "create",
             )),
             "remote" => Some((
                 "remote",
                 &["list", "add", "remove", "rename", "show", "set-url", "help"][..],
+                "list",
             )),
             _ => None,
         };
-        if let Some((_cmd, known_subcmds)) = list_default {
+        if let Some((_cmd, known_subcmds, positional_action)) = default_action {
             let next_positional = args[pos + 1..]
                 .iter()
                 .find(|a| !a.starts_with('-'))
                 .map(|s| s.as_str());
-            let needs_default = match next_positional {
-                None => true,
-                Some(s) => !known_subcmds.contains(&s),
+            let inject: Option<&str> = match next_positional {
+                None => Some("list"),
+                Some(s) if known_subcmds.contains(&s) => None,
+                Some(_) => Some(positional_action),
             };
-            if needs_default {
+            if let Some(verb) = inject {
                 let mut result = Vec::with_capacity(args.len() + 1);
                 result.extend_from_slice(&args[..pos + 1]); // include the subcommand
-                result.push("list".to_string());
+                result.push(verb.to_string());
                 result.extend(args[pos + 1..].iter().cloned());
                 return result;
             }
@@ -249,10 +271,14 @@ fn main() {
     // Parse CLI args on the main thread (lightweight, no async needed)
     let cli = Cli::parse_from(args);
 
-    // Run async work on a thread with 8MB stack to handle deeply nested
-    // async futures (merge engine → LCA finder → checkout → recursive tree).
-    // Windows default main thread stack is 1MB which is insufficient.
-    const STACK_SIZE: usize = 8 * 1024 * 1024; // 8MB
+    // Run async work on a thread with 32MB stack to handle deeply nested
+    // async futures on the single-threaded tokio runtime. The add pipeline
+    // composes JoinSet → process_single_file → write_chunked_from_file →
+    // Oid::from_file_async with large state-machine frames (ChunkerConfig,
+    // 64KB hash buffer, mmap handles, HashMap clones) that share one stack.
+    // Observed overflow on Windows at 8MB with 3×>70MB PSDs during parallel
+    // add. 32MB is comfortably above the measured peak and still cheap.
+    const STACK_SIZE: usize = 32 * 1024 * 1024; // 32MB
 
     let builder = std::thread::Builder::new()
         .name("mediagit-main".into())

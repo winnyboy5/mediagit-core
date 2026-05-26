@@ -47,8 +47,10 @@ pub fn get_similarity_threshold(filename: Option<&str>) -> f64 {
 
         match ext.to_lowercase().as_str() {
             // Creative/PDF containers: Very low threshold (embedded compressed streams
-            // shift chunk boundaries, but structural similarity remains)
-            "ai" | "ait" | "indd" | "idml" | "indt" | "eps" | "pdf" => 0.15,
+            // shift chunk boundaries, but structural similarity remains).
+            // PSD is a layered container with embedded compressed image/mask
+            // streams — structurally closer to AI/INDD than to flat JPEG/PNG.
+            "ai" | "ait" | "indd" | "idml" | "indt" | "eps" | "pdf" | "psd" | "psb" => 0.15,
 
             // Office documents (ZIP containers with shared structure)
             "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" => 0.20,
@@ -61,7 +63,7 @@ pub fn get_similarity_threshold(filename: Option<&str>) -> f64 {
             "json" | "yaml" | "toml" | "xml" => 0.95,
 
             // Images: Lower threshold (perceptual similarity)
-            "jpg" | "jpeg" | "png" | "psd" => 0.70,
+            "jpg" | "jpeg" | "png" => 0.70,
 
             // Video: Very low threshold (metadata/timeline changes significant)
             "mp4" | "mov" | "avi" | "mkv" => 0.50,
@@ -135,7 +137,7 @@ pub fn get_size_ratio_threshold(filename: Option<&str>) -> f64 {
 
         match ext.to_lowercase().as_str() {
             // Creative/PDF containers: allow 50% size difference
-            "ai" | "ait" | "indd" | "idml" | "indt" | "eps" | "pdf" => 0.50,
+            "ai" | "ait" | "indd" | "idml" | "indt" | "eps" | "pdf" | "psd" | "psb" => 0.50,
             // Office documents: allow 40% size difference
             "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" => 0.60,
             // Video: allow 30% size difference

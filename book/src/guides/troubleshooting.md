@@ -2,6 +2,44 @@
 
 Common issues and solutions for MediaGit.
 
+## Push / Upload Issues
+
+### "Direct upload to storage backend unreachable; switching to server-proxy upload"
+
+This warning appears during `mediagit push` when the **presigned URL fast path** is unavailable from your machine. The push still completes via the server-proxy route — it is slower but correct.
+
+**Affected backends:** AWS S3, MinIO, Backblaze B2, DigitalOcean Spaces.  
+**Not affected:** GCS (proxy-only), Azure Blob (SAS errors are caught server-side), local filesystem.
+
+The fast path lets the client upload chunk bytes directly to the storage bucket, bypassing the MediaGit server. It requires the client machine to have direct HTTPS access to the bucket endpoint.
+
+**Common causes and fixes:**
+
+| Cause | Fix |
+|---|---|
+| Bucket has a VPC-only policy (production default) | Expected on prod — proxy path is correct. No action needed. |
+| Corporate / ISP firewall blocks outbound S3 HTTPS | Use the proxy path (already the fallback). Or open egress to `*.s3.<region>.amazonaws.com:443`. |
+| S3 bucket policy restricts by IP | Add your machine's public IP: `aws s3api put-bucket-policy` with `aws:SourceIp` condition. |
+| MinIO behind private network | Ensure `MEDIAGIT_STORAGE_ENDPOINT` points to a publicly reachable MinIO host, or use proxy path. |
+
+**To verify connectivity from your machine:**
+```bash
+# Should return 403 (auth required) — means network is reachable
+curl -I https://<your-bucket>.s3.<region>.amazonaws.com/
+# "Could not connect" or timeout means network is blocked
+```
+
+A 403 response confirms network connectivity is fine; the bucket policy is restricting direct uploads. A connection error means egress is blocked.
+
+**To check your public IP (for IP-allowlist policies):**
+```bash
+curl ifconfig.me
+```
+
+If direct uploads are not needed from your environment, the proxy fallback is fully supported and transparent — no configuration change is required.
+
+---
+
 ## Repository Corruption
 
 ### `mediagit fsck` reports errors

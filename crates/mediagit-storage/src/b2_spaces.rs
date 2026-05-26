@@ -582,6 +582,23 @@ impl StorageBackend for B2SpacesBackend {
             anyhow::anyhow!("Failed to list objects in {}: {}", self.provider.name(), e)
         })
     }
+
+    async fn presign_put(
+        &self,
+        key: &str,
+        content_length: u64,
+        ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<crate::PresignedPut>> {
+        self.inner.presign_put(key, content_length, ttl).await
+    }
+
+    async fn presign_get(
+        &self,
+        key: &str,
+        ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<crate::PresignedDownload>> {
+        self.inner.presign_get(key, ttl).await
+    }
 }
 
 #[cfg(test)]

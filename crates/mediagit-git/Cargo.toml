@@ -22,8 +22,8 @@ serde_json.workspace = true
 zstd.workspace = true
 
 # Hashing
-sha2.workspace = true
 hex.workspace = true
+mediagit-versioning = { path = "../mediagit-versioning" }
 
 # Error handling
 thiserror.workspace = true

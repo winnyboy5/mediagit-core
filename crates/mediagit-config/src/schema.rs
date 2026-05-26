@@ -78,6 +78,19 @@ impl Config {
             .ok_or_else(|| format!("Remote '{}' not found in configuration", remote_name))
     }
 
+    /// Resolve a remote argument that may be either a name or a bare URL.
+    /// If `remote_or_url` already starts with a URL scheme it is returned as-is;
+    /// otherwise it is looked up as a remote name.
+    pub fn resolve_remote_url(&self, remote_or_url: &str) -> Result<String, String> {
+        if remote_or_url.starts_with("http://")
+            || remote_or_url.starts_with("https://")
+            || remote_or_url.starts_with("ssh://")
+        {
+            return Ok(remote_or_url.to_owned());
+        }
+        self.get_remote_url(remote_or_url)
+    }
+
     /// Add or update a remote
     pub fn set_remote(&mut self, name: impl Into<String>, url: impl Into<String>) {
         self.remotes
@@ -389,6 +402,21 @@ pub struct PerformanceConfig {
     /// Maximum concurrent operations
     #[serde(default = "default_max_concurrency")]
     pub max_concurrency: usize,
+
+    /// Override for client-side parallel chunk uploads. When None, falls back
+    /// to MEDIAGIT_UPLOAD_CONCURRENCY env var or the internal default (32).
+    #[serde(default)]
+    pub upload_concurrency: Option<usize>,
+
+    /// Override for client-side parallel chunk downloads. When None, falls back
+    /// to MEDIAGIT_DOWNLOAD_CONCURRENCY env var or the internal default (24).
+    #[serde(default)]
+    pub download_concurrency: Option<usize>,
+
+    /// Override for server-side concurrent pack-write workers. When None,
+    /// falls back to MEDIAGIT_PACK_WORKERS env var or the internal default (8).
+    #[serde(default)]
+    pub pack_workers: Option<usize>,
 
     /// Buffer size for I/O operations (in bytes)
     #[serde(default = "default_buffer_size")]
@@ -856,6 +884,9 @@ impl Default for PerformanceConfig {
     fn default() -> Self {
         PerformanceConfig {
             max_concurrency: default_max_concurrency(),
+            upload_concurrency: None,
+            download_concurrency: None,
+            pack_workers: None,
             buffer_size: 65536,
             cache: CacheConfig::default(),
             connection_pool: ConnectionPoolConfig::default(),

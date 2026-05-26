@@ -121,10 +121,10 @@ flowchart LR
 | Setting | Value |
 |---------|-------|
 | `endpoint` | `http://minio:9000` |
-| `access_key` | MinIO access key |
-| `secret_key` | MinIO secret key |
+| `access_key_id` | MinIO access key |
+| `secret_access_key` | MinIO secret key |
 | `bucket` | Bucket name |
-| `force_path_style` | `true` |
+| `prefix` | Key prefix (e.g. `media/`) |
 
 **Production Performance:**
 - Upload: **108 MB/s**
@@ -137,8 +137,8 @@ flowchart LR
 | Setting | Value |
 |---------|-------|
 | `endpoint` | `https://s3.{region}.backblazeb2.com` |
-| `access_key` | B2 Application Key ID |
-| `secret_key` | B2 Application Key |
+| `access_key_id` | B2 Application Key ID |
+| `secret_access_key` | B2 Application Key |
 | `region` | `us-west-002` |
 
 ---
@@ -148,8 +148,8 @@ flowchart LR
 | Setting | Value |
 |---------|-------|
 | `endpoint` | `https://{region}.digitaloceanspaces.com` |
-| `access_key` | Spaces access key |
-| `secret_key` | Spaces secret key |
+| `access_key_id` | Spaces access key |
+| `secret_access_key` | Spaces secret key |
 | `region` | `nyc3`, `sfo3`, etc. |
 
 ---
