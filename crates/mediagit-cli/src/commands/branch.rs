@@ -23,7 +23,14 @@ use std::time::Instant;
 /// Create, list, rename, and delete branches. Branches are lightweight references
 /// to commits that allow parallel development workflows.
 #[derive(Parser, Debug)]
-#[command(after_help = "EXAMPLES:
+// BUG-006: bare `branch` and `branch <name>` are translated in main.rs
+// preprocess_args — list default with no positional, `create` default when
+// a name is supplied (git-style sugar).
+#[command(after_help = "USAGE NOTE:
+    `branch` requires a subcommand. `mediagit branch <name>` is not valid —
+    use `mediagit branch create <name>` to make a branch.
+
+EXAMPLES:
     # List all local branches
     mediagit branch list
 
@@ -424,13 +431,32 @@ impl BranchCmd {
             anyhow::bail!("Branch '{}' already exists", opts.name);
         }
 
-        // Get start point (defaults to HEAD) - resolve symbolic refs
+        // Get start point (defaults to HEAD) - resolve symbolic refs.
+        //
+        // BUG-010: accept Git-compatible shorthand for remote-tracking refs.
+        // Try the input verbatim first (so explicit `refs/...` / `HEAD` / OIDs
+        // keep working), then fall back to `refs/remotes/<input>` when the
+        // user wrote something like `origin/feat-a`.
         let start_oid = if let Some(start_point) = &opts.start_point {
-            // Try to resolve the start point as a reference or commit
-            refdb
-                .resolve(start_point)
-                .await
-                .context(format!("Invalid start point: {}", start_point))?
+            match refdb.resolve(start_point).await {
+                Ok(oid) => oid,
+                Err(primary_err) => {
+                    let looks_like_remote_shorthand = start_point.contains('/')
+                        && !start_point.starts_with("refs/")
+                        && !start_point.starts_with("HEAD")
+                        && start_point.len() != 64;
+                    if looks_like_remote_shorthand {
+                        let fallback = format!("refs/remotes/{}", start_point);
+                        refdb
+                            .resolve(&fallback)
+                            .await
+                            .with_context(|| format!("Invalid start point: {}", start_point))?
+                    } else {
+                        return Err(primary_err)
+                            .context(format!("Invalid start point: {}", start_point));
+                    }
+                }
+            }
         } else {
             // Use HEAD as start point (resolve symbolic ref)
             refdb

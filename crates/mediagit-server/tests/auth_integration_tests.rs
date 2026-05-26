@@ -295,7 +295,12 @@ async fn test_read_permission_allows_download_pack() {
     let test_request_id = "test-request-123";
     {
         let mut want_cache = state.want_cache.lock().await;
-        want_cache.insert(test_request_id.to_string(), "test-repo".to_string(), vec![]);
+        want_cache.insert(
+            test_request_id.to_string(),
+            "test-repo".to_string(),
+            vec![],
+            vec![],
+        );
     }
 
     let app = create_router(state);

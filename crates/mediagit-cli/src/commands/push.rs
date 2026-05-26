@@ -17,9 +17,10 @@ use crate::progress::{OperationStats, ProgressTracker};
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
+use indicatif::ProgressBar;
 use mediagit_protocol::PushPhase;
-use mediagit_versioning::RefDatabase;
-use std::sync::Arc;
+use mediagit_versioning::{LcaFinder, ObjectType, RefDatabase};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// Update remote references and send objects
@@ -145,19 +146,26 @@ impl PushCmd {
         // Load config to get remote URL
         let config = mediagit_config::Config::load(&repo_root).await?;
         let remote_url = config
-            .get_remote_url(remote)
+            .resolve_remote_url(remote)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         if self.verbose {
             println!("  Remote URL: {}", remote_url);
         }
 
-        // Initialize protocol client
-        let client = mediagit_protocol::ProtocolClient::new(remote_url);
+        // Initialize protocol client. Honour [performance] upload_concurrency
+        // from the repo config so users can tune parallel chunk fan-out
+        // without setting MEDIAGIT_UPLOAD_CONCURRENCY in the env.
+        let mut client = mediagit_protocol::ProtocolClient::new(remote_url);
+        if let Some(n) = config.performance.upload_concurrency {
+            client = client.with_concurrent_uploads(n);
+        }
 
         // Initialize ODB with smart compression for consistent read/write
-        let odb =
-            mediagit_versioning::ObjectDatabase::with_smart_compression(Arc::clone(&storage), 1000);
+        let odb = Arc::new(mediagit_versioning::ObjectDatabase::with_smart_compression(
+            Arc::clone(&storage),
+            1000,
+        ));
 
         // ===== Handle push --delete: delete remote refs without uploading objects =====
         if self.delete {
@@ -288,7 +296,7 @@ impl PushCmd {
         }
 
         // Determine which refs to push
-        let refs_to_push: Vec<String> = if self.all {
+        let mut refs_to_push: Vec<String> = if self.all {
             // Push all local branches
             let branches = refdb.list_branches().await?;
             if branches.is_empty() {
@@ -305,15 +313,86 @@ impl PushCmd {
                 .ok_or_else(|| anyhow::anyhow!("HEAD is detached, please specify a refspec"))?;
             vec![ref_name]
         } else {
-            // Use refspecs - normalize to handle both short and full ref names
-            self.refspec
-                .iter()
-                .map(|r| mediagit_versioning::normalize_ref_name(r))
-                .collect()
+            // Use refspecs - normalize to handle both short and full ref names.
+            // For bare names (e.g. "v1.0"), normalize_ref_name produces refs/heads/<name>.
+            // If that ref doesn't exist locally, fall back to refs/tags/<name> so that
+            // `push origin v1.0` works when v1.0 is a tag rather than a branch.
+            let mut resolved = Vec::new();
+            for r in &self.refspec {
+                let candidate = mediagit_versioning::normalize_ref_name(r);
+                // If the candidate is a heads ref but doesn't exist, try tags
+                let resolved_ref = if candidate.starts_with("refs/heads/")
+                    && refdb.read(&candidate).await.is_err()
+                {
+                    let tag_candidate = format!(
+                        "refs/tags/{}",
+                        candidate.strip_prefix("refs/heads/").unwrap()
+                    );
+                    if refdb.read(&tag_candidate).await.is_ok() {
+                        tag_candidate
+                    } else {
+                        // Neither exists — keep the original so the error is reported below
+                        candidate
+                    }
+                } else {
+                    candidate
+                };
+                resolved.push(resolved_ref);
+            }
+            resolved
         };
 
         // Get remote refs to check current state
         let remote_refs = client.get_refs().await?;
+
+        // Append tag refs when --tags or --follow-tags is specified
+        if self.tags || self.follow_tags {
+            let all_tags = refdb.list_tags().await?;
+            if self.follow_tags {
+                // Only include tags whose target OID is an ancestor of a pushed branch tip
+                let lca = LcaFinder::new(Arc::clone(&odb));
+                // Collect branch tips from refs_to_push
+                let mut branch_tips: Vec<mediagit_versioning::Oid> = Vec::new();
+                for branch_ref in &refs_to_push {
+                    if let Ok(r) = refdb.read(branch_ref).await {
+                        if let Some(oid) = r.oid {
+                            branch_tips.push(oid);
+                        }
+                    }
+                }
+                for tag_ref in all_tags {
+                    if let Ok(r) = refdb.read(&tag_ref).await {
+                        if let Some(tag_oid) = r.oid {
+                            // Include tag if its target is an ancestor of any branch tip
+                            let mut include = false;
+                            for tip in &branch_tips {
+                                if lca.is_ancestor(&tag_oid, tip).await.unwrap_or(false) {
+                                    include = true;
+                                    break;
+                                }
+                            }
+                            if include && !refs_to_push.contains(&tag_ref) {
+                                refs_to_push.push(tag_ref);
+                            }
+                        }
+                    }
+                }
+            } else {
+                // --tags: include all local tags
+                for tag_ref in all_tags {
+                    if !refs_to_push.contains(&tag_ref) {
+                        refs_to_push.push(tag_ref);
+                    }
+                }
+            }
+            if self.verbose {
+                let tag_count = refs_to_push
+                    .iter()
+                    .filter(|r| r.starts_with("refs/tags/"))
+                    .count();
+                println!("  Including {} tag(s)", tag_count);
+            }
+        }
 
         // Build list of ref updates, skipping those already up-to-date
         let mut updates = Vec::new();
@@ -358,7 +437,7 @@ impl PushCmd {
 
         // BLOCK: Check for new branches without upstream (Git-like behavior)
         // For non-default branches, require explicit -u or --no-track
-        if !self.set_upstream && !self.no_track && self.refspec.is_empty() {
+        if !self.set_upstream && !self.no_track && self.refspec.is_empty() && !self.all {
             for update in &updates {
                 // Only check new branches (no old_oid means it doesn't exist on remote)
                 if update.old_oid.is_none() && update.name.starts_with("refs/heads/") {
@@ -401,65 +480,141 @@ impl PushCmd {
         }
 
         if !self.dry_run {
-            // Create progress bar for push using ProgressTracker
             let tracker = ProgressTracker::new(self.quiet);
-            let pb = if !self.quiet {
-                Some(tracker.spinner("Pushing..."))
+            // Spinner covers Collecting + Packing phases (no byte count yet)
+            let phase_spinner = if !self.quiet {
+                Some(tracker.spinner("Collecting objects..."))
             } else {
                 None
             };
+            // Bytes bar created on first Uploading callback; shared via Arc<Mutex>
+            let upload_pb: Arc<Mutex<Option<ProgressBar>>> = Arc::new(Mutex::new(None));
+            let upload_pb_cb = Arc::clone(&upload_pb);
 
-            // Push all refs with progress callback
             let (result, push_stats) = client
-                .push_with_progress(&odb, updates.clone(), self.force, |progress| {
-                    if let Some(ref pb) = pb {
-                        let msg = match progress.phase {
-                            PushPhase::Collecting => {
-                                if progress.total > 0 {
+                .push_with_progress(&odb, updates.clone(), self.force, move |progress| {
+                    match progress.phase {
+                        PushPhase::Collecting => {
+                            if let Some(ref sp) = phase_spinner {
+                                let msg = if progress.total > 0 {
                                     format!(
                                         "Collecting... {}/{} objects",
                                         progress.current, progress.total
                                     )
                                 } else {
                                     "Collecting objects...".to_string()
-                                }
+                                };
+                                sp.set_message(msg);
                             }
-                            PushPhase::Packing => {
-                                if progress.total > 0 {
+                        }
+                        PushPhase::Packing => {
+                            if let Some(ref sp) = phase_spinner {
+                                let msg = if progress.total > 0 {
                                     format!(
                                         "Packing... {}/{} objects",
                                         progress.current, progress.total
                                     )
                                 } else {
-                                    "Packing...".to_string()
-                                }
+                                    "Generating pack...".to_string()
+                                };
+                                sp.set_message(msg);
                             }
-                            PushPhase::Uploading => {
-                                if progress.total > 0 {
-                                    let bytes_str = if progress.total > 1024 * 1024 {
-                                        format!(
-                                            "{:.1} MiB",
-                                            progress.total as f64 / (1024.0 * 1024.0)
-                                        )
-                                    } else if progress.total > 1024 {
-                                        format!("{:.1} KiB", progress.total as f64 / 1024.0)
-                                    } else {
-                                        format!("{} B", progress.total)
-                                    };
-                                    format!("Uploading... {}", bytes_str)
-                                } else {
-                                    "Uploading...".to_string()
+                        }
+                        PushPhase::Uploading => {
+                            let mut guard = upload_pb_cb.lock().unwrap();
+                            if guard.is_none() {
+                                // Finish spinner, create bytes progress bar
+                                if let Some(ref sp) = phase_spinner {
+                                    sp.finish_and_clear();
                                 }
+                                *guard = Some(tracker.push_bar(progress.total));
                             }
-                        };
-                        pb.set_message(msg);
+                            if let Some(ref pb) = *guard {
+                                // Grow total dynamically as more objects are checked
+                                if progress.total > pb.length().unwrap_or(0) {
+                                    pb.set_length(progress.total);
+                                }
+                                pb.set_position(progress.current);
+                            }
+                        }
                     }
                 })
                 .await?;
 
-            // Finish progress bar
-            if let Some(pb) = pb {
-                pb.finish_and_clear();
+            // Clean up whichever bar is still active
+            if let Some(pb) = upload_pb.lock().unwrap().take() {
+                pb.finish_with_message("done");
+            }
+
+            // Push annotated tag .meta sidecars: write meta content as an ODB blob
+            // and record its OID in refs/tag-meta/<name> so clones can retrieve it.
+            for ref_pushed in &refs_to_push {
+                if let Some(tag_name) = ref_pushed.strip_prefix("refs/tags/") {
+                    let meta_path = storage_path
+                        .join("refs")
+                        .join("tags")
+                        .join(format!("{}.meta", tag_name));
+                    if meta_path.exists() {
+                        if let Ok(meta_bytes) = std::fs::read(&meta_path) {
+                            // Store meta as a blob in the ODB
+                            match odb.write(ObjectType::Blob, &meta_bytes).await {
+                                Ok(meta_oid) => {
+                                    // Upload the blob bytes to the server before registering
+                                    // the ref — update_refs only records the pointer, it does
+                                    // not transfer object data.
+                                    if let Ok(meta_raw) = odb.read(&meta_oid).await {
+                                        if let Err(e) = client
+                                            .upload_loose_object(
+                                                meta_oid,
+                                                ObjectType::Blob,
+                                                &meta_raw,
+                                            )
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                "Failed to upload tag meta blob for {}: {}",
+                                                tag_name,
+                                                e
+                                            );
+                                        }
+                                    }
+
+                                    // Push a ref pointing to this blob OID so server stores it
+                                    let meta_ref_name = format!("refs/tag-meta/{}", tag_name);
+                                    let remote_meta_oid = remote_refs
+                                        .refs
+                                        .iter()
+                                        .find(|r| r.name == meta_ref_name)
+                                        .map(|r| r.oid.clone());
+                                    let meta_update = mediagit_protocol::RefUpdate {
+                                        name: meta_ref_name,
+                                        old_oid: remote_meta_oid,
+                                        new_oid: meta_oid.to_hex(),
+                                        delete: false,
+                                    };
+                                    let meta_req = mediagit_protocol::RefUpdateRequest {
+                                        updates: vec![meta_update],
+                                        force: true,
+                                    };
+                                    if let Err(e) = client.update_refs(meta_req).await {
+                                        tracing::warn!(
+                                            "Failed to push tag meta ref for {}: {}",
+                                            tag_name,
+                                            e
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to store tag meta blob for {}: {}",
+                                        tag_name,
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // Update operation stats from push stats

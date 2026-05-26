@@ -90,6 +90,45 @@ impl ResetCmd {
             ResetMode::Mixed
         };
 
+        // When `self.commit` is Some, `self.paths` is empty, and no explicit
+        // mode flags (--soft/--hard) are set, the value could be either a
+        // commit specifier OR a file path.  Clap always puts the first
+        // positional arg into `commit`, so `mediagit reset photo.jpeg`
+        // would incorrectly try to resolve "photo.jpeg" as a commit.
+        //
+        // Heuristic: attempt commit resolution first.  If it fails AND the
+        // value corresponds to an existing file (or an index entry), redirect
+        // to path-mode reset (unstage) instead of erroring.
+        if let Some(ref spec) = self.commit {
+            if !self.soft && !self.hard {
+                let storage = create_storage_backend(&repo_root).await?;
+                let odb = ObjectDatabase::with_smart_compression(storage.clone(), 10000);
+                let refs = RefDatabase::new(&storage_path);
+
+                // Try resolving as a commit
+                if self.resolve_target(&odb, &refs, spec).await.is_err() {
+                    // Resolution failed — check if this looks like a file path
+                    let candidate = repo_root.join(spec);
+                    let index = Index::load(&repo_root)?;
+                    let as_path = PathBuf::from(spec.replace('\\', "/"));
+
+                    if candidate.exists() || index.contains(&as_path) {
+                        // Treat as path-mode reset (unstage the file)
+                        let path_reset = ResetCmd {
+                            commit: None,
+                            paths: vec![spec.clone()],
+                            soft: false,
+                            mixed: false,
+                            hard: false,
+                            quiet: self.quiet,
+                        };
+                        return path_reset.reset_paths(&repo_root).await;
+                    }
+                    // Not a file either — fall through to give the original error
+                }
+            }
+        }
+
         self.reset_to_commit(&repo_root, &storage_path, mode).await
     }
 
@@ -378,7 +417,18 @@ impl ResetCmd {
             return Ok(oid);
         }
 
-        // Try as OID
-        Oid::from_hex(spec).with_context(|| format!("Unknown revision: {}", spec))
+        // Try full OID
+        if let Ok(oid) = Oid::from_hex(spec) {
+            return Ok(oid);
+        }
+
+        // Try abbreviated OID (prefix scan through ODB)
+        if spec.len() >= 4 && spec.len() < 64 && spec.chars().all(|c| c.is_ascii_hexdigit()) {
+            if let Ok(oid) = odb.resolve_abbreviated_oid(spec).await {
+                return Ok(oid);
+            }
+        }
+
+        anyhow::bail!("Unknown revision: {}", spec)
     }
 }

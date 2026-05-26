@@ -90,11 +90,14 @@
 use crate::StorageBackend;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use aws_sdk_s3::config::retry::RetryConfig;
+use aws_sdk_s3::config::timeout::TimeoutConfig;
 use aws_sdk_s3::Client;
 use bytes::Bytes;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, warn};
 
 /// Configuration for the S3 backend
@@ -153,6 +156,36 @@ impl Default for S3Config {
 ///
 /// This implementation is `Send + Sync` and can be safely shared across threads
 /// and async tasks.
+/// Compute the optimal MPU part size for a given object size on S3/MinIO/B2.
+///
+/// S3 rules: ≥5 MiB per part (except last), ≤10 000 parts/object, ≤5 TiB/object.
+/// Media files (video, PSD, RAW) are typically 50 MiB – several GiB per chunk.
+/// Targeting ~96 parts keeps the number of HTTPS round-trips small while staying
+/// well within the 10 000-part limit. Floor at 16 MiB to avoid excessive
+/// per-request overhead for mid-size objects.
+/// Override with `MEDIAGIT_MPU_PART_SIZE` (bytes) for testing or special backends.
+fn mpu_part_size_s3(total_size: u64) -> u64 {
+    const MIN_PART: u64 = 5 * 1024 * 1024; // S3/B2/MinIO hard minimum
+    const MAX_PART: u64 = 5 * 1024 * 1024 * 1024; // S3 hard maximum
+    const MAX_PARTS: u64 = 10_000;
+    const TARGET_PARTS: u64 = 96; // keeps round-trips low for media chunks
+    const FLOOR: u64 = 16 * 1024 * 1024; // never go below this for media files
+
+    if let Some(v) = std::env::var("MEDIAGIT_MPU_PART_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| (MIN_PART..=MAX_PART).contains(&n))
+    {
+        return v;
+    }
+
+    // Must satisfy: num_parts <= MAX_PARTS → part_size >= total/MAX_PARTS
+    let by_count = total_size.div_ceil(MAX_PARTS).max(MIN_PART);
+    // Aim for roughly TARGET_PARTS parts
+    let by_target = total_size.div_ceil(TARGET_PARTS).max(MIN_PART);
+    FLOOR.max(by_count).max(by_target).min(MAX_PART)
+}
+
 #[derive(Clone)]
 pub struct S3Backend {
     client: Client,
@@ -243,12 +276,28 @@ impl S3Backend {
     pub async fn with_config(config: S3Config) -> Result<Self> {
         // Override endpoint if provided (for S3-compatible services like MinIO)
         // Skip aws_config::defaults().load() for custom endpoints to avoid IMDS timeouts
+        let connect_timeout_secs: u64 = std::env::var("MEDIAGIT_AWS_CONNECT_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10);
+        let max_attempts: u32 = std::env::var("MEDIAGIT_AWS_MAX_ATTEMPTS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
+        let timeout_config = TimeoutConfig::builder()
+            .connect_timeout(Duration::from_secs(connect_timeout_secs))
+            .read_timeout(Duration::from_secs(120))
+            .build();
+
         let client = if let Some(endpoint) = &config.endpoint {
             debug!("Using custom S3 endpoint: {}", endpoint);
             let mut builder = aws_sdk_s3::config::Builder::new()
                 .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
                 .endpoint_url(endpoint.clone())
-                .force_path_style(true);
+                .force_path_style(true)
+                .timeout_config(timeout_config)
+                .retry_config(RetryConfig::standard().with_max_attempts(max_attempts))
+                .http_client(crate::http_pool::shared());
             if let Some(region) = &config.region {
                 builder = builder.region(aws_sdk_s3::config::Region::new(region.clone()));
             } else {
@@ -264,6 +313,7 @@ impl S3Backend {
         } else {
             // Real AWS S3 - use standard config loading (IMDS is expected)
             let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                .http_client(crate::http_pool::shared())
                 .load()
                 .await;
             Client::new(&sdk_config)
@@ -359,11 +409,27 @@ impl S3Backend {
             "mediagit-explicit-credentials",
         );
 
+        let connect_timeout_secs: u64 = std::env::var("MEDIAGIT_AWS_CONNECT_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10);
+        let max_attempts: u32 = std::env::var("MEDIAGIT_AWS_MAX_ATTEMPTS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
+        let timeout_config = TimeoutConfig::builder()
+            .connect_timeout(Duration::from_secs(connect_timeout_secs))
+            .read_timeout(Duration::from_secs(120))
+            .build();
+
         // Build S3 config with explicit credentials and endpoint
         let mut s3_config_builder = aws_sdk_s3::config::Builder::new()
             .credentials_provider(credentials)
             .region(Region::new(region.to_string()))
-            .force_path_style(true); // Required for most S3-compatible services
+            .force_path_style(true) // Required for most S3-compatible services
+            .timeout_config(timeout_config)
+            .retry_config(RetryConfig::standard().with_max_attempts(max_attempts))
+            .http_client(crate::http_pool::shared());
 
         if let Some(endpoint) = &config.endpoint {
             debug!("Using custom S3 endpoint with credentials: {}", endpoint);
@@ -528,6 +594,72 @@ impl StorageBackend for S3Backend {
             })
         })
         .await
+    }
+
+    /// Stream an object from S3 as a `Bytes` sequence (B7).
+    ///
+    /// When `MEDIAGIT_STORAGE_STREAMING=1`, drives the AWS SDK's `ByteStream` via
+    /// `into_async_read()` + `unfold` so the object body is never fully buffered.
+    /// Falls back to the default single-chunk impl when the knob is OFF.
+    /// No retry on the streaming path: mid-stream failures bubble up to the caller.
+    async fn get_streaming(
+        &self,
+        key: &str,
+    ) -> anyhow::Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+        >,
+    > {
+        // B7: default ON — AWS clone 15.8% faster (159.8s→134.5s) on ap-south-1 (2026-05-22).
+        // Set MEDIAGIT_STORAGE_STREAMING=0 to revert to Vec<u8> round-trip.
+        let streaming_enabled = std::env::var("MEDIAGIT_STORAGE_STREAMING")
+            .as_deref()
+            .unwrap_or("1")
+            == "1";
+        if !streaming_enabled {
+            let data = self.get(key).await?;
+            return Ok(Box::pin(futures::stream::once(async move {
+                Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(data))
+            })));
+        }
+
+        Self::validate_key(key)?;
+        let key_clone = key.to_string();
+        let client = self.client.clone();
+        let bucket = self.config.bucket.clone();
+        let stats = self.stats.clone();
+
+        let response = client
+            .get_object()
+            .bucket(&bucket)
+            .key(&key_clone)
+            .send()
+            .await
+            .map_err(|e| anyhow!("get_streaming {}: {}", key_clone, e))?;
+
+        // ByteStream does not implement futures::Stream directly; convert to
+        // tokio::io::AsyncRead and drive with unfold to yield 64 KiB Bytes chunks.
+        let reader = response.body.into_async_read();
+        let stream = futures::stream::unfold((reader, stats), |(mut rdr, stats)| async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf = vec![0u8; 65536];
+            match rdr.read(&mut buf).await {
+                Ok(0) => None,
+                Ok(n) => {
+                    buf.truncate(n);
+                    stats
+                        .total_bytes_downloaded
+                        .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                    Some((
+                        Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(buf)),
+                        (rdr, stats),
+                    ))
+                }
+                Err(e) => Some((Err(anyhow!("get_streaming chunk: {}", e)), (rdr, stats))),
+            }
+        });
+
+        Ok(Box::pin(stream))
     }
 
     /// Store an object in S3
@@ -725,6 +857,145 @@ impl StorageBackend for S3Backend {
         })
         .await
     }
+
+    async fn presign_put(
+        &self,
+        key: &str,
+        _content_length: u64,
+        ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<crate::PresignedPut>> {
+        let presigning = aws_sdk_s3::presigning::PresigningConfig::expires_in(ttl)
+            .map_err(|e| anyhow::anyhow!("presigning config: {e}"))?;
+        let req = self
+            .client
+            .put_object()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .presigned(presigning)
+            .await
+            .map_err(|e| anyhow::anyhow!("presign_put s3: {e}"))?;
+        Ok(Some(crate::PresignedPut {
+            url: req.uri().to_string(),
+            method: "PUT".to_string(),
+            required_headers: req
+                .headers()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            expires_at: std::time::SystemTime::now() + ttl,
+        }))
+    }
+
+    async fn presign_get(
+        &self,
+        key: &str,
+        ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<crate::PresignedDownload>> {
+        let presigning = aws_sdk_s3::presigning::PresigningConfig::expires_in(ttl)
+            .map_err(|e| anyhow::anyhow!("presigning config: {e}"))?;
+        let req = self
+            .client
+            .get_object()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .presigned(presigning)
+            .await
+            .map_err(|e| anyhow::anyhow!("presign_get s3: {e}"))?;
+        Ok(Some(crate::PresignedDownload {
+            url: req.uri().to_string(),
+            headers: vec![],
+            expires_in_secs: ttl.as_secs(),
+        }))
+    }
+
+    async fn create_presigned_mpu(
+        &self,
+        key: &str,
+        total_size: u64,
+        ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<crate::PresignedMpu>> {
+        let part_size = mpu_part_size_s3(total_size);
+        let resp = self
+            .client
+            .create_multipart_upload()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|e| anyhow!("create_multipart_upload s3: {}", e))?;
+        let upload_id = resp
+            .upload_id()
+            .ok_or_else(|| anyhow!("no upload_id from S3"))?
+            .to_string();
+
+        let num_parts = total_size.div_ceil(part_size).max(1) as i32;
+        let presigning = aws_sdk_s3::presigning::PresigningConfig::expires_in(ttl)
+            .map_err(|e| anyhow!("presigning config: {}", e))?;
+        let mut parts = Vec::with_capacity(num_parts as usize);
+        for part_number in 1..=num_parts {
+            let req = self
+                .client
+                .upload_part()
+                .bucket(&self.config.bucket)
+                .key(key)
+                .upload_id(&upload_id)
+                .part_number(part_number)
+                .presigned(presigning.clone())
+                .await
+                .map_err(|e| anyhow!("presign upload_part {} s3: {}", part_number, e))?;
+            parts.push(crate::PresignedMpuPart {
+                part_number,
+                url: req.uri().to_string(),
+            });
+        }
+        Ok(Some(crate::PresignedMpu {
+            upload_id,
+            parts,
+            part_size,
+        }))
+    }
+
+    async fn complete_presigned_mpu(
+        &self,
+        key: &str,
+        upload_id: &str,
+        parts: Vec<crate::MpuCompletedPart>,
+    ) -> anyhow::Result<()> {
+        let completed: Vec<_> = parts
+            .into_iter()
+            .map(|p| {
+                aws_sdk_s3::types::CompletedPart::builder()
+                    .part_number(p.part_number)
+                    .e_tag(p.etag)
+                    .build()
+            })
+            .collect();
+        self.client
+            .complete_multipart_upload()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .upload_id(upload_id)
+            .multipart_upload(
+                aws_sdk_s3::types::CompletedMultipartUpload::builder()
+                    .set_parts(Some(completed))
+                    .build(),
+            )
+            .send()
+            .await
+            .map_err(|e| anyhow!("complete_multipart_upload s3: {}", e))?;
+        Ok(())
+    }
+
+    async fn abort_presigned_mpu(&self, key: &str, upload_id: &str) -> anyhow::Result<()> {
+        let _ = self
+            .client
+            .abort_multipart_upload()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .upload_id(upload_id)
+            .send()
+            .await;
+        Ok(())
+    }
 }
 
 // Helper methods for S3Backend (not part of StorageBackend trait)
@@ -800,6 +1071,7 @@ impl S3Backend {
 
         // Upload parts concurrently
         let mut part_handles = vec![];
+        let mut parts = vec![];
         let part_size = self.config.part_size as usize;
         let mut part_number = 1;
 
@@ -847,9 +1119,9 @@ impl S3Backend {
 
             // Limit concurrent uploads
             if part_handles.len() >= self.config.max_concurrent_parts {
-                // Wait for one to complete before starting more
                 if let Some(handle) = part_handles.pop() {
-                    let _ = handle.await??;
+                    let (part_num, etag) = handle.await??;
+                    parts.push((part_num, etag));
                 }
             }
 
@@ -857,7 +1129,6 @@ impl S3Backend {
         }
 
         // Wait for all remaining parts to complete
-        let mut parts = vec![];
         for handle in part_handles {
             let (part_num, etag) = handle.await??;
             parts.push((part_num, etag));

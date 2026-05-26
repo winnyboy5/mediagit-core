@@ -61,6 +61,8 @@
 //! }
 //! ```
 
+pub mod hash;
+
 mod branch;
 mod checkout;
 pub mod chunking;
@@ -79,6 +81,7 @@ mod object;
 mod odb;
 mod oid;
 mod pack;
+pub mod reachability;
 mod reflog;
 mod refs;
 mod revision;
@@ -101,12 +104,13 @@ pub use delta::{Delta, DeltaDecoder, DeltaEncoder};
 pub use diff::{ModifiedEntry, ThreeWayDiff, TreeDiff, TreeDiffer};
 pub use index::{Index, IndexEntry};
 pub use lca::{LcaFinder, LcaResult};
-pub use merge::{FastForwardInfo, MergeEngine, MergeResult, MergeStrategy};
+pub use merge::{apply_merge_to_workdir, FastForwardInfo, MergeEngine, MergeResult, MergeStrategy};
 pub use metrics::OdbMetrics;
 pub use object::ObjectType;
 pub use odb::{ObjectDatabase, RepackStats};
-pub use oid::Oid;
+pub use oid::{Oid, StorageKey};
 pub use pack::{PackHeader, PackIndex, PackMetadata, PackObjectEntry, PackReader, PackWriter};
+pub use reachability::walk_reachable;
 pub use reflog::{Reflog, ReflogEntry};
 pub use refs::{normalize_ref_name, Ref, RefDatabase, RefType};
 pub use revision::resolve_revision;

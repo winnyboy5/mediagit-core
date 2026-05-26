@@ -109,12 +109,36 @@ impl Compressor for ZlibCompressor {
                 CompressionError::decompression_failed(format!("zlib decompression failed: {}", e))
             })?;
 
-            Ok(decompressed)
-        } else {
-            // Data is not zlib compressed, return as-is
-            // This handles backward compatibility with uncompressed data
-            Ok(data.to_vec())
+            return Ok(decompressed);
         }
+
+        // Reject known foreign compressor magic bytes so mis-routed blobs
+        // (e.g. an object stored by SmartCompressor with Brotli or Zstd)
+        // fail loudly instead of being silently returned as raw data.
+        // Silent raw fallback caused BUG-001: the ODB then hashed the
+        // compressed bytes instead of the content, producing false
+        // integrity mismatches on revert.
+        if data.len() >= 4 && &data[..4] == b"BRT\x01" {
+            return Err(CompressionError::decompression_failed(
+                "zlib decoder received Brotli-prefixed data (BRT\\x01); \
+                 object should be read via SmartCompressor"
+                    .to_string(),
+            ));
+        }
+        if data.len() >= 4 && data[..4] == [0x28, 0xB5, 0x2F, 0xFD] {
+            return Err(CompressionError::decompression_failed(
+                "zlib decoder received Zstd-compressed data; \
+                 object should be read via SmartCompressor"
+                    .to_string(),
+            ));
+        }
+
+        // Data is not zlib compressed and not recognized as a foreign
+        // compressor. Return as-is for backward compatibility with
+        // legacy uncompressed blobs. Note: the ODB's integrity check
+        // computes the OID from the returned bytes, so any legacy caller
+        // relying on this path must have stored the exact raw content.
+        Ok(data.to_vec())
     }
 }
 
@@ -155,6 +179,40 @@ mod tests {
         let result = compressor.decompress(data).unwrap();
         // Should return as-is since it doesn't have zlib magic bytes
         assert_eq!(result, data);
+    }
+
+    #[test]
+    fn test_zlib_rejects_brotli_magic() {
+        // Guard for BUG-001 regression: a Brotli-prefixed blob must not be
+        // silently returned as raw bytes, since that causes the ODB
+        // integrity check to hash the compressed payload instead of content.
+        let compressor = ZlibCompressor::new(CompressionLevel::Default);
+        let mut data = b"BRT\x01".to_vec();
+        data.extend_from_slice(&[0xCE, 0xB2, 0x49, 0x17]); // nonsense payload
+        let err = compressor
+            .decompress(&data)
+            .expect_err("Brotli-prefixed data must not decompress as raw");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Brotli") || msg.contains("SmartCompressor"),
+            "expected Brotli/SmartCompressor rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_zlib_rejects_zstd_magic() {
+        // Guard for BUG-001 regression on the Zstd dispatch path.
+        let compressor = ZlibCompressor::new(CompressionLevel::Default);
+        let mut data = vec![0x28, 0xB5, 0x2F, 0xFD];
+        data.extend_from_slice(&[0x00, 0x11, 0x22, 0x33]);
+        let err = compressor
+            .decompress(&data)
+            .expect_err("Zstd-magic data must not decompress as raw");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Zstd") || msg.contains("SmartCompressor"),
+            "expected Zstd/SmartCompressor rejection, got: {msg}"
+        );
     }
 
     #[test]
@@ -227,5 +285,22 @@ mod tests {
         // Decompress and verify
         let decompressed = compressor.decompress(&compressed).unwrap();
         assert_eq!(decompressed, git_blob);
+    }
+
+    /// R5/B6: corrupt zlib frame must surface as CompressionError, never panic.
+    #[test]
+    fn decompress_corrupt_zlib_frame_is_typed_error() {
+        let c = ZlibCompressor::new(CompressionLevel::Default);
+        // 0x789C is a valid zlib header (CMF=0x78, FLG=0x9C, 0x78*256+0x9C == 30876, divisible by 31)
+        let mut corrupt = vec![0x78u8, 0x9c]; // valid zlib header
+        corrupt.extend_from_slice(&[0xFFu8; 64]); // garbage body
+        let err = c
+            .decompress(&corrupt)
+            .expect_err("corrupt zlib frame must return Err");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("zlib") || msg.contains("decompression"),
+            "error must name zlib or decompression, got: {msg}"
+        );
     }
 }

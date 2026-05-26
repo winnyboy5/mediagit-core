@@ -138,18 +138,20 @@ impl AddCmd {
             output::progress("Staging files...");
         }
 
+        let _add_wall = std::time::Instant::now();
+
         // Initialize storage backend from config (supports S3, Azure, GCS, filesystem)
         let storage_path = repo_root.join(".mediagit");
         let storage = create_storage_backend(&repo_root).await?;
 
         let delta_enabled = !self.no_delta;
+        let chunk_strategy = if self.no_chunking {
+            None
+        } else {
+            Some(ChunkStrategy::MediaAware)
+        };
 
-        let odb = ObjectDatabase::with_optimizations(
-            storage,
-            1000,
-            Some(ChunkStrategy::MediaAware),
-            delta_enabled,
-        );
+        let odb = ObjectDatabase::with_optimizations(storage, 1000, chunk_strategy, delta_enabled);
 
         if !self.quiet && self.verbose {
             output::info("Auto-chunking enabled for large files");
@@ -481,6 +483,16 @@ impl AddCmd {
             }
         }
 
+        // Best-effort auto-gc after add. Re-staging a file before commit
+        // orphans the previous version's chunks immediately; the threshold
+        // gate (50 MiB or 100 orphans) makes trivial adds a no-op.
+        if !self.dry_run && added_count > 0 {
+            let _ =
+                crate::auto_gc::maybe_run(&repo_root, crate::auto_gc::TriggerMode::PostAdd).await;
+        }
+
+        mediagit_protocol::bench::emit_add_summary(_add_wall, total_bytes, added_count);
+
         Ok(())
     }
 
@@ -556,9 +568,25 @@ impl AddCmd {
         // Choose streaming vs in-memory based on file size
         let (_content_oid, oid) = if file_size >= STREAMING_THRESHOLD {
             // STREAMING PATH: Files >= 5MB — format-aware chunking via mmap (parallel internally)
-            let content_oid = Oid::from_file_async(file_path)
-                .await
-                .context(format!("Failed to hash file: {}", file_path.display()))?;
+            // MEDIAGIT_HASH_PARALLEL: default ON. Set to "0" to force sequential.
+            // Falls back to sequential hash automatically when mmap is unavailable
+            // (e.g. network FS, locked file, 32-bit address exhaustion).
+            let content_oid = if std::env::var("MEDIAGIT_HASH_PARALLEL").as_deref() != Ok("0") {
+                let path_owned = file_path.to_path_buf();
+                match tokio::task::spawn_blocking(move || Oid::from_file_mmap_parallel(&path_owned))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("hash parallel join: {}", e))
+                {
+                    Ok(Ok(oid)) => oid,
+                    _ => Oid::from_file_async(file_path)
+                        .await
+                        .context(format!("Failed to hash file: {}", file_path.display()))?,
+                }
+            } else {
+                Oid::from_file_async(file_path)
+                    .await
+                    .context(format!("Failed to hash file: {}", file_path.display()))?
+            };
 
             // Check if unchanged from HEAD
             if let Some(head_oid) = head_files.get(&relative_path) {
@@ -571,7 +599,7 @@ impl AddCmd {
             }
 
             let oid = odb
-                .write_chunked_from_file(file_path, filename, on_bytes.clone())
+                .write_chunked_from_file(file_path, filename, on_bytes.clone(), Some(content_oid))
                 .await
                 .context("Failed to write chunked object (streaming)")?;
 

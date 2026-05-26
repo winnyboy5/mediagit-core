@@ -45,14 +45,24 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // google-cloud-storage v1 enables aws-lc-rs by default; this crate already
+    // depends on rustls with the `ring` feature for inbound TLS. With both
+    // providers compiled in, rustls 0.23 refuses to pick automatically and
+    // panics on first TLS use ("Could not automatically determine the
+    // process-level CryptoProvider"). Install ring explicitly to match the
+    // existing inbound TLS path. `_ =` swallows the "already installed" error
+    // if some other entry point (e.g. test harness) raced us.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Parse CLI arguments
     let args = Args::parse();
 
     // Setup tracing
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "mediagit_server=debug,tower_http=debug".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "mediagit_server=debug,tower_http=debug,mediagit_storage=warn".into()
+            }),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -80,6 +90,29 @@ async fn main() -> Result<()> {
 
     tracing::info!("Server configuration: {:?}", config);
 
+    // Startup summary banner — operators should see at a glance what's wired.
+    let bind_addr = if config.enable_tls {
+        format!("{}:{} (TLS)", config.host, config.tls_port)
+    } else {
+        format!("{}:{} (HTTP)", config.host, config.port)
+    };
+    let auth_state = if config.enable_auth { "ON" } else { "OFF" };
+    let rl_state = if config.enable_rate_limiting {
+        format!(
+            "ON ({} rps, burst {})",
+            config.rate_limit_rps, config.rate_limit_burst
+        )
+    } else {
+        "OFF".to_string()
+    };
+    tracing::info!(
+        "mediagit-server | listen={} | repos={} | auth={} | rate_limit={}",
+        bind_addr,
+        config.repos_dir.display(),
+        auth_state,
+        rl_state,
+    );
+
     // Create repos directory if it doesn't exist
     std::fs::create_dir_all(&config.repos_dir)?;
     tracing::info!("Repositories directory: {:?}", config.repos_dir);
@@ -90,13 +123,16 @@ async fn main() -> Result<()> {
             anyhow::anyhow!("JWT secret is required when authentication is enabled")
         })?;
         tracing::info!("Authentication is ENABLED");
-        Arc::new(AppState::new_with_full_auth(
-            config.repos_dir.clone(),
-            jwt_secret,
-        ))
+        Arc::new(
+            AppState::new_with_full_auth(config.repos_dir.clone(), jwt_secret)
+                .with_presigned_ttl(config.presigned_url_ttl_seconds),
+        )
     } else {
         tracing::warn!("Authentication is DISABLED - not suitable for production!");
-        Arc::new(AppState::new(config.repos_dir.clone()))
+        Arc::new(
+            AppState::new(config.repos_dir.clone())
+                .with_presigned_ttl(config.presigned_url_ttl_seconds),
+        )
     };
 
     // Build router with optional rate limiting

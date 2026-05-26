@@ -19,7 +19,7 @@ use console::style;
 use dialoguer::Confirm;
 use mediagit_storage::StorageBackend;
 use mediagit_versioning::{
-    BranchManager, ChunkManifest, Commit, FileMode, Oid, RefDatabase, RefType, Tree,
+    BranchManager, ChunkManifest, Commit, FileMode, Index, Oid, RefDatabase, RefType, Tree,
 };
 use std::collections::HashSet;
 use std::path::Path;
@@ -67,6 +67,52 @@ pub struct GcCmd {
     pub max_pack_size: usize,
 }
 
+/// Reusable GC options struct.
+///
+/// Mirrors the CLI flags in `GcCmd` so that other code paths (e.g. auto-gc
+/// triggered after `commit` / `pull` / `clone`) can invoke gc without going
+/// through clap.
+#[derive(Debug, Clone, Default)]
+pub struct GcOptions {
+    /// Reserved for future "aggressive" mode (currently a no-op CLI flag).
+    /// Kept on the struct so the flag is wired end-to-end the moment its
+    /// behavior is implemented; suppress the unused warning until then.
+    #[allow(dead_code)]
+    pub aggressive: bool,
+    pub no_prune: bool,
+    pub auto: bool,
+    pub dry_run: bool,
+    pub yes: bool,
+    pub quiet: bool,
+    pub verbose: bool,
+    pub repack: bool,
+    pub max_pack_size: usize,
+}
+
+impl From<&GcCmd> for GcOptions {
+    fn from(cmd: &GcCmd) -> Self {
+        Self {
+            aggressive: cmd.aggressive,
+            no_prune: cmd.no_prune,
+            auto: cmd.auto,
+            dry_run: cmd.dry_run,
+            yes: cmd.yes,
+            quiet: cmd.quiet,
+            verbose: cmd.verbose,
+            repack: cmd.repack,
+            max_pack_size: cmd.max_pack_size,
+        }
+    }
+}
+
+/// Auto-gc threshold: minimum reclaimable bytes before auto-mode proceeds.
+/// Below this, auto-gc exits silently (the work isn't worth the IO).
+const AUTO_GC_MIN_RECLAIM_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB
+
+/// Auto-gc threshold: minimum orphan object count before auto-mode proceeds.
+/// Catches "many small orphans" cases that don't trip the byte threshold.
+const AUTO_GC_MIN_ORPHAN_COUNT: usize = 100;
+
 /// Statistics collected during GC operation
 #[derive(Debug, Default)]
 struct GcStats {
@@ -93,6 +139,18 @@ struct GcStats {
 
     /// Chunk bytes reclaimed
     chunk_bytes_reclaimed: u64,
+
+    /// Orphan blob-level deltas deleted
+    blob_deltas_deleted: u64,
+
+    /// Orphan blob-level delta bytes reclaimed
+    blob_delta_bytes_reclaimed: u64,
+
+    /// Orphan chunk-level deltas deleted
+    chunk_deltas_deleted: u64,
+
+    /// Orphan chunk-level delta bytes reclaimed
+    chunk_delta_bytes_reclaimed: u64,
 
     /// Time taken for operation
     duration_secs: f64,
@@ -174,6 +232,36 @@ impl GcStats {
             );
         }
 
+        if self.blob_deltas_deleted > 0 {
+            println!(
+                "{:<25} {}",
+                "Blob deltas deleted:",
+                style(self.blob_deltas_deleted).red()
+            );
+            println!(
+                "{:<25} {}",
+                "Blob delta reclaimed:",
+                style(Self::format_bytes(self.blob_delta_bytes_reclaimed))
+                    .yellow()
+                    .bold()
+            );
+        }
+
+        if self.chunk_deltas_deleted > 0 {
+            println!(
+                "{:<25} {}",
+                "Chunk deltas deleted:",
+                style(self.chunk_deltas_deleted).red()
+            );
+            println!(
+                "{:<25} {}",
+                "Chunk delta reclaimed:",
+                style(Self::format_bytes(self.chunk_delta_bytes_reclaimed))
+                    .yellow()
+                    .bold()
+            );
+        }
+
         println!("{:<25} {:.2}s", "Time taken:", self.duration_secs);
 
         if !self.errors.is_empty() {
@@ -207,8 +295,8 @@ impl GarbageCollector {
         }
     }
 
-    /// Build reachability graph from all branch refs
-    async fn build_reachability_set(&self) -> Result<HashSet<Oid>> {
+    /// Build reachability graph from all branch refs AND current index
+    async fn build_reachability_set(&self, repo_root: &Path) -> Result<HashSet<Oid>> {
         info!("Building reachability graph from refs");
         let mut reachable = HashSet::new();
 
@@ -243,6 +331,19 @@ impl GarbageCollector {
                 if let Some(oid) = tag_ref.oid {
                     self.traverse_commit_chain(&oid, &mut reachable).await?;
                 }
+            }
+        }
+
+        // Protect currently-staged index entries from gc.
+        // Without this, running gc between `add` and `commit` would delete
+        // the staged objects, corrupting the next commit.
+        if let Ok(index) = Index::load(repo_root) {
+            let index_count = index.len();
+            for entry in index.entries() {
+                reachable.insert(entry.oid);
+            }
+            if index_count > 0 {
+                debug!("Protected {} staged index entries from gc", index_count);
             }
         }
 
@@ -559,6 +660,173 @@ impl GarbageCollector {
         Ok((orphan_manifest_keys, orphan_chunks))
     }
 
+    /// List all blob-level delta keys in storage
+    ///
+    /// Blob deltas are stored as `deltas/{oid_hex}` with metadata at `deltas/{oid_hex}.meta`.
+    /// Returns (oid, delta_key, meta_key, total_size) tuples.
+    async fn list_all_blob_deltas(&self) -> Result<Vec<(Oid, String, String, u64)>> {
+        let all_keys = self.storage.list_objects("").await?;
+        let mut deltas = Vec::new();
+
+        for key in &all_keys {
+            // Match `deltas/{64-char hex}` but not `.meta` files
+            if let Some(hex) = key.strip_prefix("deltas/") {
+                if hex.len() == 64 && !hex.contains('.') {
+                    if let Ok(oid) = Oid::from_hex(hex) {
+                        let meta_key = format!("deltas/{}.meta", hex);
+                        let delta_size = match self.storage.get(key).await {
+                            Ok(data) => data.len() as u64,
+                            Err(_) => 0,
+                        };
+                        let meta_size = match self.storage.get(&meta_key).await {
+                            Ok(data) => data.len() as u64,
+                            Err(_) => 0,
+                        };
+                        deltas.push((oid, key.clone(), meta_key, delta_size + meta_size));
+                    }
+                }
+            }
+        }
+
+        debug!("Found {} blob-level deltas in storage", deltas.len());
+        Ok(deltas)
+    }
+
+    /// List all chunk-level delta keys in storage
+    ///
+    /// Chunk deltas are stored as `chunk-deltas/{chunk_hex}` with metadata at
+    /// `chunk-deltas/{chunk_hex}.meta`.
+    /// Returns (delta_key, meta_key, total_size) tuples.
+    async fn list_all_chunk_delta_keys(&self) -> Result<Vec<(String, String, u64)>> {
+        let all_keys = self.storage.list_objects("").await?;
+        let mut chunk_deltas = Vec::new();
+
+        for key in &all_keys {
+            if let Some(hex) = key.strip_prefix("chunk-deltas/") {
+                if hex.len() == 64 && !hex.contains('.') {
+                    let meta_key = format!("chunk-deltas/{}.meta", hex);
+                    let delta_size = match self.storage.get(key).await {
+                        Ok(data) => data.len() as u64,
+                        Err(_) => 0,
+                    };
+                    let meta_size = match self.storage.get(&meta_key).await {
+                        Ok(data) => data.len() as u64,
+                        Err(_) => 0,
+                    };
+                    chunk_deltas.push((key.clone(), meta_key, delta_size + meta_size));
+                }
+            }
+        }
+
+        debug!("Found {} chunk-level deltas in storage", chunk_deltas.len());
+        Ok(chunk_deltas)
+    }
+
+    /// Find orphaned blob-level deltas.
+    ///
+    /// A blob delta is orphaned if its OID is not in the reachability set.
+    async fn find_orphan_blob_deltas(
+        &self,
+        reachable: &HashSet<Oid>,
+    ) -> Result<Vec<(String, String, u64)>> {
+        let all_blob_deltas = self.list_all_blob_deltas().await?;
+        let orphans: Vec<(String, String, u64)> = all_blob_deltas
+            .into_iter()
+            .filter(|(oid, _, _, _)| !reachable.contains(oid))
+            .map(|(_, delta_key, meta_key, size)| (delta_key, meta_key, size))
+            .collect();
+
+        info!("Found {} orphan blob-level deltas", orphans.len());
+        Ok(orphans)
+    }
+
+    /// Find orphaned chunk-level deltas.
+    ///
+    /// A chunk delta is orphaned if its chunk ID is NOT referenced by any
+    /// reachable manifest. We collect reachable chunk IDs from reachable
+    /// manifests and check against all chunk-deltas.
+    async fn find_orphan_chunk_deltas(
+        &self,
+        reachable: &HashSet<Oid>,
+    ) -> Result<Vec<(String, String, u64)>> {
+        // Collect all chunk IDs referenced by reachable manifests
+        let all_manifests = self.list_all_manifests().await?;
+        let mut reachable_chunk_ids: HashSet<String> = HashSet::new();
+
+        for (oid, _) in &all_manifests {
+            if reachable.contains(oid) {
+                let manifest_key = format!("manifests/{}", oid.to_hex());
+                if let Ok(data) = self.storage.get(&manifest_key).await {
+                    if let Ok(manifest) =
+                        mediagit_versioning::format::deserialize::<ChunkManifest>(&data)
+                    {
+                        for chunk_ref in &manifest.chunks {
+                            reachable_chunk_ids.insert(chunk_ref.id.to_hex());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Find chunk-deltas whose chunk ID is NOT in reachable set
+        let all_chunk_deltas = self.list_all_chunk_delta_keys().await?;
+        let orphans: Vec<(String, String, u64)> = all_chunk_deltas
+            .into_iter()
+            .filter(|(key, _, _)| {
+                // Extract chunk ID hex from "chunk-deltas/{hex}"
+                if let Some(hex) = key.strip_prefix("chunk-deltas/") {
+                    !reachable_chunk_ids.contains(hex)
+                } else {
+                    true // Unknown format, treat as orphan
+                }
+            })
+            .collect();
+
+        info!("Found {} orphan chunk-level deltas", orphans.len());
+        Ok(orphans)
+    }
+
+    /// Delete orphaned delta files (both blob-level and chunk-level)
+    async fn delete_deltas(
+        &self,
+        orphan_deltas: &[(String, String, u64)],
+        dry_run: bool,
+        verbose: bool,
+    ) -> Result<(u64, u64)> {
+        let mut deleted = 0u64;
+        let mut bytes_reclaimed = 0u64;
+
+        for (delta_key, meta_key, size) in orphan_deltas {
+            if dry_run {
+                if verbose {
+                    println!(
+                        "[DRY RUN] Would delete delta: {} ({} bytes)",
+                        delta_key, size
+                    );
+                }
+                deleted += 1;
+                bytes_reclaimed += size;
+            } else {
+                // Delete delta data
+                if let Err(e) = self.storage.delete(delta_key).await {
+                    warn!("Failed to delete delta {}: {}", delta_key, e);
+                }
+                // Delete delta metadata
+                if let Err(e) = self.storage.delete(meta_key).await {
+                    // Meta file may not exist for all deltas; don't warn
+                    debug!("Delta meta {} not found or delete failed: {}", meta_key, e);
+                }
+                if verbose {
+                    println!("Deleted delta: {} ({} bytes)", delta_key, size);
+                }
+                deleted += 1;
+                bytes_reclaimed += size;
+            }
+        }
+
+        Ok((deleted, bytes_reclaimed))
+    }
+
     /// Delete orphaned manifests and chunks
     async fn delete_chunks_and_manifests(
         &self,
@@ -649,256 +917,366 @@ impl GarbageCollector {
 
 impl GcCmd {
     pub async fn execute(&self) -> Result<()> {
-        let start = Instant::now();
+        run_gc(&GcOptions::from(self)).await
+    }
+}
 
-        // Determine repository root
-        let repo_root = std::env::current_dir()?;
+/// Run garbage collection with the given options.
+///
+/// Public so other commands (auto-gc after commit/pull/clone) can invoke it
+/// without going through the clap CLI parser.
+pub async fn run_gc(opts: &GcOptions) -> Result<()> {
+    let start = Instant::now();
 
-        if !repo_root.join(".mediagit").exists() {
-            anyhow::bail!("Not a MediaGit repository (no .mediagit directory found)");
-        }
+    // Determine repository root (canonicalize to match index paths)
+    let repo_root = dunce::canonicalize(std::env::current_dir()?)
+        .unwrap_or_else(|_| std::env::current_dir().expect("current dir"));
 
-        if self.dry_run && !self.quiet {
-            println!(
-                "{} Running in dry-run mode (no changes will be made)",
-                style("ℹ").blue()
-            );
-        }
+    if !repo_root.join(".mediagit").exists() {
+        anyhow::bail!("Not a MediaGit repository (no .mediagit directory found)");
+    }
 
-        // Load storage backend
-        let storage_path = repo_root.join(".mediagit");
-        let storage = create_storage_backend(&repo_root).await?;
+    if opts.dry_run && !opts.quiet {
+        println!(
+            "{} Running in dry-run mode (no changes will be made)",
+            style("ℹ").blue()
+        );
+    }
 
-        let gc = GarbageCollector::new(storage.clone(), &storage_path);
-        let mut stats = GcStats::default();
+    // Load storage backend
+    let storage_path = repo_root.join(".mediagit");
+    let storage = create_storage_backend(&repo_root).await?;
 
-        // Step 1: Build reachability graph
-        if !self.quiet {
-            println!(
-                "{} Building reachability graph from refs...",
-                style("→").cyan()
-            );
-        }
-        let reachable = gc.build_reachability_set().await?;
-        stats.reachable_objects = reachable.len() as u64;
+    let gc = GarbageCollector::new(storage.clone(), &storage_path);
+    let mut stats = GcStats::default();
 
-        // Step 2: List all objects
-        if !self.quiet {
-            println!("{} Scanning object database...", style("→").cyan());
-        }
-        let all_objects = gc.list_all_objects().await?;
-        stats.objects_scanned = all_objects.len() as u64;
+    // Step 1: Build reachability graph
+    if !opts.quiet {
+        println!(
+            "{} Building reachability graph from refs + index...",
+            style("→").cyan()
+        );
+    }
+    let reachable = gc.build_reachability_set(&repo_root).await?;
+    stats.reachable_objects = reachable.len() as u64;
 
-        // Step 3: Identify unreachable objects
-        if !self.quiet {
-            println!("{} Identifying unreachable objects...", style("→").cyan());
-        }
-        let unreachable = gc.find_unreachable_objects(&reachable).await?;
-        stats.unreachable_objects = unreachable.len() as u64;
+    // Step 2: List all objects
+    if !opts.quiet {
+        println!("{} Scanning object database...", style("→").cyan());
+    }
+    let all_objects = gc.list_all_objects().await?;
+    stats.objects_scanned = all_objects.len() as u64;
 
-        // Even if no unreachable loose objects, still check chunks/manifests
-        let has_unreachable_objects = !unreachable.is_empty();
+    // Step 3: Identify unreachable objects
+    if !opts.quiet {
+        println!("{} Identifying unreachable objects...", style("→").cyan());
+    }
+    let unreachable = gc.find_unreachable_objects(&reachable).await?;
+    stats.unreachable_objects = unreachable.len() as u64;
 
-        // Calculate total size to reclaim
-        let total_size: u64 = unreachable.iter().map(|(_, size)| size).sum();
+    // Even if no unreachable loose objects, still check chunks/manifests
+    let has_unreachable_objects = !unreachable.is_empty();
 
-        // Skip pruning if --no-prune flag is set
-        if self.no_prune {
-            if !self.quiet {
+    // Calculate total size to reclaim
+    let total_size: u64 = unreachable.iter().map(|(_, size)| size).sum();
+
+    // Pre-scan orphan chunks/manifests/deltas for both auto-gating and the
+    // normal flow below. We do this once so auto mode can decide whether
+    // to proceed without paying the cost twice.
+    let (orphan_manifests, orphan_chunks) = gc.find_orphan_chunks_and_manifests(&reachable).await?;
+    let chunk_total_size: u64 = orphan_chunks.iter().map(|(_, size)| size).sum();
+
+    let orphan_blob_deltas = gc.find_orphan_blob_deltas(&reachable).await?;
+    let blob_delta_total_size: u64 = orphan_blob_deltas.iter().map(|(_, _, s)| s).sum();
+
+    let orphan_chunk_deltas = gc.find_orphan_chunk_deltas(&reachable).await?;
+    let chunk_delta_total_size: u64 = orphan_chunk_deltas.iter().map(|(_, _, s)| s).sum();
+
+    // Auto-mode threshold check: if reclaimable work is below threshold, exit
+    // silently. Avoids paying delete-IO costs for trivial gains every commit.
+    if opts.auto {
+        let total_orphan_count = unreachable.len()
+            + orphan_manifests.len()
+            + orphan_chunks.len()
+            + orphan_blob_deltas.len()
+            + orphan_chunk_deltas.len();
+        let total_orphan_bytes =
+            total_size + chunk_total_size + blob_delta_total_size + chunk_delta_total_size;
+
+        let exceeds_byte_threshold = total_orphan_bytes >= AUTO_GC_MIN_RECLAIM_BYTES;
+        let exceeds_count_threshold = total_orphan_count >= AUTO_GC_MIN_ORPHAN_COUNT;
+
+        if !exceeds_byte_threshold && !exceeds_count_threshold {
+            if opts.verbose && !opts.quiet {
                 println!(
-                    "{} Found {} unreachable objects ({}) - skipping prune (--no-prune)",
+                    "{} auto-gc: {} orphans / {} below thresholds (>= {} or >= {} objects); skipping",
                     style("ℹ").blue(),
-                    unreachable.len(),
-                    GcStats::format_bytes(total_size)
+                    total_orphan_count,
+                    GcStats::format_bytes(total_orphan_bytes),
+                    GcStats::format_bytes(AUTO_GC_MIN_RECLAIM_BYTES),
+                    AUTO_GC_MIN_ORPHAN_COUNT,
                 );
             }
-            stats.unreachable_objects = unreachable.len() as u64;
-            stats.duration_secs = start.elapsed().as_secs_f64();
-            stats.print_summary(self.quiet);
             return Ok(());
         }
 
-        if has_unreachable_objects {
-            if self.dry_run {
-                println!(
-                    "\n{} Would delete {} objects ({} total)",
-                    style("ℹ").blue(),
-                    unreachable.len(),
-                    GcStats::format_bytes(total_size)
-                );
-
-                if self.verbose {
-                    println!("\nObjects to be deleted:");
-                    for (oid, size) in &unreachable {
-                        println!("  {} ({} bytes)", oid, size);
-                    }
-                }
-
-                stats.objects_deleted = unreachable.len() as u64;
-                stats.bytes_reclaimed = total_size;
-            } else {
-                // Confirmation required if >100 objects and not --yes flag
-                if unreachable.len() > 100 && !self.yes {
-                    let confirmed = Confirm::new()
-                        .with_prompt(format!(
-                            "Delete {} unreachable objects ({})? This action cannot be undone.",
-                            unreachable.len(),
-                            GcStats::format_bytes(total_size)
-                        ))
-                        .default(false)
-                        .interact()?;
-
-                    if !confirmed {
-                        println!("{} GC cancelled by user", style("✗").red());
-                        return Ok(());
-                    }
-                }
-
-                // Step 4: Delete objects
-                if !self.quiet {
-                    println!("{} Deleting unreachable objects...", style("→").cyan());
-                }
-                let delete_stats = gc.delete_objects(&unreachable, false, self.verbose).await?;
-                stats.objects_deleted = delete_stats.objects_deleted;
-                stats.bytes_reclaimed = delete_stats.bytes_reclaimed;
-                stats.errors = delete_stats.errors;
-
-                if !self.quiet {
-                    println!(
-                        "{} Deleted {} objects, reclaimed {}",
-                        style("✓").green(),
-                        stats.objects_deleted,
-                        GcStats::format_bytes(stats.bytes_reclaimed)
-                    );
-                }
-            }
-        }
-
-        // Step 5: Chunk & manifest garbage collection
-        if !self.quiet {
+        if !opts.quiet {
             println!(
-                "\n{} Scanning for orphaned chunks and manifests...",
-                style("→").cyan()
+                "{} auto-gc: reclaiming {} orphans ({})",
+                style("→").cyan(),
+                total_orphan_count,
+                GcStats::format_bytes(total_orphan_bytes)
             );
         }
+    }
 
-        let (orphan_manifests, orphan_chunks) =
-            gc.find_orphan_chunks_and_manifests(&reachable).await?;
+    // Skip pruning if --no-prune flag is set
+    if opts.no_prune {
+        if !opts.quiet {
+            println!(
+                "{} Found {} unreachable objects ({}) - skipping prune (--no-prune)",
+                style("ℹ").blue(),
+                unreachable.len(),
+                GcStats::format_bytes(total_size)
+            );
+        }
+        stats.unreachable_objects = unreachable.len() as u64;
+        stats.duration_secs = start.elapsed().as_secs_f64();
+        stats.print_summary(opts.quiet);
+        return Ok(());
+    }
 
-        if orphan_manifests.is_empty() && orphan_chunks.is_empty() {
-            if !self.quiet {
-                println!(
-                    "{} No orphaned chunks or manifests found.",
-                    style("✓").green()
-                );
+    if has_unreachable_objects {
+        if opts.dry_run {
+            println!(
+                "\n{} Would delete {} objects ({} total)",
+                style("ℹ").blue(),
+                unreachable.len(),
+                GcStats::format_bytes(total_size)
+            );
+
+            if opts.verbose {
+                println!("\nObjects to be deleted:");
+                for (oid, size) in &unreachable {
+                    println!("  {} ({} bytes)", oid, size);
+                }
             }
+
+            stats.objects_deleted = unreachable.len() as u64;
+            stats.bytes_reclaimed = total_size;
         } else {
-            let chunk_total_size: u64 = orphan_chunks.iter().map(|(_, size)| size).sum();
+            // Confirmation required if >100 objects and not --yes flag.
+            // Auto mode skips the prompt — it runs unattended.
+            if unreachable.len() > 100 && !opts.yes && !opts.auto {
+                let confirmed = Confirm::new()
+                    .with_prompt(format!(
+                        "Delete {} unreachable objects ({})? This action cannot be undone.",
+                        unreachable.len(),
+                        GcStats::format_bytes(total_size)
+                    ))
+                    .default(false)
+                    .interact()?;
 
-            if !self.quiet {
-                println!(
-                    "{} Found {} orphan manifests and {} orphan chunks ({})",
-                    style("ℹ").blue(),
-                    orphan_manifests.len(),
-                    orphan_chunks.len(),
-                    GcStats::format_bytes(chunk_total_size)
-                );
+                if !confirmed {
+                    println!("{} GC cancelled by user", style("✗").red());
+                    return Ok(());
+                }
             }
 
-            if self.dry_run {
-                if self.verbose {
-                    for key in &orphan_manifests {
-                        println!("  [DRY RUN] Would delete manifest: {}", key);
-                    }
-                    for (key, size) in &orphan_chunks {
-                        println!("  [DRY RUN] Would delete chunk: {} ({} bytes)", key, size);
-                    }
-                }
-                stats.manifests_deleted = orphan_manifests.len() as u64;
-                stats.chunks_deleted = orphan_chunks.len() as u64;
-                stats.chunk_bytes_reclaimed = chunk_total_size;
-            } else {
-                let chunk_stats = gc
-                    .delete_chunks_and_manifests(
-                        &orphan_manifests,
-                        &orphan_chunks,
-                        false,
-                        self.verbose,
-                    )
-                    .await?;
+            // Step 4: Delete objects
+            if !opts.quiet {
+                println!("{} Deleting unreachable objects...", style("→").cyan());
+            }
+            let delete_stats = gc.delete_objects(&unreachable, false, opts.verbose).await?;
+            stats.objects_deleted = delete_stats.objects_deleted;
+            stats.bytes_reclaimed = delete_stats.bytes_reclaimed;
+            stats.errors = delete_stats.errors;
 
-                stats.manifests_deleted = chunk_stats.manifests_deleted;
-                stats.chunks_deleted = chunk_stats.chunks_deleted;
-                stats.chunk_bytes_reclaimed = chunk_stats.chunk_bytes_reclaimed;
-                stats.errors.extend(chunk_stats.errors);
-
-                if !self.quiet {
-                    println!(
-                        "{} Deleted {} manifests + {} chunks, reclaimed {}",
-                        style("✓").green(),
-                        stats.manifests_deleted,
-                        stats.chunks_deleted,
-                        GcStats::format_bytes(stats.chunk_bytes_reclaimed)
-                    );
-                }
+            if !opts.quiet {
+                println!(
+                    "{} Deleted {} objects, reclaimed {}",
+                    style("✓").green(),
+                    stats.objects_deleted,
+                    GcStats::format_bytes(stats.bytes_reclaimed)
+                );
             }
         }
+    }
 
-        if !has_unreachable_objects && orphan_manifests.is_empty() && orphan_chunks.is_empty() {
+    // Step 5: Chunk & manifest garbage collection
+    if !opts.quiet {
+        println!(
+            "\n{} Scanning for orphaned chunks and manifests...",
+            style("→").cyan()
+        );
+    }
+
+    if orphan_manifests.is_empty() && orphan_chunks.is_empty() {
+        if !opts.quiet {
             println!(
-                "{} Repository is clean — no unreachable data found.",
+                "{} No orphaned chunks or manifests found.",
                 style("✓").green()
             );
         }
-
-        // Step 5: Repack loose objects if requested
-        if self.repack {
-            if !self.quiet {
-                println!("\n{} Repacking loose objects...", style("→").cyan());
-            }
-
-            // Create ODB for repack operation
-            use mediagit_versioning::ObjectDatabase;
-            let odb = ObjectDatabase::new(storage.clone(), 1000);
-
-            match odb.repack(self.max_pack_size, !self.dry_run).await {
-                Ok(repack_stats) => {
-                    if !self.quiet {
-                        println!(
-                            "{} Packed {} objects into pack file ({} deltas)",
-                            style("✓").green(),
-                            repack_stats.objects_packed,
-                            repack_stats.delta_objects
-                        );
-                        println!(
-                            "   Pack size: {}, Saved: {}",
-                            GcStats::format_bytes(repack_stats.pack_size),
-                            GcStats::format_bytes(repack_stats.bytes_saved)
-                        );
-                        if repack_stats.loose_objects_removed > 0 {
-                            println!(
-                                "   Removed {} loose objects",
-                                repack_stats.loose_objects_removed
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    if !self.quiet {
-                        println!("{} Repack failed: {}", style("✗").red(), e);
-                    }
-                    stats.errors.push(format!("Repack error: {}", e));
-                }
-            }
+    } else {
+        if !opts.quiet {
+            println!(
+                "{} Found {} orphan manifests and {} orphan chunks ({})",
+                style("ℹ").blue(),
+                orphan_manifests.len(),
+                orphan_chunks.len(),
+                GcStats::format_bytes(chunk_total_size)
+            );
         }
 
-        stats.duration_secs = start.elapsed().as_secs_f64();
-        stats.print_summary(self.quiet);
+        if opts.dry_run {
+            if opts.verbose {
+                for key in &orphan_manifests {
+                    println!("  [DRY RUN] Would delete manifest: {}", key);
+                }
+                for (key, size) in &orphan_chunks {
+                    println!("  [DRY RUN] Would delete chunk: {} ({} bytes)", key, size);
+                }
+            }
+            stats.manifests_deleted = orphan_manifests.len() as u64;
+            stats.chunks_deleted = orphan_chunks.len() as u64;
+            stats.chunk_bytes_reclaimed = chunk_total_size;
+        } else {
+            let chunk_stats = gc
+                .delete_chunks_and_manifests(&orphan_manifests, &orphan_chunks, false, opts.verbose)
+                .await?;
 
-        if !stats.errors.is_empty() {
-            anyhow::bail!("{} errors occurred during GC", stats.errors.len());
+            stats.manifests_deleted = chunk_stats.manifests_deleted;
+            stats.chunks_deleted = chunk_stats.chunks_deleted;
+            stats.chunk_bytes_reclaimed = chunk_stats.chunk_bytes_reclaimed;
+            stats.errors.extend(chunk_stats.errors);
+
+            if !opts.quiet {
+                println!(
+                    "{} Deleted {} manifests + {} chunks, reclaimed {}",
+                    style("✓").green(),
+                    stats.manifests_deleted,
+                    stats.chunks_deleted,
+                    GcStats::format_bytes(stats.chunk_bytes_reclaimed)
+                );
+            }
         }
-
-        Ok(())
     }
+
+    // Step 6: Blob-level delta garbage collection (deltas/ namespace)
+    if !opts.quiet {
+        println!(
+            "\n{} Scanning for orphaned blob-level deltas...",
+            style("→").cyan()
+        );
+    }
+
+    if !orphan_blob_deltas.is_empty() {
+        if !opts.quiet {
+            println!(
+                "{} Found {} orphan blob deltas ({})",
+                style("ℹ").blue(),
+                orphan_blob_deltas.len(),
+                GcStats::format_bytes(blob_delta_total_size)
+            );
+        }
+
+        if !opts.no_prune {
+            let (del, reclaimed) = gc
+                .delete_deltas(&orphan_blob_deltas, opts.dry_run, opts.verbose)
+                .await?;
+            stats.blob_deltas_deleted = del;
+            stats.blob_delta_bytes_reclaimed = reclaimed;
+        }
+    }
+
+    // Step 7: Chunk-level delta garbage collection (chunk-deltas/ namespace)
+    if !opts.quiet {
+        println!(
+            "{} Scanning for orphaned chunk-level deltas...",
+            style("→").cyan()
+        );
+    }
+
+    if !orphan_chunk_deltas.is_empty() {
+        if !opts.quiet {
+            println!(
+                "{} Found {} orphan chunk deltas ({})",
+                style("ℹ").blue(),
+                orphan_chunk_deltas.len(),
+                GcStats::format_bytes(chunk_delta_total_size)
+            );
+        }
+
+        if !opts.no_prune {
+            let (del, reclaimed) = gc
+                .delete_deltas(&orphan_chunk_deltas, opts.dry_run, opts.verbose)
+                .await?;
+            stats.chunk_deltas_deleted = del;
+            stats.chunk_delta_bytes_reclaimed = reclaimed;
+        }
+    }
+
+    let has_any_orphans = has_unreachable_objects
+        || !orphan_manifests.is_empty()
+        || !orphan_chunks.is_empty()
+        || !orphan_blob_deltas.is_empty()
+        || !orphan_chunk_deltas.is_empty();
+
+    if !has_any_orphans && !opts.quiet {
+        println!(
+            "{} Repository is clean — no unreachable data found.",
+            style("✓").green()
+        );
+    }
+
+    // Step 5: Repack loose objects if requested
+    if opts.repack {
+        if !opts.quiet {
+            println!("\n{} Repacking loose objects...", style("→").cyan());
+        }
+
+        // Create ODB for repack operation
+        use mediagit_versioning::ObjectDatabase;
+        let odb = ObjectDatabase::new(storage.clone(), 1000);
+
+        match odb.repack(opts.max_pack_size, !opts.dry_run).await {
+            Ok(repack_stats) => {
+                if !opts.quiet {
+                    println!(
+                        "{} Packed {} objects into pack file ({} deltas)",
+                        style("✓").green(),
+                        repack_stats.objects_packed,
+                        repack_stats.delta_objects
+                    );
+                    println!(
+                        "   Pack size: {}, Saved: {}",
+                        GcStats::format_bytes(repack_stats.pack_size),
+                        GcStats::format_bytes(repack_stats.bytes_saved)
+                    );
+                    if repack_stats.loose_objects_removed > 0 {
+                        println!(
+                            "   Removed {} loose objects",
+                            repack_stats.loose_objects_removed
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                if !opts.quiet {
+                    println!("{} Repack failed: {}", style("✗").red(), e);
+                }
+                stats.errors.push(format!("Repack error: {}", e));
+            }
+        }
+    }
+
+    stats.duration_secs = start.elapsed().as_secs_f64();
+    stats.print_summary(opts.quiet);
+
+    if !stats.errors.is_empty() {
+        anyhow::bail!("{} errors occurred during GC", stats.errors.len());
+    }
+
+    Ok(())
 }

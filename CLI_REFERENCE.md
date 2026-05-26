@@ -651,6 +651,7 @@ mediagit reset file.txt          # Unstage a specific file
 ### `mediagit revert`
 
 Create new commits that undo changes from existing commits.
+The working directory is updated to reflect the reverted state after the commit is created.
 
 ```bash
 mediagit revert <COMMITS>...
@@ -926,9 +927,84 @@ mediagit completions powershell >> $PROFILE
 | `MEDIAGIT_AUTHOR_NAME` | Default author name |
 | `MEDIAGIT_AUTHOR_EMAIL` | Default author email |
 
+### Performance & Concurrency
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEDIAGIT_CONCURRENT_UPLOADS` | `32` | Total upload semaphore slots for push operations |
+| `MEDIAGIT_PUSH_OBJECT_CONCURRENCY` | `8` | Number of objects uploaded concurrently during push |
+| `MEDIAGIT_PUSH_CHUNK_CONCURRENCY` | `(64 / push_object_concurrency).max(4)` | Per-object chunk upload concurrency. Targets 64 total in-flight PUTs across all concurrent objects. Override when tuning for specific cloud regions or connection profiles. |
+| `MEDIAGIT_DOWNLOAD_CONCURRENCY` | `32` | Total concurrent chunk downloads during pull/clone |
+| `MEDIAGIT_FETCH_BRANCH_CONCURRENCY` | `4` | Number of branches fetched concurrently during `fetch --all` |
+| `MEDIAGIT_FETCH_DOWNLOAD_CONCURRENCY` | `max(32 / branch_concurrency, 8)` | Per-branch download concurrency cap during `fetch --all`. Prevents TCP pool exhaustion (peak in-flight ≤ 128 at defaults). |
+| `MEDIAGIT_GCS_UPLOAD_CONCURRENCY` | `4` | Concurrent PUT slots for GCS backend (proxy path). Lower than S3 default to avoid 500s on shared TCP connections. |
+| `MEDIAGIT_RANGE_PARALLEL` | `4` | Parallel range-GET requests per chunk during download |
+
+### Throughput Pipeline (Phase 2)
+
+These knobs control the pipelined transfer engine shipped in v0.2.7-beta.1. All defaults are tuned for production use — override only when profiling specific backends or network conditions.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEDIAGIT_PULL_PIPELINE` | `1` (ON) | Enable pipelined pull — overlaps manifest fetch with chunk download |
+| `MEDIAGIT_PULL_MANIFEST_CONCURRENCY` | `8` | Number of manifests fetched concurrently via `buffer_unordered` during pull |
+| `MEDIAGIT_PUSH_PIPELINE` | `1` (ON) | Enable pipelined push — overlaps chunk upload with ODB reads |
+| `MEDIAGIT_STREAM_CHUNK_TO_DISK` | `1` (ON) | Stream downloaded chunks to disk during clone/pull instead of buffering in heap. Prevents OOM on large repos |
+| `MEDIAGIT_STORAGE_STREAMING` | `1` (ON) | Use streaming GET from S3/MinIO backends instead of buffered GET. 15.8% faster AWS clone measured |
+| `MEDIAGIT_DECOMPRESS_BLOCKING` | `1` (ON) | Offload decompression to `spawn_blocking` threadpool to avoid starving the async executor |
+| `MEDIAGIT_DECOMPRESS_BLOCKING_THRESHOLD` | `262144` | Minimum compressed size (bytes) before offloading to blocking threadpool. Below this, decompress inline |
+| `MEDIAGIT_HTTP_POOL_MAX` | `64` | Max idle TCP connections per host in the HTTP connection pool |
+
+---
+
+## Server Configuration (`mediagit-server`)
+
+The `mediagit-server` daemon provides remote repository access over HTTP/S. Repositories hosted by the server can store their actual data in alternative cloud storage backends like S3 or MinIO instead of the local filesystem.
+
+To configure a repository to use a cloud storage backend, you must edit its `.mediagit/config.toml` file.
+
+### S3 / MinIO Storage Backend
+
+The `s3` backend type covers two distinct modes selected by whether `endpoint` is set:
+
+| `endpoint` field | Mode | Used for |
+|---|---|---|
+| **Set** | MinIO-compatible | Self-hosted MinIO, DigitalOcean Spaces, Cloudflare R2, any S3-compatible service |
+| **Absent** | Native AWS S3 | Real AWS S3 — uses correct SigV4 region signing and virtual-hosted addressing |
+
+**Example: MinIO / S3-compatible service**
+```toml
+[storage]
+backend = "s3"
+endpoint = "http://localhost:9000"   # required for MinIO-compatible mode
+bucket = "mediagit-production"
+access_key_id = "your_access_key"
+secret_access_key = "your_secret_key"
+region = "us-east-1"
+```
+
+**Example: Real AWS S3**
+```toml
+[storage]
+backend = "s3"
+bucket = "my-mediagit-bucket"
+region = "ap-south-1"               # required: determines SigV4 signing region
+access_key_id = "AKIAIOSFODNN7EXAMPLE"
+secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+prefix = "media/"
+encryption = true
+encryption_algorithm = "AES256"
+# Do NOT set endpoint — omitting it activates native AWS S3 mode
+```
+
+> **Note**: The `backend = "minio"` variant is deprecated. Use `backend = "s3"` for all cases. Use `access_key_id`/`secret_access_key` (not `access_key`/`secret_key`).
+
 ---
 
 ## See Also
 
 - [Architecture](ARCHITECTURE.md)
 - [Supported Formats](SUPPORTED_FORMATS.md)
+- [Development Guide](DEVELOPMENT_GUIDE.md)
+- [Cloud Architecture](CLOUD_ARCHITECTURE.md)
+- [Future TODOs](FUTURE_TODOS.md)

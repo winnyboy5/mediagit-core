@@ -41,7 +41,7 @@
 use crate::error::{GitError, GitResult};
 use crate::pointer::PointerFile;
 use git2::Repository;
-use sha2::{Digest, Sha256};
+use mediagit_versioning::hash::Hasher;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -268,8 +268,8 @@ impl FilterDriver {
             return Ok(());
         }
 
-        // Compute SHA-256 hash
-        let mut hasher = Sha256::new();
+        // Compute BLAKE3 hash
+        let mut hasher = Hasher::new();
         hasher.update(&content);
         let hash = hasher.finalize();
         let oid = hex::encode(hash);

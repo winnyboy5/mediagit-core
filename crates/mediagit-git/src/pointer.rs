@@ -21,7 +21,7 @@
 //!
 //! ```text
 //! version https://mediagit.dev/spec/v1
-//! oid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393
+//! oid blake3:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393
 //! size 12345
 //! ```
 //!
@@ -48,7 +48,7 @@ pub struct PointerFile {
     /// Version of the pointer file format
     pub version: String,
 
-    /// Object ID (SHA-256 hash) of the actual file content
+    /// Object ID (BLAKE3 hash) of the actual file content
     pub oid: String,
 
     /// Size of the actual file in bytes
@@ -60,7 +60,7 @@ impl PointerFile {
     ///
     /// # Arguments
     ///
-    /// * `oid` - SHA-256 hash of the file content
+    /// * `oid` - BLAKE3 hash of the file content
     /// * `size` - Size of the file in bytes
     ///
     /// # Example
@@ -70,7 +70,7 @@ impl PointerFile {
     ///
     /// let pointer = PointerFile::new(
     ///     "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393".to_string(),
-    ///     12345
+    ///     12345,
     /// );
     /// ```
     pub fn new(oid: String, size: u64) -> Self {
@@ -96,7 +96,7 @@ impl PointerFile {
     /// ```rust
     /// use mediagit_git::PointerFile;
     ///
-    /// let content = "version https://mediagit.dev/spec/v1\noid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n";
+    /// let content = "version https://mediagit.dev/spec/v1\noid blake3:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n";
     /// let pointer = PointerFile::parse(content)?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
@@ -130,17 +130,17 @@ impl PointerFile {
                     version = Some(parts[1].to_string());
                 }
                 "oid" => {
-                    // Format: "sha256:hash"
+                    // Format: "blake3:hash"
                     let oid_parts: Vec<&str> = parts[1].splitn(2, ':').collect();
                     if oid_parts.len() != 2 {
                         return Err(GitError::InvalidOid(format!(
-                            "OID must be in format 'sha256:hash', got: {}",
+                            "OID must be in format 'blake3:hash', got: {}",
                             parts[1]
                         )));
                     }
-                    if oid_parts[0] != "sha256" {
+                    if oid_parts[0] != "blake3" {
                         return Err(GitError::InvalidOid(format!(
-                            "Only sha256 hashing is supported, got: {}",
+                            "Only blake3 hashing is supported, got: {}",
                             oid_parts[0]
                         )));
                     }
@@ -149,7 +149,7 @@ impl PointerFile {
                         || !oid_parts[1].chars().all(|c| c.is_ascii_hexdigit())
                     {
                         return Err(GitError::InvalidOid(format!(
-                            "Invalid SHA-256 hash: {}",
+                            "Invalid BLAKE3 hash: {}",
                             oid_parts[1]
                         )));
                     }
@@ -190,7 +190,7 @@ impl PointerFile {
     /// ```rust
     /// use mediagit_git::PointerFile;
     ///
-    /// let content = "version https://mediagit.dev/spec/v1\noid sha256:abc123\nsize 12345\n";
+    /// let content = "version https://mediagit.dev/spec/v1\noid blake3:abc123\nsize 12345\n";
     /// assert!(PointerFile::is_pointer(content));
     ///
     /// let not_pointer = "This is just regular file content";
@@ -202,7 +202,7 @@ impl PointerFile {
         }
 
         content.starts_with("version https://mediagit.dev/spec/")
-            && content.contains("oid sha256:")
+            && content.contains("oid blake3:")
             && content.contains("size ")
     }
 
@@ -221,7 +221,7 @@ impl PointerFile {
         self.to_string().into_bytes()
     }
 
-    /// Returns the OID with sha256 prefix
+    /// Returns the OID with blake3 prefix
     ///
     /// # Example
     ///
@@ -229,10 +229,10 @@ impl PointerFile {
     /// use mediagit_git::PointerFile;
     ///
     /// let pointer = PointerFile::new("abc123".to_string(), 12345);
-    /// assert_eq!(pointer.oid_with_prefix(), "sha256:abc123");
+    /// assert_eq!(pointer.oid_with_prefix(), "blake3:abc123");
     /// ```
     pub fn oid_with_prefix(&self) -> String {
-        format!("sha256:{}", self.oid)
+        format!("blake3:{}", self.oid)
     }
 }
 
@@ -268,14 +268,14 @@ mod tests {
         let text = pointer.to_string();
 
         assert!(text.contains("version https://mediagit.dev/spec/v1"));
-        assert!(text.contains(&format!("oid sha256:{}", VALID_OID)));
+        assert!(text.contains(&format!("oid blake3:{}", VALID_OID)));
         assert!(text.contains("size 12345"));
     }
 
     #[test]
     fn test_parse_valid_pointer() {
         let content = format!(
-            "version https://mediagit.dev/spec/v1\noid sha256:{}\nsize 12345\n",
+            "version https://mediagit.dev/spec/v1\noid blake3:{}\nsize 12345\n",
             VALID_OID
         );
 
@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn test_parse_with_extra_whitespace() {
         let content = format!(
-            "  version https://mediagit.dev/spec/v1  \n  oid sha256:{}  \n  size 12345  \n",
+            "  version https://mediagit.dev/spec/v1  \n  oid blake3:{}  \n  size 12345  \n",
             VALID_OID
         );
 
@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn test_parse_missing_version() {
-        let content = format!("oid sha256:{}\nsize 12345\n", VALID_OID);
+        let content = format!("oid blake3:{}\nsize 12345\n", VALID_OID);
         let result = PointerFile::parse(&content);
         assert!(matches!(result, Err(GitError::MissingPointerField(_))));
     }
@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn test_parse_missing_size() {
         let content = format!(
-            "version https://mediagit.dev/spec/v1\noid sha256:{}\n",
+            "version https://mediagit.dev/spec/v1\noid blake3:{}\n",
             VALID_OID
         );
         let result = PointerFile::parse(&content);
@@ -329,7 +329,7 @@ mod tests {
 
     #[test]
     fn test_parse_invalid_hash() {
-        let content = "version https://mediagit.dev/spec/v1\noid sha256:notahash\nsize 12345\n";
+        let content = "version https://mediagit.dev/spec/v1\noid blake3:notahash\nsize 12345\n";
         let result = PointerFile::parse(content);
         assert!(matches!(result, Err(GitError::InvalidOid(_))));
     }
@@ -337,7 +337,7 @@ mod tests {
     #[test]
     fn test_parse_invalid_size() {
         let content = format!(
-            "version https://mediagit.dev/spec/v1\noid sha256:{}\nsize notanumber\n",
+            "version https://mediagit.dev/spec/v1\noid blake3:{}\nsize notanumber\n",
             VALID_OID
         );
         let result = PointerFile::parse(&content);
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn test_is_pointer_valid() {
         let content = format!(
-            "version https://mediagit.dev/spec/v1\noid sha256:{}\nsize 12345\n",
+            "version https://mediagit.dev/spec/v1\noid blake3:{}\nsize 12345\n",
             VALID_OID
         );
         assert!(PointerFile::is_pointer(&content));
@@ -381,6 +381,6 @@ mod tests {
     #[test]
     fn test_oid_with_prefix() {
         let pointer = PointerFile::new(VALID_OID.to_string(), 12345);
-        assert_eq!(pointer.oid_with_prefix(), format!("sha256:{}", VALID_OID));
+        assert_eq!(pointer.oid_with_prefix(), format!("blake3:{}", VALID_OID));
     }
 }

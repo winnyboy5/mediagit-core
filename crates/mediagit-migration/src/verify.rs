@@ -13,7 +13,7 @@
 
 use anyhow::{Context, Result};
 use mediagit_storage::StorageBackend;
-use sha2::{Digest, Sha256};
+use mediagit_versioning::hash::Hasher;
 use std::sync::Arc;
 
 /// Object metadata for verification
@@ -101,9 +101,9 @@ impl IntegrityVerifier {
         Self { source, target }
     }
 
-    /// Compute SHA-256 checksum of data
+    /// Compute BLAKE3 checksum of data
     pub fn compute_checksum(data: &[u8]) -> String {
-        let mut hasher = Sha256::new();
+        let mut hasher = Hasher::new();
         hasher.update(data);
         hex::encode(hasher.finalize())
     }
@@ -311,11 +311,9 @@ mod tests {
         let data = b"Hello, World!";
         let checksum = IntegrityVerifier::compute_checksum(data);
 
-        // Expected SHA-256 hash of "Hello, World!"
-        assert_eq!(
-            checksum,
-            "dffd6021bb2bd5b0af676290809ec3a53191dd81c7f70a4b28688a362182986f"
-        );
+        // Expected BLAKE3 hash of "Hello, World!" — derived dynamically
+        let expected = hex::encode(blake3::hash(data).as_bytes());
+        assert_eq!(checksum, expected);
     }
 
     #[tokio::test]

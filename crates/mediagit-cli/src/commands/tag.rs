@@ -54,6 +54,10 @@ pub struct CreateOpts {
     #[arg(value_name = "COMMIT")]
     pub commit: Option<String>,
 
+    /// Create annotated tag
+    #[arg(short = 'a', long)]
+    pub annotated: bool,
+
     /// Create annotated tag with message
     #[arg(short = 'm', long, value_name = "MESSAGE")]
     pub message: Option<String>,
@@ -155,6 +159,17 @@ impl TagCmd {
         // Validate tag name
         self.validate_tag_name(&opts.name)?;
 
+        // Determine if tag should be annotated
+        let is_annotated = opts.annotated
+            || opts.message.is_some()
+            || opts.tagger.is_some()
+            || opts.email.is_some();
+
+        // Validate: annotated tags require a message
+        if is_annotated && opts.message.is_none() {
+            anyhow::bail!("annotated tag requires --message");
+        }
+
         // Check if tag already exists
         let tag_ref = format!("refs/tags/{}", opts.name);
         if refdb.exists(&tag_ref).await? && !opts.force {
@@ -176,10 +191,17 @@ impl TagCmd {
         };
 
         // Create tag based on type
-        if let Some(ref message) = opts.message {
-            // Annotated tag
-            self.create_annotated_tag(&refdb, &opts.name, target_oid, message, opts)
-                .await?;
+        if is_annotated {
+            // Annotated tag (message is guaranteed to be Some due to validation above)
+            self.create_annotated_tag(
+                &mediagit_dir,
+                &refdb,
+                &opts.name,
+                target_oid,
+                opts.message.as_ref().unwrap(),
+                opts,
+            )
+            .await?;
         } else {
             // Lightweight tag
             self.create_lightweight_tag(&refdb, &opts.name, target_oid)
@@ -187,7 +209,7 @@ impl TagCmd {
         }
 
         if !opts.quiet {
-            let tag_type = if opts.message.is_some() {
+            let tag_type = if is_annotated {
                 "annotated"
             } else {
                 "lightweight"
@@ -219,6 +241,7 @@ impl TagCmd {
     /// Create annotated tag (tag object with metadata)
     async fn create_annotated_tag(
         &self,
+        mediagit_dir: &Path,
         refdb: &RefDatabase,
         name: &str,
         commit_oid: Oid,
@@ -243,8 +266,7 @@ impl TagCmd {
         };
 
         // Get metadata path from mediagit dir
-        let mediagit_dir = std::env::current_dir()?.join(".mediagit");
-        let metadata_path = get_ref_path(&mediagit_dir, &format!("{}.meta", tag_ref));
+        let metadata_path = get_ref_path(mediagit_dir, &format!("{}.meta", tag_ref));
         if let Some(parent) = metadata_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -591,6 +613,7 @@ mod tests {
             subcommand: TagSubcommand::Create(CreateOpts {
                 name: "v1.0.0".to_string(),
                 commit: None,
+                annotated: false,
                 message: None,
                 tagger: None,
                 email: None,
@@ -620,6 +643,7 @@ mod tests {
             subcommand: TagSubcommand::Create(CreateOpts {
                 name: "v2.0.0".to_string(),
                 commit: None,
+                annotated: false,
                 message: Some("Release version 2.0.0".to_string()),
                 tagger: Some("Test User".to_string()),
                 email: Some("test@example.com".to_string()),
@@ -771,6 +795,7 @@ mod tests {
             subcommand: TagSubcommand::Create(CreateOpts {
                 name: "".to_string(),
                 commit: None,
+                annotated: false,
                 message: None,
                 tagger: None,
                 email: None,
@@ -827,6 +852,7 @@ mod tests {
             subcommand: TagSubcommand::Create(CreateOpts {
                 name: "v1.0.0".to_string(),
                 commit: None,
+                annotated: false,
                 message: None,
                 tagger: None,
                 email: None,
@@ -842,6 +868,7 @@ mod tests {
             subcommand: TagSubcommand::Create(CreateOpts {
                 name: "v1.0.0".to_string(),
                 commit: None,
+                annotated: false,
                 message: None,
                 tagger: None,
                 email: None,
@@ -851,5 +878,65 @@ mod tests {
         };
 
         assert!(cmd_force.execute(repo_path).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_annotated_flag_with_message() {
+        let (_temp, repo_path) = setup_test_repo().await;
+
+        // Create annotated tag using -a flag with -m
+        let cmd = TagCmd {
+            subcommand: TagSubcommand::Create(CreateOpts {
+                name: "rel-1".to_string(),
+                commit: None,
+                annotated: true,
+                message: Some("msg".to_string()),
+                tagger: None,
+                email: None,
+                force: false,
+                quiet: true,
+            }),
+        };
+
+        let result = cmd.execute(repo_path.clone()).await;
+        assert!(
+            result.is_ok(),
+            "Failed to create annotated tag with -a flag: {:?}",
+            result.err()
+        );
+
+        // Verify tag and metadata exist
+        let mediagit_dir = repo_path.join(".mediagit");
+        let refdb = RefDatabase::new(&mediagit_dir);
+        assert!(refdb.exists("refs/tags/rel-1").await.unwrap());
+
+        // Verify metadata file exists
+        let metadata_path = mediagit_dir.join("refs/tags/rel-1.meta");
+        assert!(tokio::fs::metadata(&metadata_path).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_annotated_flag_without_message() {
+        let (_temp, repo_path) = setup_test_repo().await;
+
+        // Try to create annotated tag without message (should fail)
+        let cmd = TagCmd {
+            subcommand: TagSubcommand::Create(CreateOpts {
+                name: "rel-2".to_string(),
+                commit: None,
+                annotated: true,
+                message: None,
+                tagger: None,
+                email: None,
+                force: false,
+                quiet: true,
+            }),
+        };
+
+        let result = cmd.execute(repo_path).await;
+        assert!(result.is_err(), "Should fail when -a without -m");
+
+        let err_msg = result.err().unwrap().to_string();
+        assert!(err_msg.contains("annotated tag requires --message"));
     }
 }

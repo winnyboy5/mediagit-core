@@ -34,14 +34,14 @@ while [ $attempt -lt $max_attempts ]; do
 
         echo ""
         echo "🔗 Service Endpoints:"
-        echo "  LocalStack (S3):     http://localhost:4566"
-        echo "  Azurite (Blob):      http://localhost:10000"
-        echo "  Fake GCS:            http://localhost:4443"
         echo "  MinIO:               http://localhost:9000 (console: http://localhost:9001)"
+        echo "  Azurite (Blob):      http://localhost:10000  [profile: azure]"
+        echo "  Fake GCS:            http://localhost:4443   [profile: gcs]"
 
         echo ""
-        echo "🧪 Ready to run integration tests with:"
-        echo "  cargo test --workspace -- --ignored"
+        echo "🧪 Ready to run integration tests:"
+        echo "  MinIO (local S3):    dev-tests/deep-tests/deep_test_minio.ps1"
+        echo "  AWS / Azure / GCS:   dev-tests/deep-tests/deep_test_aws|azure|gcs.ps1"
 
         exit 0
     fi

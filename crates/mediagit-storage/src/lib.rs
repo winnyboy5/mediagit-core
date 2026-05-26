@@ -110,6 +110,7 @@ pub mod cache;
 pub mod error;
 #[cfg(feature = "gcs")]
 pub mod gcs;
+pub(crate) mod http_pool;
 pub mod local;
 pub mod minio;
 pub mod mock;
@@ -117,6 +118,7 @@ pub mod s3;
 
 use async_trait::async_trait;
 use std::fmt::Debug;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 #[cfg(feature = "azure")]
 pub use azure::AzureBackend;
@@ -168,6 +170,65 @@ pub use s3::S3Backend;
 ///     Ok(())
 /// }
 /// ```
+/// Metadata returned by [`StorageBackend::presign_put`] for direct-to-backend uploads.
+///
+/// The client performs `PUT url` with the required headers; the server never
+/// sees the chunk bytes. When the backend cannot issue presigned URLs (local
+/// filesystem, mock, or cloud backends without key-based credentials),
+/// `presign_put` returns `Ok(None)` and the caller falls back to the existing
+/// server-proxied PUT route.
+#[derive(Debug, Clone)]
+pub struct PresignedPut {
+    /// The presigned URL the client PUTs bytes to directly.
+    pub url: String,
+    /// HTTP method string — always "PUT" for all current backends.
+    pub method: String,
+    /// Headers the client MUST send verbatim (e.g. `x-amz-*` SigV4 headers).
+    pub required_headers: Vec<(String, String)>,
+    /// Absolute expiry instant; client should not attempt the URL after this.
+    pub expires_at: std::time::SystemTime,
+}
+
+/// Metadata returned by [`StorageBackend::presign_get`] for direct-from-backend downloads.
+///
+/// The client performs `GET url` with the required headers; the server never
+/// sees the chunk bytes. When the backend cannot issue presigned URLs,
+/// `presign_get` returns `Ok(None)` and the caller falls back to the existing
+/// server-proxied GET route.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PresignedDownload {
+    /// The presigned URL the client GETs bytes from directly.
+    pub url: String,
+    /// Headers the client MUST send verbatim with the GET request.
+    pub headers: Vec<(String, String)>,
+    /// TTL in seconds from the time the URL was minted.
+    pub expires_in_secs: u64,
+}
+
+/// Result of [`StorageBackend::create_presigned_mpu`]: one presigned `UploadPart`
+/// URL per part. The client PUTs each part directly, collects the `ETag` header,
+/// then calls the server's `chunks/mpu/complete` endpoint.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PresignedMpu {
+    pub upload_id: String,
+    pub parts: Vec<PresignedMpuPart>,
+    /// Recommended part size in bytes; the last part may be smaller.
+    pub part_size: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PresignedMpuPart {
+    pub part_number: i32,
+    pub url: String,
+}
+
+/// A completed part the client reports back to finalize a multipart upload.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MpuCompletedPart {
+    pub part_number: i32,
+    pub etag: String,
+}
+
 #[async_trait]
 pub trait StorageBackend: Send + Sync + Debug {
     /// Retrieve an object by its key
@@ -204,6 +265,51 @@ pub trait StorageBackend: Send + Sync + Debug {
     /// # }
     /// ```
     async fn get(&self, key: &str) -> anyhow::Result<Vec<u8>>;
+
+    /// Stream an object as a sequence of `Bytes` chunks (B7).
+    ///
+    /// Default impl fetches the full object via `get` and emits it as a single chunk.
+    /// Backends may override with a native streaming implementation for better memory
+    /// efficiency on large objects. Gated by `MEDIAGIT_STORAGE_STREAMING=1` (OFF by default).
+    async fn get_streaming(
+        &self,
+        key: &str,
+    ) -> anyhow::Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+        >,
+    > {
+        let data = self.get(key).await?;
+        let stream = futures::stream::once(async move {
+            Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(data))
+        });
+        Ok(Box::pin(stream))
+    }
+
+    /// Stream a byte-range of an object (F5 — reserved for Track F cloud-pack Range GETs).
+    ///
+    /// Default impl returns `Unsupported`. S3/GCS/Azure native impls will be added in Track F.
+    async fn get_streaming_range(
+        &self,
+        _key: &str,
+        _range: std::ops::Range<u64>,
+    ) -> anyhow::Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+        >,
+    > {
+        anyhow::bail!("get_streaming_range is not yet implemented for this backend")
+    }
+
+    /// Store an object from a local temp file (B4 stream-to-disk).
+    ///
+    /// Default impl reads the file into memory and calls `put`. `LocalBackend`
+    /// overrides with an atomic rename so the data is never re-buffered in RAM.
+    /// Gated by `MEDIAGIT_STREAM_CHUNK_TO_DISK=1` in the protocol client.
+    async fn put_file(&self, key: &str, src: &std::path::Path) -> anyhow::Result<()> {
+        let data = tokio::fs::read(src).await?;
+        self.put(key, &data).await
+    }
 
     /// Store an object with the given key
     ///
@@ -367,6 +473,132 @@ pub trait StorageBackend: Send + Sync + Debug {
     /// # }
     /// ```
     async fn list_objects(&self, prefix: &str) -> anyhow::Result<Vec<String>>;
+
+    /// Retrieve an object with an optional caller-supplied size hint.
+    ///
+    /// Backends that support parallel range reads (e.g. GCS striped downloads)
+    /// may use the hint to issue concurrent ranged requests without an extra
+    /// metadata round-trip. Callers that already know the object size — for
+    /// example, chunk readers consulting a manifest that carries `size` — should
+    /// prefer this method over [`get`] for large objects.
+    ///
+    /// The default implementation ignores the hint and delegates to [`get`],
+    /// so backends that don't benefit from striping (filesystem, MinIO, mock)
+    /// remain unchanged. Backends that do override this method MUST be
+    /// byte-for-byte equivalent to [`get`] for the same key.
+    ///
+    /// # Arguments
+    ///
+    /// * `key`  - The object identifier (non-empty string).
+    /// * `size` - Optional total object size in bytes. `None` means the caller
+    ///            does not know the size; the backend MUST NOT issue an RPC to
+    ///            discover it (that probe was the regression that got the prior
+    ///            striped-get implementation reverted — keep the common path
+    ///            single-RPC).
+    async fn get_with_size_hint(&self, key: &str, _size: Option<u64>) -> anyhow::Result<Vec<u8>> {
+        self.get(key).await
+    }
+
+    /// Store an object by streaming bytes from `reader`.
+    ///
+    /// Backends that support true streaming uploads (e.g. GCS resumable
+    /// sessions, S3 multipart) MAY override this to pipe the reader directly
+    /// to the wire without buffering the whole payload in memory. The default
+    /// implementation drains the reader into a `Vec<u8>` (capacity hinted by
+    /// `len` when non-zero) and delegates to [`put`], so non-streaming
+    /// backends remain correct without code changes.
+    ///
+    /// `len` is an advisory upper bound used purely for buffer pre-sizing —
+    /// callers MAY pass `0` when the size is unknown. The reader is the
+    /// authoritative source of bytes; `len` is never trusted to truncate or
+    /// pad data.
+    ///
+    /// # Arguments
+    ///
+    /// * `key`    - The object identifier (non-empty string).
+    /// * `reader` - A boxed `AsyncRead` supplying the object body. Boxed +
+    ///              `Unpin` to keep the trait object-safe; concrete callers
+    ///              wrap their reader once at the boundary.
+    /// * `len`    - Advisory total length in bytes; `0` if unknown.
+    async fn put_streaming(
+        &self,
+        key: &str,
+        mut reader: Box<dyn AsyncRead + Send + Unpin>,
+        len: u64,
+    ) -> anyhow::Result<()> {
+        // Pre-size the buffer when the caller supplied a useful hint to avoid
+        // grow-by-doubling allocations on big uploads.
+        let mut buf = if len > 0 {
+            Vec::with_capacity(len as usize)
+        } else {
+            Vec::new()
+        };
+        reader.read_to_end(&mut buf).await?;
+        self.put(key, &buf).await
+    }
+
+    /// Generate a presigned PUT URL for `key` valid for `ttl`.
+    ///
+    /// Returns `Ok(Some(PresignedPut))` when the backend can sign a URL so the
+    /// client may upload chunk bytes directly to the bucket, bypassing the
+    /// server entirely. Returns `Ok(None)` when presigning is not supported
+    /// (local filesystem, mock, or non-key-authenticated cloud backends) —
+    /// callers MUST fall back to the existing `PUT /chunks/:id` proxy route.
+    ///
+    /// Errors are restricted to SDK-level failures; transient errors also
+    /// return `Ok(None)` to trigger the same fallback rather than aborting
+    /// the upload.
+    async fn presign_put(
+        &self,
+        _key: &str,
+        _content_length: u64,
+        _ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<PresignedPut>> {
+        Ok(None)
+    }
+
+    /// Returns `Ok(Some(PresignedDownload))` when the backend can sign a URL so the
+    /// client may download chunk bytes directly from the bucket, bypassing the
+    /// server entirely. Returns `Ok(None)` when presigning is not supported —
+    /// callers MUST fall back to the existing `GET /chunks/:id` proxy route.
+    async fn presign_get(
+        &self,
+        _key: &str,
+        _ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<PresignedDownload>> {
+        Ok(None)
+    }
+
+    /// Initiate a server-side multipart upload and return presigned `UploadPart` URLs.
+    ///
+    /// Returns `Ok(Some(PresignedMpu))` on S3/MinIO where the SDK exposes
+    /// `upload_part().presigned()`. Returns `Ok(None)` for backends that do not
+    /// support client-side MPU (local, mock, azure, gcs).
+    async fn create_presigned_mpu(
+        &self,
+        _key: &str,
+        _total_size: u64,
+        _ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<PresignedMpu>> {
+        Ok(None)
+    }
+
+    /// Complete a presigned multipart upload by submitting the collected ETags.
+    /// Only called after a successful `create_presigned_mpu`.
+    async fn complete_presigned_mpu(
+        &self,
+        _key: &str,
+        _upload_id: &str,
+        _parts: Vec<MpuCompletedPart>,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("MPU not supported by this backend")
+    }
+
+    /// Abort a presigned multipart upload, releasing uncommitted parts.
+    /// Best-effort; returns `Ok(())` for backends that do not support MPU.
+    async fn abort_presigned_mpu(&self, _key: &str, _upload_id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

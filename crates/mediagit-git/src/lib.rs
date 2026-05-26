@@ -34,7 +34,7 @@
 //!
 //! ```text
 //! version https://mediagit.dev/spec/v1
-//! oid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393
+//! oid blake3:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393
 //! size 12345
 //! ```
 //!
@@ -44,7 +44,7 @@
 //! use mediagit_git::{PointerFile, FilterDriver};
 //!
 //! // Parse a pointer file
-//! let content = "version https://mediagit.dev/spec/v1\noid sha256:abc123...\nsize 12345\n";
+//! let content = "version https://mediagit.dev/spec/v1\noid blake3:abc123...\nsize 12345\n";
 //! let pointer = PointerFile::parse(content)?;
 //!
 //! // Generate a pointer file

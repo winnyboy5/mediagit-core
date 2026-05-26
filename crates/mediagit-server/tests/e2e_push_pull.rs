@@ -307,34 +307,69 @@ async fn test_e2e_push_then_pull_roundtrip() {
     tokio::fs::create_dir_all(&server_repo).await.unwrap();
 
     // Initialize server repository with proper commit
-    let _server_initial_oid = init_test_repo(&server_repo).await.unwrap();
+    let server_initial_oid = init_test_repo(&server_repo).await.unwrap();
 
     // Start test server
     let (base_url, _server_handle) = start_test_server(server_repos.clone()).await;
 
     // === Client 1: Push ===
+    // Set up client1 with the server's initial commit as its base, so the
+    // subsequent commit is a genuine fast-forward of the server tip.
+    // (Previously this called init_test_repo locally, which produced a
+    // divergent commit OID that the server's non-FF guard now rejects.)
     let client1_repo = client1_temp.path().to_path_buf();
-    let client1_initial = init_test_repo(&client1_repo).await.unwrap();
+    let client1_mediagit = client1_repo.join(".mediagit");
+    tokio::fs::create_dir_all(client1_mediagit.join("objects"))
+        .await
+        .unwrap();
+    tokio::fs::create_dir_all(client1_mediagit.join("refs/heads"))
+        .await
+        .unwrap();
 
-    // Create unique commit on client1 (use .mediagit and client's own initial commit)
-    let client1_storage: Arc<dyn StorageBackend> = Arc::new(
-        LocalBackend::new(client1_repo.join(".mediagit"))
+    let client1_storage: Arc<dyn StorageBackend> =
+        Arc::new(LocalBackend::new(&client1_mediagit).await.unwrap());
+    let client1_odb = ObjectDatabase::new(Arc::clone(&client1_storage), 1000);
+
+    // Mirror the server's initial commit (and its tree+blob) into client1's
+    // ODB so the new commit can reference it as parent.
+    let server_storage: Arc<dyn StorageBackend> = Arc::new(
+        LocalBackend::new(server_repo.join(".mediagit"))
             .await
             .unwrap(),
     );
-    let client1_odb = ObjectDatabase::new(Arc::clone(&client1_storage), 1000);
+    let server_odb = ObjectDatabase::new(Arc::clone(&server_storage), 1000);
+    let server_commit = server_odb.read(&server_initial_oid).await.unwrap();
+    client1_odb
+        .write(ObjectType::Commit, &server_commit)
+        .await
+        .unwrap();
+    let server_commit_obj = mediagit_versioning::Commit::deserialize(&server_commit).unwrap();
+    let server_tree = server_odb.read(&server_commit_obj.tree).await.unwrap();
+    client1_odb
+        .write(ObjectType::Tree, &server_tree)
+        .await
+        .unwrap();
+    let server_tree_obj = mediagit_versioning::Tree::deserialize(&server_tree).unwrap();
+    for entry in server_tree_obj.entries.values() {
+        let blob_bytes = server_odb.read(&entry.oid).await.unwrap();
+        client1_odb
+            .write(ObjectType::Blob, &blob_bytes)
+            .await
+            .unwrap();
+    }
+
     let unique_commit_oid = create_commit(
         &client1_odb,
         b"unique content from client1",
         "client1_file.txt",
         "Unique commit from client1",
-        Some(client1_initial), // Use client's own initial commit
+        Some(server_initial_oid), // Fast-forward parent: server's tip.
     )
     .await
     .unwrap();
 
     // Update client1's main ref
-    let client1_refdb = RefDatabase::new(client1_repo.join(".mediagit"));
+    let client1_refdb = RefDatabase::new(&client1_mediagit);
     let client1_ref = Ref::new_direct("refs/heads/main".to_string(), unique_commit_oid);
     client1_refdb.write(&client1_ref).await.unwrap();
 

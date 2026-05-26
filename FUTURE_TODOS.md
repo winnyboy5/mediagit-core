@@ -4,7 +4,7 @@ Consolidated and **priority-ordered** registry of planned features, code-level T
 known limitations for MediaGit. Items are sourced from documentation, source code, and
 historical claudedocs analyses.
 
-> Last updated: 2026-04-03 | v0.2.6-beta.1 | Items 1 (.mediagitignore) + 4 (Streaming Format-Aware Chunker, S1–S5) **DONE**
+> Last updated: 2026-05-25 | v0.2.7-beta.1 | Items 1 (.mediagitignore) + 4 (Streaming Format-Aware Chunker, S1–S5) + Push Progress/Throughput fixes + BLAKE3 + B2/B4/B7 pipeline **DONE**
 
 **Priority levels:**
 - **P0** — Quick win or active blocker — ≤1 day effort, implement immediately
@@ -19,10 +19,10 @@ historical claudedocs analyses.
 | # | Item | Priority | Effort | Blocks / Enables |
 |---|------|----------|--------|-----------------|
 | 1 | `.mediagitignore` support in `add` + `status` | ~~**P1**~~ **✅ DONE** | 2-3 days | Shipped in v0.2.6-beta.1 |
-| 2 | Pack negotiation / bitmap index | **P1** | 1 wk | Incremental fetch (currently full-pack always) |
+| 2 | Pack negotiation / bitmap index | ~~**P1**~~ **✅ DONE** | — | Pack negotiation shipped v0.2.6-beta.1; bitmap index deferred (see §2b) |
 | 3 | Parallel object I/O during checkout | **P1** | 1 wk | Branch switch latency |
 | 4 | Streaming format-aware chunker (MKV/MP4/GLB, S1-S5) | ~~**P1**~~ **✅ DONE** | 8-12 days | Shipped in v0.2.6-beta.1 |
-| 5 | Container-aware delta (AI/PDF/INDD) | **P1** | 2-3 wk | 60-80% savings on design file edits |
+| 5 | **Phase-3 Track F — Cloud-side pack objects** (xorb-style chunk bundling) | **P1** | 2-3 wks | 5-10× clone speedup; 10k S3 objects → ~100 per push/clone; design ready |
 | 6 | Direct file serving endpoints + `mediagit download` CLI | **P1** | 2-3 days | Web UI, CI integration, CDN |
 | 7 | `mediagit media info` command | **P2** | ~200 LOC | UX for media inspection |
 | 8 | Sparse checkout | **P2** | ~500 LOC | Large repos, partial working trees |
@@ -57,19 +57,39 @@ See `crates/mediagit-cli/src/ignore_rules.rs`, `add.rs`, `status.rs`,
 
 ---
 
-### 2. Pack Negotiation / Bitmap Index
+### ~~2. Pack Negotiation~~ ✅ DONE — v0.2.6-beta.1
 *Source: `crates/mediagit-protocol/src/client.rs:122`; `claudedocs/` optimization roadmap*
 
-Pull/fetch sends an **empty have-set**, so the server always sends a full pack. For repos
-with many commits, this means downloading all objects on every fetch even when the client
-already has 99% of them.
+**Implemented** in v0.2.6-beta.1. Full have-set negotiation pipeline across all crates:
+
+- **Client**: `collect_local_have(refdb)` walks heads/remotes/tags, resolves symbolic refs,
+  deduplicates. Used by `fetch.rs` (once per fetch) and `pull.rs` (before streaming).
+  `clone.rs` correctly sends empty have for full clone.
+- **Wire protocol**: `WantRequest{want, have}` in `types.rs`, sent via `download_pack_streaming`.
+- **Server**: `download_pack` expands have-closure via `walk_reachable` (BFS object-graph
+  walker in `reachability.rs`), then prunes the want-walk via `collect_objects_recursive(stop_at)`.
+  Lenient error handling for stale/unknown have OIDs.
+- **Deterministic delta**: Producer-side similarity detection ensures reproducible chunk
+  storage for consistent have-set comparison.
+
+See `crates/mediagit-cli/src/repo.rs` (`collect_local_have`),
+`crates/mediagit-versioning/src/reachability.rs` (`walk_reachable` + 5 unit tests),
+`crates/mediagit-server/src/handlers.rs` (`download_pack`, `collect_objects_recursive`).
+
+---
+
+### 2b. Bitmap Index (Follow-up Optimization)
+*Depends on: ~~Pack Negotiation~~ (done)*
+
+The current `walk_reachable` does a full BFS traversal — O(objects) per fetch. For repos
+with <1K commits this is fast enough. At 10K+ commits, BFS dominates server latency.
 
 **What's needed:**
-- Compute local have-set (all reachable OIDs from local refs) before fetch negotiation
-- Send have-set to server; server computes the minimal pack to send
-- Optional: bitmap index over refs for fast "what's missing" detection
+- Roaring bitmap index over refs for fast reachability queries
+- Bitmap generation on push / GC / repack
+- Bitmap-accelerated "what's missing" detection in `download_pack`
 
-Effort: **~1 week**. Enables efficient incremental sync for teams.
+Effort: **~3–4 days**. Becomes valuable only at scale (10K+ commits).
 
 ---
 
@@ -170,35 +190,73 @@ loading the entire file into heap memory. Falls back to `StreamCDC` on mmap fail
 ### 5. Container-Aware Delta Encoding for PDF/ZIP Formats [DELTA-001]
 *Source: `docs/FUTURE_TODOS_2.md` — recorded 2026-03-01*
 
+> **⚠️ ATTEMPTED 2026-04-07 — REVERTED. See post-mortem below before re-attempting.**
+>
+> **Status 2026-04-18 (v6 verification, aka FEAT-001):** Re-confirmed out-of-scope.
+> `delta_ai_lg` measured 73.4 % growth on the `test-label-org.ai` → `test-label-alt.ai`
+> pair (129 MB → 215 MB — +86 MB genuinely new content, theoretical floor ~40 %).
+> The v6 creative-chunk-params fix (1 MB / 4 MB FastCDC on ai/pdf/eps/psd/indd)
+> landed `delta_psd` at **21.4 %** but AI held at 73.4 %, matching the 2026-04-07
+> finding that Illustrator's proprietary DEFLATE makes whole-file normalization
+> produce *worse* results than baseline.
+>
+> **Decision:** Not scheduled. Closing AI < 35 % requires the per-stream OID +
+> custom delta codec path (4–6 weeks, "What would be needed" below). AI is
+> intentionally **not** a gating criterion in
+> `dev-tests/standalone-deep-v6/reports/verification-plan-v6.md`. PSD < 35 %
+> remains the regression target and is protected by workspace tests.
+
 **Problem**: Adobe Illustrator (`.ai`), InDesign (`.indd`), PDF (`.pdf`) files are
 PDF/ZIP containers with DEFLATE-compressed inner streams. A single-byte change causes
 DEFLATE to reshuffle all subsequent bytes — the similarity detector finds near-zero
 matches between versions, producing deltas nearly as large as the original.
 
-**Current workaround** (`add.rs` `should_use_delta()`): `.ai/.ait/.indd/.idml/.pdf` skip
-delta for files < 50 MB. For ≥ 50 MB, delta is attempted with partial results.
+**Current workaround** (`add.rs` `should_use_delta()`): `.ai/.ait/.indd/.idml/.pdf` files
+≥ 50 MB attempt delta; smaller files skip it. Current savings: ~27% (vs 60-80% target).
 
 **Real-world data** (2026-03-01, 124 MB + 206 MB AI files):
 - 328.90 MiB original → 238.85 MiB stored (27.4% saved, 42.7% on chunks)
-- With container-aware approach: expected **60-80% savings** for typical edit workflows
 
-**Required implementation:**
-- `crates/mediagit-versioning/src/container_delta.rs` — **NEW**:
-  - **PDF path**: parse xref → inflate streams → delta per stream (matched by xref ID) →
-    re-deflate + re-assemble on read
-  - **ZIP path** (`.indd`, `.idml`): unzip entries → delta per named entry → repack on read
-- New `ObjectKind::ContainerDelta` or metadata flag in `format.rs`
-- Integration into ODB write/read path
+---
 
-**Dependencies to evaluate**: `lopdf = "0.35"` (PDF), `zip = "2"` (ZIP),
-`miniz_oxide = "0.8"` (DEFLATE).
+#### Post-mortem: Why the 2026-04-07 attempt failed
 
-**Risks**: PDF streams use mixed compression (JPEG2000, raw); InDesign `.indd` has
-proprietary sections; **100% round-trip byte fidelity required** (reconstructed file must
-open identically in Illustrator/Acrobat).
+A full branch (`feat/container-aware-delta`) implemented a two-OID pre-processing layer:
+inflate all DEFLATE streams → feed normalized (inflated) bytes to existing CDC+delta
+pipeline. All code was reverted after testing revealed it produced **worse results than
+the baseline** for Adobe Illustrator files.
 
-**Success criteria**: AI "move one path node" → delta < 5% of original; PDF paragraph
-change → delta < 10% of original. Effort: **2-3 weeks** + extensive fidelity testing.
+**Root cause**: Adobe Illustrator uses a **proprietary DEFLATE encoder** that neither
+`flate2` nor `miniz_oxide` can reproduce byte-for-byte at any compression level 0–9.
+Every stream in a `.ai` file is therefore **opaque** (Tier 3 fallback). When all streams
+are opaque:
+
+1. Inflated data (~160 MiB) is larger than the original compressed file (~143 MiB)
+2. The opaque compressed bytes must be retained for round-trip fidelity, adding overhead
+3. Net storage was **worse** than the baseline (no normalization), not better
+
+The approach works correctly for **standard PDFs** with re-deflatable streams, but real
+Adobe Illustrator `.ai` files are effectively an all-opaque edge case that defeats it.
+
+**What would be needed for a successful attempt:**
+
+- **Per-stream opaque detection BEFORE committing to normalization**: If opaque ratio
+  exceeds ~80%, skip normalization entirely for that file (fall back to baseline pipeline).
+  This was added in the last iteration but came too late — the architecture was already
+  built around the assumption most streams are re-deflatable.
+
+- **OR: stream-by-stream delta matching** instead of whole-file normalization — match
+  individual streams between versions by PDF xref ID/ZIP entry name, even if they can't
+  be re-deflated. Deltas on compressed bytes of the *same stream* are far smaller than
+  whole-file deltas. This requires a custom delta codec, not the existing zstd-dict path.
+
+- **OR: accept AI as out-of-scope** — the current baseline (27% savings on AI files) is
+  actually competitive for a format with custom DEFLATE. Focus future effort on formats
+  with standard DEFLATE (IDML, DOCX, standard PDFs) where stream re-inflation is reliable.
+
+**Effort for a correct implementation**: **4-6 weeks** (stream-by-stream delta matching
+with per-stream OID keying). **Do not attempt again** with the whole-file normalization
+approach for AI/PDF without first validating opaque-stream ratio on target files.
 
 ---
 
@@ -478,10 +536,12 @@ in the CLI but its test coverage is incomplete.
 
 ### `mediagit-protocol`
 
-**`crates/mediagit-protocol/src/client.rs:122`** *(→ item 2)*
+**`crates/mediagit-protocol/src/client.rs`** *(→ item 2 — ✅ DONE)*
 
-Pack negotiation have-set is empty — server always sends a full pack. Efficient incremental
-fetch requires computing the local have-set before negotiation.
+Pack negotiation implemented in v0.2.6-beta.1. `collect_local_have(refdb)` computes the
+have-set; server prunes the want-walk via `collect_objects_recursive(stop_at)`.
+Incremental fetch validated in deep tests (all backends). Bitmap index remains a future
+optimization (see §2b).
 
 ---
 
@@ -490,10 +550,9 @@ fetch requires computing the local have-set before negotiation.
 | # | Priority | Area | Description | Source |
 |---|----------|------|-------------|--------|
 | 1 | ~~P1~~ ✅ | **`.mediagitignore`** | **DONE** — v0.2.6-beta.1. `ignore` crate integration in `add` + `status` | `add.md:43` |
-| 2 | P1 | **Pack negotiation** | Pull/fetch always downloads full pack (no incremental negotiation) | `client.rs:122` |
+| 2 | ~~P1~~ ✅ | **Pack negotiation** | **DONE** — v0.2.6-beta.1. `collect_local_have` + `WantRequest{want,have}` + server `walk_reachable`; incremental fetch validated in deep tests | `client.rs` |
 | 3 | P1 | **Parallel checkout I/O** | Checkout reads blobs sequentially; no parallel fetch | `checkout.rs` |
 | 4 | ~~P1~~ ✅ | **TB-scale chunking** | **DONE** — Streaming format-aware chunking via mmap for all file sizes | v0.2.6-beta.1–3 |
-| 5 | P1 | **Container-aware delta** | AI/PDF/INDD delta skipped <50 MB; 60-80% savings possible | `FUTURE_TODOS_2.md` |
 | 6 | P1 | **Direct file serving** | No HTTP endpoint to download committed files by path | R&D 2026-03 |
 | 7 | P2 | **`media info` command** | No CLI command to inspect media metadata | `FUTURE_TODOS.md` |
 | 8 | P2 | **Sparse checkout** | Full tree checkout required; no partial working tree support | `FUTURE_TODOS.md` |

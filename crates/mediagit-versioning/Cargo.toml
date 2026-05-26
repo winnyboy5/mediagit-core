@@ -10,6 +10,13 @@ homepage.workspace = true
 documentation.workspace = true
 description = "Core VCS engine: ODB, refs, commits, trees, and packs"
 
+[lib]
+# Doctest compilation OOMs at jobs=2 on ≤16 GB RAM (each doctest binary
+# requires full LLVM codegen of this crate + blake3 + fastcdc + storage).
+# Code examples in doc comments still serve as documentation; actual coverage
+# is provided by unit tests and integration tests.
+doctest = false
+
 [dependencies]
 mediagit-storage = { path = "../mediagit-storage" }
 mediagit-compression = { path = "../mediagit-compression" }
@@ -18,7 +25,7 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 postcard.workspace = true
-sha2.workspace = true
+blake3.workspace = true
 hex.workspace = true
 anyhow.workspace = true
 chrono.workspace = true

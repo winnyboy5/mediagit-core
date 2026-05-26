@@ -181,6 +181,67 @@ fn test_gc_verbose() {
 }
 
 // ============================================================================
+// Auto-GC Trigger Tests (post-commit/pull/clone)
+// ============================================================================
+
+/// Commit succeeds with auto-gc enabled (default). The threshold-gated
+/// auto-gc is silent when there's nothing significant to reclaim, so this
+/// is primarily a smoke test that the trigger doesn't break commit.
+#[test]
+fn test_commit_runs_with_auto_gc_enabled() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+    add_and_commit(temp_dir.path(), "file.txt", "v1", "first");
+    // Re-stage and commit to exercise the orphan-creating path.
+    fs::write(temp_dir.path().join("file.txt"), "v2").unwrap();
+    mediagit()
+        .arg("add")
+        .arg("file.txt")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("commit")
+        .arg("-m")
+        .arg("v2")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+}
+
+/// Env var opt-out: setting MEDIAGIT_NO_AUTO_GC=1 must not break commit.
+#[test]
+fn test_commit_with_auto_gc_disabled_via_env() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+    add_and_commit(temp_dir.path(), "file.txt", "v1", "first");
+    fs::write(temp_dir.path().join("file.txt"), "v2").unwrap();
+    mediagit()
+        .arg("add")
+        .arg("file.txt")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .env("MEDIAGIT_NO_AUTO_GC", "1")
+        .arg("commit")
+        .arg("-m")
+        .arg("v2")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+}
+
+/// Per-repo opt-out via marker file `.mediagit/no-autogc`.
+#[test]
+fn test_commit_with_auto_gc_disabled_via_marker() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+    fs::write(temp_dir.path().join(".mediagit").join("no-autogc"), b"").unwrap();
+    add_and_commit(temp_dir.path(), "file.txt", "Content", "Initial commit");
+}
+
+// ============================================================================
 // FSCK Command Tests
 // ============================================================================
 

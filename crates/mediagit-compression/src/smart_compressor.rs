@@ -633,9 +633,8 @@ pub enum ObjectCategory {
     Unknown,
 }
 
-/// Size threshold for switching from Brotli to Zstd for text files
-/// At 500MB+, Brotli level 9 becomes too slow; Zstd provides 10x faster compression
-/// with only ~20% compression ratio loss
+/// Size threshold for switching from Brotli to Zstd for text files.
+/// At 500 MB+, Brotli level-9 encodes ~10× slower than Zstd with only ~20% worse ratio.
 const LARGE_TEXT_THRESHOLD: usize = 500 * 1024 * 1024; // 500 MB
 
 /// Compression strategy selection
@@ -706,9 +705,8 @@ impl CompressionStrategy {
                 CompressionStrategy::Zstd(CompressionLevel::Default)
             }
 
-            // Text/Code: Brotli for maximum compression on structured data
-            // CHANGED: Switched from Zstd to Brotli for 15-30% better compression ratios
-            // Brotli excels at text/structured data with dictionary-based compression
+            // Text/Code: Brotli for best ratio on structured text data.
+            // Large files (>500 MB) fall back to Zstd via for_object_type_with_size.
             ObjectType::Text
             | ObjectType::Json
             | ObjectType::Xml
@@ -793,23 +791,18 @@ impl CompressionStrategy {
         }
     }
 
-    /// Select optimal strategy for object type with size consideration
+    /// Select optimal strategy for object type with size consideration.
     ///
-    /// For large text files (>500MB), switches from Brotli to Zstd for 10x faster compression
-    /// with only ~20% compression ratio loss.
+    /// Text types use Brotli by default; at ≥500 MB the encode cost tips in Zstd's favour
+    /// (~10× faster at only ~20% worse ratio) so we switch automatically.
     pub fn for_object_type_with_size(obj_type: ObjectType, data_size: usize) -> Self {
-        // Check if this is a text type that would normally use Brotli
-        let base_strategy = Self::for_object_type(obj_type);
-
-        // For large text files, switch from Brotli to Zstd for faster compression
+        let base = Self::for_object_type(obj_type);
         if data_size >= LARGE_TEXT_THRESHOLD {
-            if let CompressionStrategy::Brotli(_) = base_strategy {
-                // Use Zstd Default for large text files (10x faster, ~20% worse ratio)
+            if let CompressionStrategy::Brotli(_) = base {
                 return CompressionStrategy::Zstd(CompressionLevel::Default);
             }
         }
-
-        base_strategy
+        base
     }
 }
 
@@ -860,7 +853,7 @@ impl CompressionStrategy {
             ChunkCodecHint::LosslessAudio => {
                 Some(CompressionStrategy::Zstd(CompressionLevel::Default))
             }
-            // Text subtitles — Brotli for best ratio (~80% savings)
+            // Text subtitles — Brotli best (tiny chunks, pure text; Brotli wins on ratio)
             ChunkCodecHint::TextSubtitle => {
                 Some(CompressionStrategy::Brotli(CompressionLevel::Best))
             }
@@ -881,8 +874,8 @@ pub trait TypeAwareCompressor: Send + Sync {
     /// Compress with automatic strategy selection
     fn compress_typed(&self, data: &[u8], obj_type: ObjectType) -> CompressionResult<Vec<u8>>;
 
-    /// Compress with automatic strategy selection considering data size
-    /// For large text files (>500MB), uses Zstd instead of Brotli for faster compression
+    /// Compress with automatic strategy selection considering data size.
+    /// Text types switch from Brotli to Zstd at ≥500 MB for speed.
     fn compress_typed_with_size(
         &self,
         data: &[u8],
@@ -1038,7 +1031,7 @@ impl TypeAwareCompressor for SmartCompressor {
             match entropy_class {
                 crate::EntropyClass::High => CompressionStrategy::Store,
                 crate::EntropyClass::VeryLow | crate::EntropyClass::Low => {
-                    CompressionStrategy::Brotli(CompressionLevel::Best)
+                    CompressionStrategy::Zstd(CompressionLevel::Default)
                 }
                 crate::EntropyClass::Medium => CompressionStrategy::Zstd(CompressionLevel::Default),
             }
@@ -1213,7 +1206,7 @@ mod tests {
             CompressionStrategy::Zstd(CompressionLevel::Best)
         );
 
-        // Text → Brotli Default (15-30% better compression for structured data)
+        // Text → Brotli Default (best ratio for structured text; large files fall back to Zstd)
         assert_eq!(
             CompressionStrategy::for_object_type(ObjectType::Text),
             CompressionStrategy::Brotli(CompressionLevel::Default)
@@ -1292,7 +1285,7 @@ mod tests {
             .compress_typed(&data, ObjectType::Unknown)
             .unwrap();
 
-        // Unknown uses entropy-adaptive strategy (low-entropy data → Brotli)
+        // Unknown uses entropy-adaptive strategy (low-entropy data → Zstd Default)
         assert!(compressed.len() < data.len());
 
         let decompressed = compressor.decompress_typed(&compressed).unwrap();
@@ -1311,7 +1304,7 @@ mod tests {
         assert_eq!(compressed[0], 0x00);
         assert_eq!(&compressed[1..], &high_entropy[..]);
 
-        // Low entropy (repetitive) → Brotli Best (compresses well)
+        // Low entropy (repetitive) → Zstd Default (unknown type, Brotli's text advantage absent)
         let low_entropy = b"aaaa".repeat(5000);
         let compressed = compressor
             .compress_typed_with_size(&low_entropy, ObjectType::Unknown)
@@ -1845,7 +1838,7 @@ mod tests {
 
     #[test]
     fn test_text_uses_brotli() {
-        // Verify text/structured data now uses Brotli instead of Zstd
+        // Verify text/structured data uses Brotli (best ratio for known-text types)
         assert_eq!(
             CompressionStrategy::for_object_type(ObjectType::Text),
             CompressionStrategy::Brotli(CompressionLevel::Default)
@@ -2046,11 +2039,11 @@ mod tests {
 
         // Compress with different types and verify all decompress correctly
         let types = vec![
-            ObjectType::Text,           // Brotli
-            ObjectType::Json,           // Brotli
+            ObjectType::Text,           // Brotli Default
+            ObjectType::Json,           // Brotli Default
             ObjectType::AdobePhotoshop, // Zstd Default
             ObjectType::MlCheckpoint,   // Zstd Fast
-            ObjectType::WordDocument,   // Zstd Default
+            ObjectType::WordDocument,   // Store
             ObjectType::Tiff,           // Zstd Best
         ];
 
@@ -2137,8 +2130,8 @@ mod tests {
         let empty: &[u8] = b"";
 
         let types = vec![
-            ObjectType::Text,           // Brotli
-            ObjectType::Json,           // Brotli
+            ObjectType::Text,           // Brotli Default
+            ObjectType::Json,           // Brotli Default
             ObjectType::AdobePhotoshop, // Zstd Default
             ObjectType::MlCheckpoint,   // Zstd Fast
             ObjectType::Tiff,           // Zstd Best

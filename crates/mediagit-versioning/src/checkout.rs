@@ -409,8 +409,8 @@ impl<'a> CheckoutManager<'a> {
                                 {
                                     if metadata.len() == expected_size as u64 {
                                         // Size matches - perform full hash comparison
-                                        if let Ok(file_data) = fs::read(&full_path) {
-                                            let file_oid = Oid::hash(&file_data);
+                                        // Uses streaming hash (constant 64KB memory)
+                                        if let Ok(file_oid) = Oid::from_file(&full_path) {
                                             if file_oid == entry.oid {
                                                 // File is unchanged - skip write operation
                                                 skip_write = true;
@@ -704,13 +704,6 @@ impl<'a> CheckoutManager<'a> {
         oid: &Oid,
         mode: FileMode,
     ) -> Result<()> {
-        // Read blob data
-        let blob_data = self
-            .odb
-            .read(oid)
-            .await
-            .with_context(|| format!("Failed to read blob: {}", oid))?;
-
         // Ensure parent directory exists
         if let Some(parent) = full_path.parent() {
             fs::create_dir_all(parent)
@@ -719,9 +712,17 @@ impl<'a> CheckoutManager<'a> {
 
         match mode {
             FileMode::Regular | FileMode::Executable => {
-                // Write file
-                fs::write(full_path, &blob_data)
-                    .with_context(|| format!("Failed to write file: {}", full_path.display()))?;
+                // Stream object directly to file (constant memory for any file size)
+                self.odb
+                    .read_to_file(oid, full_path)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to checkout file {}: blob {}",
+                            full_path.display(),
+                            oid
+                        )
+                    })?;
 
                 // Set executable permission if needed
                 #[cfg(unix)]
@@ -733,6 +734,12 @@ impl<'a> CheckoutManager<'a> {
                 }
             }
             FileMode::Symlink => {
+                // Symlinks are small text — safe to read into memory
+                let blob_data = self
+                    .odb
+                    .read(oid)
+                    .await
+                    .with_context(|| format!("Failed to read symlink blob: {}", oid))?;
                 let target =
                     String::from_utf8(blob_data).context("Symlink target is not valid UTF-8")?;
 

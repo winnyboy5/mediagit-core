@@ -1,6 +1,6 @@
 # MediaGit-Core Development Guide
-**Version**: 0.2.6-beta.1
-**Last Updated**: April 3, 2026
+**Version**: 0.2.7-beta.1
+**Last Updated**: May 25, 2026
 
 Complete setup guide for MediaGit development - from beginner setup to production deployment.
 
@@ -101,7 +101,7 @@ your-project/
 └── config.toml          ← Optional: storage backend config
 ```
 
-**Contains**: Commits, branches, refs, Git-compatible metadata
+**Contains**: Commits, branches, refs, MediaGit metadata
 
 **Always stored**: Locally on your machine
 
@@ -309,7 +309,7 @@ ls -lh target/debug/mediagit-server
 
 # Test CLI
 ./target/debug/mediagit --version
-# Should output: mediagit 0.2.6-beta.1
+# Should output: mediagit 0.2.7-beta.1
 
 # Test server (optional)
 ./target/debug/mediagit-server --help
@@ -646,7 +646,7 @@ Create IAM policy with minimum required permissions:
 
 ```json
 {
-  "Version": "20.2.6-beta.10-17",
+  "Version": "2012-10-17",
   "Statement": [
     {
       "Effect": "Allow",
@@ -680,10 +680,11 @@ bucket = "my-mediagit-bucket"
 region = "us-east-1"
 access_key_id = "AKIAIOSFODNN7EXAMPLE"
 secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-endpoint = "https://s3.amazonaws.com"
 prefix = "media/"
 encryption = true
 encryption_algorithm = "AES256"
+# Do NOT set endpoint for real AWS S3 — omitting it enables native AWS mode
+# (correct SigV4 region signing + virtual-hosted-style addressing)
 ```
 
 **Option 2: Environment Variables (Recommended)**
@@ -791,135 +792,150 @@ aws s3api put-bucket-lifecycle-configuration \
 
 ### 4. Azure Blob Storage Backend
 
-**Best for**: Azure-centric deployments, Microsoft ecosystem integration
+**Best for**: Azure-centric deployments, Microsoft ecosystem integration.
+
+> The Azure backend is selected per **server-side** repository — the
+> `[storage]` section in `<server-repos-dir>/<repo>/.mediagit/config.toml`
+> picks the backend that `mediagit-server` will use for that repo's objects.
+> Clients do not need any Azure credentials; they only talk to
+> `mediagit-server` over HTTP.
 
 #### Prerequisites
 
-1. **Azure Account**: https://azure.microsoft.com/
-2. **Azure CLI Installed**: See prerequisites section
-3. **Storage Account**: Create in Azure Portal
+1. **Azure subscription**: https://azure.microsoft.com/
+2. **Azure CLI**: `az login` already authenticated.
+3. `mediagit-server` and `mediagit` built with `--release` (the workspace
+   already enables `mediagit-storage/all`, which compiles in the Azure
+   backend — no extra cargo flags are needed).
 
-#### Create Storage Account and Container
+#### Provision Resource Group, Storage Account, and Container
 
 ```bash
-# Login to Azure
-az login
+# 1. Resource group
+az group create --name mediagit-dev-rg --location eastus
 
-# Create resource group
-az group create --name mediagit-rg --location eastus
-
-# Create storage account
+# 2. Storage account (account names: 3-24 lowercase alphanumeric, globally unique)
 az storage account create \
-  --name mediagitstorage \
-  --resource-group mediagit-rg \
+  --name mediagitdev$(openssl rand -hex 3) \
+  --resource-group mediagit-dev-rg \
   --location eastus \
-  --sku Standard_LRS
+  --sku Standard_LRS \
+  --kind StorageV2
 
-# Get connection string
-az storage account show-connection-string \
-  --name mediagitstorage \
-  --resource-group mediagit-rg \
-  --output tsv
-
-# Create container
+# 3. Container — record the account name you got from step 2
+ACCOUNT=mediagitdevXXXXXX   # replace with the actual name from step 2
 az storage container create \
-  --name mediagit-container \
-  --account-name mediagitstorage
+  --account-name "$ACCOUNT" \
+  --name mediagit-server-repos \
+  --auth-mode login
+
+# 4. Account key (kept server-side; never commit this anywhere)
+az storage account keys list \
+  --account-name "$ACCOUNT" \
+  --resource-group mediagit-dev-rg \
+  --query "[0].value" -o tsv
 ```
 
-#### Configuration
+#### Per-Repository Server Config
 
-**Option 1: Connection String (Development)**
+For each repo the server hosts, write its `.mediagit/config.toml` so the
+`[storage]` block selects Azure. The simplest flow is `mediagit init` on the
+server-side repo dir, then overwrite the `[storage]` section.
+
+```toml
+# <server-repos-dir>/<repo>/.mediagit/config.toml
+
+[storage]
+backend = "azure"
+account_name = "mediagitdevXXXXXX"
+container = "mediagit-server-repos"
+account_key = "<KEY_FROM_STEP_4_ABOVE>"
+# Optional: blob path prefix
+# prefix = "repo-objects/"
+```
+
+Alternative: instead of `account_key`, use a connection string:
 
 ```toml
 [storage]
 backend = "azure"
-account_name = "mediagitstorage"
-container = "mediagit-container"
-connection_string = "DefaultEndpointsProtocol=https;AccountName=mediagitstorage;AccountKey=<YOUR_KEY>;EndpointSuffix=core.windows.net"
-prefix = "files/"
+account_name = "mediagitdevXXXXXX"
+container = "mediagit-server-repos"
+connection_string = "DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;EndpointSuffix=core.windows.net"
 ```
 
-**Option 2: Account Key via Environment (Recommended)**
+Validation rules (enforced by `mediagit-config`):
+
+- `account_name`, `container` are required.
+- `container` must be 3-63 chars (Azure rule).
+- Either `account_key` **or** `connection_string` must be set (the current
+  code path does not auto-resolve from environment variables — the chosen
+  credential lives in the TOML on the server filesystem).
+
+#### Verified Manual Dev Test
+
+A working harness lives at `dev-tests/azure-manual-test/run_azure_dev_test.py`.
+It provisions a test repo, starts `mediagit-server` against the Azure
+container, pushes a 4 MiB blob from a fresh client, verifies the blobs
+landed in Azure, and clones into a second working tree to confirm a
+byte-identical roundtrip.
 
 ```bash
-# Get account key
-az storage account keys list \
-  --account-name mediagitstorage \
-  --resource-group mediagit-rg \
-  --output table
+# All three vars are required by the harness
+export MEDIAGIT_AZURE_ACCOUNT=mediagitdevXXXXXX
+export MEDIAGIT_AZURE_CONTAINER=mediagit-server-repos
+export MEDIAGIT_AZURE_KEY="<account_key>"
 
-# Set environment variable
-export MEDIAGIT_AZURE_ACCOUNT_KEY=<account_key>
+python dev-tests/azure-manual-test/run_azure_dev_test.py
 ```
 
-```toml
-[storage]
-backend = "azure"
-account_name = "mediagitstorage"
-container = "mediagit-container"
-# account_key loaded from MEDIAGIT_AZURE_ACCOUNT_KEY env var
-prefix = "files/"
+Expected tail of output on success:
+
+```text
+Azure container blobs after push: total=3, chunks/=0, chunk-deltas/=0, bare-oid=3
+$ mediagit clone http://127.0.0.1:8770/azuretest .../cloned
+✅ Cloned into ...
+=== PASS ===
+blobs uploaded to Azure: 3
+clone roundtrip byte-identical: yes
 ```
 
-**Option 3: Managed Identity (Production)**
+> **Note on object key layout:** for small / single-chunk objects (commits,
+> trees, blobs that don't trigger the chunking pipeline) the server stores
+> blobs at bare-OID keys (`<oid>`) via `ObjectDatabase::write_with_path`.
+> The `chunks/<oid>` and `chunk-deltas/<oid>` prefixes only appear for
+> multi-chunk media (e.g. PSDs, videos) that go through the chunked-write
+> path. Both layouts are valid and clones reconstruct cleanly.
 
-For Azure VM/App Service deployments, omit credentials entirely — the Azure SDK auto-detects the managed identity from the instance metadata service:
+#### Production: Managed Identity
 
-```toml
-[storage]
-backend = "azure"
-account_name = "mediagitstorage"
-container = "mediagit-container"
-# No account_key or connection_string — Azure SDK uses managed identity
-```
+For Azure VM / App Service deployments you typically don't want long-lived
+account keys on disk. The current `mediagit-storage::AzureBackend`
+constructors (`with_account_key`, `with_connection_string`,
+`with_sas_token`) require explicit credentials, so managed-identity
+authentication is **not yet wired** end-to-end through `mediagit-server`.
+For now, prefer rotating `account_key` and storing it in a secrets manager
+that templates the per-repo `config.toml` at server start.
 
-#### Rust Code Integration
+#### Backend API Reference
 
-MediaGit uses `azure-sdk-for-rust`:
+The server consumes the Azure backend via `mediagit_storage::AzureBackend`:
 
 ```rust
-// Automatically handled by MediaGit storage layer
-use azure_storage_blob::{BlobClient, BlobClientOptions};
-use azure_identity::DeveloperToolsCredential;
+use mediagit_storage::{AzureBackend, StorageBackend};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let credential = DeveloperToolsCredential::new(None)?;
-    let blob_client = BlobClient::new(
-        "https://mediagitstorage.blob.core.windows.net/",
-        "mediagit-container".to_string(),
-        "blob_name".to_string(),
-        credential,
-        Some(BlobClientOptions::default()),
-    )?;
+let backend = AzureBackend::with_account_key(
+    "mediagitdevXXXXXX",      // account_name
+    "mediagit-server-repos",  // container
+    "<account_key>",
+).await?;
 
-    // MediaGit handles blob operations
-    Ok(())
-}
+backend.put("commits/abc123", b"...").await?;
+let bytes = backend.get("commits/abc123").await?;
 ```
 
-#### Testing
-
-```bash
-# Test connection
-az storage blob list \
-  --account-name mediagitstorage \
-  --container-name mediagit-container
-
-# Initialize MediaGit repo
-./target/debug/mediagit init
-
-# Add and commit
-./target/debug/mediagit add test-file.psd
-./target/debug/mediagit commit -m "Test Azure backend"
-
-# Verify blobs
-az storage blob list \
-  --account-name mediagitstorage \
-  --container-name mediagit-container \
-  --prefix files/
-```
+The `StorageBackend` trait surface (`get` / `put` / `exists` / `delete` /
+`list_objects`) is identical across all backends.
 
 #### Access Tiers
 
@@ -937,53 +953,84 @@ az storage account management-policy create \
 
 ### 5. Google Cloud Storage (GCS) Backend
 
-**Best for**: Google Cloud deployments, GCP-centric infrastructure
+**Best for**: Google Cloud deployments, GCP-centric infrastructure.
+
+> The GCS backend is selected per **server-side** repository — the `[storage]`
+> section in `<server-repos-dir>/<repo>/.mediagit/config.toml` picks the backend
+> that `mediagit-server` will use for that repo's objects. Clients do not need
+> any GCP credentials; they only talk to `mediagit-server` over HTTP.
 
 #### Prerequisites
 
-1. **Google Cloud Account**: https://cloud.google.com/
-2. **gcloud CLI Installed**: See prerequisites section
-3. **GCS Bucket**: Create in GCP Console
+1. **Google Cloud account**: https://cloud.google.com/
+2. **gcloud CLI installed and authenticated** (`gcloud auth login`)
+3. `mediagit-server` and `mediagit` built with `--release` (the workspace
+   already enables `mediagit-storage/all`, which compiles in the GCS backend
+   — no extra cargo flags needed).
 
-#### Create GCS Bucket
+#### Provision Project, Bucket, and Service Account
 
 ```bash
-# Login to GCP
-gcloud auth login
+# 1. Pick / create a project
 gcloud config set project YOUR_PROJECT_ID
 
-# Create bucket
+# 2. Create the bucket (pick a region close to where mediagit-server runs;
+#    cross-region WAN bandwidth is the dominant push/pull bottleneck — see
+#    the "Observed throughput" note below)
 gcloud storage buckets create gs://my-mediagit-bucket \
   --location=us-east1 \
   --default-storage-class=STANDARD
 
-# Verify bucket
-gcloud storage ls gs://my-mediagit-bucket/
-```
-
-#### Service Account Setup
-
-```bash
-# Create service account
+# 3. Create a service account that the server will run as
 gcloud iam service-accounts create mediagit-sa \
   --display-name="MediaGit Service Account"
 
-# Grant Storage Object Admin role
+# 4. Grant Storage Object Admin (project-level is fine; bucket-level also works)
 gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
   --member="serviceAccount:mediagit-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
   --role="roles/storage.objectAdmin"
-
-# Create and download key
-gcloud iam service-accounts keys create ~/mediagit-credentials.json \
-  --iam-account=mediagit-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com
-
-# Set permissions
-chmod 600 ~/mediagit-credentials.json
 ```
 
-#### Configuration
+#### Authentication: ADC vs Service Account JSON Key
 
-**Option 1: Service Account Key File**
+The GCS backend supports **two** auth modes. **Pick ADC (Option A) first** —
+many GCP organisations enforce
+`constraints/iam.disableServiceAccountKeyCreation`, which blocks the SA-key
+flow described in older versions of this guide. The
+`mediagit-storage::GcsBackend::with_default_credentials` code path already
+handles ADC and is what `mediagit-server` falls back to when
+`credentials_path` is empty (`crates/mediagit-server/src/handlers.rs` →
+`with_default_credentials` branch).
+
+**Option A — Application Default Credentials (recommended)**
+
+Works on GCE / GKE / Cloud Run via instance metadata, and on a developer
+laptop via `gcloud auth application-default login` (one-time interactive
+browser sign-in that writes
+`%APPDATA%\gcloud\application_default_credentials.json` on Windows or
+`~/.config/gcloud/application_default_credentials.json` on Linux/macOS).
+
+```bash
+# One-time on the host that runs mediagit-server
+gcloud auth application-default login
+```
+
+```toml
+# <server-repos-dir>/<repo>/.mediagit/config.toml
+[storage]
+backend = "gcs"
+bucket = "my-mediagit-bucket"
+project_id = "your-project-id"
+# credentials_path intentionally omitted -> server uses ADC
+```
+
+**Option B — Service Account JSON key file** (only when key creation is allowed)
+
+```bash
+gcloud iam service-accounts keys create ~/mediagit-credentials.json \
+  --iam-account=mediagit-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com
+chmod 600 ~/mediagit-credentials.json
+```
 
 ```toml
 [storage]
@@ -991,58 +1038,141 @@ backend = "gcs"
 bucket = "my-mediagit-bucket"
 project_id = "your-project-id"
 credentials_path = "/home/user/mediagit-credentials.json"
-prefix = "media/"
 ```
 
-**Option 2: Environment Variable (Recommended)**
+If you hit `FAILED_PRECONDITION: Key creation is not allowed on this service
+account`, your org has the `iam.disableServiceAccountKeyCreation` constraint
+enforced. Switch to Option A.
+
+#### Verified Manual Dev Test
+
+A working harness lives at `dev-tests/gcs-manual-test/run_gcs_dev_test.py`.
+It provisions a fresh server-side repo, boots `mediagit-server` against the
+GCS bucket, pushes a media fixture from a clean client, lists the bucket via
+`gcloud storage ls` to confirm the blobs landed, and clones into a second
+working tree to verify a byte-identical sha256 roundtrip.
 
 ```bash
-export MEDIAGIT_GCS_CREDENTIALS_PATH=/home/user/mediagit-credentials.json
-export MEDIAGIT_GCS_PROJECT_ID=your-project-id
+# Required environment variables
 export MEDIAGIT_GCS_BUCKET=my-mediagit-bucket
+export MEDIAGIT_GCS_PROJECT=your-project-id
+
+# Optional: override the fixture (default is a 398 MiB video under test-files/)
+# export MEDIAGIT_GCS_FIXTURE=/abs/path/to/your-fixture.bin
+
+python dev-tests/gcs-manual-test/run_gcs_dev_test.py
 ```
 
-```toml
-[storage]
-backend = "gcs"
-bucket = "my-mediagit-bucket"
-project_id = "your-project-id"
-# credentials_path loaded from MEDIAGIT_GCS_CREDENTIALS_PATH env var
+Expected tail of output on success:
+
+```text
+GCS bucket blobs: total=33, chunks/=30, chunk-deltas/=0, manifests/=1, bare-oid=2
+
+=== PASS ===
+blobs uploaded to GCS: 33
+clone roundtrip byte-identical: yes (sha256=b36f1d672d768c1a...)
+push throughput: 0.66 MiB/s
 ```
 
-**Option 3: Application Default Credentials (Production)**
-
-For GCE/GKE deployments, omit `credentials_path` — the GCS client auto-detects credentials from the instance metadata service:
+A focused round-trip integration test that exercises the
+`upload_resumable` (>5 MiB) code path directly is at
+`crates/mediagit-storage/tests/gcs_integration_tests.rs::test_gcs_large_blob_roundtrip`.
+Run it with:
 
 ```bash
-# On GCE/GKE, credentials auto-detected from instance metadata
-gcloud auth application-default login  # For local testing
+export MEDIAGIT_GCS_BUCKET=my-mediagit-bucket
+export MEDIAGIT_GCS_PROJECT=your-project-id
+cargo test -p mediagit-storage --release --features gcs \
+  --test gcs_integration_tests test_gcs_large_blob_roundtrip -- --ignored --nocapture
 ```
 
-```toml
-[storage]
-backend = "gcs"
-bucket = "my-mediagit-bucket"
-project_id = "your-project-id"
-# No credentials_path — auto-detected from environment
-```
+> **Note on object key layout:** `mediagit-server` writes commits, trees, and
+> single-chunk blobs to bare-OID keys via `ObjectDatabase::write_with_path`.
+> Multi-chunk media (PSDs, videos) lands at `chunks/<oid>` and possibly
+> `chunk-deltas/<oid>` / `chunk-deltas/<oid>.meta`. Manifests sit at
+> `manifests/<oid>`. All three layouts are valid and clones reconstruct
+> cleanly.
 
-#### Testing
+#### SDK migration note (2026-04-29)
 
-```bash
-# Test connection
-gcloud storage ls gs://my-mediagit-bucket/
+The `google-cloud-storage` crate name on crates.io was donated by `@yoshidan`
+to Google. Versions ≤ `0.24` are yoshidan's pre-donation legacy releases;
+versions ≥ `1.x` are Google's official Rust SDK
+(`googleapis/google-cloud-rust`). MediaGit was previously pinned to
+`0.24` and is now on `1.11`.
 
-# Initialize MediaGit repo
-./target/debug/mediagit init
+The migration also delivers the upload-correctness guarantee by construction:
+the v1 SDK never slices the body across multiple `Multipart` calls, so the
+`upload_resumable` truncation bug that affected v0.24 (a single repeated key
+silently overwriting itself) cannot recur. Bucket data written by the old
+code (≤ 2026-04-28) is still corrupted on disk — re-push any repos whose
+chunked blobs (≥ 5 MiB) were uploaded against the legacy backend.
 
-# Add and commit
-./target/debug/mediagit add large-image.tif
-./target/debug/mediagit commit -m "Test GCS backend"
+The migration also picks up:
 
-# Verify objects
-gcloud storage ls gs://my-mediagit-bucket/media/ --recursive
-```
+- AIP-194 strict retries (provider-aware idempotency).
+- CRC32C verification on every read/write (enabled by default).
+- Caller-driven striped reads via the new `StorageBackend::get_with_size_hint`
+  trait method (see "Tunable Knobs" below).
+
+#### Known Caveats
+
+- **`prefix` is silently ignored.** `GcsBackend::{put, get, exists, delete,
+  list_objects}` does not honour the `[storage] prefix` field, so all blobs
+  land at the bucket root. Use a dedicated bucket per repo / per developer
+  if you need namespace isolation; do not co-tenant unrelated data inside one
+  bucket via `prefix`.
+- **CRC32C is computed per byte uploaded and downloaded.** This is a v1.11
+  default. Throughput on emulator / LAN paths can be CPU-bound on the hash;
+  WAN paths (the common case) are unaffected. There is no per-request knob
+  to disable it; if a future emulator regression surfaces, look at the SDK's
+  `with_resumable_upload_threshold`-style configuration.
+
+#### Observed Throughput
+
+Push throughput is dominated by WAN bandwidth between the host running
+`mediagit-server` and the bucket region. Sample numbers from `ASIA-SOUTH1`:
+
+| Fixture                        | Size   | SDK     | Push     | Throughput |
+|--------------------------------|--------|---------|----------|------------|
+| 7 MiB synthetic blob (direct)  | 7 MiB  | v0.24   | 25 s     | 0.28 MiB/s |
+| 38 MiB FLAC (full client→push) | 38 MiB | v0.24   | 216 s    | 0.17 MiB/s |
+| 398 MiB video (full pipeline)  | 398 MiB| v0.24   | 1155 s   | 0.34 MiB/s |
+| 38 MiB FLAC (full client→push) | 38 MiB | v1.11   | 70 s     | 0.54 MiB/s |
+| 38 MiB FLAC + tuned concurrency| 38 MiB | v1.11¹  | 57 s     | 0.66 MiB/s |
+| 40 MiB striped roundtrip       | 40 MiB | v1.11²  | 202 s    | 0.20 MiB/s |
+| 7 MiB single-shot roundtrip    | 7 MiB  | v1.11   | 22 s     | 0.32 MiB/s |
+
+¹ With `[performance] pack_workers = 16`, `upload_concurrency = 64`.
+² Striped via 8 MiB ranges × 8 concurrent reads (5 stripes); covers the
+caller-driven `get_with_size_hint` path, not a typical push.
+
+These are bandwidth-bound, not CPU- or backend-bound. Co-locate
+`mediagit-server` with the bucket region for production.
+
+#### Tunable Knobs
+
+The following keys live under `[performance]` in the repo's
+`mediagit-config.toml`. All are optional; absent values fall through to the
+env override (if set) and then a hard-coded default.
+
+| Key                  | Type           | Env override                  | Default | Effect                                                           |
+|----------------------|----------------|-------------------------------|---------|------------------------------------------------------------------|
+| `upload_concurrency` | `Option<usize>`| `MEDIAGIT_UPLOAD_CONCURRENCY` | `32`    | Client-side `buffer_unordered` width when pushing chunked blobs. |
+| `pack_workers`       | `Option<usize>`| `MEDIAGIT_PACK_WORKERS`       | `8`     | Server-side parallel ODB writes during streaming pack ingest.    |
+
+The original 32-stream default for `upload_concurrency` came from a 2 Mbps
+Azure West-EU tuning run. On modern WAN paths to GCS, `pack_workers = 16` and
+`upload_concurrency = 64` lift 38 MiB push from 0.54 → 0.66 MiB/s; bench in
+your own environment before raising further.
+
+The `StorageBackend::get_with_size_hint` trait method on the GCS backend
+issues striped parallel `read_object` ranges when the caller passes a size
+hint ≥ 32 MiB (`STRIPED_GET_THRESHOLD`). The default trait impl ignores the
+hint and delegates to `get`, so non-GCS backends remain unchanged. The hint
+must come from a caller that already knows the size (typically a manifest);
+do NOT add a metadata RPC just to populate it — that probe was the
+regression that got the prior striped-get attempt reverted.
 
 #### Storage Classes
 
@@ -1877,6 +2007,33 @@ read = 30
 write = 30
 ```
 
+### Environment Variable Knobs (v0.2.7+)
+
+Fine-grained runtime tuning without rebuilding. All knobs are read at startup; restart the client or server to pick up changes.
+
+| Variable | Default | Tunes |
+|----------|---------|-------|
+| `MEDIAGIT_CONCURRENT_UPLOADS` | `32` | Total upload semaphore slots per push |
+| `MEDIAGIT_PUSH_OBJECT_CONCURRENCY` | `8` | Objects uploaded concurrently (B2 pipeline) |
+| `MEDIAGIT_PUSH_CHUNK_CONCURRENCY` | `(64/obj_conc).max(4)` | Per-object chunk concurrency; targets 64 total in-flight PUTs |
+| `MEDIAGIT_DOWNLOAD_CONCURRENCY` | `32` | Total chunk downloads during pull/clone |
+| `MEDIAGIT_FETCH_BRANCH_CONCURRENCY` | `4` | Branches fetched concurrently in `fetch --all` |
+| `MEDIAGIT_FETCH_DOWNLOAD_CONCURRENCY` | `max(32/br_conc,8)` | Per-branch download cap (prevents TCP pool exhaustion) |
+| `MEDIAGIT_GCS_UPLOAD_CONCURRENCY` | `4` | GCS concurrent `write_object` calls (lower = fewer 500s) |
+| `MEDIAGIT_HTTP_POOL_MAX` | `64` | Max idle TCP connections per host |
+| `MEDIAGIT_RANGE_PARALLEL` | `4` | Parallel byte-range GETs per chunk ≥ 64 MiB |
+| `MEDIAGIT_RANGE_PARALLEL_THRESHOLD` | `67108864` | Chunk size (bytes) triggering range-parallel GET |
+| `MEDIAGIT_STAGED_UPLOAD` | `0` | Set to `1` to enable S3/MinIO multipart upload (MPU) |
+| `MEDIAGIT_MPU_THRESHOLD_BYTES` | `16777216` | Min chunk size for MPU path (16 MiB) |
+| `MEDIAGIT_MPU_PART_SIZE` | adaptive | Override MPU part size (bytes) |
+| `MEDIAGIT_BENCH` | `0` | Set to `1` to emit `[bench]` throughput summary after push/pull |
+| `MEDIAGIT_HASH_PARALLEL` | `0` | Set to `1` to enable BLAKE3 tree-parallel hashing (~2.6× faster) |
+| `MEDIAGIT_PUSH_PIPELINE` | `1` | B2 parallel push pipeline (default ON) |
+| `MEDIAGIT_STREAM_CHUNK_TO_DISK` | `1` | B4 stream-to-disk during clone (default ON; prevents heap spike) |
+| `MEDIAGIT_STORAGE_STREAMING` | `1` | B7 backend streaming GET (default ON; 15.8% faster AWS clone) |
+
+**Tip:** For WAN pushes that stall at 0 B/s, reduce `MEDIAGIT_PUSH_OBJECT_CONCURRENCY` to 4 (→ 16 in-flight PUTs total) or set `MEDIAGIT_PUSH_CHUNK_CONCURRENCY` explicitly. Run with `MEDIAGIT_BENCH=1` to measure before/after.
+
 ### Cloud Backend Optimization
 
 #### AWS S3
@@ -1904,12 +2061,21 @@ max_concurrency = 4
 
 #### GCS
 
-GCS parallel composite uploads are handled automatically by the GCS client. Adjust overall concurrency via `[performance] max_concurrency`:
+The v1.11 SDK uploads bodies in a single resumable session — there is no
+automatic parallel-composite split. Throughput is controlled by the two
+tunables documented in the GCS Backend section:
 
 ```toml
 [performance]
-max_concurrency = 4
+upload_concurrency = 64   # client-side buffer_unordered width for chunk pushes
+pack_workers       = 16   # server-side parallel ODB writes during pack ingest
 ```
+
+For large reads (≥ 32 MiB) that originate from a caller holding a size hint
+(typically a chunk manifest), the GCS backend automatically stripes the
+download across 8 MiB ranges with up to 8 concurrent requests. No config
+knob — see `STRIPED_GET_THRESHOLD` / `STRIPE_SIZE` / `STRIPE_CONCURRENCY` in
+`crates/mediagit-storage/src/gcs.rs` to retune.
 
 ---
 
@@ -2031,6 +2197,6 @@ find . -name "*.tmp" -o -name "*.log" -o -name "*~"
 
 ---
 
-**Version**: 0.2.6-beta.1
-**Last Updated**: March 5, 2026
+**Version**: 0.2.7-beta.1
+**Last Updated**: May 25, 2026
 **Maintained by**: MediaGit Core Team

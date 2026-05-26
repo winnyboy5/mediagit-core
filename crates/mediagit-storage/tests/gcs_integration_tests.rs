@@ -233,4 +233,149 @@ mod gcs_tests {
 
         assert_eq!(backend1.config().project_id, backend2.config().project_id);
     }
+
+    /// Round-trip a >resumable_threshold blob through the real GCS backend.
+    /// Pinpoints the bug where the prior `upload_resumable` looped over chunks,
+    /// re-uploaded each one to the same object key, and silently truncated the
+    /// stored object to `(data.len() % chunk_size)` bytes.
+    ///
+    /// Requires:
+    ///   MEDIAGIT_GCS_BUCKET   = test bucket
+    ///   MEDIAGIT_GCS_PROJECT  = GCP project id
+    ///   ADC (gcloud auth application-default login) or
+    ///   GOOGLE_APPLICATION_CREDENTIALS pointing at a service account key.
+    ///
+    /// Run with:
+    ///   cargo test -p mediagit-storage --release --test gcs_integration_tests \
+    ///     test_gcs_large_blob_roundtrip -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "Requires real GCS bucket + ADC; gated on MEDIAGIT_GCS_BUCKET/PROJECT env vars"]
+    async fn test_gcs_large_blob_roundtrip() {
+        let bucket = match std::env::var("MEDIAGIT_GCS_BUCKET") {
+            Ok(v) if !v.is_empty() => v,
+            _ => {
+                eprintln!("skipping: MEDIAGIT_GCS_BUCKET not set");
+                return;
+            }
+        };
+        let project = std::env::var("MEDIAGIT_GCS_PROJECT")
+            .or_else(|_| std::env::var("GOOGLE_CLOUD_PROJECT"))
+            .expect("MEDIAGIT_GCS_PROJECT or GOOGLE_CLOUD_PROJECT must be set");
+
+        let backend = GcsBackend::with_default_credentials(&project, &bucket)
+            .await
+            .expect("failed to construct GcsBackend with ADC");
+
+        // 7 MiB > default resumable_threshold (5 MiB) -> forces upload_resumable.
+        let mut data = vec![0u8; 7 * 1024 * 1024];
+        for (i, b) in data.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(31).wrapping_add(7);
+        }
+        let key = format!(
+            "gcs-manual-test/upload-resumable-roundtrip/{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        );
+
+        backend.put(&key, &data).await.expect("put failed");
+
+        let got = backend.get(&key).await.expect("get failed");
+        assert_eq!(
+            got.len(),
+            data.len(),
+            "round-trip size mismatch: got {} expected {} (this is the bug we just fixed: \
+             the old upload_resumable truncated to (data.len() % chunk_size) bytes)",
+            got.len(),
+            data.len()
+        );
+        assert_eq!(got, data, "round-trip byte mismatch");
+
+        backend.delete(&key).await.ok();
+    }
+
+    /// Round-trip a >32 MiB blob through the GCS backend, exercising the
+    /// caller-driven striped `get_with_size_hint` path.
+    ///
+    /// The threshold for striping is 32 MiB (see
+    /// `mediagit_storage::gcs::STRIPED_GET_THRESHOLD`); we pick 40 MiB so the
+    /// object straddles the threshold by a meaningful margin and produces
+    /// multiple stripes (40 MiB / 8 MiB = 5 stripes).
+    ///
+    /// Verifies:
+    ///   1. Striped download is byte-identical to the single-shot `get`.
+    ///   2. Calling `get_with_size_hint(key, None)` falls back to `get` (i.e.
+    ///      no metadata probe happens; the call should succeed and return the
+    ///      same bytes).
+    ///   3. Calling `get_with_size_hint(key, Some(small))` for a sub-threshold
+    ///      hint also falls back (no spurious striping for tiny objects).
+    ///
+    /// Same env requirements as `test_gcs_large_blob_roundtrip`.
+    #[tokio::test]
+    #[ignore = "Requires real GCS bucket + ADC; gated on MEDIAGIT_GCS_BUCKET/PROJECT env vars"]
+    async fn test_gcs_striped_get_roundtrip() {
+        let bucket = match std::env::var("MEDIAGIT_GCS_BUCKET") {
+            Ok(v) if !v.is_empty() => v,
+            _ => {
+                eprintln!("skipping: MEDIAGIT_GCS_BUCKET not set");
+                return;
+            }
+        };
+        let project = std::env::var("MEDIAGIT_GCS_PROJECT")
+            .or_else(|_| std::env::var("GOOGLE_CLOUD_PROJECT"))
+            .expect("MEDIAGIT_GCS_PROJECT or GOOGLE_CLOUD_PROJECT must be set");
+
+        let backend = GcsBackend::with_default_credentials(&project, &bucket)
+            .await
+            .expect("failed to construct GcsBackend with ADC");
+
+        // 40 MiB > 32 MiB STRIPED_GET_THRESHOLD -> exercises the striped path.
+        let total: usize = 40 * 1024 * 1024;
+        let mut data = vec![0u8; total];
+        // Same deterministic pattern as the smaller roundtrip; gives every
+        // 256-byte block a unique fingerprint so a corrupted stripe boundary
+        // (e.g. off-by-one in offset/len math) shows up as a single-byte diff.
+        for (i, b) in data.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(37).wrapping_add(11);
+        }
+        let key = format!(
+            "gcs-manual-test/striped-get-roundtrip/{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        );
+
+        backend.put(&key, &data).await.expect("put failed");
+
+        // (1) striped fast-path: caller passes the known size.
+        let got_striped = backend
+            .get_with_size_hint(&key, Some(total as u64))
+            .await
+            .expect("get_with_size_hint(Some(size)) failed");
+        assert_eq!(got_striped.len(), data.len(), "striped size mismatch");
+        assert_eq!(got_striped, data, "striped byte mismatch");
+
+        // (2) None hint: must fall back to single-shot get without a metadata
+        //     RPC. We cannot assert "no extra RPC" from outside; we only assert
+        //     correctness here. The "no probe" property is enforced by the
+        //     implementation invariant documented on get_with_size_hint.
+        let got_fallback = backend
+            .get_with_size_hint(&key, None)
+            .await
+            .expect("get_with_size_hint(None) failed");
+        assert_eq!(got_fallback, data, "None-hint fallback byte mismatch");
+
+        // (3) sub-threshold hint must also take the single-shot path; we just
+        //     re-verify byte-equality (the threshold gate is documented, not
+        //     directly observable from the trait surface).
+        let got_small_hint = backend
+            .get_with_size_hint(&key, Some(1024))
+            .await
+            .expect("get_with_size_hint(Some(small)) failed");
+        assert_eq!(got_small_hint, data, "small-hint fallback byte mismatch");
+
+        backend.delete(&key).await.ok();
+    }
 }

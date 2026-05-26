@@ -72,7 +72,7 @@ graph TD
     I --> K["get_chunk_params(file_size)"]
     K --> L["FastCDC::new(data, min, avg, max)<br/>or StreamCDC::new(file, min, avg, max)"]
     L --> M["Iterator yields chunks"]
-    M --> N["SHA-256 hash → Oid"]
+    M --> N["BLAKE3 hash → Oid"]
     N --> O["Deduplicate + Compress + Store"]
 
     C --> O
@@ -119,21 +119,28 @@ MediaGit uses the **`fastcdc` crate v3.2** (`fastcdc::v2020`) for all content-de
 
 ### Formats that use FastCDC
 
-FastCDC is dispatched by `chunk_media_aware()` → `chunk_rolling()` for formats that don't have a dedicated media parser:
+FastCDC is dispatched by `chunk_media_aware()` for formats that don't have a dedicated media parser.
 
-| Format Group | Extensions |
-|--------------|-----------|
-| Text/Code | csv, tsv, json, xml, html, txt, md, rs, py, js, ts, go, java, c, cpp, yaml, toml, sql, proto, ... |
-| ML Data | parquet, arrow, feather, orc, avro, hdf5, npy, npz, tfrecords, petastorm |
-| ML Models | pt, pth, ckpt, pb, safetensors, bin, pkl, joblib |
-| ML Deployment | onnx, gguf, ggml, tflite, mlmodel, coreml, keras, pte, llamafile |
-| Documents | pdf, svg, eps, ai |
-| Design Tools | fig, sketch, xd, indd |
-| Lossless Audio | flac, aiff, alac |
-| MPEG Streams | mpg, mpeg, vob, mts, m2ts |
-| USD/Alembic | usd, usda, usdc, usdz, abc |
-| 3D Apps | blend, max, ma, mb, c4d, hip, zpr, ztl |
-| Unknown | All unrecognized extensions |
+**Creative-container formats** (AI, PSD, PSB, PDF, EPS, Fig, Sketch, XD, InDesign) use
+**capped tier-1 params** (1 MB avg / 512 KB min / 4 MB max) regardless of file size.
+These formats embed zlib-compressed streams with a trailing xref/directory table; smaller
+chunks let FastCDC re-sync quickly after mid-file insertions, recovering dedup on
+unchanged portions.
+
+| Format Group | Extensions | Chunk Params |
+|--------------|-----------|--------------|
+| Text/Code | csv, tsv, json, xml, html, txt, md, rs, py, js, ts, go, java, c, cpp, yaml, toml, sql, proto, ... | Adaptive |
+| ML Data | parquet, arrow, feather, orc, avro, hdf5, npy, npz, tfrecords, petastorm | Adaptive |
+| ML Models | pt, pth, ckpt, pb, safetensors, bin, pkl, joblib | Adaptive |
+| ML Deployment | onnx, gguf, ggml, tflite, mlmodel, coreml, keras, pte, llamafile | Adaptive |
+| Documents/Creative | pdf, eps, ai, psd, psb | Creative (1 MB avg) |
+| Design Tools | fig, sketch, xd, indd, indt | Creative (1 MB avg) |
+| SVG | svg | Adaptive |
+| Lossless Audio | flac, aiff, alac | Adaptive |
+| MPEG Streams | mpg, mpeg, vob, mts, m2ts | Adaptive |
+| USD/Alembic | usd, usda, usdc, usdz, abc | Adaptive |
+| 3D Apps | blend, max, ma, mb, c4d, hip, zpr, ztl | Adaptive |
+| Unknown | All unrecognized extensions | Adaptive |
 
 ---
 
@@ -529,9 +536,9 @@ When file extension is unavailable, the ODB uses magic byte signatures:
 
 ---
 
-## Performance Benchmarks (v0.2.6-beta.1)
+## Performance Benchmarks (v0.2.7-beta.1)
 
-> Measured via standalone deep test suite, 36 formats, all `fsck` verified. 2026-04-03.
+> Measured via deep test suite, 23 formats, all `fsck` verified. Last run: 2026-05-25 (AWS/Azure/GCS backends, 459/459 tests passing).
 
 ### Storage Savings
 

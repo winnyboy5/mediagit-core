@@ -80,11 +80,15 @@
 use crate::StorageBackend;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use aws_sdk_s3::config::retry::RetryConfig;
+use aws_sdk_s3::config::timeout::TimeoutConfig;
 use aws_sdk_s3::Client;
 use bytes::Bytes;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Semaphore;
 use tracing::{debug, warn};
 
 /// Configuration for the MinIO backend
@@ -102,19 +106,27 @@ pub struct MinIOConfig {
     /// Secret access key
     pub secret_key: String,
 
+    /// Logical-key prefix applied transparently to every object key on the
+    /// wire. Empty means keys land at bucket root (legacy behaviour). Lets
+    /// multiple repos share one bucket without colliding on identical OIDs.
+    pub prefix: String,
+
+    /// AWS region for SigV4 signing (default: "us-east-1" for MinIO/S3-compatible)
+    pub region: String,
+
     /// Use path-style addressing (default: true for MinIO)
     pub path_style: bool,
 
-    /// Multipart upload part size in bytes (default: 100MB)
+    /// Multipart upload part size in bytes (default: 8MB)
     pub part_size: u64,
 
     /// Maximum number of concurrent parts to upload (default: 8)
     pub max_concurrent_parts: usize,
 
-    /// Maximum number of retries for failed operations (default: 3)
+    /// Maximum number of retries for failed operations (default: 5)
     pub max_retries: u32,
 
-    /// Initial retry delay in milliseconds (default: 100ms)
+    /// Initial retry delay in milliseconds (default: 1000ms)
     pub initial_retry_delay_ms: u64,
 }
 
@@ -125,12 +137,28 @@ impl Default for MinIOConfig {
             bucket: String::new(),
             access_key: String::new(),
             secret_key: String::new(),
+            prefix: String::new(),
+            region: "us-east-1".to_string(),
             path_style: true,
-            part_size: 100 * 1024 * 1024, // 100MB default
+            // 8MB: chunks larger than this use multipart so each HTTP part
+            // is small enough to complete reliably over a slow/lossy WAN
+            // connection (S3 resets TCP mid-body on large single PUTs).
+            part_size: 8 * 1024 * 1024,
             max_concurrent_parts: 8,
-            max_retries: 3,
-            initial_retry_delay_ms: 100,
+            max_retries: 5,
+            initial_retry_delay_ms: 1000,
         }
+    }
+}
+
+/// Normalize a prefix so it ends with `/` (or is empty). Idempotent. Mirrors
+/// the helper in azure.rs to keep the multi-tenant key shape consistent
+/// across backends.
+fn normalize_prefix(p: &str) -> String {
+    if p.is_empty() || p.ends_with('/') {
+        p.to_string()
+    } else {
+        format!("{}/", p)
     }
 }
 
@@ -161,11 +189,36 @@ impl MinIOStats {
 ///
 /// This implementation is `Send + Sync` and can be safely shared across threads
 /// and async tasks.
+/// Compute optimal MPU part size for MinIO (S3-API-compatible; same limits as S3).
+/// See `mpu_part_size_s3` in s3.rs for the same logic.
+fn mpu_part_size_minio(total_size: u64) -> u64 {
+    const MIN_PART: u64 = 5 * 1024 * 1024;
+    const MAX_PART: u64 = 5 * 1024 * 1024 * 1024;
+    const MAX_PARTS: u64 = 10_000;
+    const TARGET_PARTS: u64 = 96;
+    const FLOOR: u64 = 16 * 1024 * 1024;
+
+    if let Some(v) = std::env::var("MEDIAGIT_MPU_PART_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| (MIN_PART..=MAX_PART).contains(&n))
+    {
+        return v;
+    }
+
+    let by_count = total_size.div_ceil(MAX_PARTS).max(MIN_PART);
+    let by_target = total_size.div_ceil(TARGET_PARTS).max(MIN_PART);
+    FLOOR.max(by_count).max(by_target).min(MAX_PART)
+}
+
 #[derive(Clone)]
 pub struct MinIOBackend {
     client: Client,
     config: Arc<MinIOConfig>,
     stats: Arc<MinIOStats>,
+    // Limits concurrent create_multipart_upload calls to prevent overwhelming MinIO.
+    // Env: MEDIAGIT_MINIO_MPU_CONCURRENCY (default 16). Set to 0 to disable.
+    mpu_sem: Arc<Semaphore>,
     // Keep these for backward compatibility
     endpoint: String,
     bucket: String,
@@ -264,6 +317,63 @@ impl MinIOBackend {
         Self::with_config(config).await
     }
 
+    /// Create a new MinIO backend with a logical-key prefix applied to every
+    /// object on the wire. Equivalent to `new()` when `prefix` is empty.
+    /// Multiple repos sharing one bucket should each pick a distinct prefix
+    /// to avoid OID collisions on identical content.
+    pub async fn new_with_prefix(
+        endpoint: &str,
+        bucket: &str,
+        access_key: &str,
+        secret_key: &str,
+        prefix: &str,
+    ) -> anyhow::Result<Self> {
+        // Mirror the input validation from `new()` — kept inline (rather than
+        // a double-init via Self::new() then with_config) to avoid hitting the
+        // bucket twice on construction.
+        if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+            return Err(anyhow::anyhow!(
+                "Invalid endpoint: must start with http:// or https://"
+            ));
+        }
+        let endpoint = endpoint.trim_end_matches('/').to_string();
+        if bucket.is_empty() {
+            return Err(anyhow::anyhow!("bucket name cannot be empty"));
+        }
+        if bucket.len() > 63 {
+            return Err(anyhow::anyhow!("bucket name must be 63 characters or less"));
+        }
+        if !bucket
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            return Err(anyhow::anyhow!(
+                "bucket name must contain only lowercase letters, numbers, and hyphens"
+            ));
+        }
+        if bucket.starts_with('-') || bucket.ends_with('-') {
+            return Err(anyhow::anyhow!(
+                "bucket name cannot start or end with a hyphen"
+            ));
+        }
+        if access_key.is_empty() {
+            return Err(anyhow::anyhow!("access key cannot be empty"));
+        }
+        if secret_key.is_empty() {
+            return Err(anyhow::anyhow!("secret key cannot be empty"));
+        }
+
+        let config = MinIOConfig {
+            endpoint,
+            bucket: bucket.to_string(),
+            access_key: access_key.to_string(),
+            secret_key: secret_key.to_string(),
+            prefix: prefix.to_string(),
+            ..Default::default()
+        };
+        Self::with_config(config).await
+    }
+
     /// Create a new MinIO backend with custom configuration
     ///
     /// # Arguments
@@ -274,10 +384,13 @@ impl MinIOBackend {
     ///
     /// * `Ok(MinIOBackend)` - Successfully created backend
     /// * `Err` - If AWS SDK initialization or bucket access fails
-    pub async fn with_config(config: MinIOConfig) -> Result<Self> {
+    pub async fn with_config(mut config: MinIOConfig) -> Result<Self> {
+        // Normalize the prefix once at construction so all hot-path uses can
+        // assume it already ends with `/` (or is empty).
+        config.prefix = normalize_prefix(&config.prefix);
         debug!(
-            "Initializing MinIO backend: endpoint={}, bucket={}, path_style={}",
-            config.endpoint, config.bucket, config.path_style
+            "Initializing MinIO backend: endpoint={}, bucket={}, prefix='{}', path_style={}",
+            config.endpoint, config.bucket, config.prefix, config.path_style
         );
 
         // Create credentials
@@ -292,53 +405,175 @@ impl MinIOBackend {
         // Build S3 configuration directly for MinIO/S3-compatible endpoints.
         // We skip aws_config::defaults().load() to avoid IMDS region discovery
         // which causes 2x 1-second timeouts in non-AWS environments.
+        //
+        // Bound the SDK's worst case explicitly: without these, a stalled TCP
+        // can cost ~30 s/attempt × default-3 retries = ~90 s/op, which on a
+        // multi-endpoint push compounded to the 10–15 min outages we saw.
+        // Our outer `with_retry` wrapper still provides our own retry budget.
+        // connect_timeout: fast failure if host is unreachable (5 s is enough for DNS + TCP).
+        // read_timeout: time between successive response bytes — keep short to detect stalled
+        //   HTTP responses; does NOT cap upload throughput.
+        // operation_attempt_timeout / operation_timeout: deliberately NOT set here.
+        //   Chunks can be 10s–100s MB; over a slow WAN link a 30-s cap kills legitimate
+        //   uploads. The connect_timeout (5 s) is the safety valve against dead servers.
+        //   The SDK retry_config (max_attempts=2) provides a second chance on transient errors.
+        // F2: wider connect window for cross-region TLS handshakes; more attempts absorb
+        // transient S3 connection resets without surfacing 500s to the client.
+        // Env overrides: MEDIAGIT_AWS_CONNECT_TIMEOUT_SECS, MEDIAGIT_AWS_MAX_ATTEMPTS.
+        let connect_timeout_secs: u64 = std::env::var("MEDIAGIT_AWS_CONNECT_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10);
+        let max_attempts: u32 = std::env::var("MEDIAGIT_AWS_MAX_ATTEMPTS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
+        let timeout_config = TimeoutConfig::builder()
+            .connect_timeout(Duration::from_secs(connect_timeout_secs))
+            .read_timeout(Duration::from_secs(120))
+            .build();
+
         let s3_config = aws_sdk_s3::config::Builder::new()
             .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
             .endpoint_url(&config.endpoint)
             .credentials_provider(credentials)
             .force_path_style(config.path_style)
-            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .region(aws_sdk_s3::config::Region::new(config.region.clone()))
+            .timeout_config(timeout_config)
+            .retry_config(RetryConfig::standard().with_max_attempts(max_attempts))
+            // F1: share the process-wide warm connection pool so concurrent MPU calls
+            // reuse existing TCP+TLS sessions instead of opening new ones on every burst.
+            .http_client(crate::http_pool::shared())
             .build();
 
         let client = Client::from_conf(s3_config);
 
-        // Ensure bucket exists; use create_bucket and treat "already exists" as success.
-        // This avoids relying on head_bucket which can return unreliable error codes
-        // across different MinIO versions.
-        match client.create_bucket().bucket(&config.bucket).send().await {
+        // Idempotent bucket init: HEAD first; only CREATE on NotFound.
+        // Avoids the slow "create-then-ignore-AlreadyExists" path on every
+        // backend construction for buckets that already exist.
+        match client.head_bucket().bucket(&config.bucket).send().await {
             Ok(_) => {
-                debug!("MinIO bucket '{}' created successfully", config.bucket);
+                debug!("MinIO bucket '{}' already exists", config.bucket);
             }
-            Err(e) => {
-                let already_exists = e
+            Err(head_err) => {
+                let not_found = head_err
                     .as_service_error()
-                    .map(|se| se.is_bucket_already_owned_by_you() || se.is_bucket_already_exists())
+                    .map(|se| se.is_not_found())
                     .unwrap_or(false);
-                if already_exists {
-                    debug!(
-                        "MinIO bucket '{}' already exists, continuing",
-                        config.bucket
-                    );
-                } else {
-                    return Err(e).context(format!(
-                        "Failed to access or create MinIO bucket: {}",
-                        config.bucket
-                    ));
+                // Log the real AWS error so the operator can diagnose auth/region/existence issues.
+                tracing::error!(
+                    "head_bucket '{}' (region={}, endpoint={}): not_found={} | {}",
+                    config.bucket,
+                    config.region,
+                    config.endpoint,
+                    not_found,
+                    head_err
+                );
+                let mut create_req = client.create_bucket().bucket(&config.bucket);
+                if config.region != "us-east-1" {
+                    use aws_sdk_s3::types::{BucketLocationConstraint, CreateBucketConfiguration};
+                    let constraint = BucketLocationConstraint::from(config.region.as_str());
+                    let cfg = CreateBucketConfiguration::builder()
+                        .location_constraint(constraint)
+                        .build();
+                    create_req = create_req.create_bucket_configuration(cfg);
+                }
+                match create_req.send().await {
+                    Ok(_) => {
+                        debug!("MinIO bucket '{}' created successfully", config.bucket);
+                    }
+                    Err(e) => {
+                        let already_exists = e
+                            .as_service_error()
+                            .map(|se| {
+                                se.is_bucket_already_owned_by_you() || se.is_bucket_already_exists()
+                            })
+                            .unwrap_or(false);
+                        if already_exists {
+                            debug!(
+                                "MinIO bucket '{}' already exists (race-resolved)",
+                                config.bucket
+                            );
+                        } else {
+                            tracing::error!(
+                                "create_bucket '{}' (region={}) failed: {}",
+                                config.bucket,
+                                config.region,
+                                e
+                            );
+                            return Err(e).context(format!(
+                                "Failed to access or create MinIO bucket: {}",
+                                config.bucket
+                            ));
+                        }
+                    }
                 }
             }
         }
 
         debug!("Successfully connected to MinIO bucket: {}", config.bucket);
 
+        // F3: pre-warm the shared HTTP pool so the first MPU burst finds warm TCP sessions.
+        // Fire-and-forget; failures are harmless — the pool will self-populate on first use.
+        // Env: MEDIAGIT_AWS_POOL_WARM (default 16). Set to 0 to disable.
+        let warm: usize = std::env::var("MEDIAGIT_AWS_POOL_WARM")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(16);
+        if warm > 0 {
+            let warm_client = client.clone();
+            let warm_bucket = config.bucket.clone();
+            tokio::spawn(async move {
+                let futs: Vec<_> = (0..warm)
+                    .map(|_| {
+                        let c = warm_client.clone();
+                        let b = warm_bucket.clone();
+                        async move {
+                            let _ = c.head_bucket().bucket(&b).send().await;
+                        }
+                    })
+                    .collect();
+                futures::future::join_all(futs).await;
+            });
+        }
+
+        let mpu_concurrency = std::env::var("MEDIAGIT_MINIO_MPU_CONCURRENCY")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(16)
+            .max(1);
         Ok(MinIOBackend {
             client,
             config: Arc::new(config.clone()),
             stats: Arc::new(MinIOStats::new()),
+            mpu_sem: Arc::new(Semaphore::new(mpu_concurrency)),
             endpoint: config.endpoint,
             bucket: config.bucket,
             _access_key: config.access_key,
             _secret_key: config.secret_key,
         })
+    }
+
+    /// Compose the on-wire object key from a logical key. Returns the input
+    /// unchanged when prefix is empty (legacy behaviour).
+    fn full_key(&self, key: &str) -> String {
+        if self.config.prefix.is_empty() {
+            key.to_string()
+        } else {
+            format!("{}{}", self.config.prefix, key)
+        }
+    }
+
+    /// Inverse of `full_key`: strip the configured prefix from a wire key to
+    /// yield the logical key callers expect. Defensive: keys not starting
+    /// with our prefix (foreign data) pass through unchanged.
+    fn strip_prefix<'a>(&self, full: &'a str) -> &'a str {
+        if self.config.prefix.is_empty() {
+            full
+        } else {
+            full.strip_prefix(self.config.prefix.as_str())
+                .unwrap_or(full)
+        }
     }
 
     /// Get current statistics
@@ -361,7 +596,9 @@ impl MinIOBackend {
         Ok(())
     }
 
-    /// Perform operation with exponential backoff retry logic
+    /// Perform operation with exponential backoff retry logic.
+    /// Permanent errors (NoSuchKey, AccessDenied) are returned immediately
+    /// without retry — retrying them wastes time and hides the real cause.
     async fn with_retry<F, T>(&self, mut operation: F) -> Result<T>
     where
         F: FnMut() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send>>,
@@ -373,10 +610,21 @@ impl MinIOBackend {
             match operation().await {
                 Ok(result) => return Ok(result),
                 Err(e) => {
+                    let msg = e.to_string().to_lowercase();
+                    let is_permanent = msg.contains("nosuchkey")
+                        || msg.contains("no such key")
+                        || msg.contains("accessdenied")
+                        || msg.contains("access denied");
+                    if is_permanent {
+                        return Err(e);
+                    }
+
                     retry_count += 1;
                     if retry_count >= self.config.max_retries {
-                        return Err(e)
-                            .context(format!("Failed after {} retries", self.config.max_retries));
+                        return Err(e).context(format!(
+                            "Failed after {} retries; last error follows",
+                            self.config.max_retries
+                        ));
                     }
 
                     warn!(
@@ -386,8 +634,7 @@ impl MinIOBackend {
 
                     tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
 
-                    // Exponential backoff with jitter
-                    delay_ms = (delay_ms * 2).min(10000); // Cap at 10 seconds
+                    delay_ms = (delay_ms * 2).min(10000);
                 }
             }
         }
@@ -517,6 +764,7 @@ impl MinIOBackend {
 
         // Upload parts concurrently
         let mut part_handles = vec![];
+        let mut parts = vec![];
         let part_size = self.config.part_size as usize;
         let mut part_number = 1;
 
@@ -529,6 +777,8 @@ impl MinIOBackend {
             let chunk_data = chunk.to_vec();
             let part_num = part_number;
 
+            let max_retries = self.config.max_retries;
+            let initial_delay = self.config.initial_retry_delay_ms;
             let handle = tokio::spawn(async move {
                 debug!(
                     "Uploading part {} ({} bytes) for key: {}",
@@ -537,36 +787,60 @@ impl MinIOBackend {
                     key
                 );
 
-                let response = client
-                    .upload_part()
-                    .bucket(&bucket)
-                    .key(&key)
-                    .upload_id(&upload_id)
-                    .part_number(part_num)
-                    .body(Bytes::from(chunk_data.clone()).into())
-                    .send()
-                    .await
-                    .map_err(|e| anyhow!("Failed to upload part {}: {}", part_num, e))?;
-
-                let etag = response
-                    .e_tag()
-                    .ok_or_else(|| anyhow!("No ETag returned for part {}", part_num))?
-                    .to_string();
+                let mut retry = 0u32;
+                let mut delay_ms = initial_delay;
+                let (part_num_out, etag) = loop {
+                    let response = client
+                        .upload_part()
+                        .bucket(&bucket)
+                        .key(&key)
+                        .upload_id(&upload_id)
+                        .part_number(part_num)
+                        .body(Bytes::from(chunk_data.clone()).into())
+                        .send()
+                        .await;
+                    match response {
+                        Ok(r) => {
+                            let etag = r
+                                .e_tag()
+                                .ok_or_else(|| anyhow!("No ETag returned for part {}", part_num))?
+                                .to_string();
+                            break (part_num, etag);
+                        }
+                        Err(e) => {
+                            retry += 1;
+                            if retry >= max_retries {
+                                return Err(anyhow!(
+                                    "Failed to upload part {} after {} retries: {}",
+                                    part_num,
+                                    max_retries,
+                                    e
+                                ));
+                            }
+                            warn!(
+                                "Part {} upload failed (attempt {}/{}), retrying in {}ms: {}",
+                                part_num, retry, max_retries, delay_ms, e
+                            );
+                            tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                            delay_ms = (delay_ms * 2).min(10_000);
+                        }
+                    }
+                };
 
                 stats
                     .total_bytes_uploaded
                     .fetch_add(chunk_data.len() as u64, Ordering::Relaxed);
 
-                Ok::<_, anyhow::Error>((part_num, etag))
+                Ok::<_, anyhow::Error>((part_num_out, etag))
             });
 
             part_handles.push(handle);
 
             // Limit concurrent uploads
             if part_handles.len() >= self.config.max_concurrent_parts {
-                // Wait for one to complete before starting more
                 if let Some(handle) = part_handles.pop() {
-                    let _ = handle.await??;
+                    let (part_num, etag) = handle.await??;
+                    parts.push((part_num, etag));
                 }
             }
 
@@ -574,7 +848,6 @@ impl MinIOBackend {
         }
 
         // Wait for all remaining parts to complete
-        let mut parts = vec![];
         for handle in part_handles {
             let (part_num, etag) = handle.await??;
             parts.push((part_num, etag));
@@ -632,7 +905,9 @@ impl StorageBackend for MinIOBackend {
 
         let client = self.client.clone();
         let bucket = self.config.bucket.clone();
-        let key_clone = key.to_string();
+        // Use the wire key (with prefix) for all SDK calls; logical key is
+        // only used for log/error messages so the caller's view stays clean.
+        let key_clone = self.full_key(key);
         let stats = self.stats.clone();
 
         self.with_retry(|| {
@@ -650,7 +925,21 @@ impl StorageBackend for MinIOBackend {
                     .key(&key)
                     .send()
                     .await
-                    .map_err(|e| anyhow!("Failed to get object: {}", e))?;
+                    .map_err(|e| {
+                        let emsg = e.to_string().to_lowercase();
+                        // MinIO returns a generic "service error" for GET on non-existent
+                        // objects (unlike HEAD which returns a typed 404). Translate to a
+                        // nosuchkey message so with_retry treats it as permanent and stops
+                        // retrying a clearly missing object.
+                        if emsg.contains("service error")
+                            && !emsg.contains("timeout")
+                            && !emsg.contains("connect")
+                        {
+                            anyhow!("NoSuchKey: object not found: {}", key)
+                        } else {
+                            anyhow!("Failed to get object: {}", e)
+                        }
+                    })?;
 
                 let body = response
                     .body
@@ -669,17 +958,83 @@ impl StorageBackend for MinIOBackend {
         .await
     }
 
+    /// Stream an object from MinIO as a `Bytes` sequence (B7).
+    ///
+    /// When `MEDIAGIT_STORAGE_STREAMING=1`, drives the S3 SDK's `ByteStream` via
+    /// `into_async_read()` + `unfold` so the object body is never fully buffered.
+    /// Falls back to the default single-chunk impl when the knob is OFF so other
+    /// backends remain unaffected.  No retry on the streaming path: mid-stream
+    /// failures bubble up to the caller's retry layer.
+    async fn get_streaming(
+        &self,
+        key: &str,
+    ) -> anyhow::Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+        >,
+    > {
+        // B7: default ON — AWS clone 15.8% faster (2026-05-22). Set MEDIAGIT_STORAGE_STREAMING=0 to revert.
+        let streaming_enabled = std::env::var("MEDIAGIT_STORAGE_STREAMING")
+            .as_deref()
+            .unwrap_or("1")
+            == "1";
+        if !streaming_enabled {
+            let data = self.get(key).await?;
+            return Ok(Box::pin(futures::stream::once(async move {
+                Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(data))
+            })));
+        }
+
+        Self::validate_key(key)?;
+        let key_wire = self.full_key(key);
+        let client = self.client.clone();
+        let bucket = self.config.bucket.clone();
+        let stats = self.stats.clone();
+
+        let response = client
+            .get_object()
+            .bucket(&bucket)
+            .key(&key_wire)
+            .send()
+            .await
+            .map_err(|e| anyhow!("get_streaming {}: {}", key_wire, e))?;
+
+        // ByteStream does not implement futures::Stream directly; convert to
+        // tokio::io::AsyncRead and drive with unfold to yield 64 KiB Bytes chunks.
+        let reader = response.body.into_async_read();
+        let stream = futures::stream::unfold((reader, stats), |(mut rdr, stats)| async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf = vec![0u8; 65536];
+            match rdr.read(&mut buf).await {
+                Ok(0) => None,
+                Ok(n) => {
+                    buf.truncate(n);
+                    stats
+                        .total_bytes_downloaded
+                        .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                    Some((
+                        Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(buf)),
+                        (rdr, stats),
+                    ))
+                }
+                Err(e) => Some((Err(anyhow!("get_streaming chunk: {}", e)), (rdr, stats))),
+            }
+        });
+
+        Ok(Box::pin(stream))
+    }
+
     /// Store an object in MinIO
     async fn put(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
         Self::validate_key(key)?;
 
-        // For small objects, use simple put_object
+        // Apply prefix exactly once at the trait entry; put_simple and
+        // put_multipart receive the wire key and pass it straight to the SDK.
+        let wire_key = self.full_key(key);
         if data.len() as u64 <= self.config.part_size {
-            return self.put_simple(key, data).await;
+            return self.put_simple(&wire_key, data).await;
         }
-
-        // For large objects, use multipart upload
-        self.put_multipart(key, data).await
+        self.put_multipart(&wire_key, data).await
     }
 
     /// Check if an object exists in MinIO
@@ -688,7 +1043,7 @@ impl StorageBackend for MinIOBackend {
 
         let client = self.client.clone();
         let bucket = self.config.bucket.clone();
-        let key_clone = key.to_string();
+        let key_clone = self.full_key(key);
 
         self.with_retry(|| {
             let client = client.clone();
@@ -733,7 +1088,7 @@ impl StorageBackend for MinIOBackend {
 
         let client = self.client.clone();
         let bucket = self.config.bucket.clone();
-        let key_clone = key.to_string();
+        let key_clone = self.full_key(key);
         let stats = self.stats.clone();
 
         self.with_retry(|| {
@@ -761,69 +1116,352 @@ impl StorageBackend for MinIOBackend {
         .await
     }
 
-    /// List objects in MinIO with a given prefix
+    /// List objects in MinIO with a given logical prefix. The configured
+    /// backend prefix is composed with the caller's prefix on the wire and
+    /// stripped from each returned key, so callers always see logical keys
+    /// (the same ones they wrote via `put`).
     async fn list_objects(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
         let client = self.client.clone();
         let bucket = self.config.bucket.clone();
-        let prefix_clone = prefix.to_string();
+        let wire_prefix = self.full_key(prefix);
 
-        self.with_retry(|| {
-            let client = client.clone();
-            let bucket = bucket.clone();
-            let prefix = prefix_clone.clone();
+        // The closure can't borrow `&self`, so we do the wire-list there and
+        // strip the backend prefix from each key in this outer scope (where
+        // self.strip_prefix is reachable). Keeps a single source of truth for
+        // prefix handling.
+        let wire_keys: Vec<String> = self
+            .with_retry(|| {
+                let client = client.clone();
+                let bucket = bucket.clone();
+                let wire_prefix = wire_prefix.clone();
 
-            Box::pin(async move {
-                debug!("Listing objects in MinIO with prefix: '{}'", prefix);
+                Box::pin(async move {
+                    debug!(
+                        "Listing objects in MinIO with wire prefix '{}'",
+                        wire_prefix
+                    );
 
-                let mut result = vec![];
-                let mut continuation_token: Option<String> = None;
+                    let mut result = vec![];
+                    let mut continuation_token: Option<String> = None;
 
-                loop {
-                    let mut request = client.list_objects_v2().bucket(&bucket);
+                    loop {
+                        let mut request = client.list_objects_v2().bucket(&bucket);
 
-                    if !prefix.is_empty() {
-                        request = request.prefix(&prefix);
-                    }
+                        if !wire_prefix.is_empty() {
+                            request = request.prefix(&wire_prefix);
+                        }
 
-                    if let Some(token) = continuation_token {
-                        request = request.continuation_token(token);
-                    }
+                        if let Some(token) = continuation_token {
+                            request = request.continuation_token(token);
+                        }
 
-                    let response = request
-                        .send()
-                        .await
-                        .map_err(|e| anyhow!("Failed to list objects: {}", e))?;
+                        let response = request
+                            .send()
+                            .await
+                            .map_err(|e| anyhow!("Failed to list objects: {}", e))?;
 
-                    // Collect keys from this page
-                    for obj in response.contents() {
-                        if let Some(key) = obj.key() {
-                            result.push(key.to_string());
+                        for obj in response.contents() {
+                            if let Some(wire_key) = obj.key() {
+                                result.push(wire_key.to_string());
+                            }
+                        }
+
+                        if response.is_truncated() == Some(true) {
+                            continuation_token =
+                                response.next_continuation_token().map(|t| t.to_string());
+                        } else {
+                            break;
                         }
                     }
 
-                    // Check if there are more results
-                    if response.is_truncated() == Some(true) {
-                        continuation_token =
-                            response.next_continuation_token().map(|t| t.to_string());
-                    } else {
-                        break;
-                    }
-                }
-
-                // Sort for consistency
-                result.sort();
-
-                debug!("Found {} objects with prefix: '{}'", result.len(), prefix);
-                Ok(result)
+                    Ok(result)
+                })
             })
-        })
-        .await
+            .await?;
+
+        let mut result: Vec<String> = wire_keys
+            .iter()
+            .map(|k| self.strip_prefix(k).to_string())
+            .collect();
+        result.sort();
+        debug!(
+            "Found {} objects with logical prefix '{}'",
+            result.len(),
+            prefix
+        );
+        Ok(result)
+    }
+
+    async fn presign_put(
+        &self,
+        key: &str,
+        _content_length: u64,
+        ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<crate::PresignedPut>> {
+        let wire_key = self.full_key(key);
+        let presigning = aws_sdk_s3::presigning::PresigningConfig::expires_in(ttl)
+            .map_err(|e| anyhow!("presigning config: {e}"))?;
+        let req = self
+            .client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(&wire_key)
+            .presigned(presigning)
+            .await
+            .map_err(|e| anyhow!("presign_put minio: {e}"))?;
+        Ok(Some(crate::PresignedPut {
+            url: req.uri().to_string(),
+            method: "PUT".to_string(),
+            required_headers: req
+                .headers()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            expires_at: std::time::SystemTime::now() + ttl,
+        }))
+    }
+
+    async fn presign_get(
+        &self,
+        key: &str,
+        ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<crate::PresignedDownload>> {
+        let wire_key = self.full_key(key);
+        let presigning = aws_sdk_s3::presigning::PresigningConfig::expires_in(ttl)
+            .map_err(|e| anyhow!("presigning config: {e}"))?;
+        let req = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(&wire_key)
+            .presigned(presigning)
+            .await
+            .map_err(|e| anyhow!("presign_get minio: {e}"))?;
+        Ok(Some(crate::PresignedDownload {
+            url: req.uri().to_string(),
+            headers: vec![],
+            expires_in_secs: ttl.as_secs(),
+        }))
+    }
+
+    async fn create_presigned_mpu(
+        &self,
+        key: &str,
+        total_size: u64,
+        ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<crate::PresignedMpu>> {
+        let part_size = mpu_part_size_minio(total_size);
+        let wire_key = self.full_key(key);
+        // Semaphore scope: only protect the TCP connection burst for create_multipart_upload.
+        // Released before presigning so the loop (local CPU work, no network) runs concurrently
+        // across all tasks. Holding it through presigning serialized 32 tasks and killed throughput.
+        let upload_id = {
+            let _permit = self
+                .mpu_sem
+                .acquire()
+                .await
+                .map_err(|e| anyhow!("mpu semaphore: {}", e))?;
+            let resp = self
+                .client
+                .create_multipart_upload()
+                .bucket(&self.config.bucket)
+                .key(&wire_key)
+                .send()
+                .await
+                .map_err(|e| anyhow!("create_multipart_upload minio: {}", e))?;
+            resp.upload_id()
+                .ok_or_else(|| anyhow!("no upload_id from MinIO"))?
+                .to_string()
+        }; // permit released here — presigning proceeds concurrently
+
+        let num_parts = total_size.div_ceil(part_size).max(1) as i32;
+        let presigning = aws_sdk_s3::presigning::PresigningConfig::expires_in(ttl)
+            .map_err(|e| anyhow!("presigning config: {}", e))?;
+        let mut parts = Vec::with_capacity(num_parts as usize);
+        for part_number in 1..=num_parts {
+            let req = self
+                .client
+                .upload_part()
+                .bucket(&self.config.bucket)
+                .key(&wire_key)
+                .upload_id(&upload_id)
+                .part_number(part_number)
+                .presigned(presigning.clone())
+                .await
+                .map_err(|e| anyhow!("presign upload_part {} minio: {}", part_number, e))?;
+            parts.push(crate::PresignedMpuPart {
+                part_number,
+                url: req.uri().to_string(),
+            });
+        }
+        Ok(Some(crate::PresignedMpu {
+            upload_id,
+            parts,
+            part_size,
+        }))
+    }
+
+    async fn complete_presigned_mpu(
+        &self,
+        key: &str,
+        upload_id: &str,
+        parts: Vec<crate::MpuCompletedPart>,
+    ) -> anyhow::Result<()> {
+        let wire_key = self.full_key(key);
+        let completed: Vec<_> = parts
+            .into_iter()
+            .map(|p| {
+                aws_sdk_s3::types::CompletedPart::builder()
+                    .part_number(p.part_number)
+                    .e_tag(p.etag)
+                    .build()
+            })
+            .collect();
+        let _permit = self
+            .mpu_sem
+            .acquire()
+            .await
+            .map_err(|e| anyhow!("mpu semaphore: {}", e))?;
+        self.client
+            .complete_multipart_upload()
+            .bucket(&self.config.bucket)
+            .key(&wire_key)
+            .upload_id(upload_id)
+            .multipart_upload(
+                aws_sdk_s3::types::CompletedMultipartUpload::builder()
+                    .set_parts(Some(completed))
+                    .build(),
+            )
+            .send()
+            .await
+            .map_err(|e| anyhow!("complete_multipart_upload minio: {}", e))?;
+        Ok(())
+    }
+
+    async fn abort_presigned_mpu(&self, key: &str, upload_id: &str) -> anyhow::Result<()> {
+        let wire_key = self.full_key(key);
+        let _ = self
+            .client
+            .abort_multipart_upload()
+            .bucket(&self.config.bucket)
+            .key(&wire_key)
+            .upload_id(upload_id)
+            .send()
+            .await;
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_normalize_prefix_empty_passthrough() {
+        assert_eq!(normalize_prefix(""), "");
+    }
+
+    #[test]
+    fn test_normalize_prefix_appends_slash() {
+        assert_eq!(normalize_prefix("repo-objects"), "repo-objects/");
+    }
+
+    #[test]
+    fn test_normalize_prefix_idempotent_for_slashed() {
+        assert_eq!(normalize_prefix("repo-objects/"), "repo-objects/");
+    }
+
+    #[test]
+    fn test_normalize_prefix_double_call_idempotent() {
+        let once = normalize_prefix("repo");
+        let twice = normalize_prefix(&once);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn test_normalize_prefix_nested() {
+        assert_eq!(
+            normalize_prefix("multi-tenant/repo-42"),
+            "multi-tenant/repo-42/"
+        );
+    }
+
+    /// Synthetic backend construction without hitting the network — needed
+    /// because aws_sdk_s3::Client requires an `EndpointResolver` etc., which
+    /// we only assemble inside `with_config`. We build a config with a
+    /// localhost endpoint so the SDK's HTTP client never actually fires.
+    fn synthetic_minio_for_prefix_test(prefix: &str) -> MinIOBackend {
+        let creds = aws_sdk_s3::config::Credentials::new(
+            "ak".to_string(),
+            "sk".to_string(),
+            None,
+            None,
+            "synthetic",
+        );
+        let s3_config = aws_sdk_s3::config::Builder::new()
+            .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+            .endpoint_url("http://127.0.0.1:1")
+            .credentials_provider(creds)
+            .force_path_style(true)
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .build();
+        let client = Client::from_conf(s3_config);
+        let cfg = MinIOConfig {
+            endpoint: "http://127.0.0.1:1".to_string(),
+            bucket: "b".to_string(),
+            access_key: "ak".to_string(),
+            secret_key: "sk".to_string(),
+            prefix: normalize_prefix(prefix),
+            ..Default::default()
+        };
+        MinIOBackend {
+            client,
+            config: Arc::new(cfg.clone()),
+            stats: Arc::new(MinIOStats::new()),
+            mpu_sem: Arc::new(Semaphore::new(16)),
+            endpoint: cfg.endpoint,
+            bucket: cfg.bucket,
+            _access_key: cfg.access_key,
+            _secret_key: cfg.secret_key,
+        }
+    }
+
+    #[test]
+    fn test_full_key_empty_prefix_passthrough() {
+        let b = synthetic_minio_for_prefix_test("");
+        assert_eq!(b.full_key("chunks/abc"), "chunks/abc");
+    }
+
+    #[test]
+    fn test_full_key_with_prefix_prepends() {
+        let b = synthetic_minio_for_prefix_test("repo-objects");
+        assert_eq!(b.full_key("chunks/abc"), "repo-objects/chunks/abc");
+    }
+
+    #[test]
+    fn test_strip_prefix_returns_logical() {
+        let b = synthetic_minio_for_prefix_test("repo-objects");
+        assert_eq!(b.strip_prefix("repo-objects/chunks/abc"), "chunks/abc");
+    }
+
+    #[test]
+    fn test_strip_prefix_foreign_key_unchanged() {
+        let b = synthetic_minio_for_prefix_test("repo-objects");
+        assert_eq!(b.strip_prefix("other-tenant/key"), "other-tenant/key");
+    }
+
+    #[test]
+    fn test_strip_prefix_empty_passthrough() {
+        let b = synthetic_minio_for_prefix_test("");
+        assert_eq!(b.strip_prefix("chunks/abc"), "chunks/abc");
+    }
+
+    #[test]
+    fn test_full_key_strip_prefix_roundtrip() {
+        let b = synthetic_minio_for_prefix_test("multi-tenant/repo-42");
+        let logical = "manifests/deadbeef";
+        let wire = b.full_key(logical);
+        assert_eq!(b.strip_prefix(&wire), logical);
+    }
 
     #[tokio::test]
     #[ignore = "requires MinIO server"]

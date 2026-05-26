@@ -16,10 +16,10 @@
 //! This module provides streaming pack reader/writer that process objects
 //! incrementally without loading entire packs into memory.
 
+use crate::hash::Hasher;
 use crate::pack::PackHeader;
 use crate::streaming_index::StreamingPackIndex;
 use crate::{ObjectType, Oid};
-use sha2::{Digest, Sha256};
 use std::io;
 use std::path::Path;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -37,17 +37,17 @@ pub struct StreamingPackReader<R: AsyncRead + Unpin> {
     header: Option<PackHeader>,
     objects_processed: u32,
     expected_count: u32,
-    hasher: Sha256,
+    hasher: Hasher,
 }
 
 impl<R: AsyncRead + Unpin> StreamingPackReader<R> {
     /// Create new streaming pack reader
     pub async fn new(mut reader: R) -> io::Result<Self> {
-        let mut header_buf = vec![0u8; 12];
+        let mut header_buf = vec![0u8; 13];
         reader.read_exact(&mut header_buf).await?;
 
         let header = PackHeader::from_bytes(&header_buf)?;
-        let mut hasher = Sha256::new();
+        let mut hasher = Hasher::new();
         hasher.update(&header_buf);
 
         debug!(
@@ -93,7 +93,7 @@ impl<R: AsyncRead + Unpin> StreamingPackReader<R> {
         // Read object header: type (1 byte) + size (4 bytes)
         let mut header_buf = [0u8; 5];
         self.reader.read_exact(&mut header_buf).await?;
-        self.hasher.update(header_buf);
+        self.hasher.update(&header_buf);
 
         let type_byte = header_buf[0];
         let size = u32::from_le_bytes([header_buf[1], header_buf[2], header_buf[3], header_buf[4]])
@@ -197,7 +197,7 @@ pub struct StreamingPackWriter<W: AsyncWrite + Unpin> {
     writer: W,
     objects_written: u32,
     expected_count: u32,
-    hasher: Sha256,
+    hasher: Hasher,
     index: Option<StreamingPackIndex>,
     current_offset: u64,
 }
@@ -215,7 +215,7 @@ impl<W: AsyncWrite + Unpin> StreamingPackWriter<W> {
         let header_bytes = header.to_bytes();
         writer.write_all(&header_bytes).await?;
 
-        let mut hasher = Sha256::new();
+        let mut hasher = Hasher::new();
         hasher.update(&header_bytes);
 
         // Create streaming index for O(1) memory
@@ -233,7 +233,7 @@ impl<W: AsyncWrite + Unpin> StreamingPackWriter<W> {
             expected_count,
             hasher,
             index: Some(index),
-            current_offset: 12, // After header
+            current_offset: 13, // After 13-byte header (PACK + version u32 + count u32 + kind u8)
         })
     }
 
@@ -317,10 +317,10 @@ impl<W: AsyncWrite + Unpin> StreamingPackWriter<W> {
         // Write index offset (the position where the index starts in the pack file)
         let index_offset_bytes = index_offset.to_le_bytes();
         self.writer.write_all(&index_offset_bytes).await?;
-        self.hasher.update(index_offset_bytes);
+        self.hasher.update(&index_offset_bytes);
 
         // Write final checksum
-        let checksum = self.hasher.finalize();
+        let checksum: [u8; 32] = self.hasher.finalize();
         self.writer.write_all(&checksum).await?;
 
         // Flush to ensure all data is written
