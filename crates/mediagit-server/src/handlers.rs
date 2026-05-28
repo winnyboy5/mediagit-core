@@ -14,11 +14,12 @@
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     Extension, Json,
 };
 use bytes::Bytes;
 use futures::stream::StreamExt;
+use mediagit_compression::{Compressor, SmartCompressor};
 use mediagit_protocol::{
     RefInfo, RefUpdateRequest, RefUpdateResponse, RefUpdateResult, RefsResponse, WantRequest,
     WantResponse,
@@ -205,37 +206,43 @@ async fn build_storage_backend(repo_path: &StdPath) -> Result<Arc<dyn StorageBac
                 gcs_config.project_id
             );
 
-            // Determine credentials path - from config or default application credentials
-            let credentials_path = gcs_config
-                .credentials_path
-                .as_deref()
-                .or_else(|| {
-                    std::env::var("GOOGLE_APPLICATION_CREDENTIALS")
-                        .ok()
-                        .as_deref()
-                        .map(|_| "")
-                })
-                .unwrap_or("");
+            // Resolve credentials_path: absolute, ~-prefixed, or relative to repo dir.
+            // None means fall back to ADC (GOOGLE_APPLICATION_CREDENTIALS or metadata server).
+            let resolved_creds: Option<std::path::PathBuf> =
+                gcs_config.credentials_path.as_deref().map(|raw| {
+                    if let Some(rest) = raw.strip_prefix('~') {
+                        let home = std::env::var("HOME")
+                            .or_else(|_| std::env::var("USERPROFILE"))
+                            .unwrap_or_default();
+                        std::path::PathBuf::from(format!("{}{}", home, rest))
+                    } else {
+                        let p = std::path::Path::new(raw);
+                        if p.is_absolute() {
+                            p.to_path_buf()
+                        } else {
+                            repo_path.join(raw)
+                        }
+                    }
+                });
 
-            let storage = if credentials_path.is_empty() {
-                // Use default credentials (ADC) - for GKE, Cloud Run, etc.
-                GcsBackend::with_default_credentials(&gcs_config.project_id, &gcs_config.bucket)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!(
-                            "Failed to initialize GCS backend with default credentials: {}",
-                            e
-                        );
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })?
-            } else {
-                // Use service account JSON file
-                GcsBackend::new(&gcs_config.project_id, &gcs_config.bucket, credentials_path)
+            let storage = match resolved_creds {
+                Some(path) => GcsBackend::new(&gcs_config.project_id, &gcs_config.bucket, &path)
                     .await
                     .map_err(|e| {
                         tracing::error!("Failed to initialize GCS backend: {}", e);
                         StatusCode::INTERNAL_SERVER_ERROR
-                    })?
+                    })?,
+                None => {
+                    GcsBackend::with_default_credentials(&gcs_config.project_id, &gcs_config.bucket)
+                        .await
+                        .map_err(|e| {
+                            tracing::error!(
+                                "Failed to initialize GCS backend with default credentials: {}",
+                                e
+                            );
+                            StatusCode::INTERNAL_SERVER_ERROR
+                        })?
+                }
             };
 
             Arc::new(storage)
@@ -1298,53 +1305,85 @@ pub async fn upload_manifest(
 
 /// GET /:repo/chunks/:chunk_id - Download a single chunk
 ///
-/// Returns raw compressed chunk data
+/// Returns raw compressed chunk data, or 409 JSON `{"kind":"delta","base_id":"<hex>"}` if
+/// the chunk is stored as a delta. Clients receiving 409 should re-request via
+/// `GET /:repo/chunk-deltas/:chunk_id` and store via `write_chunk_delta`.
 pub async fn download_chunk(
     Path((repo, chunk_id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
-) -> Result<impl IntoResponse, StatusCode> {
-    // Check read permission
+) -> Result<Response, StatusCode> {
     check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
 
     tracing::debug!(repo = %repo, chunk_id = %chunk_id, "Downloading chunk");
 
-    // Resolve repository path
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
         tracing::warn!(repo = %repo, "Repository not found");
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Create storage backend
     let storage = get_or_init_storage(&state, &repo_path).await?;
 
-    // Read compressed chunk directly (no decompression)
     let chunk_key = format!("chunks/{}", chunk_id);
-    let chunk_data = storage.get(&chunk_key).await.map_err(|e| {
-        // Check both the top-level message and the full cause chain (via {:#}) so that
-        // context-wrapped NoSuchKey errors (e.g. "Failed after N retries: NoSuchKey") still
-        // map to 404 rather than 503.
-        let chain = format!("{:#}", e).to_lowercase();
-        if chain.contains("nosuchkey") || chain.contains("no such key") || chain.contains("404")
-            || chain.contains("not found") || chain.contains("service error")
-        {
-            tracing::warn!(chunk = %chunk_id, key = %chunk_key, "Chunk not found in storage");
-            StatusCode::NOT_FOUND
-        } else {
-            // dispatch failure, connection refused, timeout — storage backend unreachable.
-            // Return 503 so clients distinguish "chunk missing" (404) from "backend down" (503).
-            tracing::error!(chunk = %chunk_id, key = %chunk_key, error = %e, cause = %format!("{:#}", e), "Chunk storage error: backend unreachable");
-            StatusCode::SERVICE_UNAVAILABLE
+    match storage.get(&chunk_key).await {
+        Ok(chunk_data) => {
+            tracing::debug!(chunk = %chunk_id, size = chunk_data.len(), "Chunk downloaded");
+            Ok((
+                StatusCode::OK,
+                [("Content-Type", "application/octet-stream")],
+                chunk_data,
+            )
+                .into_response())
         }
-    })?;
-
-    tracing::debug!(chunk = %chunk_id, size = chunk_data.len(), "Chunk downloaded");
-    Ok((
-        StatusCode::OK,
-        [("Content-Type", "application/octet-stream")],
-        chunk_data,
-    ))
+        Err(e) => {
+            let chain = format!("{:#}", e).to_lowercase();
+            if chain.contains("nosuchkey")
+                || chain.contains("no such key")
+                || chain.contains("404")
+                || chain.contains("not found")
+                || chain.contains("service error")
+            {
+                // Before returning 404: check whether this chunk is stored as a delta.
+                // This catches the case where the client's POST /chunk-deltas/check probe
+                // failed silently (timeout / transport error) and the client is requesting
+                // a delta-only chunk via the wrong /chunks/ route.
+                let meta_key = format!("chunk-deltas/{}.meta", chunk_id);
+                if let Ok(meta_bytes) = storage.get(&meta_key).await {
+                    let meta_str = String::from_utf8_lossy(&meta_bytes);
+                    let base_hex = meta_str
+                        .strip_prefix("base:")
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    tracing::warn!(
+                        chunk = %chunk_id,
+                        base = %base_hex,
+                        "Chunk requested as full but stored as delta; returning 409 for client re-route"
+                    );
+                    return Ok((
+                        StatusCode::CONFLICT,
+                        [("Content-Type", "application/json")],
+                        format!(r#"{{"kind":"delta","base_id":"{}"}}"#, base_hex).into_bytes(),
+                    )
+                        .into_response());
+                }
+                tracing::warn!(chunk = %chunk_id, key = %chunk_key, "Chunk not found in storage");
+                Err(StatusCode::NOT_FOUND)
+            } else {
+                // dispatch failure, connection refused, timeout — storage backend unreachable.
+                // Return 503 so clients distinguish "chunk missing" (404) from "backend down" (503).
+                tracing::error!(
+                    chunk = %chunk_id,
+                    key = %chunk_key,
+                    error = %e,
+                    cause = %format!("{:#}", e),
+                    "Chunk storage error: backend unreachable"
+                );
+                Err(StatusCode::SERVICE_UNAVAILABLE)
+            }
+        }
+    }
 }
 
 /// POST /:repo/chunk-deltas/check - Check which chunks exist as chunk-deltas
@@ -1756,8 +1795,8 @@ pub async fn complete_chunk_uploads(
             let storage = Arc::clone(&storage);
             async move {
                 let key = format!("chunks/{}", chunk_id_hex);
-                match storage.exists(&key).await {
-                    Ok(true) => None,
+                match storage.head(&key).await {
+                    Ok(Some(n)) if n > 0 => None,
                     _ => Some(chunk_id_hex),
                 }
             }
@@ -1773,6 +1812,74 @@ pub async fn complete_chunk_uploads(
         "Chunk upload completion verified"
     );
     Ok(Json(CompleteUploadResponse { missing }))
+}
+
+/// POST /:repo/chunks/verify-integrity — strong per-chunk BLAKE3 verification (opt-in).
+///
+/// Reads each chunk from storage, decompresses it, and asserts BLAKE3(uncompressed) == chunk_id.
+/// Only called by clients that set `MEDIAGIT_STRONG_VERIFY=1`.
+/// Returns `{ invalid: [hex, ...] }` for any chunk whose content does not match its claimed id.
+#[derive(serde::Deserialize)]
+pub struct VerifyIntegrityRequest {
+    chunk_ids: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct VerifyIntegrityResponse {
+    invalid: Vec<String>,
+}
+
+pub async fn verify_chunk_integrity(
+    Path(repo): Path<String>,
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    Json(req): Json<VerifyIntegrityRequest>,
+) -> Result<Json<VerifyIntegrityResponse>, StatusCode> {
+    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+
+    let repo_path = state.repos_dir.join(&repo);
+    if !repo_path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let storage = get_or_init_storage(&state, &repo_path).await?;
+    let compressor = std::sync::Arc::new(SmartCompressor::new());
+
+    let invalid: Vec<String> = futures::stream::iter(req.chunk_ids)
+        .map(|chunk_id_hex| {
+            let storage = Arc::clone(&storage);
+            let compressor = std::sync::Arc::clone(&compressor);
+            async move {
+                let key = format!("chunks/{}", chunk_id_hex);
+                let compressed = match storage.get(&key).await {
+                    Ok(data) => data,
+                    Err(_) => return Some(chunk_id_hex),
+                };
+                let decompressed =
+                    match tokio::task::spawn_blocking(move || compressor.decompress(&compressed))
+                        .await
+                    {
+                        Ok(Ok(data)) => data,
+                        _ => return Some(chunk_id_hex),
+                    };
+                let hash_hex = blake3::hash(&decompressed).to_hex().to_string();
+                if hash_hex == chunk_id_hex {
+                    None
+                } else {
+                    Some(chunk_id_hex)
+                }
+            }
+        })
+        .buffer_unordered(20)
+        .filter_map(|x| async { x })
+        .collect()
+        .await;
+
+    tracing::debug!(
+        repo = %repo,
+        invalid_count = invalid.len(),
+        "Chunk integrity verified"
+    );
+    Ok(Json(VerifyIntegrityResponse { invalid }))
 }
 
 // ============================================================================

@@ -360,17 +360,22 @@ impl FilterDriver {
             if let Ok(cwd) = std::env::current_dir() {
                 let default_storage = cwd.join(".mediagit");
                 if default_storage.exists() {
-                    match self.retrieve_object(default_storage.to_str().unwrap_or(""), &pointer.oid)
-                    {
-                        Ok(content) => {
-                            debug!("Retrieved object {} ({} bytes)", pointer.oid, content.len());
-                            io::stdout().write_all(&content).map_err(|e| {
-                                GitError::FilterFailed(format!("Failed to write stdout: {}", e))
-                            })?;
-                            return Ok(());
-                        }
-                        Err(e) => {
-                            debug!("Object retrieval failed: {}", e);
+                    if let Some(storage_path) = default_storage.to_str() {
+                        match self.retrieve_object(storage_path, &pointer.oid) {
+                            Ok(content) => {
+                                debug!(
+                                    "Retrieved object {} ({} bytes)",
+                                    pointer.oid,
+                                    content.len()
+                                );
+                                io::stdout().write_all(&content).map_err(|e| {
+                                    GitError::FilterFailed(format!("Failed to write stdout: {}", e))
+                                })?;
+                                return Ok(());
+                            }
+                            Err(e) => {
+                                debug!("Object retrieval failed: {}", e);
+                            }
                         }
                     }
                 }

@@ -129,6 +129,10 @@ pub struct S3Config {
 
     /// Initial retry delay in milliseconds (default: 100ms)
     pub initial_retry_delay_ms: u64,
+
+    /// Optional key prefix applied to every object stored in the bucket.
+    /// When set, all keys are prefixed with `<prefix>/` on the wire.
+    pub prefix: Option<String>,
 }
 
 impl Default for S3Config {
@@ -143,6 +147,7 @@ impl Default for S3Config {
             max_concurrent_parts: 8,
             max_retries: 3,
             initial_retry_delay_ms: 100,
+            prefix: None,
         }
     }
 }
@@ -559,7 +564,7 @@ impl StorageBackend for S3Backend {
 
         let client = self.client.clone();
         let bucket = self.config.bucket.clone();
-        let key_clone = key.to_string();
+        let key_clone = crate::prefixed_key(&self.config.prefix, key);
         let stats = self.stats.clone();
 
         self.with_retry(|| {
@@ -624,7 +629,7 @@ impl StorageBackend for S3Backend {
         }
 
         Self::validate_key(key)?;
-        let key_clone = key.to_string();
+        let key_clone = crate::prefixed_key(&self.config.prefix, key);
         let client = self.client.clone();
         let bucket = self.config.bucket.clone();
         let stats = self.stats.clone();
@@ -704,7 +709,7 @@ impl StorageBackend for S3Backend {
 
         let client = self.client.clone();
         let bucket = self.config.bucket.clone();
-        let key_clone = key.to_string();
+        let key_clone = crate::prefixed_key(&self.config.prefix, key);
 
         self.with_retry(|| {
             let client = client.clone();
@@ -743,6 +748,43 @@ impl StorageBackend for S3Backend {
         .await
     }
 
+    /// Return the byte length of an S3 object without downloading it.
+    async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+        Self::validate_key(key)?;
+
+        let client = self.client.clone();
+        let bucket = self.config.bucket.clone();
+        let key_clone = crate::prefixed_key(&self.config.prefix, key);
+
+        self.with_retry(|| {
+            let client = client.clone();
+            let bucket = bucket.clone();
+            let key = key_clone.clone();
+
+            Box::pin(async move {
+                match client.head_object().bucket(&bucket).key(&key).send().await {
+                    Ok(resp) => Ok(Some(resp.content_length().unwrap_or(0) as u64)),
+                    Err(e) => {
+                        let emsg = e.to_string().to_lowercase();
+                        if emsg.contains("404")
+                            || emsg.contains("not found")
+                            || emsg.contains("notfound")
+                            || emsg.contains("nosuchkey")
+                            || emsg.contains("does not exist")
+                            || emsg.contains("no such key")
+                            || (emsg.contains("service error") && emsg.len() < 50)
+                        {
+                            Ok(None)
+                        } else {
+                            Err(anyhow!("Failed to head object: {}", e))
+                        }
+                    }
+                }
+            })
+        })
+        .await
+    }
+
     /// Delete an object from S3
     ///
     /// This operation is idempotent: deleting a non-existent object succeeds.
@@ -760,7 +802,7 @@ impl StorageBackend for S3Backend {
 
         let client = self.client.clone();
         let bucket = self.config.bucket.clone();
-        let key_clone = key.to_string();
+        let key_clone = crate::prefixed_key(&self.config.prefix, key);
         let stats = self.stats.clone();
 
         self.with_retry(|| {
@@ -803,7 +845,7 @@ impl StorageBackend for S3Backend {
     async fn list_objects(&self, prefix: &str) -> Result<Vec<String>> {
         let client = self.client.clone();
         let bucket = self.config.bucket.clone();
-        let prefix_clone = prefix.to_string();
+        let prefix_clone = crate::prefixed_key(&self.config.prefix, prefix);
 
         self.with_retry(|| {
             let client = client.clone();
@@ -864,6 +906,7 @@ impl StorageBackend for S3Backend {
         _content_length: u64,
         ttl: std::time::Duration,
     ) -> anyhow::Result<Option<crate::PresignedPut>> {
+        let key = crate::prefixed_key(&self.config.prefix, key);
         let presigning = aws_sdk_s3::presigning::PresigningConfig::expires_in(ttl)
             .map_err(|e| anyhow::anyhow!("presigning config: {e}"))?;
         let req = self
@@ -890,6 +933,7 @@ impl StorageBackend for S3Backend {
         key: &str,
         ttl: std::time::Duration,
     ) -> anyhow::Result<Option<crate::PresignedDownload>> {
+        let key = crate::prefixed_key(&self.config.prefix, key);
         let presigning = aws_sdk_s3::presigning::PresigningConfig::expires_in(ttl)
             .map_err(|e| anyhow::anyhow!("presigning config: {e}"))?;
         let req = self
@@ -913,12 +957,13 @@ impl StorageBackend for S3Backend {
         total_size: u64,
         ttl: std::time::Duration,
     ) -> anyhow::Result<Option<crate::PresignedMpu>> {
+        let key = crate::prefixed_key(&self.config.prefix, key);
         let part_size = mpu_part_size_s3(total_size);
         let resp = self
             .client
             .create_multipart_upload()
             .bucket(&self.config.bucket)
-            .key(key)
+            .key(key.as_str())
             .send()
             .await
             .map_err(|e| anyhow!("create_multipart_upload s3: {}", e))?;
@@ -936,7 +981,7 @@ impl StorageBackend for S3Backend {
                 .client
                 .upload_part()
                 .bucket(&self.config.bucket)
-                .key(key)
+                .key(key.as_str())
                 .upload_id(&upload_id)
                 .part_number(part_number)
                 .presigned(presigning.clone())
@@ -960,6 +1005,7 @@ impl StorageBackend for S3Backend {
         upload_id: &str,
         parts: Vec<crate::MpuCompletedPart>,
     ) -> anyhow::Result<()> {
+        let key = crate::prefixed_key(&self.config.prefix, key);
         let completed: Vec<_> = parts
             .into_iter()
             .map(|p| {
@@ -986,11 +1032,12 @@ impl StorageBackend for S3Backend {
     }
 
     async fn abort_presigned_mpu(&self, key: &str, upload_id: &str) -> anyhow::Result<()> {
+        let key = crate::prefixed_key(&self.config.prefix, key);
         let _ = self
             .client
             .abort_multipart_upload()
             .bucket(&self.config.bucket)
-            .key(key)
+            .key(key.as_str())
             .upload_id(upload_id)
             .send()
             .await;
@@ -1006,7 +1053,7 @@ impl S3Backend {
 
         let client = self.client.clone();
         let bucket = self.config.bucket.clone();
-        let key_clone = key.to_string();
+        let key_clone = crate::prefixed_key(&self.config.prefix, key);
         let data_vec = data.to_vec();
         let stats = self.stats.clone();
 
@@ -1048,7 +1095,7 @@ impl S3Backend {
 
         let client = self.client.clone();
         let bucket = self.config.bucket.clone();
-        let key_clone = key.to_string();
+        let key_clone = crate::prefixed_key(&self.config.prefix, key);
 
         // Initiate multipart upload
         let multipart = client

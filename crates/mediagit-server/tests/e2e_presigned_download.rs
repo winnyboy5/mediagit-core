@@ -69,6 +69,10 @@ impl StorageBackend for PresignOverrideBackend {
         self.inner.exists(key).await
     }
 
+    async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+        self.inner.head(key).await
+    }
+
     async fn delete(&self, key: &str) -> anyhow::Result<()> {
         self.inner.delete(key).await
     }

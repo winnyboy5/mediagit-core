@@ -584,6 +584,19 @@ impl StorageBackend for LocalBackend {
         }
     }
 
+    async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+        if key.is_empty() {
+            return Err(anyhow::anyhow!("key cannot be empty"));
+        }
+
+        let path = self.object_path(key);
+        match tokio::fs::metadata(&path).await {
+            Ok(m) => Ok(Some(m.len())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Delete an object
     ///
     /// This operation is idempotent: deleting a non-existent object succeeds.

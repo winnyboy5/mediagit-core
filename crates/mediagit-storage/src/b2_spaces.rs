@@ -583,6 +583,12 @@ impl StorageBackend for B2SpacesBackend {
         })
     }
 
+    async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+        self.inner.head(key).await.map_err(|e| {
+            anyhow::anyhow!("Failed to head object in {}: {}", self.provider.name(), e)
+        })
+    }
+
     async fn presign_put(
         &self,
         key: &str,

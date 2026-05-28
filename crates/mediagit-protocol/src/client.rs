@@ -1200,6 +1200,36 @@ impl ProtocolClient {
         Ok(r.missing)
     }
 
+    /// POST /:repo/chunks/verify-integrity — BLAKE3 re-hash of every stored chunk.
+    /// Only called when `MEDIAGIT_STRONG_VERIFY=1`. Returns chunk ids whose stored
+    /// content does not match their claimed hash.
+    async fn strong_verify_chunks(&self, chunk_ids: &[String]) -> anyhow::Result<Vec<String>> {
+        #[derive(serde::Serialize)]
+        struct Req<'a> {
+            chunk_ids: &'a [String],
+        }
+        #[derive(serde::Deserialize)]
+        struct Resp {
+            invalid: Vec<String>,
+        }
+
+        let url = format!("{}/chunks/verify-integrity", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .json(&Req { chunk_ids })
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("POST /chunks/verify-integrity returned {}", resp.status());
+        }
+        let r = resp
+            .json::<Resp>()
+            .await
+            .context("parse /chunks/verify-integrity")?;
+        Ok(r.invalid)
+    }
+
     /// Upload a manifest to the remote server
     async fn upload_manifest(&self, oid: &Oid, data: &[u8]) -> Result<()> {
         let url = format!("{}/manifests/{}", self.base_url, oid.to_hex());
@@ -1633,7 +1663,8 @@ impl ProtocolClient {
                                                     }
                                                     break 'direct;
                                                 }
-                                                TransferOutcome::PermanentChunk => {
+                                                TransferOutcome::PermanentChunk
+                                                | TransferOutcome::PermanentChunkAfterDelay(_) => {
                                                     tracing::warn!(
                                                         chunk = %hex,
                                                         attempt,
@@ -1806,6 +1837,28 @@ impl ProtocolClient {
                         // counted in Pass A. Retry is the same logical work.
                     }
                     let _ = (_pass_retry_n, _pass_retry_bytes);
+                }
+            }
+
+            // Optional strong verify: decompress + BLAKE3 every chunk server-side.
+            // Gated by MEDIAGIT_STRONG_VERIFY=1; endpoint unavailability is non-fatal.
+            if std::env::var("MEDIAGIT_STRONG_VERIFY").as_deref() == Ok("1")
+                && !full_chunks.is_empty()
+            {
+                let hexes: Vec<String> = full_chunks.iter().map(|c| c.to_hex()).collect();
+                tracing::debug!(count = hexes.len(), "Running strong chunk integrity verify");
+                match self.strong_verify_chunks(&hexes).await {
+                    Ok(invalid) if !invalid.is_empty() => {
+                        anyhow::bail!(
+                            "Strong verify found {} chunk(s) with corrupted content: {:?}",
+                            invalid.len(),
+                            &invalid[..invalid.len().min(5)]
+                        );
+                    }
+                    Ok(_) => tracing::debug!("Strong verify passed"),
+                    Err(e) => {
+                        tracing::warn!(err = %e, "Strong verify endpoint unavailable; skipping")
+                    }
                 }
             }
 
@@ -2471,7 +2524,8 @@ impl ProtocolClient {
                                                         }
                                                         break 'direct;
                                                     }
-                                                    TransferOutcome::PermanentChunk => {
+                                                    TransferOutcome::PermanentChunk
+                                                    | TransferOutcome::PermanentChunkAfterDelay(_) => {
                                                         tracing::warn!(
                                                             chunk = %hex,
                                                             attempt,
@@ -2896,25 +2950,32 @@ impl ProtocolClient {
         let response = match self.client.post(&url).json(&payload).send().await {
             Ok(r) => r,
             Err(e) => {
-                tracing::debug!(error = %e, "chunk-deltas/check failed (treating as no deltas)");
+                // Transport failure is unexpected — warn so production issues surface
+                // instead of silently routing all chunks through /chunks/<id> and 404ing.
+                tracing::warn!(error = %e, "chunk-deltas/check request failed (treating as no deltas)");
                 return empty;
             }
         };
 
         if !response.status().is_success() {
-            // 404 means old server — silently fall back. Other statuses also
-            // fall back (best-effort optimization, never blocks the clone).
-            tracing::debug!(
-                status = %response.status(),
-                "chunk-deltas/check non-success (treating as no deltas)"
-            );
+            if response.status().as_u16() == 404 {
+                // 404 means old server without this endpoint — expected, silently fall back.
+                tracing::debug!(status = %response.status(), "chunk-deltas/check 404 (old server); treating as no deltas");
+            } else {
+                // Non-404 failures (500/503/etc.) are unexpected — log at warn so
+                // production probe failures are visible rather than silently causing clone 404s.
+                tracing::warn!(
+                    status = %response.status(),
+                    "chunk-deltas/check non-success (treating as no deltas)"
+                );
+            }
             return empty;
         }
 
         let map: std::collections::HashMap<String, String> = match response.json().await {
             Ok(m) => m,
             Err(e) => {
-                tracing::debug!(error = %e, "chunk-deltas/check parse failed");
+                tracing::warn!(error = %e, "chunk-deltas/check response parse failed (treating as no deltas)");
                 return empty;
             }
         };
@@ -3282,6 +3343,38 @@ impl ProtocolClient {
                                 let response = client.get(&url).send().await.map_err(|e| {
                                     anyhow::anyhow!("Failed to download chunk {}: {}", chunk_id, e)
                                 })?;
+                                // F3: server returns 409 when the chunk is delta-only.
+                                // This happens when our POST /chunk-deltas/check probe failed
+                                // silently and we ended up in the wrong (full-chunk) pass.
+                                // Re-route: download via /chunk-deltas/<id> and store as delta.
+                                if response.status() == reqwest::StatusCode::CONFLICT {
+                                    let body: serde_json::Value =
+                                        response.json().await.unwrap_or_default();
+                                    let base_hex =
+                                        body.get("base_id").and_then(|v| v.as_str()).unwrap_or("");
+                                    if let Ok(base_id) = Oid::from_hex(base_hex) {
+                                        let delta_url =
+                                            format!("{}/chunk-deltas/{}", base_url, hex);
+                                        match client.get(&delta_url).send().await {
+                                            Ok(dr) if dr.status().is_success() => {
+                                                let delta_bytes = dr.bytes().await?.to_vec();
+                                                let net = delta_bytes.len() as u64;
+                                                odb.write_chunk_delta(
+                                                    &chunk_id,
+                                                    &base_id,
+                                                    &delta_bytes,
+                                                )
+                                                .await?;
+                                                return Ok::<_, anyhow::Error>((chunk_id, net));
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    anyhow::bail!(
+                                        "GET /chunks/{} returned 409 but delta reclassification failed",
+                                        chunk_id
+                                    );
+                                }
                                 if !response.status().is_success() {
                                     anyhow::bail!(
                                         "GET /chunks/{} failed with status: {}",
@@ -3525,6 +3618,10 @@ async fn download_chunk_direct(
             .to_string();
         let body = resp.text().await.unwrap_or_default();
         let outcome = crate::error_class::classify_auto_get(status, url, &ct, &hc, &body);
+        if let crate::error_class::TransferOutcome::PermanentChunkAfterDelay(delay) = outcome {
+            tokio::time::sleep(delay).await;
+            anyhow::bail!("presigned GET 404 (after {delay:?} delay): status={status}");
+        }
         anyhow::bail!("presigned GET failed: status={status} outcome={outcome:?}");
     }
 
@@ -3791,7 +3888,9 @@ async fn upload_chunk_mpu(
                                 "MPU part transient error; retrying"
                             );
                         }
-                        TransferOutcome::PermanentChunk | TransferOutcome::PermanentConfig => {
+                        TransferOutcome::PermanentChunk
+                        | TransferOutcome::PermanentChunkAfterDelay(_)
+                        | TransferOutcome::PermanentConfig => {
                             tracing::debug!(
                                 chunk = %chunk_hex,
                                 part = part.part_number,
