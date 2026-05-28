@@ -17,12 +17,13 @@
 //! incrementally without loading entire packs into memory.
 
 use crate::hash::Hasher;
-use crate::pack::PackHeader;
+use crate::pack::{PackHeader, PackKind, PACK_HEADER_SIZE};
 use crate::streaming_index::StreamingPackIndex;
 use crate::{ObjectType, Oid};
 use std::io;
-use std::path::Path;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use std::path::{Path, PathBuf};
+use tempfile::NamedTempFile;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use tracing::{debug, trace};
 
 const DELTA_MAGIC: &[u8; 5] = b"DELTA";
@@ -190,6 +191,36 @@ impl<R: AsyncRead + Unpin> StreamingPackReader<R> {
     }
 }
 
+/// Result returned by `StreamingPackWriter::finalize_cloud`.
+pub struct CloudPackResult {
+    /// 32-byte BLAKE3 hash — the content address of the completed pack.
+    pub pack_oid: Vec<u8>,
+    /// Total byte length of the pack file.
+    pub byte_len: u64,
+    /// Path to the completed tempfile on disk (caller must upload then drop).
+    pub temp_path: PathBuf,
+    /// Chunk index entries sorted by offset.
+    pub index: Vec<CloudChunkLoc>,
+}
+
+/// One entry in the cloud chunk index.
+pub struct CloudChunkLoc {
+    pub chunk_oid: Oid,
+    pub offset: u64,
+    pub length: u32,
+}
+
+/// Returns the maximum number of concurrent pack-builder tasks.
+///
+/// Reads `MEDIAGIT_PACK_BUILDER_CONCURRENCY` env var; defaults to `2`.
+#[allow(dead_code)]
+pub fn pack_builder_concurrency() -> usize {
+    std::env::var("MEDIAGIT_PACK_BUILDER_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2)
+}
+
 /// Streaming pack writer that generates pack data incrementally
 ///
 /// Uses `StreamingPackIndex` for O(1) memory regardless of object count.
@@ -200,6 +231,9 @@ pub struct StreamingPackWriter<W: AsyncWrite + Unpin> {
     hasher: Hasher,
     index: Option<StreamingPackIndex>,
     current_offset: u64,
+    kind: PackKind,
+    /// Kept alive so the tempfile is not deleted until `finalize_cloud` consumes it.
+    temp_named_file: Option<NamedTempFile>,
 }
 
 impl<W: AsyncWrite + Unpin> StreamingPackWriter<W> {
@@ -233,7 +267,9 @@ impl<W: AsyncWrite + Unpin> StreamingPackWriter<W> {
             expected_count,
             hasher,
             index: Some(index),
-            current_offset: 13, // After 13-byte header (PACK + version u32 + count u32 + kind u8)
+            current_offset: PACK_HEADER_SIZE as u64, // After pack header (PACK + version u32 + count u32 + kind u8)
+            kind: PackKind::Local,
+            temp_named_file: None,
         })
     }
 
@@ -299,10 +335,10 @@ impl<W: AsyncWrite + Unpin> StreamingPackWriter<W> {
             ));
         }
 
-        // Current offset is where the index will start (after header + objects)
-        let index_offset = self.current_offset as u32;
+        // Current offset is where the chunk_index will start (after header + objects)
+        let chunk_index_offset: u64 = self.current_offset;
 
-        // Finalize streaming index to get serialized bytes
+        // Finalize streaming index to get serialized bytes (count u32 + entries)
         let index_bytes = if let Some(index) = self.index.take() {
             index.finalize().await?
         } else {
@@ -314,8 +350,8 @@ impl<W: AsyncWrite + Unpin> StreamingPackWriter<W> {
         self.writer.write_all(&index_bytes).await?;
         self.hasher.update(&index_bytes);
 
-        // Write index offset (the position where the index starts in the pack file)
-        let index_offset_bytes = index_offset.to_le_bytes();
+        // Write chunk_index_offset as u64 LE immediately before checksum
+        let index_offset_bytes = chunk_index_offset.to_le_bytes();
         self.writer.write_all(&index_offset_bytes).await?;
         self.hasher.update(&index_offset_bytes);
 
@@ -328,7 +364,7 @@ impl<W: AsyncWrite + Unpin> StreamingPackWriter<W> {
 
         debug!(
             objects_written = self.objects_written,
-            index_offset = index_offset,
+            chunk_index_offset = chunk_index_offset,
             "Pack finalized with index and checksum"
         );
 
@@ -338,6 +374,165 @@ impl<W: AsyncWrite + Unpin> StreamingPackWriter<W> {
     /// Get number of objects written so far
     pub fn objects_written(&self) -> u32 {
         self.objects_written
+    }
+}
+
+impl StreamingPackWriter<tokio::fs::File> {
+    /// Create an open-ended streaming pack writer that streams to a temporary file.
+    ///
+    /// Unlike `new`, this constructor does not require knowing the object count upfront.
+    /// Use `finalize_cloud` (not `finalize`) to complete the pack.
+    ///
+    /// # Arguments
+    /// * `kind` - Pack storage kind (e.g. `PackKind::CloudObject`)
+    /// * `temp_dir` - Directory where the temporary pack file is created
+    pub async fn new_open_ended(kind: PackKind, temp_dir: &Path) -> io::Result<Self> {
+        // Create the named tempfile synchronously then open it async
+        let named_tf = NamedTempFile::new_in(temp_dir).map_err(|e: std::io::Error| {
+            io::Error::new(e.kind(), format!("Failed to create temp pack file: {}", e))
+        })?;
+        let path = named_tf.path().to_path_buf();
+
+        // Open the tempfile path for async read+write
+        let file: tokio::fs::File = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .await?;
+
+        // Write 13-byte placeholder header (will be patched in finalize_cloud)
+        let mut writer = file;
+        writer.write_all(&[0u8; PACK_HEADER_SIZE]).await?;
+
+        // Create streaming index
+        let index = StreamingPackIndex::new(temp_dir).await?;
+
+        debug!(
+            kind = ?kind,
+            temp_dir = %temp_dir.display(),
+            "Open-ended streaming pack writer initialized"
+        );
+
+        Ok(Self {
+            writer,
+            objects_written: 0,
+            expected_count: 0, // sentinel: open-ended
+            hasher: Hasher::new(),
+            index: Some(index),
+            current_offset: PACK_HEADER_SIZE as u64,
+            kind,
+            temp_named_file: Some(named_tf),
+        })
+    }
+
+    /// Finalize the open-ended pack: patch the header, write the trailer, compute BLAKE3.
+    ///
+    /// Returns a `CloudPackResult` with the temp file path left on disk.
+    /// The caller is responsible for uploading and then dropping the file.
+    pub async fn finalize_cloud(mut self) -> io::Result<CloudPackResult> {
+        let actual_count = self.objects_written;
+        let chunk_index_offset: u64 = self.current_offset;
+
+        // Finalize the streaming index to get [count u32][entries 44B×N]
+        let index_bytes = if let Some(index) = self.index.take() {
+            index.finalize().await?
+        } else {
+            vec![0, 0, 0, 0]
+        };
+
+        // Write index bytes then chunk_index_offset pointer (no BLAKE3 yet)
+        self.writer.write_all(&index_bytes).await?;
+        self.writer
+            .write_all(&chunk_index_offset.to_le_bytes())
+            .await?;
+
+        // --- Patch the 13-byte header at offset 0 ---
+        let mut real_header = PackHeader::new(actual_count);
+        real_header.kind = self.kind;
+        let header_bytes = real_header.to_bytes();
+
+        self.writer.seek(std::io::SeekFrom::Start(0)).await?;
+        self.writer.write_all(&header_bytes).await?;
+
+        // --- Stream-read the entire file to compute BLAKE3 ---
+        self.writer.seek(std::io::SeekFrom::Start(0)).await?;
+        self.writer.flush().await?;
+
+        let mut hash_hasher = Hasher::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = self.writer.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            hash_hasher.update(&buf[..n]);
+        }
+        let checksum: [u8; 32] = hash_hasher.finalize();
+
+        // Append checksum at end
+        self.writer.seek(std::io::SeekFrom::End(0)).await?;
+        self.writer.write_all(&checksum).await?;
+        self.writer.flush().await?;
+
+        // Total file size
+        let byte_len = self.writer.seek(std::io::SeekFrom::End(0)).await?;
+
+        // --- Build Vec<CloudChunkLoc> from index_bytes ---
+        // Format: [count: u32 LE][OID 32B | offset u64 LE | length u32 LE] × count
+        let mut cloud_index = Vec::with_capacity(actual_count as usize);
+        if index_bytes.len() >= 4 {
+            let count = u32::from_le_bytes([
+                index_bytes[0],
+                index_bytes[1],
+                index_bytes[2],
+                index_bytes[3],
+            ]) as usize;
+            let entries_data = &index_bytes[4..];
+            const ENTRY_SIZE: usize = 44; // 32 OID + 8 offset + 4 length
+            for i in 0..count {
+                let base = i * ENTRY_SIZE;
+                if base + ENTRY_SIZE > entries_data.len() {
+                    break;
+                }
+                let mut oid_bytes = [0u8; 32];
+                oid_bytes.copy_from_slice(&entries_data[base..base + 32]);
+                let offset =
+                    u64::from_le_bytes(entries_data[base + 32..base + 40].try_into().unwrap());
+                let length =
+                    u32::from_le_bytes(entries_data[base + 40..base + 44].try_into().unwrap());
+                cloud_index.push(CloudChunkLoc {
+                    chunk_oid: Oid::from_bytes(oid_bytes),
+                    offset,
+                    length,
+                });
+            }
+        }
+
+        // Persist the tempfile so the caller can upload it before dropping.
+        let temp_path: PathBuf = if let Some(named_tf) = self.temp_named_file.take() {
+            let path = named_tf.path().to_path_buf();
+            // Prevent auto-delete: forget the NamedTempFile without running its destructor.
+            std::mem::forget(named_tf);
+            path
+        } else {
+            return Err(io::Error::other(
+                "Missing temp file handle in open-ended writer",
+            ));
+        };
+
+        debug!(
+            objects_written = actual_count,
+            chunk_index_offset = chunk_index_offset,
+            byte_len = byte_len,
+            "Cloud pack finalized"
+        );
+
+        Ok(CloudPackResult {
+            pack_oid: checksum.to_vec(),
+            byte_len,
+            temp_path,
+            index: cloud_index,
+        })
     }
 }
 
@@ -414,5 +609,108 @@ mod tests {
         assert_eq!(read_type, ObjectType::Blob);
         assert_eq!(read_data, test_data);
         assert!(reader.next_object().await.is_none());
+    }
+
+    /// Helper: re-hash all bytes of a file except the trailing 32-byte BLAKE3 checksum.
+    async fn hash_file_minus_checksum(path: &std::path::Path) -> Vec<u8> {
+        let mut file = tokio::fs::File::open(path).await.unwrap();
+        let meta = file.metadata().await.unwrap();
+        let total = meta.len();
+        assert!(total >= 32, "file too small to contain checksum");
+        let to_hash = total - 32;
+
+        let mut hasher = Hasher::new();
+        let mut remaining = to_hash;
+        let mut buf = vec![0u8; 64 * 1024];
+        while remaining > 0 {
+            let want = (remaining as usize).min(buf.len());
+            let n = file.read(&mut buf[..want]).await.unwrap();
+            assert!(n > 0);
+            hasher.update(&buf[..n]);
+            remaining -= n as u64;
+        }
+        hasher.finalize().to_vec()
+    }
+
+    #[tokio::test]
+    async fn test_open_ended_round_trip_1_chunk() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let mut writer =
+            StreamingPackWriter::new_open_ended(PackKind::CloudObject, temp_dir.path())
+                .await
+                .unwrap();
+
+        let data = b"single chunk data";
+        let oid = Oid::hash(data);
+        writer
+            .write_object(oid, ObjectType::Blob, data)
+            .await
+            .unwrap();
+
+        let result = writer.finalize_cloud().await.unwrap();
+
+        // BLAKE3 is 32 bytes
+        assert_eq!(result.pack_oid.len(), 32);
+
+        // Verify stored BLAKE3 matches re-computed hash
+        let expected_hash = hash_file_minus_checksum(&result.temp_path).await;
+        assert_eq!(result.pack_oid, expected_hash, "BLAKE3 mismatch");
+
+        // Index has exactly 1 entry with the correct OID
+        assert_eq!(result.index.len(), 1);
+        assert_eq!(result.index[0].chunk_oid, oid);
+
+        // Cleanup
+        let _ = std::fs::remove_file(&result.temp_path);
+    }
+
+    #[tokio::test]
+    async fn test_open_ended_round_trip_128_chunks() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let mut writer =
+            StreamingPackWriter::new_open_ended(PackKind::CloudObject, temp_dir.path())
+                .await
+                .unwrap();
+
+        let mut expected_oids = Vec::with_capacity(128);
+        for i in 0u32..128 {
+            let data = format!("chunk-{}", i);
+            let oid = Oid::hash(data.as_bytes());
+            expected_oids.push(oid);
+            writer
+                .write_object(oid, ObjectType::Blob, data.as_bytes())
+                .await
+                .unwrap();
+        }
+
+        let result = writer.finalize_cloud().await.unwrap();
+
+        assert_eq!(result.pack_oid.len(), 32);
+
+        // Verify BLAKE3
+        let expected_hash = hash_file_minus_checksum(&result.temp_path).await;
+        assert_eq!(result.pack_oid, expected_hash, "BLAKE3 mismatch");
+
+        // All 128 entries present
+        assert_eq!(result.index.len(), 128);
+
+        // OIDs match insertion order (streaming index preserves insertion order)
+        for (i, entry) in result.index.iter().enumerate() {
+            assert_eq!(
+                entry.chunk_oid, expected_oids[i],
+                "OID mismatch at index {}",
+                i
+            );
+        }
+
+        // Offsets are strictly increasing
+        for w in result.index.windows(2) {
+            assert!(w[1].offset > w[0].offset, "offsets not strictly increasing");
+        }
+
+        // Cleanup
+        let _ = std::fs::remove_file(&result.temp_path);
     }
 }

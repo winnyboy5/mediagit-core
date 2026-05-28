@@ -533,6 +533,61 @@ impl StorageBackend for GcsBackend {
         Ok(buf)
     }
 
+    async fn get_streaming_range(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+    ) -> anyhow::Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+        >,
+    > {
+        if key.is_empty() {
+            return Err(anyhow::anyhow!("key cannot be empty"));
+        }
+        let prefixed = crate::prefixed_key(&self.config.prefix, key);
+        let bucket_path = self.bucket_path();
+        let storage = self.storage.clone();
+        let len = range.end - range.start;
+
+        let resp = storage
+            .read_object(&bucket_path, &prefixed)
+            .set_read_range(ReadRange::segment(range.start, len))
+            .send()
+            .await
+            .map_err(|e| {
+                if Self::is_not_found(&e) {
+                    anyhow::anyhow!("object not found: {}", key)
+                } else {
+                    anyhow::anyhow!(
+                        "GCS get_streaming_range error for key '{}' [{}+{}]: {}",
+                        key,
+                        range.start,
+                        len,
+                        e
+                    )
+                }
+            })?;
+
+        let stream = futures::stream::unfold(resp, |mut r| async move {
+            match r.next().await {
+                Some(Ok(chunk)) => Some((
+                    Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::copy_from_slice(&chunk)),
+                    r,
+                )),
+                Some(Err(e)) => Some((
+                    Err(anyhow::anyhow!(
+                        "GCS get_streaming_range stream error: {}",
+                        e
+                    )),
+                    r,
+                )),
+                None => None,
+            }
+        });
+        Ok(Box::pin(stream))
+    }
+
     /// Store an object in GCS.
     ///
     /// Uses `write_object` with `Bytes::copy_from_slice` for a single Arc-managed

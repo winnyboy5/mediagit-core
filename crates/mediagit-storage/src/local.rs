@@ -419,6 +419,51 @@ impl StorageBackend for LocalBackend {
         }
     }
 
+    async fn get_streaming_range(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+    ) -> anyhow::Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+        >,
+    > {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        let path = self.object_path(key);
+        let mut file = tokio::fs::File::open(&path).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!("object not found: {}", key)
+            } else {
+                anyhow::anyhow!("get_streaming_range open {}: {}", key, e)
+            }
+        })?;
+        file.seek(std::io::SeekFrom::Start(range.start)).await?;
+        let remaining = range.end - range.start;
+        let stream = futures::stream::unfold((file, remaining), |(mut f, mut left)| async move {
+            if left == 0 {
+                return None;
+            }
+            let chunk_size = left.min(65536) as usize;
+            let mut buf = vec![0u8; chunk_size];
+            match f.read(&mut buf).await {
+                Ok(0) => None,
+                Ok(n) => {
+                    buf.truncate(n);
+                    left -= n as u64;
+                    Some((
+                        Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(buf)),
+                        (f, left),
+                    ))
+                }
+                Err(e) => Some((
+                    Err(anyhow::anyhow!("get_streaming_range read: {}", e)),
+                    (f, left),
+                )),
+            }
+        });
+        Ok(Box::pin(stream))
+    }
+
     /// Store an object with the given key
     ///
     /// Uses atomic writes: writes to a temporary file first, then atomically
