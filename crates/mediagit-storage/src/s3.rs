@@ -667,6 +667,55 @@ impl StorageBackend for S3Backend {
         Ok(Box::pin(stream))
     }
 
+    async fn get_streaming_range(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+    ) -> anyhow::Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+        >,
+    > {
+        Self::validate_key(key)?;
+        let key_clone = crate::prefixed_key(&self.config.prefix, key);
+        let client = self.client.clone();
+        let bucket = self.config.bucket.clone();
+        let stats = self.stats.clone();
+
+        let response = client
+            .get_object()
+            .bucket(&bucket)
+            .key(&key_clone)
+            .range(format!("bytes={}-{}", range.start, range.end - 1))
+            .send()
+            .await
+            .map_err(|e| anyhow!("get_streaming_range {}: {}", key_clone, e))?;
+
+        let reader = response.body.into_async_read();
+        let stream = futures::stream::unfold((reader, stats), |(mut rdr, stats)| async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf = vec![0u8; 65536];
+            match rdr.read(&mut buf).await {
+                Ok(0) => None,
+                Ok(n) => {
+                    buf.truncate(n);
+                    stats
+                        .total_bytes_downloaded
+                        .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                    Some((
+                        Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(buf)),
+                        (rdr, stats),
+                    ))
+                }
+                Err(e) => Some((
+                    Err(anyhow!("get_streaming_range chunk: {}", e)),
+                    (rdr, stats),
+                )),
+            }
+        });
+        Ok(Box::pin(stream))
+    }
+
     /// Store an object in S3
     ///
     /// For objects smaller than the configured part size, uses direct put_object.

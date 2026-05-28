@@ -16,23 +16,24 @@
 //! Pack files provide efficient storage of multiple objects with optional
 //! delta compression for similar objects.
 //!
-//! # Format
+//! # Format (version 3)
 //!
 //! ```text
 //! [Header: 13 bytes]
 //!   - Signature: "PACK" (4 bytes)
-//!   - Version: u32 (4 bytes, currently 2)
+//!   - Version: u32 (4 bytes, currently 3)
 //!   - Object count: u32 (4 bytes)
 //!   - Kind: u8 (1 byte) — 0=Local, 1=CloudObject, 2=Reconstruction
 //! [Objects: variable]
 //!   - Object entries (variable size)
-//! [Index: variable]
-//!   - OID -> (offset, size) mapping
-//! [Checksum: 32 bytes]
-//!   - BLAKE3 of pack content
+//! [chunk_index_count: u32 LE]        ← chunk_index_offset points here
+//! [chunk_index entries × count]      ← (chunk_oid: 32B, offset: u64 LE, length: u32 LE) × count
+//! [chunk_index_offset: u64 LE]       ← 8 bytes immediately before checksum
+//! [BLAKE3 checksum: 32 bytes]        ← pack OID = trailing 32 bytes
 //! ```
 //!
-//! Older packs without the kind byte are read as `PackKind::Local`.
+//! The chunk_index is sorted by offset. The BLAKE3 checksum is computed over
+//! everything before it.
 
 use crate::delta::{Delta, DeltaDecoder};
 use crate::hash::Hasher;
@@ -46,8 +47,13 @@ use tracing::{debug, info, warn};
 const DELTA_MAGIC: &[u8; 5] = b"DELTA";
 
 const PACK_SIGNATURE: &[u8; 4] = b"PACK";
-const PACK_VERSION: u32 = 2;
+const PACK_VERSION: u32 = 3;
 const CHECKSUM_SIZE: usize = 32;
+/// Size of the 13-byte pack file header (PACK signature + version u32 + count u32 + kind u8).
+pub const PACK_HEADER_SIZE: usize = 13;
+/// Size of one chunk index entry: chunk_oid (32B) + offset (u64, 8B) + length (u32, 4B).
+#[allow(dead_code)]
+pub const CLOUD_INDEX_ENTRY_SIZE: usize = 44;
 
 /// Pack storage context. Byte 12 of the binary header (0 for packs written before this field).
 ///
@@ -96,9 +102,9 @@ impl PackHeader {
         }
     }
 
-    /// Serialize header to bytes (13 bytes: PACK + version u32 LE + count u32 LE + kind u8)
+    /// Serialize header to bytes (PACK_HEADER_SIZE bytes: PACK + version u32 LE + count u32 LE + kind u8)
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(13);
+        let mut bytes = Vec::with_capacity(PACK_HEADER_SIZE);
         bytes.extend_from_slice(PACK_SIGNATURE);
         bytes.extend_from_slice(&self.version.to_le_bytes());
         bytes.extend_from_slice(&self.object_count.to_le_bytes());
@@ -106,9 +112,9 @@ impl PackHeader {
         bytes
     }
 
-    /// Deserialize header from bytes. Accepts both 12-byte (pre-kind) and 13-byte formats.
+    /// Deserialize header from bytes. Requires exactly PACK_HEADER_SIZE (13) bytes.
     pub fn from_bytes(data: &[u8]) -> io::Result<Self> {
-        if data.len() < 12 {
+        if data.len() < PACK_HEADER_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Pack header too short",
@@ -124,11 +130,7 @@ impl PackHeader {
 
         let version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
         let object_count = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
-        let kind = if data.len() >= 13 {
-            PackKind::from_byte(data[12])
-        } else {
-            PackKind::Local
-        };
+        let kind = PackKind::from_byte(data[12]);
 
         if version != PACK_VERSION {
             warn!(
@@ -469,7 +471,7 @@ impl PackWriter {
     ///
     /// # Returns
     ///
-    /// Complete pack file data with header, objects, index, and checksum
+    /// Complete pack file data with header, objects, chunk_index, chunk_index_offset, and checksum
     pub fn finalize(self) -> Vec<u8> {
         let mut pack_data = Vec::new();
 
@@ -483,21 +485,33 @@ impl PackWriter {
         // Write objects
         pack_data.extend_from_slice(&self.data);
 
-        // Now adjust index offsets to be relative to pack file start
-        let mut adjusted_index = PackIndex::new();
-        for (oid, (offset, size)) in &self.index.entries {
-            adjusted_index.insert(*oid, objects_start as u64 + offset, *size);
+        // Build adjusted index with offsets relative to pack file start,
+        // then sort entries by offset for the chunk_index requirement.
+        let mut offset_sorted: Vec<(Oid, u64, u32)> = self
+            .index
+            .entries
+            .iter()
+            .map(|(oid, (offset, size))| (*oid, objects_start as u64 + offset, *size))
+            .collect();
+        offset_sorted.sort_by_key(|(_, offset, _)| *offset);
+
+        // chunk_index_offset points to start of the count u32
+        let chunk_index_offset = pack_data.len() as u64;
+
+        // Write count
+        pack_data.extend_from_slice(&(offset_sorted.len() as u32).to_le_bytes());
+
+        // Write entries: (oid: 32B, offset: u64 LE, size: u32 LE)
+        for (oid, offset, size) in &offset_sorted {
+            pack_data.extend_from_slice(oid.as_bytes());
+            pack_data.extend_from_slice(&offset.to_le_bytes());
+            pack_data.extend_from_slice(&size.to_le_bytes());
         }
 
-        // Write index
-        let index_bytes = adjusted_index.to_bytes();
-        let index_offset = pack_data.len() as u32;
-        pack_data.extend_from_slice(&index_bytes);
+        // Write chunk_index_offset as u64 LE immediately before the checksum
+        pack_data.extend_from_slice(&chunk_index_offset.to_le_bytes());
 
-        // Write index offset (helps us find the index when reading)
-        pack_data.extend_from_slice(&index_offset.to_le_bytes());
-
-        // Calculate and write checksum for content (excluding checksum itself)
+        // Calculate and write checksum over everything before it
         let mut h = Hasher::new();
         h.update(&pack_data[..]);
         let checksum = h.finalize();
@@ -533,15 +547,16 @@ impl PackReader {
     ///
     /// Returns error if pack format is invalid
     pub fn new(data: Vec<u8>) -> io::Result<Self> {
-        if data.len() < 12 + CHECKSUM_SIZE + 4 {
+        // Minimum: header(13) + count(4) + chunk_index_offset(8) + checksum(32) = 57
+        if data.len() < PACK_HEADER_SIZE + 4 + 8 + CHECKSUM_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Pack file too short",
             ));
         }
 
-        // Verify header (pass up to 13 bytes so kind byte is included when present)
-        PackHeader::from_bytes(&data[0..data.len().min(13)])?;
+        // Verify header
+        PackHeader::from_bytes(&data[..PACK_HEADER_SIZE])?;
 
         // Verify checksum (at end)
         let checksum_offset = data.len() - CHECKSUM_SIZE;
@@ -557,31 +572,35 @@ impl PackReader {
             ));
         }
 
-        // Read index offset (located right before index offset marker and checksum)
-        let index_offset_pos = data.len() - CHECKSUM_SIZE - 4;
-        let index_offset = u32::from_le_bytes([
+        // Read chunk_index_offset (u64 LE immediately before the checksum)
+        let index_offset_pos = checksum_offset - 8;
+        let chunk_index_offset = u64::from_le_bytes([
             data[index_offset_pos],
             data[index_offset_pos + 1],
             data[index_offset_pos + 2],
             data[index_offset_pos + 3],
+            data[index_offset_pos + 4],
+            data[index_offset_pos + 5],
+            data[index_offset_pos + 6],
+            data[index_offset_pos + 7],
         ]) as usize;
 
-        if index_offset < 12 {
+        if chunk_index_offset < PACK_HEADER_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Invalid pack index offset",
+                "Invalid pack chunk_index_offset",
             ));
         }
 
-        // Parse index
-        let index = PackIndex::from_bytes(&data[index_offset..index_offset_pos])?;
+        // Parse index: count u32 at chunk_index_offset, then count × 44B entries
+        let index = PackIndex::from_bytes(&data[chunk_index_offset..index_offset_pos])?;
 
         info!(object_count = index.len(), "Pack file loaded successfully");
 
         Ok(Self {
             data,
             index,
-            _object_data_end: index_offset,
+            _object_data_end: chunk_index_offset,
         })
     }
 
@@ -739,6 +758,13 @@ impl PackReader {
         self.index.iter().map(|(oid, _)| *oid).collect()
     }
 
+    /// Look up a chunk by OID for Range-GET use.
+    ///
+    /// Returns `(offset, length)` if found, or `None` if the OID is not in this pack.
+    pub fn chunk_oid_to_loc(&self, oid: &Oid) -> Option<(u64, u32)> {
+        self.index.lookup(oid)
+    }
+
     /// Get pack statistics
     pub fn stats(&self) -> PackMetadata {
         let object_count = self.index.len() as u32;
@@ -783,17 +809,14 @@ mod tests {
     fn test_pack_header_roundtrip() {
         let header = PackHeader::new(42);
         let bytes = header.to_bytes();
-        assert_eq!(bytes.len(), 13);
+        assert_eq!(bytes.len(), PACK_HEADER_SIZE);
         assert_eq!(&bytes[0..4], PACK_SIGNATURE);
         assert_eq!(bytes[12], 0); // PackKind::Local
 
         let decoded = PackHeader::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.version, PACK_VERSION);
         assert_eq!(decoded.object_count, 42);
         assert_eq!(decoded.kind, PackKind::Local);
-
-        // Backward compat: 12-byte header (pre-kind) defaults to Local
-        let decoded_old = PackHeader::from_bytes(&bytes[0..12]).unwrap();
-        assert_eq!(decoded_old.kind, PackKind::Local);
     }
 
     #[test]
