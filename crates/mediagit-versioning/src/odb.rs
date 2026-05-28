@@ -11,10 +11,10 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
 
-//! Object Database (ODB) - Content-addressable storage with SHA-256 addressing
+//! Object Database (ODB) - Content-addressable storage with BLAKE3 addressing
 //!
 //! The ODB provides:
-//! - **Content-addressable storage**: Objects are identified by SHA-256 hash of their content
+//! - **Content-addressable storage**: Objects are identified by BLAKE3 hash of their content
 //! - **Automatic deduplication**: Identical content is stored only once
 //! - **LRU caching**: Frequently accessed objects are cached in memory
 //! - **Observable metrics**: Track cache performance and deduplication efficiency
@@ -228,7 +228,7 @@ async fn chunk_delta_chain_contains_impl(
 ///
 /// - **Storage**: Pluggable backend via `StorageBackend` trait
 /// - **Caching**: Moka LRU cache for hot objects
-/// - **Addressing**: SHA-256 hash for content addressing
+/// - **Addressing**: BLAKE3 hash for content addressing
 /// - **Organization**: Git-like object paths: `objects/{first2hex}/{remaining62hex}`
 ///
 /// # Examples
@@ -517,7 +517,7 @@ impl ObjectDatabase {
 
     /// Write an object to the database
     ///
-    /// Computes the SHA-256 hash of the content and stores it if not already present.
+    /// Computes the BLAKE3 hash of the content and stores it if not already present.
     /// Automatic deduplication: identical content returns the same OID without re-storing.
     ///
     /// # Arguments
@@ -527,7 +527,7 @@ impl ObjectDatabase {
     ///
     /// # Returns
     ///
-    /// The OID (SHA-256 hash) of the object
+    /// The OID (BLAKE3 hash) of the object
     ///
     /// # Examples
     ///
@@ -635,7 +635,7 @@ impl ObjectDatabase {
     ///
     /// # Returns
     ///
-    /// The OID (SHA-256 hash) of the object
+    /// The OID (BLAKE3 hash) of the object
     pub async fn write_with_path(
         &self,
         obj_type: ObjectType,
@@ -799,20 +799,10 @@ impl ObjectDatabase {
                             .map_err(|e| anyhow::anyhow!("Failed to compress chunk delta: {}", e))?
                     };
 
-                    self.storage
-                        .put(&delta_key, &compressed_delta)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("Failed to store chunk delta: {}", e))?;
-
-                    // TOCTOU guard: O(1) in-memory check inside a short-held lock.
-                    // The transitive chain check above is NOT atomic; two workers can
-                    // both pass it and then write A→B / B→A, creating a cycle on disk.
-                    // We prevent this by recording committed pairs in a HashSet.
-                    // Only the HashSet mutation is inside the lock — no network IO —
-                    // so the lock is held for microseconds rather than hundreds of ms.
-                    // (base_id, chunk.id) in the set means base is already a delta of
-                    // chunk; adding chunk→base now would form a direct cycle, so abort.
-                    let should_write_meta = {
+                    // TOCTOU guard FIRST: check+register before any I/O.  If the
+                    // reverse pair (base_id, chunk.id) is already committed, skip all
+                    // writes — no orphaned binary on disk.
+                    let should_write = {
                         let mut pairs = self.delta_written_pairs.lock().await;
                         if pairs.contains(&(base_id, chunk.id)) {
                             false
@@ -822,33 +812,41 @@ impl ObjectDatabase {
                         }
                     };
 
-                    if should_write_meta {
-                        let meta_key = format!("chunk-deltas/{}.meta", chunk.id.to_hex());
-                        let meta_data = format!("base:{}", base_id.to_hex());
-                        self.storage
-                            .put(&meta_key, meta_data.as_bytes())
-                            .await
-                            .map_err(|e| {
-                                anyhow::anyhow!("Failed to store chunk delta meta: {}", e)
-                            })?;
-                        debug!(
-                            chunk_id = %chunk.id,
-                            base_id = %base_id,
-                            original_size = chunk.data.len(),
-                            delta_size = delta_bytes.len(),
-                            ratio = delta_ratio,
-                            similarity = score.score,
-                            "Stored chunk as delta"
-                        );
-                        return Ok(true);
+                    if !should_write {
+                        return Ok(false);
                     }
-                    // Reverse pair already committed (TOCTOU race closed): orphaned
-                    // delta bytes are harmless — gc will remove them on next run.
+
+                    // Write .meta FIRST — it is the durability anchor for all existence
+                    // probes (odb.rs:exists, check_chunk_deltas_exist). Writing meta before
+                    // the binary means a crash between the two writes leaves an unreachable
+                    // binary (collected by `gc`) rather than a binary with no routing sidecar
+                    // (which would cause clone 404 when the probe correctly returns the id
+                    // but the download handler sees no meta and returns NOT_FOUND).
+                    let meta_key = format!("chunk-deltas/{}.meta", chunk.id.to_hex());
+                    let meta_data = format!("base:{}", base_id.to_hex());
+                    if let Err(e) = self.storage.put(&meta_key, meta_data.as_bytes()).await {
+                        if !self.storage.exists(&meta_key).await.unwrap_or(false) {
+                            return Err(anyhow::anyhow!("Failed to store chunk delta meta: {}", e));
+                        }
+                    }
+
+                    if let Err(e) = self.storage.put(&delta_key, &compressed_delta).await {
+                        // Best-effort cleanup: remove the .meta we already committed so the
+                        // chunk is not permanently misrouted. If the delete also fails, gc
+                        // will collect the orphaned sidecar on next run.
+                        let _ = self.storage.delete(&meta_key).await;
+                        return Err(anyhow::anyhow!("Failed to store chunk delta binary: {}", e));
+                    }
                     debug!(
                         chunk_id = %chunk.id,
                         base_id = %base_id,
-                        "TOCTOU delta race: reverse pair already committed; degrading to full chunk"
+                        original_size = chunk.data.len(),
+                        delta_size = delta_bytes.len(),
+                        ratio = delta_ratio,
+                        similarity = score.score,
+                        "Stored chunk as delta"
                     );
+                    return Ok(true);
                 }
             }
         }
@@ -874,7 +872,7 @@ impl ObjectDatabase {
     ///
     /// # Returns
     ///
-    /// The OID (SHA-256 hash) of the original data
+    /// The OID (BLAKE3 hash) of the original data
     pub async fn write_chunked(
         &self,
         obj_type: ObjectType,
@@ -1208,7 +1206,12 @@ impl ObjectDatabase {
         // bytes, chunk order) — independent of worker scheduling. Workers then
         // run the expensive encode/compress/store step in parallel against a
         // pre-selected `base_oid_opt`.
-        let num_workers = num_cpus::get().min(num_chunks).max(2);
+        let num_workers = std::env::var("MEDIAGIT_CHUNK_WRITE_CONCURRENCY")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or_else(num_cpus::get)
+            .min(num_chunks)
+            .max(2);
         let (tx, rx) =
             async_channel::bounded::<(usize, crate::chunking::ContentChunk, Option<Oid>)>(64);
 
@@ -1404,20 +1407,8 @@ impl ObjectDatabase {
                                             .map_err(|e| anyhow::anyhow!("Compress delta: {}", e))?
                                     };
 
-                                    // Tolerate concurrent writes: if put fails but chunk exists, treat as dedup
-                                    if let Err(e) = storage.put(&delta_key, &compressed_delta).await
-                                    {
-                                        if !storage.exists(&delta_key).await.unwrap_or(false) {
-                                            return Err(anyhow::anyhow!("Store delta: {}", e));
-                                        }
-                                    }
-
-                                    // TOCTOU guard: the transitive chain check above is NOT
-                                    // atomic; two workers can both pass it and then write A→B
-                                    // / B→A, creating a cycle on disk. Prevent this by
-                                    // recording committed pairs in a HashSet. Only the
-                                    // HashSet mutation is inside the lock — no network IO.
-                                    let should_write_meta = {
+                                    // TOCTOU guard FIRST: check+register before any I/O.
+                                    let should_write = {
                                         let mut pairs = delta_pairs.lock().await;
                                         if pairs.contains(&(base_id, chunk.id)) {
                                             false
@@ -1427,7 +1418,16 @@ impl ObjectDatabase {
                                         }
                                     };
 
-                                    if should_write_meta {
+                                    if should_write {
+                                        // Tolerate concurrent writes: if put fails but chunk exists, treat as dedup
+                                        if let Err(e) =
+                                            storage.put(&delta_key, &compressed_delta).await
+                                        {
+                                            if !storage.exists(&delta_key).await.unwrap_or(false) {
+                                                return Err(anyhow::anyhow!("Store delta: {}", e));
+                                            }
+                                        }
+
                                         let meta_key =
                                             format!("chunk-deltas/{}.meta", chunk.id.to_hex());
                                         let meta_data = format!("base:{}", base_id.to_hex());
@@ -1453,7 +1453,7 @@ impl ObjectDatabase {
                                         debug!(
                                             chunk_id = %chunk.id,
                                             base_id = %base_id,
-                                            "Parallel: TOCTOU delta race — reverse pair committed; degrading to full chunk"
+                                            "Parallel: TOCTOU delta race — reverse pair committed; skipping write"
                                         );
                                     }
                                 }
@@ -1557,7 +1557,7 @@ impl ObjectDatabase {
     ///
     /// # Returns
     ///
-    /// The OID (SHA-256 hash) of the file content
+    /// The OID (BLAKE3 hash) of the file content
     ///
     /// # Memory Usage
     ///
@@ -1755,20 +1755,8 @@ impl ObjectDatabase {
                                             .map_err(|e| anyhow::anyhow!("Compress delta: {}", e))?
                                     };
 
-                                    // Tolerate concurrent writes: if put fails but chunk exists, treat as dedup
-                                    if let Err(e) = storage.put(&delta_key, &compressed_delta).await
-                                    {
-                                        if !storage.exists(&delta_key).await.unwrap_or(false) {
-                                            return Err(anyhow::anyhow!("Store delta: {}", e));
-                                        }
-                                    }
-
-                                    // TOCTOU guard: the transitive chain check above is NOT
-                                    // atomic; two workers can both pass it and then write A→B
-                                    // / B→A, creating a cycle on disk. Prevent this by
-                                    // recording committed pairs in a HashSet. Only the
-                                    // HashSet mutation is inside the lock — no network IO.
-                                    let should_write_meta = {
+                                    // TOCTOU guard FIRST: check+register before any I/O.
+                                    let should_write = {
                                         let mut pairs = delta_pairs.lock().await;
                                         if pairs.contains(&(base_id, chunk.id)) {
                                             false
@@ -1778,7 +1766,16 @@ impl ObjectDatabase {
                                         }
                                     };
 
-                                    if should_write_meta {
+                                    if should_write {
+                                        // Tolerate concurrent writes: if put fails but chunk exists, treat as dedup
+                                        if let Err(e) =
+                                            storage.put(&delta_key, &compressed_delta).await
+                                        {
+                                            if !storage.exists(&delta_key).await.unwrap_or(false) {
+                                                return Err(anyhow::anyhow!("Store delta: {}", e));
+                                            }
+                                        }
+
                                         let meta_key =
                                             format!("chunk-deltas/{}.meta", chunk.id.to_hex());
                                         let meta_data = format!("base:{}", base_id.to_hex());
@@ -1804,7 +1801,7 @@ impl ObjectDatabase {
                                         debug!(
                                             chunk_id = %chunk.id,
                                             base_id = %base_id,
-                                            "Streaming parallel: TOCTOU delta race — reverse pair committed; degrading to full chunk"
+                                            "Streaming parallel: TOCTOU delta race — reverse pair committed; skipping write"
                                         );
                                     }
                                 }

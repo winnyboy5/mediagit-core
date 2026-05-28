@@ -599,6 +599,31 @@ pub trait StorageBackend: Send + Sync + Debug {
     async fn abort_presigned_mpu(&self, _key: &str, _upload_id: &str) -> anyhow::Result<()> {
         Ok(())
     }
+
+    /// Return the byte length of an object without downloading it.
+    ///
+    /// Returns `Ok(Some(len))` when the object exists, `Ok(None)` when it
+    /// does not. Propagates other errors (permission denied, I/O failure, etc.).
+    async fn head(&self, key: &str) -> anyhow::Result<Option<u64>>;
+}
+
+/// Prepend `prefix` to `key`, separated by `/`.
+///
+/// An absent or empty prefix is a no-op so callers are not forced to
+/// handle the `None` case in hot paths.
+///
+/// ```
+/// use mediagit_storage::prefixed_key;
+/// assert_eq!(prefixed_key(&None, "chunks/abc"), "chunks/abc");
+/// assert_eq!(prefixed_key(&Some(String::new()), "chunks/abc"), "chunks/abc");
+/// assert_eq!(prefixed_key(&Some("t1".into()), "chunks/abc"), "t1/chunks/abc");
+/// assert_eq!(prefixed_key(&Some("t1/".into()), "chunks/abc"), "t1/chunks/abc");
+/// ```
+pub fn prefixed_key(prefix: &Option<String>, key: &str) -> String {
+    match prefix.as_deref().filter(|p| !p.is_empty()) {
+        Some(p) => format!("{}/{}", p.trim_end_matches('/'), key),
+        None => key.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -615,5 +640,22 @@ mod tests {
     fn trait_is_object_safe() {
         // Verify the trait can be used as a trait object
         fn _check_object_safe(_: &dyn StorageBackend) {}
+    }
+
+    #[test]
+    fn prefixed_key_empty_is_identity() {
+        assert_eq!(prefixed_key(&None, "chunks/abc"), "chunks/abc");
+        assert_eq!(
+            prefixed_key(&Some(String::new()), "chunks/abc"),
+            "chunks/abc"
+        );
+        assert_eq!(
+            prefixed_key(&Some("t1".into()), "chunks/abc"),
+            "t1/chunks/abc"
+        );
+        assert_eq!(
+            prefixed_key(&Some("t1/".into()), "chunks/abc"),
+            "t1/chunks/abc"
+        );
     }
 }

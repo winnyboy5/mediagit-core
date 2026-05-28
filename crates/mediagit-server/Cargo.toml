@@ -29,6 +29,7 @@ tokio-util = { version = "0.7", features = ["io"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+blake3 = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
@@ -52,6 +53,7 @@ rustls = { version = "0.23", features = ["ring"] }
 # Internal dependencies
 mediagit-protocol = { path = "../mediagit-protocol" }
 mediagit-versioning = { path = "../mediagit-versioning" }
+mediagit-compression = { path = "../mediagit-compression" }
 mediagit-storage = { path = "../mediagit-storage", features = ["all"] }
 mediagit-config = { path = "../mediagit-config" }
 mediagit-security = { path = "../mediagit-security", features = ["all"] }

@@ -1082,6 +1082,42 @@ impl StorageBackend for MinIOBackend {
         .await
     }
 
+    async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+        Self::validate_key(key)?;
+
+        let client = self.client.clone();
+        let bucket = self.config.bucket.clone();
+        let key_clone = self.full_key(key);
+
+        self.with_retry(|| {
+            let client = client.clone();
+            let bucket = bucket.clone();
+            let key = key_clone.clone();
+
+            Box::pin(async move {
+                match client.head_object().bucket(&bucket).key(&key).send().await {
+                    Ok(resp) => Ok(Some(resp.content_length().unwrap_or(0) as u64)),
+                    Err(e) => {
+                        let emsg = e.to_string().to_lowercase();
+                        if emsg.contains("404")
+                            || emsg.contains("not found")
+                            || emsg.contains("notfound")
+                            || emsg.contains("nosuchkey")
+                            || emsg.contains("does not exist")
+                            || emsg.contains("no such key")
+                            || (emsg.contains("service error") && emsg.len() < 50)
+                        {
+                            Ok(None)
+                        } else {
+                            Err(anyhow!("Failed to head object: {}", e))
+                        }
+                    }
+                }
+            })
+        })
+        .await
+    }
+
     /// Delete an object from MinIO
     async fn delete(&self, key: &str) -> anyhow::Result<()> {
         Self::validate_key(key)?;

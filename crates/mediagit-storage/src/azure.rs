@@ -747,6 +747,31 @@ impl StorageBackend for AzureBackend {
         }
     }
 
+    async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+        Self::validate_key(key)?;
+
+        let wire_key = self.full_key(key);
+        let blob_client = self.client.blob_client(&wire_key);
+
+        match blob_client.get_properties().await {
+            Ok(resp) => Ok(Some(resp.blob.properties.content_length)),
+            Err(e) => {
+                let emsg = e.to_string().to_lowercase();
+                if emsg.contains("404")
+                    || emsg.contains("not found")
+                    || emsg.contains("notfound")
+                    || emsg.contains("blobnotfound")
+                    || emsg.contains("does not exist")
+                    || emsg.contains("containernotfound")
+                {
+                    Ok(None)
+                } else {
+                    Err(Self::map_error(e, key))
+                }
+            }
+        }
+    }
+
     async fn delete(&self, key: &str) -> anyhow::Result<()> {
         Self::validate_key(key)?;
 

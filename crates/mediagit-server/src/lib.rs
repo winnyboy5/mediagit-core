@@ -104,6 +104,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/{repo}/chunks/complete",
             post(handlers::complete_chunk_uploads),
         )
+        .route(
+            "/{repo}/chunks/verify-integrity",
+            post(handlers::verify_chunk_integrity),
+        )
         .route("/{repo}/chunks/mpu/start", post(handlers::mpu_start))
         .route("/{repo}/chunks/mpu/complete", post(handlers::mpu_complete))
         .route("/{repo}/chunks/mpu/abort", post(handlers::mpu_abort))
@@ -259,6 +263,10 @@ pub fn create_router_with_rate_limit(
         .route(
             "/{repo}/chunks/complete",
             post(handlers::complete_chunk_uploads),
+        )
+        .route(
+            "/{repo}/chunks/verify-integrity",
+            post(handlers::verify_chunk_integrity),
         )
         .route("/{repo}/chunks/mpu/start", post(handlers::mpu_start))
         .route("/{repo}/chunks/mpu/complete", post(handlers::mpu_complete))

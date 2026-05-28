@@ -31,10 +31,14 @@
 //!
 //! ## Retry
 //!
-//! The v1.11 SDK has a built-in storage-aware retry policy (AIP-194) enabled by
-//! default. `GcsConfig::max_retries` is preserved for API compat but is not
-//! currently wired to the SDK's attempt limit (adding `google-cloud-gax` as a
-//! direct dep would enable that — deferred).
+//! `Storage` (data plane: put/get) uses `AlwaysRetry.with_attempt_limit(max_retries)`
+//! so upload/download failures are retried up to `GcsConfig::max_retries` times.
+//!
+//! `StorageControl` (gRPC control plane: exists/delete/list) uses the SDK default
+//! AIP-194 policy.  `AlwaysRetry` is deliberately NOT applied here because it
+//! retries `NOT_FOUND`, which `exists()` uses as a fast "absent" signal.  Applying
+//! `AlwaysRetry` to `StorageControl` causes exponential back-off on every missing
+//! chunk, stalling `chunks/check` on a fresh bucket.
 //!
 //! ## Config fields `chunk_size` / `resumable_threshold`
 //!
@@ -48,6 +52,9 @@ use crate::StorageBackend;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, StreamExt, TryStreamExt};
+use google_cloud_auth::signer::Signer;
+use google_cloud_gax::retry_policy::{AlwaysRetry, RetryPolicyExt};
+use google_cloud_storage::builder::storage::SignedUrlBuilder;
 use google_cloud_storage::client::{Storage, StorageControl};
 use google_cloud_storage::model_ext::ReadRange;
 use std::fmt;
@@ -85,6 +92,9 @@ pub struct GcsConfig {
     pub resumable_threshold: usize,
     /// Maximum number of attempts (including the first) for transient failures.
     pub max_retries: u32,
+    /// Optional key prefix applied to every object stored in the bucket.
+    /// When set, all keys are prefixed with `<prefix>/` on the wire.
+    pub prefix: Option<String>,
 }
 
 impl Default for GcsConfig {
@@ -95,6 +105,7 @@ impl Default for GcsConfig {
             chunk_size: 256 * 1024,               // 256 KB — unused in v1
             resumable_threshold: 5 * 1024 * 1024, // 5 MB
             max_retries: 3,
+            prefix: None,
         }
     }
 }
@@ -145,6 +156,12 @@ pub struct GcsBackend {
     /// ~20-25 s when too many concurrent uploads land on the same host.
     /// Configurable via MEDIAGIT_GCS_UPLOAD_CONCURRENCY (default 4).
     upload_semaphore: Arc<tokio::sync::Semaphore>,
+    /// V4 URL signer. `None` when ADC resolved to a credential that cannot
+    /// sign locally or remotely (e.g. workload-identity-federation without
+    /// IAM signBlob). When `None`, `presign_put`/`presign_get` return
+    /// `Ok(None)` and the caller falls back to server-proxied transfer.
+    /// Set `MEDIAGIT_GCS_DISABLE_PRESIGN=1` to force `None` at runtime.
+    signer: Option<Signer>,
 }
 
 impl GcsBackend {
@@ -169,15 +186,18 @@ impl GcsBackend {
     /// Caller must ensure ADC is resolvable before calling (i.e. set
     /// `GOOGLE_APPLICATION_CREDENTIALS` if needed).
     async fn build_clients(config: &GcsConfig) -> anyhow::Result<(Storage, StorageControl)> {
-        // The SDK's default retry policy is already storage-aware (AIP-194 compliant).
-        // We additionally configure the resumable-upload threshold on the Storage
-        // data-plane client so the SDK selects simple vs resumable automatically.
         let storage = Storage::builder()
             .with_resumable_upload_threshold(config.resumable_threshold)
+            .with_retry_policy(AlwaysRetry.with_attempt_limit(config.max_retries))
             .build()
             .await
             .map_err(|e| anyhow::anyhow!("GCS Storage client build failed: {}", e))?;
 
+        // StorageControl (gRPC control plane: exists/delete/list) intentionally uses
+        // the SDK default retry policy rather than AlwaysRetry.  AlwaysRetry retries
+        // NOT_FOUND, which exists() relies on as a fast "absent" signal.  Retrying
+        // NOT_FOUND causes exponential backoff for every missing chunk, stalling
+        // chunks/check when the bucket is empty or a fresh push is underway.
         let control = StorageControl::builder()
             .build()
             .await
@@ -228,6 +248,11 @@ impl GcsBackend {
         let gcs_config = GcsConfig::new(project_id.clone(), bucket_name.clone());
         let (storage, control) = Self::build_clients(&gcs_config).await?;
 
+        // GOOGLE_APPLICATION_CREDENTIALS is now set; ADC picks it up.
+        let signer = google_cloud_auth::credentials::Builder::default()
+            .build_signer()
+            .map_err(|e| anyhow::anyhow!("GCS signer build failed: {}", e))?;
+
         debug!(
             project_id = %project_id,
             bucket_name = %bucket_name,
@@ -239,6 +264,7 @@ impl GcsBackend {
             control: Arc::new(control),
             config: gcs_config,
             upload_semaphore: Self::build_upload_semaphore(),
+            signer: Some(signer),
         })
     }
 
@@ -269,6 +295,10 @@ impl GcsBackend {
 
         let (storage, control) = Self::build_clients(&config).await?;
 
+        let signer = google_cloud_auth::credentials::Builder::default()
+            .build_signer()
+            .map_err(|e| anyhow::anyhow!("GCS signer build failed: {}", e))?;
+
         debug!(
             project_id = %config.project_id,
             bucket_name = %config.bucket_name,
@@ -280,6 +310,7 @@ impl GcsBackend {
             control: Arc::new(control),
             config,
             upload_semaphore: Self::build_upload_semaphore(),
+            signer: Some(signer),
         })
     }
 
@@ -359,11 +390,24 @@ impl GcsBackend {
         let gcs_config = GcsConfig::new(project_id.clone(), bucket_name.clone());
         let (storage, control) = Self::build_clients(&gcs_config).await?;
 
+        let signer = match google_cloud_auth::credentials::Builder::default().build_signer() {
+            Ok(s) => Some(s),
+            Err(e) => {
+                warn!(
+                    target: "mediagit_storage::gcs",
+                    error = %e,
+                    "GCS signer unavailable; presigned URLs disabled, falling back to server proxy"
+                );
+                None
+            }
+        };
+
         Ok(GcsBackend {
             storage: Arc::new(storage),
             control: Arc::new(control),
             config: gcs_config,
             upload_semaphore: Self::build_upload_semaphore(),
+            signer,
         })
     }
 
@@ -442,6 +486,7 @@ impl fmt::Debug for GcsBackend {
             .field("chunk_size", &self.config.chunk_size)
             .field("resumable_threshold", &self.config.resumable_threshold)
             .field("max_retries", &self.config.max_retries)
+            .field("presigned_urls_enabled", &self.signer.is_some())
             .finish()
     }
 }
@@ -457,6 +502,8 @@ impl StorageBackend for GcsBackend {
             return Err(anyhow::anyhow!("key cannot be empty"));
         }
 
+        let key = crate::prefixed_key(&self.config.prefix, key);
+        let key = key.as_str();
         let bucket_path = self.bucket_path();
         debug!(key = %key, bucket = %bucket_path, "Downloading object from GCS");
 
@@ -499,6 +546,8 @@ impl StorageBackend for GcsBackend {
             return Err(anyhow::anyhow!("key cannot be empty"));
         }
 
+        let key = crate::prefixed_key(&self.config.prefix, key);
+        let key = key.as_str();
         debug!(
             key = %key,
             size = data.len(),
@@ -537,6 +586,8 @@ impl StorageBackend for GcsBackend {
             return Err(anyhow::anyhow!("key cannot be empty"));
         }
 
+        let key = crate::prefixed_key(&self.config.prefix, key);
+        let key = key.as_str();
         let bucket_path = self.bucket_path();
 
         match self
@@ -557,12 +608,42 @@ impl StorageBackend for GcsBackend {
         }
     }
 
+    /// Return the byte length of a GCS object without downloading it.
+    async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+        if key.is_empty() {
+            return Err(anyhow::anyhow!("key cannot be empty"));
+        }
+
+        let key = crate::prefixed_key(&self.config.prefix, key);
+        let key = key.as_str();
+        let bucket_path = self.bucket_path();
+
+        match self
+            .control
+            .get_object()
+            .set_bucket(&bucket_path)
+            .set_object(key)
+            .send()
+            .await
+        {
+            Ok(obj) => Ok(Some(obj.size as u64)),
+            Err(e) if Self::is_not_found(&e) => Ok(None),
+            Err(e) => Err(anyhow::anyhow!(
+                "GCS get_object error for key '{}': {}",
+                key,
+                e
+            )),
+        }
+    }
+
     /// Delete an object from GCS (idempotent: 404 is treated as success).
     async fn delete(&self, key: &str) -> anyhow::Result<()> {
         if key.is_empty() {
             return Err(anyhow::anyhow!("key cannot be empty"));
         }
 
+        let key = crate::prefixed_key(&self.config.prefix, key);
+        let key = key.as_str();
         let bucket_path = self.bucket_path();
 
         match self
@@ -597,10 +678,17 @@ impl StorageBackend for GcsBackend {
     /// pagination here to preserve the existing error-mapping pattern.
     async fn list_objects(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
         let bucket_path = self.bucket_path();
+        let wire_prefix = crate::prefixed_key(&self.config.prefix, prefix);
+        let backend_prefix = self.config.prefix.as_deref().unwrap_or("");
+        let strip_prefix = if backend_prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", backend_prefix.trim_end_matches('/'))
+        };
 
         debug!(
             bucket = %self.config.bucket_name,
-            prefix = %prefix,
+            prefix = %wire_prefix,
             "Listing objects from GCS"
         );
 
@@ -610,8 +698,8 @@ impl StorageBackend for GcsBackend {
         loop {
             let mut builder = self.control.list_objects().set_parent(&bucket_path);
 
-            if !prefix.is_empty() {
-                builder = builder.set_prefix(prefix);
+            if !wire_prefix.is_empty() {
+                builder = builder.set_prefix(&wire_prefix);
             }
             if !page_token.is_empty() {
                 builder = builder.set_page_token(&page_token);
@@ -623,7 +711,15 @@ impl StorageBackend for GcsBackend {
                 .map_err(|e| anyhow::anyhow!("GCS list_objects error: {}", e))?;
 
             for obj in &response.objects {
-                results.push(obj.name.clone());
+                let logical = if strip_prefix.is_empty() {
+                    obj.name.clone()
+                } else {
+                    obj.name
+                        .strip_prefix(&strip_prefix)
+                        .unwrap_or(&obj.name)
+                        .to_string()
+                };
+                results.push(logical);
             }
 
             page_token = response.next_page_token.clone();
@@ -731,15 +827,70 @@ impl StorageBackend for GcsBackend {
 
     async fn presign_put(
         &self,
-        _key: &str,
+        key: &str,
         _content_length: u64,
-        _ttl: std::time::Duration,
+        ttl: std::time::Duration,
     ) -> anyhow::Result<Option<crate::PresignedPut>> {
-        // GCS V4 signed URL generation requires HMAC-SHA256 with service account
-        // private key material, which is not exposed by the google-cloud-storage
-        // v1.11 ADC-based Storage/StorageControl clients. Caller falls back to
-        // server-proxied PUT.
-        Ok(None)
+        const MAX_GCS_TTL: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+        if ttl > MAX_GCS_TTL {
+            warn!(
+                target: "mediagit_storage::gcs",
+                ttl_secs = ttl.as_secs(),
+                "presign_put TTL exceeds GCS 7-day cap; falling back to server proxy"
+            );
+            return Ok(None);
+        }
+        if std::env::var_os("MEDIAGIT_GCS_DISABLE_PRESIGN").is_some() {
+            return Ok(None);
+        }
+        let Some(signer) = self.signer.as_ref() else {
+            return Ok(None);
+        };
+        let url = SignedUrlBuilder::for_object(self.bucket_path(), key)
+            .with_method(http::Method::PUT)
+            .with_expiration(ttl)
+            .sign_with(signer)
+            .await
+            .map_err(|e| anyhow::anyhow!("GCS V4 presign_put failed: {e}"))?;
+        Ok(Some(crate::PresignedPut {
+            url,
+            method: "PUT".to_string(),
+            required_headers: vec![],
+            expires_at: std::time::SystemTime::now() + ttl,
+        }))
+    }
+
+    async fn presign_get(
+        &self,
+        key: &str,
+        ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<crate::PresignedDownload>> {
+        const MAX_GCS_TTL: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+        if ttl > MAX_GCS_TTL {
+            warn!(
+                target: "mediagit_storage::gcs",
+                ttl_secs = ttl.as_secs(),
+                "presign_get TTL exceeds GCS 7-day cap; falling back to server proxy"
+            );
+            return Ok(None);
+        }
+        if std::env::var_os("MEDIAGIT_GCS_DISABLE_PRESIGN").is_some() {
+            return Ok(None);
+        }
+        let Some(signer) = self.signer.as_ref() else {
+            return Ok(None);
+        };
+        let url = SignedUrlBuilder::for_object(self.bucket_path(), key)
+            .with_method(http::Method::GET)
+            .with_expiration(ttl)
+            .sign_with(signer)
+            .await
+            .map_err(|e| anyhow::anyhow!("GCS V4 presign_get failed: {e}"))?;
+        Ok(Some(crate::PresignedDownload {
+            url,
+            headers: vec![],
+            expires_in_secs: ttl.as_secs(),
+        }))
     }
 }
 

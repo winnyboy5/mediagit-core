@@ -1024,6 +1024,17 @@ project_id = "your-project-id"
 # credentials_path intentionally omitted -> server uses ADC
 ```
 
+> **Heads-up about presigned URLs (Option A).** ADC `authorized_user`
+> credentials (the file written by `gcloud auth application-default login`)
+> contain a refresh token but **no private key**. The V4 signing path
+> (`SignedUrlBuilder::sign_with(signer)` in `crates/mediagit-storage/src/gcs.rs`)
+> requires an RSA private key, so every presign attempt silently fails, the
+> server maps each result to `null`, and the client falls back to
+> **server-proxy upload/download**. Functionally correct, but every byte
+> traverses `mediagit-server` instead of going direct to GCS. Pick
+> **Option B (SA JSON key)** if you want presigned URLs, or run on
+> GCE/GKE with a workload identity that supports `iam.signBlob`.
+
 **Option B — Service Account JSON key file** (only when key creation is allowed)
 
 ```bash
@@ -1044,34 +1055,90 @@ If you hit `FAILED_PRECONDITION: Key creation is not allowed on this service
 account`, your org has the `iam.disableServiceAccountKeyCreation` constraint
 enforced. Switch to Option A.
 
-#### Verified Manual Dev Test
+**Option C — Workload Identity (GKE / Cloud Run / WIF) — presigned without SA keys**
 
-A working harness lives at `dev-tests/gcs-manual-test/run_gcs_dev_test.py`.
-It provisions a fresh server-side repo, boots `mediagit-server` against the
-GCS bucket, pushes a media fixture from a clean client, lists the bucket via
-`gcloud storage ls` to confirm the blobs landed, and clones into a second
-working tree to verify a byte-identical sha256 roundtrip.
+If your org disables SA key creation but you still need presigned direct-transfer
+URLs, bind a [Workload Identity](https://cloud.google.com/iam/docs/workload-identity-federation)
+to the GCP service account. No credential files needed; omit `credentials_path`:
 
 ```bash
-# Required environment variables
-export MEDIAGIT_GCS_BUCKET=my-mediagit-bucket
-export MEDIAGIT_GCS_PROJECT=your-project-id
-
-# Optional: override the fixture (default is a 398 MiB video under test-files/)
-# export MEDIAGIT_GCS_FIXTURE=/abs/path/to/your-fixture.bin
-
-python dev-tests/gcs-manual-test/run_gcs_dev_test.py
+# One-time: bind Kubernetes SA to GCP SA (GKE example)
+gcloud iam service-accounts add-iam-policy-binding \
+  mediagit-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com \
+  --role="roles/iam.workloadIdentityUser" \
+  --member="serviceAccount:YOUR_PROJECT_ID.svc.id.goog[YOUR_NAMESPACE/mediagit]"
 ```
 
-Expected tail of output on success:
+The GCS backend uses `iam.signBlob` when building V4 presigned URLs. A pod
+running with bound workload identity and `roles/iam.serviceAccountTokenCreator`
+on itself satisfies this call automatically — no JSON key file required.
+
+**Developer laptop note:** `gcloud auth application-default login` always produces
+`authorized_user` credentials. These cannot sign blobs and cannot produce presigned
+URLs regardless of org policy or role bindings. Proxy mode is automatic and correct;
+no configuration is needed or possible to change this on a laptop.
+
+#### Presigned URL Support
+
+GCS upload/download takes one of two paths depending on the credential type:
+
+| Path | When active | Trade-off |
+|---|---|---|
+| **Direct (presigned V4)** | Server runs with an SA JSON key (`credentials_path` set) OR on GCE/GKE with a workload identity that supports `iam.signBlob`. | Client PUT/GET goes direct to GCS. Server only handles protocol overhead. |
+| **Proxy (server-streamed)** | `credentials_path` is empty and ADC resolves to `authorized_user` (developer laptop). Also when `MEDIAGIT_GCS_DISABLE_PRESIGN=1` or TTL exceeds 7 days. | Every byte traverses `mediagit-server`. Correct but latency-bound on WAN. |
+
+**How to verify which path is active:**
+
+```bash
+# Terminal 1 — server with storage-level logs
+RUST_LOG=mediagit_server=info,mediagit_storage=info ./target/release/mediagit-server
+
+# Terminal 2 — push or clone any repo
+./target/release/mediagit push origin main
+
+# Grep server output for verdict:
+#   "GCS V4 presign_put failed" / "GCS V4 presign_get failed"  → proxy path active
+#   (absence of those lines + direct PUTs in network trace)     → presigned path active
+```
+
+**Override knobs (set on the server process):**
+
+| Variable | Effect |
+|---|---|
+| `MEDIAGIT_GCS_DISABLE_PRESIGN=1` | Force proxy even when a signer is available — useful for tracing or environments that restrict egress to `*.googleapis.com`. |
+| `MEDIAGIT_DOWNLOAD_DIRECT_DISABLE=1` | Client-side: bypass presigned GET URLs and always proxy downloads. Server still issues them. |
+
+**TTL constraint.** GCS hard-caps V4 presigned URLs at 7 days. If `presigned_url_ttl_secs` in the server config exceeds that, the signing step is skipped and the server falls back to proxy for every request. Keep TTL ≤ 12 h.
+
+#### Verified Manual Dev Test
+
+The comprehensive PowerShell harness at `dev-tests/deep-tests/deep_test_gcs.ps1`
+covers 155+ test cases: all CLI commands (add, commit, branch, merge, stash,
+reset, revert, tag, diff, gc, fsck, verify), diverse media formats, delta
+encoding, deduplication, pack negotiation, and GCS remote operations including
+push / clone / pull with SHA-256 byte-identical integrity verification.
+
+```powershell
+# Run from the repo root (uses target\release binaries + test-files\)
+powershell -ExecutionPolicy Bypass `
+  -File dev-tests\deep-tests\deep_test_gcs.ps1
+```
+
+The harness starts its own `mediagit-server` on port 8773, configures it
+against bucket `mediagit-dev2-storage` with ADC credentials (proxy mode),
+pushes a diverse media fixture set including delta-encoded commits, clones
+into a separate directory, and verifies SHA-256 roundtrip parity for every
+tracked file. Results land in `dev-tests/deep-tests/reports/deep_test_report_gcs.md`.
+
+Expected tail of output on success (proxy mode, 33+ blobs):
 
 ```text
-GCS bucket blobs: total=33, chunks/=30, chunk-deltas/=0, manifests/=1, bare-oid=2
+=== SUMMARY ===
+PASS: 150+  FAIL: 0  SKIP: 0
 
-=== PASS ===
-blobs uploaded to GCS: 33
-clone roundtrip byte-identical: yes (sha256=b36f1d672d768c1a...)
-push throughput: 0.66 MiB/s
+Clone SHA-256 integrity: all files match
+Push throughput:  0.54 MiB/s  (proxy/ADC path — WAN-bound)
+Clone throughput: 0.42 MiB/s
 ```
 
 A focused round-trip integration test that exercises the
@@ -1146,6 +1213,11 @@ Push throughput is dominated by WAN bandwidth between the host running
 ¹ With `[performance] pack_workers = 16`, `upload_concurrency = 64`.
 ² Striped via 8 MiB ranges × 8 concurrent reads (5 stripes); covers the
 caller-driven `get_with_size_hint` path, not a typical push.
+
+> **Note:** All sample numbers above were collected on the **proxy path**
+> (developer-laptop ADC). Direct-path (SA JSON key or GKE workload identity)
+> numbers will be higher on the same WAN link — bench in your own environment
+> before publishing.
 
 These are bandwidth-bound, not CPU- or backend-bound. Co-locate
 `mediagit-server` with the bucket region for production.
