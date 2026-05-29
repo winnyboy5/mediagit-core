@@ -56,7 +56,7 @@ use axum::{
     http::StatusCode,
     middleware,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use std::sync::Arc;
@@ -138,6 +138,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/{repo}/tree", get(handlers::list_tree_root))
         // Pack manifest endpoints (F6) — Track-F cloud pack bundling
         .route("/{repo}/packs/complete", post(handlers::complete_pack))
+        .route("/{repo}/packs/:pack_id", put(handlers::upload_pack_proxy))
         .route("/{repo}/chunks/locate", post(handlers::locate_chunks))
         .route(
             "/{repo}/packs/presign-download-urls",
@@ -309,6 +310,7 @@ pub fn create_router_with_rate_limit(
         .route("/{repo}/tree", get(handlers::list_tree_root))
         // Pack manifest endpoints (F6) — Track-F cloud pack bundling
         .route("/{repo}/packs/complete", post(handlers::complete_pack))
+        .route("/{repo}/packs/:pack_id", put(handlers::upload_pack_proxy))
         .route("/{repo}/chunks/locate", post(handlers::locate_chunks))
         .route(
             "/{repo}/packs/presign-download-urls",

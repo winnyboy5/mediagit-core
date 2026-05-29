@@ -1404,21 +1404,29 @@ impl ProtocolClient {
                 .as_deref()
                 .unwrap_or("1")
                 != "0";
-            if !full_chunks.is_empty() && cloud_packs {
-                let (pack_n, pack_b) = self
-                    .push_full_chunks_via_packs(&full_chunks, odb)
-                    .await
-                    .unwrap_or_else(|e| {
+            let pack_pushed = if !full_chunks.is_empty() && cloud_packs {
+                match self.push_full_chunks_via_packs(&full_chunks, odb).await {
+                    Ok((n, b)) if n > 0 => {
+                        chunks_uploaded += n;
+                        upload_bytes += b;
+                        true
+                    }
+                    Ok(_) => {
+                        tracing::debug!("pack push: 0 chunks uploaded; using per-chunk fallback");
+                        false
+                    }
+                    Err(e) => {
                         tracing::warn!(
                             err = %e,
-                            "pack-mode push failed; retry via per-chunk fallback"
+                            "pack push failed; falling back to per-chunk path"
                         );
-                        (0, 0)
-                    });
-                chunks_uploaded += pack_n;
-                upload_bytes += pack_b;
-            }
-            if !full_chunks.is_empty() && !cloud_packs {
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+            if !full_chunks.is_empty() && !pack_pushed {
                 // Request presigned PUT URLs from the server.  Cloud
                 // backends return signed bucket URLs; Local/Mock return
                 // null → falls through to the server-proxy PUT path.
@@ -1867,8 +1875,10 @@ impl ProtocolClient {
 
             // Optional strong verify: decompress + BLAKE3 every chunk server-side.
             // Gated by MEDIAGIT_STRONG_VERIFY=1; endpoint unavailability is non-fatal.
+            // Skipped in pack mode — chunks live at packs/<oid>, not chunks/<hex>.
             if std::env::var("MEDIAGIT_STRONG_VERIFY").as_deref() == Ok("1")
                 && !full_chunks.is_empty()
+                && !cloud_packs
             {
                 let hexes: Vec<String> = full_chunks.iter().map(|c| c.to_hex()).collect();
                 tracing::debug!(count = hexes.len(), "Running strong chunk integrity verify");
@@ -3303,26 +3313,36 @@ impl ProtocolClient {
                 let full_chunk_hex: Vec<String> = full_chunks.iter().map(|c| c.to_hex()).collect();
 
                 // F7: pack-mode pull path — locate → presign → Range-GET.
+                // Falls back to legacy per-chunk path if pack mode returns 0 chunks or errors.
                 let cloud_packs_pull = std::env::var("MEDIAGIT_CLOUD_PACKS")
                     .as_deref()
                     .unwrap_or("1")
                     != "0";
-                if cloud_packs_pull && !full_chunks.is_empty() {
+                let pack_pulled = if cloud_packs_pull && !full_chunks.is_empty() {
                     match self.pull_chunks_via_packs(&full_chunks, odb).await {
-                        Ok(n) => {
+                        Ok(n) if n > 0 => {
                             tracing::debug!(chunks = n, "pack-mode pull complete");
-                            // Chunks written; skip legacy download_urls path below.
+                            true
+                        }
+                        Ok(_) => {
+                            tracing::debug!(
+                                "pack-mode pull: 0 chunks located; using per-chunk fallback"
+                            );
+                            false
                         }
                         Err(e) => {
                             tracing::warn!(
                                 err = %e,
                                 "pack-mode pull failed; falling back to per-chunk"
                             );
+                            false
                         }
                     }
-                }
+                } else {
+                    false
+                };
 
-                if direct_download_enabled && !full_chunk_hex.is_empty() && !cloud_packs_pull {
+                if direct_download_enabled && !full_chunk_hex.is_empty() && !pack_pulled {
                     on_progress(
                         bytes_done,
                         total_manifest_bytes,
@@ -3330,14 +3350,14 @@ impl ProtocolClient {
                     );
                 }
                 let download_urls =
-                    if direct_download_enabled && !full_chunk_hex.is_empty() && !cloud_packs_pull {
+                    if direct_download_enabled && !full_chunk_hex.is_empty() && !pack_pulled {
                         self.request_chunk_download_urls(&full_chunk_hex).await
                     } else {
                         std::collections::HashMap::new()
                     };
 
                 // ── Pass A: full chunks (and any chunks needed as delta bases) ──
-                if !full_chunks.is_empty() && !cloud_packs_pull {
+                if !full_chunks.is_empty() && !pack_pulled {
                     let download_urls = std::sync::Arc::new(download_urls);
                     let _dl_pass_a_t = std::time::Instant::now();
                     let mut _dl_pass_a_n = 0u64;
@@ -3906,9 +3926,10 @@ impl ProtocolClient {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        err = %e,
-                        "Pack Range-GET batch failed; these chunks need proxy-GET fallback"
+                    // Propagate so the caller falls back to per-chunk legacy for all chunks.
+                    // ODB dedup handles any re-downloads of already-written chunks.
+                    return Err(
+                        e.context("pack Range-GET failed; caller should use per-chunk fallback")
                     );
                 }
             }
