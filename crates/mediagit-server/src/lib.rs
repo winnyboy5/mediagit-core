@@ -136,6 +136,17 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route("/{repo}/tree/{*path}", get(handlers::list_tree))
         .route("/{repo}/tree", get(handlers::list_tree_root))
+        // Pack manifest endpoints (F6) — Track-F cloud pack bundling
+        .route("/{repo}/packs/complete", post(handlers::complete_pack))
+        .route("/{repo}/chunks/locate", post(handlers::locate_chunks))
+        .route(
+            "/{repo}/packs/presign-download-urls",
+            post(handlers::presign_pack_downloads),
+        )
+        .route(
+            "/{repo}/packs/rebuild-index",
+            post(handlers::rebuild_pack_index),
+        )
         .with_state(Arc::clone(&state));
 
     // Apply authentication middleware to Git routes if enabled
@@ -296,6 +307,17 @@ pub fn create_router_with_rate_limit(
         )
         .route("/{repo}/tree/{*path}", get(handlers::list_tree))
         .route("/{repo}/tree", get(handlers::list_tree_root))
+        // Pack manifest endpoints (F6) — Track-F cloud pack bundling
+        .route("/{repo}/packs/complete", post(handlers::complete_pack))
+        .route("/{repo}/chunks/locate", post(handlers::locate_chunks))
+        .route(
+            "/{repo}/packs/presign-download-urls",
+            post(handlers::presign_pack_downloads),
+        )
+        .route(
+            "/{repo}/packs/rebuild-index",
+            post(handlers::rebuild_pack_index),
+        )
         .with_state(Arc::clone(&state));
 
     // Apply middleware layers

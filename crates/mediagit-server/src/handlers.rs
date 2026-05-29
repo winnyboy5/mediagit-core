@@ -35,7 +35,7 @@ use std::sync::Arc;
 use tokio::io::duplex;
 use tokio_util::io::ReaderStream;
 
-use crate::state::AppState;
+use crate::state::{AppState, PackLoc};
 
 /// Helper function to check if user has required permission
 fn check_permission(
@@ -1597,11 +1597,11 @@ pub async fn upload_chunk_delta(
 // ============================================================================
 
 #[derive(serde::Deserialize)]
-pub struct PresignUploadUrlsRequest {
-    chunk_ids: Vec<String>,
-    /// Optional byte sizes per chunk id; used to pass content_length to the backend.
+pub struct PresignPackUploadsRequest {
+    pack_ids: Vec<String>,
+    /// Byte sizes parallel to `pack_ids`; index i is the size for `pack_ids[i]`.
     #[serde(default)]
-    sizes: std::collections::HashMap<String, u64>,
+    sizes: Vec<u64>,
 }
 
 #[derive(serde::Serialize)]
@@ -1612,18 +1612,18 @@ pub struct PresignedPutJson {
     required_headers: Vec<[String; 2]>,
 }
 
-/// POST /:repo/chunks/upload-urls — Mint presigned PUT URLs for a batch of chunks.
+/// POST /:repo/chunks/upload-urls — Mint presigned PUT URLs for a batch of pack objects.
 ///
-/// Request: `{ chunk_ids: [hex, ...], sizes: {hex: u64, ...} }`
+/// Request: `{ pack_ids: [hex, ...], sizes: [u64, ...] }`
 /// Response: `{ hex: { url, method, required_headers } | null, ... }`
 ///
 /// A `null` entry means the backend does not support presigning; the client must
-/// fall back to the server-proxied `PUT /chunks/:id` route for that chunk.
+/// fall back to the server-proxied upload route for that pack.
 pub async fn presign_chunk_uploads(
     Path(repo): Path<String>,
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
-    Json(req): Json<PresignUploadUrlsRequest>,
+    Json(req): Json<PresignPackUploadsRequest>,
 ) -> Result<Json<std::collections::HashMap<String, Option<PresignedPutJson>>>, StatusCode> {
     check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
 
@@ -1634,39 +1634,64 @@ pub async fn presign_chunk_uploads(
     let storage = get_or_init_storage(&state, &repo_path).await?;
     let ttl = std::time::Duration::from_secs(state.presigned_url_ttl_secs);
 
-    let mut urls: std::collections::HashMap<String, Option<PresignedPutJson>> =
-        std::collections::HashMap::new();
-    for chunk_id_hex in &req.chunk_ids {
-        let key = format!("chunks/{}", chunk_id_hex);
-        let content_length = req.sizes.get(chunk_id_hex).copied().unwrap_or(0);
-        let entry = match storage.presign_put(&key, content_length, ttl).await {
-            Ok(Some(p)) => Some(PresignedPutJson {
-                url: p.url,
-                method: p.method,
-                required_headers: p
-                    .required_headers
-                    .into_iter()
-                    .map(|(k, v)| [k, v])
-                    .collect(),
-            }),
-            Ok(None) => None,
-            Err(e) => {
-                tracing::warn!(
-                    repo = %repo,
-                    chunk = %chunk_id_hex,
-                    err = %e,
-                    "presign_put failed; client will fall back to proxy upload"
-                );
-                None
+    let presign_concurrency: usize = std::env::var("MEDIAGIT_PRESIGN_CONCURRENCY")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n: &usize| *n > 0)
+        .unwrap_or(64);
+
+    let count = req.pack_ids.len();
+    let pairs: Vec<(String, u64)> = req
+        .pack_ids
+        .into_iter()
+        .enumerate()
+        .map(|(i, id)| {
+            let size = req.sizes.get(i).copied().unwrap_or(0);
+            (id, size)
+        })
+        .collect();
+
+    let entries: Vec<(String, Option<PresignedPutJson>)> =
+        futures::stream::iter(pairs.into_iter().map(|(pack_id, content_length)| {
+            let storage = Arc::clone(&storage);
+            let repo = repo.clone();
+            async move {
+                let key = format!("packs/{}", pack_id);
+                let entry = match storage.presign_put(&key, content_length, ttl).await {
+                    Ok(Some(p)) => Some(PresignedPutJson {
+                        url: p.url,
+                        method: p.method,
+                        required_headers: p
+                            .required_headers
+                            .into_iter()
+                            .map(|(k, v)| [k, v])
+                            .collect(),
+                    }),
+                    Ok(None) => None,
+                    Err(e) => {
+                        tracing::warn!(
+                            repo = %repo,
+                            pack = %pack_id,
+                            err = %e,
+                            "presign_put failed; client will fall back to proxy upload"
+                        );
+                        None
+                    }
+                };
+                (pack_id, entry)
             }
-        };
-        urls.insert(chunk_id_hex.clone(), entry);
-    }
+        }))
+        .buffer_unordered(presign_concurrency)
+        .collect()
+        .await;
+
+    let urls: std::collections::HashMap<String, Option<PresignedPutJson>> =
+        entries.into_iter().collect();
 
     tracing::info!(
         repo = %repo,
-        count = req.chunk_ids.len(),
-        "Presigned chunk upload URLs generated"
+        count = count,
+        "Presigned pack upload URLs generated"
     );
     Ok(Json(urls))
 }
@@ -2408,4 +2433,375 @@ pub async fn list_tree_root(
 ) -> Result<Json<TreeListResponse>, StatusCode> {
     tracing::info!("GET /{}/tree ref={}", repo, params.ref_name);
     list_tree_impl(repo, String::new(), state, auth_user, params.ref_name).await
+}
+
+// ============================================================================
+// Pack Manifest Endpoints (F6) — Track-F cloud pack bundling
+// ============================================================================
+
+#[derive(serde::Deserialize)]
+pub struct ManifestEntry {
+    pub chunk_oid: String,
+    pub offset: u64,
+    pub length: u32,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PackIndexLine {
+    chunk_oid: String,
+    pack_oid: String,
+    offset: u64,
+    length: u32,
+}
+
+#[derive(serde::Deserialize)]
+pub struct CompletePackRequest {
+    pub pack_oid: String,
+    pub manifest: Vec<ManifestEntry>,
+}
+
+/// POST /{repo}/packs/complete — Register a finished cloud pack and its chunk manifest.
+///
+/// Server HEADs the pack object before accepting the manifest so a crash between
+/// PUT and complete cannot create a manifest pointing at a missing pack.
+pub async fn complete_pack(
+    Path(repo): Path<String>,
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    Json(req): Json<CompletePackRequest>,
+) -> Result<StatusCode, StatusCode> {
+    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+
+    crate::security::validate_repo_name(&repo).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let repo_path = state.repos_dir.join(&repo);
+    if !repo_path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let storage = get_or_init_storage(&state, &repo_path).await?;
+
+    let pack_key = format!("packs/{}", req.pack_oid);
+    match storage.head(&pack_key).await {
+        Ok(Some(_)) => {}
+        _ => {
+            tracing::warn!(
+                repo = %repo,
+                pack = %req.pack_oid,
+                "complete_pack: pack object missing in storage"
+            );
+            return Err(StatusCode::CONFLICT);
+        }
+    }
+
+    // Persist to JSONL under <repo>/.mediagit/packs/<shard>/<pack_oid>.jsonl
+    let shard = if req.pack_oid.len() >= 2 {
+        &req.pack_oid[..2]
+    } else {
+        "00"
+    };
+    let manifest_dir = repo_path.join(".mediagit").join("packs").join(shard);
+    tokio::fs::create_dir_all(&manifest_dir)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let manifest_path = manifest_dir.join(format!("{}.jsonl", req.pack_oid));
+
+    let mut jsonl = String::new();
+    for entry in &req.manifest {
+        let line = PackIndexLine {
+            chunk_oid: entry.chunk_oid.clone(),
+            pack_oid: req.pack_oid.clone(),
+            offset: entry.offset,
+            length: entry.length,
+        };
+        match serde_json::to_string(&line) {
+            Ok(s) => {
+                jsonl.push_str(&s);
+                jsonl.push('\n');
+            }
+            Err(e) => {
+                tracing::error!("Failed to serialize manifest entry: {}", e);
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        }
+    }
+    tokio::fs::write(&manifest_path, jsonl.as_bytes())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Update in-memory index.
+    {
+        let mut idx = state.pack_index.write().await;
+        let repo_idx = idx.entry(repo.clone()).or_default();
+        for entry in &req.manifest {
+            repo_idx.insert(
+                entry.chunk_oid.clone(),
+                PackLoc {
+                    pack_oid: req.pack_oid.clone(),
+                    offset: entry.offset,
+                    length: entry.length,
+                },
+            );
+        }
+    }
+
+    tracing::info!(
+        repo = %repo,
+        pack = %req.pack_oid,
+        chunks = req.manifest.len(),
+        "Pack manifest registered"
+    );
+    Ok(StatusCode::CREATED)
+}
+
+/// Scan local JSONL manifest files for a repo and populate pack_index.
+async fn load_jsonl_index(
+    state: &AppState,
+    repo: &str,
+    repo_path: &std::path::Path,
+) -> Result<(), StatusCode> {
+    let packs_dir = repo_path.join(".mediagit").join("packs");
+    if !packs_dir.exists() {
+        let mut idx = state.pack_index.write().await;
+        idx.entry(repo.to_string()).or_default();
+        return Ok(());
+    }
+
+    let mut repo_entries: std::collections::HashMap<String, PackLoc> =
+        std::collections::HashMap::new();
+
+    let mut shard_dir = tokio::fs::read_dir(&packs_dir)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    while let Some(shard) = shard_dir
+        .next_entry()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
+        let shard_path = shard.path();
+        if !shard_path.is_dir() {
+            continue;
+        }
+        let mut files = tokio::fs::read_dir(&shard_path)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        while let Some(file) = files
+            .next_entry()
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        {
+            let file_path = file.path();
+            if file_path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let content = tokio::fs::read_to_string(&file_path)
+                .await
+                .unwrap_or_default();
+            for line in content.lines() {
+                if line.is_empty() {
+                    continue;
+                }
+                if let Ok(entry) = serde_json::from_str::<PackIndexLine>(line) {
+                    if !entry.chunk_oid.is_empty() && !entry.pack_oid.is_empty() {
+                        repo_entries.insert(
+                            entry.chunk_oid,
+                            PackLoc {
+                                pack_oid: entry.pack_oid,
+                                offset: entry.offset,
+                                length: entry.length,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    let mut idx = state.pack_index.write().await;
+    idx.insert(repo.to_string(), repo_entries);
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+pub struct LocateChunksRequest {
+    pub chunk_ids: Vec<String>,
+    #[serde(default)]
+    pub wants_full_repo: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct LocatedChunk {
+    pub pack_oid: String,
+    pub offset: u64,
+    pub length: u32,
+}
+
+/// POST /{repo}/chunks/locate — Resolve chunk OIDs to pack locations.
+///
+/// `wants_full_repo=true` returns the entire chunk→pack map in one response
+/// (used by full-clone to eliminate per-chunk round-trips).
+pub async fn locate_chunks(
+    Path(repo): Path<String>,
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    Json(req): Json<LocateChunksRequest>,
+) -> Result<Json<std::collections::HashMap<String, LocatedChunk>>, StatusCode> {
+    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+
+    crate::security::validate_repo_name(&repo).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let repo_path = state.repos_dir.join(&repo);
+    if !repo_path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // Lazy-load from JSONL if this repo has no entry in the in-memory index yet.
+    {
+        let idx = state.pack_index.read().await;
+        if !idx.contains_key(&repo) {
+            drop(idx);
+            load_jsonl_index(&state, &repo, &repo_path).await?;
+        }
+    }
+
+    let idx = state.pack_index.read().await;
+    let repo_idx = match idx.get(&repo) {
+        Some(m) => m,
+        None => return Ok(Json(std::collections::HashMap::new())),
+    };
+
+    let result: std::collections::HashMap<String, LocatedChunk> = if req.wants_full_repo {
+        repo_idx
+            .iter()
+            .map(|(chunk_oid, loc)| {
+                (
+                    chunk_oid.clone(),
+                    LocatedChunk {
+                        pack_oid: loc.pack_oid.clone(),
+                        offset: loc.offset,
+                        length: loc.length,
+                    },
+                )
+            })
+            .collect()
+    } else {
+        req.chunk_ids
+            .iter()
+            .filter_map(|id| {
+                repo_idx.get(id).map(|loc| {
+                    (
+                        id.clone(),
+                        LocatedChunk {
+                            pack_oid: loc.pack_oid.clone(),
+                            offset: loc.offset,
+                            length: loc.length,
+                        },
+                    )
+                })
+            })
+            .collect()
+    };
+
+    Ok(Json(result))
+}
+
+#[derive(serde::Deserialize)]
+pub struct PresignPackDownloadRequest {
+    pub pack_ids: Vec<String>,
+}
+
+/// POST /{repo}/packs/presign-download-urls — Mint presigned GET URLs for pack objects.
+///
+/// Returns one URL per pack_id. Client uses these for Range-GET reconstruction.
+pub async fn presign_pack_downloads(
+    Path(repo): Path<String>,
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    Json(req): Json<PresignPackDownloadRequest>,
+) -> Result<Json<std::collections::HashMap<String, Option<PresignedGetJson>>>, StatusCode> {
+    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+
+    crate::security::validate_repo_name(&repo).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let repo_path = state.repos_dir.join(&repo);
+    if !repo_path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let storage = get_or_init_storage(&state, &repo_path).await?;
+    let ttl = std::time::Duration::from_secs(state.presigned_url_ttl_secs);
+
+    let presign_concurrency: usize = std::env::var("MEDIAGIT_PRESIGN_CONCURRENCY")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n: &usize| *n > 0)
+        .unwrap_or(64);
+
+    let entries: Vec<(String, Option<PresignedGetJson>)> =
+        futures::stream::iter(req.pack_ids.into_iter().map(|pack_id| {
+            let storage = Arc::clone(&storage);
+            let repo = repo.clone();
+            async move {
+                let key = format!("packs/{}", pack_id);
+                let entry = match storage.presign_get(&key, ttl).await {
+                    Ok(Some(p)) => Some(PresignedGetJson {
+                        url: p.url,
+                        headers: p.headers,
+                        method: "GET".to_string(),
+                        expires_in_secs: p.expires_in_secs,
+                    }),
+                    Ok(None) => None,
+                    Err(e) => {
+                        tracing::warn!(
+                            repo = %repo,
+                            pack = %pack_id,
+                            err = %e,
+                            "presign_get failed for pack download"
+                        );
+                        None
+                    }
+                };
+                (pack_id, entry)
+            }
+        }))
+        .buffer_unordered(presign_concurrency)
+        .collect()
+        .await;
+
+    Ok(Json(entries.into_iter().collect()))
+}
+
+#[derive(serde::Serialize)]
+pub struct RebuildIndexResponse {
+    pub indexed_chunks: usize,
+}
+
+/// POST /{repo}/packs/rebuild-index — Rebuild in-memory pack index from local JSONL files.
+///
+/// Evicts the current in-memory index for the repo and rescans all JSONL manifest
+/// files under `<repo>/.mediagit/packs/`. Safe to call multiple times.
+pub async fn rebuild_pack_index(
+    Path(repo): Path<String>,
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+) -> Result<Json<RebuildIndexResponse>, StatusCode> {
+    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+
+    crate::security::validate_repo_name(&repo).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let repo_path = state.repos_dir.join(&repo);
+    if !repo_path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // Evict current in-memory state then reload from disk.
+    {
+        let mut idx = state.pack_index.write().await;
+        idx.remove(&repo);
+    }
+    load_jsonl_index(&state, &repo, &repo_path).await?;
+
+    let count = {
+        let idx = state.pack_index.read().await;
+        idx.get(&repo).map(|m| m.len()).unwrap_or(0)
+    };
+
+    tracing::info!(repo = %repo, chunks = count, "Pack index rebuilt from JSONL");
+    Ok(Json(RebuildIndexResponse {
+        indexed_chunks: count,
+    }))
 }
