@@ -133,6 +133,14 @@ impl Default for WantCache {
     }
 }
 
+/// Location of a chunk within a cloud pack object.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PackLoc {
+    pub pack_oid: String,
+    pub offset: u64,
+    pub length: u32,
+}
+
 /// Shared application state
 pub struct AppState {
     /// Directory containing repositories
@@ -160,6 +168,10 @@ pub struct AppState {
     /// Without sharing, each handler has its own HashSet → guard is ineffective.
     pub odb_cache: RwLock<HashMap<PathBuf, ObjectDatabase>>,
 
+    /// In-memory pack manifest index: repo -> chunk_oid_hex -> PackLoc.
+    /// Populated from local JSONL on first locate hit; updated on complete_pack.
+    pub pack_index: RwLock<HashMap<String, HashMap<String, PackLoc>>>,
+
     /// Authentication layer (optional - can be disabled for development)
     pub auth_layer: Option<Arc<AuthLayer>>,
 
@@ -176,6 +188,7 @@ impl AppState {
             want_cache: Mutex::new(WantCache::new()),
             storage_backends: RwLock::new(HashMap::new()),
             odb_cache: RwLock::new(HashMap::new()),
+            pack_index: RwLock::new(HashMap::new()),
             auth_layer: None,
             auth_service: None,
         }
@@ -200,6 +213,7 @@ impl AppState {
             want_cache: Mutex::new(WantCache::new()),
             storage_backends: RwLock::new(HashMap::new()),
             odb_cache: RwLock::new(HashMap::new()),
+            pack_index: RwLock::new(HashMap::new()),
             auth_layer: Some(auth_layer),
             auth_service: Some(auth_service),
         }
@@ -220,6 +234,7 @@ impl AppState {
             want_cache: Mutex::new(WantCache::new()),
             storage_backends: RwLock::new(HashMap::new()),
             odb_cache: RwLock::new(HashMap::new()),
+            pack_index: RwLock::new(HashMap::new()),
             auth_layer: Some(auth_layer),
             auth_service: Some(auth_service),
         }
