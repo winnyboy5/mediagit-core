@@ -2523,13 +2523,13 @@ pub async fn complete_pack(
             }
         }
     }
-    tokio::fs::write(&manifest_path, jsonl.as_bytes())
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Update in-memory index.
+    // Hold write lock for both JSONL write and in-memory update so concurrent
+    // complete_pack calls don't interleave their appends (F9 concurrency guard).
     {
         let mut idx = state.pack_index.write().await;
+        tokio::fs::write(&manifest_path, jsonl.as_bytes())
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let repo_idx = idx.entry(repo.clone()).or_default();
         for entry in &req.manifest {
             repo_idx.insert(

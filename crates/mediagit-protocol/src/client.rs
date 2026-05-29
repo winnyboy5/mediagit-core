@@ -1400,7 +1400,25 @@ impl ProtocolClient {
 
             // ── Pass A: full chunks (must land before any delta whose
             // base is in this push) ──────────────────────────────────
-            if !full_chunks.is_empty() {
+            let cloud_packs = std::env::var("MEDIAGIT_CLOUD_PACKS")
+                .as_deref()
+                .unwrap_or("1")
+                != "0";
+            if !full_chunks.is_empty() && cloud_packs {
+                let (pack_n, pack_b) = self
+                    .push_full_chunks_via_packs(&full_chunks, odb)
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(
+                            err = %e,
+                            "pack-mode push failed; retry via per-chunk fallback"
+                        );
+                        (0, 0)
+                    });
+                chunks_uploaded += pack_n;
+                upload_bytes += pack_b;
+            }
+            if !full_chunks.is_empty() && !cloud_packs {
                 // Request presigned PUT URLs from the server.  Cloud
                 // backends return signed bucket URLs; Local/Mock return
                 // null → falls through to the server-proxy PUT path.
@@ -3283,21 +3301,43 @@ impl ProtocolClient {
                 // Batch-request presigned GET URLs for full chunks (best-effort;
                 // empty map on old servers / disabled backends / env gate).
                 let full_chunk_hex: Vec<String> = full_chunks.iter().map(|c| c.to_hex()).collect();
-                if direct_download_enabled && !full_chunk_hex.is_empty() {
+
+                // F7: pack-mode pull path — locate → presign → Range-GET.
+                let cloud_packs_pull = std::env::var("MEDIAGIT_CLOUD_PACKS")
+                    .as_deref()
+                    .unwrap_or("1")
+                    != "0";
+                if cloud_packs_pull && !full_chunks.is_empty() {
+                    match self.pull_chunks_via_packs(&full_chunks, odb).await {
+                        Ok(n) => {
+                            tracing::debug!(chunks = n, "pack-mode pull complete");
+                            // Chunks written; skip legacy download_urls path below.
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                err = %e,
+                                "pack-mode pull failed; falling back to per-chunk"
+                            );
+                        }
+                    }
+                }
+
+                if direct_download_enabled && !full_chunk_hex.is_empty() && !cloud_packs_pull {
                     on_progress(
                         bytes_done,
                         total_manifest_bytes,
                         &format!("Preparing {} download URLs...", full_chunk_hex.len()),
                     );
                 }
-                let download_urls = if direct_download_enabled && !full_chunk_hex.is_empty() {
-                    self.request_chunk_download_urls(&full_chunk_hex).await
-                } else {
-                    std::collections::HashMap::new()
-                };
+                let download_urls =
+                    if direct_download_enabled && !full_chunk_hex.is_empty() && !cloud_packs_pull {
+                        self.request_chunk_download_urls(&full_chunk_hex).await
+                    } else {
+                        std::collections::HashMap::new()
+                    };
 
                 // ── Pass A: full chunks (and any chunks needed as delta bases) ──
-                if !full_chunks.is_empty() {
+                if !full_chunks.is_empty() && !cloud_packs_pull {
                     let download_urls = std::sync::Arc::new(download_urls);
                     let _dl_pass_a_t = std::time::Instant::now();
                     let mut _dl_pass_a_n = 0u64;
@@ -3551,6 +3591,67 @@ impl ProtocolClient {
             b.summary();
         }
         Ok(total_chunks_downloaded)
+    }
+
+    // -----------------------------------------------------------------------
+    // F4: Pack-mode push — bundle full chunks into cloud packs
+    // -----------------------------------------------------------------------
+
+    /// Bundle `full_chunks` into cloud packs and upload each via presigned PUT.
+    /// Returns `(chunks_uploaded, bytes_uploaded)`.
+    async fn push_full_chunks_via_packs(
+        &self,
+        full_chunks: &[Oid],
+        odb: &ObjectDatabase,
+    ) -> Result<(u32, u64)> {
+        use crate::pack_builder::{upload_and_register, PackBuilder};
+
+        let temp_dir = tempfile::TempDir::new().context("create pack temp dir")?;
+        let mut builder = PackBuilder::new(temp_dir.path());
+
+        let direct_client = reqwest::Client::builder()
+            .pool_idle_timeout(std::time::Duration::from_secs(60))
+            .pool_max_idle_per_host(http_pool_max())
+            .tcp_nodelay(true)
+            .timeout(std::time::Duration::from_secs(300))
+            .http1_only()
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
+        let mut chunks_done: u32 = 0;
+        let mut bytes_done: u64 = 0;
+
+        for chunk_id in full_chunks {
+            let data = odb
+                .read(chunk_id)
+                .await
+                .with_context(|| format!("read chunk {} for pack", chunk_id))?;
+
+            if let Some(result) = builder
+                .add_chunk(*chunk_id, &data)
+                .await
+                .with_context(|| format!("pack chunk {}", chunk_id))?
+            {
+                let pack_bytes = result.byte_len;
+                upload_and_register(result, &self.base_url, &self.client, &direct_client)
+                    .await
+                    .context("upload_and_register pack")?;
+                bytes_done += pack_bytes;
+            }
+            bytes_done += data.len() as u64;
+            chunks_done += 1;
+        }
+
+        if let Some(result) = builder.finish().await.context("finish final pack")? {
+            let pack_bytes = result.byte_len;
+            upload_and_register(result, &self.base_url, &self.client, &direct_client)
+                .await
+                .context("upload_and_register final pack")?;
+            bytes_done += pack_bytes;
+        }
+
+        drop(temp_dir);
+        Ok((chunks_done, bytes_done))
     }
 
     // -----------------------------------------------------------------------

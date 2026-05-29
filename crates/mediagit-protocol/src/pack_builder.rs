@@ -161,10 +161,10 @@ impl PackBuilder {
 ///
 /// This is the network-side of F4: the PackBuilder handles disk assembly,
 /// `upload_and_register` handles transport and server registration.
+/// `base_url` must already include the repo segment (e.g. `http://server/my-repo`).
 pub async fn upload_and_register(
     result: CloudPackResult,
     base_url: &str,
-    repo: &str,
     http_client: &reqwest::Client,
     direct_client: &reqwest::Client,
 ) -> Result<()> {
@@ -172,7 +172,7 @@ pub async fn upload_and_register(
     let byte_len = result.byte_len;
 
     // 1. Request presigned PUT URL for packs/<pack_oid>
-    let presign_url = format!("{}/{}/chunks/upload-urls", base_url, repo);
+    let presign_url = format!("{}/chunks/upload-urls", base_url);
     let presign_body = serde_json::json!({
         "pack_ids": [pack_oid_hex],
         "sizes": [byte_len],
@@ -221,7 +221,7 @@ pub async fn upload_and_register(
         tracing::debug!(pack = %pack_oid_hex, bytes = byte_len, "Pack uploaded via presigned URL");
     } else {
         // Proxy fallback: PUT directly to server
-        let proxy_url = format!("{}/{}/chunks/{}", base_url, repo, pack_oid_hex);
+        let proxy_url = format!("{}/chunks/{}", base_url, pack_oid_hex);
         let resp = http_client
             .put(&proxy_url)
             .body(pack_data)
@@ -247,7 +247,7 @@ pub async fn upload_and_register(
         })
         .collect();
 
-    let complete_url = format!("{}/{}/packs/complete", base_url, repo);
+    let complete_url = format!("{}/packs/complete", base_url);
     let complete_body = serde_json::json!({
         "pack_oid": pack_oid_hex,
         "manifest": manifest,
