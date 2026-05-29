@@ -22,6 +22,7 @@ pub mod bench;
 pub mod client;
 pub mod error_class;
 pub mod journal;
+pub mod pack_builder;
 pub mod streaming;
 pub mod types;
 
