@@ -220,8 +220,8 @@ pub async fn upload_and_register(
         }
         tracing::debug!(pack = %pack_oid_hex, bytes = byte_len, "Pack uploaded via presigned URL");
     } else {
-        // Proxy fallback: PUT directly to server
-        let proxy_url = format!("{}/chunks/{}", base_url, pack_oid_hex);
+        // Proxy fallback: PUT to /packs/<oid> so complete_pack's head("packs/<oid>") succeeds
+        let proxy_url = format!("{}/packs/{}", base_url, pack_oid_hex);
         let resp = http_client
             .put(&proxy_url)
             .body(pack_data)

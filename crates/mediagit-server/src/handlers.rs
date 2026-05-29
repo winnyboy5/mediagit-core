@@ -1259,6 +1259,33 @@ pub async fn upload_chunk(
     Ok(StatusCode::OK)
 }
 
+/// PUT /:repo/packs/:pack_id — Proxy-upload a pack object when presigning is unavailable.
+///
+/// Stores raw pack bytes at `packs/<pack_id>` so that `/packs/complete` can verify via head().
+pub async fn upload_pack_proxy(
+    Path((repo, pack_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    body: Bytes,
+) -> Result<StatusCode, StatusCode> {
+    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+
+    let repo_path = state.repos_dir.join(&repo);
+    if !repo_path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let storage = get_or_init_storage(&state, &repo_path).await?;
+    let pack_key = format!("packs/{}", pack_id);
+    storage.put(&pack_key, &body).await.map_err(|e| {
+        tracing::error!(pack = %pack_id, error = %e, "Failed to store pack via proxy");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    tracing::debug!(pack = %pack_id, bytes = body.len(), "Pack stored via proxy upload");
+    Ok(StatusCode::OK)
+}
+
 /// PUT /:repo/manifests/:oid - Upload a chunk manifest
 ///
 /// Request body: Serialized ChunkManifest
