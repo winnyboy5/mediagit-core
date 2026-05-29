@@ -45,6 +45,13 @@ struct PresignedGetInfo {
     expires_in_secs: u64,
 }
 
+/// Location of a chunk within a cloud pack object (F7).
+struct PackLocInfo {
+    pack_oid: String,
+    offset: u64,
+    length: u32,
+}
+
 /// Statistics from a push operation
 #[derive(Debug, Clone, Default)]
 pub struct PushStats {
@@ -3545,6 +3552,301 @@ impl ProtocolClient {
         }
         Ok(total_chunks_downloaded)
     }
+
+    // -----------------------------------------------------------------------
+    // F7: Pack-based pull (locate → presign → Range-GET → ODB)
+    // F8: Per-slice BLAKE3 verify
+    // -----------------------------------------------------------------------
+
+    /// Locate chunks in the server's pack manifest index.
+    ///
+    /// `wants_full_repo=true` fetches the entire map in one response (full-clone).
+    async fn locate_chunks_in_packs(
+        &self,
+        chunk_ids: &[String],
+        wants_full_repo: bool,
+    ) -> Result<std::collections::HashMap<String, PackLocInfo>> {
+        #[derive(serde::Serialize)]
+        struct Req<'a> {
+            chunk_ids: &'a [String],
+            wants_full_repo: bool,
+        }
+        #[derive(serde::Deserialize)]
+        struct LocEntry {
+            pack_oid: String,
+            offset: u64,
+            length: u32,
+        }
+
+        let url = format!("{}/chunks/locate", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .json(&Req {
+                chunk_ids,
+                wants_full_repo,
+            })
+            .send()
+            .await
+            .context("POST /chunks/locate")?;
+        if !resp.status().is_success() {
+            anyhow::bail!("POST /chunks/locate returned {}", resp.status());
+        }
+        let map: std::collections::HashMap<String, LocEntry> =
+            resp.json().await.context("parse /chunks/locate")?;
+        Ok(map
+            .into_iter()
+            .map(|(oid, e)| {
+                (
+                    oid,
+                    PackLocInfo {
+                        pack_oid: e.pack_oid,
+                        offset: e.offset,
+                        length: e.length,
+                    },
+                )
+            })
+            .collect())
+    }
+
+    /// Request presigned GET URLs for a batch of pack objects.
+    async fn request_pack_download_urls(
+        &self,
+        pack_ids: &[String],
+    ) -> std::collections::HashMap<String, Option<PresignedGetInfo>> {
+        if pack_ids.is_empty() {
+            return std::collections::HashMap::new();
+        }
+        #[derive(serde::Serialize)]
+        struct Req<'a> {
+            pack_ids: &'a [String],
+        }
+        let url = format!("{}/packs/presign-download-urls", self.base_url);
+        let result = async {
+            let resp = self
+                .client
+                .post(&url)
+                .json(&Req { pack_ids })
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                anyhow::bail!(
+                    "POST /packs/presign-download-urls returned {}",
+                    resp.status()
+                );
+            }
+            resp.json::<std::collections::HashMap<String, Option<PresignedGetInfo>>>()
+                .await
+                .context("parse /packs/presign-download-urls")
+        }
+        .await;
+        match result {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(err = %e, "request_pack_download_urls failed");
+                std::collections::HashMap::new()
+            }
+        }
+    }
+
+    /// Pull a set of chunks via pack-mode Range-GET (F7 + F8).
+    ///
+    /// Returns the count of chunks successfully written to ODB.
+    /// Chunks not found in the pack index are silently skipped (caller may
+    /// fall back to legacy proxy GET for those).
+    pub async fn pull_chunks_via_packs(
+        &self,
+        chunk_ids: &[Oid],
+        odb: &ObjectDatabase,
+    ) -> Result<u32> {
+        use futures::StreamExt;
+
+        if chunk_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let pack_verify = std::env::var("MEDIAGIT_PACK_VERIFY")
+            .as_deref()
+            .unwrap_or("1")
+            != "0";
+
+        let download_concurrency: usize = std::env::var("MEDIAGIT_DOWNLOAD_CONCURRENCY")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|n: &usize| *n > 0)
+            .or(self.concurrent_downloads)
+            .unwrap_or(24);
+
+        let coalesce_max_gap: u64 = std::env::var("MEDIAGIT_PACK_RANGE_COALESCE_MAX_GAP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1_048_576);
+        let coalesce_max_bytes: u64 = std::env::var("MEDIAGIT_PACK_RANGE_COALESCE_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8_388_608);
+
+        let all_hex: Vec<String> = chunk_ids.iter().map(|o| o.to_hex()).collect();
+        let wants_full_repo = all_hex.len() > 512;
+        let loc_map = self
+            .locate_chunks_in_packs(&all_hex, wants_full_repo)
+            .await?;
+        if loc_map.is_empty() {
+            return Ok(0);
+        }
+
+        // Group by pack_oid, sort by offset.
+        let mut by_pack: std::collections::HashMap<String, Vec<(String, u64, u32)>> =
+            std::collections::HashMap::new();
+        for hex in &all_hex {
+            if let Some(loc) = loc_map.get(hex) {
+                by_pack.entry(loc.pack_oid.clone()).or_default().push((
+                    hex.clone(),
+                    loc.offset,
+                    loc.length,
+                ));
+            }
+        }
+
+        let pack_ids: Vec<String> = by_pack.keys().cloned().collect();
+        let presign_map = self.request_pack_download_urls(&pack_ids).await;
+
+        let tasks: Vec<_> = by_pack
+            .into_iter()
+            .filter_map(|(pack_oid, mut chunks)| {
+                let url = presign_map
+                    .get(&pack_oid)
+                    .and_then(|o| o.as_ref())
+                    .map(|p| p.url.clone())?;
+                chunks.sort_unstable_by_key(|(_, off, _)| *off);
+                Some((chunks, url, pack_oid))
+            })
+            .collect();
+
+        let client = self.client.clone();
+
+        type PackChunkPairs = Vec<(Oid, Vec<u8>)>;
+        let per_pack_results: Vec<Result<PackChunkPairs>> = futures::stream::iter(tasks)
+            .map(|(chunks, url, pack_oid)| {
+                let client = client.clone();
+                let cmg = coalesce_max_gap;
+                let cmb = coalesce_max_bytes;
+                async move {
+                    let ranges = coalesce_chunk_ranges(&chunks, cmg, cmb);
+                    let mut out: Vec<(Oid, Vec<u8>)> = Vec::new();
+
+                    for (range_start, range_end) in ranges {
+                        let hdr = format!("bytes={}-{}", range_start, range_end.saturating_sub(1));
+                        let resp = client
+                            .get(&url)
+                            .header("Range", &hdr)
+                            .send()
+                            .await
+                            .with_context(|| format!("Range-GET {} range {}", pack_oid, hdr))?;
+
+                        let status = resp.status().as_u16();
+                        if status != 200 && status != 206 {
+                            anyhow::bail!("Range-GET returned {} for pack {}", status, pack_oid);
+                        }
+
+                        let body = resp.bytes().await.context("read Range-GET body")?;
+
+                        for (hex, off, len) in &chunks {
+                            if *off < range_start || *off + *len as u64 > range_end {
+                                continue;
+                            }
+                            let rel = (*off - range_start) as usize;
+                            let slice_end = rel + *len as usize;
+                            if slice_end > body.len() || *len < 5 {
+                                tracing::warn!(chunk = %hex, "pack slice bounds error");
+                                continue;
+                            }
+                            // Pack object layout: type(1) + size(4) + data
+                            let data = &body[rel + 5..slice_end];
+
+                            let oid = match Oid::from_hex(hex) {
+                                Ok(o) => o,
+                                Err(_) => continue,
+                            };
+
+                            // F8: BLAKE3 per-slice verify
+                            if pack_verify {
+                                let mut h = mediagit_versioning::hash::Hasher::new();
+                                h.update(data);
+                                let computed = Oid::from_bytes(h.finalize());
+                                if computed != oid {
+                                    tracing::warn!(
+                                        chunk = %hex,
+                                        "BLAKE3 mismatch on pack slice"
+                                    );
+                                    continue;
+                                }
+                            }
+
+                            out.push((oid, data.to_vec()));
+                        }
+                    }
+                    Ok(out)
+                }
+            })
+            .buffer_unordered(download_concurrency)
+            .collect()
+            .await;
+
+        let mut chunks_written: u32 = 0;
+        for result in per_pack_results {
+            match result {
+                Ok(pairs) => {
+                    for (oid, data) in pairs {
+                        odb.write(ObjectType::Blob, &data)
+                            .await
+                            .with_context(|| format!("write chunk {} to ODB", oid))?;
+                        chunks_written += 1;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        err = %e,
+                        "Pack Range-GET batch failed; these chunks need proxy-GET fallback"
+                    );
+                }
+            }
+        }
+
+        Ok(chunks_written)
+    }
+}
+
+/// Coalesce adjacent/near chunk ranges within a sorted (offset-ascending) chunk list.
+///
+/// Returns a list of (start, end) byte ranges where `end` is exclusive.
+/// Only merges if `gap <= max_gap` AND `merged_size <= max_bytes`.
+fn coalesce_chunk_ranges(
+    chunks: &[(String, u64, u32)],
+    max_gap: u64,
+    max_bytes: u64,
+) -> Vec<(u64, u64)> {
+    let mut ranges: Vec<(u64, u64)> = Vec::new();
+    if chunks.is_empty() {
+        return ranges;
+    }
+    let mut cur_start = chunks[0].1;
+    let mut cur_end = cur_start + chunks[0].2 as u64;
+
+    for (_, off, len) in &chunks[1..] {
+        let chunk_end = off + *len as u64;
+        let gap = off.saturating_sub(cur_end);
+        let merged = chunk_end - cur_start;
+        if gap <= max_gap && merged <= max_bytes {
+            cur_end = cur_end.max(chunk_end);
+        } else {
+            ranges.push((cur_start, cur_end));
+            cur_start = *off;
+            cur_end = chunk_end;
+        }
+    }
+    ranges.push((cur_start, cur_end));
+    ranges
 }
 
 /// Download a single chunk directly from a presigned GET URL, verify its hash.
