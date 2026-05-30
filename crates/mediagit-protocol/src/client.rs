@@ -50,6 +50,7 @@ struct PackLocInfo {
     pack_oid: String,
     offset: u64,
     length: u32,
+    compressed_hash: Option<String>,
 }
 
 /// Statistics from a push operation
@@ -3640,6 +3641,7 @@ impl ProtocolClient {
 
         let mut chunks_done: u32 = 0;
         let mut bytes_done: u64 = 0;
+        let mut current_hashes: Vec<(String, String)> = Vec::new();
 
         for chunk_id in full_chunks {
             let data = odb
@@ -3647,15 +3649,26 @@ impl ProtocolClient {
                 .await
                 .with_context(|| format!("read chunk {} for pack", chunk_id))?;
 
+            // Record BLAKE3(compressed bytes) for per-slice pull-side verify.
+            let comp_hash = Oid::hash(&data).to_hex();
+            current_hashes.push((chunk_id.to_hex(), comp_hash));
+
             if let Some(result) = builder
                 .add_chunk(*chunk_id, &data)
                 .await
                 .with_context(|| format!("pack chunk {}", chunk_id))?
             {
                 let pack_bytes = result.byte_len;
-                upload_and_register(result, &self.base_url, &self.client, &direct_client)
-                    .await
-                    .context("upload_and_register pack")?;
+                let hashes = std::mem::take(&mut current_hashes);
+                upload_and_register(
+                    result,
+                    &self.base_url,
+                    &self.client,
+                    &direct_client,
+                    &hashes,
+                )
+                .await
+                .context("upload_and_register pack")?;
                 bytes_done += pack_bytes;
             }
             bytes_done += data.len() as u64;
@@ -3664,9 +3677,15 @@ impl ProtocolClient {
 
         if let Some(result) = builder.finish().await.context("finish final pack")? {
             let pack_bytes = result.byte_len;
-            upload_and_register(result, &self.base_url, &self.client, &direct_client)
-                .await
-                .context("upload_and_register final pack")?;
+            upload_and_register(
+                result,
+                &self.base_url,
+                &self.client,
+                &direct_client,
+                &current_hashes,
+            )
+            .await
+            .context("upload_and_register final pack")?;
             bytes_done += pack_bytes;
         }
 
@@ -3697,6 +3716,8 @@ impl ProtocolClient {
             pack_oid: String,
             offset: u64,
             length: u32,
+            #[serde(default)]
+            compressed_hash: Option<String>,
         }
 
         let url = format!("{}/chunks/locate", self.base_url);
@@ -3724,6 +3745,7 @@ impl ProtocolClient {
                         pack_oid: e.pack_oid,
                         offset: e.offset,
                         length: e.length,
+                        compressed_hash: e.compressed_hash,
                     },
                 )
             })
@@ -3817,6 +3839,17 @@ impl ProtocolClient {
             return Ok(0);
         }
 
+        // Build chunk → compressed_hash lookup for per-slice verify.
+        let compressed_hashes: std::collections::HashMap<String, String> = loc_map
+            .iter()
+            .filter_map(|(hex, loc)| {
+                loc.compressed_hash
+                    .as_ref()
+                    .map(|h| (hex.clone(), h.clone()))
+            })
+            .collect();
+        let compressed_hashes = std::sync::Arc::new(compressed_hashes);
+
         // Group by pack_oid, sort by offset.
         let mut by_pack: std::collections::HashMap<String, Vec<(String, u64, u32)>> =
             std::collections::HashMap::new();
@@ -3853,6 +3886,7 @@ impl ProtocolClient {
                 let client = client.clone();
                 let cmg = coalesce_max_gap;
                 let cmb = coalesce_max_bytes;
+                let comp_hashes = std::sync::Arc::clone(&compressed_hashes);
                 async move {
                     let ranges = coalesce_chunk_ranges(&chunks, cmg, cmb);
                     let mut out: Vec<(Oid, Vec<u8>)> = Vec::new();
@@ -3890,6 +3924,18 @@ impl ProtocolClient {
                                 Ok(o) => o,
                                 Err(_) => continue,
                             };
+
+                            // Per-slice compressed-hash verify when manifest includes it.
+                            if let Some(expected) = comp_hashes.get(hex.as_str()) {
+                                let computed = Oid::hash(data).to_hex();
+                                if &computed != expected {
+                                    tracing::warn!(
+                                        chunk = %hex,
+                                        "compressed-hash mismatch on pack slice; skipping"
+                                    );
+                                    continue;
+                                }
+                            }
 
                             out.push((oid, data.to_vec()));
                         }

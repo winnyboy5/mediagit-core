@@ -139,6 +139,10 @@ pub struct PackLoc {
     pub pack_oid: String,
     pub offset: u64,
     pub length: u32,
+    /// BLAKE3 of the compressed chunk bytes stored in the pack.
+    /// Used for per-slice integrity verify on pull (absent on old manifests).
+    #[serde(default)]
+    pub compressed_hash: Option<String>,
 }
 
 /// Shared application state
