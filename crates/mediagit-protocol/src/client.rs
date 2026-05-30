@@ -3786,15 +3786,12 @@ impl ProtocolClient {
             return Ok(0);
         }
 
-        // F8 per-slice verify: pack stores compressed bytes (matching local ODB storage).
-        // chunk_oid = BLAKE3(uncompressed), so BLAKE3(compressed_slice) != chunk_oid.
-        // Whole-pack integrity is guaranteed by pack_oid = BLAKE3(full pack bytes) at upload.
-        // Enable per-slice verify only when MEDIAGIT_PACK_VERIFY=1 (opt-in for debugging).
-        let pack_verify = std::env::var("MEDIAGIT_PACK_VERIFY")
-            .as_deref()
-            .unwrap_or("0")
-            == "1";
-
+        // Integrity model: pack bytes are compressed (matching local ODB storage format).
+        // chunk_oid = BLAKE3(uncompressed), so per-slice BLAKE3 would not match.
+        // Integrity is covered by: (a) pack_oid = BLAKE3(full pack bytes) verified at push
+        // upload time via complete_pack; (b) clone-SHA / fsck tests on the pulled working tree.
+        // Per-slice hash verification requires storing compressed hashes in the manifest
+        // and is deferred as a future improvement.
         let download_concurrency: usize = std::env::var("MEDIAGIT_DOWNLOAD_CONCURRENCY")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -3893,20 +3890,6 @@ impl ProtocolClient {
                                 Ok(o) => o,
                                 Err(_) => continue,
                             };
-
-                            // F8: BLAKE3 per-slice verify
-                            if pack_verify {
-                                let mut h = mediagit_versioning::hash::Hasher::new();
-                                h.update(data);
-                                let computed = Oid::from_bytes(h.finalize());
-                                if computed != oid {
-                                    tracing::warn!(
-                                        chunk = %hex,
-                                        "BLAKE3 mismatch on pack slice"
-                                    );
-                                    continue;
-                                }
-                            }
 
                             out.push((oid, data.to_vec()));
                         }
