@@ -1624,6 +1624,13 @@ pub async fn upload_chunk_delta(
 // ============================================================================
 
 #[derive(serde::Deserialize)]
+pub struct PresignChunkUploadsRequest {
+    chunk_ids: Vec<String>,
+    #[serde(default)]
+    sizes: std::collections::HashMap<String, u64>,
+}
+
+#[derive(serde::Deserialize)]
 pub struct PresignPackUploadsRequest {
     pack_ids: Vec<String>,
     /// Byte sizes parallel to `pack_ids`; index i is the size for `pack_ids[i]`.
@@ -1639,14 +1646,14 @@ pub struct PresignedPutJson {
     required_headers: Vec<[String; 2]>,
 }
 
-/// POST /:repo/chunks/upload-urls — Mint presigned PUT URLs for a batch of pack objects.
+/// POST /:repo/packs/upload-urls — Mint presigned PUT URLs for a batch of pack objects.
 ///
 /// Request: `{ pack_ids: [hex, ...], sizes: [u64, ...] }`
 /// Response: `{ hex: { url, method, required_headers } | null, ... }`
 ///
 /// A `null` entry means the backend does not support presigning; the client must
 /// fall back to the server-proxied upload route for that pack.
-pub async fn presign_chunk_uploads(
+pub async fn presign_pack_uploads(
     Path(repo): Path<String>,
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
@@ -1719,6 +1726,84 @@ pub async fn presign_chunk_uploads(
         repo = %repo,
         count = count,
         "Presigned pack upload URLs generated"
+    );
+    Ok(Json(urls))
+}
+
+/// POST /:repo/chunks/upload-urls — Mint presigned PUT URLs for a batch of chunk objects.
+///
+/// Request: `{ chunk_ids: [hex, ...], sizes: {hex: u64, ...} }`
+/// Response: `{ hex: { url, method, required_headers } | null, ... }`
+pub async fn presign_chunk_uploads(
+    Path(repo): Path<String>,
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    Json(req): Json<PresignChunkUploadsRequest>,
+) -> Result<Json<std::collections::HashMap<String, Option<PresignedPutJson>>>, StatusCode> {
+    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+    let repo_path = state.repos_dir.join(&repo);
+    if !repo_path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let storage = get_or_init_storage(&state, &repo_path).await?;
+    let ttl = std::time::Duration::from_secs(state.presigned_url_ttl_secs);
+    let presign_concurrency: usize = std::env::var("MEDIAGIT_PRESIGN_CONCURRENCY")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n: &usize| *n > 0)
+        .unwrap_or(64);
+
+    let count = req.chunk_ids.len();
+    let pairs: Vec<(String, u64)> = req
+        .chunk_ids
+        .into_iter()
+        .map(|id| {
+            let size = req.sizes.get(&id).copied().unwrap_or(0);
+            (id, size)
+        })
+        .collect();
+
+    let entries: Vec<(String, Option<PresignedPutJson>)> =
+        futures::stream::iter(pairs.into_iter().map(|(chunk_id, content_length)| {
+            let storage = Arc::clone(&storage);
+            let repo = repo.clone();
+            async move {
+                let key = format!("chunks/{}", chunk_id);
+                let entry = match storage.presign_put(&key, content_length, ttl).await {
+                    Ok(Some(p)) => Some(PresignedPutJson {
+                        url: p.url,
+                        method: p.method,
+                        required_headers: p
+                            .required_headers
+                            .into_iter()
+                            .map(|(k, v)| [k, v])
+                            .collect(),
+                    }),
+                    Ok(None) => None,
+                    Err(e) => {
+                        tracing::warn!(
+                            repo = %repo,
+                            chunk = %chunk_id,
+                            err = %e,
+                            "presign_put failed; client will fall back to proxy upload"
+                        );
+                        None
+                    }
+                };
+                (chunk_id, entry)
+            }
+        }))
+        .buffer_unordered(presign_concurrency)
+        .collect()
+        .await;
+
+    let urls: std::collections::HashMap<String, Option<PresignedPutJson>> =
+        entries.into_iter().collect();
+
+    tracing::info!(
+        repo = %repo,
+        count = count,
+        "Presigned chunk upload URLs generated"
     );
     Ok(Json(urls))
 }
