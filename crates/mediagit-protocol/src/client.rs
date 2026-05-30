@@ -3931,6 +3931,8 @@ impl ProtocolClient {
                                 if &computed != expected {
                                     tracing::warn!(
                                         chunk = %hex,
+                                        expected = %expected,
+                                        computed = %computed,
                                         "compressed-hash mismatch on pack slice; skipping"
                                     );
                                     continue;
@@ -3968,6 +3970,15 @@ impl ProtocolClient {
             }
         }
 
+        if chunks_written == 0 && !loc_map.is_empty() {
+            tracing::error!(
+                located = loc_map.len(),
+                "pack-mode pull: 0/{} chunks passed verify — all slices failed \
+                 compressed-hash check or bounds; server JSONL may be stale or \
+                 from a different binary. Falling back to per-chunk (slow).",
+                loc_map.len()
+            );
+        }
         Ok(chunks_written)
     }
 }
