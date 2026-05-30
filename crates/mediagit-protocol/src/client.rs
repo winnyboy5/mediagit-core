@@ -3919,7 +3919,7 @@ impl ProtocolClient {
             match result {
                 Ok(pairs) => {
                     for (oid, data) in pairs {
-                        odb.write(ObjectType::Blob, &data)
+                        odb.write_chunk(&oid, &data)
                             .await
                             .with_context(|| format!("write chunk {} to ODB", oid))?;
                         chunks_written += 1;
