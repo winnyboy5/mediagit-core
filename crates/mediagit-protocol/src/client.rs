@@ -3643,7 +3643,7 @@ impl ProtocolClient {
 
         for chunk_id in full_chunks {
             let data = odb
-                .get_chunk(chunk_id)
+                .get_compressed_chunk(chunk_id)
                 .await
                 .with_context(|| format!("read chunk {} for pack", chunk_id))?;
 
@@ -3786,10 +3786,14 @@ impl ProtocolClient {
             return Ok(0);
         }
 
+        // F8 per-slice verify: pack stores compressed bytes (matching local ODB storage).
+        // chunk_oid = BLAKE3(uncompressed), so BLAKE3(compressed_slice) != chunk_oid.
+        // Whole-pack integrity is guaranteed by pack_oid = BLAKE3(full pack bytes) at upload.
+        // Enable per-slice verify only when MEDIAGIT_PACK_VERIFY=1 (opt-in for debugging).
         let pack_verify = std::env::var("MEDIAGIT_PACK_VERIFY")
             .as_deref()
-            .unwrap_or("1")
-            != "0";
+            .unwrap_or("0")
+            == "1";
 
         let download_concurrency: usize = std::env::var("MEDIAGIT_DOWNLOAD_CONCURRENCY")
             .ok()
@@ -3919,7 +3923,7 @@ impl ProtocolClient {
             match result {
                 Ok(pairs) => {
                     for (oid, data) in pairs {
-                        odb.write_chunk(&oid, &data)
+                        odb.put_compressed_chunk(&oid, &data)
                             .await
                             .with_context(|| format!("write chunk {} to ODB", oid))?;
                         chunks_written += 1;
