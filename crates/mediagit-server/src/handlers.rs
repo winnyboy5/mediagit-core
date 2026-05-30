@@ -2556,6 +2556,9 @@ pub struct ManifestEntry {
     pub chunk_oid: String,
     pub offset: u64,
     pub length: u32,
+    /// BLAKE3 of the compressed chunk bytes (absent on old manifests).
+    #[serde(default)]
+    pub compressed_hash: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -2564,6 +2567,8 @@ struct PackIndexLine {
     pack_oid: String,
     offset: u64,
     length: u32,
+    #[serde(default)]
+    compressed_hash: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -2623,6 +2628,7 @@ pub async fn complete_pack(
             pack_oid: req.pack_oid.clone(),
             offset: entry.offset,
             length: entry.length,
+            compressed_hash: entry.compressed_hash.clone(),
         };
         match serde_json::to_string(&line) {
             Ok(s) => {
@@ -2650,6 +2656,7 @@ pub async fn complete_pack(
                     pack_oid: req.pack_oid.clone(),
                     offset: entry.offset,
                     length: entry.length,
+                    compressed_hash: entry.compressed_hash.clone(),
                 },
             );
         }
@@ -2719,6 +2726,7 @@ async fn load_jsonl_index(
                                 pack_oid: entry.pack_oid,
                                 offset: entry.offset,
                                 length: entry.length,
+                                compressed_hash: entry.compressed_hash,
                             },
                         );
                     }
@@ -2744,6 +2752,7 @@ pub struct LocatedChunk {
     pub pack_oid: String,
     pub offset: u64,
     pub length: u32,
+    pub compressed_hash: Option<String>,
 }
 
 /// POST /{repo}/chunks/locate — Resolve chunk OIDs to pack locations.
@@ -2789,6 +2798,7 @@ pub async fn locate_chunks(
                         pack_oid: loc.pack_oid.clone(),
                         offset: loc.offset,
                         length: loc.length,
+                        compressed_hash: loc.compressed_hash.clone(),
                     },
                 )
             })
@@ -2804,6 +2814,7 @@ pub async fn locate_chunks(
                             pack_oid: loc.pack_oid.clone(),
                             offset: loc.offset,
                             length: loc.length,
+                            compressed_hash: loc.compressed_hash.clone(),
                         },
                     )
                 })

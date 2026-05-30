@@ -167,6 +167,7 @@ pub async fn upload_and_register(
     base_url: &str,
     http_client: &reqwest::Client,
     direct_client: &reqwest::Client,
+    compressed_hashes: &[(String, String)],
 ) -> Result<()> {
     let pack_oid_hex = bytes_to_hex(&result.pack_oid);
     let byte_len = result.byte_len;
@@ -236,10 +237,16 @@ pub async fn upload_and_register(
         .index
         .iter()
         .map(|loc| {
+            let chunk_hex = loc.chunk_oid.to_hex();
+            let comp_hash = compressed_hashes
+                .iter()
+                .find(|(h, _)| h == &chunk_hex)
+                .map(|(_, hash)| hash.clone());
             serde_json::json!({
-                "chunk_oid": loc.chunk_oid.to_hex(),
+                "chunk_oid": chunk_hex,
                 "offset": loc.offset,
                 "length": loc.length,
+                "compressed_hash": comp_hash,
             })
         })
         .collect();
