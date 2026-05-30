@@ -172,7 +172,7 @@ pub async fn upload_and_register(
     let byte_len = result.byte_len;
 
     // 1. Request presigned PUT URL for packs/<pack_oid>
-    let presign_url = format!("{}/chunks/upload-urls", base_url);
+    let presign_url = format!("{}/packs/upload-urls", base_url);
     let presign_body = serde_json::json!({
         "pack_ids": [pack_oid_hex],
         "sizes": [byte_len],
@@ -182,19 +182,16 @@ pub async fn upload_and_register(
         .json(&presign_body)
         .send()
         .await
-        .context("POST /chunks/upload-urls")?;
+        .context("POST /packs/upload-urls")?;
 
     if !presign_resp.status().is_success() {
-        anyhow::bail!(
-            "POST /chunks/upload-urls returned {}",
-            presign_resp.status()
-        );
+        anyhow::bail!("POST /packs/upload-urls returned {}", presign_resp.status());
     }
 
     let presign_map: std::collections::HashMap<String, Option<serde_json::Value>> = presign_resp
         .json()
         .await
-        .context("parse /chunks/upload-urls response")?;
+        .context("parse /packs/upload-urls response")?;
 
     // 2. Upload pack bytes
     let pack_data = tokio::fs::read(&result.temp_path)

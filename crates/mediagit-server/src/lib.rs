@@ -138,6 +138,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/{repo}/tree", get(handlers::list_tree_root))
         // Pack manifest endpoints (F6) — Track-F cloud pack bundling
         .route("/{repo}/packs/complete", post(handlers::complete_pack))
+        .route(
+            "/{repo}/packs/upload-urls",
+            post(handlers::presign_pack_uploads),
+        )
         .route("/{repo}/packs/:pack_id", put(handlers::upload_pack_proxy))
         .route("/{repo}/chunks/locate", post(handlers::locate_chunks))
         .route(
@@ -310,6 +314,10 @@ pub fn create_router_with_rate_limit(
         .route("/{repo}/tree", get(handlers::list_tree_root))
         // Pack manifest endpoints (F6) — Track-F cloud pack bundling
         .route("/{repo}/packs/complete", post(handlers::complete_pack))
+        .route(
+            "/{repo}/packs/upload-urls",
+            post(handlers::presign_pack_uploads),
+        )
         .route("/{repo}/packs/:pack_id", put(handlers::upload_pack_proxy))
         .route("/{repo}/chunks/locate", post(handlers::locate_chunks))
         .route(

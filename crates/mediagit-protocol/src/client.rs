@@ -3643,7 +3643,7 @@ impl ProtocolClient {
 
         for chunk_id in full_chunks {
             let data = odb
-                .get_compressed_chunk(chunk_id)
+                .get_chunk(chunk_id)
                 .await
                 .with_context(|| format!("read chunk {} for pack", chunk_id))?;
 
