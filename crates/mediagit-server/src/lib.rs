@@ -142,7 +142,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/{repo}/packs/upload-urls",
             post(handlers::presign_pack_uploads),
         )
-        .route("/{repo}/packs/:pack_id", put(handlers::upload_pack_proxy))
+        .route("/{repo}/packs/{pack_id}", put(handlers::upload_pack_proxy))
         .route("/{repo}/chunks/locate", post(handlers::locate_chunks))
         .route(
             "/{repo}/packs/presign-download-urls",
@@ -318,7 +318,7 @@ pub fn create_router_with_rate_limit(
             "/{repo}/packs/upload-urls",
             post(handlers::presign_pack_uploads),
         )
-        .route("/{repo}/packs/:pack_id", put(handlers::upload_pack_proxy))
+        .route("/{repo}/packs/{pack_id}", put(handlers::upload_pack_proxy))
         .route("/{repo}/chunks/locate", post(handlers::locate_chunks))
         .route(
             "/{repo}/packs/presign-download-urls",
