@@ -3475,29 +3475,6 @@ impl ObjectDatabase {
         }
     }
 
-    /// Store a chunk from uncompressed data at the `chunks/<hex>` key.
-    ///
-    /// Compresses via the ODB's configured compressor, then stores at `chunks/{hex}`.
-    /// This is the correct storage path for pack-pulled chunks, consistent with
-    /// `get_chunk`, `get_compressed_chunk`, and `put_compressed_chunk`.
-    pub async fn write_chunk(&self, chunk_id: &Oid, data: &[u8]) -> anyhow::Result<()> {
-        let chunk_key = format!("chunks/{}", chunk_id.to_hex());
-        let compressed = if let Some(sc) = &self.smart_compressor {
-            sc.compress_typed(data, CompressionObjectType::Unknown)
-                .map_err(|e| anyhow::anyhow!("compress chunk {}: {}", chunk_id, e))?
-        } else if self.compression_enabled {
-            self.compressor
-                .compress(data)
-                .map_err(|e| anyhow::anyhow!("compress chunk {}: {}", chunk_id, e))?
-        } else {
-            data.to_vec()
-        };
-        self.storage
-            .put(&chunk_key, &compressed)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to store chunk {}: {}", chunk_id, e))
-    }
-
     /// Store raw compressed chunk data (no compression)
     ///
     /// Used when receiving pre-compressed chunks from remote.
