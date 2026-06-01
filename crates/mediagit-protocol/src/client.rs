@@ -1405,11 +1405,21 @@ impl ProtocolClient {
                 .as_deref()
                 .unwrap_or("1")
                 != "0";
+            let mut pack_had_error = false;
             let pack_pushed = if !full_chunks.is_empty() && cloud_packs {
-                match self.push_full_chunks_via_packs(&full_chunks, odb).await {
+                match self
+                    .push_full_chunks_via_packs(
+                        &full_chunks,
+                        odb,
+                        &chunk_manifest_sizes,
+                        &bytes_progress,
+                    )
+                    .await
+                {
                     Ok((n, b)) if n > 0 => {
                         chunks_uploaded += n;
                         upload_bytes += b;
+                        // Numerator already credited per-pack inside push_full_chunks_via_packs.
                         true
                     }
                     Ok(_) => {
@@ -1417,6 +1427,7 @@ impl ProtocolClient {
                         false
                     }
                     Err(e) => {
+                        pack_had_error = true;
                         tracing::warn!(
                             err = %e,
                             "pack push failed; falling back to per-chunk path"
@@ -1428,6 +1439,35 @@ impl ProtocolClient {
                 false
             };
             if !full_chunks.is_empty() && !pack_pushed {
+                // If the pack path failed mid-way, some packs may have completed
+                // and registered their chunks server-side before the error. Re-check
+                // so the fallback only uploads chunks that are genuinely still missing,
+                // avoiding bandwidth waste and duplicate storage.
+                if pack_had_error {
+                    let hexes: Vec<String> = full_chunks.iter().map(|c| c.to_hex()).collect();
+                    let still_missing: std::collections::HashSet<String> =
+                        self.check_chunks_exist(&hexes).await?.into_iter().collect();
+                    // push_full_chunks_via_packs rolled back all its numerator credits on error.
+                    // Re-credit the bytes for chunks that landed in completed packs so the
+                    // denominator (already published at bytes_total_progress) stays balanced
+                    // and the progress bar can reach 100%.
+                    let already_uploaded_bytes: u64 = full_chunks
+                        .iter()
+                        .filter(|id| !still_missing.contains(&id.to_hex()))
+                        .filter_map(|id| chunk_manifest_sizes.get(id))
+                        .sum();
+                    if already_uploaded_bytes > 0 {
+                        bytes_progress.fetch_add(already_uploaded_bytes, Ordering::Relaxed);
+                    }
+                    full_chunks.retain(|id| still_missing.contains(&id.to_hex()));
+                    tracing::debug!(
+                        original = hexes.len(),
+                        still_missing = full_chunks.len(),
+                        already_credited = already_uploaded_bytes,
+                        "re-checked existence after partial pack failure"
+                    );
+                }
+
                 // Request presigned PUT URLs from the server.  Cloud
                 // backends return signed bucket URLs; Local/Mock return
                 // null → falls through to the server-proxy PUT path.
@@ -3309,56 +3349,55 @@ impl ProtocolClient {
                     "Split chunk download: full first, then deltas"
                 );
 
-                // Batch-request presigned GET URLs for full chunks (best-effort;
-                // empty map on old servers / disabled backends / env gate).
-                let full_chunk_hex: Vec<String> = full_chunks.iter().map(|c| c.to_hex()).collect();
-
                 // F7: pack-mode pull path — locate → presign → Range-GET.
                 // Falls back to legacy per-chunk path if pack mode returns 0 chunks or errors.
                 let cloud_packs_pull = std::env::var("MEDIAGIT_CLOUD_PACKS")
                     .as_deref()
                     .unwrap_or("1")
                     != "0";
-                let pack_pulled = if cloud_packs_pull && !full_chunks.is_empty() {
-                    match self.pull_chunks_via_packs(&full_chunks, odb).await {
-                        Ok(n) if n > 0 => {
-                            tracing::debug!(chunks = n, "pack-mode pull complete");
-                            true
+                // F7: pack-mode pull returns the set of chunks written.
+                // Remaining (not in written_set) fall through to per-chunk path.
+                let pack_written: std::collections::HashSet<mediagit_versioning::Oid> =
+                    if cloud_packs_pull && !full_chunks.is_empty() {
+                        match self.pull_chunks_via_packs(&full_chunks, odb).await {
+                            Ok(written) => {
+                                tracing::debug!(chunks = written.len(), "pack-mode pull complete");
+                                written
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    err = %e,
+                                    "pack-mode pull failed; falling back to per-chunk"
+                                );
+                                std::collections::HashSet::new()
+                            }
                         }
-                        Ok(_) => {
-                            tracing::debug!(
-                                "pack-mode pull: 0 chunks located; using per-chunk fallback"
-                            );
-                            false
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                err = %e,
-                                "pack-mode pull failed; falling back to per-chunk"
-                            );
-                            false
-                        }
-                    }
-                } else {
-                    false
-                };
+                    } else {
+                        std::collections::HashSet::new()
+                    };
+                // Chunks not written by pack-mode pull: fall through to per-chunk download.
+                let chunks_for_fallback: Vec<Oid> = full_chunks
+                    .into_iter()
+                    .filter(|c| !pack_written.contains(c))
+                    .collect();
+                let fallback_hex: Vec<String> =
+                    chunks_for_fallback.iter().map(|c| c.to_hex()).collect();
 
-                if direct_download_enabled && !full_chunk_hex.is_empty() && !pack_pulled {
+                if direct_download_enabled && !fallback_hex.is_empty() {
                     on_progress(
                         bytes_done,
                         total_manifest_bytes,
-                        &format!("Preparing {} download URLs...", full_chunk_hex.len()),
+                        &format!("Preparing {} download URLs...", fallback_hex.len()),
                     );
                 }
-                let download_urls =
-                    if direct_download_enabled && !full_chunk_hex.is_empty() && !pack_pulled {
-                        self.request_chunk_download_urls(&full_chunk_hex).await
-                    } else {
-                        std::collections::HashMap::new()
-                    };
+                let download_urls = if direct_download_enabled && !fallback_hex.is_empty() {
+                    self.request_chunk_download_urls(&fallback_hex).await
+                } else {
+                    std::collections::HashMap::new()
+                };
 
-                // ── Pass A: full chunks (and any chunks needed as delta bases) ──
-                if !full_chunks.is_empty() && !pack_pulled {
+                // ── Pass A: full chunks not yet written (pack miss or pack disabled) ──
+                if !chunks_for_fallback.is_empty() {
                     let download_urls = std::sync::Arc::new(download_urls);
                     let _dl_pass_a_t = std::time::Instant::now();
                     let mut _dl_pass_a_n = 0u64;
@@ -3370,7 +3409,7 @@ impl ProtocolClient {
                         .as_deref()
                         .unwrap_or("1")
                         == "1";
-                    let mut stream = futures::stream::iter(full_chunks.into_iter())
+                    let mut stream = futures::stream::iter(chunks_for_fallback.into_iter())
                         .map(|chunk_id| {
                             let client = self.client.clone();
                             let direct_client = direct_client.clone();
@@ -3620,12 +3659,24 @@ impl ProtocolClient {
 
     /// Bundle `full_chunks` into cloud packs and upload each via presigned PUT.
     /// Returns `(chunks_uploaded, bytes_uploaded)`.
+    #[allow(clippy::type_complexity)]
     async fn push_full_chunks_via_packs(
         &self,
         full_chunks: &[Oid],
         odb: &ObjectDatabase,
+        chunk_manifest_sizes: &std::collections::HashMap<Oid, u64>,
+        bytes_progress: &Arc<AtomicU64>,
     ) -> Result<(u32, u64)> {
         use crate::pack_builder::{upload_and_register, PackBuilder};
+        use futures::stream::{FuturesUnordered, StreamExt};
+
+        // Each in-flight pack is read fully into RAM (~MEDIAGIT_PACK_BYTES) for upload,
+        // so keep this modest; =1 restores sequential uploads. Default 8 ≈ 512 MiB ceiling.
+        let pack_upload_concurrency: usize = std::env::var("MEDIAGIT_PACK_UPLOAD_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(8);
 
         let temp_dir = tempfile::TempDir::new().context("create pack temp dir")?;
         let mut builder = PackBuilder::new(temp_dir.path());
@@ -3641,56 +3692,106 @@ impl ProtocolClient {
 
         let mut chunks_done: u32 = 0;
         let mut bytes_done: u64 = 0;
+        // Numerator (in manifest/uncompressed bytes — same unit as the denominator)
+        // already added to `bytes_progress`. Tracked so we can roll back on error and
+        // let the per-chunk fallback re-credit from a clean slate (no double-count).
+        let mut credited: u64 = 0;
         let mut current_hashes: Vec<(String, String)> = Vec::new();
+        // Σ manifest size of the chunks accumulated into the currently-open pack.
+        let mut pending_manifest_bytes: u64 = 0;
+        // Boxed so the per-pack and final-pack upload futures (distinct anonymous
+        // types) can share one queue.
+        let mut inflight: FuturesUnordered<
+            std::pin::Pin<Box<dyn std::future::Future<Output = (Result<()>, u64, u64)> + Send>>,
+        > = FuturesUnordered::new();
 
-        for chunk_id in full_chunks {
-            let data = odb
-                .get_compressed_chunk(chunk_id)
-                .await
-                .with_context(|| format!("read chunk {} for pack", chunk_id))?;
+        // Build packs synchronously; upload them concurrently (bounded). Wrapped so a
+        // failure mid-stream can roll back the numerator credits before propagating.
+        let outcome: Result<()> = async {
+            for chunk_id in full_chunks {
+                let data = odb
+                    .get_compressed_chunk(chunk_id)
+                    .await
+                    .with_context(|| format!("read chunk {} for pack", chunk_id))?;
 
-            // Record BLAKE3(compressed bytes) for per-slice pull-side verify.
-            let comp_hash = Oid::hash(&data).to_hex();
-            current_hashes.push((chunk_id.to_hex(), comp_hash));
+                // Record BLAKE3(compressed bytes) for per-slice pull-side verify.
+                let comp_hash = Oid::hash(&data).to_hex();
+                current_hashes.push((chunk_id.to_hex(), comp_hash));
+                pending_manifest_bytes += chunk_manifest_sizes.get(chunk_id).copied().unwrap_or(0);
 
-            if let Some(result) = builder
-                .add_chunk(*chunk_id, &data)
-                .await
-                .with_context(|| format!("pack chunk {}", chunk_id))?
-            {
-                let pack_bytes = result.byte_len;
-                let hashes = std::mem::take(&mut current_hashes);
-                upload_and_register(
-                    result,
-                    &self.base_url,
-                    &self.client,
-                    &direct_client,
-                    &hashes,
-                )
-                .await
-                .context("upload_and_register pack")?;
-                bytes_done += pack_bytes;
+                if let Some(result) = builder
+                    .add_chunk(*chunk_id, &data)
+                    .await
+                    .with_context(|| format!("pack chunk {}", chunk_id))?
+                {
+                    // The sealed pack includes the chunk just added (writer flushes on
+                    // cap hit), so it covers every chunk accumulated since the last seal.
+                    let hashes = std::mem::take(&mut current_hashes);
+                    let manifest_bytes = std::mem::take(&mut pending_manifest_bytes);
+                    let pack_byte_len = result.byte_len;
+                    let direct = direct_client.clone(); // cheap: reqwest::Client is Arc-internal
+                    inflight.push(Box::pin(async move {
+                        let r = upload_and_register(
+                            result,
+                            &self.base_url,
+                            &self.client,
+                            &direct,
+                            &hashes,
+                        )
+                        .await;
+                        (r, pack_byte_len, manifest_bytes)
+                    }));
+
+                    // Backpressure: never hold more than N packs in flight.
+                    while inflight.len() >= pack_upload_concurrency {
+                        if let Some((r, pb, mb)) = inflight.next().await {
+                            r.context("upload_and_register pack")?;
+                            bytes_done += pb;
+                            bytes_progress.fetch_add(mb, Ordering::Relaxed);
+                            credited += mb;
+                        }
+                    }
+                }
+                chunks_done += 1;
             }
-            bytes_done += data.len() as u64;
-            chunks_done += 1;
-        }
 
-        if let Some(result) = builder.finish().await.context("finish final pack")? {
-            let pack_bytes = result.byte_len;
-            upload_and_register(
-                result,
-                &self.base_url,
-                &self.client,
-                &direct_client,
-                &current_hashes,
-            )
-            .await
-            .context("upload_and_register final pack")?;
-            bytes_done += pack_bytes;
+            // Flush the final partial pack.
+            if let Some(result) = builder.finish().await.context("finish final pack")? {
+                let hashes = std::mem::take(&mut current_hashes);
+                let manifest_bytes = std::mem::take(&mut pending_manifest_bytes);
+                let pack_byte_len = result.byte_len;
+                let direct = direct_client.clone();
+                inflight.push(Box::pin(async move {
+                    let r =
+                        upload_and_register(result, &self.base_url, &self.client, &direct, &hashes)
+                            .await;
+                    (r, pack_byte_len, manifest_bytes)
+                }));
+            }
+
+            // Drain remaining uploads.
+            while let Some((r, pb, mb)) = inflight.next().await {
+                r.context("upload_and_register pack")?;
+                bytes_done += pb;
+                bytes_progress.fetch_add(mb, Ordering::Relaxed);
+                credited += mb;
+            }
+            Ok(())
         }
+        .await;
 
         drop(temp_dir);
-        Ok((chunks_done, bytes_done))
+
+        match outcome {
+            Ok(()) => Ok((chunks_done, bytes_done)),
+            Err(e) => {
+                // Roll back our credits so the per-chunk fallback re-credits from zero.
+                if credited > 0 {
+                    bytes_progress.fetch_sub(credited, Ordering::Relaxed);
+                }
+                Err(e)
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3794,18 +3895,18 @@ impl ProtocolClient {
 
     /// Pull a set of chunks via pack-mode Range-GET (F7 + F8).
     ///
-    /// Returns the count of chunks successfully written to ODB.
-    /// Chunks not found in the pack index are silently skipped (caller may
-    /// fall back to legacy proxy GET for those).
+    /// Returns the set of chunk OIDs successfully written to ODB.
+    /// Caller diffs against the requested set to find any that were skipped
+    /// (bounds error or hash mismatch) and falls back to per-chunk download.
     pub async fn pull_chunks_via_packs(
         &self,
         chunk_ids: &[Oid],
         odb: &ObjectDatabase,
-    ) -> Result<u32> {
+    ) -> Result<std::collections::HashSet<Oid>> {
         use futures::StreamExt;
 
         if chunk_ids.is_empty() {
-            return Ok(0);
+            return Ok(std::collections::HashSet::new());
         }
 
         // Integrity model: pack bytes are compressed (matching local ODB storage format).
@@ -3836,7 +3937,7 @@ impl ProtocolClient {
             .locate_chunks_in_packs(&all_hex, wants_full_repo)
             .await?;
         if loc_map.is_empty() {
-            return Ok(0);
+            return Ok(std::collections::HashSet::new());
         }
 
         // Build chunk → compressed_hash lookup for per-slice verify.
@@ -3949,7 +4050,7 @@ impl ProtocolClient {
             .collect()
             .await;
 
-        let mut chunks_written: u32 = 0;
+        let mut written_set: std::collections::HashSet<Oid> = std::collections::HashSet::new();
         for result in per_pack_results {
             match result {
                 Ok(pairs) => {
@@ -3957,12 +4058,12 @@ impl ProtocolClient {
                         odb.put_compressed_chunk(&oid, &data)
                             .await
                             .with_context(|| format!("write chunk {} to ODB", oid))?;
-                        chunks_written += 1;
+                        written_set.insert(oid);
                     }
                 }
                 Err(e) => {
-                    // Propagate so the caller falls back to per-chunk legacy for all chunks.
-                    // ODB dedup handles any re-downloads of already-written chunks.
+                    // Propagate so the caller falls back to per-chunk for all chunks.
+                    // ODB dedup handles re-downloads of already-written chunks.
                     return Err(
                         e.context("pack Range-GET failed; caller should use per-chunk fallback")
                     );
@@ -3970,7 +4071,7 @@ impl ProtocolClient {
             }
         }
 
-        if chunks_written == 0 && !loc_map.is_empty() {
+        if written_set.is_empty() && !loc_map.is_empty() {
             tracing::error!(
                 located = loc_map.len(),
                 "pack-mode pull: 0/{} chunks passed verify — all slices failed \
@@ -3979,7 +4080,7 @@ impl ProtocolClient {
                 loc_map.len()
             );
         }
-        Ok(chunks_written)
+        Ok(written_set)
     }
 }
 
