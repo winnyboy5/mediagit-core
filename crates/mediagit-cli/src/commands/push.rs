@@ -534,6 +534,12 @@ impl PushCmd {
                                 if progress.total > pb.length().unwrap_or(0) {
                                     pb.set_length(progress.total);
                                 }
+                                // Reset ETA on large jumps (pack seals, object transitions)
+                                // so protocol overhead stalls don't produce "eta 231y".
+                                let prev = pb.position();
+                                if progress.current.saturating_sub(prev) > 1_048_576 {
+                                    pb.reset_eta();
+                                }
                                 pb.set_position(progress.current);
                             }
                         }
