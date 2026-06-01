@@ -266,6 +266,26 @@ pub trait StorageBackend: Send + Sync + Debug {
     /// ```
     async fn get(&self, key: &str) -> anyhow::Result<Vec<u8>>;
 
+    /// Retrieve a byte range from an object (`offset` inclusive, `len` bytes).
+    ///
+    /// Default implementation fetches the whole object and slices it.
+    /// Backends may override for efficient HTTP Range-GET.
+    async fn get_range(&self, key: &str, offset: u64, len: u64) -> anyhow::Result<Vec<u8>> {
+        let data = self.get(key).await?;
+        let start = offset as usize;
+        let end = start + len as usize;
+        if end > data.len() {
+            anyhow::bail!(
+                "get_range: {}..{} out of bounds for key '{}' (object len {})",
+                offset,
+                end,
+                key,
+                data.len()
+            );
+        }
+        Ok(data[start..end].to_vec())
+    }
+
     /// Stream an object as a sequence of `Bytes` chunks (B7).
     ///
     /// Default impl fetches the full object via `get` and emits it as a single chunk.

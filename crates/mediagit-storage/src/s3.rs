@@ -952,17 +952,21 @@ impl StorageBackend for S3Backend {
     async fn presign_put(
         &self,
         key: &str,
-        _content_length: u64,
+        content_length: u64,
         ttl: std::time::Duration,
     ) -> anyhow::Result<Option<crate::PresignedPut>> {
         let key = crate::prefixed_key(&self.config.prefix, key);
         let presigning = aws_sdk_s3::presigning::PresigningConfig::expires_in(ttl)
             .map_err(|e| anyhow::anyhow!("presigning config: {e}"))?;
-        let req = self
+        let mut builder = self
             .client
             .put_object()
             .bucket(&self.config.bucket)
-            .key(key)
+            .key(key);
+        if content_length > 0 {
+            builder = builder.content_length(content_length as i64);
+        }
+        let req = builder
             .presigned(presigning)
             .await
             .map_err(|e| anyhow::anyhow!("presign_put s3: {e}"))?;

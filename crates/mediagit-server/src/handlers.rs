@@ -1167,17 +1167,38 @@ pub async fn check_chunks_exist(
     // Create storage backend
     let storage = get_or_init_storage(&state, &repo_path).await?;
 
+    // Lazy-load pack index from JSONL if not yet warm (mirrors locate_chunks).
+    {
+        let idx = state.pack_index.read().await;
+        if !idx.contains_key(&repo) {
+            drop(idx);
+            load_jsonl_index(&state, &repo, &repo_path).await?;
+        }
+    }
+
+    // Build set of chunks stored in packs for this repo (pack-index-aware).
+    let in_pack_set: std::collections::HashSet<String> = {
+        let idx = state.pack_index.read().await;
+        idx.get(&repo)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+
     // Check chunks concurrently — up to 50 in-flight existence checks.
     // storage is Arc<dyn StorageBackend> (Send+Sync), cheap to clone.
     //
-    // A chunk counts as "present" if either `chunks/<id>` or `chunk-deltas/<id>.meta`
-    // exists: the delta sidecar is a valid storage form and the reader path
-    // handles both. Otherwise a re-push would rematerialize existing deltas
-    // into full chunks and undo the storage savings.
+    // A chunk counts as "present" if any of:
+    //   - `chunks/<id>` exists in storage (full chunk)
+    //   - `chunk-deltas/<id>.meta` exists (delta sidecar)
+    //   - chunk is recorded in the in-memory pack_index (pack-stored)
     let missing: Vec<String> = futures::stream::iter(chunk_ids)
         .map(|chunk_id_hex| {
             let storage = Arc::clone(&storage);
+            let in_pack = in_pack_set.contains(&chunk_id_hex);
             async move {
+                if in_pack {
+                    return None;
+                }
                 let chunk_key = format!("chunks/{}", chunk_id_hex);
                 let delta_meta_key = format!("chunk-deltas/{}.meta", chunk_id_hex);
                 let (full, delta) = futures::future::join(
@@ -1394,6 +1415,50 @@ pub async fn download_chunk(
                         format!(r#"{{"kind":"delta","base_id":"{}"}}"#, base_hex).into_bytes(),
                     )
                         .into_response());
+                }
+                // Check pack index — chunk may exist inside a pack blob.
+                let pack_loc = {
+                    let idx = state.pack_index.read().await;
+                    idx.get(&repo).and_then(|m| m.get(&chunk_id)).cloned()
+                };
+                if let Some(loc) = pack_loc {
+                    if loc.length < 5 {
+                        tracing::error!(
+                            chunk = %chunk_id,
+                            pack = %loc.pack_oid,
+                            length = loc.length,
+                            "Pack index entry has length < 5 — corrupt index"
+                        );
+                        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                    }
+                    let pack_key = format!("packs/{}", loc.pack_oid);
+                    // Skip 5-byte pack entry header [type:1][size:4] to get raw chunk data.
+                    let data_offset = loc.offset + 5;
+                    let data_len = (loc.length as u64) - 5;
+                    match storage.get_range(&pack_key, data_offset, data_len).await {
+                        Ok(data) => {
+                            tracing::debug!(
+                                chunk = %chunk_id,
+                                pack = %loc.pack_oid,
+                                "Served chunk from pack via proxy"
+                            );
+                            return Ok((
+                                StatusCode::OK,
+                                [("Content-Type", "application/octet-stream")],
+                                data,
+                            )
+                                .into_response());
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                chunk = %chunk_id,
+                                pack = %loc.pack_oid,
+                                err = %e,
+                                "Failed to Range-GET chunk from pack"
+                            );
+                            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                        }
+                    }
                 }
                 tracing::warn!(chunk = %chunk_id, key = %chunk_key, "Chunk not found in storage");
                 Err(StatusCode::NOT_FOUND)
@@ -1764,12 +1829,15 @@ pub async fn presign_chunk_uploads(
         .collect();
 
     let entries: Vec<(String, Option<PresignedPutJson>)> =
-        futures::stream::iter(pairs.into_iter().map(|(chunk_id, content_length)| {
+        futures::stream::iter(pairs.into_iter().map(|(chunk_id, _content_length)| {
             let storage = Arc::clone(&storage);
             let repo = repo.clone();
             async move {
                 let key = format!("chunks/{}", chunk_id);
-                let entry = match storage.presign_put(&key, content_length, ttl).await {
+                // Pass 0 — chunk compressed size is unknown at presign time, and binding
+                // the uncompressed manifest size would cause 403 SignatureDoesNotMatch
+                // when compressed bytes are PUT for compressible content.
+                let entry = match storage.presign_put(&key, 0, ttl).await {
                     Ok(Some(p)) => Some(PresignedPutJson {
                         url: p.url,
                         method: p.method,
@@ -1927,10 +1995,30 @@ pub async fn complete_chunk_uploads(
     }
     let storage = get_or_init_storage(&state, &repo_path).await?;
 
+    // Lazy-load pack index from JSONL if not yet warm (mirrors locate_chunks).
+    {
+        let idx = state.pack_index.read().await;
+        if !idx.contains_key(&repo) {
+            drop(idx);
+            load_jsonl_index(&state, &repo, &repo_path).await?;
+        }
+    }
+
+    let in_pack_set: std::collections::HashSet<String> = {
+        let idx = state.pack_index.read().await;
+        idx.get(&repo)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+
     let missing: Vec<String> = futures::stream::iter(req.chunk_ids)
         .map(|chunk_id_hex| {
             let storage = Arc::clone(&storage);
+            let in_pack = in_pack_set.contains(&chunk_id_hex);
             async move {
+                if in_pack {
+                    return None;
+                }
                 let key = format!("chunks/{}", chunk_id_hex);
                 match storage.head(&key).await {
                     Ok(Some(n)) if n > 0 => None,
@@ -2599,13 +2687,36 @@ pub async fn complete_pack(
     let pack_key = format!("packs/{}", req.pack_oid);
     match storage.head(&pack_key).await {
         Ok(Some(_)) => {}
-        _ => {
+        Ok(None) => {
             tracing::warn!(
                 repo = %repo,
                 pack = %req.pack_oid,
-                "complete_pack: pack object missing in storage"
+                "complete_pack: pack object missing in storage (409)"
             );
             return Err(StatusCode::CONFLICT);
+        }
+        Err(e) => {
+            // Storage error (transient network, backend hiccup). One retry after
+            // a short delay before declaring the pack missing — avoids false 409
+            // on momentary backend errors when the PUT succeeded.
+            tracing::warn!(
+                repo = %repo,
+                pack = %req.pack_oid,
+                err = %e,
+                "complete_pack: HEAD check failed with storage error; retrying once"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            match storage.head(&pack_key).await {
+                Ok(Some(_)) => {}
+                _ => {
+                    tracing::error!(
+                        repo = %repo,
+                        pack = %req.pack_oid,
+                        "complete_pack: pack still not found after retry (409)"
+                    );
+                    return Err(StatusCode::CONFLICT);
+                }
+            }
         }
     }
 

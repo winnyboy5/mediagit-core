@@ -1280,17 +1280,17 @@ impl StorageBackend for MinIOBackend {
     async fn presign_put(
         &self,
         key: &str,
-        _content_length: u64,
+        content_length: u64,
         ttl: std::time::Duration,
     ) -> anyhow::Result<Option<crate::PresignedPut>> {
         let wire_key = self.full_key(key);
         let presigning = aws_sdk_s3::presigning::PresigningConfig::expires_in(ttl)
             .map_err(|e| anyhow!("presigning config: {e}"))?;
-        let req = self
-            .client
-            .put_object()
-            .bucket(&self.bucket)
-            .key(&wire_key)
+        let mut builder = self.client.put_object().bucket(&self.bucket).key(&wire_key);
+        if content_length > 0 {
+            builder = builder.content_length(content_length as i64);
+        }
+        let req = builder
             .presigned(presigning)
             .await
             .map_err(|e| anyhow!("presign_put minio: {e}"))?;
