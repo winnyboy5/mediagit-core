@@ -645,10 +645,34 @@ impl ProtocolClient {
                     });
                 let pack_written: std::collections::HashSet<mediagit_versioning::Oid> =
                     if cloud_packs_pull && !full_chunks.is_empty() {
-                        match self
-                            .pull_chunks_via_packs(&full_chunks, odb, Some(pack_progress_cb))
-                            .await
-                        {
+                        // Drive the pack future while emitting progress ticks every 500 ms so
+                        // the CLI bar advances during the (potentially long) GCS Range-GET phase.
+                        // Intermediate credits use compressed bytes (pack_bytes) — an underestimate
+                        // vs the uncompressed denominator — so bytes_done is corrected at the end.
+                        let mut pack_fut = std::pin::pin!(self.pull_chunks_via_packs(
+                            &full_chunks,
+                            odb,
+                            Some(pack_progress_cb)
+                        ));
+                        let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
+                        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                        let pack_result = loop {
+                            tokio::select! {
+                                result = &mut pack_fut => { break result; }
+                                _ = tick.tick() => {
+                                    let in_flight =
+                                        pack_bytes.load(std::sync::atomic::Ordering::Relaxed);
+                                    if in_flight > 0 {
+                                        on_progress(
+                                            bytes_done.saturating_add(in_flight),
+                                            pack_total,
+                                            "Downloading via packs...",
+                                        );
+                                    }
+                                }
+                            }
+                        };
+                        match pack_result {
                             Ok(written) => {
                                 tracing::debug!(chunks = written.len(), "pack-mode pull complete");
                                 written
@@ -664,12 +688,15 @@ impl ProtocolClient {
                     } else {
                         std::collections::HashSet::new()
                     };
-                // Sync bytes accumulated during pack-mode and report a single progress update.
-                // Only credit bytes when pack_written is non-empty: on partial error the
-                // fallback re-downloads all full_chunks, so crediting orphan bytes would
-                // overshoot the total.
+                // Credit uncompressed bytes matching the denominator unit.
+                // pack_bytes holds compressed data.len() — wrong unit; use chunk_size_map
+                // (ChunkRef.size = uncompressed) so bytes_done reaches total_manifest_bytes.
+                // Only credit on success; on partial error fallback covers all full_chunks.
                 if !pack_written.is_empty() {
-                    bytes_done += pack_bytes.load(std::sync::atomic::Ordering::Relaxed);
+                    bytes_done += pack_written
+                        .iter()
+                        .map(|oid| chunk_size_map.get(&oid.to_hex()).copied().unwrap_or(0))
+                        .sum::<u64>();
                     on_progress(bytes_done, pack_total, "Pack download complete");
                 }
                 // Chunks not written by pack-mode pull: fall through to per-chunk download.

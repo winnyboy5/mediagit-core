@@ -313,6 +313,7 @@ impl PullCmd {
                 let chunk_pb = progress.download_bar("Downloading large files", 0);
 
                 let chunk_pb_ref = chunk_pb.clone();
+                let mut last_bytes_done = 0u64;
                 let chunks_downloaded = client
                     .download_chunked_objects(
                         &odb,
@@ -322,6 +323,12 @@ impl PullCmd {
                                 chunk_pb_ref.set_length(bytes_total);
                                 chunk_pb_ref.reset_eta();
                             }
+                            // Reset ETA on large jumps (end-of-object correction) so
+                            // the 5s inter-object delta-check stall doesn't produce "eta 231y".
+                            if bytes_done.saturating_sub(last_bytes_done) > 1_048_576 {
+                                chunk_pb_ref.reset_eta();
+                            }
+                            last_bytes_done = bytes_done;
                             chunk_pb_ref.set_position(bytes_done);
                             chunk_pb_ref.set_message(msg.to_string());
                         },
