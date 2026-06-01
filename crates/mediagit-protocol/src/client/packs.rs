@@ -262,8 +262,9 @@ impl ProtocolClient {
         &self,
         chunk_ids: &[Oid],
         odb: &ObjectDatabase,
+        on_progress: Option<std::sync::Arc<dyn Fn(u64) + Send + Sync>>,
     ) -> Result<std::collections::HashSet<Oid>> {
-        use futures::StreamExt;
+        use futures::{StreamExt, TryStreamExt};
 
         if chunk_ids.is_empty() {
             return Ok(std::collections::HashSet::new());
@@ -340,14 +341,17 @@ impl ProtocolClient {
             .collect();
 
         let client = self.client.clone();
+        // Clone odb so it can move into concurrent async tasks (all fields are Arc-wrapped).
+        let odb = odb.clone();
 
-        type PackChunkPairs = Vec<(Oid, Vec<u8>)>;
-        let per_pack_results: Vec<Result<PackChunkPairs>> = futures::stream::iter(tasks)
+        let written_set: std::collections::HashSet<Oid> = futures::stream::iter(tasks)
             .map(|(chunks, url, pack_oid)| {
                 let client = client.clone();
                 let cmg = coalesce_max_gap;
                 let cmb = coalesce_max_bytes;
                 let comp_hashes = std::sync::Arc::clone(&compressed_hashes);
+                let odb = odb.clone();
+                let progress = on_progress.clone();
                 async move {
                     let ranges = coalesce_chunk_ranges(&chunks, cmg, cmb);
                     let mut out: Vec<(Oid, Vec<u8>)> = Vec::new();
@@ -403,33 +407,34 @@ impl ProtocolClient {
                             out.push((oid, data.to_vec()));
                         }
                     }
-                    Ok(out)
-                }
-            })
-            .buffer_unordered(download_concurrency)
-            .collect()
-            .await;
-
-        let mut written_set: std::collections::HashSet<Oid> = std::collections::HashSet::new();
-        for result in per_pack_results {
-            match result {
-                Ok(pairs) => {
-                    for (oid, data) in pairs {
+                    // Write to ODB and report progress as each chunk arrives, without
+                    // buffering all pack results first (eliminates the collect().await pattern).
+                    let mut written: Vec<Oid> = Vec::new();
+                    for (oid, data) in out {
+                        let chunk_size = data.len() as u64;
                         odb.put_compressed_chunk(&oid, &data)
                             .await
                             .with_context(|| format!("write chunk {} to ODB", oid))?;
-                        written_set.insert(oid);
+                        if let Some(ref cb) = progress {
+                            cb(chunk_size);
+                        }
+                        written.push(oid);
                     }
+                    Ok::<Vec<Oid>, anyhow::Error>(written)
                 }
-                Err(e) => {
-                    // Propagate so the caller falls back to per-chunk for all chunks.
-                    // ODB dedup handles re-downloads of already-written chunks.
-                    return Err(
-                        e.context("pack Range-GET failed; caller should use per-chunk fallback")
-                    );
-                }
-            }
-        }
+            })
+            .buffer_unordered(download_concurrency)
+            .try_fold(
+                std::collections::HashSet::<Oid>::new(),
+                |mut acc, oids: Vec<Oid>| async move {
+                    acc.extend(oids);
+                    Ok(acc)
+                },
+            )
+            .await
+            .map_err(|e| {
+                e.context("pack Range-GET failed; caller should use per-chunk fallback")
+            })?;
 
         if written_set.is_empty() && !loc_map.is_empty() {
             tracing::error!(
