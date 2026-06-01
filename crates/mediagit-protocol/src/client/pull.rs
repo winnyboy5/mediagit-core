@@ -632,9 +632,23 @@ impl ProtocolClient {
                     != "0";
                 // F7: pack-mode pull returns the set of chunks written.
                 // Remaining (not in written_set) fall through to per-chunk path.
+                //
+                // Build a thread-safe progress callback: pack downloads run concurrently so
+                // bytes_done is accumulated via AtomicU64 and synced back after pack completes.
+                let pack_bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                let pack_bytes_clone = pack_bytes.clone();
+                let pack_total = total_manifest_bytes;
+                let pack_progress_cb: std::sync::Arc<dyn Fn(u64) + Send + Sync> =
+                    std::sync::Arc::new(move |chunk_bytes: u64| {
+                        pack_bytes_clone
+                            .fetch_add(chunk_bytes, std::sync::atomic::Ordering::Relaxed);
+                    });
                 let pack_written: std::collections::HashSet<mediagit_versioning::Oid> =
                     if cloud_packs_pull && !full_chunks.is_empty() {
-                        match self.pull_chunks_via_packs(&full_chunks, odb).await {
+                        match self
+                            .pull_chunks_via_packs(&full_chunks, odb, Some(pack_progress_cb))
+                            .await
+                        {
                             Ok(written) => {
                                 tracing::debug!(chunks = written.len(), "pack-mode pull complete");
                                 written
@@ -650,6 +664,14 @@ impl ProtocolClient {
                     } else {
                         std::collections::HashSet::new()
                     };
+                // Sync bytes accumulated during pack-mode and report a single progress update.
+                // Only credit bytes when pack_written is non-empty: on partial error the
+                // fallback re-downloads all full_chunks, so crediting orphan bytes would
+                // overshoot the total.
+                if !pack_written.is_empty() {
+                    bytes_done += pack_bytes.load(std::sync::atomic::Ordering::Relaxed);
+                    on_progress(bytes_done, pack_total, "Pack download complete");
+                }
                 // Chunks not written by pack-mode pull: fall through to per-chunk download.
                 let chunks_for_fallback: Vec<Oid> = full_chunks
                     .into_iter()
