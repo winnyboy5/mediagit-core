@@ -110,6 +110,14 @@ async fn seed_client_with_delta(
 /// shape the clone path's `/chunk-deltas/check` endpoint walks.
 #[tokio::test]
 async fn push_preserves_chunk_deltas_on_server() {
+    // Cloud packs (MEDIAGIT_CLOUD_PACKS, default ON) bundle full chunks into a
+    // single pack object instead of writing each at chunks/<id>. This test pins
+    // the per-chunk on-disk layout of the chunk-delta path — chunks/<base> plus
+    // chunk-deltas/<delta>{,.meta} — which the clone-side /chunk-deltas/check
+    // endpoint walks, so it must run with packing disabled. Packed delta
+    // preservation is covered separately by the F-series cloud-pack tests.
+    std::env::set_var("MEDIAGIT_CLOUD_PACKS", "0");
+
     // ── Client ──────────────────────────────────────────────────────────
     let client_temp = TempDir::new().unwrap();
     let client_mediagit = client_temp.path().join(".mediagit");
