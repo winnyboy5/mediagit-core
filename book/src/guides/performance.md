@@ -169,7 +169,7 @@ cargo bench --workspace -p mediagit-compression
 
 - **Cache the binary**: Download once, cache with `actions/cache`, skip re-download on subsequent runs
 - **Parallel jobs**: Match `--jobs` to the CI runner's CPU count (`nproc` on Linux)
-- **Avoid re-verifying in CI**: `mediagit fsck` is fast; `mediagit verify` does full SHA-256 re-reads and is slower
+- **Avoid re-verifying in CI**: `mediagit fsck` is fast; `mediagit verify` does full BLAKE3 re-reads and is slower
 - **Use regional buckets**: Place S3 buckets in the same region as your CI runners
 
 ## See Also

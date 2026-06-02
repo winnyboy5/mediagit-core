@@ -13,7 +13,7 @@ mediagit commit [OPTIONS]
 Creates a new commit containing the current contents of the staging area along with a log message describing the changes. The commit becomes the new tip of the current branch.
 
 MediaGit commits include:
-- SHA-256 hash of the commit tree
+- BLAKE3 (64-hex) hash of the commit tree
 - Parent commit references
 - Author and committer information
 - Timestamp
@@ -23,22 +23,28 @@ MediaGit commits include:
 ## Options
 
 ### `-m, --message <MESSAGE>`
-**Required** (unless `--amend` or `--file` is used). Commit message describing the changes.
+**Required** (unless `--file` or `-e` is used). Commit message describing the changes.
 
 ### `-F, --file <FILE>`
 Read commit message from file instead of command line.
 
-### `--amend`
-Replace the tip of the current branch by creating a new commit with the previous commit's contents plus staged changes.
-
-### `-a, --all`
-Automatically stage all modified tracked files before committing.
+### `-e, --edit`
+Open commit message in the default text editor.
 
 ### `--allow-empty`
 Allow creating a commit with no changes.
 
+### `--include`
+Add untracked files to the index and include them in this commit.
+
+### `-s, --signoff`
+Add a `Signed-off-by` trailer to the commit message.
+
+### `--dry-run`
+Show what would be committed without creating the commit.
+
 ### `-v, --verbose`
-Show diff of changes being committed.
+Show extra detail about the commit after it is created.
 
 ### `--author <AUTHOR>`
 Override the commit author.
@@ -49,6 +55,10 @@ Override the commit author.
 Override the author date.
 
 - **Format**: ISO 8601 or Unix timestamp
+
+> **Note**: `-a`/`--all` is not supported. MediaGit's `add` performs chunking and
+> delta encoding, so auto-staging from `commit` is intentionally disabled. Use
+> `mediagit add .` followed by `mediagit commit` instead.
 
 ## Examples
 
@@ -72,15 +82,6 @@ $ mediagit commit -m "Update brand identity assets
 [main b4d7e1a] Update brand identity assets
  12 files changed (8 added, 3 modified, 1 deleted)
  Compression: 156.8 MB → 28.4 MB (81.9% savings)
-```
-
-### Commit all changes
-```bash
-$ mediagit commit -am "Quick fix: correct video resolution"
-✓ Auto-staged 3 modified files
-[main c5e9f2b] Quick fix: correct video resolution
- 3 files changed
- Compression: 450.3 MB → 68.2 MB (84.8% savings)
 ```
 
 ### Amend last commit

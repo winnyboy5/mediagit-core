@@ -521,7 +521,7 @@ impl PushCmd {
                             }
                         }
                         PushPhase::Uploading => {
-                            let mut guard = upload_pb_cb.lock().unwrap();
+                            let mut guard = upload_pb_cb.lock().unwrap_or_else(|e| e.into_inner());
                             if guard.is_none() {
                                 // Finish spinner, create bytes progress bar
                                 if let Some(ref sp) = phase_spinner {
@@ -534,6 +534,12 @@ impl PushCmd {
                                 if progress.total > pb.length().unwrap_or(0) {
                                     pb.set_length(progress.total);
                                 }
+                                // Reset ETA on large jumps (pack seals, object transitions)
+                                // so protocol overhead stalls don't produce "eta 231y".
+                                let prev = pb.position();
+                                if progress.current.saturating_sub(prev) > 1_048_576 {
+                                    pb.reset_eta();
+                                }
                                 pb.set_position(progress.current);
                             }
                         }
@@ -542,7 +548,7 @@ impl PushCmd {
                 .await?;
 
             // Clean up whichever bar is still active
-            if let Some(pb) = upload_pb.lock().unwrap().take() {
+            if let Some(pb) = upload_pb.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 pb.finish_with_message("done");
             }
 

@@ -6,20 +6,22 @@ Content-Addressable Storage (CAS) is the foundation of MediaGit's deduplication 
 
 In CAS, data is retrieved by its content (hash) rather than by name or location:
 - **Traditional FS**: `path/to/file.txt` → content
-- **CAS**: `SHA-256(content)` → content
+- **CAS**: `BLAKE3(content)` → content
 
-## SHA-256 Hashing
+## BLAKE3 Hashing
 
-MediaGit uses SHA-256 for all objects:
+MediaGit uses **BLAKE3** as the content hash for every object (blobs, trees, commits, chunks). The digest is 32 bytes (64 hex characters) and is computed through a single entry point in `hash.rs`:
 ```rust
-use sha2::{Sha256, Digest};
+use blake3::Hasher;
 
 let content = b"hello world";
-let mut hasher = Sha256::new();
+let mut hasher = Hasher::new();
 hasher.update(content);
-let oid = hasher.finalize();
-// oid = b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
+let oid = hasher.finalize(); // 32-byte digest, displayed as 64 hex chars
+// oid = 9a2e... (illustrative)
 ```
+
+BLAKE3 is significantly faster than SHA-256 and hashes large media in parallel via its internal tree structure (`update_rayon`). See the dedicated [BLAKE3 Hashing](./blake3.md) chapter for the rationale, tree-parallel design, and the beta migration note.
 
 ## Benefits
 
@@ -35,7 +37,7 @@ Hash mismatch immediately detected:
 ```rust
 let stored_oid = "5891b5b522...";
 let content = read_object(stored_oid);
-let actual_oid = sha256(&content);
+let actual_oid = blake3_hash(&content);
 
 if actual_oid != stored_oid {
     panic!("Corruption detected!");
@@ -80,9 +82,9 @@ objects/
 
 ## Collision Resistance
 
-SHA-256 has 2^256 possible outputs (approximately 10^77):
+BLAKE3 produces a 256-bit digest, giving 2^256 possible outputs (approximately 10^77):
 - **Probability of collision**: Negligible (< 10^-60 for millions of objects)
-- **Comparison**: More atoms in observable universe than SHA-256 outputs
+- **Comparison**: More atoms in observable universe than BLAKE3 outputs
 
 ### Collision Handling
 If collision detected (theoretical):
@@ -105,17 +107,17 @@ If collision detected (theoretical):
 
 ### Rust Code
 ```rust
-use sha2::{Sha256, Digest};
+use blake3::Hasher;
 use std::io::Read;
 
 pub fn hash_object(data: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
+    let mut hasher = Hasher::new();
     hasher.update(data);
     hasher.finalize().into()
 }
 
 pub fn hash_stream<R: Read>(reader: &mut R) -> std::io::Result<[u8; 32]> {
-    let mut hasher = Sha256::new();
+    let mut hasher = Hasher::new();
     let mut buffer = [0u8; 8192];
 
     loop {
@@ -132,5 +134,6 @@ pub fn hash_stream<R: Read>(reader: &mut R) -> std::io::Result<[u8; 32]> {
 
 ## Related Documentation
 
+- [BLAKE3 Hashing](./blake3.md)
 - [Object Database (ODB)](./odb.md)
 - [Core Concepts](./concepts.md)

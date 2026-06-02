@@ -1,6 +1,6 @@
 # Object Database (ODB)
 
-The Object Database (ODB) is the core storage engine for MediaGit, managing content-addressable objects with SHA-256 hashing.
+The Object Database (ODB) is the core storage engine for MediaGit, managing content-addressable objects with BLAKE3 hashing.
 
 ## Architecture
 
@@ -10,7 +10,7 @@ graph TB
     Cache --> Compression[Compression Layer]
     Compression --> Backend[Storage Backend]
 
-    API --> |Write| Hash[SHA-256 Hasher]
+    API --> |Write| Hash[BLAKE3 Hasher]
     Hash --> Cache
 
     Backend --> Local[Local FS]
@@ -28,8 +28,8 @@ graph TB
 ### Writing Objects
 
 ```rust
-// 1. Calculate SHA-256 hash
-let oid = sha256(&content);
+// 1. Calculate BLAKE3 hash
+let oid = blake3_hash(&content);
 
 // 2. Check cache
 if cache.contains(&oid) {
@@ -61,7 +61,7 @@ let compressed = backend.get(&oid.to_path()).await?;
 let content = decompress(&compressed)?;
 
 // 4. Verify integrity
-let actual_oid = sha256(&content);
+let actual_oid = blake3_hash(&content);
 if actual_oid != oid {
     return Err(CorruptedObject);
 }
@@ -124,7 +124,7 @@ For files exceeding type-specific thresholds (5-10MB), MediaGit automatically ch
 ## Object Addressing
 
 ### OID (Object ID)
-- **Hash**: SHA-256 (64 hex characters)
+- **Hash**: BLAKE3 (32 bytes, displayed as 64 hex characters)
 - **Example**: `5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03`
 
 ### Path Mapping
@@ -218,7 +218,7 @@ Chain depth: 3
 Every object read is verified:
 ```rust
 let content = backend.get(&oid.to_path()).await?;
-let actual_oid = sha256(&content);
+let actual_oid = blake3_hash(&content);
 if actual_oid != oid {
     return Err(OdbError::CorruptedObject {
         expected: oid,
@@ -230,7 +230,7 @@ if actual_oid != oid {
 ### Bulk Verification
 `mediagit verify` checks all objects:
 - Read every object
-- Verify SHA-256 hash
+- Verify BLAKE3 hash
 - Report corrupted objects
 - Optionally repair from remote
 
@@ -338,7 +338,7 @@ File: large-video.mp4 (6 GB)
 ```
 
 **Chunk Index** contains:
-- Chunk OIDs (SHA-256 hashes)
+- Chunk OIDs (BLAKE3 hashes)
 - Chunk offsets in original file
 - Chunk sizes
 - Reconstruction order

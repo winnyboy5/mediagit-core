@@ -226,6 +226,15 @@ impl ConfigLoader {
                 )
             })?;
         }
+        if let Ok(value) = std::env::var("MEDIAGIT_CHUNK_WRITE_CONCURRENCY") {
+            config.performance.chunk_write_concurrency = Some(value.parse().map_err(|_| {
+                ConfigError::env_var_parsing_error(
+                    "MEDIAGIT_CHUNK_WRITE_CONCURRENCY",
+                    &value,
+                    "expected valid integer",
+                )
+            })?);
+        }
 
         // Security settings
         if let Ok(value) = std::env::var("MEDIAGIT_API_KEY") {

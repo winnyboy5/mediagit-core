@@ -18,6 +18,8 @@ MediaGit push is **optimized for large media files**, using:
 - Compression-aware transfers
 - Deduplication across pushes
 
+Chunk data is transferred directly to the storage backend via presigned URLs, with automatic server-proxy fallback when presigned transfer is unavailable.
+
 ## Options
 
 ### Repository and Refspec

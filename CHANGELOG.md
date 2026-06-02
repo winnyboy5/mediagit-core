@@ -5,6 +5,36 @@ All notable changes to MediaGit will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.2.8-beta.1] - 2026-06-02
+
+Cloud-pack hardening, the god-file refactor, and a full documentation accuracy
+pass. Verified by the 2026-06-02 deep-test run: **614/614 PASS** across
+MinIO/AWS/Azure/GCS (151/150/154/159), fsck + F8 compressed-hash integrity clean,
+26.3–26.5% cloud storage savings, cross-backend delta parity (35 delta objects).
+
+### Added
+- **Cloud packs (Phase-3 Track F, F1–F11)**: client-side chunk bundling into pack
+  objects (≤64 MiB / ≤1024 chunks) with an embedded index; clone via pack-locate +
+  Range-GET. Cuts cloud object count from thousands to hundreds. Per-slice
+  compressed-hash integrity (F8).
+- **Presigned-URL transfer**: server mints presigned PUT/GET URLs; client transfers
+  directly to/from S3/Azure/GCS/MinIO with automatic server-proxy fallback when a
+  backend cannot sign (e.g. GCS ADC) or a URL 404s. Presigned MPU for large chunks
+  on S3/MinIO.
+- New mdBook chapters: **BLAKE3 Hashing** and **Cloud Packs**.
+
+### Changed
+- **God-file refactor**: `odb.rs`, `chunking.rs`, `smart_compressor.rs`, the protocol
+  client, and the server handlers split into submodule directories. No behavior change.
+- Documentation refreshed for accuracy across README, ARCHITECTURE, CLOUD_ARCHITECTURE,
+  CLI_REFERENCE, SUPPORTED_FORMATS, DEVELOPMENT_GUIDE, FUTURE_TODOS, comparison, and the
+  mdBook — including new/updated diagrams, the corrected server endpoint inventory, and
+  SHA-256 → BLAKE3 corrections throughout.
+
+### Fixed
+- Push/pull ETA reset on object transitions and upload jumps; live progress in pack-mode
+  pull/clone.
+
 ## [v0.2.7-beta.1] - 2026-05-25
 
 This release covers all Phase-2 work completed between 2026-04-03 and 2026-05-25,

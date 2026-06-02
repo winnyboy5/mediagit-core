@@ -11,7 +11,10 @@ mediagit clone [OPTIONS] <URL> [DIRECTORY]
 ## Description
 
 Creates a local copy of a remote MediaGit repository, downloading all objects and
-setting up a remote named `origin` pointing to the source URL.
+setting up a remote named `origin` pointing to the source URL. Objects are fetched
+via presigned-URL direct-from-backend transfer (with server-proxy fallback); cloud
+packs bundle many chunks into a single download for fast clones of small-chunk
+repositories.
 
 ## Arguments
 

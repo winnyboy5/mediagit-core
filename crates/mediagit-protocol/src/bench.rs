@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Schema version for the `[bench]` summary line. Increment when fields change.
-const BENCH_SCHEMA_VERSION: u8 = 2;
+const BENCH_SCHEMA_VERSION: u8 = 3;
 
 /// Collect all `MEDIAGIT_*` env vars as a sorted `KEY=val,...` string.
 fn collect_knobs() -> String {
@@ -48,6 +48,12 @@ pub struct BenchSession {
     manifest_to_first_byte_ns: AtomicU64,
     wall_start: Instant,
     concurrency: usize,
+    // F11: Track-F pack-mode metrics
+    presign_urls: AtomicU64,
+    pack_count: AtomicU64,
+    pack_bytes: AtomicU64,
+    range_gets: AtomicU64,
+    coalesced_gets: AtomicU64,
 }
 
 impl BenchSession {
@@ -60,7 +66,32 @@ impl BenchSession {
             manifest_to_first_byte_ns: AtomicU64::new(0),
             wall_start: Instant::now(),
             concurrency,
+            presign_urls: AtomicU64::new(0),
+            pack_count: AtomicU64::new(0),
+            pack_bytes: AtomicU64::new(0),
+            range_gets: AtomicU64::new(0),
+            coalesced_gets: AtomicU64::new(0),
         })
+    }
+
+    /// Record presigned URL requests issued (one per pack upload or download batch).
+    pub fn record_presign_urls(&self, n: u64) {
+        self.presign_urls.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Record one completed pack upload or download.
+    pub fn record_pack(&self, byte_len: u64) {
+        self.pack_count.fetch_add(1, Ordering::Relaxed);
+        self.pack_bytes.fetch_add(byte_len, Ordering::Relaxed);
+    }
+
+    /// Record one Range-GET request. `coalesced=true` when the request covers
+    /// more than one logical chunk (i.e. ranges were merged).
+    pub fn record_range_get(&self, coalesced: bool) {
+        self.range_gets.fetch_add(1, Ordering::Relaxed);
+        if coalesced {
+            self.coalesced_gets.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Record time from first manifest fetch start to first chunk byte received.
@@ -115,12 +146,30 @@ impl BenchSession {
                 "n/a".to_string()
             }
         };
+        let presign_urls = self.presign_urls.load(Ordering::Relaxed);
+        let pack_count = self.pack_count.load(Ordering::Relaxed);
+        let pack_bytes = self.pack_bytes.load(Ordering::Relaxed);
+        let range_gets = self.range_gets.load(Ordering::Relaxed);
+        let coalesced_gets = self.coalesced_gets.load(Ordering::Relaxed);
+        let pack_bytes_avg_mb = if pack_count > 0 {
+            pack_bytes as f64 / pack_count as f64 / (1024.0 * 1024.0)
+        } else {
+            0.0
+        };
+        let range_coalesce_ratio = if range_gets > 0 {
+            coalesced_gets as f64 / range_gets as f64
+        } else {
+            0.0
+        };
         let knobs = collect_knobs();
         eprintln!(
             "[bench] bench_schema_version={schema} op={op} chunks={chunks} total_bytes={bytes} \
              wall={wall:.2}s active_sum={active:.2}s \
              avg_chunk_mb={avg:.2} throughput_mbs={mbs:.2} \
              util_pct={util:.0}% manifest_to_first_byte_ms={m2fb} \
+             presign_urls={presign_urls} pack_count={pack_count} \
+             pack_bytes_avg_mb={pack_bytes_avg:.2} range_gets={range_gets} \
+             range_coalesce_ratio={coalesce_ratio:.2} \
              knobs={knobs}",
             schema = BENCH_SCHEMA_VERSION,
             op = self.op,
@@ -132,6 +181,11 @@ impl BenchSession {
             mbs = bps_wall / (1024.0 * 1024.0),
             util = util_pct,
             m2fb = manifest_to_first_byte_ms,
+            presign_urls = presign_urls,
+            pack_count = pack_count,
+            pack_bytes_avg = pack_bytes_avg_mb,
+            range_gets = range_gets,
+            coalesce_ratio = range_coalesce_ratio,
             knobs = if knobs.is_empty() {
                 "none".to_string()
             } else {

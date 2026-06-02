@@ -27,13 +27,13 @@
 graph TD
     A["File Input"] --> B["ObjectType::from_path()"]
     B --> C{"Already compressed?"}
-    C -->|"JPEG/PNG/GIF/WebP/AVIF/HEIC<br/>MP4/MOV/AVI/MKV/WebM<br/>MP3/AAC/OGG/Opus<br/>ZIP/GZ/7Z/RAR<br/>AI/InDesign<br/>DOCX/XLSX/PPTX"| D["💾 Store"]
+    C -->|"JPEG/PNG/GIF/WebP/AVIF/HEIC<br/>MP4/MOV/AVI/MKV/WebM/FLV/WMV/MXF<br/>MP3/AAC/OGG/Opus<br/>ZIP/GZ/7Z/RAR<br/>AI/InDesign<br/>DOCX/XLSX/PPTX<br/>Parquet/Arrow/ORC/Avro"| D["💾 Store"]
     C -->|No| E{"File category?"}
-    E -->|"TIFF/BMP/RAW/EXR/HDR<br/>WAV/AIFF/FLAC/ALAC"| F["🗜️ Zstd Best (level 19)"]
+    E -->|"TIFF/BMP/RAW/EXR/HDR/DPX<br/>WAV/AIFF/FLAC/ALAC<br/>3D (STL/OBJ/PLY/GLB/FBX/DAE)"| F["🗜️ Zstd Best (level 19)"]
     E -->|"Text/Code ≤500MB"| G["📦 Brotli Default (level 9)"]
     E -->|"Text/Code >500MB"| H["🗜️ Zstd Default (10x faster)"]
     E -->|"ML Data/Weights/Checkpoints"| I["🗜️ Zstd Fast (level 1)"]
-    E -->|"ML Inference/Creative<br/>Database/TAR"| J["🗜️ Zstd Default (level 3)"]
+    E -->|"ML Inference/Creative project<br/>PDF/EPS/SVG/Database/TAR"| J["🗜️ Zstd Default (level 3)"]
     E -->|"Git Objects"| K["📋 Zlib Default (level 6)"]
 
     D --> L{"Compressed > Original?"}
@@ -126,6 +126,14 @@ FastCDC is dispatched by `chunk_media_aware()` for formats that don't have a ded
 These formats embed zlib-compressed streams with a trailing xref/directory table; smaller
 chunks let FastCDC re-sync quickly after mid-file insertions, recovering dedup on
 unchanged portions.
+
+> **Known delta limitations for creative formats:**
+> - **Adobe Illustrator (`.ai`)**: delta ceiling is format-limited to ~27% savings due to
+>   Illustrator's proprietary DEFLATE encoder; the theoretical floor is ~40% and cannot be
+>   reached without a custom per-stream delta codec (see FUTURE_TODOS.md §5b).
+> - **PDF container-aware delta**: attempted 2026-04-07, reverted. Standard pipeline (delta
+>   on whole file) is the current behavior; `delta = ❌` in the Documents table reflects
+>   this. See FUTURE_TODOS.md §5b for the post-mortem.
 
 | Format Group | Extensions | Chunk Params |
 |--------------|-----------|--------------|
@@ -247,25 +255,25 @@ unchanged portions.
 
 | Format | Extensions | Compression | Chunking | Delta | Merge |
 |--------|-----------|-------------|----------|-------|-------|
-| glTF/GLB | `.gltf`, `.glb` | 🗜️ Zstd Default | 🎬 GLB parsing (≥10MB) | ✅ | 🧩 3D |
-| OBJ | `.obj` | 🗜️ Zstd Default | 🎬 Text 3D parsing (≥10MB) | ✅ | 🧩 3D |
-| FBX | `.fbx` | 🗜️ Zstd Default | 🎬 FBX parsing (≥10MB) | ✅ | 🧩 3D |
-| STL | `.stl` | 🗜️ Zstd Default | 🎬 Text 3D parsing (≥10MB) | ❌ | 🧩 3D |
-| PLY | `.ply` | 🗜️ Zstd Default | 🎬 Text 3D parsing (≥10MB) | ❌ | 🧩 3D |
-| COLLADA | `.dae` | 🗜️ Zstd Default | ✂️ FastCDC (≥10MB) | ❌ | 🧩 3D |
-| 3DS | `.3ds` | 🗜️ Zstd Default | ✂️ FastCDC (≥10MB) | ❌ | 🧩 3D |
+| glTF/GLB | `.gltf`, `.glb` | 🗜️ Zstd Best | 🎬 GLB parsing (≥10MB) | ✅ | 🧩 3D |
+| OBJ | `.obj` | 🗜️ Zstd Best | 🎬 Text 3D parsing (≥10MB) | ✅ | 🧩 3D |
+| FBX | `.fbx` | 🗜️ Zstd Best | 🎬 FBX parsing (≥10MB) | ✅ | 🧩 3D |
+| STL | `.stl` | 🗜️ Zstd Best | 🎬 Text 3D parsing (≥10MB) | ❌ | 🧩 3D |
+| PLY | `.ply` | 🗜️ Zstd Best | 🎬 Text 3D parsing (≥10MB) | ❌ | 🧩 3D |
+| COLLADA | `.dae` | 🗜️ Zstd Best | ✂️ FastCDC (≥10MB) | ❌ | 🧩 3D |
+| 3DS | `.3ds` | 🗜️ Zstd Best | ✂️ FastCDC (≥10MB) | ❌ | 🧩 3D |
 
 ### USD Ecosystem
 
 | Format | Extensions | Compression | Chunking | Merge |
 |--------|-----------|-------------|----------|-------|
-| USD | `.usd`, `.usda`, `.usdc`, `.usdz` | 🗜️ Zstd Default | ✂️ FastCDC (≥10MB) | 🧩 3D |
+| USD | `.usd`, `.usda`, `.usdc`, `.usdz` | 🗜️ Zstd Best | ✂️ FastCDC (≥10MB) | 🧩 3D |
 
 ### Alembic
 
 | Format | Extensions | Compression | Chunking | Merge |
 |--------|-----------|-------------|----------|-------|
-| Alembic | `.abc` | 🗜️ Zstd Default | ✂️ FastCDC (≥10MB) | 🧩 3D |
+| Alembic | `.abc` | 🗜️ Zstd Best | ✂️ FastCDC (≥10MB) | 🧩 3D |
 
 > **3D merge**: Structural analysis of vertices, faces, bones, materials.
 > Always flags for manual review in 3D software.
@@ -285,7 +293,12 @@ unchanged portions.
 | Premiere Pro | `.prproj`, `.psq` | 🗜️ Zstd Default | ✂️ FastCDC (≥10MB) | 🧩 VFX |
 
 > **Why AI/InDesign use Store**: These are PDF-based containers with internally compressed
-> streams. Compression expands the data, wasting CPU.
+> streams. Compression expands the data, wasting CPU. EPS and PDF are separate ObjectTypes
+> that receive Zstd Default; only `.ai`/`.ait` and InDesign map to the Store path.
+
+> **AI delta ceiling**: Adobe Illustrator's proprietary DEFLATE encoder limits delta
+> efficiency to ~27% savings (theoretical floor ~40%). Whole-file normalization was
+> attempted and reverted (2026-04-07) — see FUTURE_TODOS.md §5b for details.
 
 ### Video Editing
 
@@ -538,9 +551,13 @@ When file extension is unavailable, the ODB uses magic byte signatures:
 
 ## Performance Benchmarks (v0.2.7-beta.1)
 
-> Measured via deep test suite, 23 formats, all `fsck` verified. Last run: 2026-05-25 (AWS/Azure/GCS backends, 459/459 tests passing).
+> Measured via deep test suite, all `fsck` + F8 compressed-hash integrity verified. Last run: 2026-06-02 (MinIO/AWS/Azure/GCS backends, 614/614 tests passing). Mixed-fixture aggregate savings 26.3–26.5%; compressible formats individually 50–81%. Already-compressed media (JPEG, PNG, MP4, OGG, ZIP) contributes ~0% by design — the aggregate is fixture-mix-weighted.
 
 ### Storage Savings
+
+> Mixed-fixture aggregate: **26.3–26.5%** across all backends (614/614 tests, 2026-06-02).
+> Already-compressed media (JPEG, PNG, MP4, OGG, ZIP) contributes ~0% by design.
+> Compressible formats individually achieve 50–81%.
 
 | Category | Format | Original | Stored | Savings | Ratio |
 |----------|--------|----------|--------|---------|-------|
@@ -554,8 +571,14 @@ When file extension is unavailable, the ODB uses magic byte signatures:
 | Audio | WAV (54MB) | 54.38 MB | 24.95 MB | 54.1% | 2.18x |
 | 3D Binary | GLB (13MB) | 13.15 MB | 6.49 MB | 50.6% | 2.03x |
 | 3D Binary | FBX-bin (6MB) | 6.05 MB | 3.26 MB | 46.2% | 1.86x |
-| Video (compressed) | MP4/MKV/MOV | — | — | 0% | 1.00x |
-| Archive (compressed) | ZIP (656MB) | 656 MB | 657 MB | 0% | 1.00x |
+| Audio (compressed) | FLAC/OGG | — | — | ~0% | 1.00x |
+| Video (compressed) | MP4/MKV/MOV | — | — | ~0% | 1.00x |
+| Archive (compressed) | ZIP (656MB) | 656 MB | 657 MB | ~0% | 1.00x |
+
+> **Note**: FLAC receives `Zstd Best` compression (it is lossless audio, not lossy-encoded);
+> the ~0% row above reflects the SmartCompressor fallback-to-Store when compressed output
+> exceeds original — i.e. FLAC's internal prediction coding already approaches theoretical
+> entropy. OGG/MP3/AAC/Opus are codec-encoded → always Store.
 
 ### Delta Encoding Top Performers
 
@@ -565,5 +588,4 @@ When file extension is unavailable, the ODB uses magic byte signatures:
 | AI-lg (123MB) | 100% | 4.5 KB |
 | PSD-xl (213MB) | 99.8% | 424 KB |
 | WAV (54MB) | 99.8% | 139 KB |
-| ZIP (656MB) | 99.9% | 569 KB |
 | FLAC (37MB) | 98.5% | 593 KB |

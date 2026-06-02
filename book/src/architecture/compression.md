@@ -66,7 +66,7 @@ fn select_algorithm(path: &Path, size: u64) -> CompressionAlgorithm {
 
 ## Performance Benchmarks
 
-> Verified via standalone deep test suite (v0.2.6-beta.1, 2026-04-03).
+> Verified via standalone deep test suite (v0.2.7-beta.1, 2026-04-03).
 
 | File Type | Size | Algorithm | Savings | Throughput |
 |-----------|------|-----------|---------|------------|

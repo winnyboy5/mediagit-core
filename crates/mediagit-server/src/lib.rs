@@ -56,7 +56,7 @@ use axum::{
     http::StatusCode,
     middleware,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use std::sync::Arc;
@@ -104,6 +104,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/{repo}/chunks/complete",
             post(handlers::complete_chunk_uploads),
         )
+        .route(
+            "/{repo}/chunks/verify-integrity",
+            post(handlers::verify_chunk_integrity),
+        )
         .route("/{repo}/chunks/mpu/start", post(handlers::mpu_start))
         .route("/{repo}/chunks/mpu/complete", post(handlers::mpu_complete))
         .route("/{repo}/chunks/mpu/abort", post(handlers::mpu_abort))
@@ -132,6 +136,22 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route("/{repo}/tree/{*path}", get(handlers::list_tree))
         .route("/{repo}/tree", get(handlers::list_tree_root))
+        // Pack manifest endpoints (F6) — Track-F cloud pack bundling
+        .route("/{repo}/packs/complete", post(handlers::complete_pack))
+        .route(
+            "/{repo}/packs/upload-urls",
+            post(handlers::presign_pack_uploads),
+        )
+        .route("/{repo}/packs/{pack_id}", put(handlers::upload_pack_proxy))
+        .route("/{repo}/chunks/locate", post(handlers::locate_chunks))
+        .route(
+            "/{repo}/packs/presign-download-urls",
+            post(handlers::presign_pack_downloads),
+        )
+        .route(
+            "/{repo}/packs/rebuild-index",
+            post(handlers::rebuild_pack_index),
+        )
         .with_state(Arc::clone(&state));
 
     // Apply authentication middleware to Git routes if enabled
@@ -260,6 +280,10 @@ pub fn create_router_with_rate_limit(
             "/{repo}/chunks/complete",
             post(handlers::complete_chunk_uploads),
         )
+        .route(
+            "/{repo}/chunks/verify-integrity",
+            post(handlers::verify_chunk_integrity),
+        )
         .route("/{repo}/chunks/mpu/start", post(handlers::mpu_start))
         .route("/{repo}/chunks/mpu/complete", post(handlers::mpu_complete))
         .route("/{repo}/chunks/mpu/abort", post(handlers::mpu_abort))
@@ -288,6 +312,22 @@ pub fn create_router_with_rate_limit(
         )
         .route("/{repo}/tree/{*path}", get(handlers::list_tree))
         .route("/{repo}/tree", get(handlers::list_tree_root))
+        // Pack manifest endpoints (F6) — Track-F cloud pack bundling
+        .route("/{repo}/packs/complete", post(handlers::complete_pack))
+        .route(
+            "/{repo}/packs/upload-urls",
+            post(handlers::presign_pack_uploads),
+        )
+        .route("/{repo}/packs/{pack_id}", put(handlers::upload_pack_proxy))
+        .route("/{repo}/chunks/locate", post(handlers::locate_chunks))
+        .route(
+            "/{repo}/packs/presign-download-urls",
+            post(handlers::presign_pack_downloads),
+        )
+        .route(
+            "/{repo}/packs/rebuild-index",
+            post(handlers::rebuild_pack_index),
+        )
         .with_state(Arc::clone(&state));
 
     // Apply middleware layers

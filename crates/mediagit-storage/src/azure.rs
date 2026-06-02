@@ -692,6 +692,57 @@ impl StorageBackend for AzureBackend {
         }
     }
 
+    async fn get_streaming_range(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+    ) -> anyhow::Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+        >,
+    > {
+        Self::validate_key(key)?;
+        let wire_key = self.full_key(key);
+        let blob_client = self.client.blob_client(&wire_key);
+        // Request the exact byte range in a single HTTP request (chunk_size = entire range).
+        let range_len = range.end - range.start;
+        let azure_range = azure_core::prelude::Range::new(range.start, range.end);
+        let pageable = blob_client
+            .get()
+            .range(azure_range)
+            .chunk_size(range_len.max(1))
+            .into_stream();
+
+        // Collect all pages (typically just one for a bounded range) into a flat stream.
+        let stream = futures::stream::unfold((pageable, false), |(mut pag, done)| async move {
+            if done {
+                return None;
+            }
+            use futures::StreamExt as _;
+            match pag.next().await {
+                None => None,
+                Some(Err(e)) => Some((
+                    Err(anyhow::anyhow!(
+                        "get_streaming_range Azure page error: {}",
+                        e
+                    )),
+                    (pag, true),
+                )),
+                Some(Ok(page)) => match page.data.collect().await {
+                    Ok(data) => Some((Ok::<bytes::Bytes, anyhow::Error>(data), (pag, false))),
+                    Err(e) => Some((
+                        Err(anyhow::anyhow!(
+                            "get_streaming_range Azure data error: {}",
+                            e
+                        )),
+                        (pag, true),
+                    )),
+                },
+            }
+        });
+        Ok(Box::pin(stream))
+    }
+
     async fn put(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
         Self::validate_key(key)?;
 
@@ -740,6 +791,31 @@ impl StorageBackend for AzureBackend {
                     || error_msg.contains("containernotfound")
                 {
                     Ok(false)
+                } else {
+                    Err(Self::map_error(e, key))
+                }
+            }
+        }
+    }
+
+    async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+        Self::validate_key(key)?;
+
+        let wire_key = self.full_key(key);
+        let blob_client = self.client.blob_client(&wire_key);
+
+        match blob_client.get_properties().await {
+            Ok(resp) => Ok(Some(resp.blob.properties.content_length)),
+            Err(e) => {
+                let emsg = e.to_string().to_lowercase();
+                if emsg.contains("404")
+                    || emsg.contains("not found")
+                    || emsg.contains("notfound")
+                    || emsg.contains("blobnotfound")
+                    || emsg.contains("does not exist")
+                    || emsg.contains("containernotfound")
+                {
+                    Ok(None)
                 } else {
                     Err(Self::map_error(e, key))
                 }

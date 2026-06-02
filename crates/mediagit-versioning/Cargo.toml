@@ -38,11 +38,11 @@ memmap2 = "0.9"
 num_cpus = "1.16"
 async-channel = "2.3"
 zstd.workspace = true
+tempfile = "3.13"
 
 [dev-dependencies]
 proptest.workspace = true
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
-tempfile = "3.13"
 uuid = { version = "1.11", features = ["v4"] }
 
 [[bench]]

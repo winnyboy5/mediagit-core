@@ -1,6 +1,6 @@
 # Storage Backends
 
-MediaGit supports 7 storage backends through a unified trait-based abstraction.
+MediaGit supports 7 storage backends through a unified trait-based abstraction. All 614/614 deep tests pass across the cloud backends (MinIO 151, AWS 150, Azure 154, GCS 159; 2026-06-02), with cloud storage savings of 26.3–26.5%.
 
 ## Available Backends
 
@@ -24,6 +24,15 @@ pub trait Backend: Send + Sync {
     async fn list(&self, prefix: &str) -> Result<Vec<String>>;
 }
 ```
+
+## Cloud Packs and Presigned Transfer
+
+For cloud backends, MediaGit does not store each chunk as its own object. The client bundles chunks into **cloud packs** (≤ 64 MiB / ≤ 1024 chunks, with an embedded index), cutting per-repository object counts from tens of thousands to a few hundred. See [Cloud Packs](./cloud-packs.md) for the full design.
+
+Transfer is **presigned** wherever the backend can sign:
+
+- **Upload**: the server mints presigned PUT URLs and the client PUTs packs directly to the backend (presigned multipart upload for large packs on S3/MinIO; proxy-upload fallback when the backend can't sign).
+- **Download/clone**: the server mints presigned GET URLs and the client issues Range-GETs direct from the backend (proxy-GET fallback on 404/null).
 
 ## Configuration
 

@@ -240,6 +240,15 @@ impl StorageBackend for MockBackend {
         results.sort();
         Ok(results)
     }
+
+    async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+        if key.is_empty() {
+            return Err(anyhow::anyhow!("key cannot be empty"));
+        }
+
+        let store = self.store.read().await;
+        Ok(store.get(key).map(|v| v.len() as u64))
+    }
 }
 
 #[cfg(test)]

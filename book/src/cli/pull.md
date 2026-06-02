@@ -18,6 +18,8 @@ MediaGit pull is **optimized for large media repositories**, using:
 - Smart chunk reuse and deduplication
 - Efficient merge strategies for media files
 
+Downloads use presigned-URL direct-from-backend transfer with server-proxy fallback; cloud-pack bundles further reduce round trips on small-chunk repositories.
+
 ## Options
 
 ### Integration Method
