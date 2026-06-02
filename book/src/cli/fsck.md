@@ -22,64 +22,38 @@ MediaGit fsck provides **media-aware verification** including chunk-level integr
 
 ## Options
 
-### Verification Mode
-
 #### `--full`
-Perform complete verification of all objects (default).
+Full check including dangling/unreachable objects (slower but thorough).
 
-#### `--connectivity-only`
-Check only connectivity, skip detailed validation.
+#### `--quick`
+Quick check — objects and references only, no connectivity analysis.
 
-#### `--dangling`
-Print dangling (unreachable but valid) objects.
-
-#### `--no-dangling`
-Suppress dangling object reports (default).
-
-#### `--unreachable`
-Show all unreachable objects.
+#### `--all`
+Show all objects checked.
 
 #### `--lost-found`
-Write dangling objects to .mediagit/lost-found/.
+Print lost/dangling objects that are not reachable from any reference.
 
-### Object Selection
+#### `--no-dangling`
+Suppress dangling object reports.
 
-#### `<object>...`
-Check specific objects instead of entire repository.
+#### `--repair`
+Attempt to repair repairable issues automatically.
 
-#### `--cache`
-Check index file consistency.
+#### `--dry-run`
+With `--repair`: show what would be repaired without making changes.
 
-#### `--commit-graph`
-Verify commit graph integrity.
+#### `--max-objects <N>`
+Limit number of objects to check (0 = unlimited, default: 0).
 
-### Output Options
+#### `--path <PATH>`
+Repository path to check (defaults to current directory).
 
 #### `-v`, `--verbose`
-Show detailed verification information.
-
-#### `--progress`
-Show progress during verification.
-
-#### `--no-progress`
-Suppress progress reporting.
+Show detailed progress and per-object results.
 
 #### `-q`, `--quiet`
 Suppress all output except errors.
-
-### MediaGit-Specific Options
-
-#### `--verify-chunks`
-Verify chunk integrity and checksums.
-
-#### `--verify-compression`
-Validate compressed object integrity.
-
-#### `--verify-dedup`
-Check deduplication consistency.
-
-#### `--repair`
-Attempt to repair minor issues (use with caution).
 
 ## Examples
 
@@ -104,30 +78,13 @@ Connectivity check:
 Repository integrity: OK
 ```
 
-### Full verification with chunks
+### Full check including dangling objects
 
 ```bash
-$ mediagit fsck --verify-chunks
-Checking object directory: .mediagit/objects
-Checking objects: 100% (8,875/8,875), done.
-
-Object verification:
-  Commits: 142 ✓
-  Trees: 1,847 ✓
-  Blobs: 6,886 ✓
-
-Chunk verification:
-  Total chunks: 2,847
-  Verifying checksums: 100% (2,847/2,847) ✓
-  Verifying integrity: 100% (2,847/2,847) ✓
-  Corrupted chunks: 0 ✓
-
-Deduplication verification:
-  Duplicate references: 847
-  Reference consistency: 100% ✓
-  No dedup errors ✓
-
-Repository integrity: OK
+$ mediagit fsck --full
+🔍 Checking repository integrity at .mediagit
+...
+✅ Repository integrity: OK
 ```
 
 ### Show dangling objects
@@ -185,65 +142,12 @@ Dangling objects written to .mediagit/lost-found/:
 3 objects saved for recovery
 ```
 
-### Verify specific objects
+### Quick check
 
 ```bash
-$ mediagit fsck HEAD main feature/video-optimization
-Checking specified objects...
-
-HEAD (a3c8f9d):
-  Type: commit ✓
-  Tree: valid ✓
-  Parents: valid ✓
-  Author/Committer: valid ✓
-
-main (a3c8f9d):
-  Points to valid commit ✓
-
-feature/video-optimization (b4d7e1a):
-  Points to valid commit ✓
-
-3 objects verified, all OK
-```
-
-### Verify index
-
-```bash
-$ mediagit fsck --cache
-Checking index file...
-
-Index statistics:
-  Version: 2
-  Entries: 247
-  Size: 12.4 KB
-
-Index verification:
-  Entry checksums: 100% (247/247) ✓
-  Object references: 100% (247/247) ✓
-  Path ordering: valid ✓
-  Extension data: valid ✓
-
-Index integrity: OK
-```
-
-### Verify commit graph
-
-```bash
-$ mediagit fsck --commit-graph
-Checking commit graph...
-
-Commit graph statistics:
-  Version: 1
-  Commits: 142
-  Size: 24.7 KB
-
-Commit graph verification:
-  Commit OIDs: 100% (142/142) ✓
-  Parent links: 100% (128/128) ✓
-  Generation numbers: valid ✓
-  Bloom filters: valid ✓
-
-Commit graph integrity: OK
+$ mediagit fsck --quick
+🔍 Checking repository integrity at .mediagit
+✅ All verifications passed
 ```
 
 ### Verbose output
@@ -282,24 +186,16 @@ No errors found
 Repository integrity: EXCELLENT
 ```
 
-### Compression verification
+### Repair mode
 
 ```bash
-$ mediagit fsck --verify-compression
-Checking objects: 100% (8,875/8,875), done.
+$ mediagit fsck --repair --dry-run
+🔍 Checking repository integrity at .mediagit
+# Shows what would be repaired without making changes
 
-Compression verification:
-  Total compressed objects: 6,886
-  Decompression test: 100% (6,886/6,886) ✓
-  Checksum validation: 100% (6,886/6,886) ✓
-  Compression ratio verification: ✓
-
-Compression statistics:
-  Average ratio: 82.3%
-  Corrupted objects: 0 ✓
-  Invalid compression: 0 ✓
-
-All compression valid ✓
+$ mediagit fsck --repair
+🔍 Checking repository integrity at .mediagit
+# Attempts to repair repairable issues automatically
 ```
 
 ### Deduplication verification

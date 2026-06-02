@@ -19,7 +19,7 @@ graph TD
     end
 
     subgraph Core["Core Libraries"]
-        VER["mediagit-versioning<br/>ODB · Index · Refs<br/>Chunks · Delta · Packs"]
+        VER["mediagit-versioning<br/>ODB · Index · Refs<br/>Chunks · Delta · Cloud Packs"]
         COMP["mediagit-compression<br/>Zstd · Brotli · Zlib<br/>SmartCompressor"]
         MEDIA["mediagit-media<br/>Image · PSD · Video<br/>Audio · 3D · VFX"]
     end
@@ -49,6 +49,7 @@ graph TD
     Server --> Infra
     CLI --> Support
     Server --> Support
+    VER -.->|"cloud packs<br/>(few large objects)"| STORE
 ```
 
 ---
@@ -58,12 +59,12 @@ graph TD
 | Crate | Role | Key Modules |
 |-------|------|-------------|
 | **mediagit-cli** | CLI binary (28 commands) | `commands/`, main entry |
-| **mediagit-versioning** | Core VCS engine | ODB, index, refs, tree, commit, chunking, delta, similarity, packs, streaming |
+| **mediagit-versioning** | Core VCS engine | `odb/` & `chunking/` (submodules), index, refs, tree, commit, delta, similarity, cloud packs (`streaming_pack`, `streaming_index`, `pack`, `transaction`) |
 | **mediagit-compression** | Smart compression | Zstd, Brotli, Zlib, Store; `SmartCompressor` with type+size awareness |
 | **mediagit-media** | Media parsing & merging | Image, PSD, Video, Audio, 3D, VFX parsers & merge strategies |
 | **mediagit-storage** | Storage abstraction | `StorageBackend` trait + 7 implementations |
-| **mediagit-protocol** | Network protocol | Client, pack reader/writer, streaming pack, chunk transfer |
-| **mediagit-server** | HTTP server | Axum routes, handlers, auth middleware, rate limiting, security |
+| **mediagit-protocol** | Network protocol | `client/` (submodule), pack reader/writer, streaming pack, chunk transfer, cloud-pack transfer |
+| **mediagit-server** | HTTP server | Axum routes, `handlers/` (submodule), auth middleware, rate limiting, security |
 | **mediagit-security** | Security layer | Encryption (AES-256-GCM), Auth (JWT + API keys), TLS, audit, KDF |
 | **mediagit-config** | Configuration | TOML config file management |
 | **mediagit-observability** | Logging/tracing | Structured tracing with env-filter |
@@ -132,7 +133,7 @@ It is **not** wired into the CLI binary — migration commands are a future mile
 
 ## Object Database (ODB)
 
-The ODB is the core storage engine (`mediagit-versioning/src/odb.rs`, 3,576 lines).
+The ODB is the core storage engine (`mediagit-versioning/src/odb/` — split into submodules after the god-file refactor).
 
 ### Object Types
 - **Blob** — File content (raw or chunked)
@@ -197,7 +198,7 @@ graph TD
 
 ## Compression Engine
 
-**Crate**: `mediagit-compression` · **Key file**: `smart_compressor.rs` (1,947 lines)
+**Crate**: `mediagit-compression` · **Key module**: `smart_compressor/` (submodule directory after the god-file refactor)
 
 ### Compression Strategy Selection
 
@@ -292,7 +293,7 @@ Auto-detects algorithm from magic bytes:
 
 ## Chunking Engine
 
-**Crate**: `mediagit-versioning` · **Key file**: `chunking.rs`
+**Crate**: `mediagit-versioning` · **Key module**: `chunking/` (submodule directory after the god-file refactor)
 
 ### Chunking Strategy Decision
 
@@ -646,30 +647,39 @@ pub trait StorageBackend: Send + Sync + Debug {
 
 **Crate**: `mediagit-server` · **Framework**: Axum · **Port**: Configurable
 
-#### Endpoints (20 handler routes + auth)
+#### Endpoints (25 repo routes + health + auth)
+
+Handler fn names below are exactly as registered in `mediagit-server/src/lib.rs` (`handlers/` submodule). Routes that bind two methods (`objects/pack`, `chunks/:chunk_id`, `chunk-deltas/:chunk_id`, `manifests/:oid`) are shown as combined GET/PUT (or GET/POST) rows.
 
 | Method | Path | Handler | Purpose |
 |--------|------|---------|---------|
 | GET | `/:repo/info/refs` | `get_refs` | List all refs |
 | POST | `/:repo/refs/update` | `update_refs` | Update or delete refs |
 | POST | `/:repo/objects/want` | `request_objects` | Request specific objects |
-| GET | `/:repo/objects/pack` | `download_pack` | Download pack file |
-| POST | `/:repo/objects/pack` | `upload_pack` | Upload pack file (streaming) |
+| GET / POST | `/:repo/objects/pack` | `download_pack` / `upload_pack` | Download / upload legacy object pack (streaming) |
 | POST | `/:repo/chunks/check` | `check_chunks_exist` | Check which chunks exist |
-| POST | `/:repo/chunks/upload-urls` | `presign_chunk_uploads` | Get presigned upload URLs |
-| POST | `/:repo/chunks/complete` | `complete_chunk_uploads` | Confirm chunk uploads |
-| GET | `/:repo/chunks/:chunk_id` | `download_chunk` | Download a single chunk |
-| PUT | `/:repo/chunks/:chunk_id` | `upload_chunk` | Upload a single chunk |
+| POST | `/:repo/chunks/upload-urls` | `presign_chunk_uploads` | Mint presigned PUT URLs for chunks |
+| POST | `/:repo/chunks/download-urls` | `presign_chunk_downloads` | Mint presigned GET URLs for chunks |
+| POST | `/:repo/chunks/complete` | `complete_chunk_uploads` | Confirm direct chunk uploads |
+| POST | `/:repo/chunks/verify-integrity` | `verify_chunk_integrity` | Server-side fsck of stored chunks |
+| POST | `/:repo/chunks/mpu/start` | `mpu_start` | Begin presigned multipart upload (S3/MinIO) |
+| POST | `/:repo/chunks/mpu/complete` | `mpu_complete` | Complete multipart upload |
+| POST | `/:repo/chunks/mpu/abort` | `mpu_abort` | Abort multipart upload |
+| GET / PUT | `/:repo/chunks/:chunk_id` | `download_chunk` / `upload_chunk` | Proxy-fallback single-chunk download / upload |
+| POST | `/:repo/chunks/locate` | `locate_chunks` | Resolve chunk IDs → pack id + byte offset/length |
 | POST | `/:repo/chunk-deltas/check` | `check_chunk_deltas_exist` | Check chunk delta availability |
-| GET | `/:repo/chunk-deltas/:chunk_id` | `download_chunk_delta` | Download chunk delta sidecar |
-| PUT | `/:repo/chunk-deltas/:chunk_id` | `upload_chunk_delta` | Upload chunk delta sidecar |
-| GET | `/:repo/manifests/:oid` | `download_manifest` | Download chunk manifest |
-| PUT | `/:repo/manifests/:oid` | `upload_manifest` | Upload chunk manifest |
+| GET / PUT | `/:repo/chunk-deltas/:chunk_id` | `download_chunk_delta` / `upload_chunk_delta` | Chunk delta sidecar transfer |
+| GET / PUT | `/:repo/manifests/:oid` | `download_manifest` / `upload_manifest` | Chunk manifest transfer |
+| POST | `/:repo/packs/complete` | `complete_pack` | Register a finalized cloud pack + its index (F6) |
+| POST | `/:repo/packs/upload-urls` | `presign_pack_uploads` | Mint presigned PUT URLs for pack objects |
+| PUT | `/:repo/packs/:pack_id` | `upload_pack_proxy` | Proxy-upload a pack when backend can't sign |
+| POST | `/:repo/packs/presign-download-urls` | `presign_pack_downloads` | Mint presigned GET URLs for pack Range reads |
+| POST | `/:repo/packs/rebuild-index` | `rebuild_pack_index` | Rebuild the server-side pack index |
 | GET | `/:repo/files/*path` | `download_file_by_path` | Stream file by path from any ref |
 | GET | `/:repo/tree/*path` | `list_tree` | List directory contents as JSON |
 | GET | `/:repo/tree` | `list_tree_root` | List root tree contents |
-| GET | `/health`, `/healthz` | `health_handler` | Health check (bypasses auth) |
-| — | `/auth/*` | Auth routes | Login, register, token refresh |
+| GET | `/health`, `/healthz` | `health_handler` | Health check (merged after middleware, bypasses auth + rate limiting) |
+| — | `/auth/*` | Auth routes (`create_auth_router`) | Login, register, token refresh (only when auth enabled) |
 
 #### Security Middleware Stack
 
@@ -696,9 +706,76 @@ graph TD
 **Crate**: `mediagit-protocol`
 
 - **Pack format**: Custom binary with streaming support
-- **Chunk transfer**: Parallel upload/download of individual chunks
+- **Chunk transfer**: Parallel upload/download of individual chunks (presigned-direct with proxy fallback)
 - **Object negotiation**: Want/Have protocol for efficient sync
 - **Streaming**: `StreamingPackWriter` + `StreamingPackReader` for memory-efficient transfers
+- **Cloud packs**: client bundles many chunks into a few large pack objects (see below)
+
+---
+
+## Cloud Packs
+
+**Crate**: `mediagit-versioning` · **Key files**: `streaming_pack.rs` (`StreamingPackWriter` / `StreamingPackReader`, `CloudPackResult`, `finalize_cloud()`, `PackKind::CloudObject`), `streaming_index.rs` (`StreamingPackIndex`, O(1) memory), `pack.rs`, `transaction.rs` (`PackTransaction`) · **Server**: `handlers/transfer.rs`, `chunks.rs`, `repo.rs`
+
+Phase-3 **Track F** (shipped, F1–F11). Instead of uploading thousands of tiny per-chunk objects, the client **bundles chunks into pack objects** (cap **≤ 64 MiB / ≤ 1024 chunks**) with an **embedded index**, then uploads each pack as a single large cloud object. This collapses object counts dramatically (e.g. **10k objects → 100s**), which is the dominant cost on small-chunk repos against object storage.
+
+**F8 integrity**: each pack slice carries a **compressed-hash** verification — the server (and `fsck`) re-hashes the stored compressed bytes per slice to detect corruption end-to-end.
+
+### Cloud Pack Flow
+
+```mermaid
+graph LR
+    A["Chunks to push"] --> B["PackTransaction<br/>batch chunks<br/>(≤64 MiB / ≤1024)"]
+    B --> C["StreamingPackWriter<br/>write slices + embedded index"]
+    C --> D["finalize_cloud()<br/>→ CloudPackResult<br/>(PackKind::CloudObject)"]
+    D --> E["Upload pack object<br/>(presigned PUT,<br/>proxy fallback)"]
+    E --> F["POST /:repo/packs/complete<br/>register pack + index<br/>(server pack index)"]
+
+    G["Clone / pull"] --> H["POST /:repo/chunks/locate<br/>→ pack id + offset/len"]
+    H --> I["StreamingPackReader<br/>Range-GET coalescing"]
+    I --> J["F8: verify per-slice<br/>compressed hash"]
+    J --> K["Write chunks to local ODB"]
+
+    style B fill:#7B68EE,color:#fff
+    style C fill:#7B68EE,color:#fff
+    style E fill:#27AE60,color:#fff
+    style H fill:#E8A838,color:#fff
+    style J fill:#3498db,color:#fff
+```
+
+Clone/pull never re-downloads whole packs: `locate_chunks` resolves each wanted chunk to its `(pack_id, offset, length)`, and the client issues coalesced HTTP **Range GETs** so only the needed byte ranges are fetched.
+
+---
+
+## Presigned Transfer
+
+To avoid funneling all bytes through the server, transfers default to **presigned direct** access to object storage, with an **automatic proxy fallback** through the server when the backend cannot sign URLs.
+
+- **Upload**: server mints presigned **PUT** URLs (`POST /:repo/packs/upload-urls`, `POST /:repo/chunks/upload-urls`). The client PUTs directly to backend object storage, bypassing the server. If a backend can't sign, the server returns a **null** entry for that key → the client falls back to **proxy upload** (`PUT /:repo/chunks/:id`, `PUT /:repo/packs/:pack_id`). Large chunks use presigned **multipart upload** (`/:repo/chunks/mpu/start|complete|abort`) on S3/MinIO.
+- **Download**: server mints presigned **GET** URLs (`POST /:repo/chunks/download-urls`, `POST /:repo/packs/presign-download-urls`; handlers call `backend.presign_get`). The client GETs directly from the backend; on **404 or null** entry it automatically falls back to **proxy GET** through the server. Pack-mode pull uses client-side Range-GET coalescing.
+- **Signing capability**: S3, MinIO, and Azure sign natively. **GCS requires a service-account key**; under ADC `authorized_user` credentials there is no private key, so presign returns null and the proxy path is always used.
+
+```mermaid
+flowchart TD
+    subgraph Direct["Presigned-direct path"]
+        C1["Client"] -->|"POST upload-urls /<br/>download-urls"| S1["Server"]
+        S1 -->|"presigned PUT/GET URLs<br/>(or null per key)"| C1
+        C1 <-->|"PUT / GET bytes directly"| BE1["Backend object storage"]
+    end
+
+    subgraph Proxy["Proxy fallback (null URL or 404)"]
+        C2["Client"] <-->|"PUT/GET via server<br/>(/chunks/:id, /packs/:pack_id)"| S2["Server"]
+        S2 <-->|"backend.put / backend.get"| BE2["Backend object storage"]
+    end
+
+    SC["Signing capability:<br/>S3 / MinIO / Azure = native<br/>GCS = SA key only<br/>(ADC authorized_user → null → proxy)"]
+
+    style C1 fill:#3498db,color:#fff
+    style C2 fill:#3498db,color:#fff
+    style BE1 fill:#27AE60,color:#fff
+    style BE2 fill:#27AE60,color:#fff
+    style SC fill:#E8A838,color:#fff
+```
 
 ---
 
@@ -785,13 +862,26 @@ sequenceDiagram
 
     CLI->>CLI: Determine objects to send (local − remote)
 
-    alt Chunked objects
+    alt Cloud-pack path (default for chunked data)
         CLI->>Server: POST /:repo/chunks/check [chunk IDs]
         Server-->>CLI: Missing chunk IDs
-        loop For each missing chunk
-            CLI->>Server: PUT /:repo/chunks/:id [data]
+        CLI->>CLI: PackTransaction → StreamingPackWriter<br/>bundle chunks (≤64 MiB / ≤1024)
+        CLI->>Server: POST /:repo/packs/upload-urls
+        alt Backend can sign
+            Server-->>CLI: presigned PUT URLs
+            CLI->>BE: PUT pack object(s) directly
+        else null (e.g. GCS ADC)
+            Server-->>CLI: null entry
+            CLI->>Server: PUT /:repo/packs/:pack_id (proxy)
+            Server->>BE: backend.put(pack)
         end
-        CLI->>Server: PUT /:repo/manifests/:oid [manifest]
+        CLI->>Server: POST /:repo/packs/complete [pack + index]
+    end
+
+    alt Single large chunks (S3/MinIO)
+        CLI->>Server: POST /:repo/chunks/mpu/start
+        CLI->>BE: PUT parts via presigned MPU URLs
+        CLI->>Server: POST /:repo/chunks/mpu/complete
     end
 
     alt Non-chunked objects
@@ -815,6 +905,7 @@ sequenceDiagram
 sequenceDiagram
     participant CLI as CloneCmd
     participant Server as Remote Server
+    participant BE as StorageBackend
     participant ODB as Local ODB
     participant FS as Working Directory
 
@@ -834,11 +925,21 @@ sequenceDiagram
     loop For chunked objects
         CLI->>Server: GET /:repo/manifests/:oid
         Server-->>CLI: ChunkManifest
-        loop For each chunk in manifest
-            CLI->>Server: GET /:repo/chunks/:id
-            Server-->>CLI: Chunk data
-            CLI->>ODB: Store chunk
+    end
+
+    alt Cloud-pack path (default)
+        CLI->>Server: POST /:repo/chunks/locate [chunk IDs]
+        Server-->>CLI: pack id + offset/length per chunk
+        CLI->>Server: POST /:repo/packs/presign-download-urls
+        alt Backend can sign
+            Server-->>CLI: presigned GET URLs
+            CLI->>BE: Range-GET coalesced byte ranges directly
+        else null / 404
+            CLI->>Server: GET /:repo/chunks/:id (proxy fallback)
+            Server->>BE: backend.get(chunk)
         end
+        CLI->>CLI: F8 verify per-slice compressed hash
+        CLI->>ODB: Store chunks
     end
 
     CLI->>CLI: Create refs/remotes/origin/*

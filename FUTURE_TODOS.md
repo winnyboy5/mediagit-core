@@ -4,7 +4,7 @@ Consolidated and **priority-ordered** registry of planned features, code-level T
 known limitations for MediaGit. Items are sourced from documentation, source code, and
 historical claudedocs analyses.
 
-> Last updated: 2026-05-25 | v0.2.7-beta.1 | Items 1 (.mediagitignore) + 4 (Streaming Format-Aware Chunker, S1–S5) + Push Progress/Throughput fixes + BLAKE3 + B2/B4/B7 pipeline **DONE**
+> Last updated: 2026-06-02 | v0.2.7-beta.1 | Items 1 (.mediagitignore) + 4 (Streaming Format-Aware Chunker, S1–S5) + Push Progress/Throughput fixes + BLAKE3 + B2/B4/B7 pipeline + **5 (Phase-3 Track F / cloud packs, F1–F11)** + Presigned-URL transfer (W1–W5) + God-file refactor (handlers/ smart_compressor/ client/ odb/ chunking/) + Server direct file-serving endpoints **DONE**
 
 **Priority levels:**
 - **P0** — Quick win or active blocker — ≤1 day effort, implement immediately
@@ -22,8 +22,8 @@ historical claudedocs analyses.
 | 2 | Pack negotiation / bitmap index | ~~**P1**~~ **✅ DONE** | — | Pack negotiation shipped v0.2.6-beta.1; bitmap index deferred (see §2b) |
 | 3 | Parallel object I/O during checkout | **P1** | 1 wk | Branch switch latency |
 | 4 | Streaming format-aware chunker (MKV/MP4/GLB, S1-S5) | ~~**P1**~~ **✅ DONE** | 8-12 days | Shipped in v0.2.6-beta.1 |
-| 5 | **Phase-3 Track F — Cloud-side pack objects** (xorb-style chunk bundling) | **P1** | 2-3 wks | 5-10× clone speedup; 10k S3 objects → ~100 per push/clone; design ready |
-| 6 | Direct file serving endpoints + `mediagit download` CLI | **P1** | 2-3 days | Web UI, CI integration, CDN |
+| 5 | **Phase-3 Track F — Cloud-side pack objects** (xorb-style chunk bundling) | ~~**P1**~~ **✅ DONE** | — | Shipped v0.2.7-beta.1 (F1–F11, streaming_pack.rs, F8 integrity) |
+| 6 | `mediagit download` CLI subcommand | **P1** | 2-3 days | Web UI, CI integration, CDN (server endpoints already shipped) |
 | 7 | `mediagit media info` command | **P2** | ~200 LOC | UX for media inspection |
 | 8 | Sparse checkout | **P2** | ~500 LOC | Large repos, partial working trees |
 | 9 | CLI command unit tests | **P2** | Large | Test coverage completeness |
@@ -187,7 +187,18 @@ loading the entire file into heap memory. Falls back to `StreamCDC` on mmap fail
 
 ---
 
-### 5. Container-Aware Delta Encoding for PDF/ZIP Formats [DELTA-001]
+### ~~5. Phase-3 Track F — Cloud-side Pack Objects~~ ✅ DONE — v0.2.7-beta.1
+
+xorb-style chunk bundling shipped as `streaming_pack.rs` / `CloudPackResult`, phases F1–F11
+complete including F8 integrity verification. 614/614 tests pass across all four backends.
+10k S3 objects → ~100 per push/clone; 5-10× clone speedup on small-chunk repos confirmed.
+
+See `plans/squishy-whistle.md` for the approved plan, and
+`crates/mediagit-protocol/src/streaming_pack.rs` for the implementation.
+
+---
+
+### 5b. Container-Aware Delta Encoding for PDF/ZIP Formats [DELTA-001]
 *Source: `docs/FUTURE_TODOS_2.md` — recorded 2026-03-01*
 
 > **⚠️ ATTEMPTED 2026-04-07 — REVERTED. See post-mortem below before re-attempting.**
@@ -260,33 +271,24 @@ approach for AI/PDF without first validating opaque-stream ratio on target files
 
 ---
 
-### 6. Direct File Serving Endpoints + `mediagit download` CLI
-*Source: protocol R&D analysis 2026-03; `crates/mediagit-protocol/src/streaming.rs`**
+### 6. `mediagit download` CLI Subcommand
+*Source: protocol R&D analysis 2026-03; `crates/mediagit-protocol/src/streaming.rs`*
 
-New server endpoints for raw file download ("GitHub Download Raw" equivalent). Enables
-web UI, CI pipelines, preview tools, and CDN integration.
+> **Server side DONE.** `crates/mediagit-server/src/handlers/browse.rs` ships
+> `download_file_by_path`, `list_tree`, and `resolve_path_to_blob` — the full HTTP
+> endpoint surface (`GET /{repo}/files/{*path}?ref=HEAD`, `GET /{repo}/tree/{*path}?ref=HEAD`).
 
-**Endpoints:**
+**Remaining gap**: the CLI client subcommand does not exist yet.
 
-| Endpoint | Description |
-|---|---|
-| `GET /{repo}/files/{*path}?ref=HEAD` | Download file by path from committed state |
-| `GET /{repo}/tree/{*path}?ref=HEAD` | List directory contents as JSON |
-| `GET /{repo}/tree?ref=HEAD` | List root tree |
+**Target usage**: `mediagit download origin assets/logo.psd --ref main`
 
-**Server changes** (`handlers.rs`):
-- `resolve_path_to_blob()` — tree walk by path components → blob OID
-- `download_file_by_path()` — streaming O(64KB) via `duplex` + `tokio::spawn` + `ReaderStream`
-  (same pattern as `download_pack` at `handlers.rs:494-541`)
-- `list_tree()` — JSON directory listing
+**File to create**: `crates/mediagit-cli/src/commands/download.rs` — adapt
+`StreamingDownloader` in `streaming.rs` for VCS-scoped URLs. Wire into `commands/mod.rs`
+and `main.rs`.
 
-**Phase 2** (after server endpoints): `mediagit download origin assets/logo.psd --ref main`
-CLI command in `crates/mediagit-cli/src/commands/download.rs`, adapting `StreamingDownloader`
-in `streaming.rs` for VCS-scoped URLs.
+**Path security** (already enforced server-side): rejects `..`, absolute paths, null bytes.
 
-**Path security**: reject `..`, absolute paths, null bytes; validate against tree entry names.
-
-Effort: **2-3 days** (server only). CLI phase: additional 2-3 days.
+Effort: **2-3 days** (CLI only).
 
 ---
 
@@ -553,7 +555,7 @@ optimization (see §2b).
 | 2 | ~~P1~~ ✅ | **Pack negotiation** | **DONE** — v0.2.6-beta.1. `collect_local_have` + `WantRequest{want,have}` + server `walk_reachable`; incremental fetch validated in deep tests | `client.rs` |
 | 3 | P1 | **Parallel checkout I/O** | Checkout reads blobs sequentially; no parallel fetch | `checkout.rs` |
 | 4 | ~~P1~~ ✅ | **TB-scale chunking** | **DONE** — Streaming format-aware chunking via mmap for all file sizes | v0.2.6-beta.1–3 |
-| 6 | P1 | **Direct file serving** | No HTTP endpoint to download committed files by path | R&D 2026-03 |
+| 6 | P1 | **`mediagit download` CLI** | Server endpoints shipped (`browse.rs`); CLI subcommand (`commands/download.rs`) not yet implemented | R&D 2026-03 |
 | 7 | P2 | **`media info` command** | No CLI command to inspect media metadata | `FUTURE_TODOS.md` |
 | 8 | P2 | **Sparse checkout** | Full tree checkout required; no partial working tree support | `FUTURE_TODOS.md` |
 | 9 | P2 | **CLI unit tests** | All coverage is integration tests; no per-command unit tests | `FUTURE_TODOS_2.md` |

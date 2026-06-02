@@ -10,6 +10,10 @@ See [Storage Backend Configuration](../guides/storage-config.md) for detailed se
 
 Requires appropriate credentials configured via environment variables or config file.
 
+## Transfer
+
+MinIO is S3-compatible and supports presigned transfer end to end. The server mints presigned PUT URLs for upload and presigned GET URLs for download/clone, moving chunks and [cloud packs](./cloud-packs.md) **direct-to-backend**. Large packs use presigned **multipart upload (MPU)**, with a server proxy fallback.
+
 ## Performance
 
 Cloud-based storage with network latency. Use for distributed teams and backup.

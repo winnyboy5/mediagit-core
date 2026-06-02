@@ -9,11 +9,11 @@ Content-addressable storage identifies objects by their content (via cryptograph
 
 ### How MediaGit Uses CAS
 ```
-File Content → SHA-256 Hash → Object ID (OID)
-   "hello"   →   5891b5b522...  →  objects/58/91b5b522...
+File Content → BLAKE3 Hash → Object ID (OID)
+   content   →   5891b5b522... (illustrative)  →  objects/58/91b5b522...
 ```
 
-Every object (blob, tree, commit) is stored under its SHA-256 hash:
+Every object (blob, tree, commit) is stored under its BLAKE3 hash:
 - **Blobs**: Raw file content
 - **Trees**: Directory listings
 - **Commits**: Snapshots with metadata
@@ -135,7 +135,7 @@ MediaGit supports lightweight branches similar to Git:
 
 ### Branch Storage
 - Branches are just files in `refs/heads/`
-- Each file contains a commit hash (64 hex characters for SHA-256)
+- Each file contains a commit hash (64 hex characters for the 32-byte BLAKE3 OID)
 - Creating a branch = writing a 40-byte file (instant)
 
 ### Branch Visualization
