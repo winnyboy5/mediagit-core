@@ -11,7 +11,7 @@ Internal file format reference for MediaGit's on-disk data structures.
     ├── config.toml       # Repository configuration (TOML)
     ├── objects/          # Content-addressable object database
     │   ├── <xx>/         # Two-character prefix directories
-    │   │   └── <hash>    # Object files (remaining 62 hex chars of SHA-256)
+    │   │   └── <hash>    # Object files (remaining 62 hex chars of BLAKE3)
     │   └── pack/         # Pack files (future)
     ├── refs/             # Reference storage
     │   └── heads/        # Branch refs
@@ -26,7 +26,7 @@ Internal file format reference for MediaGit's on-disk data structures.
 
 ## Object Format
 
-All objects are stored content-addressably. The object's SHA-256 hash (over the uncompressed content) is used as the key. The key is split into a 2-character directory prefix and 62-character filename:
+All objects are stored content-addressably. The object's BLAKE3 hash (over the uncompressed content) is used as the key. The key is split into a 2-character directory prefix and 62-character filename:
 
 ```
 objects/ab/cdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890cd
@@ -69,7 +69,7 @@ The manifest contains:
 - File path
 - Total file size
 - Ordered list of chunks, each with:
-  - Chunk hash (SHA-256 of chunk content)
+  - Chunk hash (BLAKE3 of chunk content)
   - Chunk offset in the original file
   - Chunk size (uncompressed)
   - Whether the chunk is stored as full or delta
@@ -78,7 +78,7 @@ The manifest contains:
 
 ## Reference Format
 
-Refs are plain text files containing a 64-character hex SHA-256 hash followed by a newline:
+Refs are plain text files containing a 64-character hex BLAKE3 hash followed by a newline:
 
 ```
 .mediagit/refs/heads/main
@@ -124,7 +124,7 @@ Commits are stored as Bincode-serialized structs containing:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `tree` | `[u8; 32]` | SHA-256 hash of the root tree object |
+| `tree` | `[u8; 32]` | BLAKE3 hash of the root tree object |
 | `parents` | `Vec<[u8; 32]>` | Parent commit hashes (0 for initial, 1+ for merges) |
 | `author` | `string` | Author name |
 | `email` | `string` | Author email |
@@ -140,7 +140,7 @@ Trees are stored as Bincode-serialized ordered lists of entries:
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | `string` | Filename (not full path) |
-| `hash` | `[u8; 32]` | SHA-256 hash of the blob or subtree |
+| `hash` | `[u8; 32]` | BLAKE3 hash of the blob or subtree |
 | `is_tree` | `bool` | `true` for subdirectory, `false` for file |
 | `size` | `u64` | Uncompressed size in bytes |
 
@@ -169,11 +169,11 @@ These files are informational only and can be deleted without affecting reposito
 
 ## Hashing
 
-MediaGit uses **SHA-256** for all content hashing:
+MediaGit uses **BLAKE3** for all content hashing (32-byte digest, displayed as 64 hex chars; tree-parallel for large media):
 
-- Object identity: SHA-256 of the uncompressed object content
-- Chunk identity: SHA-256 of the uncompressed chunk content
-- Commit hash: SHA-256 of the serialized commit object
+- Object identity: BLAKE3 of the uncompressed object content
+- Chunk identity: BLAKE3 of the uncompressed chunk content
+- Commit hash: BLAKE3 of the serialized commit object
 
 ---
 

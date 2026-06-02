@@ -1,7 +1,7 @@
 # MediaGit vs. Competitors — Technical Comparison
 
 **Date:** May 2026  
-**MediaGit Version:** 0.2.7-beta.1 (`feat/pack-negotiation` branch)  
+**MediaGit Version:** 0.2.8-beta.1 (`refactor/god-files-split` branch)  
 **Evidence basis:** 459 automated deep-tests run 2026-05-25 across AWS S3 (ap-south-1), Azure Blob Storage (South India), and Google Cloud Storage; competitor data from public docs, GitHub issues, and vendor pricing pages as of May 2026.
 
 ---
@@ -213,7 +213,7 @@ MediaGit tested 28+ commands across all 3 cloud backends with 459 passing tests:
 |-----------|---------------|--------|
 | BLAKE3 hashing (10–20× faster than SHA-256 on non-SHA-NI) | ✅ BLAKE3 | Phase-2 Track A complete |
 | Pipelined push/pull (manifest+chunk overlap) | ✅ B2/B4/B7 pipeline (default ON) | Phase-2 Track B complete |
-| Cloud-side pack objects (xorb-style bundle) | Per-chunk cloud objects | Phase-3 Track F planned |
+| Cloud-side pack objects (chunk bundling) | ✅ Cloud packs (≤64 MiB / ≤1024-chunk bundles, F8 integrity) | Phase-3 Track F complete |
 | File locking (exclusive checkout) | Not implemented | On roadmap |
 | DCC plugin integrations (Maya, Nuke, Houdini) | Not implemented | Future milestone |
 | GUI client | CLI only | Future milestone |

@@ -12,7 +12,8 @@ mediagit fetch [OPTIONS] [REMOTE] [BRANCH]
 
 Fetches branches and objects from a remote repository, updating remote-tracking
 refs. Does **not** modify the local working tree — use `mediagit pull` to fetch
-and merge in one step.
+and merge in one step. Objects are downloaded via presigned-URL direct-from-backend
+transfer, with server-proxy fallback.
 
 ## Arguments
 

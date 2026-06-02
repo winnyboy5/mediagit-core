@@ -1,5 +1,5 @@
 # MediaGit-Core Development Guide
-**Version**: 0.2.7-beta.1
+**Version**: 0.2.8-beta.1
 **Last Updated**: May 25, 2026
 
 Complete setup guide for MediaGit development - from beginner setup to production deployment.
@@ -309,7 +309,7 @@ ls -lh target/debug/mediagit-server
 
 # Test CLI
 ./target/debug/mediagit --version
-# Should output: mediagit 0.2.7-beta.1
+# Should output: mediagit 0.2.8-beta.1
 
 # Test server (optional)
 ./target/debug/mediagit-server --help
@@ -1520,6 +1520,15 @@ This section provides a comprehensive reference for all configuration files used
 - The **server** is where you configure storage backends (S3, MinIO, Azure, etc.)
 - The **CLI** only configures remote server URLs
 
+> **Transfer internals (v0.2.7-beta.1):** Push and pull use a pipelined transfer engine
+> with two advanced modes. **Presigned-URL transfer** (W1–W5): for S3/MinIO/Azure backends
+> the server issues short-lived presigned URLs so chunk data travels direct client ↔ cloud
+> without proxying through the server process; GCS falls back to server-proxy when SA key
+> signing is unavailable. **Cloud packs** (Phase-3 Track F): chunks are bundled into
+> 64 MiB / 1024-chunk pack objects on push, reducing S3 API call count ~100× and giving
+> 5-10× clone speedup on small-chunk repos. See [ARCHITECTURE.md](ARCHITECTURE.md) for
+> design details.
+
 ### Configuration File Summary
 
 | Config File | Location | Purpose |
@@ -2269,6 +2278,6 @@ find . -name "*.tmp" -o -name "*.log" -o -name "*~"
 
 ---
 
-**Version**: 0.2.7-beta.1
+**Version**: 0.2.8-beta.1
 **Last Updated**: May 25, 2026
 **Maintained by**: MediaGit Core Team

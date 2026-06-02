@@ -251,51 +251,117 @@ flowchart LR
 
 ## Data Flow
 
-### Upload Flow (Chunks)
+### Upload Flow (Presigned-Direct)
+
+Client PUTs chunks directly to backend storage using server-minted presigned URLs, bypassing the server for data transfer. If the backend cannot sign (e.g. GCS with ADC), the server returns `null` and the client falls back to proxy upload.
 
 ```mermaid
 sequenceDiagram
     participant Client
     participant Server
     participant Storage
-    
+
     Client->>Server: POST /chunks/check (chunk OIDs)
     Server->>Storage: Check existence
     Storage-->>Server: Missing chunks list
     Server-->>Client: Missing chunks list
-    
-    loop For each missing chunk
-        Client->>Server: PUT /chunks/:id (encrypted)
+
+    Client->>Server: POST /:repo/chunks/upload-urls (missing OIDs)
+    Server-->>Client: Presigned PUT URLs (or null → proxy fallback)
+
+    alt Presigned URL available
+        Client->>Storage: PUT chunk directly (presigned URL)
+        Storage-->>Client: 200 OK
+    else Proxy fallback
+        Client->>Server: PUT /chunks/:id
         Server->>Storage: Store chunk
-        Storage-->>Server: OK
         Server-->>Client: 201 Created
     end
-    
+
+    Note over Client,Storage: Large chunks: presigned MPU via<br/>POST /:repo/chunks/mpu/start|complete|abort
+
     Client->>Server: PUT /manifests/:oid
     Server->>Storage: Store manifest
     Server-->>Client: OK
 ```
 
-### Download Flow
+### Download Flow (Presigned-Direct)
+
+Client GETs chunks directly from backend storage using server-minted presigned GET URLs. On 404 or `null` (unsigned), falls back to proxy GET. Pack-mode pull uses client-side Range-GET coalescing.
+
+**Signing capability**: S3, MinIO, and Azure sign natively. GCS requires a service-account key JSON; ADC `authorized_user` credentials have no private key, so presign returns `null` and the client runs at proxy speed.
 
 ```mermaid
 sequenceDiagram
     participant Client
     participant Server
     participant Storage
-    
+
     Client->>Server: GET /objects/pack
     Server->>Storage: Get pack + manifests
     Storage-->>Server: Pack data
     Server-->>Client: Pack (X-Chunked-Objects header)
-    
-    loop For each chunked object
+
+    Client->>Server: POST /:repo/chunks/download-urls (OID list)
+    Server-->>Client: Presigned GET URLs (or null → proxy fallback)
+
+    alt Presigned URL available
+        Client->>Storage: GET chunk directly (presigned URL)
+        Storage-->>Client: Chunk data
+    else Proxy / 404 fallback
         Client->>Server: GET /chunks/:id
         Server->>Storage: Get chunk
-        Storage-->>Server: Chunk data
-        Server-->>Client: Chunk (encrypted)
+        Server-->>Client: Chunk data
     end
+
+    Note over Client,Storage: Pack-mode pull: client Range-GET coalescing<br/>via POST /:repo/packs/presign-download-urls
 ```
+
+---
+
+## Cloud Packs
+
+MediaGit bundles chunks into **cloud pack objects** before uploading (Phase-3 Track F). Instead of storing thousands of individual chunk objects, the client packs up to 1,024 chunks (≤ 64 MiB) into a single object with an embedded index. This dramatically cuts API request count and cost, and speeds clones on small-chunk repos.
+
+- **Object count reduction**: ~10,000 individual chunk objects → hundreds of pack objects (deep tests: 463–467 chunked + 35 delta objects per backend)
+- **Clone path**: pack-locate via embedded index → Range-GET to fetch only needed slices
+- **Integrity (F8)**: per-slice compressed-hash verification on every pull — all backends clean in deep tests
+
+```mermaid
+flowchart LR
+    subgraph Client["Client — Push"]
+        C1[Chunks] --> PACK[Pack Builder\n≤64 MiB / ≤1024 chunks]
+        PACK --> IDX[Embedded Index]
+    end
+
+    subgraph Server["Server"]
+        UP[POST /:repo/packs/upload-urls]
+    end
+
+    subgraph Storage["Cloud Backend"]
+        OBJ[(Pack Object\n+ Embedded Index)]
+    end
+
+    PACK -->|presigned PUT| OBJ
+    Client -->|request URLs| UP
+    UP -->|presigned URLs| Client
+```
+
+---
+
+## Cross-Backend Deep-Test Parity (2026-06-02)
+
+614/614 tests passing across all four backends. All fsck + F8 compressed-hash checks clean.
+
+| Backend | Tests | Cloud Savings | Push Elapsed | Clone Elapsed | Server Mem Δ | fsck / F8 |
+|---------|-------|--------------|-------------|--------------|-------------|-----------|
+| **MinIO** | 151/151 | 8.4%* | 76 s | 87 s | ±3.7 MB | ✅ Clean |
+| **AWS S3** | 150/150 | 26.3% | 154 s | 225 s | +26 MB | ✅ Clean |
+| **Azure Blob** | 154/154 | 26.5% | 304 s | 178 s | +35 MB | ✅ Clean |
+| **GCS** | 159/159 | 26.4% | 178 s | 212 s | +30 MB | ✅ Clean |
+
+> \* MinIO 8.4% = cumulative multi-push fixture (lower savings expected by design). AWS/Azure/GCS 26.3–26.5% are single-corpus savings.
+> AWS/Azure/GCS push and clone are WAN-bound (~62 Mbps to ap-south-1). Reports: `dev-tests/deep-tests/reports/`.
 
 ---
 
