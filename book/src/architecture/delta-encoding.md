@@ -223,7 +223,7 @@ let delta = Delta::from_bytes(&delta_bytes)?;
 let reconstructed = DeltaDecoder::apply(&base_data, &delta)?;
 
 // Verify integrity
-let actual_hash = sha256(&reconstructed);
+let actual_hash = blake3_hash(&reconstructed);
 assert_eq!(actual_hash, expected_hash);
 ```
 
@@ -287,7 +287,7 @@ Base (v12) → Δ1 → ... → Δ5 (depth 5, rebalanced)
 - Effects applied: 15–30% savings
 - Re-recording: 0–5% savings
 
-### Delta Efficiency Benchmarks (v0.2.6-beta.1)
+### Delta Efficiency Benchmarks (v0.2.7-beta.1)
 
 > Measured via standalone deep test suite, 2026-04-03. All `fsck` verified.
 

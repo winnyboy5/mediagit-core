@@ -1024,6 +1024,55 @@ impl StorageBackend for MinIOBackend {
         Ok(Box::pin(stream))
     }
 
+    async fn get_streaming_range(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+    ) -> anyhow::Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+        >,
+    > {
+        Self::validate_key(key)?;
+        let key_wire = self.full_key(key);
+        let client = self.client.clone();
+        let bucket = self.config.bucket.clone();
+        let stats = self.stats.clone();
+
+        let response = client
+            .get_object()
+            .bucket(&bucket)
+            .key(&key_wire)
+            .range(format!("bytes={}-{}", range.start, range.end - 1))
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("get_streaming_range {}: {}", key_wire, e))?;
+
+        let reader = response.body.into_async_read();
+        let stream = futures::stream::unfold((reader, stats), |(mut rdr, stats)| async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf = vec![0u8; 65536];
+            match rdr.read(&mut buf).await {
+                Ok(0) => None,
+                Ok(n) => {
+                    buf.truncate(n);
+                    stats
+                        .total_bytes_downloaded
+                        .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                    Some((
+                        Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(buf)),
+                        (rdr, stats),
+                    ))
+                }
+                Err(e) => Some((
+                    Err(anyhow::anyhow!("get_streaming_range chunk: {}", e)),
+                    (rdr, stats),
+                )),
+            }
+        });
+        Ok(Box::pin(stream))
+    }
+
     /// Store an object in MinIO
     async fn put(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
         Self::validate_key(key)?;
@@ -1074,6 +1123,42 @@ impl StorageBackend for MinIOBackend {
                             Ok(false)
                         } else {
                             Err(anyhow!("Failed to check object existence: {}", e))
+                        }
+                    }
+                }
+            })
+        })
+        .await
+    }
+
+    async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+        Self::validate_key(key)?;
+
+        let client = self.client.clone();
+        let bucket = self.config.bucket.clone();
+        let key_clone = self.full_key(key);
+
+        self.with_retry(|| {
+            let client = client.clone();
+            let bucket = bucket.clone();
+            let key = key_clone.clone();
+
+            Box::pin(async move {
+                match client.head_object().bucket(&bucket).key(&key).send().await {
+                    Ok(resp) => Ok(Some(resp.content_length().unwrap_or(0) as u64)),
+                    Err(e) => {
+                        let emsg = e.to_string().to_lowercase();
+                        if emsg.contains("404")
+                            || emsg.contains("not found")
+                            || emsg.contains("notfound")
+                            || emsg.contains("nosuchkey")
+                            || emsg.contains("does not exist")
+                            || emsg.contains("no such key")
+                            || (emsg.contains("service error") && emsg.len() < 50)
+                        {
+                            Ok(None)
+                        } else {
+                            Err(anyhow!("Failed to head object: {}", e))
                         }
                     }
                 }
@@ -1195,17 +1280,17 @@ impl StorageBackend for MinIOBackend {
     async fn presign_put(
         &self,
         key: &str,
-        _content_length: u64,
+        content_length: u64,
         ttl: std::time::Duration,
     ) -> anyhow::Result<Option<crate::PresignedPut>> {
         let wire_key = self.full_key(key);
         let presigning = aws_sdk_s3::presigning::PresigningConfig::expires_in(ttl)
             .map_err(|e| anyhow!("presigning config: {e}"))?;
-        let req = self
-            .client
-            .put_object()
-            .bucket(&self.bucket)
-            .key(&wire_key)
+        let mut builder = self.client.put_object().bucket(&self.bucket).key(&wire_key);
+        if content_length > 0 {
+            builder = builder.content_length(content_length as i64);
+        }
+        let req = builder
             .presigned(presigning)
             .await
             .map_err(|e| anyhow!("presign_put minio: {e}"))?;

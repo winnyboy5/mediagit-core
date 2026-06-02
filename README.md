@@ -9,16 +9,16 @@
 
 ## 🎯 Status
 
-**Version**: v0.2.7-beta.1
+**Version**: v0.2.8-beta.1
 **Status**: 🚧 **BETA**
 **Features**: 100% complete (all P0–P3 items implemented)
-**Last Validated**: May 25, 2026 — 459/459 deep tests on AWS S3, Azure Blob, GCS (release build, Windows 11)
+**Last Validated**: June 2, 2026 — 614/614 deep tests on MinIO, AWS S3, Azure Blob, GCS (release build, Windows 11)
 **🚨 WARNING 🚨**: This project is under active development. Be aware that large breaking changes may happen before 1.0 is reached.
 
-✅ **459/459 deep-tests passing** across AWS S3 (ap-south-1), Azure Blob (South India), Google Cloud Storage
-✅ **28 CLI commands validated end-to-end** — 0 crashes, 0 data corruption across all 3 cloud backends
+✅ **614/614 deep-tests passing** across MinIO, AWS S3 (ap-south-1), Azure Blob (South India), Google Cloud Storage
+✅ **28 CLI commands validated end-to-end** — 0 crashes, 0 data corruption across all 4 cloud backends
 ✅ **27+ file types tested** (58 GB dataset) across video, audio, 3D, image, design, ML
-✅ **26.5%+ storage savings** measured on mixed media corpus (compression + dedup + delta, validated May 2026)
+✅ **26.3–26.5% storage savings** measured on cloud backends (compression + dedup + delta, validated June 2026)
 ✅ **Files up to 398 MB** staged and transferred; single-file scalability to 6 GB tested
 
 | Metric | Result |
@@ -31,7 +31,7 @@
 | **Network clone (local server)** | 100 MB/s (150 MB local server) |
 | **Network clone (cloud WAN, South Asia)** | 0.03–0.10 MB/s (WAN-bound) |
 | **Commit latency** | 30–52 ms (constant regardless of file size) |
-| **Storage savings (validated, May 2026)** | **26.5%** across 3 cloud backends (AWS, Azure, GCS) |
+| **Storage savings (validated, June 2026)** | **26.3–26.5%** across 4 cloud backends (MinIO, AWS, Azure, GCS) |
 | **Storage savings (average mixed media)** | ~30% (compression + dedup + delta) |
 | **Exact dedup (CAS): exact duplicate** | 99.9% savings (CAS hit, 0.7 KB overhead) |
 | **Exact dedup (CAS): 3× identical MP4** | 66% savings |
@@ -81,6 +81,17 @@ Traditional Git struggles with large binary files. MediaGit solves this with:
 - **MinIO**: S3-compatible local/private cloud (validated at 100+ MB/s)
 - **Others**: Backblaze B2, DigitalOcean Spaces
 
+📦 **Cloud Packs** (Phase-3 Track F)
+
+Instead of uploading thousands of individual chunk objects, MediaGit bundles chunks into **pack objects** (≤ 64 MiB / ≤ 1,024 chunks each) with an embedded index. This collapses ~10,000 small objects into hundreds of packs per repo, cutting API request count and storage costs. Clone uses pack-locate + Range-GET so only needed slices are fetched. F8 integrity verifies every slice's compressed hash on pull.
+
+- Deep tests: 463–467 chunked + 35 delta objects per backend — all fsck/F8 clean
+- 614/614 tests passing across MinIO, AWS, Azure, GCS (June 2, 2026)
+
+🔗 **Presigned-URL Transfer**
+
+Uploads and downloads bypass the server entirely when the backend supports signing. The server mints presigned PUT/GET URLs; the client communicates directly with cloud storage. On unsigned backends (GCS with ADC) or 404, the client automatically falls back to server-proxy transfer. Large chunks use presigned multipart upload (MPU) on S3/MinIO.
+
 🔒 **Security**
 - AES-256-GCM encryption at rest
 - JWT + API key authentication
@@ -115,19 +126,19 @@ curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/instal
 
 **Linux x86_64 — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.7-beta.1/mediagit-0.2.7-beta.1-x86_64-linux.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-x86_64-linux.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **macOS Apple Silicon — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.7-beta.1/mediagit-0.2.7-beta.1-aarch64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-aarch64-macos.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **Windows x86_64 (PowerShell):**
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.7-beta.1/mediagit-0.2.7-beta.1-x86_64-windows.zip" -OutFile mediagit.zip
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-x86_64-windows.zip" -OutFile mediagit.zip
 Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 # Add to PATH:
 [Environment]::SetEnvironmentVariable("Path", "$env:Path;$env:LOCALAPPDATA\MediaGit\bin", "User")
@@ -136,8 +147,8 @@ Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 #### Docker
 
 ```bash
-docker pull ghcr.io/winnyboy5/mediagit-core:0.2.7-beta.1
-docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.7-beta.1 mediagit --version
+docker pull ghcr.io/winnyboy5/mediagit-core:0.2.8-beta.1
+docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.8-beta.1 mediagit --version
 ```
 
 #### From Source
@@ -157,11 +168,11 @@ cargo build --release
 
 | Platform | Archive |
 |----------|---------|
-| Linux x86_64 | `mediagit-0.2.7-beta.1-x86_64-linux.tar.gz` |
-| Linux ARM64 | `mediagit-0.2.7-beta.1-aarch64-linux.tar.gz` |
-| macOS Intel | `mediagit-0.2.7-beta.1-x86_64-macos.tar.gz` |
-| macOS Apple Silicon | `mediagit-0.2.7-beta.1-aarch64-macos.tar.gz` |
-| Windows x86_64 | `mediagit-0.2.7-beta.1-x86_64-windows.zip` |
+| Linux x86_64 | `mediagit-0.2.8-beta.1-x86_64-linux.tar.gz` |
+| Linux ARM64 | `mediagit-0.2.8-beta.1-aarch64-linux.tar.gz` |
+| macOS Intel | `mediagit-0.2.8-beta.1-x86_64-macos.tar.gz` |
+| macOS Apple Silicon | `mediagit-0.2.8-beta.1-aarch64-macos.tar.gz` |
+| Windows x86_64 | `mediagit-0.2.8-beta.1-x86_64-windows.zip` |
 
 Each archive includes `mediagit` (CLI) and `mediagit-server` binaries, plus a `.sha256` checksum file.
 
@@ -424,7 +435,7 @@ Compression strategy is selected automatically per file type. Pre-compressed for
 | **Chunk-level Deduplication** | ✅ BLAKE3 CAS | ❌ | File-level only | ✅ BLAKE3 | Partial |
 | **Binary Delta** | ✅ Per-chunk zstd dict | ❌ | RCS file-level | ✅ Implicit | ✅ Delta sync |
 | **Built-in Compression** | ✅ Zstd+Brotli Smart | ❌ | ❌ | ❌ | ❌ |
-| **Storage Savings (validated)** | **26.5%** (459 tests, 3 clouds) | 0% extra | 0–5% RCS | Not published | Not published |
+| **Storage Savings (validated)** | **26.3–26.5%** (614 tests, 4 clouds) | 0% extra | 0–5% RCS | Not published | Not published |
 | **Self-Hosted** | ✅ Primary mode | ✅ LFS server | ✅ Primary | ❌ Cloud-only | ❌ Cloud-only |
 | **Cloud Backends** | S3, Azure, GCS, MinIO, B2 | Any LFS server | None native | HF Hub only | Proprietary |
 | **Offline Commits** | ✅ | ✅ (Git) | ❌ | ❌ | Not documented |
@@ -777,7 +788,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] Per-chunk `on_progress` callback for continuous byte-level progress during multi-GB ingestion
 - [x] Security: upgraded `quinn-proto` (RUSTSEC-2026-0037)
 
-### v0.2.7-beta.1 (Current Beta) — March–May 2026
+### v0.2.7-beta.1 — March–May 2026
 *Delta engine rewrite, CLI refinements, server improvements*
 
 - [x] Delta encoder replaced: suffix-array sliding-window → **zstd dictionary compression** (+1.3–2.1pp savings, 1.4–2.4× faster, 73% less code)
@@ -832,7 +843,7 @@ aws iam get-user-policy --user-name mediagit-user --policy-name MediaGitS3Policy
 ```bash
 # The /releases/latest API returns 404 when only pre-releases exist.
 # Pass the version explicitly:
-VERSION=0.2.7-beta.1 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
+VERSION=0.2.8-beta.1 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 
 # Or on Windows PowerShell:
 iwr -UseBasicParsing https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.ps1 | iex
@@ -887,10 +898,10 @@ Special thanks to:
 
 - **Lines of Code**: 85,000+ (Rust, 218 source files across 14 crates)
 - **Features**: 100% complete (all P0–P3 items)
-- **Test Coverage**: 1,529 unit/integration tests; **459/459 deep-tests** across AWS S3, Azure Blob, GCS (validated 2026-05-25)
+- **Test Coverage**: 1,529 unit/integration tests; **614/614 deep-tests** across MinIO, AWS S3, Azure Blob, GCS (validated 2026-06-02)
 - **Staging Throughput**: 25–240 MB/s for small files; 2.8–5.2 MB/s for chunked large files (WAV/PSD/GLB)
 - **Network Throughput**: 134–267 MB/s push (local server, pack negotiation); WAN-bound on cloud backends
-- **Storage Savings**: **26.5%** validated on 3 cloud backends (May 2026); ~30% average across mixed media projects
+- **Storage Savings**: **26.3–26.5%** validated on 4 cloud backends (June 2026); ~30% average across mixed media projects
 - **Stability**: 0 crashes, 0 data corruption across all validated test runs
 - **File Formats**: 70+ extensions (video, audio, image, 3D, DCC, ML, game engines, office)
 - **Server Endpoints**: 20 handler routes + auth
@@ -900,4 +911,4 @@ Special thanks to:
 
 **Made with 🦀 and ❤️ by the MediaGit Contributors**
 
-**Status**: Beta | **Version**: v0.2.7-beta.1 | **Updated**: May 25, 2026 | **Cloud-Validated**: 459/459 tests ✅
+**Status**: Beta | **Version**: v0.2.8-beta.1 | **Updated**: June 2, 2026 | **Cloud-Validated**: 614/614 tests ✅

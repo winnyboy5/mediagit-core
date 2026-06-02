@@ -15,7 +15,7 @@ Adds the current content of specified files to the staging area (index), prepari
 - **Content deduplication**: Identical content stored only once
 - **Delta compression**: Efficient storage of file modifications
 - **Chunking**: Large files split for optimal storage
-- **Hash computation**: SHA-256 content addressing
+- **Hash computation**: BLAKE3 content addressing
 
 ## Arguments
 

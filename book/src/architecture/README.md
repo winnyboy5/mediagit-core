@@ -38,7 +38,7 @@ graph TB
 - **Location**: `crates/mediagit-cli/`
 
 ### 2. Core Logic
-- **Object Database (ODB)**: Content-addressable storage with SHA-256 hashing
+- **Object Database (ODB)**: Content-addressable storage with BLAKE3 hashing
 - **Versioning Engine**: Branch management, merge strategies, LCA algorithms
 - **Media Intelligence**: Format-aware parsing and merging for PSD, video, audio
 - **Location**: `crates/mediagit-versioning/`, `crates/mediagit-media/`
@@ -67,7 +67,7 @@ sequenceDiagram
 
     User->>CLI: mediagit add large-file.psd
     CLI->>ODB: Store object
-    ODB->>ODB: Calculate SHA-256 hash
+    ODB->>ODB: Calculate BLAKE3 hash
     ODB->>Compression: Compress with zstd
     Compression->>Storage: Write to backend
     Storage-->>User: ✓ Object stored
@@ -83,7 +83,7 @@ sequenceDiagram
 
 ### Content-Addressable Storage
 - **Why**: Automatic deduplication, data integrity verification
-- **How**: SHA-256 hashing of all objects (blobs, trees, commits)
+- **How**: BLAKE3 hashing of all objects (blobs, trees, commits)
 - **Benefit**: Identical files stored only once across all branches
 
 ### Async-First Architecture
@@ -118,7 +118,7 @@ sequenceDiagram
 - B2/MinIO/Spaces: Application keys with bucket-level permissions
 
 ### Integrity
-- SHA-256 content verification on all read operations
+- BLAKE3 content verification on all read operations
 - Cryptographic hashing prevents data tampering
 - `mediagit verify` for repository health checks
 

@@ -418,6 +418,11 @@ pub struct PerformanceConfig {
     #[serde(default)]
     pub pack_workers: Option<usize>,
 
+    /// Override for parallel chunk write concurrency. When None, falls back
+    /// to MEDIAGIT_CHUNK_WRITE_CONCURRENCY env var or the internal default (num_cpus).
+    #[serde(default)]
+    pub chunk_write_concurrency: Option<usize>,
+
     /// Buffer size for I/O operations (in bytes)
     #[serde(default = "default_buffer_size")]
     pub buffer_size: usize,
@@ -887,6 +892,7 @@ impl Default for PerformanceConfig {
             upload_concurrency: None,
             download_concurrency: None,
             pack_workers: None,
+            chunk_write_concurrency: None,
             buffer_size: 65536,
             cache: CacheConfig::default(),
             connection_pool: ConnectionPoolConfig::default(),

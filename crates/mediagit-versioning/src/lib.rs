@@ -109,14 +109,18 @@ pub use metrics::OdbMetrics;
 pub use object::ObjectType;
 pub use odb::{ObjectDatabase, RepackStats};
 pub use oid::{Oid, StorageKey};
-pub use pack::{PackHeader, PackIndex, PackMetadata, PackObjectEntry, PackReader, PackWriter};
+pub use pack::{
+    PackHeader, PackIndex, PackKind, PackMetadata, PackObjectEntry, PackReader, PackWriter,
+};
 pub use reachability::walk_reachable;
 pub use reflog::{Reflog, ReflogEntry};
 pub use refs::{normalize_ref_name, Ref, RefDatabase, RefType};
 pub use revision::resolve_revision;
 pub use similarity::{ObjectMetadata, SimilarityDetector, SimilarityScore};
 pub use streaming_index::StreamingPackIndex;
-pub use streaming_pack::{StreamingPackReader, StreamingPackWriter};
+pub use streaming_pack::{
+    CloudChunkLoc, CloudPackResult, StreamingPackReader, StreamingPackWriter,
+};
 pub use transaction::{recover_incomplete_transactions, PackTransaction, RecoveryReport};
 pub use tree::{FileMode, Tree, TreeEntry};
 

@@ -1,23 +1,81 @@
 # MediaGit CLI Reference
 
-Complete command reference for MediaGit — Git for Media Files.
+Complete command reference for MediaGit v0.2.8-beta.1 — Git for Media Files.
+
+Object IDs (OIDs) throughout MediaGit — commits, blobs, chunks — are **BLAKE3** hashes displayed as 64 lowercase hex characters.
 
 ---
+
+## Command Taxonomy
+
+```mermaid
+graph LR
+    subgraph Setup
+        init
+        clone
+        remote
+    end
+    subgraph "File Ops"
+        add
+        commit
+        status
+        diff
+        show
+    end
+    subgraph "Branch & History"
+        branch
+        merge
+        rebase
+        cherry-pick
+        log
+        reset
+        revert
+        reflog
+        stash
+        bisect
+        tag
+    end
+    subgraph Remote
+        push
+        pull
+        fetch
+    end
+    subgraph Utility
+        gc
+        fsck
+        verify
+        stats
+        version
+        completions
+    end
+```
 
 ## Quick Reference
 
 | Category | Commands |
 |----------|----------|
 | **Setup** | `init`, `clone`, `remote` |
-| **Basic** | `add`, `commit`, `status`, `log`, `diff`, `show` |
-| **Branching** | `branch`, `merge`, `rebase`, `cherry-pick` |
+| **File Ops** | `add`, `commit`, `status`, `diff`, `show` |
+| **Branch & History** | `branch`, `merge`, `rebase`, `cherry-pick`, `log`, `reset`, `revert`, `reflog`, `stash`, `bisect`, `tag` |
 | **Remote** | `push`, `pull`, `fetch` |
-| **Tags** | `tag` |
-| **Stashing** | `stash` |
-| **History** | `reset`, `revert`, `reflog` |
-| **Debugging** | `bisect` |
-| **Maintenance** | `gc`, `fsck`, `verify`, `stats` |
-| **Meta** | `version`, `completions` |
+| **Utility** | `gc`, `fsck`, `verify`, `stats`, `version`, `completions` |
+
+### Git-Compatibility Shims
+
+MediaGit preprocesses arguments before parsing to provide familiar git muscle-memory:
+
+| You type | Becomes |
+|----------|---------|
+| `mediagit checkout <ref>` | `mediagit branch switch <ref>` |
+| `mediagit checkout -b <ref>` | `mediagit branch switch -c <ref>` |
+| `mediagit co <ref>` | `mediagit branch switch <ref>` |
+| `mediagit log -5` | `mediagit log -n 5` |
+| `mediagit reflog -5` | `mediagit reflog -n 5` |
+| `mediagit branch` (no args) | `mediagit branch list` |
+| `mediagit branch <name>` | `mediagit branch create <name>` |
+| `mediagit tag` (no args) | `mediagit tag list` |
+| `mediagit tag <name>` | `mediagit tag create <name>` |
+| `mediagit remote` (no args) | `mediagit remote list` |
 
 ### Global Flags
 
@@ -45,8 +103,8 @@ mediagit init [PATH]
 
 | Flag | Description |
 |------|-------------|
-| `--bare` | Create bare repository |
-| `--initial-branch <NAME>` | Set initial branch name |
+| `--bare` | Create bare repository (no working tree) |
+| `--initial-branch <NAME>` | Set initial branch name (default: `main`) |
 | `--template <PATH>` | Use template directory |
 | `-q, --quiet` | Suppress output |
 
@@ -94,12 +152,12 @@ mediagit remote <SUBCOMMAND>
 
 | Subcommand | Usage | Description |
 |------------|-------|-------------|
-| `add` | `remote add <NAME> <URL>` | Add remote |
+| `add` | `remote add [-f] <NAME> <URL>` | Add remote (`-f` fetches immediately) |
 | `remove` | `remote remove <NAME>` | Remove remote |
-| `list` | `remote list` | List remotes |
+| `list` | `remote list [-v]` | List remotes (`-v` shows URLs) |
 | `rename` | `remote rename <OLD> <NEW>` | Rename remote |
 | `show` | `remote show <NAME>` | Show remote info |
-| `set-url` | `remote set-url <NAME> <URL>` | Change URL |
+| `set-url` | `remote set-url [--push] <NAME> <URL>` | Change URL (`--push` sets push URL) |
 
 **Examples:**
 ```bash
@@ -214,7 +272,7 @@ Show commit history.
 mediagit log [REVISION] [-- PATHS]...
 ```
 
-`REVISION` accepts a branch name, tag, full OID, or abbreviated OID (≥4 hex chars).
+`REVISION` accepts a branch name, tag, full OID (BLAKE3, 64 hex chars), or abbreviated OID (≥4 hex chars).
 
 | Flag | Description |
 |------|-------------|
@@ -276,10 +334,7 @@ mediagit show [OBJECT]
 
 | Flag | Description |
 |------|-------------|
-| `-p, --patch` | Show patch |
-| `--stat` | Show statistics |
-| `--pretty <FORMAT>` | Output format |
-| `-U, --unified <N>` | Context lines |
+| `--stat` | Show file change statistics |
 | `-q, --quiet` | Suppress output |
 | `-v, --verbose` | Detailed output |
 
@@ -316,18 +371,43 @@ mediagit branch <SUBCOMMAND>
 | `merge` | `branch merge <BRANCH>` | Merge branch |
 | `protect` | `branch protect <BRANCH>` | Protect branch |
 
+**Flags for `branch list`:**
+
 | Flag | Description |
 |------|-------------|
-| `-r, --remote` | List/operate on remote branches |
-| `-a, --all` | List all branches |
-| `-c, --create` | Create and switch |
-| `-f, --force` | Force operation |
-| `-D` | Force delete |
-| `-u, --set-upstream` | Set upstream |
-| `--no-ff` | No fast-forward merge |
-| `--ff-only` | Fast-forward only |
+| `-r, --remote` | List remote-tracking branches |
+| `-a, --all` | List all branches (local + remote) |
+| `--sort <KEY>` | Sort branches by key |
 | `-v, --verbose` | Detailed output |
-| `-q, --quiet` | Suppress output |
+
+**Flags for `branch create`:**
+
+| Flag | Description |
+|------|-------------|
+| `-u, --set-upstream <UPSTREAM>` | Set upstream branch |
+| `--track` | Track a remote branch |
+| `--no-track` | Don't set tracking |
+
+**Flags for `branch switch`:**
+
+| Flag | Description |
+|------|-------------|
+| `-c, --create` | Create and switch to new branch |
+| `-f, --force` | Force switch even with local changes |
+
+**Flags for `branch delete`:**
+
+| Flag | Description |
+|------|-------------|
+| `-D, --force` | Force delete (ignore merge status) |
+| `-d, --delete-merged` | Delete only if merged |
+| `-r, --remote` | Delete remote-tracking ref |
+
+**Flags for `branch rename`:**
+
+| Flag | Description |
+|------|-------------|
+| `-f, --force` | Force rename |
 
 **Examples:**
 ```bash
@@ -362,7 +442,7 @@ mediagit merge <BRANCH>
 | `-X, --strategy-option <OPT>` | Strategy option |
 | `--no-commit` | Don't commit |
 | `--abort` | Abort merge |
-| `--continue` | Continue merge |
+| `--continue-merge` | Continue merge after resolving conflicts |
 | `-q, --quiet` | Suppress output |
 | `-v, --verbose` | Detailed output |
 
@@ -371,6 +451,7 @@ mediagit merge <BRANCH>
 mediagit merge feature/complete
 mediagit merge develop --no-ff -m "Merge develop into main"
 mediagit merge --squash hotfix
+mediagit merge --continue-merge
 ```
 
 ---
@@ -385,21 +466,20 @@ mediagit rebase <UPSTREAM> [BRANCH]
 
 | Flag | Description |
 |------|-------------|
-| `-i, --interactive` | Interactive rebase |
-| `-m, --rebase-merges` | Preserve merges |
 | `--keep-empty` | Keep empty commits |
-| `--autosquash` | Auto-squash fixup commits |
 | `--abort` | Abort rebase |
-| `--continue` | Continue rebase |
+| `--continue-rebase` | Continue rebase after resolving conflicts |
 | `--skip` | Skip current commit |
 | `-q, --quiet` | Suppress output |
 | `-v, --verbose` | Detailed output |
 
+> `-i/--interactive`, `-m/--rebase-merges`, and `--autosquash` are accepted but not yet implemented.
+
 **Examples:**
 ```bash
 mediagit rebase main
-mediagit rebase -i HEAD~5
-mediagit rebase --continue
+mediagit rebase --continue-rebase
+mediagit rebase --abort
 ```
 
 ---
@@ -414,24 +494,49 @@ mediagit cherry-pick <COMMITS>...
 
 | Flag | Description |
 |------|-------------|
-| `--continue` | Continue operation |
+| `--continue-pick` | Continue operation after resolving conflicts |
 | `--abort` | Abort operation |
 | `--skip` | Skip current commit |
 | `-n, --no-commit` | Don't commit |
 | `-e, --edit` | Edit message |
-| `-x` | Append commit reference |
+| `-x, --append-message` | Append original commit reference to message |
 | `-q, --quiet` | Suppress output |
 
 **Examples:**
 ```bash
 mediagit cherry-pick abc123
 mediagit cherry-pick abc123 def456 ghi789
-mediagit cherry-pick --continue
+mediagit cherry-pick --continue-pick
 ```
 
 ---
 
 ## Remote Operations
+
+### Transfer Architecture
+
+Push, pull, clone, and fetch use **presigned-URL direct transfer**: the server mints short-lived presigned PUT/GET URLs and the client transfers data straight to the cloud backend (S3, MinIO, Azure Blob, GCS) without proxying bytes through the server. A proxy fallback is used when the backend cannot sign (e.g. GCS without a service-account key) or when a presigned URL returns 404. Large chunks on S3/MinIO use multipart upload (MPU) via presigned part URLs.
+
+Pull and clone also benefit from **cloud packs**: the server bundles related chunks into pack objects stored directly in the backend. The client requests a pack index, locates needed chunks via pack-locate, and fetches them with Range-GET — reducing object count by up to 10× and dramatically cutting clone latency on small-chunk repos.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as mediagit-server
+    participant B as Cloud Backend<br/>(S3/MinIO/Azure/GCS)
+
+    Note over C,B: Push
+    C->>S: POST /push (ref updates + OID list)
+    S-->>C: presigned PUT URLs (per chunk)
+    C->>B: PUT chunks directly (parallel)
+    C->>S: POST /push/complete
+
+    Note over C,B: Pull / Clone
+    C->>S: POST /pull (want OIDs)
+    S-->>C: pack index + presigned GET URLs
+    C->>B: GET pack / Range-GET chunks (parallel)
+    C->>C: reconstruct + write ODB
+```
 
 ### `mediagit push`
 
@@ -443,7 +548,7 @@ mediagit push [REMOTE] [REFSPEC]...
 
 | Flag | Description |
 |------|-------------|
-| `--all` | Push all branches |
+| `-a, --all` | Push all branches |
 | `--tags` | Push all tags |
 | `--follow-tags` | Push annotated tags |
 | `--dry-run` | Preview push |
@@ -451,6 +556,7 @@ mediagit push [REMOTE] [REFSPEC]...
 | `--force-with-lease` | Safe force push |
 | `-d, --delete` | Delete remote ref |
 | `-u, --set-upstream` | Set upstream |
+| `--no-track` | Push without setting upstream tracking |
 | `-q, --quiet` | Suppress output |
 | `-v, --verbose` | Detailed output |
 
@@ -485,21 +591,21 @@ mediagit pull [REMOTE] [BRANCH]
 | Flag | Description |
 |------|-------------|
 | `-r, --rebase` | Rebase instead of merge |
-| `-s, --strategy <STRATEGY>` | Merge strategy |
-| `-X, --strategy-option <OPT>` | Strategy option |
 | `--dry-run` | Preview pull |
 | `--no-commit` | Don't commit merge |
 | `--abort` | Abort pull |
-| `--continue` | Continue pull |
+| `--continue-pull` | Continue pull after resolving conflicts |
 | `-q, --quiet` | Suppress output |
 | `-v, --verbose` | Detailed output |
+
+> `-s/--strategy` and `-X/--strategy-option` are accepted for git-compatibility but hidden; MediaGit uses binary-aware merge for media files.
 
 **Examples:**
 ```bash
 mediagit pull
 mediagit pull origin develop
 mediagit pull --rebase
-mediagit pull --continue
+mediagit pull --continue-pull
 ```
 
 ---
@@ -548,17 +654,30 @@ mediagit tag <SUBCOMMAND>
 | `show` | `tag show <NAME>` | Show tag info |
 | `verify` | `tag verify <NAME>` | Verify tag |
 
+**Flags for `tag create`:**
+
 | Flag | Description |
 |------|-------------|
-| `-m, --message <MSG>` | Tag message (annotated) |
-| `--tagger <NAME>` | Override tagger name |
-| `--email <EMAIL>` | Override email |
+| `-a, --annotated` | Create annotated tag |
+| `-m, --message <MSG>` | Tag message (implies annotated) |
+| `--tagger <NAME>` | Override tagger name (annotated tags) |
+| `--email <EMAIL>` | Override tagger email (annotated tags) |
 | `-f, --force` | Replace existing tag |
-| `--sort <KEY>` | Sort by key |
-| `--reverse` | Reverse sort order |
-| `--full` | Show full OIDs |
 | `-q, --quiet` | Suppress output |
-| `-v, --verbose` | Detailed output |
+
+**Flags for `tag list`:**
+
+| Flag | Description |
+|------|-------------|
+| `-n, --verbose` | Show verbose output (include commit info) |
+| `--sort <KEY>` | Sort by key (default: `refname`) |
+| `--reverse` | Reverse sort order |
+
+**Flags for `tag show`:**
+
+| Flag | Description |
+|------|-------------|
+| `--full` | Show full OID details |
 
 **Examples:**
 ```bash
@@ -593,14 +712,25 @@ mediagit stash <SUBCOMMAND>
 | `pop` | `stash pop [STASH]` | Apply and remove |
 | `clear` | `stash clear` | Clear all |
 
+**Flags for `stash save` / `stash push`:**
+
 | Flag | Description |
 |------|-------------|
+| `-m, --message <MSG>` | Stash message |
 | `-u, --include-untracked` | Include untracked files |
-| `--index` | Restore index state |
-| `-p, --patch` | Interactive stash |
-| `-f, --force` | Force apply |
 | `-q, --quiet` | Suppress output |
-| `-v, --verbose` | Detailed output |
+
+**Flags for `stash apply` / `stash pop`:**
+
+| Flag | Description |
+|------|-------------|
+| `--index` | Reinstate index (staged) changes |
+
+**Flags for `stash show`:**
+
+| Flag | Description |
+|------|-------------|
+| `-p, --patch` | Show patch diff |
 
 **Examples:**
 ```bash
@@ -756,13 +886,13 @@ mediagit gc
 
 | Flag | Description |
 |------|-------------|
-| `--aggressive` | Aggressive optimization |
-| `--prune <DAYS>` | Prune objects older than N days |
-| `--auto` | Run only if needed |
-| `--dry-run` | Preview changes |
-| `-y, --yes` | Skip confirmation |
-| `--repack` | Repack objects |
-| `--max-pack-size <N>` | Max pack size |
+| `--aggressive` | Aggressive optimization pass |
+| `--no-prune` | Skip pruning unreachable objects (gc prunes by default) |
+| `--auto` | Run only if thresholds are exceeded |
+| `--dry-run` | Preview changes without deleting |
+| `-y, --yes` | Skip confirmation prompts |
+| `--repack` | Repack loose objects into pack files |
+| `--max-pack-size <N>` | Max objects per pack file (0 = unlimited) |
 | `-q, --quiet` | Suppress output |
 | `-v, --verbose` | Detailed output |
 
@@ -774,8 +904,8 @@ mediagit gc
 **Examples:**
 ```bash
 mediagit gc                       # Standard garbage collection
-mediagit gc --aggressive          # Deep sweep + pack recompaction
-mediagit gc --prune=30 --dry-run  # Preview: prune objects older than 30 days
+mediagit gc --aggressive --yes    # Aggressive pass, skip confirmation
+mediagit gc --dry-run             # Preview what would be deleted
 mediagit gc --verbose             # Show each deleted object/chunk/manifest
 ```
 
@@ -786,7 +916,7 @@ mediagit gc --verbose             # Show each deleted object/chunk/manifest
 
 ### `mediagit fsck`
 
-Check repository integrity.
+Check repository integrity (verifies BLAKE3 checksums, reference validity, and commit graph connectivity).
 
 ```bash
 mediagit fsck
@@ -817,7 +947,7 @@ mediagit fsck --repair --dry-run
 
 ### `mediagit verify`
 
-Quick integrity verification.
+Quick integrity verification — checks BLAKE3 object checksums and reference validity. For full graph analysis use `fsck`.
 
 ```bash
 mediagit verify [COMMIT]

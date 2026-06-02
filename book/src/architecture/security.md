@@ -8,7 +8,7 @@ MediaGit security model and best practices.
 - **Cloud**: IAM roles, service principals, API keys
 
 ## Data Integrity
-- SHA-256 hashing for all objects
+- BLAKE3 hashing for all objects (content-addressed OIDs)
 - Cryptographic verification on read
 - `mediagit verify` for repository health
 

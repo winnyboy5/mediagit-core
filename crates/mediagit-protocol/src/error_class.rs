@@ -20,9 +20,20 @@ pub enum TransferOutcome {
     RefreshUrl,
     /// Fall back to proxy for this chunk only; does not affect siblings.
     PermanentChunk,
+    /// Object reported as not-found but may still be replicating (e.g. MPU completion lag).
+    /// Caller should sleep for the given duration, then fall back to proxy.
+    PermanentChunkAfterDelay(std::time::Duration),
     /// Config-level failure (auth, bucket policy). Increment global counter;
     /// ≥3 of these across the push signals a real misconfiguration.
     PermanentConfig,
+}
+
+fn not_found_delay() -> std::time::Duration {
+    let ms = std::env::var("MEDIAGIT_404_FALLBACK_DELAY_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(500);
+    std::time::Duration::from_millis(ms)
 }
 
 /// Extract the error code from an AWS S3 / Azure Blob XML error body.
@@ -165,19 +176,19 @@ pub fn classify_auto_get(
     header_code: &str,
     body: &str,
 ) -> TransferOutcome {
-    // NoSuchKey on GET → object may not be replicated yet → proxy fallback
+    // NoSuchKey on GET → object may not be replicating yet; delay before proxy fallback
     let xml_code = parse_xml_error_code(body);
     if xml_code == "NoSuchKey" || xml_code == "NoSuchObject" {
-        return TransferOutcome::PermanentChunk;
+        return TransferOutcome::PermanentChunkAfterDelay(not_found_delay());
     }
-    // 416 Range Not Satisfiable → treat as permanent (no range headers sent by us)
+    // 416 Range Not Satisfiable → range overshoot is a real bug, no delay
     if status == 416 {
         return TransferOutcome::PermanentChunk;
     }
-    // GCS "notFound" reason
+    // GCS "notFound" reason → same delayed fallback
     let gcs_reason = parse_gcs_reason(body);
     if gcs_reason == "notFound" {
-        return TransferOutcome::PermanentChunk;
+        return TransferOutcome::PermanentChunkAfterDelay(not_found_delay());
     }
     // Otherwise defer to the same classify_auto logic
     classify_auto(status, url, content_type, header_code, body)
@@ -331,16 +342,33 @@ mod tests {
     }
 
     #[test]
-    fn get_no_such_key_is_permanent_chunk() {
+    fn get_no_such_key_is_delayed_fallback() {
         let body = "<Error><Code>NoSuchKey</Code></Error>";
-        assert_eq!(
-            classify_auto_get(404, "https://bucket.s3.amazonaws.com/key", "", "", body),
-            TransferOutcome::PermanentChunk
+        let outcome = classify_auto_get(404, "https://bucket.s3.amazonaws.com/key", "", "", body);
+        assert!(
+            matches!(outcome, TransferOutcome::PermanentChunkAfterDelay(_)),
+            "expected PermanentChunkAfterDelay, got {outcome:?}"
         );
     }
 
     #[test]
-    fn get_416_is_permanent_chunk() {
+    fn get_gcs_not_found_is_delayed_fallback() {
+        let body = r#"{"error":{"errors":[{"reason":"notFound"}]}}"#;
+        let outcome = classify_auto_get(
+            404,
+            "https://storage.googleapis.com/bucket/obj",
+            "",
+            "",
+            body,
+        );
+        assert!(
+            matches!(outcome, TransferOutcome::PermanentChunkAfterDelay(_)),
+            "expected PermanentChunkAfterDelay, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn get_416_stays_permanent_chunk_no_delay() {
         assert_eq!(
             classify_auto_get(416, "https://bucket.s3.amazonaws.com/key", "", "", ""),
             TransferOutcome::PermanentChunk
