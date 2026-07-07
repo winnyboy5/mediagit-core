@@ -174,6 +174,7 @@ impl InitCmd {
                 sync: false,
                 file_permissions: "0644".to_string(),
             }),
+            cdc_seed: generate_cdc_seed(),
             ..Config::default()
         };
 
@@ -185,4 +186,23 @@ impl InitCmd {
 
         Ok(())
     }
+}
+
+/// Generate a fresh per-repo CDC seed for new repositories.
+///
+/// Draws 32 bytes from the OS RNG and derives the seed via BLAKE3's key
+/// derivation function, then discards the random bytes themselves — only the
+/// derived seed is persisted. Storing just the seed (vs. seed + secret) is
+/// one config field instead of two and leaks nothing extra: the seed only
+/// need be unpredictable enough to avoid two independently-created repos
+/// colliding, not cryptographically secret.
+fn generate_cdc_seed() -> u64 {
+    let mut secret = [0u8; 32];
+    if getrandom::fill(&mut secret).is_err() {
+        // OS RNG unavailable: fall back to legacy unseeded behavior rather
+        // than failing `init` entirely.
+        return 0;
+    }
+    let derived = blake3::derive_key("mediagit cdc seed v1", &secret);
+    u64::from_le_bytes(derived[..8].try_into().expect("8 bytes"))
 }

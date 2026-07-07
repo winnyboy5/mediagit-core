@@ -217,6 +217,132 @@ impl ObjectDatabase {
         self.write_with_path(obj_type, data, filename).await
     }
 
+    /// Attempt delta compression against a caller-nominated base object,
+    /// bypassing `SimilarityDetector`'s byte-sampling search entirely.
+    ///
+    /// This exists for the P4a pHash-guided image delta-base nomination:
+    /// pHash can identify perceptually-similar images that byte-sampling
+    /// misses (e.g. re-compressed/re-graded exports), but pHash is
+    /// advisory-only — it just picks *which* object to try. This method
+    /// still enforces every existing safety gate (self-reference, delta
+    /// cycle, `MAX_DELTA_DEPTH`, and the 80%-of-original size gate), so a
+    /// bad nomination costs one failed delta attempt and never produces a
+    /// wrong result.
+    ///
+    /// Returns `Ok(Some(oid))` if a delta was created and stored.
+    /// Returns `Ok(None)` (never an error) if the base was unreadable, would
+    /// create a cycle/exceeds chain depth, or the delta failed the 80% gate
+    /// — callers should fall back to their normal write path in that case.
+    pub async fn write_delta_against_base(
+        &self,
+        obj_type: ObjectType,
+        data: &[u8],
+        filename: &str,
+        forced_base_oid: Oid,
+    ) -> anyhow::Result<Option<Oid>> {
+        if !self.delta_enabled {
+            return Ok(None);
+        }
+
+        let oid = Oid::hash(data);
+
+        // CRITICAL: Prevent self-referencing delta (OID == base OID)
+        if oid == forced_base_oid {
+            return Ok(None);
+        }
+
+        // Read base object; a bad/missing nomination just means "no delta"
+        let base_data = match self.read(&forced_base_oid).await {
+            Ok(d) => d,
+            Err(e) => {
+                debug!(
+                    oid = %oid,
+                    base_oid = %forced_base_oid,
+                    error = %e,
+                    "phash-nominated base unreadable, skipping delta attempt"
+                );
+                return Ok(None);
+            }
+        };
+
+        // Same chain-depth and cycle guards as write_with_delta
+        let base_depth = self.get_delta_depth(&forced_base_oid).await.unwrap_or(0);
+        let would_create_cycle = self
+            .delta_chain_contains(&forced_base_oid, &oid)
+            .await
+            .unwrap_or(false);
+
+        if would_create_cycle || base_depth >= MAX_DELTA_DEPTH {
+            return Ok(None);
+        }
+
+        let delta = DeltaEncoder::encode(&base_data, data);
+        let delta_data = delta.to_bytes();
+
+        // Only use delta if it's smaller than 80% of original — this is the
+        // gate that actually decides, not the pHash nomination.
+        let delta_ratio = delta_data.len() as f64 / data.len() as f64;
+        if delta_ratio >= 0.80 {
+            debug!(
+                oid = %oid,
+                base_oid = %forced_base_oid,
+                delta_ratio,
+                "phash-nominated delta not beneficial, skipping"
+            );
+            return Ok(None);
+        }
+
+        info!(
+            oid = %oid,
+            base_oid = %forced_base_oid,
+            original_size = data.len(),
+            delta_size = delta_data.len(),
+            ratio = delta_ratio,
+            "phash-nominated delta beneficial, storing delta"
+        );
+
+        let delta_key = format!("deltas/{}", oid.to_hex());
+        let compressed_delta = if let Some(smart_comp) = &self.smart_compressor {
+            smart_comp.compress_typed(&delta_data, CompressionObjectType::Unknown)?
+        } else {
+            self.compressor.compress(&delta_data)?
+        };
+
+        self.storage.put(&delta_key, &compressed_delta).await?;
+
+        let new_depth = base_depth + 1;
+        let delta_meta = format!("base:{}:depth:{}", forced_base_oid.to_hex(), new_depth);
+        let meta_key = format!("deltas/{}.meta", oid.to_hex());
+        self.storage.put(&meta_key, delta_meta.as_bytes()).await?;
+
+        let mut metrics = self.metrics.write().await;
+        metrics.record_write(data.len() as u64, true);
+        drop(metrics);
+
+        if data.len() <= MAX_CACHEABLE_OBJECT_SIZE {
+            self.cache.insert(oid, Arc::new(data.to_vec())).await;
+        }
+
+        // Add to similarity detector so future byte-sampling deltas can also
+        // consider this object as a candidate base.
+        let mut metadata = crate::similarity::ObjectMetadata::new(
+            oid,
+            data.len(),
+            obj_type,
+            if filename.is_empty() {
+                None
+            } else {
+                Some(filename.to_string())
+            },
+        );
+        metadata.generate_samples(data);
+        let mut detector = self.similarity_detector.write().await;
+        detector.add_object(metadata);
+        drop(detector);
+
+        Ok(Some(oid))
+    }
+
     /// Get the delta chain depth for an object
     ///
     /// Returns 0 if object is not a delta (full object).
@@ -565,5 +691,115 @@ impl ObjectDatabase {
             // Try pack files
             self.read_from_packs(&oid).await
         })
+    }
+}
+
+#[cfg(test)]
+mod phash_delta_tests {
+    use super::*;
+    use mediagit_storage::mock::MockBackend;
+    use std::sync::Arc as StdArc;
+
+    #[tokio::test]
+    async fn test_write_delta_against_base_success() {
+        let storage = StdArc::new(MockBackend::new());
+        let odb = ObjectDatabase::new(storage, 100);
+
+        // Base and target share a long common prefix/suffix so the delta is
+        // well under 80% of the target size.
+        let mut base = vec![b'a'; 10_000];
+        base.extend_from_slice(b"UNIQUE_TAIL_BASE");
+        let base_oid = odb.write(ObjectType::Blob, &base).await.unwrap();
+
+        let mut target = vec![b'a'; 10_000];
+        target.extend_from_slice(b"UNIQUE_TAIL_TARG");
+
+        let result = odb
+            .write_delta_against_base(ObjectType::Blob, &target, "img.jpg", base_oid)
+            .await
+            .unwrap();
+
+        assert!(result.is_some(), "expected delta to be accepted");
+        let oid = result.unwrap();
+        assert_eq!(oid, Oid::hash(&target));
+
+        // Delta metadata must reference the forced base.
+        let meta_key = format!("deltas/{}.meta", oid.to_hex());
+        assert!(odb.storage.exists(&meta_key).await.unwrap());
+
+        // Reading back must reconstruct the original target bytes.
+        let read_back = odb.read(&oid).await.unwrap();
+        assert_eq!(read_back, target);
+    }
+
+    #[tokio::test]
+    async fn test_write_delta_against_base_unreadable_base_returns_none() {
+        let storage = StdArc::new(MockBackend::new());
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let target = b"some target content".to_vec();
+        let nonexistent_base = Oid::hash(b"never written");
+
+        let result = odb
+            .write_delta_against_base(ObjectType::Blob, &target, "img.jpg", nonexistent_base)
+            .await
+            .unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_write_delta_against_base_self_reference_returns_none() {
+        let storage = StdArc::new(MockBackend::new());
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let data = b"identical data".to_vec();
+        let oid = Oid::hash(&data);
+
+        let result = odb
+            .write_delta_against_base(ObjectType::Blob, &data, "img.jpg", oid)
+            .await
+            .unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_write_delta_against_base_rejects_when_gate_fails() {
+        let storage = StdArc::new(MockBackend::new());
+        let odb = ObjectDatabase::new(storage, 100);
+
+        // Completely unrelated content, generated so neither the base nor
+        // the target contains long repeated/matching runs: the delta will
+        // not be smaller than 80% of the target, so the gate must reject it
+        // and no delta metadata should be written.
+        fn pseudo_random_bytes(seed: u64, len: usize) -> Vec<u8> {
+            let mut state = seed;
+            (0..len)
+                .map(|_| {
+                    // xorshift64
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    (state & 0xff) as u8
+                })
+                .collect()
+        }
+
+        let base = pseudo_random_bytes(0x1234_5678_9abc_def0, 5000);
+        let base_oid = odb.write(ObjectType::Blob, &base).await.unwrap();
+
+        let target = pseudo_random_bytes(0x0fed_cba9_8765_4321, 5000);
+
+        let result = odb
+            .write_delta_against_base(ObjectType::Blob, &target, "img.jpg", base_oid)
+            .await
+            .unwrap();
+
+        assert!(result.is_none(), "gate should have rejected a poor delta");
+
+        let target_oid = Oid::hash(&target);
+        let meta_key = format!("deltas/{}.meta", target_oid.to_hex());
+        assert!(!odb.storage.exists(&meta_key).await.unwrap());
     }
 }

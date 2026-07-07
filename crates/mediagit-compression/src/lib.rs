@@ -124,17 +124,21 @@ pub enum CompressionLevel {
     Fast,
     /// Default balance (level 3 for zstd, 9 for brotli)
     Default,
-    /// Best compression, slower (level 22 for zstd, 11 for brotli)
+    /// Best compression, slower (level 19 for zstd, 11 for brotli).
+    /// zstd 20-22 ("ultra") need ~1 GB per compression context and OOM under
+    /// parallel adds on 16 GB machines, for <0.5% extra ratio on media data
+    /// (measured 2026-07-07: deep-test FLAC add hard-failed on the ultra
+    /// path). Level 19 is the highest normal level (~128 MB per context).
     Best,
 }
 
 impl CompressionLevel {
-    /// Convert to zstd compression level (1-22)
+    /// Convert to zstd compression level (1-19; ultra levels excluded, see `Best`)
     pub fn to_zstd_level(self) -> i32 {
         match self {
             CompressionLevel::Fast => 1,
             CompressionLevel::Default => 3,
-            CompressionLevel::Best => 22,
+            CompressionLevel::Best => 19,
         }
     }
 
@@ -281,7 +285,7 @@ mod tests {
     fn compression_level_conversions() {
         assert_eq!(CompressionLevel::Fast.to_zstd_level(), 1);
         assert_eq!(CompressionLevel::Default.to_zstd_level(), 3);
-        assert_eq!(CompressionLevel::Best.to_zstd_level(), 22);
+        assert_eq!(CompressionLevel::Best.to_zstd_level(), 19); // ultra (20-22) excluded: OOM class
 
         assert_eq!(CompressionLevel::Fast.to_brotli_level(), 4);
         assert_eq!(CompressionLevel::Default.to_brotli_level(), 9);

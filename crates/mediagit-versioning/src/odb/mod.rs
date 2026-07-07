@@ -281,6 +281,10 @@ pub struct ObjectDatabase {
     /// Chunking strategy (optional)
     chunk_strategy: Option<ChunkStrategy>,
 
+    /// Per-repo CDC seed (0 = legacy/unseeded). Env var `MEDIAGIT_CDC_SEED`
+    /// overrides this at the point of use via `chunking::resolve_cdc_seed`.
+    cdc_seed: u64,
+
     /// Enable delta encoding for similar objects
     delta_enabled: bool,
 
@@ -306,6 +310,7 @@ impl Clone for ObjectDatabase {
             compression_enabled: self.compression_enabled,
             smart_compressor: self.smart_compressor.clone(),
             chunk_strategy: self.chunk_strategy,
+            cdc_seed: self.cdc_seed,
             delta_enabled: self.delta_enabled,
             similarity_detector: self.similarity_detector.clone(),
             base_chunk_cache: self.base_chunk_cache.clone(),
@@ -339,6 +344,69 @@ pub struct RepackStats {
 mod tests {
     use super::*;
     use mediagit_storage::mock::MockBackend;
+
+    /// Pins the guard the chunk-delta cycle fix relies on: with A→B and
+    /// B→C metas on disk, a writer about to store C→A walks A's chain and
+    /// must find C (the loop closer). Under the widened delta_written_pairs
+    /// lock this walk is atomic with the meta write, so the last write of a
+    /// would-be A→B→C→A cycle always refuses (found as AWS deep-test
+    /// failure 2026-07-07: three video chunks stored as mutual deltas,
+    /// unreconstructable).
+    #[tokio::test]
+    async fn test_chunk_delta_chain_walk_detects_loop_closer() {
+        let storage = Arc::new(MockBackend::new());
+        let a = Oid::hash(b"chunk-a");
+        let b = Oid::hash(b"chunk-b");
+        let c = Oid::hash(b"chunk-c");
+
+        // Simulate two committed deltas: A→B, B→C.
+        storage
+            .put(
+                &format!("chunk-deltas/{}.meta", a.to_hex()),
+                format!("base:{}", b.to_hex()).as_bytes(),
+            )
+            .await
+            .unwrap();
+        storage
+            .put(
+                &format!("chunk-deltas/{}.meta", b.to_hex()),
+                format!("base:{}", c.to_hex()).as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        // The would-be loop closer C→A: walking from base A must reach C.
+        assert!(
+            chunk_delta_chain_contains_impl(&*storage, a, c).await,
+            "walk from A must find C so the C→A write is refused"
+        );
+        // Non-cycle nomination is still allowed: D→A terminates at full chunk C.
+        let d = Oid::hash(b"chunk-d");
+        assert!(
+            !chunk_delta_chain_contains_impl(&*storage, a, d).await,
+            "walk from A must not find unrelated D"
+        );
+    }
+
+    /// An already-corrupt on-disk cycle must not hang the walk.
+    #[tokio::test]
+    async fn test_chunk_delta_chain_walk_bails_on_existing_cycle() {
+        let storage = Arc::new(MockBackend::new());
+        let a = Oid::hash(b"cyc-a");
+        let b = Oid::hash(b"cyc-b");
+        for (from, to) in [(a, b), (b, a)] {
+            storage
+                .put(
+                    &format!("chunk-deltas/{}.meta", from.to_hex()),
+                    format!("base:{}", to.to_hex()).as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+        let unrelated = Oid::hash(b"cyc-x");
+        // Terminates (visited-set bail) and reports "not found".
+        assert!(!chunk_delta_chain_contains_impl(&*storage, a, unrelated).await);
+    }
 
     #[tokio::test]
     async fn test_write_and_read() {

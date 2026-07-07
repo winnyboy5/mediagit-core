@@ -67,6 +67,13 @@ pub struct Config {
     /// Custom user-defined settings
     #[serde(default)]
     pub custom: HashMap<String, serde_json::Value>,
+
+    /// Per-repo content-defined chunking (CDC) seed. `0` (the default for
+    /// repos without this field, e.g. pre-existing configs) reproduces the
+    /// original unseeded chunk boundaries exactly. Generated once at `mediagit
+    /// init` for new repos and propagated to clones via protocol capabilities.
+    #[serde(default)]
+    pub cdc_seed: u64,
 }
 
 impl Config {
@@ -845,6 +852,7 @@ impl Default for Config {
             branches: HashMap::new(),
             protected_branches: HashMap::new(),
             custom: HashMap::new(),
+            cdc_seed: 0,
         }
     }
 }
@@ -1003,5 +1011,28 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn test_config_without_cdc_seed_defaults_to_zero() {
+        // Existing configs written before this field existed must still parse,
+        // with cdc_seed defaulting to 0 (legacy/unseeded chunking).
+        let toml_str = r#"
+[app]
+[storage]
+backend = "filesystem"
+base_path = "./data"
+[compression]
+[performance]
+[performance.cache]
+[performance.connection_pool]
+[performance.timeouts]
+[observability]
+[observability.metrics]
+[security]
+[security.rate_limiting]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.cdc_seed, 0);
     }
 }

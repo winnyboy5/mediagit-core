@@ -110,6 +110,9 @@ struct FileStats {
     media_files: u64,
     text_files: u64,
     other_files: u64,
+    /// Per media-type counts (video/audio/image/creative/3d/...), keyed by
+    /// `categorize_extension`'s category name.
+    media_by_category: HashMap<String, u64>,
 }
 
 impl StatsCmd {
@@ -263,6 +266,17 @@ impl StatsCmd {
                         println!("  Text files: {}", stats.text_files);
                         if stats.other_files > 0 {
                             println!("  Other files: {}", stats.other_files);
+                        }
+                        if crate::media_meta::media_meta_enabled()
+                            && !stats.media_by_category.is_empty()
+                        {
+                            println!("  By media type:");
+                            let mut categories: Vec<(&String, &u64)> =
+                                stats.media_by_category.iter().collect();
+                            categories.sort_by(|a, b| b.1.cmp(a.1));
+                            for (category, count) in categories {
+                                println!("    {:8}: {}", category, count);
+                            }
                         }
                     }
                 }
@@ -577,6 +591,15 @@ impl StatsCmd {
 
                 if is_media {
                     stats.media_files += 1;
+                    if let Some(ext) = Path::new(&name).extension().and_then(|e| e.to_str()) {
+                        let category = categorize_extension(ext);
+                        if category != "other" {
+                            *stats
+                                .media_by_category
+                                .entry(category.to_string())
+                                .or_insert(0) += 1;
+                        }
+                    }
                 } else if is_text {
                     stats.text_files += 1;
                 } else {

@@ -17,6 +17,7 @@ mediagit-storage = { path = "../mediagit-storage", features = ["all"] }
 mediagit-versioning = { path = "../mediagit-versioning" }
 mediagit-observability = { path = "../mediagit-observability" }
 mediagit-protocol = { path = "../mediagit-protocol" }
+mediagit-media = { path = "../mediagit-media" }
 
 # Workspace dependencies
 tokio.workspace = true
@@ -24,6 +25,7 @@ clap.workspace = true
 clap_complete.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+postcard.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 indicatif.workspace = true
@@ -31,6 +33,7 @@ console.workspace = true
 toml.workspace = true
 chrono.workspace = true
 rayon.workspace = true
+blake3.workspace = true
 
 # Additional dependencies
 dialoguer = "0.12"
@@ -41,6 +44,7 @@ dunce = "1.0"  # Cross-platform path canonicalization (handles Windows \\?\ pref
 num_cpus = "1.16"
 husky-rs = "0.3.2"
 ignore = "0.4"  # .gitignore-compatible pattern matching for .mediagitignore
+getrandom = "0.4"  # OS RNG for per-repo CDC seed generation at `mediagit init`
 
 [lib]
 name = "mediagit_cli"

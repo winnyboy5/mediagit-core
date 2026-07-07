@@ -71,9 +71,14 @@ impl CompressionStrategy {
                 CompressionStrategy::Store
             }
 
-            // Uncompressed/lossless audio: Zstd best
-            ObjectType::Flac | ObjectType::Wav | ObjectType::Aiff | ObjectType::Alac => {
-                CompressionStrategy::Zstd(CompressionLevel::Best)
+            // Uncompressed PCM audio: Zstd best
+            ObjectType::Wav | ObjectType::Aiff => CompressionStrategy::Zstd(CompressionLevel::Best),
+
+            // Lossless-compressed audio (FLAC/ALAC is already entropy-coded;
+            // measured gain from Best over Default is ~0.1%): cheap Zstd only.
+            // Matches the chunk-level ChunkCodecHint::LosslessAudio routing.
+            ObjectType::Flac | ObjectType::Alac => {
+                CompressionStrategy::Zstd(CompressionLevel::Default)
             }
 
             // Documents: Zstd default

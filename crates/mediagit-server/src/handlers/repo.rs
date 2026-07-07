@@ -92,9 +92,21 @@ pub async fn get_refs(
         }
     }
 
+    // Advertise the repo's CDC seed (if any) so clones inherit matching chunk
+    // boundaries. Omitted entirely when the seed is 0 (legacy repos / repos
+    // without the field) to keep the capability list unchanged for them.
+    let mut capabilities = vec!["pack-v1".to_string()];
+    let cdc_seed = mediagit_config::Config::load(&repo_path)
+        .await
+        .map(|c| c.cdc_seed)
+        .unwrap_or(0);
+    if cdc_seed != 0 {
+        capabilities.push(format!("cdc-seed={}", cdc_seed));
+    }
+
     Ok(Json(RefsResponse {
         refs: ref_infos,
-        capabilities: vec!["pack-v1".to_string()],
+        capabilities,
     }))
 }
 

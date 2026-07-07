@@ -244,6 +244,10 @@ pub struct FsckOptions {
     /// Detect dangling objects
     pub check_dangling: bool,
 
+    /// Validate chunk-delta chains (cycles, broken bases, excessive depth).
+    /// Cheap: reads only the tiny `chunk-deltas/*.meta` sidecars.
+    pub check_chunk_deltas: bool,
+
     /// Maximum objects to check (0 = unlimited)
     pub max_objects: u64,
 
@@ -258,6 +262,7 @@ impl Default for FsckOptions {
             check_refs: true,
             check_connectivity: true,
             check_dangling: false, // Expensive operation
+            check_chunk_deltas: true,
             max_objects: 0,
             verbose: false,
         }
@@ -272,6 +277,7 @@ impl FsckOptions {
             check_refs: true,
             check_connectivity: true,
             check_dangling: true,
+            check_chunk_deltas: true,
             max_objects: 0,
             verbose: true,
         }
@@ -284,6 +290,7 @@ impl FsckOptions {
             check_refs: true,
             check_connectivity: false,
             check_dangling: false,
+            check_chunk_deltas: false,
             max_objects: 0,
             verbose: false,
         }
@@ -361,6 +368,12 @@ impl FsckChecker {
         if options.check_dangling {
             info!("Detecting dangling objects...");
             self.check_dangling(&mut report).await?;
+        }
+
+        // Step 5: Validate chunk-delta chains
+        if options.check_chunk_deltas {
+            info!("Validating chunk-delta chains...");
+            self.check_chunk_deltas(&mut report).await?;
         }
 
         info!(
@@ -629,6 +642,126 @@ impl FsckChecker {
         })
     }
 
+    /// Validate chunk-delta chains: every `chunk-deltas/<id>.meta` must lead,
+    /// via `base:` links, to a full chunk within `MAX_DELTA_DEPTH` hops —
+    /// never to a cycle (unreconstructable, data-loss; see the 2026-07-07
+    /// A→B→C→A incident) and never to a missing base.
+    ///
+    /// One `list_objects` pass loads all metas into a map; chains are then
+    /// walked in memory, so cost is O(number of chunk deltas), independent of
+    /// chunk sizes.
+    async fn check_chunk_deltas(&self, report: &mut FsckReport) -> anyhow::Result<()> {
+        let keys = self.storage.list_objects("chunk-deltas/").await?;
+
+        // delta chunk id -> base chunk id
+        let mut bases: std::collections::HashMap<Oid, Oid> = std::collections::HashMap::new();
+        for key in &keys {
+            let Some(hex) = key
+                .strip_prefix("chunk-deltas/")
+                .and_then(|k| k.strip_suffix(".meta"))
+            else {
+                continue;
+            };
+            let Ok(id) = Oid::from_hex(hex) else {
+                report.add_issue(FsckIssue::new(
+                    IssueSeverity::Warning,
+                    IssueCategory::InvalidFormat,
+                    format!("chunk-delta meta with unparseable id: {}", key),
+                ));
+                continue;
+            };
+            let Ok(bytes) = self.storage.get(key).await else {
+                continue;
+            };
+            let base = std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|s| s.trim().strip_prefix("base:"))
+                // Tolerate the extended "base:<hex>:depth:<n>" form.
+                .map(|rest| rest.split(':').next().unwrap_or(rest).trim())
+                .and_then(|hex| Oid::from_hex(hex).ok());
+            match base {
+                Some(b) => {
+                    bases.insert(id, b);
+                }
+                None => {
+                    report.add_issue(
+                        FsckIssue::new(
+                            IssueSeverity::Error,
+                            IssueCategory::InvalidFormat,
+                            format!("chunk-delta meta is malformed: {}", key),
+                        )
+                        .with_oid(id),
+                    );
+                }
+            }
+        }
+
+        for &id in bases.keys() {
+            let mut visited = std::collections::HashSet::new();
+            let mut current = id;
+            loop {
+                if !visited.insert(current) {
+                    report.add_issue(
+                        FsckIssue::new(
+                            IssueSeverity::Error,
+                            IssueCategory::CircularReference,
+                            format!(
+                                "chunk-delta cycle: chain from {} revisits {} — chunks on this \
+                                 loop have no full copy and cannot be reconstructed",
+                                id.to_hex(),
+                                current.to_hex()
+                            ),
+                        )
+                        .with_oid(id),
+                    );
+                    break;
+                }
+                match bases.get(&current) {
+                    Some(&next) => current = next,
+                    None => {
+                        // Chain terminates: base must exist as a full chunk.
+                        let chunk_key = format!("chunks/{}", current.to_hex());
+                        if !self.storage.exists(&chunk_key).await.unwrap_or(false) {
+                            report.add_issue(
+                                FsckIssue::new(
+                                    IssueSeverity::Error,
+                                    IssueCategory::MissingObject,
+                                    format!(
+                                        "chunk-delta chain from {} ends at missing base chunk {}",
+                                        id.to_hex(),
+                                        current.to_hex()
+                                    ),
+                                )
+                                .with_oid(id),
+                            );
+                        } else if visited.len() > crate::odb::MAX_DELTA_DEPTH as usize {
+                            report.add_issue(
+                                FsckIssue::new(
+                                    IssueSeverity::Warning,
+                                    IssueCategory::InvalidFormat,
+                                    format!(
+                                        "chunk-delta chain from {} is {} hops deep (max {})",
+                                        id.to_hex(),
+                                        visited.len(),
+                                        crate::odb::MAX_DELTA_DEPTH
+                                    ),
+                                )
+                                .with_oid(id),
+                            );
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        debug!(
+            chunk_deltas = bases.len(),
+            "chunk-delta chain check complete"
+        );
+        Ok(())
+    }
+
     /// Detect dangling (unreferenced) objects
     async fn check_dangling(&self, report: &mut FsckReport) -> anyhow::Result<()> {
         debug!("Detecting dangling objects");
@@ -888,6 +1021,86 @@ impl FsckRepair {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mediagit_storage::mock::MockBackend;
+
+    async fn checker_with_metas(entries: &[(&Oid, &Oid)], full_chunks: &[&Oid]) -> FsckChecker {
+        let storage = Arc::new(MockBackend::new());
+        for (id, base) in entries {
+            storage
+                .put(
+                    &format!("chunk-deltas/{}.meta", id.to_hex()),
+                    format!("base:{}", base.to_hex()).as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+        for id in full_chunks {
+            storage
+                .put(&format!("chunks/{}", id.to_hex()), b"full chunk data")
+                .await
+                .unwrap();
+        }
+        FsckChecker::new(storage)
+    }
+
+    #[tokio::test]
+    async fn test_fsck_detects_chunk_delta_cycle() {
+        // The 2026-07-07 AWS incident shape: A→B→C→A, no full copy anywhere.
+        let a = Oid::hash(b"fsck-a");
+        let b = Oid::hash(b"fsck-b");
+        let c = Oid::hash(b"fsck-c");
+        let checker = checker_with_metas(&[(&a, &b), (&b, &c), (&c, &a)], &[]).await;
+
+        let mut report = FsckReport::new();
+        checker.check_chunk_deltas(&mut report).await.unwrap();
+
+        let cycles: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.category == IssueCategory::CircularReference)
+            .collect();
+        assert!(
+            !cycles.is_empty(),
+            "A→B→C→A chunk-delta cycle must be reported"
+        );
+        assert!(report.has_errors());
+    }
+
+    #[tokio::test]
+    async fn test_fsck_detects_missing_chunk_delta_base() {
+        let a = Oid::hash(b"fsck-orphan");
+        let missing = Oid::hash(b"fsck-missing-base");
+        let checker = checker_with_metas(&[(&a, &missing)], &[]).await;
+
+        let mut report = FsckReport::new();
+        checker.check_chunk_deltas(&mut report).await.unwrap();
+
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.category == IssueCategory::MissingObject),
+            "chain ending at a missing base chunk must be reported"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fsck_healthy_chunk_delta_chain_is_clean() {
+        let a = Oid::hash(b"fsck-h1");
+        let b = Oid::hash(b"fsck-h2");
+        let full = Oid::hash(b"fsck-full");
+        let checker = checker_with_metas(&[(&a, &b), (&b, &full)], &[&full]).await;
+
+        let mut report = FsckReport::new();
+        checker.check_chunk_deltas(&mut report).await.unwrap();
+
+        assert_eq!(
+            report.total_issues(),
+            0,
+            "healthy A→B→full chain must produce no issues, got: {:?}",
+            report.issues
+        );
+    }
 
     #[test]
     fn test_fsck_issue_creation() {

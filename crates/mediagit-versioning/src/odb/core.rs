@@ -35,6 +35,7 @@ impl ObjectDatabase {
             compression_enabled: true,
             smart_compressor: None,
             chunk_strategy: None,
+            cdc_seed: 0,
             delta_enabled: true, // ✅ CRITICAL FIX: Enable delta compression by default for storage savings
             similarity_detector: Arc::new(RwLock::new(crate::similarity::SimilarityDetector::new(
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
@@ -77,6 +78,7 @@ impl ObjectDatabase {
             compression_enabled,
             smart_compressor: None,
             chunk_strategy: None,
+            cdc_seed: 0,
             delta_enabled: true, // ✅ Enable delta compression for storage savings
             similarity_detector: Arc::new(RwLock::new(crate::similarity::SimilarityDetector::new(
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
@@ -108,6 +110,7 @@ impl ObjectDatabase {
             compression_enabled: true,
             smart_compressor: Some(Arc::new(SmartCompressor::new())),
             chunk_strategy: None,
+            cdc_seed: 0,
             delta_enabled: true, // ✅ CRITICAL FIX: Enable delta compression for 70-90% storage savings
             similarity_detector: Arc::new(RwLock::new(crate::similarity::SimilarityDetector::new(
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
@@ -123,6 +126,7 @@ impl ObjectDatabase {
         cache_capacity: u64,
         chunk_strategy: Option<ChunkStrategy>,
         delta_enabled: bool,
+        cdc_seed: u64,
     ) -> Self {
         info!(
             capacity = cache_capacity,
@@ -144,6 +148,7 @@ impl ObjectDatabase {
             compression_enabled: true,
             smart_compressor: Some(Arc::new(SmartCompressor::new())),
             chunk_strategy,
+            cdc_seed,
             delta_enabled,
             similarity_detector: Arc::new(RwLock::new(crate::similarity::SimilarityDetector::new(
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
@@ -175,6 +180,7 @@ impl ObjectDatabase {
             compression_enabled: false,
             smart_compressor: None,
             chunk_strategy: None,
+            cdc_seed: 0,
             delta_enabled: false,
             similarity_detector: Arc::new(RwLock::new(crate::similarity::SimilarityDetector::new(
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,

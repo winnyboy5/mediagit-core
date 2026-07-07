@@ -16,7 +16,9 @@
 mod auto_gc;
 mod commands;
 mod ignore_rules;
+mod media_meta;
 mod output;
+mod phash_index;
 mod progress;
 mod repo;
 

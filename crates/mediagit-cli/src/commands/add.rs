@@ -151,7 +151,20 @@ impl AddCmd {
             Some(ChunkStrategy::MediaAware)
         };
 
-        let odb = ObjectDatabase::with_optimizations(storage, 1000, chunk_strategy, delta_enabled);
+        // Repo's persisted CDC seed (0 for repos without the field / legacy repos).
+        // `MEDIAGIT_CDC_SEED` env var overrides this inside the chunker itself.
+        let cdc_seed = mediagit_config::Config::load(&repo_root)
+            .await
+            .map(|c| c.cdc_seed)
+            .unwrap_or(0);
+
+        let odb = ObjectDatabase::with_optimizations(
+            storage,
+            1000,
+            chunk_strategy,
+            delta_enabled,
+            cdc_seed,
+        );
 
         if !self.quiet && self.verbose {
             output::info("Auto-chunking enabled for large files");
@@ -622,8 +635,31 @@ impl AddCmd {
                 }
             }
 
+            // P4a: pHash-guided delta-base nomination for images. Advisory
+            // only — nominates which prior object to TRY first; the 80%
+            // delta gate in write_delta_against_base still decides.
+            // should_use_delta() always skips jpg/png/webp (poor byte-level
+            // delta candidates), so without this, images never even attempt
+            // delta. MEDIAGIT_PHASH=0 restores that exact prior behavior.
+            let phash_lookup = if delta_enabled && crate::phash_index::is_hashable_image(filename) {
+                crate::phash_index::compute_and_nominate(repo_root, &content).await
+            } else {
+                None
+            };
+
+            let phash_delta_oid =
+                if let Some(base_oid) = phash_lookup.as_ref().and_then(|l| l.nominated_base) {
+                    odb.write_delta_against_base(ObjectType::Blob, &content, filename, base_oid)
+                        .await
+                        .context("Failed pHash-guided delta attempt")?
+                } else {
+                    None
+                };
+
             // Use parallel chunking for large files, sequential for small
-            let oid = if Self::should_use_chunking(content.len(), filename) {
+            let oid = if let Some(delta_oid) = phash_delta_oid {
+                delta_oid
+            } else if Self::should_use_chunking(content.len(), filename) {
                 odb.write_chunked_parallel(ObjectType::Blob, &content, filename)
                     .await
                     .context("Failed to write chunked object")?
@@ -636,6 +672,12 @@ impl AddCmd {
                     .await
                     .context("Failed to write object")?
             };
+
+            // Record this file's pHash for future nominations (content-addressed
+            // storage means `oid` == `content_oid` regardless of which branch above wrote it).
+            if let Some(lookup) = phash_lookup {
+                crate::phash_index::record(repo_root, lookup.hash, oid).await;
+            }
 
             // Report bytes for non-streaming staged files (streaming path uses per-chunk callback)
             if let Some(ref cb) = on_bytes {

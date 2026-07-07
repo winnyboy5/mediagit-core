@@ -147,6 +147,20 @@ url = "{}"
         init_spinner.set_message("Fetching remote refs...");
         let remote_refs = client.get_refs().await?;
         init_spinner.finish_with_message("Connected");
+
+        // Inherit the remote's CDC seed (if advertised) so this clone produces
+        // matching chunk boundaries for better cross-clone dedup. Missing
+        // capability just leaves cdc_seed at 0 (legacy) — this only affects
+        // dedup ratio, never correctness (chunk storage is content-addressed).
+        if let Some(seed) = remote_refs.capabilities.iter().find_map(|c| {
+            c.strip_prefix("cdc-seed=")
+                .and_then(|v| v.parse::<u64>().ok())
+        }) {
+            let config_path = storage_path.join("config.toml");
+            let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+            std::fs::write(&config_path, format!("cdc_seed = {}\n{}", seed, existing))?;
+        }
+
         let remote_ref_name = format!("refs/heads/{}", branch);
         let remote_ref = remote_refs
             .refs

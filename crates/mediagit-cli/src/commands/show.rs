@@ -150,9 +150,11 @@ impl ShowCmd {
                     println!("---");
                     for path in &added {
                         println!(" {} | {}", path.display(), style("new file").green());
+                        Self::print_media_line(&odb, &current_tree_files, path).await;
                     }
                     for path in &modified {
                         println!(" {} | {}", path.display(), style("modified").yellow());
+                        Self::print_media_line(&odb, &current_tree_files, path).await;
                     }
                     for path in &deleted {
                         println!(" {} | {}", path.display(), style("deleted").red());
@@ -199,6 +201,29 @@ impl ShowCmd {
         }
 
         Ok(())
+    }
+
+    /// Print a `media: ...` metadata line for a changed file, if applicable.
+    ///
+    /// Reads the blob bytes via the object database (never the working tree)
+    /// and parses them with `mediagit-media`. Silent on any failure or when
+    /// the file isn't a recognized media type.
+    async fn print_media_line(
+        odb: &ObjectDatabase,
+        current_tree_files: &HashMap<PathBuf, Oid>,
+        path: &Path,
+    ) {
+        let Some(oid) = current_tree_files.get(path) else {
+            return;
+        };
+        let Ok(data) = odb.read(oid).await else {
+            return;
+        };
+        if let Some(line) =
+            super::super::media_meta::media_summary_line(&data, &path.to_string_lossy()).await
+        {
+            println!("   {}", style(line).dim());
+        }
     }
 
     /// Helper to get a flat map of file paths to OIDs from a tree

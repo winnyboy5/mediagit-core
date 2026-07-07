@@ -4,7 +4,7 @@ Consolidated and **priority-ordered** registry of planned features, code-level T
 known limitations for MediaGit. Items are sourced from documentation, source code, and
 historical claudedocs analyses.
 
-> Last updated: 2026-06-02 | v0.2.7-beta.1 | Items 1 (.mediagitignore) + 4 (Streaming Format-Aware Chunker, S1–S5) + Push Progress/Throughput fixes + BLAKE3 + B2/B4/B7 pipeline + **5 (Phase-3 Track F / cloud packs, F1–F11)** + Presigned-URL transfer (W1–W5) + God-file refactor (handlers/ smart_compressor/ client/ odb/ chunking/) + Server direct file-serving endpoints **DONE**
+> Last updated: 2026-07-07 | v0.2.8-beta.1 | Items 1 (.mediagitignore) + 4 (Streaming Format-Aware Chunker, S1–S5) + Push Progress/Throughput fixes + BLAKE3 + B2/B4/B7 pipeline + **5 (Phase-3 Track F / cloud packs, F1–F11)** + Presigned-URL transfer (W1–W5) + God-file refactor (handlers/ smart_compressor/ client/ odb/ chunking/) + Server direct file-serving endpoints + **5c (Smart-media cycle P0–P5: dedup harness/gate, keyed CDC seed, codec detection, blend/STL/PLY walkers, pHash image delta, show/stats media metadata)** + chunk-delta cycle fix + fsck chunk-delta validation + zstd Best 22→19 (3.2× add speedup) **DONE**
 
 **Priority levels:**
 - **P0** — Quick win or active blocker — ≤1 day effort, implement immediately
@@ -24,7 +24,7 @@ historical claudedocs analyses.
 | 4 | Streaming format-aware chunker (MKV/MP4/GLB, S1-S5) | ~~**P1**~~ **✅ DONE** | 8-12 days | Shipped in v0.2.6-beta.1 |
 | 5 | **Phase-3 Track F — Cloud-side pack objects** (xorb-style chunk bundling) | ~~**P1**~~ **✅ DONE** | — | Shipped v0.2.7-beta.1 (F1–F11, streaming_pack.rs, F8 integrity) |
 | 6 | `mediagit download` CLI subcommand | **P1** | 2-3 days | Web UI, CI integration, CDN (server endpoints already shipped) |
-| 7 | `mediagit media info` command | **P2** | ~200 LOC | UX for media inspection |
+| 7 | `mediagit media info` command | **P2** | ~100 LOC | mediagit-media wired into CLI 2026-07-07 (`media_meta.rs`); `show`/`stats` already print media lines — this is now a thin dedicated-command wrapper |
 | 8 | Sparse checkout | **P2** | ~500 LOC | Large repos, partial working trees |
 | 9 | CLI command unit tests | **P2** | Large | Test coverage completeness |
 | 10 | Annotated tag objects (PGP signing) | **P2** | 1 wk | Full tag semantics |
@@ -39,6 +39,14 @@ historical claudedocs analyses.
 | 19 | macOS Metal GPU acceleration | **P3** | 2-3 wk | Apple Silicon image processing |
 | 20 | Security / Audit enhancements (v0.3.0+) | **P3** | — | Compliance, SIEM |
 | 21 | SSO integration, multi-region, Web UI (v1.0.0) | **P3** | — | Enterprise features |
+| 22 | GA knob-policy execution (remove/keep each `MEDIAGIT_*` knob) | **P1** (at GA) | 1 day | `docs/next-set/knob-policy.md` is the decision record |
+| 23 | `checkout` doesn't re-materialize a deleted working-tree file | **P2** | 2-3 days | Found during P4a verification 2026-07-07; UX/correctness gap |
+| 24 | FBX Objects-descending walker (or delete walker at GA) | **P3** | 1-2 wk | Fair trial closed 2026-07-07: top-level cuts ≈ CDC (+0.003pp) |
+| 25 | EXR structure-aware chunking | **P3** | 3-5 days | Needs real EXR fixtures first (creating them requires the `exr` crate) |
+| 26 | .sketch/.fig ZIP-entry-aware chunking | **P3** | 3-5 days | No fixtures in corpus yet |
+| 27 | Video pHash (keyframe extract + image_hasher) | **P3** | 1-2 wk | No viable video-phash crate (verified 2026-07-07) |
+| 28 | Cross-process chunk-delta write lock | **P3** | 2-3 days | In-process race fixed 2026-07-07; multi-process writers to one local repo could still race (CLI never does this) |
+| 29 | phash.idx compaction | **P3** | 0.5 day | Append-only today; only matters >1M entries (~16 MB) |
 
 ---
 
@@ -198,6 +206,39 @@ See `plans/squishy-whistle.md` for the approved plan, and
 
 ---
 
+### ~~5c. Smart-Media Handling Cycle (P0–P5)~~ ✅ DONE — 2026-07-07
+
+Shipped on `feat/smart-media-handling` (awaits commit), validated 614/614 across
+MinIO/AWS/Azure/GCS. Full detail: `docs/next-set/knob-policy.md` (every knob + GA fate)
+and `dev-tests/deep-tests/reports/consolidated_report_2026-07-07.md`.
+
+- **P0 harness**: `examples/dedup_report.rs` + `dev-tests/compare_dedup.ps1` +
+  locked `dedup-baseline.json` — every later change gated on per-format
+  dedup/compression/timing. Caught two real regressions the same day it shipped.
+- **P1**: fastcdc 3.2→4.0.1 (seed=0 byte-identical, gate-proven) + per-repo keyed CDC
+  seed (`cdc_seed` config, `cdc-seed` protocol capability to clones) — chunking-attack
+  surface closed at zero throughput cost.
+- **P2**: codec detection fills `CodecHint` from MP4 stsd / MKV Tracks / AVI strh —
+  H.264/AAC→Store, PCM→Zstd, subs→Brotli; boundaries untouched.
+- **P3**: .blend BHEAD / binary STL / binary PLY walkers (byte-perfect reassembly
+  proofs); audio tier for MP3/OGG. **Measurement-rejected**: parquet/safetensors
+  walkers (generic CDC already at 99%+ of theoretical-ideal dedup on real edit pairs —
+  no crate dep taken); FBX walker default-off (fair trial on a structure-valid edit:
+  +0.003pp, see item 24). WAV/FLAC audio tier rejected (+140% add-time for <1pp).
+- **P4**: pHash-guided delta-base nomination — images can delta at all now
+  (metadata-edit jpg → 0.012% delta; re-encodes correctly gate-rejected);
+  `show`/`stats` media metadata lines (`media_meta.rs`).
+- **P5**: all-knobs-off run reproduces the pre-plan baseline **byte-for-byte**.
+- **Chunk-delta cycle fix** (data-loss class, pre-existing TOCTOU race): A→B→C→A
+  chunk-delta cycles under parallel adds; `delta_written_pairs` lock now spans
+  [chain re-walk + meta write] at all 3 write sites.
+- **fsck `check_chunk_deltas`**: detects cycles / missing bases / over-deep chains
+  (on by default; the AWS corruption shape is now catchable).
+- **zstd `Best` 22→19 + FLAC/ALAC→Default**: 0.0002% ratio cost, corpus add
+  42s→13s (3.2×), FLAC add 33× faster, ultra-OOM class eliminated.
+
+---
+
 ### 5b. Container-Aware Delta Encoding for PDF/ZIP Formats [DELTA-001]
 *Source: `docs/FUTURE_TODOS_2.md` — recorded 2026-03-01*
 
@@ -299,11 +340,17 @@ Effort: **2-3 days** (CLI only).
 
 Display metadata for local/committed media files using existing parsers in `mediagit-media`.
 
+> **Rescoped 2026-07-07 (P4b shipped):** `mediagit-media` is now a dependency of
+> `mediagit-cli`, and `crates/mediagit-cli/src/media_meta.rs` already formats media
+> metadata for `show` and `stats` (knob: `MEDIAGIT_MEDIA_META`). This item is now a
+> thin dedicated-subcommand wrapper over that module — **~100 LOC**, mostly clap
+> surface + JSON output.
+
 **CLI usage**: `mediagit media info <FILES...> [--format text|json] [--verbose] [--hash]`
 
 **Files to create/modify:**
-- `crates/mediagit-cli/src/commands/media.rs` — new command (~200 LOC)
-- `crates/mediagit-cli/src/commands/mod.rs`, `main.rs`, `Cargo.toml`
+- `crates/mediagit-cli/src/commands/media.rs` — new command (~100 LOC, reuse `media_meta.rs`)
+- `crates/mediagit-cli/src/commands/mod.rs`, `main.rs`
 
 **Parsers to use** (all exist in `mediagit-media`):
 
@@ -534,7 +581,9 @@ implementation plan yet. Effort: **2-3 weeks** (research + implementation).
 // FIXME: FSCK functionality is under development - tests may fail due to incomplete implementation
 ```
 The `mediagit fsck` integration test suite is gated behind this marker. FSCK is functional
-in the CLI but its test coverage is incomplete.
+in the CLI but its test coverage is incomplete. *(Update 2026-07-07: fsck gained
+chunk-delta chain validation — cycles / missing bases / depth — with 3 unit tests in
+`src/fsck.rs`; the 4 gated integration tests remain `#[ignore]`d.)*
 
 ### `mediagit-protocol`
 
@@ -570,4 +619,10 @@ optimization (see §2b).
 | 18 | P3 | **Windows ARM64** | No native pre-built binary; x64 emulation works but slower | `windows-arm64.md` |
 | 19 | P3 | **Metal GPU** | No GPU-accelerated image processing on Apple Silicon | `macos-arm64.md:88` |
 | 20 | P3 | **SIEM / audit** | No Splunk/ELK connectors; SOC 2/GDPR export is v1.0.0 | claudedocs |
-| 21 | P3 | **FSCK test coverage** | Integration tests marked as potentially failing | `fsck_test.rs:37` |
+| 21 | P3 | **FSCK test coverage** | Integration tests marked as potentially failing (fsck itself gained chunk-delta cycle/missing-base validation 2026-07-07) | `fsck_test.rs:37` |
+| 23 | P2 | **Checkout re-materialization** | `checkout` doesn't restore a manually deleted working-tree file when switching to a branch with identical tree | found 2026-07-07 |
+| 24 | P3 | **FBX structure chunking** | Top-level EndOffset walker ≈ CDC (Objects node holds ~98% of bytes); beating CDC needs an Objects-descending walker | fair trial 2026-07-07 |
+| 25 | P3 | **EXR chunking** | No structure-aware chunking; blocked on real EXR fixtures | plan 2026-07-07 |
+| 26 | P3 | **.sketch/.fig chunking** | ZIP containers get generic fixed chunking; entry-aware cuts unexplored | plan 2026-07-07 |
+| 27 | P3 | **Video pHash** | No perceptual delta-base nomination for video; no viable crate | R&D 2026-07-07 |
+| 28 | P3 | **Cross-process delta lock** | Chunk-delta cycle guard is per-process; concurrent multi-process writers to one local repo could still race | fix 2026-07-07 |

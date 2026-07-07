@@ -14,9 +14,25 @@
 use super::*;
 
 impl ContentChunker {
-    /// Create a new content chunker with the specified strategy
+    /// Create a new content chunker with the specified strategy.
+    ///
+    /// Resolves the CDC seed the same way `with_seed` does (env override,
+    /// falling back to `0`), so `MEDIAGIT_CDC_SEED` reaches call sites (e.g.
+    /// examples, benches) that don't have a repo config to read.
     pub fn new(strategy: ChunkStrategy) -> Self {
-        Self { strategy }
+        Self::with_seed(strategy, 0)
+    }
+
+    /// Create a new content chunker with the specified strategy and CDC seed.
+    ///
+    /// `seed` is resolved via [`resolve_cdc_seed`] — the `MEDIAGIT_CDC_SEED`
+    /// env var overrides whatever is passed in here. `seed = 0` (with no env
+    /// override) is byte-identical to unseeded/legacy boundaries.
+    pub fn with_seed(strategy: ChunkStrategy, seed: u64) -> Self {
+        Self {
+            strategy,
+            seed: resolve_cdc_seed(seed),
+        }
     }
 
     /// Chunk data according to the configured strategy
@@ -150,8 +166,14 @@ impl ContentChunker {
         // A10/XET: fastcdc::v2020::StreamCDC implements gear-hash cut-point skip
         // (advances min_size-window-1 bytes before testing the mask), matching
         // the XET/HuggingFace CDC optimization. No hand-rolled skip needed.
-        let chunker =
-            fastcdc::v2020::StreamCDC::new(file, min_size as u32, avg_size as u32, max_size as u32);
+        let chunker = fastcdc::v2020::StreamCDC::with_level_and_seed(
+            file,
+            min_size,
+            avg_size,
+            max_size,
+            fastcdc::v2020::Normalization::Level1,
+            self.seed,
+        );
 
         for result in chunker {
             let entry = result.map_err(|e| anyhow::anyhow!("FastCDC stream error: {}", e))?;
@@ -227,7 +249,7 @@ impl ContentChunker {
                 "avi" | "riff" | "mp4" | "mov" | "m4v" | "m4a" | "3gp"
                     | "mkv" | "webm" | "mka" | "mk3d"
                     // 3D model containers with dedicated parsers
-                    | "glb" | "gltf" | "obj" | "stl" | "ply" | "fbx"
+                    | "glb" | "gltf" | "obj" | "stl" | "ply" | "fbx" | "blend"
             )
         };
 
@@ -297,8 +319,14 @@ impl ContentChunker {
         let (avg_size, min_size, max_size) = get_chunk_params(file_size);
         let file = std::fs::File::open(path)
             .map_err(|e| anyhow::anyhow!("Failed to open file '{}': {}", path.display(), e))?;
-        let stream_cdc =
-            fastcdc::v2020::StreamCDC::new(file, min_size as u32, avg_size as u32, max_size as u32);
+        let stream_cdc = fastcdc::v2020::StreamCDC::with_level_and_seed(
+            file,
+            min_size,
+            avg_size,
+            max_size,
+            fastcdc::v2020::Normalization::Level1,
+            self.seed,
+        );
 
         for result in stream_cdc {
             let entry = result.map_err(|e| anyhow::anyhow!("FastCDC streaming error: {}", e))?;
@@ -368,7 +396,14 @@ impl ContentChunker {
     ) -> Result<Vec<ContentChunk>> {
         use fastcdc::v2020::FastCDC;
 
-        let chunker = FastCDC::new(data, min_size as u32, avg_size as u32, max_size as u32);
+        let chunker = FastCDC::with_level_and_seed(
+            data,
+            min_size,
+            avg_size,
+            max_size,
+            fastcdc::v2020::Normalization::Level1,
+            self.seed,
+        );
         let mut chunks = Vec::new();
 
         for entry in chunker {
@@ -411,10 +446,14 @@ impl ContentChunker {
         match extension.to_lowercase().as_str() {
             // Media - Structure-aware chunking
             "avi" | "riff" => self.chunk_avi(data).await,
-            // WAV is RIFF-based audio but not interleaved A/V — use rolling CDC
+            // WAV is RIFF-based audio but not interleaved A/V — use rolling CDC.
+            // NOTE: measured (dedup_report corpus) does NOT route this through
+            // the audio tier despite WAV being in its target format list — see
+            // the "wav"/"flac" deviation note on the `flac` arm below.
             "wav" => {
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
-                self.chunk_fastcdc(data, avg, min, max).await
+                let chunks = self.chunk_fastcdc(data, avg, min, max).await?;
+                Ok(apply_codec_hint(chunks, CodecHint::PCM))
             }
             "mp4" | "mov" | "m4v" | "m4a" | "3gp" => self.chunk_mp4(data).await,
             "mkv" | "webm" | "mka" | "mk3d" => self.chunk_matroska(data).await,
@@ -426,7 +465,9 @@ impl ContentChunker {
 
             // 3D Models - Structure-aware chunking
             "glb" | "gltf" => self.chunk_glb(data).await,
-            "obj" | "stl" | "ply" => self.chunk_3d_text(data).await,
+            "obj" => self.chunk_3d_text(data).await,
+            "stl" => self.chunk_stl(data).await,
+            "ply" => self.chunk_ply(data).await,
             "fbx" => self.chunk_fbx(data).await,
             "usd" | "usda" | "usdc" | "usdz" => {
                 // USD ecosystem - rolling CDC for scene graph dedup
@@ -438,8 +479,12 @@ impl ContentChunker {
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
                 self.chunk_fastcdc(data, avg, min, max).await
             }
-            "blend" | "max" | "ma" | "mb" | "c4d" | "hip" | "zpr" | "ztl" => {
-                // Application-specific 3D formats - rolling CDC
+            // Blender scene files - BHEAD block walker (falls back to CDC for
+            // the zstd/gzip-compressed form Blender >= 3.0 default-saves).
+            "blend" => self.chunk_blend(data).await,
+            "max" | "ma" | "c4d" | "hip" | "zpr" | "ztl" => {
+                // Application-specific 3D formats - rolling CDC. .ma is ASCII
+                // Maya and already gets content-defined (text-safe) treatment here.
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
                 self.chunk_fastcdc(data, avg, min, max).await
             }
@@ -487,23 +532,79 @@ impl ContentChunker {
             }
 
             // Design tools - creative containers (Fig/Sketch/XD/INDD) use
-            // the same small-chunk params for cross-version dedup.
-            "fig" | "sketch" | "xd" | "indd" | "indt" => {
+            // the same small-chunk params for cross-version dedup. AE (.aep,
+            // RIFX) and Premiere (.prproj, gzipped XML — never transformed;
+            // decompressing would break byte-perfect reproduction) too.
+            "fig" | "sketch" | "xd" | "indd" | "indt" | "aep" | "prproj" => {
                 let (avg, min, max) = get_creative_chunk_params(data.len() as u64);
                 self.chunk_fastcdc(data, avg, min, max).await
             }
 
-            // Lossless audio - Rolling CDC
-            "flac" | "aiff" | "alac" => {
-                let (avg, min, max) = get_chunk_params(data.len() as u64);
+            // Maya binary - creative-tier params (small chunks improve
+            // boundary re-sync after scene edits, same rationale as AI/PSD).
+            "mb" => {
+                let (avg, min, max) = get_creative_chunk_params(data.len() as u64);
                 self.chunk_fastcdc(data, avg, min, max).await
             }
 
-            // Compressed formats - Fixed chunking (already compressed, replaced entirely)
-            "jpg" | "jpeg" | "png" | "gif" | "webp" | "avif" | "heic" | "mp3" | "aac" | "ogg"
-            | "opus" | "zip" | "7z" | "rar" | "gz" | "xz" | "bz2" => {
-                self.chunk_fixed(data, 4 * 1024 * 1024).await
+            // Lossless audio - Rolling CDC, whole-file codec hint from extension.
+            // DEVIATION from the P3a spec (which lists WAV/AIFF/FLAC/OGG/MP3 as
+            // audio-tier targets): measured on the dedup_report corpus, routing
+            // WAV/FLAC through the smaller audio-tier params (256K avg) regressed
+            // total add_ms by ~140% for <1pp dedup gain. Root cause: SmartCompressor
+            // has a large fixed per-call cost (~195ms, measured), and shrinking
+            // average chunk size on these two large-by-volume formats multiplies
+            // the number of unique chunks needing compression ~4x. WAV/AIFF/FLAC
+            // (large uncompressed/lossless masters in real usage) keep the
+            // pre-P3a generic tier unconditionally; only MP3/OGG (below, typically
+            // much smaller files, and where the win is fixed->CDC re-sync rather
+            // than raw chunk-size reduction) use the audio tier.
+            "flac" => {
+                let (avg, min, max) = get_chunk_params(data.len() as u64);
+                let chunks = self.chunk_fastcdc(data, avg, min, max).await?;
+                Ok(apply_codec_hint(chunks, CodecHint::FLAC))
             }
+            "aiff" => {
+                let (avg, min, max) = get_chunk_params(data.len() as u64);
+                let chunks = self.chunk_fastcdc(data, avg, min, max).await?;
+                Ok(apply_codec_hint(chunks, CodecHint::PCM))
+            }
+            "alac" => {
+                let (avg, min, max) = get_chunk_params(data.len() as u64);
+                let chunks = self.chunk_fastcdc(data, avg, min, max).await?;
+                Ok(apply_codec_hint(chunks, CodecHint::ALAC))
+            }
+
+            // Lossy compressed audio. MP3/OGG move to the audio tier's rolling
+            // CDC (re-syncs after edits, unlike fixed chunking); AAC is
+            // unaffected and keeps fixed chunking. MEDIAGIT_AUDIO_TIER=0
+            // restores the pre-P3a fixed-chunking behavior for MP3/OGG.
+            "mp3" => {
+                let chunks = if audio_tier_enabled() {
+                    let (avg, min, max) = get_audio_chunk_params(data.len() as u64);
+                    self.chunk_fastcdc(data, avg, min, max).await?
+                } else {
+                    self.chunk_fixed(data, 4 * 1024 * 1024).await?
+                };
+                Ok(apply_codec_hint(chunks, CodecHint::MP3))
+            }
+            "aac" => {
+                let chunks = self.chunk_fixed(data, 4 * 1024 * 1024).await?;
+                Ok(apply_codec_hint(chunks, CodecHint::AAC))
+            }
+            "ogg" => {
+                let chunks = if audio_tier_enabled() {
+                    let (avg, min, max) = get_audio_chunk_params(data.len() as u64);
+                    self.chunk_fastcdc(data, avg, min, max).await?
+                } else {
+                    self.chunk_fixed(data, 4 * 1024 * 1024).await?
+                };
+                Ok(apply_codec_hint(chunks, CodecHint::Vorbis))
+            }
+
+            // Compressed formats - Fixed chunking (already compressed, replaced entirely)
+            "jpg" | "jpeg" | "png" | "gif" | "webp" | "avif" | "heic" | "opus" | "zip" | "7z"
+            | "rar" | "gz" | "xz" | "bz2" => self.chunk_fixed(data, 4 * 1024 * 1024).await,
 
             // Unknown - Rolling CDC as safe default for dedup
             _ => {
