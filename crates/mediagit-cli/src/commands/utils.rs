@@ -16,6 +16,12 @@
 use anyhow::Result;
 use chrono::Duration;
 
+/// Size threshold above which files use streaming (constant-memory) hashing
+/// instead of reading fully into memory. `add` and `status` must agree on
+/// this value — otherwise they can hash the same file via different paths
+/// and report false "modified" changes.
+pub const STREAMING_THRESHOLD: u64 = 5 * 1024 * 1024; // 5MB
+
 /// Format a duration as a human-readable "time ago" string.
 pub fn format_duration_ago(duration: Duration) -> String {
     let secs = duration.num_seconds();
@@ -81,4 +87,65 @@ pub fn validate_ref_name(name: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Shared test-only lock for `MEDIAGIT_REPO`, the process-global env var
+/// `find_repo_root()` honors (set by the `-C` flag in production). Several
+/// command test modules (merge, rebase, cherry-pick, stash) need to point
+/// `find_repo_root()` at a temp repo without changing the process cwd; since
+/// `cargo test` runs them concurrently in one binary, all such tests must
+/// serialize through this one lock — a lock local to each module would not
+/// prevent two modules from stomping the same env var at once.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::Mutex;
+    pub(crate) static REPO_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Initialize a minimal repo at `repo_path`: `.mediagit` + `refs/heads/main`
+    /// pointing at a fresh empty-tree commit, with `HEAD` tracking it. Shared by
+    /// merge/rebase/cherry-pick tests that need `find_repo_root()` to succeed
+    /// and `HEAD` to resolve to a real commit. Returns the initial commit's OID.
+    pub(crate) async fn init_repo_with_commit(
+        repo_path: &std::path::Path,
+    ) -> mediagit_versioning::Oid {
+        use mediagit_versioning::{
+            Commit, ObjectDatabase, ObjectType, Ref, RefDatabase, Signature, Tree,
+        };
+
+        let mediagit_dir = repo_path.join(".mediagit");
+        tokio::fs::create_dir_all(mediagit_dir.join("refs/heads"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(mediagit_dir.join("refs/tags"))
+            .await
+            .unwrap();
+
+        let storage = crate::repo::create_storage_backend(repo_path)
+            .await
+            .unwrap();
+        let odb = ObjectDatabase::with_smart_compression(storage, 1000);
+
+        let tree_oid = Tree::new().write(&odb).await.unwrap();
+        let sig = Signature::now("Test".to_string(), "test@example.com".to_string());
+        let commit = Commit::new(tree_oid, sig.clone(), sig, "Initial commit".to_string());
+        let commit_oid = odb
+            .write(ObjectType::Commit, &commit.serialize().unwrap())
+            .await
+            .unwrap();
+
+        let refdb = RefDatabase::new(&mediagit_dir);
+        refdb
+            .write(&Ref::new_direct("refs/heads/main".to_string(), commit_oid))
+            .await
+            .unwrap();
+        refdb
+            .write(&Ref::new_symbolic(
+                "HEAD".to_string(),
+                "refs/heads/main".to_string(),
+            ))
+            .await
+            .unwrap();
+
+        commit_oid
+    }
 }

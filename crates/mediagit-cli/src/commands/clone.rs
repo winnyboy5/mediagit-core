@@ -122,15 +122,30 @@ impl CloneCmd {
 
         // Step 3: Configure remote
         init_spinner.set_message("Configuring remote...");
+        // Layout v2: default namespace = sanitized basename of the clone
+        // target directory, matching `init`'s convention.
+        let namespace = target_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "repo".to_string());
         let config_content = format!(
-            r#"[remotes.origin]
+            r#"repo_namespace = "{}"
+layout_version = {}
+repo_id = "{}"
+
+[remotes.origin]
 url = "{}"
 "#,
+            mediagit_storage::sanitize_namespace(&namespace),
+            mediagit_config::CURRENT_LAYOUT_VERSION,
+            mediagit_storage::generate_repo_id(),
             self.url
         );
         std::fs::write(storage_path.join("config.toml"), config_content)?;
 
-        // Step 4: Initialize storage and fetch
+        // Step 4: Initialize storage and fetch. `create_storage_backend`
+        // performs the LAYOUT marker check/write itself (one of the two
+        // production wrap-points), keyed off the repo_id just written above.
         init_spinner.set_message("Connecting to remote...");
         let storage = create_storage_backend(&target_dir).await?;
         let odb = Arc::new(ObjectDatabase::with_smart_compression(
@@ -139,9 +154,18 @@ url = "{}"
         ));
         let refdb = RefDatabase::new(&storage_path);
 
-        // Initialize protocol client (no repo config yet for clone — use env
-        // MEDIAGIT_DOWNLOAD_CONCURRENCY to tune download concurrency).
-        let client = mediagit_protocol::ProtocolClient::new(self.url.clone());
+        // Initialize protocol client. config.toml was just written above with
+        // an empty `[remotes.origin]` (no token yet — clone predates the
+        // repo existing, so per-remote credentials can't be set ahead of
+        // time), so credential resolution here effectively falls through to
+        // env MEDIAGIT_TOKEN/MEDIAGIT_API_KEY. Also honours env
+        // MEDIAGIT_DOWNLOAD_CONCURRENCY to tune download concurrency.
+        let clone_config = mediagit_config::Config::load(&target_dir)
+            .await
+            .unwrap_or_default();
+        let client = mediagit_protocol::ProtocolClient::new(self.url.clone()).with_credentials(
+            crate::repo::resolve_credentials(&target_dir, &clone_config, "origin"),
+        );
 
         // Step 5: Get remote refs
         init_spinner.set_message("Fetching remote refs...");
@@ -230,6 +254,14 @@ url = "{}"
             .map_err(|e| anyhow::anyhow!("Invalid remote OID: {}", e))?;
         let ref_update = mediagit_versioning::Ref::new_direct(remote_ref_name.clone(), remote_oid);
         refdb.write(&ref_update).await?;
+
+        // Upstream tracking (M2 plumbing, consumed by `status` in M4): the
+        // cloned default branch tracks origin's default branch by construction.
+        {
+            let mut tracking_config = mediagit_config::Config::load(&target_dir).await?;
+            tracking_config.set_branch_upstream(branch, "origin", remote_ref_name.clone());
+            tracking_config.save(&target_dir)?;
+        }
 
         // Step 8b: Create tracking refs for all remote branches (LAZY CLONE)
         // We only download objects for the default branch. Other branches' objects

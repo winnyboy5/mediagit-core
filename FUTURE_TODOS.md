@@ -20,14 +20,14 @@ historical claudedocs analyses.
 |---|------|----------|--------|-----------------|
 | 1 | `.mediagitignore` support in `add` + `status` | ~~**P1**~~ **✅ DONE** | 2-3 days | Shipped in v0.2.6-beta.1 |
 | 2 | Pack negotiation / bitmap index | ~~**P1**~~ **✅ DONE** | — | Pack negotiation shipped v0.2.6-beta.1; bitmap index deferred (see §2b) |
-| 3 | Parallel object I/O during checkout | **P1** | 1 wk | Branch switch latency |
+| 3 | Parallel object I/O during checkout | ~~**P1**~~ **✅ DONE** | 1 wk | M3 — JoinSet+Semaphore with MEDIAGIT_CHECKOUT_PARALLELISM (default cpus cap 8) |
 | 4 | Streaming format-aware chunker (MKV/MP4/GLB, S1-S5) | ~~**P1**~~ **✅ DONE** | 8-12 days | Shipped in v0.2.6-beta.1 |
 | 5 | **Phase-3 Track F — Cloud-side pack objects** (xorb-style chunk bundling) | ~~**P1**~~ **✅ DONE** | — | Shipped v0.2.7-beta.1 (F1–F11, streaming_pack.rs, F8 integrity) |
-| 6 | `mediagit download` CLI subcommand | **P1** | 2-3 days | Web UI, CI integration, CDN (server endpoints already shipped) |
-| 7 | `mediagit media info` command | **P2** | ~100 LOC | mediagit-media wired into CLI 2026-07-07 (`media_meta.rs`); `show`/`stats` already print media lines — this is now a thin dedicated-command wrapper |
-| 8 | Sparse checkout | **P2** | ~500 LOC | Large repos, partial working trees |
-| 9 | CLI command unit tests | **P2** | Large | Test coverage completeness |
-| 10 | Annotated tag objects (PGP signing) | **P2** | 1 wk | Full tag semantics |
+| 6 | `mediagit download` CLI subcommand | ~~**P1**~~ **✅ DONE** | 2-3 days | M2 — plain streaming GET, full-URL mode, no-repo requirement for CI/scripting |
+| 7 | `mediagit media info` command | ~~**P2**~~ **✅ DONE** | ~100 LOC | M5b — `commands/media.rs` wired into CLI; surfaces full parsed-struct detail for image/video/audio/PSD/3D formats |
+| 8 | Sparse checkout | ~~**P2**~~ **✅ DONE** | ~500 LOC | M5b — cone + pattern modes, `.mediagit/info/sparse-checkout`, set/list/disable subcommands |
+| 9 | CLI command unit tests | ~~**P2**~~ **✅ DONE** | Large | M6 — mock-storage scaffold + 46 new unit tests for merge/rebase/cherry-pick/stash, un-ignored 4 fsck integration tests |
+| 10 | Annotated tag objects (SSH signing) | ~~**P2**~~ **✅ DONE** | 1 wk | M5a — ObjectType::Tag + postcard format + SSHSIG signing with MEDIAGIT_SIGN/MEDIAGIT_SIGN_KEY (ed25519, TOFU verify) |
 | 11 | HTTP/3 via reqwest feature flag | **P3** | 1 day | When reqwest `http3` stabilizes (~2026 Q4) |
 | 12 | Git migration tooling (re-add filter/install/track) | **P3** | 1-2 wk | When user base requests migration |
 | 13 | `mediagit://` URL scheme | **P3** | 1 day | Post-HTTP/3 adoption |
@@ -40,13 +40,14 @@ historical claudedocs analyses.
 | 20 | Security / Audit enhancements (v0.3.0+) | **P3** | — | Compliance, SIEM |
 | 21 | SSO integration, multi-region, Web UI (v1.0.0) | **P3** | — | Enterprise features |
 | 22 | GA knob-policy execution (remove/keep each `MEDIAGIT_*` knob) | **P1** (at GA) | 1 day | `docs/next-set/knob-policy.md` is the decision record |
-| 23 | `checkout` doesn't re-materialize a deleted working-tree file | **P2** | 2-3 days | Found during P4a verification 2026-07-07; UX/correctness gap |
+| 23 | `checkout` doesn't re-materialize a deleted working-tree file | ~~**P2**~~ **✅ DONE** | 2-3 days | M0 — fixed in checkout.rs: checks `exists()` in addition to OID-equality for re-materialization |
 | 24 | FBX Objects-descending walker (or delete walker at GA) | **P3** | 1-2 wk | Fair trial closed 2026-07-07: top-level cuts ≈ CDC (+0.003pp) |
 | 25 | EXR structure-aware chunking | **P3** | 3-5 days | Needs real EXR fixtures first (creating them requires the `exr` crate) |
 | 26 | .sketch/.fig ZIP-entry-aware chunking | **P3** | 3-5 days | No fixtures in corpus yet |
 | 27 | Video pHash (keyframe extract + image_hasher) | **P3** | 1-2 wk | No viable video-phash crate (verified 2026-07-07) |
 | 28 | Cross-process chunk-delta write lock | **P3** | 2-3 days | In-process race fixed 2026-07-07; multi-process writers to one local repo could still race (CLI never does this) |
 | 29 | phash.idx compaction | **P3** | 0.5 day | Append-only today; only matters >1M entries (~16 MB) |
+| 30 | PSD spot-color channel parse failure | **P3** | Unscoped (needs upstream fix or crate swap) | `psd` crate 0.3.5 errors "invalid channel id 3" on PSDs with a spot-color channel; found 2026-07-10, M5b |
 
 ---
 
@@ -626,3 +627,4 @@ optimization (see §2b).
 | 26 | P3 | **.sketch/.fig chunking** | ZIP containers get generic fixed chunking; entry-aware cuts unexplored | plan 2026-07-07 |
 | 27 | P3 | **Video pHash** | No perceptual delta-base nomination for video; no viable crate | R&D 2026-07-07 |
 | 28 | P3 | **Cross-process delta lock** | Chunk-delta cycle guard is per-process; concurrent multi-process writers to one local repo could still race | fix 2026-07-07 |
+| 30 | P3 | **PSD spot-color channels** | `psd` crate 0.3.5 errors `"invalid channel id 3"` on PSDs with a spot-color channel; falls back to generic chunking, no crash/data-loss | found 2026-07-10, M5b |

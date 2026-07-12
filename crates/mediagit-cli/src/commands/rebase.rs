@@ -520,3 +520,130 @@ impl RebaseCmd {
         Ok(commits)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::utils::test_support::{init_repo_with_commit, REPO_ENV_LOCK};
+    use clap::Parser;
+    use tempfile::TempDir;
+
+    fn parse(args: &[&str]) -> Result<RebaseCmd, clap::Error> {
+        let mut full = vec!["rebase"];
+        full.extend_from_slice(args);
+        RebaseCmd::try_parse_from(full)
+    }
+
+    #[test]
+    fn parse_basic_upstream() {
+        let cmd = parse(&["main"]).unwrap();
+        assert_eq!(cmd.upstream, "main");
+        assert!(cmd.branch.is_none());
+        assert!(!cmd.abort);
+    }
+
+    #[test]
+    fn parse_missing_upstream_is_error() {
+        assert!(parse(&[]).is_err());
+    }
+
+    #[test]
+    fn parse_upstream_and_branch() {
+        let cmd = parse(&["main", "feature"]).unwrap();
+        assert_eq!(cmd.upstream, "main");
+        assert_eq!(cmd.branch.as_deref(), Some("feature"));
+    }
+
+    #[test]
+    fn parse_all_flags() {
+        let cmd = parse(&[
+            "main",
+            "--keep-empty",
+            "--abort",
+            "--continue-rebase",
+            "--skip",
+            "-q",
+            "-v",
+        ])
+        .unwrap();
+        assert!(cmd.keep_empty);
+        assert!(cmd.abort);
+        assert!(cmd.continue_rebase);
+        assert!(cmd.skip);
+        assert!(cmd.quiet);
+        assert!(cmd.verbose);
+    }
+
+    /// Guards `MEDIAGIT_REPO` across the `.await` points in `execute()`
+    /// (see `REPO_ENV_LOCK` docs).
+    #[allow(clippy::await_holding_lock)]
+    async fn execute_in(repo_path: &std::path::Path, cmd: &RebaseCmd) -> Result<()> {
+        let _guard = REPO_ENV_LOCK.lock().unwrap();
+        std::env::set_var("MEDIAGIT_REPO", repo_path);
+        let result = cmd.execute().await;
+        std::env::remove_var("MEDIAGIT_REPO");
+        result
+    }
+
+    #[tokio::test]
+    async fn execute_no_repo_is_error() {
+        let temp = TempDir::new().unwrap();
+        let cmd = parse(&["main"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("Not a mediagit repository"));
+    }
+
+    #[tokio::test]
+    async fn execute_unknown_upstream_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["does-not-exist"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("Cannot resolve branch"));
+    }
+
+    #[tokio::test]
+    async fn execute_interactive_is_not_implemented_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["main", "-i"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Interactive rebase not yet implemented"));
+    }
+
+    #[tokio::test]
+    async fn execute_rebase_merges_is_not_implemented_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["main", "--rebase-merges"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Rebase with merge commits not yet implemented"));
+    }
+
+    #[tokio::test]
+    async fn abort_without_rebase_in_progress_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["main", "--abort"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("No rebase in progress"));
+    }
+
+    #[tokio::test]
+    async fn skip_without_rebase_in_progress_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["main", "--skip"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("No rebase in progress"));
+    }
+}

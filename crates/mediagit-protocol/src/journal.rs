@@ -122,7 +122,52 @@ impl UploadJournal {
     pub fn delete(path: &Path) {
         let _ = std::fs::remove_file(path);
     }
+
+    /// Sweep stale journal files (`.mediagit/upload/*.journal`) older than
+    /// `max_age`. Age-based only — a journal younger than `max_age` is left
+    /// alone even if its push has already completed (it'll be cleaned up by
+    /// `delete` on the next successful push, or by a later sweep once it
+    /// ages out). Never touches anything but `*.journal` files in that one
+    /// directory, so it can't collide with live/fresh uploads. Idempotent:
+    /// running it twice in a row sweeps nothing the second time. Returns the
+    /// number of files removed; best-effort — a single file's stat/remove
+    /// failure doesn't abort the sweep of the rest.
+    pub fn sweep_stale(repo_dir: &Path, max_age: std::time::Duration) -> usize {
+        let upload_dir = repo_dir.join(".mediagit").join("upload");
+        let entries = match std::fs::read_dir(&upload_dir) {
+            Ok(e) => e,
+            Err(_) => return 0, // no upload dir yet — nothing to sweep
+        };
+
+        let now = std::time::SystemTime::now();
+        let mut swept = 0;
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("journal") {
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            let Ok(modified) = metadata.modified() else {
+                continue;
+            };
+            let Ok(age) = now.duration_since(modified) else {
+                continue; // clock skew (mtime in the future) — leave it alone
+            };
+            if age > max_age && std::fs::remove_file(&path).is_ok() {
+                swept += 1;
+            }
+        }
+        swept
+    }
 }
+
+/// Default staleness threshold for [`UploadJournal::sweep_stale`]: journals
+/// older than this are assumed abandoned (the push that created them either
+/// completed via `delete()` or failed permanently long ago).
+pub const DEFAULT_JOURNAL_MAX_AGE: std::time::Duration =
+    std::time::Duration::from_secs(7 * 24 * 3600);
 
 #[cfg(test)]
 mod tests {
@@ -188,6 +233,48 @@ mod tests {
         let j = UploadJournal::load_or_new(&path, "push-004").unwrap();
         assert_eq!(j.push_id, "push-004");
         assert!(j.chunks.is_empty());
+    }
+
+    #[test]
+    fn sweep_stale_removes_old_keeps_fresh() {
+        let dir = std::env::temp_dir().join("mediagit-journal-sweep-test");
+        let upload_dir = dir.join(".mediagit").join("upload");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&upload_dir).unwrap();
+
+        let stale = upload_dir.join("stale-push.journal");
+        let fresh = upload_dir.join("fresh-push.journal");
+        std::fs::write(&stale, b"{}").unwrap();
+        std::fs::write(&fresh, b"{}").unwrap();
+
+        // Backdate the "stale" file's mtime by 8 days (stdlib only —
+        // `File::set_modified` was stabilized in Rust 1.75).
+        let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 24 * 3600);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+
+        let swept = UploadJournal::sweep_stale(&dir, DEFAULT_JOURNAL_MAX_AGE);
+        assert_eq!(swept, 1);
+        assert!(!stale.exists(), "stale journal must be removed");
+        assert!(fresh.exists(), "fresh journal must survive");
+
+        // Idempotent: sweeping again finds nothing left to remove.
+        let swept_again = UploadJournal::sweep_stale(&dir, DEFAULT_JOURNAL_MAX_AGE);
+        assert_eq!(swept_again, 0);
+        assert!(fresh.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sweep_stale_missing_upload_dir_is_noop() {
+        let dir = std::env::temp_dir().join("mediagit-journal-sweep-missing-xyz");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(UploadJournal::sweep_stale(&dir, DEFAULT_JOURNAL_MAX_AGE), 0);
     }
 
     #[test]

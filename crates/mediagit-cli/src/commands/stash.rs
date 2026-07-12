@@ -582,3 +582,158 @@ struct StashEntry {
     timestamp: String,
     branch: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::utils::test_support::{init_repo_with_commit, REPO_ENV_LOCK};
+    use clap::Parser;
+    use tempfile::TempDir;
+
+    fn parse(args: &[&str]) -> Result<StashCmd, clap::Error> {
+        let mut full = vec!["stash"];
+        full.extend_from_slice(args);
+        StashCmd::try_parse_from(full)
+    }
+
+    #[test]
+    fn parse_save_with_message_flag() {
+        let cmd = parse(&["save", "-m", "WIP"]).unwrap();
+        match cmd.command {
+            StashSubcommand::Save(opts) => {
+                assert_eq!(opts.message_flag.as_deref(), Some("WIP"));
+                assert!(!opts.include_untracked);
+            }
+            _ => panic!("expected Save"),
+        }
+    }
+
+    #[test]
+    fn parse_push_alias_with_positional_message() {
+        let cmd = parse(&["push", "WIP message", "-u"]).unwrap();
+        match cmd.command {
+            StashSubcommand::Push(opts) => {
+                assert_eq!(opts.message_positional.as_deref(), Some("WIP message"));
+                assert!(opts.include_untracked);
+            }
+            _ => panic!("expected Push"),
+        }
+    }
+
+    #[test]
+    fn parse_apply_with_index() {
+        let cmd = parse(&["apply", "1", "--index"]).unwrap();
+        match cmd.command {
+            StashSubcommand::Apply(opts) => {
+                assert_eq!(opts.stash, Some(1));
+                assert!(opts.index);
+            }
+            _ => panic!("expected Apply"),
+        }
+    }
+
+    #[test]
+    fn parse_list_verbose() {
+        let cmd = parse(&["list", "-v"]).unwrap();
+        match cmd.command {
+            StashSubcommand::List(opts) => assert!(opts.verbose),
+            _ => panic!("expected List"),
+        }
+    }
+
+    #[test]
+    fn parse_drop_and_pop_default_to_no_index() {
+        let cmd = parse(&["drop"]).unwrap();
+        match cmd.command {
+            StashSubcommand::Drop(opts) => assert_eq!(opts.stash, None),
+            _ => panic!("expected Drop"),
+        }
+
+        let cmd = parse(&["pop", "2"]).unwrap();
+        match cmd.command {
+            StashSubcommand::Pop(opts) => assert_eq!(opts.stash, Some(2)),
+            _ => panic!("expected Pop"),
+        }
+    }
+
+    #[test]
+    fn parse_clear_force() {
+        let cmd = parse(&["clear", "-f"]).unwrap();
+        match cmd.command {
+            StashSubcommand::Clear(opts) => assert!(opts.force),
+            _ => panic!("expected Clear"),
+        }
+    }
+
+    #[test]
+    fn parse_missing_subcommand_is_error() {
+        assert!(parse(&[]).is_err());
+    }
+
+    /// Guards `MEDIAGIT_REPO` across the `.await` points in `execute()`
+    /// (see `REPO_ENV_LOCK` docs).
+    #[allow(clippy::await_holding_lock)]
+    async fn execute_in(repo_path: &std::path::Path, cmd: &StashCmd) -> Result<()> {
+        let _guard = REPO_ENV_LOCK.lock().unwrap();
+        std::env::set_var("MEDIAGIT_REPO", repo_path);
+        let result = cmd.execute().await;
+        std::env::remove_var("MEDIAGIT_REPO");
+        result
+    }
+
+    #[tokio::test]
+    async fn execute_no_repo_is_error() {
+        let temp = TempDir::new().unwrap();
+        let cmd = parse(&["list"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("Not a mediagit repository"));
+    }
+
+    #[tokio::test]
+    async fn list_with_no_stashes_is_ok() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["list"]).unwrap();
+        execute_in(temp.path(), &cmd).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn save_with_no_changes_is_ok() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["save", "-m", "nothing to stash"]).unwrap();
+        execute_in(temp.path(), &cmd).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn drop_out_of_range_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["drop", "0"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("Stash entry 0 not found"));
+    }
+
+    #[tokio::test]
+    async fn apply_out_of_range_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["apply", "0"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("Stash entry 0 not found"));
+    }
+
+    #[tokio::test]
+    async fn show_out_of_range_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["show", "0"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("Stash entry 0 not found"));
+    }
+}

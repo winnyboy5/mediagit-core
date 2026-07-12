@@ -24,7 +24,7 @@
 use std::path::Path;
 
 /// Blobs larger than this are skipped (never parsed for metadata).
-const MAX_MEDIA_META_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_MEDIA_META_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Kill switch: `MEDIAGIT_MEDIA_META=0` disables all metadata parsing/printing.
 pub fn media_meta_enabled() -> bool {
@@ -54,6 +54,8 @@ pub async fn media_summary_line(data: &[u8], filename: &str) -> Option<String> {
         "mp4" | "mov" | "m4v" => video_summary(data).await,
         "wav" | "mp3" | "flac" | "aac" | "ogg" | "m4a" => audio_summary(data, filename, &ext).await,
         "psd" => psd_summary(data).await,
+        "obj" | "fbx" | "blend" | "gltf" | "glb" | "stl" | "usd" | "usda" | "usdc" | "usdz"
+        | "ply" => model3d_summary(data, filename).await,
         _ => return None,
     };
 
@@ -105,6 +107,16 @@ async fn audio_summary(data: &[u8], filename: &str, ext: &str) -> mediagit_media
     Ok(format!(
         "media: {}Hz {}ch {} {:.1}s",
         info.sample_rate, info.channels, ext, info.duration_seconds
+    ))
+}
+
+async fn model3d_summary(data: &[u8], filename: &str) -> mediagit_media::Result<String> {
+    let info = mediagit_media::Model3DParser::new()
+        .parse(data, filename)
+        .await?;
+    Ok(format!(
+        "media: {:?} {} verts, {} faces, {} object(s)",
+        info.format, info.vertex_count, info.face_count, info.object_count
     ))
 }
 

@@ -64,17 +64,26 @@ fn fixture_paths() -> Option<(PathBuf, PathBuf)> {
 }
 
 /// Where the filesystem storage backend actually lands the `deltas/<hex>.meta`
-/// key: it sanitizes the key to `deltas__<hex>.meta` and shards it under the
-/// first four characters of the sanitized key (always `de/lt` for deltas),
-/// beneath the backend root `.mediagit/objects/objects/`.
+/// key under layout v2: namespaced under the repo's sanitized directory
+/// basename, then sharded on the *hash itself* (not the key string) —
+/// `.mediagit/objects/<ns>/deltas/<h0:2>/<h2:4>/<hex>.meta` — co-located
+/// with its binary sibling at the same shard (`local.rs::object_path`).
 fn delta_meta_path(repo_root: &Path, oid: &Oid) -> PathBuf {
+    let ns = mediagit_storage::sanitize_namespace(
+        &repo_root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    );
+    let hex = oid.to_hex();
     repo_root
         .join(".mediagit")
         .join("objects")
-        .join("objects")
-        .join("de")
-        .join("lt")
-        .join(format!("deltas__{}.meta", oid.to_hex()))
+        .join(ns)
+        .join("deltas")
+        .join(&hex[0..2])
+        .join(&hex[2..4])
+        .join(format!("{}.meta", hex))
 }
 
 fn read_index_entries(repo_root: &Path) -> Vec<IndexEntry> {

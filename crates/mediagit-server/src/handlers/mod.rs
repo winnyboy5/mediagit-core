@@ -28,7 +28,7 @@ use mediagit_security::auth::AuthUser;
 use mediagit_storage::{AzureBackend, GcsBackend, LocalBackend, MinIOBackend, StorageBackend};
 use mediagit_versioning::{
     resolve_revision, Commit, LcaFinder, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Reflog,
-    ReflogEntry, StreamingPackWriter, Tree,
+    ReflogEntry, StreamingPackWriter, Tag, Tree,
 };
 use std::path::Path as StdPath;
 use std::sync::Arc;
@@ -126,7 +126,62 @@ async fn get_or_init_odb(
     Ok(odb)
 }
 
-/// Helper function to create storage backend based on repository configuration
+/// Determine the effective repo namespace (layout v2) for a served repo:
+/// env override wins, then the value persisted in the repo's config.toml,
+/// then a sanitized basename of the repo path as a last-resort fallback for
+/// repos whose config predates `repo_namespace`. Mirrors the CLI's
+/// `resolve_repo_namespace` in `mediagit-cli/src/repo.rs`.
+fn resolve_repo_namespace(repo_path: &StdPath, config: &mediagit_config::Config) -> String {
+    if let Ok(ns) = std::env::var("MEDIAGIT_REPO_NAMESPACE") {
+        if !ns.trim().is_empty() {
+            return mediagit_storage::sanitize_namespace(&ns);
+        }
+    }
+    if let Some(ns) = &config.repo_namespace {
+        if !ns.trim().is_empty() {
+            return mediagit_storage::sanitize_namespace(ns);
+        }
+    }
+    let basename = repo_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "repo".to_string());
+    mediagit_storage::sanitize_namespace(&basename)
+}
+
+/// Resolve this served repository's identity (namespace-collision guard,
+/// M2). Mirrors the CLI's `resolve_repo_id` in `mediagit-cli/src/repo.rs`:
+/// returns `config.repo_id` if present, otherwise generates one and writes
+/// it back to the repo's `config.toml` immediately so it's stable across
+/// subsequent requests instead of being regenerated (and thus mismatching
+/// the marker) on every call.
+fn resolve_repo_id(
+    repo_path: &StdPath,
+    config: &mediagit_config::Config,
+) -> Result<String, StatusCode> {
+    if let Some(id) = &config.repo_id {
+        if !id.trim().is_empty() {
+            return Ok(id.clone());
+        }
+    }
+    let id = mediagit_storage::generate_repo_id();
+    let mut updated = config.clone();
+    updated.repo_id = Some(id.clone());
+    updated.save(repo_path).map_err(|e| {
+        tracing::error!(
+            "Failed to persist newly generated repo_id to config.toml: {}",
+            e
+        );
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(id)
+}
+
+/// Helper function to create storage backend based on repository configuration.
+///
+/// Layout v2: always wraps the backend in
+/// [`mediagit_storage::NamespacedBackend`] — one of exactly two production
+/// construction sites (the other is the CLI's `create_storage_backend`).
 async fn build_storage_backend(repo_path: &StdPath) -> Result<Arc<dyn StorageBackend>, StatusCode> {
     // Load repository configuration
     let config = mediagit_config::Config::load(repo_path)
@@ -135,6 +190,9 @@ async fn build_storage_backend(repo_path: &StdPath) -> Result<Arc<dyn StorageBac
             tracing::error!("Failed to load repository config: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+
+    let ns = resolve_repo_namespace(repo_path, &config);
+    let repo_id = resolve_repo_id(repo_path, &config)?;
 
     // Create storage backend based on configuration
     let storage: Arc<dyn StorageBackend> = match &config.storage {
@@ -263,7 +321,23 @@ async fn build_storage_backend(repo_path: &StdPath) -> Result<Arc<dyn StorageBac
         }
     };
 
-    Ok(storage)
+    let namespaced = mediagit_storage::NamespacedBackend::new(storage, ns).map_err(|e| {
+        tracing::error!("Failed to construct namespaced storage backend: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    mediagit_storage::check_or_write_layout_marker(
+        &namespaced,
+        mediagit_config::CURRENT_LAYOUT_VERSION,
+        &repo_id,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Layout version check failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Arc::new(namespaced))
 }
 
 /// MinIO / S3-compatible storage (MinIO, DigitalOcean Spaces, Cloudflare R2, etc.).
@@ -426,6 +500,13 @@ async fn collect_objects_bfs(
                         }
                     }
                 }
+                ObjectType::Tag => {
+                    if let Ok(tag) = Tag::deserialize(&obj_data) {
+                        if !stop_at.contains(&tag.target) && visited.insert(tag.target) {
+                            frontier.push(tag.target);
+                        }
+                    }
+                }
                 ObjectType::Blob => { /* leaf */ }
             }
         }
@@ -435,8 +516,10 @@ async fn collect_objects_bfs(
 }
 
 /// Helper function to detect object type from raw object data
-/// MediaGit stores objects with bincode serialization, so we try to deserialize
-/// as Commit or Tree. If neither works, it's a Blob.
+/// MediaGit stores objects with postcard serialization, so we try to
+/// deserialize as Commit, Tree, then Tag (in that order — see
+/// `mediagit_versioning::reachability`'s module docs for why this ordering
+/// is safe). If none work, it's a Blob.
 fn detect_object_type(data: &[u8]) -> Option<ObjectType> {
     // Try to deserialize as Commit first using its own deserializer
     if Commit::deserialize(data).is_ok() {
@@ -448,7 +531,12 @@ fn detect_object_type(data: &[u8]) -> Option<ObjectType> {
         return Some(ObjectType::Tree);
     }
 
-    // If neither, it's a Blob (or at minimum treat it as one)
+    // Try to deserialize as Tag using its own deserializer
+    if Tag::deserialize(data).is_ok() {
+        return Some(ObjectType::Tag);
+    }
+
+    // If none, it's a Blob (or at minimum treat it as one)
     Some(ObjectType::Blob)
 }
 

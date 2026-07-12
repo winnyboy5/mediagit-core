@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use tracing::{debug, info};
 
 /// Configuration version
-pub const CONFIG_VERSION: u32 = 1;
+pub const CONFIG_VERSION: u32 = 2;
 
 /// Migration trait for handling config upgrades
 pub trait ConfigMigration {
@@ -167,6 +167,40 @@ impl ConfigMigration for MigrationV0ToV1 {
     }
 }
 
+/// Migration from v1 to v2: object-store layout v2 (per-repo namespace +
+/// true hash fanout). `repo_namespace` and `layout_version` are new fields
+/// with `#[serde(default)]` on `Config`, so a config missing them already
+/// parses fine without running this migration — it exists for explicitness
+/// and so `layout_version` is recorded as `1` (not silently absent) on
+/// configs that predate the field, matching the on-disk `LAYOUT` marker
+/// semantics (missing marker == v1, never v2).
+pub struct MigrationV1ToV2;
+
+impl ConfigMigration for MigrationV1ToV2 {
+    fn source_version(&self) -> u32 {
+        1
+    }
+
+    fn target_version(&self) -> u32 {
+        2
+    }
+
+    fn migrate(&self, mut config: Value) -> ConfigResult<Value> {
+        if config["layout_version"].is_null() {
+            config["layout_version"] = json!(1);
+        }
+        // repo_namespace intentionally left absent (None) rather than
+        // invented here — the storage factory computes a default (sanitized
+        // repo dir basename) at open time; this migration must not silently
+        // rename an existing physical layout.
+        Ok(config)
+    }
+
+    fn description(&self) -> &str {
+        "Record explicit layout_version=1 for pre-layout-v2 configs"
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -238,6 +272,16 @@ mod tests {
             migrated["observability"]["metrics"]["endpoint"].as_str(),
             Some("/metrics")
         );
+    }
+
+    #[test]
+    fn test_migration_v1_to_v2_records_layout_version() {
+        let migration = MigrationV1ToV2;
+        let config = json!({ "app": { "name": "mediagit" } });
+
+        let migrated = migration.migrate(config).unwrap();
+        assert_eq!(migrated["layout_version"].as_u64(), Some(1));
+        assert!(migrated["repo_namespace"].is_null());
     }
 
     #[test]

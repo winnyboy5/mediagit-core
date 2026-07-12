@@ -299,6 +299,12 @@ pub async fn download_pack(
     // subtrees and blobs reachable from a parent commit — is pruned from the
     // pack walk below. Unknown haves (stale or forged) are silently skipped
     // by `walk_reachable`, which is the whole point of having it be lenient.
+    //
+    // M3 bitmap short-circuit: for each have OID with a valid, current-
+    // version bitmap (`bitmaps/<oid>.bitmap`), use its precomputed closure
+    // instead of walking the ODB. Any miss/stale/corrupt/version-mismatch/
+    // disabled falls back to BFS for that OID — bitmaps are a pure speedup,
+    // never a correctness dependency (see `mediagit_versioning::bitmap`).
     let have_oids: Vec<Oid> = have_list
         .iter()
         .filter_map(|s| Oid::from_hex(s).ok())
@@ -306,6 +312,44 @@ pub async fn download_pack(
     // Fast path: empty have-set (clone) skips the expensive BFS expansion.
     let stop_at = if have_oids.is_empty() {
         std::collections::HashSet::new()
+    } else if mediagit_versioning::bitmap_enabled() {
+        let mut stop_at = std::collections::HashSet::new();
+        let mut bfs_roots = Vec::new();
+        let mut bitmap_hits = 0usize;
+        for have in &have_oids {
+            let key = mediagit_versioning::bitmap_key(have);
+            let hit = match odb.storage().get(&key).await {
+                Ok(bytes) => mediagit_versioning::ReachabilityBitmap::deserialize(&bytes),
+                Err(_) => None,
+            };
+            match hit {
+                Some(bitmap) => {
+                    bitmap_hits += 1;
+                    state
+                        .bitmap_hits
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    stop_at.extend(bitmap.to_oid_set());
+                }
+                None => bfs_roots.push(*have),
+            }
+        }
+        if !bfs_roots.is_empty() {
+            let empty: std::collections::HashSet<Oid> = std::collections::HashSet::new();
+            let bfs_extra = mediagit_versioning::walk_reachable(&odb, bfs_roots, &empty)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to expand have-closure: {}", e);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+            stop_at.extend(bfs_extra);
+        }
+        tracing::info!(
+            "Have-closure: {} bitmap hit(s), {} BFS fallback root(s) of {} have OIDs",
+            bitmap_hits,
+            have_oids.len() - bitmap_hits,
+            have_oids.len()
+        );
+        stop_at
     } else {
         let empty: std::collections::HashSet<Oid> = std::collections::HashSet::new();
         mediagit_versioning::walk_reachable(&odb, have_oids, &empty)
@@ -697,6 +741,74 @@ pub async fn update_refs(
                     tracing::warn!("Failed to write reflog for '{}': {}", update.name, e);
                 }
 
+                // M3 (#2b): post-receive bitmap generation for the new tip.
+                // Derived data — generated in the background so it never adds
+                // push latency; a failure here is logged and otherwise
+                // ignored (walk_reachable BFS fallback covers the miss).
+                if mediagit_versioning::bitmap_enabled() {
+                    let odb_for_bitmap = Arc::clone(&odb);
+                    let ref_name = update.name.clone();
+                    let old_oid = pre_write_oid;
+                    tokio::spawn(async move {
+                        match mediagit_versioning::ReachabilityBitmap::generate(
+                            odb_for_bitmap.as_ref(),
+                            new_oid,
+                        )
+                        .await
+                        {
+                            Ok(bitmap) => match bitmap.serialize() {
+                                Ok(bytes) => {
+                                    let key = mediagit_versioning::bitmap_key(&new_oid);
+                                    if let Err(e) = odb_for_bitmap.storage().put(&key, &bytes).await
+                                    {
+                                        tracing::warn!(
+                                            "Failed to persist bitmap for '{}' ({}): {}",
+                                            ref_name,
+                                            new_oid,
+                                            e
+                                        );
+                                    } else if let Some(old_oid) = old_oid {
+                                        // Retention: prune the previous tip's bitmap now that
+                                        // the new tip's bitmap is safely persisted. Two refs
+                                        // pointing at the same tip share one bitmap key;
+                                        // deleting it when one ref moves off it is safe because
+                                        // bitmaps are pure speedup — a miss falls back to the
+                                        // BFS walk, and gc/next-push regenerates as needed.
+                                        // Steady state is ~one bitmap per ref; gc's
+                                        // regenerate_and_prune_bitmaps remains the backstop for
+                                        // orphans (deleted branches, forced moves).
+                                        if old_oid != new_oid {
+                                            let old_key = mediagit_versioning::bitmap_key(&old_oid);
+                                            if let Err(e) =
+                                                odb_for_bitmap.storage().delete(&old_key).await
+                                            {
+                                                tracing::warn!(
+                                                    "Failed to delete previous bitmap for '{}' ({}): {}",
+                                                    ref_name,
+                                                    old_oid,
+                                                    e
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => tracing::warn!(
+                                    "Failed to serialize bitmap for '{}' ({}): {}",
+                                    ref_name,
+                                    new_oid,
+                                    e
+                                ),
+                            },
+                            Err(e) => tracing::warn!(
+                                "Failed to generate bitmap for '{}' ({}): {}",
+                                ref_name,
+                                new_oid,
+                                e
+                            ),
+                        }
+                    });
+                }
+
                 results.push(RefUpdateResult {
                     ref_name: update.name,
                     success: true,
@@ -741,6 +853,19 @@ pub struct CompletePackRequest {
     pub manifest: Vec<ManifestEntry>,
 }
 
+/// Pack-manifest parity check (M1): returns the first manifest entry (if
+/// any) whose `[offset, offset+length)` range exceeds `pack_size`. Pulled out
+/// as a pure function so the boundary logic is unit-testable without an HTTP
+/// harness or a live storage backend.
+fn first_entry_exceeding_pack_size(
+    manifest: &[ManifestEntry],
+    pack_size: u64,
+) -> Option<&ManifestEntry> {
+    manifest
+        .iter()
+        .find(|entry| entry.offset.saturating_add(entry.length as u64) > pack_size)
+}
+
 /// POST /{repo}/packs/complete — Register a finished cloud pack and its chunk manifest.
 ///
 /// Server HEADs the pack object before accepting the manifest so a crash between
@@ -761,8 +886,9 @@ pub async fn complete_pack(
     let storage = get_or_init_storage(&state, &repo_path).await?;
 
     let pack_key = format!("packs/{}", req.pack_oid);
+    let pack_size: u64;
     match storage.head(&pack_key).await {
-        Ok(Some(_)) => {}
+        Ok(Some(size)) => pack_size = size,
         Ok(None) => {
             tracing::warn!(
                 repo = %repo,
@@ -783,7 +909,7 @@ pub async fn complete_pack(
             );
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             match storage.head(&pack_key).await {
-                Ok(Some(_)) => {}
+                Ok(Some(size)) => pack_size = size,
                 _ => {
                     tracing::error!(
                         repo = %repo,
@@ -794,6 +920,25 @@ pub async fn complete_pack(
                 }
             }
         }
+    }
+
+    // Pack-manifest parity check: every manifest entry's byte range must fit
+    // within the pack object's actual (HEAD-reported) size. A manifest
+    // claiming ranges beyond the real pack — from a truncated upload, a
+    // client bug, or a malicious request — would silently corrupt every
+    // future chunk read through this pack, so it's rejected here rather
+    // than accepted and discovered later at read time.
+    if let Some(bad) = first_entry_exceeding_pack_size(&req.manifest, pack_size) {
+        tracing::error!(
+            repo = %repo,
+            pack = %req.pack_oid,
+            pack_size,
+            chunk = %bad.chunk_oid,
+            offset = bad.offset,
+            length = bad.length,
+            "complete_pack: manifest entry range exceeds pack size (parity check failed)"
+        );
+        return Err(StatusCode::BAD_REQUEST);
     }
 
     // Persist to JSONL under <repo>/.mediagit/packs/<shard>/<pack_oid>.jsonl
@@ -981,4 +1126,50 @@ pub async fn rebuild_pack_index(
     Ok(Json(RebuildIndexResponse {
         indexed_chunks: count,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(chunk_oid: &str, offset: u64, length: u32) -> ManifestEntry {
+        ManifestEntry {
+            chunk_oid: chunk_oid.to_string(),
+            offset,
+            length,
+            compressed_hash: None,
+        }
+    }
+
+    #[test]
+    fn parity_check_passes_when_all_entries_fit() {
+        let manifest = vec![entry("a", 0, 100), entry("b", 100, 200)];
+        assert!(first_entry_exceeding_pack_size(&manifest, 300).is_none());
+    }
+
+    #[test]
+    fn parity_check_passes_at_exact_boundary() {
+        // offset + length == pack_size is valid (exclusive upper bound).
+        let manifest = vec![entry("a", 0, 300)];
+        assert!(first_entry_exceeding_pack_size(&manifest, 300).is_none());
+    }
+
+    #[test]
+    fn parity_check_flags_entry_exceeding_pack_size() {
+        let manifest = vec![entry("a", 0, 100), entry("b", 100, 201)];
+        let bad = first_entry_exceeding_pack_size(&manifest, 300).unwrap();
+        assert_eq!(bad.chunk_oid, "b");
+    }
+
+    #[test]
+    fn parity_check_handles_offset_overflow_without_panicking() {
+        let manifest = vec![entry("a", u64::MAX - 1, 100)];
+        let bad = first_entry_exceeding_pack_size(&manifest, 300).unwrap();
+        assert_eq!(bad.chunk_oid, "a");
+    }
+
+    #[test]
+    fn parity_check_empty_manifest_passes() {
+        assert!(first_entry_exceeding_pack_size(&[], 0).is_none());
+    }
 }

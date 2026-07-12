@@ -39,6 +39,8 @@ num_cpus = "1.16"
 async-channel = "2.3"
 zstd.workspace = true
 tempfile = "3.13"
+roaring = "0.11.4"
+ignore = "0.4"  # gitignore-style pattern matching, reused for sparse-checkout pattern mode
 
 [dev-dependencies]
 proptest.workspace = true

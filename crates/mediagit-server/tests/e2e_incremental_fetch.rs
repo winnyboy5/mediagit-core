@@ -52,6 +52,51 @@ async fn open_odb(mediagit_dir: &std::path::Path) -> ObjectDatabase {
     ObjectDatabase::new(storage, 100)
 }
 
+/// Like `open_odb`, but for repos that will be *served* by `start_test_server`:
+/// the production server wraps its storage backend in `NamespacedBackend`
+/// (layout v2), namespaced by the sanitized repo-directory basename (these
+/// test repos carry no config.toml, so the server falls back to that
+/// default — see `mediagit-server/src/handlers/mod.rs::resolve_repo_namespace`).
+/// Seeding data through a *raw* `LocalBackend` here would write objects at a
+/// different physical path than the server later reads them from.
+async fn open_server_odb(repo_root: &std::path::Path) -> ObjectDatabase {
+    let mediagit_dir = repo_root.join(".mediagit");
+    let inner: Arc<dyn StorageBackend> = Arc::new(LocalBackend::new(&mediagit_dir).await.unwrap());
+    let ns = mediagit_storage::sanitize_namespace(
+        &repo_root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    );
+    let namespaced = mediagit_storage::NamespacedBackend::new(inner, ns).unwrap();
+    // Namespace-collision guard (M2): persist repo_id via config.toml before
+    // the marker, so the server's later `build_storage_backend` resolves the
+    // same repo_id instead of generating a different one and hard-erroring.
+    // Reuse an existing repo_id if already present (this helper may be
+    // called more than once against the same repo_root).
+    let mut config = mediagit_config::Config::load(repo_root).await.unwrap();
+    let repo_id = match &config.repo_id {
+        Some(id) if !id.trim().is_empty() => id.clone(),
+        _ => {
+            let id = mediagit_storage::generate_repo_id();
+            config.repo_id = Some(id.clone());
+            config.save(repo_root).unwrap();
+            id
+        }
+    };
+    // Write the LAYOUT marker while the store is still empty — see
+    // `e2e_push_pull.rs::open_storage` for why this is required.
+    mediagit_storage::check_or_write_layout_marker(
+        &namespaced,
+        mediagit_config::CURRENT_LAYOUT_VERSION,
+        &repo_id,
+    )
+    .await
+    .unwrap();
+    let storage: Arc<dyn StorageBackend> = Arc::new(namespaced);
+    ObjectDatabase::new(storage, 100)
+}
+
 /// Create a commit with a new blob and single-file tree on top of `parent`.
 /// Returns `(commit_oid, tree_oid, blob_oid)`.
 async fn commit_with_file(
@@ -98,7 +143,7 @@ async fn incremental_fetch_sends_only_delta() {
         .await
         .unwrap();
 
-    let server_odb = open_odb(&server_mediagit).await;
+    let server_odb = open_server_odb(&server_repo).await;
     let (c1, t1, b1) = commit_with_file(&server_odb, b"v1", "a.txt", None).await;
 
     let refdb = RefDatabase::new(server_mediagit.clone());
@@ -206,7 +251,7 @@ async fn unknown_have_oids_do_not_break_fetch() {
         .await
         .unwrap();
 
-    let server_odb = open_odb(&server_mediagit).await;
+    let server_odb = open_server_odb(&server_repo).await;
     let (c1, _t1, _b1) = commit_with_file(&server_odb, b"v1", "a.txt", None).await;
     RefDatabase::new(server_mediagit.clone())
         .write(&Ref::new_direct("refs/heads/main".to_string(), c1))

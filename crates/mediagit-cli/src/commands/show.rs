@@ -15,7 +15,7 @@ use super::super::repo::{create_storage_backend, find_repo_root};
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
-use mediagit_versioning::{resolve_revision, Commit, ObjectDatabase, Oid, RefDatabase, Tree};
+use mediagit_versioning::{resolve_revision, Commit, ObjectDatabase, Oid, RefDatabase, Tag, Tree};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -177,8 +177,36 @@ impl ShowCmd {
                     println!();
                 }
             }
+            Err(_) if Tag::deserialize(&data).is_ok() => {
+                let tag = Tag::deserialize(&data).expect("checked Ok above");
+                println!(
+                    "{} {} ({})",
+                    style("tag").yellow().bold(),
+                    style(&tag.name).yellow(),
+                    oid
+                );
+                println!("Tagger: {} <{}>", tag.tagger.name, tag.tagger.email);
+                println!("Date:   {}", tag.tagger.timestamp);
+                println!();
+                for line in tag.message.lines() {
+                    println!("    {}", line);
+                }
+                println!();
+                println!(
+                    "{} {} {}",
+                    style("target").cyan().bold(),
+                    tag.target_type,
+                    style(&tag.target).yellow()
+                );
+                match &tag.signature {
+                    Some(_) => {
+                        println!("Signature: present (use `mediagit tag verify` to check it)")
+                    }
+                    None => println!("Signature: none (unsigned)"),
+                }
+            }
             Err(_) => {
-                // Not a commit, show raw object info
+                // Not a commit or tag, show raw object info
                 println!("{} {}", style("object").cyan().bold(), style(&oid).yellow());
                 println!("Size: {} bytes", data.len());
 

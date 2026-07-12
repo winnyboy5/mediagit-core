@@ -1716,42 +1716,59 @@ impl ObjectDatabase {
                 tokio::fs::create_dir_all(parent).await?;
             }
 
-            // Open file for streaming write
-            let mut file = tokio::fs::File::create(path).await?;
+            // Open a sibling tmp file for streaming write; only renamed into
+            // place (via `finalize_atomic_write`) once every chunk has been
+            // verified and written. A crash or error mid-stream leaves at
+            // worst a stale `.mgtmp`, never a truncated file at `path`.
+            let tmp_path = atomic_tmp_path(path)?;
+            let mut file = tokio::fs::File::create(&tmp_path).await?;
             let mut bytes_written = 0u64;
 
-            for chunk_ref in &manifest.chunks {
-                // Use get_chunk() which handles both full and delta-encoded chunks
-                let decompressed = self.get_chunk(&chunk_ref.id).await.map_err(|e| {
-                    anyhow::anyhow!("Failed to read chunk {}: {}", chunk_ref.id.to_hex(), e)
-                })?;
+            let write_result: anyhow::Result<()> = async {
+                for chunk_ref in &manifest.chunks {
+                    // Use get_chunk() which handles both full and delta-encoded chunks
+                    let decompressed = self.get_chunk(&chunk_ref.id).await.map_err(|e| {
+                        anyhow::anyhow!("Failed to read chunk {}: {}", chunk_ref.id.to_hex(), e)
+                    })?;
 
-                // Verify chunk integrity (hash + size)
-                let computed_chunk_oid = Oid::hash(&decompressed);
-                if computed_chunk_oid != chunk_ref.id {
-                    anyhow::bail!(
-                        "Chunk integrity check failed for {}: expected {}, computed {}",
-                        chunk_ref.id.to_hex(),
-                        chunk_ref.id,
-                        computed_chunk_oid
-                    );
+                    // Verify chunk integrity (hash + size)
+                    let computed_chunk_oid = Oid::hash(&decompressed);
+                    if computed_chunk_oid != chunk_ref.id {
+                        anyhow::bail!(
+                            "Chunk integrity check failed for {}: expected {}, computed {}",
+                            chunk_ref.id.to_hex(),
+                            chunk_ref.id,
+                            computed_chunk_oid
+                        );
+                    }
+
+                    if decompressed.len() != chunk_ref.size {
+                        anyhow::bail!(
+                            "Chunk size mismatch for {}: expected {}, got {}",
+                            chunk_ref.id.to_hex(),
+                            chunk_ref.size,
+                            decompressed.len()
+                        );
+                    }
+
+                    // Stream to file (chunk is dropped after write)
+                    file.write_all(&decompressed).await?;
+                    bytes_written += decompressed.len() as u64;
                 }
 
-                if decompressed.len() != chunk_ref.size {
-                    anyhow::bail!(
-                        "Chunk size mismatch for {}: expected {}, got {}",
-                        chunk_ref.id.to_hex(),
-                        chunk_ref.size,
-                        decompressed.len()
-                    );
-                }
-
-                // Stream to file (chunk is dropped after write)
-                file.write_all(&decompressed).await?;
-                bytes_written += decompressed.len() as u64;
+                file.flush().await?;
+                Ok(())
             }
+            .await;
 
-            file.flush().await?;
+            if let Err(e) = write_result {
+                drop(file);
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return Err(e);
+            }
+            drop(file);
+
+            finalize_atomic_write(&tmp_path, path).await?;
 
             info!(
                 oid = %oid,
@@ -1770,7 +1787,12 @@ impl ObjectDatabase {
                 tokio::fs::create_dir_all(parent).await?;
             }
 
-            tokio::fs::write(path, &data).await?;
+            let tmp_path = atomic_tmp_path(path)?;
+            if let Err(e) = tokio::fs::write(&tmp_path, &data).await {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return Err(e.into());
+            }
+            finalize_atomic_write(&tmp_path, path).await?;
             Ok(data.len() as u64)
         }
     }
@@ -2428,5 +2450,150 @@ impl ObjectDatabase {
             )
         })?;
         Ok(Some((base_id, delta_bytes)))
+    }
+}
+
+/// Compute the sibling `.mgtmp` temp path used by `read_to_file` for an
+/// atomic write. Appends to the *full* file name rather than using
+/// `Path::with_extension`, which replaces the extension and would collide
+/// differently-named files sharing a stem (e.g. `a.psd` and `a.txt` would
+/// both become `a.mgtmp`). Same directory as `path`, so the eventual
+/// rename is a same-filesystem, atomic operation.
+fn atomic_tmp_path(path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    let file_name = path.file_name().ok_or_else(|| {
+        anyhow::anyhow!("read_to_file: path has no file name: {}", path.display())
+    })?;
+    let mut tmp_name = file_name.to_os_string();
+    tmp_name.push(".mgtmp");
+    Ok(path.with_file_name(tmp_name))
+}
+
+/// Rename `tmp_path` into place at `path`. Tolerates a transient
+/// Windows rename failure (e.g. destination locked by an AV scan or a
+/// concurrent reader) with one remove-destination-and-retry, mirroring the
+/// spirit of `LocalBackend`'s CAS rename retry. On any final failure,
+/// best-effort removes `tmp_path` before returning the error — a failed
+/// `read_to_file` never leaves the tmp file behind.
+async fn finalize_atomic_write(
+    tmp_path: &std::path::Path,
+    path: &std::path::Path,
+) -> anyhow::Result<()> {
+    if let Err(first_err) = tokio::fs::rename(tmp_path, path).await {
+        let _ = tokio::fs::remove_file(path).await;
+        if let Err(retry_err) = tokio::fs::rename(tmp_path, path).await {
+            let _ = tokio::fs::remove_file(tmp_path).await;
+            return Err(anyhow::anyhow!(
+                "Failed to rename {} to {}: {} (retry: {})",
+                tmp_path.display(),
+                path.display(),
+                first_err,
+                retry_err
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod read_to_file_atomicity_tests {
+    use super::*;
+    use crate::chunking::ChunkStrategy;
+    use mediagit_storage::mock::MockBackend;
+    use std::sync::Arc as StdArc;
+
+    /// F1: a chunked `read_to_file` that fails partway (missing chunk) must
+    /// leave no partial content at the final path and no stray `.mgtmp`
+    /// sibling — the write goes to a tmp file first and is only renamed
+    /// into place after every chunk is verified.
+    #[tokio::test]
+    async fn read_to_file_error_leaves_no_partial_final() {
+        let storage = StdArc::new(MockBackend::new());
+        let odb = ObjectDatabase::with_optimizations(
+            storage.clone(),
+            100,
+            Some(ChunkStrategy::Fixed { size: 256 * 1024 }),
+            false,
+            0,
+        );
+
+        // 2MB of varied content so it chunks into several pieces.
+        let data: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let oid = odb
+            .write_chunked(ObjectType::Blob, &data, "big.bin")
+            .await
+            .expect("write_chunked should succeed");
+
+        // Confirm this actually went through the chunked path.
+        let manifest_key = format!("manifests/{}", oid.to_hex());
+        assert!(
+            storage.exists(&manifest_key).await.unwrap(),
+            "test setup expected a chunked object"
+        );
+
+        // Delete one chunk so reconstruction fails partway through.
+        let manifest_data = storage.get(&manifest_key).await.unwrap();
+        let manifest: crate::chunking::ChunkManifest =
+            crate::format::deserialize(&manifest_data).unwrap();
+        let victim_chunk = &manifest.chunks[manifest.chunks.len() / 2];
+        storage
+            .delete(&format!("chunks/{}", victim_chunk.id.to_hex()))
+            .await
+            .unwrap();
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let dest = tmp_dir.path().join("existing.bin");
+        std::fs::write(&dest, b"OLD CONTENT").unwrap();
+
+        let result = odb.read_to_file(&oid, &dest).await;
+        assert!(result.is_err(), "read_to_file must fail: chunk missing");
+
+        // Pre-existing content at the final path must be untouched.
+        let on_disk = std::fs::read(&dest).unwrap();
+        assert_eq!(
+            on_disk, b"OLD CONTENT",
+            "final path must retain its old content after a failed read_to_file"
+        );
+
+        // No stray .mgtmp sibling.
+        for entry in std::fs::read_dir(tmp_dir.path()).unwrap() {
+            let path = entry.unwrap().path();
+            assert!(
+                !path.to_string_lossy().ends_with(".mgtmp"),
+                "stray tmp file left behind: {}",
+                path.display()
+            );
+        }
+    }
+
+    /// F1: `read_to_file` for a non-chunked object must atomically replace
+    /// an existing destination file's content (exercises Windows
+    /// rename-replace via the tmp-file-then-rename path).
+    #[tokio::test]
+    async fn read_to_file_overwrites_existing_dest() {
+        let storage = StdArc::new(MockBackend::new());
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let data = b"brand new content".to_vec();
+        let oid = odb.write(ObjectType::Blob, &data).await.unwrap();
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let dest = tmp_dir.path().join("existing.txt");
+        std::fs::write(&dest, b"stale content that is longer than the new content").unwrap();
+
+        let bytes_written = odb.read_to_file(&oid, &dest).await.unwrap();
+        assert_eq!(bytes_written, data.len() as u64);
+
+        let on_disk = std::fs::read(&dest).unwrap();
+        assert_eq!(on_disk, data);
+
+        // No stray .mgtmp sibling after a successful write.
+        for entry in std::fs::read_dir(tmp_dir.path()).unwrap() {
+            let path = entry.unwrap().path();
+            assert!(
+                !path.to_string_lossy().ends_with(".mgtmp"),
+                "stray tmp file left behind: {}",
+                path.display()
+            );
+        }
     }
 }

@@ -17,6 +17,43 @@ Tags mark specific commits with meaningful names (e.g., release versions,
 approved milestone snapshots). MediaGit stores tags as refs under
 `.mediagit/refs/tags/`.
 
+There are two kinds of tag:
+
+- **Lightweight** (`tag create <NAME>`) — the ref points directly at a commit.
+- **Annotated** (`tag create -a -m <MSG>` or any of `-m`/`--tagger`/`--email`)
+  — the ref points at a real `Tag` object in the object database: a target
+  OID, tagger, message, and (optionally) a signature. This replaces the old
+  `{tag_ref}.meta` sidecar file — annotated tags are now first-class objects
+  that push/clone/fsck/gc all understand, not a ref plus a side file.
+
+## Signing (`MEDIAGIT_SIGN`)
+
+Annotated tags can be signed with your **existing OpenSSH ed25519 key**
+(`~/.ssh/id_ed25519` — override with `MEDIAGIT_SIGN_KEY`). This is opt-in
+(off by default) and reuses the SSH key you already manage for familiar
+key-handling UX — but the signature itself is **MediaGit-native**: an
+OpenSSH-armored `SshSig` blob stored inside the Tag object. It is not git's
+tag-signing format, and git interoperability is not a design goal —
+MediaGit is a standalone VCS.
+
+```bash
+MEDIAGIT_SIGN=1 mediagit tag create v1.0 -m "Q3 release"
+mediagit tag verify v1.0
+```
+
+`tag verify` reports one of: `valid signature, signed by <fingerprint>`,
+`INVALID signature — contents do not match signature` (exits non-zero), or
+`unsigned`. Verification checks the signature against the signer's public
+key **embedded in the signature itself**, so it works on any clone with no
+local key configured. This is a trust-on-first-use model: "valid" proves
+the tag contents are exactly what the reported key signed — whether you
+trust the person holding that key is your call (MediaGit keeps no trust
+store; compare the fingerprint out of band). Passphrase-protected keys are
+detected and rejected with a clear error message; passphrase prompting is
+not implemented yet — use an unencrypted key or point `MEDIAGIT_SIGN_KEY`
+at one. MediaGit does not warn about lax key-file permissions the way ssh
+does — protect your key with filesystem permissions.
+
 ## Subcommands
 
 ### `create`
@@ -66,6 +103,16 @@ Show tag details.
 mediagit tag show <NAME>
 ```
 
+### `verify`
+
+Verify a tag reference, and — for annotated tags — its signature against
+the signer key embedded in the signature (no local key needed; see the
+trust-model note above). An INVALID signature exits non-zero.
+
+```bash
+mediagit tag verify <NAME>
+```
+
 ## Examples
 
 ### Create a lightweight tag at HEAD
@@ -111,13 +158,23 @@ v2.0
 
 ```bash
 $ mediagit tag show v2.0
-tag v2.0
-Tagger: Alice Smith <alice@example.com>
-Date:   Mon Jun 09 2025 14:30:00
+Tag:     v2.0
+Commit:  def5678...
+Type:    annotated
 
+Message:
 Q2 2025 approved asset set
 
-commit def5678...
+Tagger:  Alice Smith <alice@example.com>
+Date:    2025-06-09 14:30:00 UTC
+Signature: none (unsigned)
+```
+
+### Verify a signed tag
+
+```bash
+$ mediagit tag verify v2.0
+Tag 'v2.0': valid signature, signed by SHA256:mVXBazcXfPRnLnDLNXkycrLLLQtu6efGZzMg9C6JAZI (contents intact; key ownership not verified)
 ```
 
 ### Delete a tag

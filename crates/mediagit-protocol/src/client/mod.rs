@@ -13,7 +13,8 @@
 
 use anyhow::{Context, Result};
 use mediagit_versioning::{
-    chunking::ChunkManifest, Commit, FileMode, ObjectDatabase, ObjectType, Oid, PackWriter, Tree,
+    chunking::ChunkManifest, Commit, FileMode, ObjectDatabase, ObjectType, Oid, PackWriter, Tag,
+    Tree,
 };
 use std::collections::{HashSet, VecDeque};
 use std::sync::{
@@ -92,10 +93,87 @@ pub struct PushProgress {
     pub message: String,
 }
 
+/// Client credentials for authenticating requests to a MediaGit server's
+/// control-plane endpoints (`self.base_url`-relative: `/info/refs`,
+/// `/objects/*`, `/chunks/*`, ...). Never sent to direct/presigned
+/// cloud-storage URLs (S3/Azure/GCS/MinIO) — those always go out over a
+/// separately-constructed `direct_client` that carries no default headers,
+/// so baking credentials into `ProtocolClient`'s own `reqwest::Client`
+/// cannot leak them to a third-party bucket.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Credentials {
+    /// No credentials — no `Authorization`/`X-Api-Key` header is sent.
+    /// Talking to an authless server with `None` behaves exactly as before
+    /// this feature existed (the authless-regression guard).
+    #[default]
+    None,
+    /// JWT bearer token, sent as `Authorization: Bearer <token>`.
+    Bearer(String),
+    /// API key, sent as `X-Api-Key: <key>`.
+    ApiKey(String),
+}
+
+impl Credentials {
+    fn header(&self) -> Option<(&'static str, String)> {
+        match self {
+            Credentials::None => None,
+            Credentials::Bearer(token) => Some(("authorization", format!("Bearer {token}"))),
+            Credentials::ApiKey(key) => Some(("x-api-key", key.clone())),
+        }
+    }
+}
+
+/// Build the control-plane `reqwest::Client` with the given credentials
+/// baked in as a default header (present on every request sent through this
+/// client instance). Shared by `ProtocolClient::new` and `with_credentials`
+/// so both construct the client identically apart from the header.
+fn build_control_plane_client(creds: &Credentials) -> reqwest::Client {
+    let pool_max = http_pool_max();
+    let mut builder = reqwest::Client::builder()
+        // HTTP/2 is used for control-plane traffic (manifest, URL-mint,
+        // ref negotiation). Multiplexing many small requests on one TLS
+        // connection avoids per-request handshake cost. Data-plane
+        // presigned PUT/GET uses separate direct_client (HTTP/1.1).
+        .pool_max_idle_per_host(pool_max)
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .tcp_keepalive(std::time::Duration::from_secs(30))
+        .tcp_nodelay(true)
+        .http2_adaptive_window(true)
+        // Larger HTTP/2 windows reduce flow-control stalls when bulk
+        // media chunks ride concurrent streams over one connection.
+        .http2_initial_stream_window_size(8 * 1024 * 1024)
+        .http2_initial_connection_window_size(32 * 1024 * 1024)
+        .http2_keep_alive_interval(Some(std::time::Duration::from_secs(20)))
+        // The MediaGit control protocol never legitimately redirects; following
+        // one would re-send x-api-key cross-host (reqwest strips Authorization
+        // on cross-host redirects but NOT custom headers).
+        .redirect(reqwest::redirect::Policy::none());
+    // No per-request timeout: large chunked-blob PUTs to Azure/S3
+    // (single object up to several hundred MB) can legitimately run
+    // for minutes — the server side ships block-by-block to cloud.
+    // tcp_keepalive (30s) already detects truly dead peers; a hard
+    // request ceiling here causes spurious "error sending request"
+    // failures on healthy slow uploads. See dev-tests/azure-manual-
+    // test for the regression that motivated removing this.
+    if let Some((name, value)) = creds.header() {
+        if let Ok(header_value) = reqwest::header::HeaderValue::from_str(&value) {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(reqwest::header::HeaderName::from_static(name), header_value);
+            builder = builder.default_headers(headers);
+        }
+    }
+    builder.build().unwrap_or_else(|_| reqwest::Client::new())
+}
+
 /// HTTP client for the MediaGit protocol
 pub struct ProtocolClient {
     base_url: String,
     client: reqwest::Client,
+    /// Credentials attached to every control-plane request via `client`'s
+    /// default headers (set in `build_control_plane_client`). Stored so
+    /// `with_credentials` can rebuild `client` and so callers can inspect
+    /// what's configured.
+    credentials: Credentials,
     /// Optional override for parallel chunk-upload fan-out. Takes precedence
     /// over the internal default (32) but is itself overridden by the
     /// `MEDIAGIT_UPLOAD_CONCURRENCY` env var. Set via `with_concurrent_uploads`.
@@ -118,6 +196,7 @@ pub(crate) fn http_pool_max() -> usize {
         .unwrap_or(64)
 }
 
+pub(crate) mod browse;
 pub(crate) mod packs;
 pub(crate) mod pull;
 pub(crate) mod push;
@@ -129,38 +208,31 @@ impl ProtocolClient {
     /// # Arguments
     /// * `base_url` - Base URL of the MediaGit server (e.g., "http://localhost:3000/repo")
     pub fn new(base_url: impl Into<String>) -> Self {
-        // Control-plane pool size: idle TLS connections to mediagit-server.
-        // Override via MEDIAGIT_HTTP_POOL_MAX (see http_pool_max()).
-        let pool_max = http_pool_max();
+        let credentials = Credentials::None;
         Self {
             base_url: base_url.into(),
+            client: build_control_plane_client(&credentials),
+            credentials,
             concurrent_uploads: None,
             concurrent_downloads: None,
-            client: reqwest::Client::builder()
-                // HTTP/2 is used for control-plane traffic (manifest, URL-mint,
-                // ref negotiation). Multiplexing many small requests on one TLS
-                // connection avoids per-request handshake cost. Data-plane
-                // presigned PUT/GET uses separate direct_client (HTTP/1.1).
-                .pool_max_idle_per_host(pool_max)
-                .pool_idle_timeout(std::time::Duration::from_secs(90))
-                .tcp_keepalive(std::time::Duration::from_secs(30))
-                .tcp_nodelay(true)
-                .http2_adaptive_window(true)
-                // Larger HTTP/2 windows reduce flow-control stalls when bulk
-                // media chunks ride concurrent streams over one connection.
-                .http2_initial_stream_window_size(8 * 1024 * 1024)
-                .http2_initial_connection_window_size(32 * 1024 * 1024)
-                .http2_keep_alive_interval(Some(std::time::Duration::from_secs(20)))
-                // No per-request timeout: large chunked-blob PUTs to Azure/S3
-                // (single object up to several hundred MB) can legitimately run
-                // for minutes — the server side ships block-by-block to cloud.
-                // tcp_keepalive (30s) already detects truly dead peers; a hard
-                // request ceiling here causes spurious "error sending request"
-                // failures on healthy slow uploads. See dev-tests/azure-manual-
-                // test for the regression that motivated removing this.
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
         }
+    }
+
+    /// Attach credentials, sent as a default header (`Authorization: Bearer
+    /// <t>` or `X-Api-Key: <k>`) on every control-plane request this client
+    /// makes. Rebuilds the internal HTTP client with the same pool/timeout
+    /// settings as `new` — direct/presigned cloud-storage requests use their
+    /// own separately-built client and never see this header regardless.
+    /// `Credentials::None` (the default) attaches no header at all.
+    pub fn with_credentials(mut self, credentials: Credentials) -> Self {
+        self.client = build_control_plane_client(&credentials);
+        self.credentials = credentials;
+        self
+    }
+
+    /// The credentials currently configured on this client.
+    pub fn credentials(&self) -> &Credentials {
+        &self.credentials
     }
 
     /// Override the parallel chunk-upload fan-out used by
@@ -190,6 +262,7 @@ impl ProtocolClient {
         Self {
             base_url: self.base_url.clone(),
             client: self.client.clone(),
+            credentials: self.credentials.clone(),
             concurrent_uploads: self.concurrent_uploads,
             concurrent_downloads: Some(n),
         }
@@ -731,6 +804,160 @@ mod tests {
     fn test_client_creation() {
         let client = ProtocolClient::new("http://localhost:3000/test-repo");
         assert_eq!(client.base_url, "http://localhost:3000/test-repo");
+    }
+
+    #[test]
+    fn new_client_has_no_credentials() {
+        let client = ProtocolClient::new("http://localhost:3000/test-repo");
+        assert_eq!(client.credentials(), &Credentials::None);
+    }
+
+    #[test]
+    fn with_credentials_updates_stored_credentials() {
+        let client = ProtocolClient::new("http://localhost:3000/test-repo")
+            .with_credentials(Credentials::Bearer("tok".to_string()));
+        assert_eq!(
+            client.credentials(),
+            &Credentials::Bearer("tok".to_string())
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Header-attachment tests: a minimal raw-HTTP TCP responder captures
+    // whatever headers arrive on the wire, so these prove the header is
+    // actually sent (or actually absent), not just stored in a struct
+    // field. `build_control_plane_client` bakes the header into
+    // `self.client`'s default headers, so it rides every request that
+    // client makes uniformly (get_refs, update_refs, download_chunk, ...)
+    // — these tests exercise a representative sample of control-plane
+    // call sites, not an exhaustive list.
+    // ------------------------------------------------------------------
+
+    /// Start a raw TCP responder that captures the request headers of the
+    /// first connection into `captured` (lowercased names) and replies with
+    /// a fixed 200 JSON body sufficient for `RefsResponse`.
+    async fn start_header_capturing_server() -> (
+        String,
+        std::sync::Arc<tokio::sync::Mutex<Option<Vec<(String, String)>>>>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let captured = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let captured_clone = captured.clone();
+
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                // Read until we see the blank-line header terminator.
+                loop {
+                    let n = socket.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let text = String::from_utf8_lossy(&buf);
+                let headers: Vec<(String, String)> = text
+                    .lines()
+                    .skip(1) // request line
+                    .take_while(|l| !l.is_empty())
+                    .filter_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        Some((k.trim().to_lowercase(), v.trim().to_string()))
+                    })
+                    .collect();
+                *captured_clone.lock().await = Some(headers);
+
+                let body = r#"{"refs":[],"capabilities":[]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        (format!("http://{addr}/test-repo"), captured)
+    }
+
+    #[tokio::test]
+    async fn bearer_credentials_attach_authorization_header() {
+        let (url, captured) = start_header_capturing_server().await;
+        let client =
+            ProtocolClient::new(url).with_credentials(Credentials::Bearer("s3cr3t".to_string()));
+        let _ = client.get_refs().await;
+        let headers = captured.lock().await.clone().expect("request was received");
+        assert_eq!(
+            headers
+                .iter()
+                .find(|(k, _)| k == "authorization")
+                .map(|(_, v)| v.as_str()),
+            Some("Bearer s3cr3t")
+        );
+        assert!(!headers.iter().any(|(k, _)| k == "x-api-key"));
+    }
+
+    #[tokio::test]
+    async fn api_key_credentials_attach_x_api_key_header() {
+        let (url, captured) = start_header_capturing_server().await;
+        let client =
+            ProtocolClient::new(url).with_credentials(Credentials::ApiKey("mykey".to_string()));
+        let _ = client.get_refs().await;
+        let headers = captured.lock().await.clone().expect("request was received");
+        assert_eq!(
+            headers
+                .iter()
+                .find(|(k, _)| k == "x-api-key")
+                .map(|(_, v)| v.as_str()),
+            Some("mykey")
+        );
+        assert!(!headers.iter().any(|(k, _)| k == "authorization"));
+    }
+
+    /// Authless regression guard: no credentials configured → no
+    /// Authorization/X-Api-Key header at all, exactly as before this
+    /// feature existed. An old/authless server sees nothing new.
+    #[tokio::test]
+    async fn no_credentials_attaches_no_auth_header() {
+        let (url, captured) = start_header_capturing_server().await;
+        let client = ProtocolClient::new(url); // Credentials::None by default
+        let _ = client.get_refs().await;
+        let headers = captured.lock().await.clone().expect("request was received");
+        assert!(!headers.iter().any(|(k, _)| k == "authorization"));
+        assert!(!headers.iter().any(|(k, _)| k == "x-api-key"));
+    }
+
+    #[tokio::test]
+    async fn bearer_credentials_attach_header_on_update_refs_too() {
+        // Second representative control-plane call site (POST, not GET),
+        // confirming the header rides via default_headers regardless of
+        // which ProtocolClient method is used.
+        let (url, captured) = start_header_capturing_server().await;
+        let client =
+            ProtocolClient::new(url).with_credentials(Credentials::Bearer("tok2".to_string()));
+        let _ = client
+            .update_refs(crate::types::RefUpdateRequest {
+                updates: vec![],
+                force: false,
+            })
+            .await;
+        let headers = captured.lock().await.clone().expect("request was received");
+        assert_eq!(
+            headers
+                .iter()
+                .find(|(k, _)| k == "authorization")
+                .map(|(_, v)| v.as_str()),
+            Some("Bearer tok2")
+        );
     }
 
     // Additional integration tests would require a running server

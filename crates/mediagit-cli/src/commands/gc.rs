@@ -19,7 +19,8 @@ use console::style;
 use dialoguer::Confirm;
 use mediagit_storage::StorageBackend;
 use mediagit_versioning::{
-    BranchManager, ChunkManifest, Commit, FileMode, Index, Oid, RefDatabase, RefType, Tree,
+    BranchManager, ChunkManifest, Commit, FileMode, Index, ObjectType, Oid, RefDatabase, RefType,
+    Tag, Tree,
 };
 use std::collections::HashSet;
 use std::path::Path;
@@ -329,7 +330,37 @@ impl GarbageCollector {
         for tag_name in tags {
             if let Ok(tag_ref) = self.refdb.read(&format!("refs/tags/{}", tag_name)).await {
                 if let Some(oid) = tag_ref.oid {
-                    self.traverse_commit_chain(&oid, &mut reachable).await?;
+                    // `oid` is either a lightweight tag (points straight at a
+                    // commit) or an annotated tag (points at a Tag object).
+                    // Protect the ref target itself either way, then walk
+                    // THROUGH a Tag object to its target — otherwise a
+                    // commit reachable only via an annotated tag would be
+                    // collected as garbage.
+                    reachable.insert(oid);
+                    let tag_obj = match self.odb.read(&oid).await {
+                        Ok(data) => Tag::deserialize(&data).ok(),
+                        Err(_) => None,
+                    };
+                    match tag_obj {
+                        Some(tag) => match tag.target_type {
+                            ObjectType::Commit => {
+                                self.traverse_commit_chain(&tag.target, &mut reachable)
+                                    .await?;
+                            }
+                            ObjectType::Tree => {
+                                self.traverse_tree(&tag.target, &mut reachable).await?;
+                            }
+                            ObjectType::Blob | ObjectType::Tag => {
+                                // Leaf or tag-of-a-tag target: existence is
+                                // all gc protects for non-commit targets.
+                                reachable.insert(tag.target);
+                            }
+                        },
+                        None => {
+                            // Lightweight tag: oid IS the commit directly.
+                            self.traverse_commit_chain(&oid, &mut reachable).await?;
+                        }
+                    }
                 }
             }
         }
@@ -827,6 +858,75 @@ impl GarbageCollector {
         Ok((deleted, bytes_reclaimed))
     }
 
+    /// Bitmap maintenance (M3, #2b): regenerate the reachability bitmap for
+    /// every current branch tip, and prune bitmaps belonging to commits no
+    /// longer in `reachable`.
+    ///
+    /// Bitmaps are derived data (see `mediagit_versioning::bitmap`) — a
+    /// regeneration or prune failure here is never fatal to `gc`; callers
+    /// log and continue. The `bitmaps/` namespace is never touched by the
+    /// orphan sweeps above (they only match `chunks/`, `manifests/`,
+    /// `deltas/`, `chunk-deltas/` prefixes), so this is the one place gc
+    /// actively manages it.
+    ///
+    /// Returns (regenerated_count, pruned_count).
+    async fn regenerate_and_prune_bitmaps(
+        &self,
+        reachable: &HashSet<Oid>,
+    ) -> Result<(usize, usize)> {
+        let mut regenerated = 0usize;
+
+        let branches = self.branch_mgr.list().await?;
+        for branch in &branches {
+            match mediagit_versioning::ReachabilityBitmap::generate(&self.odb, branch.oid).await {
+                Ok(bitmap) => match bitmap.serialize() {
+                    Ok(bytes) => {
+                        let key = mediagit_versioning::bitmap_key(&branch.oid);
+                        if let Err(e) = self.storage.put(&key, &bytes).await {
+                            warn!(
+                                "Failed to persist bitmap for branch '{}': {}",
+                                branch.name, e
+                            );
+                        } else {
+                            regenerated += 1;
+                        }
+                    }
+                    Err(e) => warn!(
+                        "Failed to serialize bitmap for branch '{}': {}",
+                        branch.name, e
+                    ),
+                },
+                Err(e) => warn!(
+                    "Failed to regenerate bitmap for branch '{}': {}",
+                    branch.name, e
+                ),
+            }
+        }
+
+        let mut pruned = 0usize;
+        let all_bitmap_keys = self.storage.list_objects("bitmaps").await?;
+        for key in all_bitmap_keys {
+            let Some(hex) = key
+                .strip_prefix("bitmaps/")
+                .and_then(|s| s.strip_suffix(".bitmap"))
+            else {
+                continue;
+            };
+            let Ok(oid) = Oid::from_hex(hex) else {
+                continue;
+            };
+            if !reachable.contains(&oid) {
+                if let Err(e) = self.storage.delete(&key).await {
+                    warn!("Failed to prune orphaned bitmap {}: {}", key, e);
+                } else {
+                    pruned += 1;
+                }
+            }
+        }
+
+        Ok((regenerated, pruned))
+    }
+
     /// Delete orphaned manifests and chunks
     async fn delete_chunks_and_manifests(
         &self,
@@ -1236,9 +1336,13 @@ pub async fn run_gc(opts: &GcOptions) -> Result<()> {
             println!("\n{} Repacking loose objects...", style("→").cyan());
         }
 
-        // Create ODB for repack operation
+        // Create ODB for repack operation. Loose objects are written via
+        // `with_smart_compression` (zstd/brotli/zlib) by add/commit, so the
+        // repack reader must use the same compressor — `ObjectDatabase::new`
+        // is plain-zlib-only and fails to decompress every zstd/brotli loose
+        // object, silently packing 0 objects.
         use mediagit_versioning::ObjectDatabase;
-        let odb = ObjectDatabase::new(storage.clone(), 1000);
+        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
 
         match odb.repack(opts.max_pack_size, !opts.dry_run).await {
             Ok(repack_stats) => {
@@ -1267,6 +1371,31 @@ pub async fn run_gc(opts: &GcOptions) -> Result<()> {
                     println!("{} Repack failed: {}", style("✗").red(), e);
                 }
                 stats.errors.push(format!("Repack error: {}", e));
+            }
+        }
+    }
+
+    // Step 8: Bitmap maintenance (M3, #2b) — regenerate branch-tip bitmaps,
+    // prune bitmaps for commits no longer reachable. Derived data: skipped
+    // entirely under --dry-run (writes nothing) or when MEDIAGIT_BITMAP
+    // disables it. A failure here never fails the gc run.
+    if !opts.dry_run && mediagit_versioning::bitmap_enabled() {
+        if !opts.quiet {
+            println!("\n{} Updating reachability bitmaps...", style("→").cyan());
+        }
+        match gc.regenerate_and_prune_bitmaps(&reachable).await {
+            Ok((regenerated, pruned)) => {
+                if !opts.quiet && (regenerated > 0 || pruned > 0) {
+                    println!(
+                        "{} Regenerated {} bitmap(s), pruned {} orphaned bitmap(s)",
+                        style("✓").green(),
+                        regenerated,
+                        pruned
+                    );
+                }
+            }
+            Err(e) => {
+                warn!("Bitmap maintenance failed: {}", e);
             }
         }
     }

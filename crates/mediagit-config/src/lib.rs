@@ -55,7 +55,9 @@ pub mod validation;
 // Re-export commonly used items
 pub use error::{ConfigError, ConfigResult};
 pub use loader::{ConfigFormat, ConfigLoader};
-pub use migration::{ConfigMigration, MigrationManager, MigrationV0ToV1, CONFIG_VERSION};
+pub use migration::{
+    ConfigMigration, MigrationManager, MigrationV0ToV1, MigrationV1ToV2, CONFIG_VERSION,
+};
 pub use schema::*;
 pub use validation::Validator;
 

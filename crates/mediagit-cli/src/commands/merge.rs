@@ -594,3 +594,128 @@ impl MergeCmd {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::utils::test_support::{init_repo_with_commit, REPO_ENV_LOCK};
+    use clap::Parser;
+    use tempfile::TempDir;
+
+    fn parse(args: &[&str]) -> Result<MergeCmd, clap::Error> {
+        let mut full = vec!["merge"];
+        full.extend_from_slice(args);
+        MergeCmd::try_parse_from(full)
+    }
+
+    #[test]
+    fn parse_basic_branch() {
+        let cmd = parse(&["feature-branch"]).unwrap();
+        assert_eq!(cmd.branch, "feature-branch");
+        assert!(!cmd.no_ff);
+        assert!(!cmd.ff_only);
+        assert!(!cmd.squash);
+        assert!(!cmd.abort);
+        assert!(!cmd.continue_merge);
+    }
+
+    #[test]
+    fn parse_missing_branch_is_error() {
+        assert!(parse(&[]).is_err());
+    }
+
+    #[test]
+    fn parse_all_flags() {
+        let cmd = parse(&[
+            "feature",
+            "-m",
+            "custom message",
+            "--no-ff",
+            "-s",
+            "recursive",
+            "-X",
+            "ours",
+            "--no-commit",
+            "-q",
+            "-v",
+        ])
+        .unwrap();
+        assert_eq!(cmd.branch, "feature");
+        assert_eq!(cmd.message.as_deref(), Some("custom message"));
+        assert!(cmd.no_ff);
+        assert_eq!(cmd.strategy.as_deref(), Some("recursive"));
+        assert_eq!(cmd.strategy_option.as_deref(), Some("ours"));
+        assert!(cmd.no_commit);
+        assert!(cmd.quiet);
+        assert!(cmd.verbose);
+    }
+
+    #[test]
+    fn parse_abort_and_continue_flags() {
+        let cmd = parse(&["feature", "--abort"]).unwrap();
+        assert!(cmd.abort);
+
+        let cmd = parse(&["feature", "--continue-merge"]).unwrap();
+        assert!(cmd.continue_merge);
+    }
+
+    /// Guards `MEDIAGIT_REPO` (see `REPO_ENV_LOCK` docs) across the `.await`
+    /// points in `execute()` below — mirrors `tag.rs`'s `SIGN_ENV_LOCK` pattern.
+    #[allow(clippy::await_holding_lock)]
+    async fn execute_in(repo_path: &std::path::Path, cmd: &MergeCmd) -> Result<()> {
+        let _guard = REPO_ENV_LOCK.lock().unwrap();
+        std::env::set_var("MEDIAGIT_REPO", repo_path);
+        let result = cmd.execute().await;
+        std::env::remove_var("MEDIAGIT_REPO");
+        result
+    }
+
+    #[tokio::test]
+    async fn execute_no_repo_is_error() {
+        let temp = TempDir::new().unwrap();
+        let cmd = parse(&["feature-branch"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("Not a mediagit repository"));
+    }
+
+    #[tokio::test]
+    async fn execute_unknown_branch_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["does-not-exist"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("Cannot resolve branch"));
+    }
+
+    #[tokio::test]
+    async fn execute_unknown_strategy_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        // A branch that resolves (main, i.e. HEAD itself) but an invalid -s value.
+        let cmd = parse(&["main", "-s", "not-a-real-strategy"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("Unknown merge strategy"));
+    }
+
+    #[tokio::test]
+    async fn continue_merge_without_merge_in_progress_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["main", "--continue-merge"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("No merge in progress"));
+    }
+
+    #[tokio::test]
+    async fn abort_merge_with_no_state_is_ok_and_cleans_nothing() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["main", "--abort"]).unwrap();
+        // abort_merge() only removes state files if present; no state == Ok.
+        execute_in(temp.path(), &cmd).await.unwrap();
+    }
+}

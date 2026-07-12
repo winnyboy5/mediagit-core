@@ -393,7 +393,9 @@ impl ProtocolClient {
             .tcp_nodelay(true)
             .http1_only()
             .build()
-            .unwrap_or_else(|_| self.client.clone());
+            // Fallback must be credential-free: self.client carries auth
+            // default_headers, which must never reach presigned URLs.
+            .unwrap_or_else(|_| reqwest::Client::new());
 
         // ── Phase 1: manifests (fast — small metadata payloads) ──────────────
         // Download all manifests upfront to know total_chunks before any data

@@ -181,6 +181,12 @@ pub struct AppState {
 
     /// Authentication service with user management (optional)
     pub auth_service: Option<Arc<AuthService>>,
+
+    /// M3 (#2b) test/observability counter: incremented once per `have` OID
+    /// whose reachability bitmap was used instead of a BFS walk in
+    /// `download_pack`. Not used for any correctness decision — purely lets
+    /// tests and operators observe the short-circuit firing.
+    pub bitmap_hits: AtomicU64,
 }
 
 impl AppState {
@@ -195,6 +201,7 @@ impl AppState {
             pack_index: RwLock::new(HashMap::new()),
             auth_layer: None,
             auth_service: None,
+            bitmap_hits: AtomicU64::new(0),
         }
     }
 
@@ -220,6 +227,7 @@ impl AppState {
             pack_index: RwLock::new(HashMap::new()),
             auth_layer: Some(auth_layer),
             auth_service: Some(auth_service),
+            bitmap_hits: AtomicU64::new(0),
         }
     }
 
@@ -241,6 +249,7 @@ impl AppState {
             pack_index: RwLock::new(HashMap::new()),
             auth_layer: Some(auth_layer),
             auth_service: Some(auth_service),
+            bitmap_hits: AtomicU64::new(0),
         }
     }
 

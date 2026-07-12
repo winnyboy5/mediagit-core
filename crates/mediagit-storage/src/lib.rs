@@ -114,6 +114,7 @@ pub(crate) mod http_pool;
 pub mod local;
 pub mod minio;
 pub mod mock;
+pub mod namespaced;
 pub mod s3;
 
 use async_trait::async_trait;
@@ -128,6 +129,7 @@ pub use error::{StorageError, StorageResult};
 pub use gcs::GcsBackend;
 pub use local::LocalBackend;
 pub use minio::MinIOBackend;
+pub use namespaced::{generate_repo_id, sanitize_namespace, NamespacedBackend};
 pub use s3::S3Backend;
 
 /// Storage backend trait for object storage operations
@@ -646,9 +648,195 @@ pub fn prefixed_key(prefix: &Option<String>, key: &str) -> String {
     }
 }
 
+/// The reserved key used for the layout-version marker written at the
+/// storage root (under the namespace, once wrapped in
+/// [`NamespacedBackend`]). Not part of the logical object key space —
+/// `LocalBackend` places it unsharded and excludes it from `list_objects`.
+pub const LAYOUT_MARKER_KEY: &str = "LAYOUT";
+
+/// Check (or, on a fresh/empty store, write) the `LAYOUT` version marker.
+///
+/// Called by both production storage factories (CLI `create_storage_backend`,
+/// server `build_storage_backend`) right after wrapping the backend in
+/// [`NamespacedBackend`], so every code path that opens a repo's storage
+/// enforces this invariant.
+///
+/// `repo_id` identifies *this* repository (distinct from the namespace,
+/// which defaults to a sanitized directory basename and can collide across
+/// independently-created repos pointed at the same storage root/bucket).
+/// The marker records it as `"<version> <repo_id>"` so a second, unrelated
+/// repo that happens to compute the same namespace is refused instead of
+/// silently merging into the first repo's key space (data loss via gc's
+/// orphan sweep otherwise).
+///
+/// - Marker absent AND the namespace has no other keys yet → this is a
+///   brand-new store (typically `init`/`clone`, which usually write the
+///   marker explicitly themselves — this is the fallback for any other
+///   caller that reaches an empty store first): write `expected_version` +
+///   `repo_id`.
+/// - Marker absent AND the namespace already has data → pre-layout-v2 data
+///   with no marker. MediaGit is beta with no migration path, so this is a
+///   hard error pointing at re-init/re-clone rather than silently applying
+///   v2 physical-path rules to v1-shaped data.
+/// - Marker present but its version doesn't match `expected_version` → hard
+///   error (same re-init/re-clone guidance).
+/// - Marker present, version matches, but carries no `repo_id` → written by
+///   pre-namespace-collision-fix code this same beta cycle (single-owner was
+///   the only shipped behavior at the time). Adopt it: write `repo_id` into
+///   the marker and proceed.
+/// - Marker present with a *different* `repo_id` → namespace collision: two
+///   independently-created repos computed the same namespace against this
+///   storage root/bucket. Hard error naming both the namespace and the
+///   conflicting repo_id, with a hint to set `storage.repo_namespace` or
+///   `MEDIAGIT_REPO_NAMESPACE`.
+/// - Marker present with a matching `repo_id` → no-op.
+pub async fn check_or_write_layout_marker(
+    storage: &dyn StorageBackend,
+    expected_version: u32,
+    repo_id: &str,
+) -> anyhow::Result<()> {
+    match storage.get(LAYOUT_MARKER_KEY).await {
+        Ok(data) => {
+            let text = String::from_utf8_lossy(&data).trim().to_string();
+            let mut parts = text.splitn(2, ' ');
+            let found_version = parts.next().unwrap_or("");
+            let found_repo_id = parts.next().map(|s| s.trim()).filter(|s| !s.is_empty());
+
+            if found_version != expected_version.to_string() {
+                anyhow::bail!(
+                    "storage layout version mismatch: found '{found_version}', expected '{expected_version}'. \
+                     MediaGit is in beta and does not migrate layouts automatically — \
+                     re-init or re-clone this repository."
+                );
+            }
+
+            match found_repo_id {
+                None => {
+                    // Pre-namespace-collision-fix marker from this same beta
+                    // cycle: adopt it (single-owner was the only shipped
+                    // behavior when it was written).
+                    storage
+                        .put(
+                            LAYOUT_MARKER_KEY,
+                            format!("{expected_version} {repo_id}").as_bytes(),
+                        )
+                        .await?;
+                    Ok(())
+                }
+                Some(found) if found == repo_id => Ok(()),
+                Some(found) => {
+                    anyhow::bail!(
+                        "storage namespace collision: this storage location is already owned by \
+                         repo_id '{found}', but this repository is '{repo_id}'. Two independently \
+                         created repositories appear to share the same namespace on this storage \
+                         root/bucket — continuing would risk one repo's `gc` deleting the other's \
+                         objects. Set a distinct `storage.repo_namespace` in config.toml or the \
+                         MEDIAGIT_REPO_NAMESPACE environment variable for one of them."
+                    );
+                }
+            }
+        }
+        Err(_) => {
+            let has_data = !storage
+                .list_objects("")
+                .await
+                .unwrap_or_default()
+                .is_empty();
+            if has_data {
+                anyhow::bail!(
+                    "storage has existing data but no LAYOUT marker (pre-layout-v2). \
+                     MediaGit is in beta and does not migrate layouts automatically — \
+                     re-init or re-clone this repository."
+                );
+            }
+            storage
+                .put(
+                    LAYOUT_MARKER_KEY,
+                    format!("{expected_version} {repo_id}").as_bytes(),
+                )
+                .await?;
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mock::MockBackend;
+
+    #[tokio::test]
+    async fn layout_marker_written_on_fresh_empty_store() {
+        let storage = MockBackend::new();
+        check_or_write_layout_marker(&storage, 2, "repo-a")
+            .await
+            .unwrap();
+        assert_eq!(storage.get(LAYOUT_MARKER_KEY).await.unwrap(), b"2 repo-a");
+    }
+
+    #[tokio::test]
+    async fn layout_marker_matching_version_and_repo_id_is_noop() {
+        let storage = MockBackend::new();
+        storage.put(LAYOUT_MARKER_KEY, b"2 repo-a").await.unwrap();
+        check_or_write_layout_marker(&storage, 2, "repo-a")
+            .await
+            .unwrap();
+        assert_eq!(storage.get(LAYOUT_MARKER_KEY).await.unwrap(), b"2 repo-a");
+    }
+
+    #[tokio::test]
+    async fn layout_marker_mismatch_is_hard_error() {
+        let storage = MockBackend::new();
+        storage.put(LAYOUT_MARKER_KEY, b"1 repo-a").await.unwrap();
+        let err = check_or_write_layout_marker(&storage, 2, "repo-a")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("layout version mismatch"));
+        assert!(err.to_string().contains("re-init or re-clone"));
+    }
+
+    #[tokio::test]
+    async fn layout_marker_missing_with_existing_data_is_hard_error() {
+        let storage = MockBackend::new();
+        // Pre-existing data, but no LAYOUT marker: pre-v2 layout.
+        storage.put("chunks/abc", b"data").await.unwrap();
+        let err = check_or_write_layout_marker(&storage, 2, "repo-a")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no LAYOUT marker"));
+    }
+
+    #[tokio::test]
+    async fn layout_marker_without_repo_id_is_adopted() {
+        // Marker written by pre-namespace-collision-fix code this cycle:
+        // version only, no repo_id.
+        let storage = MockBackend::new();
+        storage.put(LAYOUT_MARKER_KEY, b"2").await.unwrap();
+        check_or_write_layout_marker(&storage, 2, "repo-a")
+            .await
+            .unwrap();
+        assert_eq!(storage.get(LAYOUT_MARKER_KEY).await.unwrap(), b"2 repo-a");
+        // Second open with the same repo_id is a no-op.
+        check_or_write_layout_marker(&storage, 2, "repo-a")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn layout_marker_different_repo_id_is_collision_error() {
+        let storage = MockBackend::new();
+        check_or_write_layout_marker(&storage, 2, "repo-a")
+            .await
+            .unwrap();
+        let err = check_or_write_layout_marker(&storage, 2, "repo-b")
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("namespace collision"));
+        assert!(msg.contains("repo-a"));
+        assert!(msg.contains("repo-b"));
+        assert!(msg.contains("MEDIAGIT_REPO_NAMESPACE"));
+    }
 
     #[test]
     fn storage_trait_compiles() {

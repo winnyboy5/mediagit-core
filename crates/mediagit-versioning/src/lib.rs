@@ -63,6 +63,7 @@
 
 pub mod hash;
 
+mod bitmap;
 mod branch;
 mod checkout;
 pub mod chunking;
@@ -86,11 +87,14 @@ mod reflog;
 mod refs;
 mod revision;
 mod similarity;
+mod sparse;
 mod streaming_index;
 mod streaming_pack;
+mod tag_object;
 mod transaction;
 mod tree;
 
+pub use bitmap::{bitmap_enabled, bitmap_key, ReachabilityBitmap};
 pub use branch::{BranchInfo, BranchManager, DetachedHead};
 pub use checkout::{CheckoutManager, CheckoutStats};
 pub use chunking::{
@@ -117,11 +121,13 @@ pub use reflog::{Reflog, ReflogEntry};
 pub use refs::{normalize_ref_name, Ref, RefDatabase, RefType};
 pub use revision::resolve_revision;
 pub use similarity::{ObjectMetadata, SimilarityDetector, SimilarityScore};
+pub use sparse::{SparseFilter, SparseMode};
 pub use streaming_index::StreamingPackIndex;
 pub use streaming_pack::{
     CloudChunkLoc, CloudPackResult, StreamingPackReader, StreamingPackWriter,
 };
-pub use transaction::{recover_incomplete_transactions, PackTransaction, RecoveryReport};
+pub use tag_object::Tag;
+pub use transaction::PackTransaction;
 pub use tree::{FileMode, Tree, TreeEntry};
 
 // Re-export fsck module

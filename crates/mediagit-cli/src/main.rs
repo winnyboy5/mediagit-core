@@ -83,6 +83,12 @@ enum Commands {
     /// Fetch remote changes without merging
     Fetch(FetchCmd),
 
+    /// Download a single file from a remote repository by path
+    Download(DownloadCmd),
+
+    /// Inspect media file metadata (image/video/audio/PSD/3D)
+    Media(MediaCmd),
+
     /// Manage remote repositories
     Remote(RemoteCmd),
 
@@ -140,6 +146,10 @@ enum Commands {
 
     /// Revert commits by creating inverse commits
     Revert(RevertCmd),
+
+    /// Manage sparse checkout (partial working tree)
+    #[command(name = "sparse-checkout")]
+    SparseCheckout(SparseCheckoutCmd),
 
     /// Show version information
     Version,
@@ -362,6 +372,8 @@ async fn async_main(cli: Cli) -> Result<()> {
         Some(Commands::Push(cmd)) => cmd.execute().await,
         Some(Commands::Pull(cmd)) => cmd.execute().await,
         Some(Commands::Fetch(cmd)) => cmd.execute().await,
+        Some(Commands::Download(cmd)) => cmd.execute().await,
+        Some(Commands::Media(cmd)) => cmd.execute().await,
         Some(Commands::Remote(cmd)) => cmd.execute().await,
         Some(Commands::Branch(cmd)) => cmd.execute().await,
         Some(Commands::Tag(cmd)) => {
@@ -384,6 +396,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         Some(Commands::Reflog(cmd)) => cmd.execute().await,
         Some(Commands::Reset(cmd)) => cmd.execute().await,
         Some(Commands::Revert(cmd)) => cmd.execute().await,
+        Some(Commands::SparseCheckout(cmd)) => cmd.execute().await,
         Some(Commands::Version) => {
             print_version();
             Ok(())
@@ -405,6 +418,8 @@ async fn async_main(cli: Cli) -> Result<()> {
             println!("  push         Update remote references");
             println!("  pull         Fetch and integrate remote changes");
             println!("  fetch        Fetch remote changes without merging");
+            println!("  download     Download a single file from a remote repository by path");
+            println!("  media        Inspect media file metadata (image/video/audio/PSD/3D)");
             println!("  remote       Manage remote repositories");
             println!("  branch       Manage branches");
             println!("  tag          Manage tags");
@@ -421,6 +436,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             println!("  fsck         Check repository integrity");
             println!("  verify       Verify commits and signatures");
             println!("  stats        Show repository statistics");
+            println!("  sparse-checkout  Manage sparse checkout (partial working tree)");
             println!();
             println!("Run 'mediagit <COMMAND> --help' for command-specific help");
             Ok(())

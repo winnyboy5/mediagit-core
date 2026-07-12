@@ -196,6 +196,10 @@ impl PsdParser {
     pub async fn parse(&self, data: &[u8]) -> Result<PsdInfo> {
         info!("Parsing PSD file");
 
+        // Known limitation (see FUTURE_TODOS.md #30): the upstream `psd` crate
+        // rejects some real-world PSDs with "invalid channel id 3" — layers
+        // carrying a spot-color channel, which its `ChannelKind` enum doesn't
+        // model. Not fixed here; affected files fall back to generic chunking.
         let psd = Psd::from_bytes(data)
             .map_err(|e| MediaError::PsdError(format!("Failed to parse PSD: {}", e)))?;
 

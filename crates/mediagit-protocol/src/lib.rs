@@ -27,7 +27,7 @@ pub mod streaming;
 pub mod types;
 
 // Re-export commonly used types
-pub use client::{ProtocolClient, PushPhase, PushProgress, PushStats};
+pub use client::{Credentials, ProtocolClient, PushPhase, PushProgress, PushStats};
 pub use streaming::{
     DownloadConfig, DownloadHandle, StreamingDownloader, StreamingUploader, TransferProgress,
     UploadConfig, UploadHandle,

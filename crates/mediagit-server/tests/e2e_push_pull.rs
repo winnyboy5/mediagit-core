@@ -49,6 +49,59 @@ async fn start_test_server(repos_dir: PathBuf) -> (String, tokio::task::JoinHand
     (base_url, handle)
 }
 
+/// Open the storage backend for `repo_path` exactly as the production server
+/// would (`mediagit-server/src/handlers/mod.rs::build_storage_backend`):
+/// wrapped in `NamespacedBackend`, namespaced by the sanitized repo-directory
+/// basename (these test repos carry no config.toml on entry, so both this
+/// helper and the real server fall back to that same default namespace — but
+/// this helper does write a minimal config.toml carrying `repo_id`, so the
+/// LAYOUT marker it writes agrees with what the server resolves on first
+/// open). Any repo directory under `server_repos` that `start_test_server`
+/// will later serve over HTTP MUST be written/read through this helper —
+/// writing through a raw, unwrapped `LocalBackend` would land objects at a
+/// different physical path than the server's HTTP handlers read from.
+async fn open_storage(repo_path: &std::path::Path) -> anyhow::Result<Arc<dyn StorageBackend>> {
+    let mediagit_dir = repo_path.join(".mediagit");
+    let inner: Arc<dyn StorageBackend> = Arc::new(LocalBackend::new(&mediagit_dir).await?);
+    let ns = mediagit_storage::sanitize_namespace(
+        &repo_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    );
+    let namespaced = mediagit_storage::NamespacedBackend::new(inner, ns)?;
+    // Namespace-collision guard (M2): persist a repo_id via config.toml
+    // *before* writing the marker, so the server's own `build_storage_backend`
+    // (which independently resolves/generates repo_id on first open) reads
+    // back the same value instead of generating a different one and
+    // hard-erroring on a collision against the marker written below. Reuse
+    // an existing repo_id if this repo_path was already opened once
+    // (this helper is called repeatedly against the same repo in several
+    // tests) — only generate on first open, mirroring `resolve_repo_id`.
+    let mut config = mediagit_config::Config::load(repo_path).await?;
+    let repo_id = match &config.repo_id {
+        Some(id) if !id.trim().is_empty() => id.clone(),
+        _ => {
+            let id = mediagit_storage::generate_repo_id();
+            config.repo_id = Some(id.clone());
+            config.save(repo_path)?;
+            id
+        }
+    };
+    // Write the LAYOUT marker now, while the store is still empty — mirrors
+    // what production `init`/`clone` do. Without this, the server's own
+    // `build_storage_backend` (which also runs this check) would see
+    // "no marker, but data present" on the very first HTTP request against
+    // a repo this test harness hand-built, and hard-error.
+    mediagit_storage::check_or_write_layout_marker(
+        &namespaced,
+        mediagit_config::CURRENT_LAYOUT_VERSION,
+        &repo_id,
+    )
+    .await?;
+    Ok(Arc::new(namespaced))
+}
+
 // Helper to initialize a test repository with proper commit objects
 async fn init_test_repo(repo_path: &std::path::Path) -> anyhow::Result<Oid> {
     let mediagit_dir = repo_path.join(".mediagit");
@@ -56,8 +109,8 @@ async fn init_test_repo(repo_path: &std::path::Path) -> anyhow::Result<Oid> {
     tokio::fs::create_dir_all(mediagit_dir.join("objects")).await?;
     tokio::fs::create_dir_all(mediagit_dir.join("refs/heads")).await?;
 
-    // Create ODB using .mediagit directory (matches server's storage location)
-    let storage: Arc<dyn StorageBackend> = Arc::new(LocalBackend::new(&mediagit_dir).await?);
+    // Namespaced storage — see `open_storage` docs.
+    let storage = open_storage(repo_path).await?;
     let odb = ObjectDatabase::new(Arc::clone(&storage), 1000);
 
     // Write initial blob
@@ -148,11 +201,7 @@ async fn test_e2e_push_workflow() {
     let _client_initial_oid = init_test_repo(&client_repo).await.unwrap();
 
     // Create new commit on client (use .mediagit to match init_test_repo)
-    let storage: Arc<dyn StorageBackend> = Arc::new(
-        LocalBackend::new(client_repo.join(".mediagit"))
-            .await
-            .unwrap(),
-    );
+    let storage = open_storage(&client_repo).await.unwrap();
     let odb = ObjectDatabase::new(Arc::clone(&storage), 1000);
     let new_commit_oid = create_commit(
         &odb,
@@ -228,12 +277,8 @@ async fn test_e2e_pull_workflow() {
     // Initialize server repository with proper commit
     let _initial_oid = init_test_repo(&server_repo).await.unwrap();
 
-    // Add additional commit to server (use .mediagit path to match server's storage location)
-    let server_storage: Arc<dyn StorageBackend> = Arc::new(
-        LocalBackend::new(server_repo.join(".mediagit"))
-            .await
-            .unwrap(),
-    );
+    // Add additional commit to server (namespaced — see `open_storage` docs)
+    let server_storage = open_storage(&server_repo).await.unwrap();
     let server_odb = ObjectDatabase::new(Arc::clone(&server_storage), 1000);
     let server_commit_oid = create_commit(
         &server_odb,
@@ -331,12 +376,9 @@ async fn test_e2e_push_then_pull_roundtrip() {
     let client1_odb = ObjectDatabase::new(Arc::clone(&client1_storage), 1000);
 
     // Mirror the server's initial commit (and its tree+blob) into client1's
-    // ODB so the new commit can reference it as parent.
-    let server_storage: Arc<dyn StorageBackend> = Arc::new(
-        LocalBackend::new(server_repo.join(".mediagit"))
-            .await
-            .unwrap(),
-    );
+    // ODB so the new commit can reference it as parent. (Namespaced — see
+    // `open_storage` docs.)
+    let server_storage = open_storage(&server_repo).await.unwrap();
     let server_odb = ObjectDatabase::new(Arc::clone(&server_storage), 1000);
     let server_commit = server_odb.read(&server_initial_oid).await.unwrap();
     client1_odb
@@ -450,12 +492,8 @@ async fn test_force_push() {
     // Initialize server repository with proper commit
     let server_initial_oid = init_test_repo(&server_repo).await.unwrap();
 
-    // Add divergent commit to server (simulating divergent history)
-    let server_storage: Arc<dyn StorageBackend> = Arc::new(
-        LocalBackend::new(server_repo.join(".mediagit"))
-            .await
-            .unwrap(),
-    );
+    // Add divergent commit to server (namespaced — see `open_storage` docs)
+    let server_storage = open_storage(&server_repo).await.unwrap();
     let server_odb = ObjectDatabase::new(Arc::clone(&server_storage), 1000);
     let server_divergent_oid = create_commit(
         &server_odb,
@@ -479,11 +517,7 @@ async fn test_force_push() {
     let client_repo = client_temp.path().to_path_buf();
     let client_initial = init_test_repo(&client_repo).await.unwrap();
 
-    let client_storage: Arc<dyn StorageBackend> = Arc::new(
-        LocalBackend::new(client_repo.join(".mediagit"))
-            .await
-            .unwrap(),
-    );
+    let client_storage = open_storage(&client_repo).await.unwrap();
     let client_odb = ObjectDatabase::new(Arc::clone(&client_storage), 1000);
 
     // Create client's divergent commit based on its own initial commit

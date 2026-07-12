@@ -280,22 +280,7 @@ impl ProtocolClient {
             let mut have_queue = VecDeque::new();
             for oid in have_oids {
                 if visited.insert(oid) {
-                    // Detect actual object type by reading and inspecting the object
-                    let obj_type = if let Ok(obj_data) = odb.read(&oid).await {
-                        // Try to deserialize as each type to detect the actual type
-                        if mediagit_versioning::format::deserialize::<Commit>(&obj_data).is_ok() {
-                            ObjectType::Commit
-                        } else if mediagit_versioning::format::deserialize::<Tree>(&obj_data)
-                            .is_ok()
-                        {
-                            ObjectType::Tree
-                        } else {
-                            ObjectType::Blob
-                        }
-                    } else {
-                        // Object not found locally - assume Commit for remote objects
-                        ObjectType::Commit
-                    };
+                    let obj_type = detect_object_type(odb, &oid).await;
                     have_queue.push_back((oid, obj_type));
                 }
             }
@@ -342,8 +327,15 @@ impl ProtocolClient {
                                 }
                             }
                         }
+                        ObjectType::Tag => {
+                            if let Ok(tag) = Tag::deserialize(&obj_data) {
+                                if visited.insert(tag.target) {
+                                    have_queue.push_back((tag.target, tag.target_type));
+                                }
+                            }
+                        }
                         // Blob is filtered above; this arm satisfies exhaustiveness.
-                        _ => {}
+                        ObjectType::Blob => {}
                     }
                 }
             }
@@ -351,10 +343,14 @@ impl ProtocolClient {
             tracing::debug!("Marked {} objects as already on remote", visited.len());
         }
 
-        // Now collect only NEW objects (not in visited set)
+        // Now collect only NEW objects (not in visited set). Ref-update
+        // targets are usually commits, but can also be annotated Tag
+        // objects (e.g. `push --tags`), so the type must be detected rather
+        // than assumed.
         for oid in commit_oids {
             if visited.insert(oid) {
-                queue.push_back((oid, ObjectType::Commit));
+                let obj_type = detect_object_type(odb, &oid).await;
+                queue.push_back((oid, obj_type));
             }
         }
 
@@ -406,6 +402,19 @@ impl ProtocolClient {
                             };
                             queue.push_back((entry.oid, entry_type));
                         }
+                    }
+                }
+                ObjectType::Tag => {
+                    let obj_data = odb
+                        .read(&oid)
+                        .await
+                        .context(format!("Failed to read tag {}", oid))?;
+
+                    let tag: Tag = mediagit_versioning::format::deserialize(&obj_data)
+                        .context(format!("Failed to deserialize tag {}", oid))?;
+
+                    if visited.insert(tag.target) {
+                        queue.push_back((tag.target, tag.target_type));
                     }
                 }
                 ObjectType::Blob => {
@@ -2203,5 +2212,27 @@ impl ProtocolClient {
             b.summary();
         }
         Ok(total_chunks_uploaded)
+    }
+}
+
+/// Detect an object's type by reading it and trying each deserializer in
+/// turn (Commit, Tree, Tag; else Blob) — same ordering rationale as
+/// `mediagit_versioning::reachability`'s sniff chain. Falls back to
+/// `ObjectType::Commit` if the object can't be read at all, matching this
+/// module's pre-existing behavior for stale/unknown "have" OIDs from the
+/// remote (an over-broad guess here only means the traversal below reads
+/// the object and finds it truly isn't a commit, not a correctness issue).
+async fn detect_object_type(odb: &ObjectDatabase, oid: &Oid) -> ObjectType {
+    let Ok(obj_data) = odb.read(oid).await else {
+        return ObjectType::Commit;
+    };
+    if Commit::deserialize(&obj_data).is_ok() {
+        ObjectType::Commit
+    } else if Tree::deserialize(&obj_data).is_ok() {
+        ObjectType::Tree
+    } else if Tag::deserialize(&obj_data).is_ok() {
+        ObjectType::Tag
+    } else {
+        ObjectType::Blob
     }
 }

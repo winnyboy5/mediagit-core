@@ -529,12 +529,12 @@ impl AddCmd {
         ))?;
 
         let file_size = metadata.len();
-        // 5MB: aligns with should_use_chunking() minimum.
-        // Files ≥ 5MB go through write_chunked_from_file() which uses StreamCDC for
-        // most formats.  Only container formats with dedicated structure-aware parsers
-        // (MP4, MKV, AVI, GLB, FBX, …) use mmap + format-aware chunking; all others
-        // stay on StreamCDC for maximum delta-compressibility.
-        const STREAMING_THRESHOLD: u64 = 5 * 1024 * 1024; // 5MB
+        // Aligns with should_use_chunking() minimum.
+        // Files ≥ STREAMING_THRESHOLD go through write_chunked_from_file() which uses
+        // StreamCDC for most formats.  Only container formats with dedicated
+        // structure-aware parsers (MP4, MKV, AVI, GLB, FBX, …) use mmap + format-aware
+        // chunking; all others stay on StreamCDC for maximum delta-compressibility.
+        use super::utils::STREAMING_THRESHOLD;
 
         let relative_path = file_path
             .strip_prefix(repo_root)

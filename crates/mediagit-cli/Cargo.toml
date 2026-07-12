@@ -18,6 +18,7 @@ mediagit-versioning = { path = "../mediagit-versioning" }
 mediagit-observability = { path = "../mediagit-observability" }
 mediagit-protocol = { path = "../mediagit-protocol" }
 mediagit-media = { path = "../mediagit-media" }
+mediagit-security = { path = "../mediagit-security" }
 
 # Workspace dependencies
 tokio.workspace = true
@@ -45,6 +46,7 @@ num_cpus = "1.16"
 husky-rs = "0.3.2"
 ignore = "0.4"  # .gitignore-compatible pattern matching for .mediagitignore
 getrandom = "0.4"  # OS RNG for per-repo CDC seed generation at `mediagit init`
+url = "2.5"  # scheme/host/port parsing for full-URL download credential gating (F4)
 
 [lib]
 name = "mediagit_cli"
@@ -56,6 +58,9 @@ path = "src/main.rs"
 
 [dev-dependencies]
 mediagit-test-utils = { path = "../mediagit-test-utils" }
+mediagit-server = { path = "../mediagit-server" }
 assert_cmd = "2.1"
 predicates = "3.1"
 tempfile.workspace = true
+axum.workspace = true
+ssh-key = { version = "0.6.7", features = ["ed25519"] }

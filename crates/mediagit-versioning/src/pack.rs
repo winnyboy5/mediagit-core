@@ -330,8 +330,8 @@ fn should_pack_object(size: usize, object_type: ObjectType, filename: Option<&st
                 size > MIN_PACK_SIZE
             }
         }
-        // Always pack commits and trees (small, critical metadata)
-        ObjectType::Commit | ObjectType::Tree => true,
+        // Always pack commits, trees, and tags (small, critical metadata)
+        ObjectType::Commit | ObjectType::Tree | ObjectType::Tag => true,
     }
 }
 
@@ -370,11 +370,9 @@ impl PackWriter {
         let offset = self.data.len() as u64;
 
         // Write simple header: 1 byte type + 4 bytes size
-        let type_byte = match object_type {
-            ObjectType::Blob => 1u8,
-            ObjectType::Tree => 2u8,
-            ObjectType::Commit => 3u8,
-        };
+        // `ObjectType::to_u8`/`from_u8` are the single source of truth for
+        // the wire byte value (the reader below already uses `from_u8`).
+        let type_byte = object_type.to_u8();
         self.data.push(type_byte);
         self.data
             .extend_from_slice(&(object_data.len() as u32).to_le_bytes());

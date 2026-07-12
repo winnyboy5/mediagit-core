@@ -162,6 +162,13 @@ pub struct SwitchOpts {
     #[arg(short, long)]
     pub create: bool,
 
+    /// When used with --create, set up upstream tracking. If `branch` looks
+    /// like `<remote>/<name>` (e.g. `origin/feat-a`), the new local branch
+    /// is named `<name>`, started from the `<remote>/<name>` tracking ref
+    /// instead of HEAD, and set to track it.
+    #[arg(long)]
+    pub track: bool,
+
     /// Force switch even if local changes
     #[arg(short = 'f', long)]
     pub force: bool,
@@ -473,6 +480,53 @@ impl BranchCmd {
             output::success(&format!("Created branch '{}' at {}", opts.name, start_oid));
         }
 
+        // Upstream tracking (M2 plumbing, consumed by `status` in M4).
+        // Source is `--set-upstream <remote>/<branch>` if given, else the
+        // start point when `--track` was requested (matching git's
+        // "track what you branched from" convention).
+        if !opts.no_track {
+            let track_source = opts
+                .set_upstream
+                .as_deref()
+                .or_else(|| opts.track.then_some(opts.start_point.as_deref()).flatten());
+            if let Some(source) = track_source {
+                match source.split_once('/') {
+                    Some((remote, remote_branch)) => {
+                        let mut config = mediagit_config::Config::load(&repo_root).await?;
+                        config.set_branch_upstream(
+                            &opts.name,
+                            remote,
+                            format!("refs/heads/{}", remote_branch),
+                        );
+                        config.save(&repo_root)?;
+                        if !opts.quiet {
+                            output::info(&format!(
+                                "Branch '{}' set up to track '{}/{}'",
+                                opts.name, remote, remote_branch
+                            ));
+                        }
+                    }
+                    None if opts.set_upstream.is_some() => {
+                        anyhow::bail!(
+                            "--set-upstream expects <remote>/<branch> (got '{}')",
+                            source
+                        );
+                    }
+                    None => {
+                        // --track given but the start point doesn't look like
+                        // <remote>/<branch> (e.g. a bare OID or local ref) —
+                        // nothing to track against; not an error.
+                        if !opts.quiet {
+                            output::warning(&format!(
+                                "--track: start point '{}' doesn't look like <remote>/<branch>; no upstream recorded",
+                                source
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -490,10 +544,21 @@ impl BranchCmd {
         let refdb = RefDatabase::new(&storage_path);
 
         // Strip refs/heads/ prefix if already present
-        let branch_name = opts
+        let stripped = opts
             .branch
             .strip_prefix("refs/heads/")
             .unwrap_or(&opts.branch);
+
+        // `--track` shorthand: `branch switch -c --track origin/feat-a`
+        // creates a local branch named "feat-a" (not "origin/feat-a")
+        // tracking origin/feat-a, started from that remote-tracking ref
+        // instead of HEAD — mirrors `branch create`'s BUG-010 shorthand.
+        let track_shorthand = if opts.create && opts.track {
+            stripped.split_once('/')
+        } else {
+            None
+        };
+        let branch_name = track_shorthand.map(|(_, name)| name).unwrap_or(stripped);
         let branch_ref_name = format!("refs/heads/{}", branch_name);
 
         // OPTIMIZATION: Get current commit BEFORE updating HEAD
@@ -504,21 +569,53 @@ impl BranchCmd {
         if opts.create {
             // Check if branch already exists
             if refdb.read(&branch_ref_name).await.is_ok() {
-                anyhow::bail!("Branch '{}' already exists", opts.branch);
+                anyhow::bail!("Branch '{}' already exists", branch_name);
             }
 
-            // Get current HEAD for start point (resolve symbolic ref)
-            let start_oid = refdb
-                .resolve("HEAD")
-                .await
-                .context("HEAD has no commit yet")?;
+            let start_oid = if let Some((remote, remote_branch)) = track_shorthand {
+                let remote_tracking_ref = format!("refs/remotes/{}/{}", remote, remote_branch);
+                refdb.resolve(&remote_tracking_ref).await.with_context(|| {
+                    format!(
+                        "--track: remote-tracking ref '{}' not found",
+                        remote_tracking_ref
+                    )
+                })?
+            } else {
+                // Get current HEAD for start point (resolve symbolic ref)
+                refdb
+                    .resolve("HEAD")
+                    .await
+                    .context("HEAD has no commit yet")?
+            };
 
             // Create the branch reference
             let branch_ref = Ref::new_direct(branch_ref_name.clone(), start_oid);
             refdb.write(&branch_ref).await?;
 
             if !opts.quiet {
-                output::success(&format!("Created branch '{}'", opts.branch));
+                output::success(&format!("Created branch '{}'", branch_name));
+            }
+
+            // Upstream tracking (M2 plumbing, consumed by `status` in M4).
+            if let Some((remote, remote_branch)) = track_shorthand {
+                let mut config = mediagit_config::Config::load(&repo_root).await?;
+                config.set_branch_upstream(
+                    branch_name,
+                    remote,
+                    format!("refs/heads/{}", remote_branch),
+                );
+                config.save(&repo_root)?;
+                if !opts.quiet {
+                    output::info(&format!(
+                        "Branch '{}' set up to track '{}/{}'",
+                        branch_name, remote, remote_branch
+                    ));
+                }
+            } else if opts.track && !opts.quiet {
+                output::warning(&format!(
+                    "--track: '{}' doesn't look like <remote>/<branch>; no upstream recorded",
+                    opts.branch
+                ));
             }
         } else {
             // Verify branch exists
@@ -589,7 +686,7 @@ impl BranchCmd {
         index.save(&repo_root)?;
 
         if !opts.quiet {
-            output::success(&format!("Switched to branch '{}'", opts.branch));
+            output::success(&format!("Switched to branch '{}'", branch_name));
             if files_updated > 0 {
                 output::info(&format!(
                     "Updated {} file(s) in working directory",

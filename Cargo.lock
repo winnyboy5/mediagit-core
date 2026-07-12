@@ -3398,6 +3398,7 @@ version = "0.2.8-beta.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "axum",
  "blake3",
  "chrono",
  "clap",
@@ -3415,6 +3416,8 @@ dependencies = [
  "mediagit-media",
  "mediagit-observability",
  "mediagit-protocol",
+ "mediagit-security",
+ "mediagit-server",
  "mediagit-storage",
  "mediagit-test-utils",
  "mediagit-versioning",
@@ -3424,10 +3427,12 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "ssh-key",
  "tempfile",
  "tokio",
  "toml",
  "tracing",
+ "url",
  "walkdir",
 ]
 
@@ -3576,6 +3581,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "ssh-key",
  "tempfile",
  "thiserror 2.0.18",
  "time",
@@ -3635,6 +3641,7 @@ dependencies = [
  "bytes",
  "criterion",
  "futures",
+ "getrandom 0.4.2",
  "google-cloud-auth",
  "google-cloud-gax",
  "google-cloud-storage",
@@ -3654,6 +3661,7 @@ version = "0.2.8-beta.1"
 dependencies = [
  "assert_cmd",
  "dunce",
+ "mediagit-storage",
  "predicates",
  "tempfile",
 ]
@@ -3669,6 +3677,7 @@ dependencies = [
  "criterion",
  "fastcdc",
  "hex",
+ "ignore",
  "mediagit-compression",
  "mediagit-storage",
  "memmap2",
@@ -3676,6 +3685,7 @@ dependencies = [
  "num_cpus",
  "postcard",
  "proptest",
+ "roaring",
  "serde",
  "serde_json",
  "tempfile",
@@ -4078,6 +4088,20 @@ dependencies = [
  "ecdsa",
  "elliptic-curve",
  "primeorder",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "p521"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fc9e2161f1f215afdfce23677034ae137bbd45016a880c2eb3ba8eb95f085b2"
+dependencies = [
+ "base16ct",
+ "ecdsa",
+ "elliptic-curve",
+ "primeorder",
+ "rand_core 0.6.4",
  "sha2 0.10.9",
 ]
 
@@ -4968,6 +4992,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "roaring"
+version = "0.11.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1dedc5658c6ecb3bdb5ef5f3295bb9253f42dcf3fd1402c03f6b1f7659c3c4a9"
+dependencies = [
+ "bytemuck",
+ "byteorder",
+]
+
+[[package]]
 name = "rsa"
 version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4981,6 +5015,7 @@ dependencies = [
  "pkcs1",
  "pkcs8",
  "rand_core 0.6.4",
+ "sha2 0.10.9",
  "signature",
  "spki",
  "subtle",
@@ -5596,6 +5631,48 @@ checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
  "der",
+]
+
+[[package]]
+name = "ssh-cipher"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "caac132742f0d33c3af65bfcde7f6aa8f62f0e991d80db99149eb9d44708784f"
+dependencies = [
+ "cipher",
+ "ssh-encoding",
+]
+
+[[package]]
+name = "ssh-encoding"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb9242b9ef4108a78e8cd1a2c98e193ef372437f8c22be363075233321dd4a15"
+dependencies = [
+ "base64ct",
+ "pem-rfc7468",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "ssh-key"
+version = "0.6.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b86f5297f0f04d08cabaa0f6bff7cb6aec4d9c3b49d87990d63da9d9156a8c3"
+dependencies = [
+ "ed25519-dalek",
+ "p256",
+ "p384",
+ "p521",
+ "rand_core 0.6.4",
+ "rsa",
+ "sec1",
+ "sha2 0.10.9",
+ "signature",
+ "ssh-cipher",
+ "ssh-encoding",
+ "subtle",
+ "zeroize",
 ]
 
 [[package]]

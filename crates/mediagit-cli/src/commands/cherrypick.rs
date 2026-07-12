@@ -557,3 +557,111 @@ struct CherryPickState {
     current_commit: Option<String>,
     remaining_commits: Vec<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::utils::test_support::{init_repo_with_commit, REPO_ENV_LOCK};
+    use clap::Parser;
+    use tempfile::TempDir;
+
+    fn parse(args: &[&str]) -> Result<CherryPickCmd, clap::Error> {
+        let mut full = vec!["cherry-pick"];
+        full.extend_from_slice(args);
+        CherryPickCmd::try_parse_from(full)
+    }
+
+    #[test]
+    fn parse_basic_commit() {
+        let cmd = parse(&["abc123"]).unwrap();
+        assert_eq!(cmd.commits, vec!["abc123".to_string()]);
+        assert!(!cmd.abort);
+        assert!(!cmd.no_commit);
+    }
+
+    #[test]
+    fn parse_multiple_commits() {
+        let cmd = parse(&["c1", "c2", "c3"]).unwrap();
+        assert_eq!(cmd.commits, vec!["c1", "c2", "c3"]);
+    }
+
+    #[test]
+    fn parse_missing_commits_is_error() {
+        assert!(parse(&[]).is_err());
+    }
+
+    #[test]
+    fn parse_all_flags() {
+        let cmd = parse(&["c1", "-n", "-e", "-x", "-q"]).unwrap();
+        assert!(cmd.no_commit);
+        assert!(cmd.edit);
+        assert!(cmd.append_message);
+        assert!(cmd.quiet);
+    }
+
+    #[test]
+    fn parse_abort_continue_skip() {
+        assert!(parse(&["c1", "--abort"]).unwrap().abort);
+        assert!(parse(&["c1", "--continue-pick"]).unwrap().continue_pick);
+        assert!(parse(&["c1", "--skip"]).unwrap().skip);
+    }
+
+    /// Guards `MEDIAGIT_REPO` across the `.await` points in `execute()`
+    /// (see `REPO_ENV_LOCK` docs).
+    #[allow(clippy::await_holding_lock)]
+    async fn execute_in(repo_path: &std::path::Path, cmd: &CherryPickCmd) -> Result<()> {
+        let _guard = REPO_ENV_LOCK.lock().unwrap();
+        std::env::set_var("MEDIAGIT_REPO", repo_path);
+        let result = cmd.execute().await;
+        std::env::remove_var("MEDIAGIT_REPO");
+        result
+    }
+
+    #[tokio::test]
+    async fn execute_no_repo_is_error() {
+        let temp = TempDir::new().unwrap();
+        let cmd = parse(&["abc123"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("Not a mediagit repository"));
+    }
+
+    #[tokio::test]
+    async fn execute_unresolvable_commit_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["does-not-exist"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("Failed to resolve commit"));
+    }
+
+    #[tokio::test]
+    async fn continue_without_cherrypick_in_progress_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["c1", "--continue-pick"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("No cherry-pick in progress"));
+    }
+
+    #[tokio::test]
+    async fn abort_without_cherrypick_in_progress_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["c1", "--abort"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("No cherry-pick in progress"));
+    }
+
+    #[tokio::test]
+    async fn skip_without_cherrypick_in_progress_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["c1", "--skip"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("No cherry-pick in progress"));
+    }
+}

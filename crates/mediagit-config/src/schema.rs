@@ -74,6 +74,46 @@ pub struct Config {
     /// init` for new repos and propagated to clones via protocol capabilities.
     #[serde(default)]
     pub cdc_seed: u64,
+
+    /// Per-repo storage namespace (layout v2). All object keys are prefixed
+    /// `"<repo_namespace>/"` by `NamespacedBackend` so one storage
+    /// root/bucket can safely host multiple repos. `None` for pre-v2 repos
+    /// (never written) — the storage factory falls back to a sanitized
+    /// basename of the repo root at open time. Set once at `init`/`clone`
+    /// and never changed afterward (changing it would silently orphan every
+    /// existing key under the old namespace).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_namespace: Option<String>,
+
+    /// Physical storage layout version. `1` = pre-namespace flat layout
+    /// (implicit, absent from old configs); `2` = per-repo namespace +
+    /// true hash fanout (this cycle). Mirrored in the `LAYOUT` marker file
+    /// at the storage root so a repo opened with the wrong client version
+    /// fails fast instead of silently corrupting the physical layout.
+    #[serde(default = "default_layout_version")]
+    pub layout_version: u32,
+
+    /// Unique identifier for *this* repository, distinct from
+    /// `repo_namespace` (which defaults to a sanitized directory basename
+    /// and can collide across independently-created repos sharing a
+    /// storage root/bucket). Generated once at `init`/`clone` and recorded
+    /// in the `LAYOUT` marker so a namespace collision is a hard error
+    /// instead of silently merging two repos' key spaces. `None` for
+    /// configs written before this field existed (adopted into the marker
+    /// on first open after this fix — see `check_or_write_layout_marker`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_id: Option<String>,
+}
+
+/// Current on-disk layout version new repos are initialized with.
+pub const CURRENT_LAYOUT_VERSION: u32 = 2;
+
+fn default_layout_version() -> u32 {
+    // Configs written before this field existed predate layout v2 entirely
+    // (v1 had no namespace, no `LAYOUT` marker) — default to 1, not
+    // `CURRENT_LAYOUT_VERSION`, so a pre-existing repo's config doesn't
+    // silently claim to be on a layout it was never written with.
+    1
 }
 
 impl Config {
@@ -607,6 +647,20 @@ pub struct RemoteConfig {
     /// Default fetch flag
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_fetch: Option<bool>,
+
+    /// JWT bearer token for this remote (client auth, M2). Highest-precedence
+    /// credential source — checked before `MEDIAGIT_TOKEN`/`MEDIAGIT_API_KEY`.
+    /// Stored in plaintext in `config.toml`; a world/group-readable config
+    /// file triggers a warning when this is read (see `resolve_credentials`
+    /// in `mediagit-cli/src/repo.rs`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+
+    /// API key for this remote (client auth, M2). Same precedence and
+    /// plaintext-storage caveat as `token`; only one of `token`/`api_key`
+    /// should be set per remote (`token` wins if both are).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
 }
 
 impl RemoteConfig {
@@ -617,6 +671,8 @@ impl RemoteConfig {
             fetch: None,
             push: None,
             default_fetch: Some(true),
+            token: None,
+            api_key: None,
         }
     }
 
@@ -853,6 +909,9 @@ impl Default for Config {
             protected_branches: HashMap::new(),
             custom: HashMap::new(),
             cdc_seed: 0,
+            repo_namespace: None,
+            layout_version: default_layout_version(),
+            repo_id: None,
         }
     }
 }

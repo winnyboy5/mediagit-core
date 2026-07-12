@@ -47,7 +47,7 @@
 //! ```
 
 use crate::odb::ObjectDatabase;
-use crate::{Commit, Oid, Ref, RefType};
+use crate::{Commit, ObjectType, Oid, Ref, RefType, Tag, Tree};
 use mediagit_storage::StorageBackend;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -554,6 +554,19 @@ impl FsckChecker {
         // Traverse from all branch heads
         for r in refs {
             if let Some(oid) = r.oid {
+                let is_annotated_tag = r.namespace() == Some("tags")
+                    && self
+                        .check_and_traverse_tag(
+                            &r,
+                            oid,
+                            &mut visited,
+                            &mut referenced_objects,
+                            report,
+                        )
+                        .await?;
+                if is_annotated_tag {
+                    continue;
+                }
                 self.traverse_commit(&oid, &mut visited, &mut referenced_objects, report)
                     .await?;
             }
@@ -584,10 +597,12 @@ impl FsckChecker {
             visited.insert(*oid);
             referenced_objects.insert(*oid);
 
-            // Try to read commit
-            // Use oid.to_hex() - LocalBackend handles "objects/" prefix and sharding
-            let key = oid.to_hex();
-            let data = match self.storage.get(&key).await {
+            // Read via the ODB (not raw storage) so compressed/smart-compressed
+            // commit objects are decompressed before deserialization — a direct
+            // `self.storage.get()` here previously fed compressed bytes straight
+            // into `format::deserialize`, corrupting every connectivity check on
+            // a repo written through the normal (compressed) ODB write path.
+            let data = match self.odb.read(oid).await {
                 Ok(d) => d,
                 Err(_) => {
                     report.add_issue(
@@ -640,6 +655,92 @@ impl FsckChecker {
 
             Ok(())
         })
+    }
+
+    /// Validate and traverse a `refs/tags/*` ref's target.
+    ///
+    /// Returns `Ok(true)` if `oid` deserialized as a [`Tag`] object
+    /// (annotated tag) — in that case this method already did all the
+    /// necessary work (structure validation + walking through to the
+    /// target) and the caller must not also call `traverse_commit(oid, ..)`
+    /// on it. Returns `Ok(false)` for a lightweight tag (oid is a commit
+    /// directly), leaving the caller to fall back to `traverse_commit`.
+    async fn check_and_traverse_tag(
+        &self,
+        r: &Ref,
+        oid: Oid,
+        visited: &mut HashSet<Oid>,
+        referenced_objects: &mut HashSet<Oid>,
+        report: &mut FsckReport,
+    ) -> anyhow::Result<bool> {
+        // Via the ODB, not raw storage, so a compressed Tag object decompresses
+        // before deserialization (same fix as traverse_commit below).
+        let Ok(data) = self.odb.read(&oid).await else {
+            // Missing object: let the generic traverse_commit path below
+            // report it via its own "missing" issue for a uniform message.
+            return Ok(false);
+        };
+        let Ok(tag) = Tag::deserialize(&data) else {
+            // Not a Tag object -> lightweight tag, oid is a commit.
+            return Ok(false);
+        };
+
+        visited.insert(oid);
+        referenced_objects.insert(oid);
+
+        // Validate: target exists.
+        if !self.object_exists(&tag.target).await? {
+            report.add_issue(
+                FsckIssue::new(
+                    IssueSeverity::Error,
+                    IssueCategory::BrokenReference,
+                    format!("Tag {} ({}) target {} is missing", r.name, oid, tag.target),
+                )
+                .with_ref(r.name.clone())
+                .with_oid(oid),
+            );
+            return Ok(true);
+        }
+        referenced_objects.insert(tag.target);
+
+        // Validate: declared target_type matches the actual target object.
+        if let Ok(target_data) = self.odb.read(&tag.target).await {
+            let type_matches = match tag.target_type {
+                ObjectType::Commit => Commit::deserialize(&target_data).is_ok(),
+                ObjectType::Tree => Tree::deserialize(&target_data).is_ok(),
+                ObjectType::Tag => Tag::deserialize(&target_data).is_ok(),
+                // Any bytes are a valid blob; nothing to falsify.
+                ObjectType::Blob => true,
+            };
+            if !type_matches {
+                report.add_issue(
+                    FsckIssue::new(
+                        IssueSeverity::Error,
+                        IssueCategory::InvalidFormat,
+                        format!(
+                            "Tag {} ({}) declares target_type {} but target {} does not match",
+                            r.name, oid, tag.target_type, tag.target
+                        ),
+                    )
+                    .with_ref(r.name.clone())
+                    .with_oid(oid),
+                );
+            }
+        }
+
+        // Walk through to the target so its own closure is checked too.
+        match tag.target_type {
+            ObjectType::Commit => {
+                self.traverse_commit(&tag.target, visited, referenced_objects, report)
+                    .await?;
+            }
+            // Tree/Blob/Tag targets: existence and type already validated
+            // above; check_connectivity's scope (matching its pre-existing
+            // behavior for other refs) only descends into commit graphs.
+            ObjectType::Tree | ObjectType::Blob | ObjectType::Tag => {}
+        }
+
+        Ok(true)
     }
 
     /// Validate chunk-delta chains: every `chunk-deltas/<id>.meta` must lead,
@@ -820,6 +921,12 @@ impl FsckChecker {
                     referenced.insert(commit.tree);
                     for parent in commit.parents {
                         self.collect_referenced_objects(&parent, visited, referenced)
+                            .await?;
+                    }
+                } else if let Ok(tag) = crate::format::deserialize::<Tag>(&data) {
+                    referenced.insert(tag.target);
+                    if tag.target_type == ObjectType::Commit {
+                        self.collect_referenced_objects(&tag.target, visited, referenced)
                             .await?;
                     }
                 }
@@ -1156,5 +1263,133 @@ mod tests {
         let quick = FsckOptions::quick();
         assert!(!quick.check_dangling);
         assert!(!quick.check_connectivity);
+    }
+
+    async fn write_ref(storage: &Arc<MockBackend>, name: &str, oid: Oid) {
+        let r = Ref::new_direct(name.to_string(), oid);
+        let bytes = crate::format::serialize(&r).unwrap();
+        storage.put(name, &bytes).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_fsck_flags_tag_with_missing_target() {
+        let storage = Arc::new(MockBackend::new());
+
+        let bogus_target = Oid::hash(b"fsck-tag-missing-target");
+        let author = crate::Signature::now("t".to_string(), "t@e".to_string());
+        let tag = Tag::new(
+            bogus_target,
+            ObjectType::Commit,
+            "v1.0.0".to_string(),
+            author,
+            "release".to_string(),
+        );
+        let tag_bytes = tag.serialize().unwrap();
+        let tag_oid = Oid::hash(&tag_bytes);
+        storage.put(&tag_oid.to_hex(), &tag_bytes).await.unwrap();
+        write_ref(&storage, "refs/tags/v1.0.0", tag_oid).await;
+
+        let checker = FsckChecker::new(storage);
+        let mut report = FsckReport::new();
+        checker.check_connectivity(&mut report).await.unwrap();
+
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.category == IssueCategory::BrokenReference
+                    && i.message.contains("target")),
+            "missing tag target must be reported, got: {:?}",
+            report.issues
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fsck_flags_tag_with_wrong_target_type() {
+        let storage = Arc::new(MockBackend::new());
+
+        // Target actually stored is a blob, but the tag declares Commit.
+        let blob_data = b"just a blob, not a commit";
+        let blob_oid = Oid::hash(blob_data);
+        storage.put(&blob_oid.to_hex(), blob_data).await.unwrap();
+
+        let author = crate::Signature::now("t".to_string(), "t@e".to_string());
+        let tag = Tag::new(
+            blob_oid,
+            ObjectType::Commit,
+            "v1.0.0".to_string(),
+            author,
+            "release".to_string(),
+        );
+        let tag_bytes = tag.serialize().unwrap();
+        let tag_oid = Oid::hash(&tag_bytes);
+        storage.put(&tag_oid.to_hex(), &tag_bytes).await.unwrap();
+        write_ref(&storage, "refs/tags/v1.0.0", tag_oid).await;
+
+        let checker = FsckChecker::new(storage);
+        let mut report = FsckReport::new();
+        checker.check_connectivity(&mut report).await.unwrap();
+
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.category == IssueCategory::InvalidFormat
+                    && i.message.contains("target_type")),
+            "target_type mismatch must be reported, got: {:?}",
+            report.issues
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fsck_healthy_annotated_tag_is_clean_and_walks_target() {
+        let storage = Arc::new(MockBackend::new());
+
+        // Build a real commit -> tree -> blob chain.
+        let blob_data = b"file contents";
+        let blob_oid = Oid::hash(blob_data);
+        storage.put(&blob_oid.to_hex(), blob_data).await.unwrap();
+
+        let mut tree = Tree::new();
+        tree.add_entry(crate::TreeEntry::new(
+            "a.txt".to_string(),
+            crate::FileMode::Regular,
+            blob_oid,
+        ));
+        let tree_bytes = crate::format::serialize(&tree).unwrap();
+        let tree_oid = Oid::hash(&tree_bytes);
+        storage.put(&tree_oid.to_hex(), &tree_bytes).await.unwrap();
+
+        let author = crate::Signature::now("t".to_string(), "t@e".to_string());
+        let commit = Commit::new(tree_oid, author.clone(), author.clone(), "msg".to_string());
+        let commit_bytes = crate::format::serialize(&commit).unwrap();
+        let commit_oid = Oid::hash(&commit_bytes);
+        storage
+            .put(&commit_oid.to_hex(), &commit_bytes)
+            .await
+            .unwrap();
+
+        let tag = Tag::new(
+            commit_oid,
+            ObjectType::Commit,
+            "v1.0.0".to_string(),
+            author,
+            "release".to_string(),
+        );
+        let tag_bytes = tag.serialize().unwrap();
+        let tag_oid = Oid::hash(&tag_bytes);
+        storage.put(&tag_oid.to_hex(), &tag_bytes).await.unwrap();
+        write_ref(&storage, "refs/tags/v1.0.0", tag_oid).await;
+
+        let checker = FsckChecker::new(storage);
+        let mut report = FsckReport::new();
+        checker.check_connectivity(&mut report).await.unwrap();
+
+        assert_eq!(
+            report.total_issues(),
+            0,
+            "healthy annotated tag must produce no issues, got: {:?}",
+            report.issues
+        );
     }
 }

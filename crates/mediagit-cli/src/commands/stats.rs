@@ -17,9 +17,11 @@ use anyhow::Result;
 use clap::Parser;
 use console::style;
 use indicatif::HumanBytes;
+use mediagit_storage::StorageBackend;
 use mediagit_versioning::{Commit, ObjectDatabase, Oid, RefDatabase, Tree};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
 /// Show repository statistics
 #[derive(Parser, Debug)]
@@ -85,6 +87,11 @@ struct StorageStats {
     original_bytes: u64,
     /// Per file-category: (original_bytes, file_count)
     category_stats: std::collections::HashMap<String, (u64, u64)>,
+    /// Largest single hash-shard bucket observed (category + first 2 hex
+    /// chars of the hash), with its entry count. Layout-agnostic fanout
+    /// diagnostic: a large value here means real-world data is defeating
+    /// the 256-way shard fanout and directories are growing unbounded again.
+    largest_shard_bucket: Option<(String, u64)>,
 }
 
 /// Commit history statistics
@@ -129,12 +136,12 @@ impl StatsCmd {
 
         // Handle Prometheus format output
         if self.prometheus {
-            return self.output_prometheus(&storage_path, &odb, &refdb).await;
+            return self.output_prometheus(&storage, &odb, &refdb).await;
         }
 
         // Handle JSON format output
         if self.json {
-            return self.output_json(&storage_path, &odb, &refdb).await;
+            return self.output_json(&storage, &odb, &refdb).await;
         }
 
         println!("{} Repository Statistics\n", style("📊").cyan().bold());
@@ -154,7 +161,7 @@ impl StatsCmd {
 
         // Storage statistics (real data from disk)
         if self.storage || show_all {
-            let stats = self.compute_storage_stats(&storage_path).await?;
+            let stats = self.compute_storage_stats(&storage).await?;
             println!("{}", style("Storage:").bold());
 
             let total_objects = stats.loose_object_count + stats.chunk_count + stats.delta_count;
@@ -198,6 +205,9 @@ impl StatsCmd {
                 }
                 if stats.manifest_count > 0 {
                     println!("  Chunk manifests: {}", stats.manifest_count);
+                }
+                if let Some((bucket, count)) = &stats.largest_shard_bucket {
+                    println!("  Largest shard directory: {} entries in {}", count, bucket);
                 }
 
                 let metrics = odb.metrics().await;
@@ -314,7 +324,7 @@ impl StatsCmd {
 
         // Compression statistics (from storage analysis)
         if self.compression || show_all {
-            self.show_compression_stats(&storage_path).await?;
+            self.show_compression_stats(&storage).await?;
         }
 
         if !self.quiet {
@@ -324,81 +334,103 @@ impl StatsCmd {
         Ok(())
     }
 
-    /// Compute storage statistics by walking the .mediagit directory
+    /// Compute storage statistics via the `StorageBackend` abstraction.
     ///
-    /// Chunks, manifests, and deltas are stored inside the sharded `objects/`
-    /// directory with encoded filenames (e.g. `chunks__abc...`, `manifests__abc...`,
-    /// `chunk-deltas__abc...`). This method distinguishes them by filename prefix.
-    async fn compute_storage_stats(&self, storage_path: &Path) -> Result<StorageStats> {
+    /// Layout-agnostic and backend-agnostic: classifies every key returned by
+    /// `list_objects("")` by its logical prefix (`chunks/`, `chunk-deltas/`,
+    /// `manifests/`, `deltas/`, `packs/`; anything else is a bare-OID loose
+    /// object). This replaced a v1 implementation that `walkdir`'d
+    /// `.mediagit/{packs,objects}` directly and classified by an encoded
+    /// filename prefix (`chunks__...`) — both directories moved under a
+    /// per-repo namespace folder in layout v2, and pack files were *already*
+    /// nested one level deeper than that code assumed even pre-v2
+    /// (`base_path` config points at `.mediagit/objects`, so real pack files
+    /// lived at `.mediagit/objects/packs/`, not `.mediagit/packs/` — the v1
+    /// pack-count fix only worked in tests that hand-planted a pack file at
+    /// the path the buggy code expected). Going through `list_objects`
+    /// sidesteps both bugs and works for cloud backends too.
+    async fn compute_storage_stats(
+        &self,
+        storage: &Arc<dyn StorageBackend>,
+    ) -> Result<StorageStats> {
         let mut stats = StorageStats::default();
+        let keys = storage.list_objects("").await.unwrap_or_default();
 
-        // Walk objects/ directory and classify files by their encoded name prefix
-        let objects_dir = storage_path.join("objects");
-        if objects_dir.exists() {
-            // Collect manifest file paths for a second pass
-            let mut manifest_paths: Vec<std::path::PathBuf> = Vec::new();
+        let mut manifest_keys: Vec<String> = Vec::new();
+        // (category, shard1) -> count, for the fanout diagnostic.
+        let mut shard_buckets: HashMap<(String, String), u64> = HashMap::new();
 
-            for entry in walkdir::WalkDir::new(&objects_dir)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-            {
-                let path = entry.path();
-                let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        for key in &keys {
+            let size = storage.head(key).await.unwrap_or(None).unwrap_or(0);
 
-                // Skip pack and index files
-                if filename.ends_with(".pack") || filename.ends_with(".idx") {
-                    if filename.ends_with(".pack") {
-                        stats.pack_count += 1;
-                        stats.pack_bytes += file_size;
-                    }
-                } else if filename.starts_with("chunks__") {
-                    // Chunk file (stored as "chunks/{hex}" → encoded as "chunks__{hex}")
-                    stats.chunk_count += 1;
-                    stats.chunk_bytes += file_size;
-                } else if filename.starts_with("chunk-deltas__") || filename.starts_with("deltas__")
-                {
-                    // Delta file (chunk-level or object-level) or delta metadata
-                    if !filename.ends_with(".meta") {
-                        stats.delta_count += 1;
-                        stats.delta_bytes += file_size;
-                    }
-                } else if filename.starts_with("manifests__") {
-                    // Manifest file — collect for second pass
-                    stats.manifest_count += 1;
-                    manifest_paths.push(path.to_path_buf());
-                } else {
-                    // Regular loose object
-                    stats.loose_object_count += 1;
-                    stats.loose_bytes += file_size;
+            let category = if key.starts_with("packs/") {
+                stats.pack_count += 1;
+                stats.pack_bytes += size;
+                "packs"
+            } else if key.starts_with("chunks/") {
+                stats.chunk_count += 1;
+                stats.chunk_bytes += size;
+                "chunks"
+            } else if key.starts_with("chunk-deltas/") {
+                if !key.ends_with(".meta") {
+                    stats.delta_count += 1;
+                    stats.delta_bytes += size;
                 }
+                "chunk-deltas"
+            } else if key.starts_with("deltas/") {
+                if !key.ends_with(".meta") {
+                    stats.delta_count += 1;
+                    stats.delta_bytes += size;
+                }
+                "deltas"
+            } else if key.starts_with("manifests/") {
+                stats.manifest_count += 1;
+                manifest_keys.push(key.clone());
+                "manifests"
+            } else {
+                // Bare OID loose object (commits/trees/blobs).
+                stats.loose_object_count += 1;
+                stats.loose_bytes += size;
+                "objects"
+            };
+
+            let hash_part = key.rsplit('/').next().unwrap_or(key);
+            let hash_part = hash_part.strip_suffix(".meta").unwrap_or(hash_part);
+            if hash_part.len() >= 2 {
+                *shard_buckets
+                    .entry((category.to_string(), hash_part[0..2].to_string()))
+                    .or_insert(0) += 1;
             }
+        }
 
-            // Second pass: read manifests to extract original file sizes
-            for manifest_path in &manifest_paths {
-                if let Ok(data) = std::fs::read(manifest_path) {
-                    if let Ok(manifest) = mediagit_versioning::format::deserialize::<
-                        mediagit_versioning::ChunkManifest,
-                    >(&data)
-                    {
-                        stats.original_bytes += manifest.total_size;
+        stats.largest_shard_bucket = shard_buckets
+            .into_iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|((cat, shard), count)| (format!("{cat}/{shard}"), count));
 
-                        // Categorize by file extension
-                        let category = manifest
-                            .filename
-                            .as_deref()
-                            .and_then(|f| std::path::Path::new(f).extension())
-                            .and_then(|e| e.to_str())
-                            .map(|ext| categorize_extension(ext))
-                            .unwrap_or("other");
-                        let cat_entry = stats
-                            .category_stats
-                            .entry(category.to_string())
-                            .or_insert((0, 0));
-                        cat_entry.0 += manifest.total_size;
-                        cat_entry.1 += 1;
-                    }
+        // Read manifests to extract original file sizes (per-category
+        // compression-ratio breakdown).
+        for manifest_key in &manifest_keys {
+            if let Ok(data) = storage.get(manifest_key).await {
+                if let Ok(manifest) = mediagit_versioning::format::deserialize::<
+                    mediagit_versioning::ChunkManifest,
+                >(&data)
+                {
+                    stats.original_bytes += manifest.total_size;
+
+                    let category = manifest
+                        .filename
+                        .as_deref()
+                        .and_then(|f| std::path::Path::new(f).extension())
+                        .and_then(|e| e.to_str())
+                        .map(|ext| categorize_extension(ext))
+                        .unwrap_or("other");
+                    let cat_entry = stats
+                        .category_stats
+                        .entry(category.to_string())
+                        .or_insert((0, 0));
+                    cat_entry.0 += manifest.total_size;
+                    cat_entry.1 += 1;
                 }
             }
         }
@@ -666,10 +698,10 @@ impl StatsCmd {
         println!();
     }
 
-    async fn show_compression_stats(&self, storage_path: &Path) -> Result<()> {
+    async fn show_compression_stats(&self, storage: &Arc<dyn StorageBackend>) -> Result<()> {
         println!("{}", style("Compression:").bold());
 
-        let stats = self.compute_storage_stats(storage_path).await?;
+        let stats = self.compute_storage_stats(storage).await?;
         let total_stored =
             stats.loose_bytes + stats.pack_bytes + stats.chunk_bytes + stats.delta_bytes;
 
@@ -728,11 +760,11 @@ impl StatsCmd {
 
     async fn output_prometheus(
         &self,
-        storage_path: &Path,
+        storage: &Arc<dyn StorageBackend>,
         odb: &ObjectDatabase,
         refdb: &RefDatabase,
     ) -> Result<()> {
-        let storage_stats = self.compute_storage_stats(storage_path).await?;
+        let storage_stats = self.compute_storage_stats(storage).await?;
         let commit_stats = self
             .compute_commit_stats(odb, refdb)
             .await
@@ -767,11 +799,11 @@ impl StatsCmd {
 
     async fn output_json(
         &self,
-        storage_path: &Path,
+        storage: &Arc<dyn StorageBackend>,
         odb: &ObjectDatabase,
         refdb: &RefDatabase,
     ) -> Result<()> {
-        let storage_stats = self.compute_storage_stats(storage_path).await?;
+        let storage_stats = self.compute_storage_stats(storage).await?;
         let commit_stats = self
             .compute_commit_stats(odb, refdb)
             .await
@@ -807,7 +839,8 @@ impl StatsCmd {
                 "pack_files": storage_stats.pack_count,
                 "chunks": storage_stats.chunk_count,
                 "deltas": storage_stats.delta_count,
-                "manifests": storage_stats.manifest_count
+                "manifests": storage_stats.manifest_count,
+                "largest_shard_bucket": storage_stats.largest_shard_bucket.as_ref().map(|(b, c)| serde_json::json!({"bucket": b, "count": c}))
             },
             "commits": {
                 "total": commit_stats.total_commits,

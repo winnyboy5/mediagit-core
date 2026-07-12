@@ -40,6 +40,10 @@ graph LR
         pull
         fetch
     end
+    subgraph "Media & Sparse"
+        media
+        sparse-checkout
+    end
     subgraph Utility
         gc
         fsck
@@ -57,7 +61,8 @@ graph LR
 | **Setup** | `init`, `clone`, `remote` |
 | **File Ops** | `add`, `commit`, `status`, `diff`, `show` |
 | **Branch & History** | `branch`, `merge`, `rebase`, `cherry-pick`, `log`, `reset`, `revert`, `reflog`, `stash`, `bisect`, `tag` |
-| **Remote** | `push`, `pull`, `fetch` |
+| **Remote** | `push`, `pull`, `fetch`, `download` |
+| **Media & Sparse** | `media`, `sparse-checkout` |
 | **Utility** | `gc`, `fsck`, `verify`, `stats`, `version`, `completions` |
 
 ### Git-Compatibility Shims
@@ -250,16 +255,18 @@ mediagit status
 | `--ignored` | Show ignored files |
 | `-s, --short` | Short format output |
 | `--porcelain` | Machine-readable output |
-| `-b, --branch` | Show branch info |
-| `--ahead-behind` | Show ahead/behind counts |
+| `-b, --branch` | Show branch info, including upstream ahead/behind when configured |
 | `-q, --quiet` | Suppress output |
-| `-v, --verbose` | Detailed output |
+| `-v, --verbose` | Detailed output (adds total size to the summary line) |
+| `--json` | Single JSON document on stdout (implies no colors/progress) |
 
 **Examples:**
 ```bash
 mediagit status
 mediagit status -s              # Short format
 mediagit status --porcelain     # For scripting
+mediagit status -b              # Branch + ahead/behind vs. upstream
+mediagit status --json          # Machine-readable structured output
 ```
 
 ---
@@ -634,11 +641,56 @@ mediagit fetch --all --prune
 
 ---
 
+### `mediagit download`
+
+Download a single file from a remote repository by path — a plain streaming
+GET against the server's file-browse endpoint, not a full clone. Works
+**without a local repository** when given a full URL (the point: CI/scripting
+can pull one asset without cloning). When run inside a repository with a
+non-URL path, resolves against the `origin` remote.
+
+```bash
+mediagit download <REMOTE_PATH> [--ref <REF>] [-o <PATH>]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--ref <REF>` | Branch, tag, or commit OID to download from (default: server's `main`, else `master`, else first branch) |
+| `-o, --output <PATH>` | Output file path (default: the file's base name in the current directory) |
+| `-q, --quiet` | Suppress output |
+
+**Examples:**
+```bash
+# No local repository needed — first path segment after the host is the repo name
+mediagit download http://server:3000/my-project/assets/logo.png
+
+mediagit download http://server:3000/my-project/assets/logo.png --ref v1.0
+mediagit download http://server:3000/my-project/assets/logo.png -o logo.png
+
+# Inside a repo, resolves against the 'origin' remote
+mediagit download assets/logo.png
+```
+
+Rejects `..` path-traversal components client-side (in addition to server-side
+validation). Attaches client credentials (`MEDIAGIT_TOKEN`/`MEDIAGIT_API_KEY`
+or per-remote config) exactly like `push`/`pull`/`fetch`/`clone` when run
+inside a repository with a non-URL path. In full-URL mode, credentials are
+attached only if the typed URL's host matches one of the current
+repository's configured remotes (scheme + host + effective port); with no
+local repository, or no matching remote, no credentials are sent — this
+keeps `MEDIAGIT_TOKEN`/`MEDIAGIT_API_KEY` from being sent to an arbitrary
+host.
+
+---
+
 ## Tags
 
 ### `mediagit tag`
 
-Manage tags.
+Manage tags. Annotated tags (`-a`/`-m`) are real objects in the object
+database (`ObjectType::Tag`) — a tag name, tagger, message, and a target
+OID, just like a commit. Lightweight tags are still just a ref pointing
+directly at a commit.
 
 ```bash
 mediagit tag <SUBCOMMAND>
@@ -652,7 +704,25 @@ mediagit tag <SUBCOMMAND>
 | `list` | `tag list [PATTERN]` | List tags |
 | `delete` | `tag delete <NAME>...` | Delete tags |
 | `show` | `tag show <NAME>` | Show tag info |
-| `verify` | `tag verify <NAME>` | Verify tag |
+| `verify` | `tag verify <NAME>` | Verify tag ref, and signature if annotated |
+
+#### Signing (`MEDIAGIT_SIGN`)
+
+Annotated tags can be signed with your **existing OpenSSH ed25519 key**
+(`~/.ssh/id_ed25519` by default — override with `MEDIAGIT_SIGN_KEY`), so
+signing reuses key management you already have. The signature format is
+**MediaGit-native** (an OpenSSH-armored `SshSig` blob stored inside the Tag
+object) — this is not git's tag-signing format, and git interop is not a
+goal; MediaGit is a standalone VCS.
+
+```bash
+MEDIAGIT_SIGN=1 mediagit tag create v1.0.0 -m "Release 1.0.0"
+mediagit tag verify v1.0.0    # valid signature, signed by <fingerprint> / INVALID (exits non-zero) / unsigned
+                              # verifies against the key embedded in the signature (TOFU) — no local key needed
+```
+
+Off by default (opt-in). Passphrase-protected keys are detected and
+rejected with a clear error — passphrase prompting isn't implemented yet.
 
 **Flags for `tag create`:**
 
@@ -685,6 +755,71 @@ mediagit tag create v1.0.0
 mediagit tag create v1.0.0 -m "Release version 1.0.0"
 mediagit tag list
 mediagit tag delete v0.9.0
+```
+
+---
+
+## Media & Sparse Checkout
+
+### `mediagit media`
+
+Inspect media file metadata — image, video, audio, PSD, and 3D-model formats.
+Reads a working-tree file directly (never touches the ODB) and reports every
+top-level field the corresponding `mediagit-media` parser produces.
+
+```bash
+mediagit media info <PATH> [--json]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output the full parsed metadata struct as JSON instead of `label: value` lines |
+
+Supported extensions: `jpg/jpeg/png/tif/tiff/webp` (image), `mp4/mov/m4v`
+(video), `wav/mp3/flac/aac/ogg/m4a` (audio), `psd` (PSD), `obj/fbx/blend/
+gltf/glb/stl/usd/usda/usdc/usdz/ply` (3D). Files over 256 MB are skipped
+(same cap as the `status`/`show` `media: ...` summary line, gated by
+`MEDIAGIT_MEDIA_META`). An unsupported extension prints a one-line message
+and exits `0`.
+
+**Examples:**
+```bash
+mediagit media info assets/hero.png
+mediagit media info assets/clip.mp4 --json
+```
+
+### `mediagit sparse-checkout`
+
+Materialize only part of the working tree. Two pattern styles: **cone mode**
+(default) takes directory prefixes, included recursively; **pattern mode**
+(`--patterns`) takes gitignore-style globs, where a match means *include*
+(the inverse of `.mediagitignore`).
+
+```bash
+mediagit sparse-checkout <SUBCOMMAND>
+```
+
+**Subcommands:**
+
+| Subcommand | Usage | Description |
+|------------|-------|-------------|
+| `set` | `sparse-checkout set <PATTERN>... [--patterns]` | Write patterns and apply: remove newly-excluded tracked files, materialize newly-included ones |
+| `list` (alias `ls`) | `sparse-checkout list` | Show the active mode and patterns |
+| `disable` | `sparse-checkout disable` | Remove the pattern file and restore the full working tree |
+
+**Semantics:** excluded files are never written by ordinary checkout
+operations (branch switch, clone, reset, etc.), and an excluded file that
+already exists on disk is never deleted by them either — it's simply outside
+the cone. Only `sparse-checkout set`/`disable` materialize or remove files in
+response to a pattern change. `status` treats sparse-excluded paths as
+absent, not deleted.
+
+**Examples:**
+```bash
+mediagit sparse-checkout set assets/textures assets/audio
+mediagit sparse-checkout set --patterns '*.png' '*.wav'
+mediagit sparse-checkout list
+mediagit sparse-checkout disable
 ```
 
 ---
@@ -1056,6 +1191,14 @@ mediagit completions powershell >> $PROFILE
 | `MEDIAGIT_REPO` | Repository path (set by `-C` flag) |
 | `MEDIAGIT_AUTHOR_NAME` | Default author name |
 | `MEDIAGIT_AUTHOR_EMAIL` | Default author email |
+| `MEDIAGIT_TOKEN` | Bearer token for remote authentication (client auth). Lowest precedence, below per-remote `token` in `config.toml` |
+| `MEDIAGIT_API_KEY` | API key for remote authentication (client auth). Same precedence as `MEDIAGIT_TOKEN`; `MEDIAGIT_TOKEN` wins if both are set |
+| `MEDIAGIT_SIGN` | Sign annotated tags with your SSH key (`1`/`true`/`on`). Off by default |
+| `MEDIAGIT_SIGN_KEY` | Path to the ed25519 key used to sign/verify tags. Default: `~/.ssh/id_ed25519` |
+| `MEDIAGIT_CHECKOUT_PARALLELISM` | Number of parallel file I/O operations during checkout (branch switch, clone, etc.). Default: number of CPUs capped at 8. Set to `1` for sequential behavior |
+| `MEDIAGIT_BITMAP` | Enable reachability bitmap generation on push/gc and consumption on fetch/pull (`0`/`1`, `off`/`on`, `false`/`true`). Default: on. Set to `0` to disable (falls back to BFS walk) |
+| `MEDIAGIT_REPO_NAMESPACE` | Override the default repository namespace prefix used by multi-repo storage backends. Default: sanitized repository directory basename |
+| `MEDIAGIT_REFLOG_MAX` | Maximum number of reflog entries to keep per ref. Default: `1000`. Older entries are pruned during `git` operations |
 
 ### Performance & Concurrency
 

@@ -133,10 +133,152 @@ pub fn find_repo_root_from(start: &std::path::Path) -> Result<PathBuf> {
     }
 }
 
+/// Resolve client credentials for talking to `remote_name` (M2 client auth).
+///
+/// Precedence: per-remote config (`remotes.<name>.token` / `.api_key` in
+/// config.toml) → env `MEDIAGIT_TOKEN` / `MEDIAGIT_API_KEY` → none. `token`
+/// wins over `api_key` if a remote somehow has both set. Threaded into
+/// `ProtocolClient::with_credentials` by every remote command (fetch, pull,
+/// push, clone, download).
+///
+/// Missing/no remote entry (e.g. `clone`, which has no repo config yet) or
+/// unknown `remote_name` falls straight through to the env-var checks.
+pub fn resolve_credentials(
+    repo_root: &Path,
+    config: &mediagit_config::Config,
+    remote_name: &str,
+) -> mediagit_protocol::Credentials {
+    if let Some(remote) = config.remotes.get(remote_name) {
+        if let Some(token) = remote.token.as_deref().filter(|t| !t.trim().is_empty()) {
+            warn_if_config_world_readable(repo_root);
+            return mediagit_protocol::Credentials::Bearer(token.to_string());
+        }
+        if let Some(key) = remote.api_key.as_deref().filter(|k| !k.trim().is_empty()) {
+            warn_if_config_world_readable(repo_root);
+            return mediagit_protocol::Credentials::ApiKey(key.to_string());
+        }
+    }
+    if let Some(token) = std::env::var("MEDIAGIT_TOKEN")
+        .ok()
+        .filter(|t| !t.trim().is_empty())
+    {
+        return mediagit_protocol::Credentials::Bearer(token);
+    }
+    if let Some(key) = std::env::var("MEDIAGIT_API_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty())
+    {
+        return mediagit_protocol::Credentials::ApiKey(key);
+    }
+    mediagit_protocol::Credentials::None
+}
+
+/// True if `typed_url` and `remote_url` point at the same host for
+/// credential-attachment purposes (F4): same scheme (case-insensitive),
+/// same host (case-insensitive), and same effective port — an explicit
+/// port if given, else the scheme's well-known default (80/443/...).
+/// Path, query, and userinfo are ignored; either URL failing to parse is
+/// treated as "no match" (fail closed).
+///
+/// Used only to gate credential attachment in `download`'s full-URL mode:
+/// env/config credentials are attached only if the user-typed URL's host
+/// matches one of the repo's configured remotes, so a typo'd or malicious
+/// host never receives a token meant for the real remote.
+pub fn host_matches_remote(typed_url: &str, remote_url: &str) -> bool {
+    let (Ok(a), Ok(b)) = (url::Url::parse(typed_url), url::Url::parse(remote_url)) else {
+        return false;
+    };
+    if !a.scheme().eq_ignore_ascii_case(b.scheme()) {
+        return false;
+    }
+    match (a.host_str(), b.host_str()) {
+        (Some(ha), Some(hb)) if ha.eq_ignore_ascii_case(hb) => {}
+        _ => return false,
+    }
+    a.port_or_known_default() == b.port_or_known_default()
+}
+
+/// Best-effort warning when a credential was just read from a config.toml
+/// that's readable by group/other. Unix-only (real permission bits); on
+/// Windows this is a no-op rather than shelling out to `icacls` for a
+/// one-line advisory — add real ACL inspection if this ever matters more
+/// than a nudge.
+#[cfg(unix)]
+fn warn_if_config_world_readable(repo_root: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let config_path = repo_root.join(".mediagit").join("config.toml");
+    if let Ok(meta) = std::fs::metadata(&config_path) {
+        if meta.permissions().mode() & 0o077 != 0 {
+            eprintln!(
+                "warning: {} is readable by group/other and may contain a remote token or API key — consider `chmod 600` on it",
+                config_path.display()
+            );
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_if_config_world_readable(_repo_root: &Path) {
+    // ponytail: best-effort only, see doc comment above.
+}
+
+/// Determine the effective repo namespace (layout v2): env override wins,
+/// then the value persisted in config.toml at init/clone time, then a
+/// sanitized basename of the repo root as a last-resort fallback for repos
+/// whose config predates `repo_namespace` (never written on disk in that
+/// case — recomputed identically every time, since repo root doesn't move).
+fn resolve_repo_namespace(repo_root: &Path, config: &mediagit_config::Config) -> String {
+    if let Ok(ns) = std::env::var("MEDIAGIT_REPO_NAMESPACE") {
+        if !ns.trim().is_empty() {
+            return mediagit_storage::sanitize_namespace(&ns);
+        }
+    }
+    if let Some(ns) = &config.repo_namespace {
+        if !ns.trim().is_empty() {
+            return mediagit_storage::sanitize_namespace(ns);
+        }
+    }
+    let basename = repo_root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "repo".to_string());
+    mediagit_storage::sanitize_namespace(&basename)
+}
+
+/// Resolve this repository's identity (namespace-collision guard, M2).
+///
+/// Returns the `repo_id` persisted in `config.repo_id`. For configs written
+/// before this field existed (`None`), generates a fresh one and writes it
+/// back to `config.toml` immediately — "generate-and-write on first open" —
+/// so the value is stable across subsequent invocations rather than being
+/// silently unowned or regenerated every run (which would make the
+/// collision guard useless: a marker adopted with a throwaway id would
+/// mismatch on the very next open).
+async fn resolve_repo_id(repo_root: &Path, config: &mediagit_config::Config) -> Result<String> {
+    if let Some(id) = &config.repo_id {
+        if !id.trim().is_empty() {
+            return Ok(id.clone());
+        }
+    }
+    let id = mediagit_storage::generate_repo_id();
+    let mut updated = config.clone();
+    updated.repo_id = Some(id.clone());
+    updated
+        .save(repo_root)
+        .context("Failed to persist newly generated repo_id to config.toml")?;
+    Ok(id)
+}
+
 /// Create the appropriate storage backend based on repository config.
 ///
 /// Reads `.mediagit/config.toml` to determine backend type (filesystem, S3, Azure, GCS).
 /// Falls back to local filesystem if config is missing or uses default storage.
+///
+/// Layout v2: the returned backend is always wrapped in
+/// [`mediagit_storage::NamespacedBackend`] so every key is transparently
+/// prefixed `"<repo_namespace>/"` — this is one of exactly two production
+/// construction sites (the other is the server's `build_storage_backend`);
+/// every backend arm below funnels through the same wrap-before-return path.
 ///
 /// # Arguments
 /// * `repo_root` - Root of the mediagit repository (parent of .mediagit/)
@@ -151,13 +293,35 @@ pub async fn create_storage_backend(repo_root: &Path) -> Result<Arc<dyn StorageB
         .await
         .unwrap_or_default();
 
+    let ns = resolve_repo_namespace(repo_root, &config);
+    let repo_id = resolve_repo_id(repo_root, &config).await?;
+    let inner = create_inner_storage_backend(repo_root, &mediagit_dir, &config).await?;
+    let namespaced = mediagit_storage::NamespacedBackend::new(inner, ns)
+        .context("Failed to construct namespaced storage backend")?;
+
+    mediagit_storage::check_or_write_layout_marker(
+        &namespaced,
+        mediagit_config::CURRENT_LAYOUT_VERSION,
+        &repo_id,
+    )
+    .await
+    .context("Layout version check failed")?;
+
+    Ok(Arc::new(namespaced))
+}
+
+async fn create_inner_storage_backend(
+    repo_root: &Path,
+    mediagit_dir: &Path,
+    config: &mediagit_config::Config,
+) -> Result<Arc<dyn StorageBackend>> {
     match &config.storage {
         mediagit_config::StorageConfig::FileSystem(fs_config) => {
             let storage_path = if std::path::Path::new(&fs_config.base_path).is_absolute() {
                 PathBuf::from(&fs_config.base_path)
             } else if fs_config.base_path == "./data" {
                 // Default config value - use .mediagit
-                mediagit_dir.clone()
+                mediagit_dir.to_path_buf()
             } else {
                 repo_root.join(&fs_config.base_path)
             };
@@ -392,5 +556,69 @@ mod tests {
         // Simulate Windows-style path
         let result = normalize_path(Path::new(".\\test.ai"), &repo_root);
         assert_eq!(result, PathBuf::from("test.ai"));
+    }
+
+    #[test]
+    fn host_matches_remote_exact_match() {
+        assert!(host_matches_remote(
+            "http://host.example/repo/file.png",
+            "http://host.example/repo"
+        ));
+    }
+
+    #[test]
+    fn host_matches_remote_case_insensitive_host() {
+        assert!(host_matches_remote(
+            "http://Host.Example/repo/file.png",
+            "http://host.example/repo"
+        ));
+    }
+
+    #[test]
+    fn host_matches_remote_explicit_matches_default_port_http() {
+        assert!(host_matches_remote(
+            "http://host.example:80/repo/file.png",
+            "http://host.example/repo"
+        ));
+    }
+
+    #[test]
+    fn host_matches_remote_explicit_matches_default_port_https() {
+        assert!(host_matches_remote(
+            "https://host.example:443/repo/file.png",
+            "https://host.example/repo"
+        ));
+    }
+
+    #[test]
+    fn host_matches_remote_different_port_no_match() {
+        assert!(!host_matches_remote(
+            "http://host.example:8080/repo/file.png",
+            "http://host.example/repo"
+        ));
+    }
+
+    #[test]
+    fn host_matches_remote_different_scheme_no_match() {
+        assert!(!host_matches_remote(
+            "https://host.example/repo/file.png",
+            "http://host.example/repo"
+        ));
+    }
+
+    #[test]
+    fn host_matches_remote_ignores_path_and_userinfo() {
+        assert!(host_matches_remote(
+            "http://user:pass@host.example/some/other/path",
+            "http://host.example/completely-different-repo-path"
+        ));
+    }
+
+    #[test]
+    fn host_matches_remote_different_host_no_match() {
+        assert!(!host_matches_remote(
+            "http://evil.example/repo/file.png",
+            "http://host.example/repo"
+        ));
     }
 }

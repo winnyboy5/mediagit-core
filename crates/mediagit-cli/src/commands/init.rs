@@ -20,7 +20,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use mediagit_config::{Config, FileSystemStorage, StorageConfig};
 use mediagit_storage::LocalBackend;
-use mediagit_versioning::{ObjectDatabase, Ref, RefDatabase};
+use mediagit_versioning::{Ref, RefDatabase};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -91,11 +91,8 @@ impl InitCmd {
         // Initialize storage backend (local for now)
         // LocalBackend will create the "objects" directory automatically
         let storage_path = repo_path.join(".mediagit");
-        let storage: Arc<dyn mediagit_storage::StorageBackend> =
+        let _storage: Arc<dyn mediagit_storage::StorageBackend> =
             Arc::new(LocalBackend::new(&storage_path).await?);
-
-        // Initialize object database
-        let _odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
 
         // Initialize reference database (uses direct filesystem, not StorageBackend)
         let refdb = RefDatabase::new(&storage_path);
@@ -113,6 +110,18 @@ impl InitCmd {
 
         // Create default configuration
         self.create_default_config(&repo_path, initial_branch)?;
+
+        // Write the layout-v2 LAYOUT marker under the repo's namespace. Must
+        // happen after config.toml exists (it carries repo_namespace and
+        // repo_id), so we re-derive the (now-namespaced) storage backend via
+        // the same factory every other command uses rather than reusing the
+        // raw, unwrapped `_storage` constructed above.
+        // `create_storage_backend` performs the marker check/write itself
+        // (it's one of the two production wrap-points), so no separate call
+        // is needed here.
+        crate::repo::create_storage_backend(&repo_path)
+            .await
+            .context("Failed to write LAYOUT marker")?;
 
         if !self.quiet {
             output::success(&format!(
@@ -166,6 +175,14 @@ impl InitCmd {
     fn create_default_config(&self, repo_path: &Path, _initial_branch: &str) -> Result<()> {
         info!("Creating default configuration");
 
+        // Layout v2: default namespace = sanitized basename of the repo root,
+        // computed once and persisted so it survives the repo being moved
+        // or MEDIAGIT_REPO_NAMESPACE not being set on a later invocation.
+        let namespace = repo_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "repo".to_string());
+
         // Configure filesystem storage
         let config = Config {
             storage: StorageConfig::FileSystem(FileSystemStorage {
@@ -175,6 +192,9 @@ impl InitCmd {
                 file_permissions: "0644".to_string(),
             }),
             cdc_seed: generate_cdc_seed(),
+            repo_namespace: Some(mediagit_storage::sanitize_namespace(&namespace)),
+            layout_version: mediagit_config::CURRENT_LAYOUT_VERSION,
+            repo_id: Some(mediagit_storage::generate_repo_id()),
             ..Config::default()
         };
 
