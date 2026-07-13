@@ -13,6 +13,24 @@
 
 use super::*;
 
+/// Cap on how many chunks `seed_similarity_from_manifest` will sample from a
+/// previous manifest. Without a bound, seeding is O(prior chunk count ×
+/// delta-chain depth) — every chunk of the previous version's manifest gets
+/// a full `get_chunk` reconstruction. Override via
+/// `MEDIAGIT_SIMILARITY_SEED_MAX_CHUNKS`.
+fn similarity_seed_max_chunks() -> usize {
+    match std::env::var("MEDIAGIT_SIMILARITY_SEED_MAX_CHUNKS") {
+        Ok(v) => v.parse::<usize>().unwrap_or_else(|_| {
+            warn!(
+                "MEDIAGIT_SIMILARITY_SEED_MAX_CHUNKS='{}' is not a valid usize, using default 256",
+                v
+            );
+            256
+        }),
+        Err(_) => 256,
+    }
+}
+
 impl ObjectDatabase {
     /// Try to store a chunk as delta against a similar existing chunk.
     ///
@@ -2056,8 +2074,24 @@ impl ObjectDatabase {
         &self,
         manifest: &ChunkManifest,
     ) -> anyhow::Result<usize> {
+        let total = manifest.chunks.len();
+        let max_chunks = similarity_seed_max_chunks();
+        // Spread the sample evenly across the manifest instead of just
+        // taking the first `max_chunks` — a stride keeps coverage
+        // representative of the whole file, not just its start.
+        let stride = (total / max_chunks.max(1)).max(1);
+
         let mut seeded = 0;
-        for chunk_ref in &manifest.chunks {
+        let mut skipped_deep = 0;
+        for chunk_ref in manifest.chunks.iter().step_by(stride).take(max_chunks) {
+            // Reconstructing a deep delta chain just to seed the detector
+            // costs more than the delta it might later enable — skip it.
+            // Depth 2 measured: costs ≤1.7pp savings on 5-deep wav chains,
+            // buys flat seeding time on deep epoch chains (PERF-ML-1).
+            if self.chunk_delta_depth(&chunk_ref.id).await > 2 {
+                skipped_deep += 1;
+                continue;
+            }
             if let Ok(data) = self.get_chunk(&chunk_ref.id).await {
                 let mut meta = crate::similarity::ObjectMetadata::new(
                     chunk_ref.id,
@@ -2070,14 +2104,51 @@ impl ObjectDatabase {
                 seeded += 1;
             }
         }
-        if seeded > 0 {
+        if seeded > 0 || skipped_deep > 0 {
             info!(
                 seeded_chunks = seeded,
-                total_chunks = manifest.chunks.len(),
+                skipped_deep_chunks = skipped_deep,
+                total_chunks = total,
+                sampled_chunks = total.div_ceil(stride).min(max_chunks),
                 "Seeded similarity detector from previous manifest"
             );
         }
         Ok(seeded)
+    }
+
+    /// Depth of `chunk_id`'s delta chain (0 = full chunk, no `.meta`).
+    /// Only reads the small `chunk-deltas/*.meta` sidecars — never chunk
+    /// payloads — so it's cheap to call before deciding whether a full
+    /// `get_chunk` reconstruction is worth it.
+    async fn chunk_delta_depth(&self, chunk_id: &Oid) -> usize {
+        let mut depth = 0usize;
+        let mut cur = *chunk_id;
+        let mut visited = std::collections::HashSet::new();
+        loop {
+            if depth > MAX_DELTA_DEPTH as usize || !visited.insert(cur) {
+                return depth;
+            }
+            let meta_key = format!("chunk-deltas/{}.meta", cur.to_hex());
+            match self.storage.exists(&meta_key).await {
+                Ok(true) => {}
+                _ => return depth,
+            }
+            let bytes = match self.storage.get(&meta_key).await {
+                Ok(b) => b,
+                Err(_) => return depth,
+            };
+            let s = String::from_utf8_lossy(&bytes);
+            let hex = match s.trim().strip_prefix("base:") {
+                Some(h) => h.trim(),
+                None => return depth,
+            };
+            let next = match Oid::from_hex(hex) {
+                Ok(o) => o,
+                Err(_) => return depth,
+            };
+            cur = next;
+            depth += 1;
+        }
     }
 
     /// Seed the similarity detector from a full blob object (non-chunked files).
@@ -2176,24 +2247,38 @@ impl ObjectDatabase {
             }
         };
 
-        // Read the base chunk (non-delta) once
+        // Read the base chunk (non-delta) once. Loose first; if `gc --repack`
+        // has bundled it into a pack and removed the loose copy, fall back to
+        // the same pack-routing `read_from_packs` uses for whole objects
+        // (chunk IDs are content hashes too, so its integrity check applies
+        // unchanged). `read_from_packs` returns already-decompressed data.
         let base_key = format!("chunks/{}", base_id.to_hex());
-        let compressed_base = self.storage.get(&base_key).await?;
-        let mut current = if let Some(smart_comp) = &self.smart_compressor {
-            decompress_typed_blocking(smart_comp.clone(), compressed_base)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to decompress base chunk: {}", e))?
-        } else {
-            let algo = CompressionAlgorithm::detect(&compressed_base);
-            match algo {
-                CompressionAlgorithm::None => compressed_base,
-                _ => {
-                    let fallback = compressed_base.clone();
-                    decompress_blocking(self.compressor.clone(), compressed_base)
+        let mut current = match self.storage.get(&base_key).await {
+            Ok(compressed_base) => {
+                if let Some(smart_comp) = &self.smart_compressor {
+                    decompress_typed_blocking(smart_comp.clone(), compressed_base)
                         .await
-                        .unwrap_or(fallback)
+                        .map_err(|e| anyhow::anyhow!("Failed to decompress base chunk: {}", e))?
+                } else {
+                    let algo = CompressionAlgorithm::detect(&compressed_base);
+                    match algo {
+                        CompressionAlgorithm::None => compressed_base,
+                        _ => {
+                            let fallback = compressed_base.clone();
+                            decompress_blocking(self.compressor.clone(), compressed_base)
+                                .await
+                                .unwrap_or(fallback)
+                        }
+                    }
                 }
             }
+            Err(_) => self.read_from_packs(&base_id).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to read base chunk {}: not found loose or in packs: {}",
+                    base_id,
+                    e
+                )
+            })?,
         };
 
         // Apply deltas from base->leaf (chain is leaf-first, so reverse)
@@ -2250,45 +2335,36 @@ impl ObjectDatabase {
     pub async fn get_compressed_chunk(&self, chunk_id: &Oid) -> anyhow::Result<Vec<u8>> {
         let chunk_key = format!("chunks/{}", chunk_id.to_hex());
 
-        // Fast path: raw chunk exists
+        // Fast path: raw chunk exists loose
         if let Ok(data) = self.storage.get(&chunk_key).await {
             return Ok(data);
         }
 
-        // Fallback: chunk is delta-encoded — reconstruct and re-compress
-        let delta_meta_key = format!("chunk-deltas/{}.meta", chunk_id.to_hex());
-        if self.storage.exists(&delta_meta_key).await.unwrap_or(false) {
-            tracing::debug!(
-                chunk_id = %chunk_id,
-                "Chunk stored as delta, reconstructing for transfer"
-            );
+        // Fallback: chunk is delta-encoded, or was bundled into a pack by
+        // `gc --repack` (and the loose copy removed) — reconstruct via
+        // get_chunk() (delta-chain-aware and pack-aware) and re-compress for
+        // transfer.
+        tracing::debug!(
+            chunk_id = %chunk_id,
+            "Chunk not found loose, reconstructing via delta chain or pack"
+        );
 
-            // Reconstruct full decompressed data from delta chain
-            let decompressed = self.get_chunk(chunk_id).await.map_err(|e| {
-                anyhow::anyhow!("Failed to reconstruct delta chunk {}: {}", chunk_id, e)
-            })?;
+        let decompressed = self
+            .get_chunk(chunk_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to reconstruct chunk {}: {}", chunk_id, e))?;
 
-            // Re-compress for network transfer
-            if let Some(smart_comp) = &self.smart_compressor {
-                smart_comp
-                    .compress_typed(&decompressed, CompressionObjectType::Unknown)
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "Failed to compress reconstructed chunk {}: {}",
-                            chunk_id,
-                            e
-                        )
-                    })
-            } else {
-                self.compressor.compress(&decompressed).map_err(|e| {
+        // Re-compress for network transfer
+        if let Some(smart_comp) = &self.smart_compressor {
+            smart_comp
+                .compress_typed(&decompressed, CompressionObjectType::Unknown)
+                .map_err(|e| {
                     anyhow::anyhow!("Failed to compress reconstructed chunk {}: {}", chunk_id, e)
                 })
-            }
         } else {
-            Err(anyhow::anyhow!(
-                "Failed to read compressed chunk {}: not found as raw or delta",
-                chunk_id
-            ))
+            self.compressor.compress(&decompressed).map_err(|e| {
+                anyhow::anyhow!("Failed to compress reconstructed chunk {}: {}", chunk_id, e)
+            })
         }
     }
 
@@ -2335,7 +2411,8 @@ impl ObjectDatabase {
             .map_err(|e| anyhow::anyhow!("Failed to store manifest {}: {}", oid, e))
     }
 
-    /// Check if a chunk exists (including delta-encoded chunks)
+    /// Check if a chunk exists (including delta-encoded chunks and chunks
+    /// that only live inside a pack file — see `ensure_pack_membership_loaded`).
     pub async fn chunk_exists(&self, chunk_id: &Oid) -> anyhow::Result<bool> {
         let chunk_key = format!("chunks/{}", chunk_id.to_hex());
         if self.storage.exists(&chunk_key).await? {
@@ -2343,7 +2420,46 @@ impl ObjectDatabase {
         }
         // Also check for delta-encoded chunk
         let delta_key = format!("chunk-deltas/{}.meta", chunk_id.to_hex());
-        self.storage.exists(&delta_key).await
+        if self.storage.exists(&delta_key).await? {
+            return Ok(true);
+        }
+        // Packs are immutable once written and the loose copy is deleted on
+        // `repack(remove_loose=true)`, so a miss above doesn't mean "new" —
+        // it may already be packed.
+        self.ensure_pack_membership_loaded().await?;
+        let guard = self.pack_membership.read().await;
+        Ok(guard.as_ref().is_some_and(|set| set.contains(chunk_id)))
+    }
+
+    /// Lazily build the in-memory set of every OID embedded in a pack index.
+    /// Reads each pack file once (to parse its trailing index) — cheap
+    /// relative to a per-call full-pack scan, and never re-run once loaded
+    /// except to extend it (`repack()` does this directly).
+    async fn ensure_pack_membership_loaded(&self) -> anyhow::Result<()> {
+        {
+            let guard = self.pack_membership.read().await;
+            if guard.is_some() {
+                return Ok(());
+            }
+        }
+        let mut guard = self.pack_membership.write().await;
+        if guard.is_some() {
+            // Another task raced us and already loaded it.
+            return Ok(());
+        }
+        use crate::pack::PackReader;
+        let mut set = std::collections::HashSet::new();
+        for pack_key in self.list_pack_files().await? {
+            if let Ok(pack_data) = self.storage.get(&pack_key).await {
+                if let Ok(pack_reader) = PackReader::new(pack_data) {
+                    for (oid, _) in pack_reader.index().iter() {
+                        set.insert(*oid);
+                    }
+                }
+            }
+        }
+        *guard = Some(set);
+        Ok(())
     }
 
     /// Check whether a chunk-delta is present locally for the given chunk id.

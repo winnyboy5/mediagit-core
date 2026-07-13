@@ -144,7 +144,21 @@ impl ResetCmd {
         let reflog = Reflog::new(storage_path);
 
         // Get current HEAD
-        let old_oid = refs.resolve("HEAD").await?;
+        let old_oid = match refs.resolve("HEAD").await {
+            Ok(oid) => oid,
+            Err(_) => {
+                // HEAD is unborn (no commits yet — refs/heads/<branch>
+                // doesn't exist). There's no tree to reset the index or
+                // working tree to. `reset <rev>` still can't be satisfied
+                // and errors with a clearer message; the no-target form
+                // (`reset` / `reset --hard`) treats the target state as
+                // the empty tree so it can still be used to unstage.
+                if self.commit.is_some() {
+                    anyhow::bail!("No commits yet, cannot reset to a specific revision");
+                }
+                return self.reset_unborn(repo_root, mode);
+            }
+        };
 
         // Resolve target commit
         let target_spec = self.commit.as_deref().unwrap_or("HEAD");
@@ -204,15 +218,20 @@ impl ResetCmd {
             self.reset_index(repo_root, &odb, &old_commit).await?;
         }
 
-        // Step 2: Reset index (mixed and hard)
-        if mode == ResetMode::Mixed || mode == ResetMode::Hard {
+        // Step 2: Reset index (mixed populates it from the target tree)
+        if mode == ResetMode::Mixed {
             self.reset_index(repo_root, &odb, &target_commit).await?;
         }
 
-        // Step 3: Reset working tree (hard only)
+        // Step 3: Reset working tree (hard only), then leave an EMPTY index.
+        // An empty index means "clean" (a normal commit clears it too); a
+        // hard reset lands the working tree exactly at target_oid, so
+        // repopulating the index with the whole tree made `status` show
+        // every file as phantom-staged afterward.
         if mode == ResetMode::Hard {
             self.reset_working_tree(repo_root, &odb, &target_oid)
                 .await?;
+            Index::new().save(repo_root)?;
         }
 
         if !self.quiet {
@@ -242,6 +261,29 @@ impl ResetCmd {
             }
             let summary = target_commit.summary();
             println!("  {} {}", style("→").dim(), summary);
+        }
+
+        Ok(())
+    }
+
+    /// Handle `reset` / `reset --hard` with no <rev> when HEAD is unborn
+    /// (no commits yet). There's no tree to move HEAD to, so the target
+    /// state is treated as the empty tree: clear the index and, for
+    /// --hard, leave the working tree untouched (never delete user files
+    /// before the first commit).
+    fn reset_unborn(&self, repo_root: &Path, mode: ResetMode) -> Result<()> {
+        Index::new().save(repo_root)?;
+
+        if !self.quiet {
+            match mode {
+                ResetMode::Hard => println!(
+                    "{} unborn HEAD: index cleared, working tree untouched",
+                    style("ℹ").cyan()
+                ),
+                ResetMode::Soft | ResetMode::Mixed => {
+                    println!("{} No commits yet; index cleared", style("✓").green())
+                }
+            }
         }
 
         Ok(())

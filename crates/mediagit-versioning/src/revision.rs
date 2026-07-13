@@ -84,6 +84,13 @@ pub async fn resolve_revision(
         return Ok(oid);
     }
 
+    // Try with refs/tags prefix (branches take precedence, matching git).
+    // Makes tags usable as revisions in show/diff/log/download/branch/reset.
+    let tag_ref = format!("refs/tags/{}", revision);
+    if let Ok(oid) = refdb.resolve(&tag_ref).await {
+        return Ok(oid);
+    }
+
     anyhow::bail!("Cannot resolve revision: {}", revision)
 }
 

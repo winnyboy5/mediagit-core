@@ -20,13 +20,35 @@ use dialoguer::Confirm;
 use mediagit_storage::StorageBackend;
 use mediagit_versioning::{
     BranchManager, ChunkManifest, Commit, FileMode, Index, ObjectType, Oid, RefDatabase, RefType,
-    Tag, Tree,
+    Reflog, Tag, Tree,
 };
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info, warn};
+
+/// Default horizon (in days) for protecting reflog-referenced commits from
+/// gc. Entries older than this are no longer roots, matching git's
+/// `gc.reflogExpire` behavior. `0` disables reflog roots entirely (old
+/// behavior). Override via `MEDIAGIT_GC_REFLOG_HORIZON_DAYS`.
+const DEFAULT_GC_REFLOG_HORIZON_DAYS: i64 = 90;
+
+fn gc_reflog_horizon_days() -> i64 {
+    std::env::var("MEDIAGIT_GC_REFLOG_HORIZON_DAYS")
+        .ok()
+        .and_then(|v| {
+            v.parse::<i64>().ok().or_else(|| {
+                tracing::warn!(
+                    "MEDIAGIT_GC_REFLOG_HORIZON_DAYS='{}' is not a valid i64, using default {}",
+                    v,
+                    DEFAULT_GC_REFLOG_HORIZON_DAYS
+                );
+                None
+            })
+        })
+        .unwrap_or(DEFAULT_GC_REFLOG_HORIZON_DAYS)
+}
 
 /// Clean up repository and optimize storage
 #[derive(Parser, Debug)]
@@ -280,6 +302,7 @@ struct GarbageCollector {
     odb: mediagit_versioning::ObjectDatabase,
     refdb: RefDatabase,
     branch_mgr: BranchManager,
+    reflog: Reflog,
 }
 
 impl GarbageCollector {
@@ -293,6 +316,7 @@ impl GarbageCollector {
             odb,
             refdb: RefDatabase::new(root_path),
             branch_mgr: BranchManager::new(root_path),
+            reflog: Reflog::new(root_path),
         }
     }
 
@@ -362,6 +386,55 @@ impl GarbageCollector {
                         }
                     }
                 }
+            }
+        }
+
+        // Protect reflog-referenced commits from gc, so `reflog`-based
+        // recovery of a branch reset/rebase/etc. keeps working. Only
+        // entries newer than the horizon are roots (matches git's
+        // gc.reflogExpire); a horizon of 0 disables this entirely.
+        let horizon_days = gc_reflog_horizon_days();
+        if horizon_days != 0 {
+            let cutoff = (horizon_days > 0)
+                .then(|| chrono::Utc::now() - chrono::Duration::days(horizon_days));
+            let zero_oid = Oid::from_bytes([0u8; 32]);
+
+            let reflog_refs = self.reflog.list_refs().await.unwrap_or_default();
+            let mut reflog_roots = 0usize;
+            for ref_name in reflog_refs {
+                let entries = match self.reflog.read(&ref_name, None).await {
+                    Ok(entries) => entries,
+                    Err(_) => continue,
+                };
+                for entry in entries {
+                    // Entries with no parseable timestamp already never
+                    // reach here (Reflog::read drops unparseable lines) —
+                    // treat any entry we do get as in-horizon by default.
+                    let in_horizon = cutoff.is_none_or(|c| entry.committer.timestamp >= c);
+                    if !in_horizon {
+                        continue;
+                    }
+                    for oid in [entry.old_oid, entry.new_oid] {
+                        if oid == zero_oid {
+                            continue;
+                        }
+                        // Skip oids the ODB no longer has (pruned by a
+                        // prior gc) without erroring.
+                        if self.odb.read(&oid).await.is_err() {
+                            continue;
+                        }
+                        if !reachable.contains(&oid) {
+                            reflog_roots += 1;
+                        }
+                        self.traverse_commit_chain(&oid, &mut reachable).await?;
+                    }
+                }
+            }
+            if reflog_roots > 0 {
+                debug!(
+                    "Protected {} reflog-referenced commits from gc",
+                    reflog_roots
+                );
             }
         }
 

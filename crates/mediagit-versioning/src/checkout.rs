@@ -14,7 +14,9 @@
 //! Checkout operations for restoring working directory from commits
 //!
 //! This module provides functionality to update the working directory
-//! to match a specific commit's tree structure.
+//! to match a specific commit's tree structure. Per-file ODB I/O is
+//! parallelized (env knob `MEDIAGIT_CHECKOUT_PARALLELISM`, default = CPUs
+//! capped at 8).
 
 use crate::sparse::SparseFilter;
 use crate::{Commit, FileMode, ObjectDatabase, Oid, Tree};

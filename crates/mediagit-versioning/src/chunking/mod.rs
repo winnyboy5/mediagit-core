@@ -52,7 +52,7 @@ use tracing::{debug, info, warn};
 pub(crate) mod chunker;
 pub(crate) mod formats;
 
-/// Chunk identifier (SHA-256 hash of chunk content)
+/// Chunk identifier (BLAKE3 hash of chunk content)
 pub type ChunkId = Oid;
 
 /// Chunking strategy selection
@@ -268,6 +268,49 @@ fn get_creative_chunk_params(_file_size: u64) -> (usize, usize, usize) {
 /// unique chunks on those two large-by-volume formats.
 fn get_audio_chunk_params(_file_size: u64) -> (usize, usize, usize) {
     (256 * 1024, 64 * 1024, 1024 * 1024)
+}
+
+static CONTAINER_CHUNK_CAP_BYTES: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+// ponytail: the format-aware container walkers (chunk_avi/chunk_mp4/
+// chunk_matroska/...) accumulate every ContentChunk — each owning a Vec<u8>
+// copy of its bytes — into one Vec before any chunk is forwarded to the
+// caller (see fill_coverage_gaps in formats.rs, which re-sorts the whole Vec
+// for gap-patching and can't run incrementally without becoming a cursor-based
+// rewrite of boundary-adjacent logic). So peak heap for that path scales with
+// file size. Rather than risk touching that logic under time pressure, cap
+// it: above this size, container-format files fall back to the already-
+// memory-bounded StreamCDC path (same one non-container files always use).
+// Upgrade path: make fill_coverage_gaps track a running cursor instead of
+// re-scanning the full Vec, then thread a channel sender through the walkers
+// so they can stream chunks out as found, removing this cap entirely.
+//
+/// Byte-size ceiling above which container-format chunking (mmap + the
+/// format-aware walker) is skipped in favor of `StreamCDC`, to bound peak
+/// heap use for the container path.
+///
+/// Controlled by `MEDIAGIT_CONTAINER_CHUNK_CAP_MB` (default: 100, matching
+/// the existing medium-file tier boundary in `chunk_file_streaming`). Set to
+/// `0` to disable the cap (unbounded, pre-existing behavior).
+fn container_chunk_cap_bytes() -> u64 {
+    *CONTAINER_CHUNK_CAP_BYTES.get_or_init(|| {
+        container_chunk_cap_from_env(
+            std::env::var("MEDIAGIT_CONTAINER_CHUNK_CAP_MB")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+/// Split out from [`container_chunk_cap_bytes`] so tests can exercise the
+/// parsing logic directly without touching the process-wide `OnceLock`.
+fn container_chunk_cap_from_env(var: Option<&str>) -> u64 {
+    let mb = var.and_then(|v| v.parse::<u64>().ok()).unwrap_or(100);
+    if mb == 0 {
+        u64::MAX
+    } else {
+        mb * 1024 * 1024
+    }
 }
 
 /// Content-based chunker
@@ -534,7 +577,7 @@ pub struct ChunkStoreStats {
 /// Chunk reference in manifest (minimal metadata for reconstruction)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkRef {
-    /// Chunk identifier (SHA-256 hash)
+    /// Chunk identifier (BLAKE3 hash)
     pub id: ChunkId,
     /// Offset in original file
     pub offset: u64,
@@ -2358,6 +2401,58 @@ mod tests {
             chunks.len() > 1,
             "audio-tier CDC should split a 2MB ogg into multiple chunks \
              (pre-P3a fixed-chunking produced exactly 1)"
+        );
+    }
+
+    #[test]
+    fn test_container_chunk_cap_env_parsing() {
+        assert_eq!(container_chunk_cap_from_env(None), 100 * 1024 * 1024);
+        assert_eq!(container_chunk_cap_from_env(Some("1")), 1024 * 1024);
+        assert_eq!(container_chunk_cap_from_env(Some("0")), u64::MAX);
+        assert_eq!(
+            container_chunk_cap_from_env(Some("garbage")),
+            100 * 1024 * 1024
+        );
+    }
+
+    /// Below the cap, `collect_file_chunks_blocking` must still route through
+    /// the format-aware AVI walker (proven by the Metadata RIFF-header chunk
+    /// it emits, which StreamCDC never produces) and must reproduce the same
+    /// chunk set as calling `chunk()` directly — the cap check must not
+    /// change behavior for files it doesn't affect.
+    #[tokio::test]
+    async fn test_collect_file_chunks_blocking_below_cap_matches_direct_chunk() {
+        let mut data = b"RIFF".to_vec();
+        data.extend_from_slice(&(2 * 1024 * 1024u32).to_le_bytes());
+        data.extend_from_slice(b"AVI ");
+        data.extend_from_slice(&pseudo_random_bytes(2 * 1024 * 1024, 7));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clip.avi");
+        std::fs::write(&path, &data).unwrap();
+
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let direct = chunker.chunk(&data, "clip.avi").await.unwrap();
+        assert!(
+            direct.iter().any(|c| c.chunk_type == ChunkType::Metadata),
+            "direct chunk() should use the AVI walker (Metadata header chunk)"
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let chunker2 = ContentChunker::new(ChunkStrategy::MediaAware);
+        let path2 = path.clone();
+        let handle =
+            tokio::task::spawn_blocking(move || chunker2.collect_file_chunks_blocking(path2, tx));
+        let mut streamed = Vec::new();
+        while let Some(chunk) = rx.recv().await {
+            streamed.push(chunk);
+        }
+        handle.await.unwrap().unwrap();
+
+        assert_eq!(
+            direct.iter().map(|c| c.id).collect::<Vec<_>>(),
+            streamed.iter().map(|c| c.id).collect::<Vec<_>>(),
+            "below the cap, streaming collection must match direct chunk() byte-for-byte"
         );
     }
 }

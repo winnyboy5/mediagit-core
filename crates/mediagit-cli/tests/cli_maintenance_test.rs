@@ -273,9 +273,11 @@ fn test_gc_prunes_bitmap_for_deleted_branch() {
         .success();
 
     // Second gc: must prune exactly the orphaned (feature/B) bitmap and
-    // regenerate exactly the surviving (main/A) one.
+    // regenerate exactly the surviving (main/A) one. Reflog protection is
+    // disabled so B is truly unreachable (like git's gc.reflogExpire=now).
     mediagit()
         .arg("gc")
+        .env("MEDIAGIT_GC_REFLOG_HORIZON_DAYS", "0")
         .current_dir(temp_dir.path())
         .assert()
         .success()

@@ -556,7 +556,24 @@ impl TagCmd {
         let storage = create_storage_backend(&repo_path).await?;
         let odb = ObjectDatabase::with_smart_compression(storage, 1000);
 
-        match self.read_tag_object(&odb, &oid).await {
+        // BUG-VFX-1: unlike read_tag_object() (used by `show`/`list -v`,
+        // which treat any failed read as "lightweight tag, nothing to show"),
+        // `verify` must surface a CONTENT-HASH mismatch (tampered/corrupt tag
+        // object) as a non-zero exit. But a *missing* object is not corruption:
+        // a lightweight tag points straight at a commit (which may legitimately
+        // be absent locally), so only an integrity failure is fatal here.
+        let data = match odb.read(&oid).await {
+            Ok(d) => Some(d),
+            Err(e) if e.to_string().contains("integrity check failed") => {
+                return Err(e).context(format!(
+                    "Tag '{}': object is corrupted (content does not match its OID)",
+                    opts.name
+                ));
+            }
+            Err(_) => None, // missing/unreadable -> treat as lightweight tag
+        };
+
+        match data.as_deref().and_then(|d| Tag::deserialize(d).ok()) {
             Some(tag) => {
                 if opts.verbose {
                     println!("Tag '{}' ref is valid (annotated)", opts.name);

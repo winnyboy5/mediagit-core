@@ -99,6 +99,14 @@ pub struct PushCmd {
     /// Verbose mode
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Verify remote chunk integrity and force re-upload any chunk the
+    /// server reports as corrupted, using the local repo as the source of
+    /// truth. Runs even if refs are already up to date (that's the case a
+    /// poisoned remote needs). Always runs a full strong verify (BLAKE3
+    /// re-hash) — not gated by MEDIAGIT_STRONG_VERIFY.
+    #[arg(long)]
+    pub repair: bool,
 }
 
 impl PushCmd {
@@ -344,8 +352,8 @@ impl PushCmd {
             resolved
         };
 
-        // Get remote refs to check current state
-        let remote_refs = client.get_refs().await?;
+        // Get remote refs to check current state (404 = repo not created yet, treated as empty)
+        let remote_refs = client.get_refs_or_empty().await?;
 
         // Append tag refs when --tags or --follow-tags is specified
         if self.tags || self.follow_tags {
@@ -399,6 +407,11 @@ impl PushCmd {
         // Build list of ref updates, skipping those already up-to-date
         let mut updates = Vec::new();
         let mut skipped_uptodate = 0;
+        // Local OIDs for every ref being pushed, collected regardless of
+        // up-to-date status. --repair needs the FULL set (not just refs with
+        // new commits) because a poisoned remote chunk is, by definition,
+        // one the server already believes it has.
+        let mut repair_commit_oids: Vec<mediagit_versioning::Oid> = Vec::new();
 
         for ref_to_push in &refs_to_push {
             // Validate ref name before pushing
@@ -409,6 +422,10 @@ impl PushCmd {
             let local_oid = local_ref
                 .oid
                 .ok_or_else(|| anyhow::anyhow!("Ref '{}' has no OID", ref_to_push))?;
+
+            if self.repair {
+                repair_commit_oids.push(local_oid);
+            }
 
             let remote_oid = remote_refs
                 .refs
@@ -465,6 +482,37 @@ impl PushCmd {
                             branch_name
                         );
                     }
+                }
+            }
+        }
+
+        // --repair: strong-verify every chunk reachable from the pushed refs and
+        // force re-upload any the server reports as corrupted. Runs even when refs
+        // are already up to date - that's exactly the poisoned-remote scenario
+        // (BUG-RM-3), since ordinary push dedup never re-checks content once the
+        // server claims to already have a chunk.
+        if self.repair {
+            if !self.quiet {
+                println!("{} Verifying remote chunk integrity...", style("🔧").cyan());
+            }
+            let report = client
+                .repair_remote(&odb, repair_commit_oids.clone())
+                .await
+                .context("Remote chunk repair failed")?;
+            if !self.quiet {
+                println!(
+                    "  {} verified {} chunk(s): {} repaired, {} unrepairable",
+                    style("✓").green(),
+                    report.verified,
+                    report.repaired,
+                    report.unrepairable.len()
+                );
+                if !report.unrepairable.is_empty() {
+                    println!(
+                        "  {} unrepairable (missing/unreadable locally): {:?}",
+                        style("⚠").yellow(),
+                        &report.unrepairable[..report.unrepairable.len().min(5)]
+                    );
                 }
             }
         }

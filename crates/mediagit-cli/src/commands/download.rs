@@ -22,7 +22,8 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use std::path::PathBuf;
+use mediagit_versioning::{Commit, ObjectDatabase, RefDatabase};
+use std::path::{Path, PathBuf};
 
 /// Download a single file from a remote repository by path
 ///
@@ -79,6 +80,40 @@ pub struct DownloadCmd {
 impl DownloadCmd {
     pub async fn execute(&self) -> Result<()> {
         use crate::output;
+
+        // Local case: repo-relative path, run inside a repository — resolve
+        // `--ref` and read the blob straight out of local history, no
+        // server contact required. Any local miss (unresolvable ref, path
+        // not in the tree, no repo, ...) falls through unchanged to the
+        // existing remote/URL path below.
+        let is_url =
+            self.remote_path.starts_with("http://") || self.remote_path.starts_with("https://");
+        if !is_url {
+            validate_no_path_traversal(&self.remote_path)?;
+            if let Ok(repo_root) = crate::repo::find_repo_root() {
+                if let Some(bytes) = self.try_local_extract(&repo_root).await {
+                    let out_path = self.output_path(&self.remote_path);
+                    if let Some(parent) = out_path.parent() {
+                        if !parent.as_os_str().is_empty() {
+                            std::fs::create_dir_all(parent)
+                                .context("Failed to create output directory")?;
+                        }
+                    }
+                    std::fs::write(&out_path, &bytes).with_context(|| {
+                        format!("Failed to write output file '{}'", out_path.display())
+                    })?;
+                    if !self.quiet {
+                        output::success(&format!(
+                            "Downloaded '{}' ({} bytes) to {}",
+                            self.remote_path,
+                            bytes.len(),
+                            out_path.display()
+                        ));
+                    }
+                    return Ok(());
+                }
+            }
+        }
 
         let (base_url, file_path, config, repo_root, attach_credentials) =
             self.resolve_source().await?;
@@ -231,6 +266,31 @@ impl DownloadCmd {
             .resolve_remote_url("origin")
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         Ok((base_url, self.remote_path.clone(), config, repo_root, true))
+    }
+
+    /// Try to resolve `--ref` (default `HEAD`) and extract `remote_path`
+    /// from local repository history — no server contact. Reuses
+    /// `ShowCmd`'s revision-peeling and tree-walk helpers (same logic as
+    /// `show <rev>:<path>`). Returns `None` on any local miss (unresolvable
+    /// ref, path not found in the tree, storage error, ...) so `execute`
+    /// falls back to the existing remote-download path unchanged.
+    async fn try_local_extract(&self, repo_root: &Path) -> Option<Vec<u8>> {
+        let storage = crate::repo::create_storage_backend(repo_root).await.ok()?;
+        let refdb = RefDatabase::new(repo_root.join(".mediagit"));
+        let odb = ObjectDatabase::with_smart_compression(storage, 1000);
+
+        let ref_name = self.r#ref.as_deref().unwrap_or("HEAD");
+        let oid = mediagit_versioning::resolve_revision(ref_name, &refdb, &odb)
+            .await
+            .ok()?;
+        let commit_oid = super::show::ShowCmd::peel_to_commit(oid, &odb).await.ok()?;
+        let commit_data = odb.read(&commit_oid).await.ok()?;
+        let commit = Commit::deserialize(&commit_data).ok()?;
+        let file_oid =
+            super::show::ShowCmd::find_path_in_tree(&odb, &commit.tree, &self.remote_path)
+                .await
+                .ok()?;
+        odb.read(&file_oid).await.ok()
     }
 
     fn output_path(&self, file_path: &str) -> PathBuf {

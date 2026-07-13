@@ -198,7 +198,12 @@ impl FetchCmd {
         // Set MEDIAGIT_FETCH_BRANCH_CONCURRENCY=1 to force sequential.
         let branch_concurrency: usize = std::env::var("MEDIAGIT_FETCH_BRANCH_CONCURRENCY")
             .ok()
-            .and_then(|v| v.parse().ok())
+            .and_then(|v| {
+                v.parse().ok().or_else(|| {
+                    tracing::warn!("MEDIAGIT_FETCH_BRANCH_CONCURRENCY='{}' is not a valid usize, using default 4", v);
+                    None
+                })
+            })
             .unwrap_or(4)
             .max(1);
 
@@ -284,12 +289,22 @@ impl FetchCmd {
             // Override: MEDIAGIT_FETCH_DOWNLOAD_CONCURRENCY.
             let base_dl_concurrency: usize = std::env::var("MEDIAGIT_DOWNLOAD_CONCURRENCY")
                 .ok()
-                .and_then(|s| s.parse().ok())
+                .and_then(|s| {
+                    s.parse().ok().or_else(|| {
+                        tracing::warn!("MEDIAGIT_DOWNLOAD_CONCURRENCY='{}' is not a valid usize, using default 32", s);
+                        None
+                    })
+                })
                 .filter(|n: &usize| *n > 0)
                 .unwrap_or(32);
             let download_per_branch: usize = std::env::var("MEDIAGIT_FETCH_DOWNLOAD_CONCURRENCY")
                 .ok()
-                .and_then(|s| s.parse::<usize>().ok())
+                .and_then(|s| {
+                    s.parse::<usize>().ok().or_else(|| {
+                        tracing::warn!("MEDIAGIT_FETCH_DOWNLOAD_CONCURRENCY='{}' is not a valid usize, using computed default", s);
+                        None
+                    })
+                })
                 .filter(|n| *n > 0)
                 .unwrap_or_else(|| (base_dl_concurrency / branch_concurrency).max(8));
 

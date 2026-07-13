@@ -46,7 +46,7 @@ use std::sync::Arc;
     mediagit merge --abort
 
     # Continue merge after resolving conflicts
-    mediagit merge --continue
+    mediagit merge --continue-merge
 
 SEE ALSO:
     mediagit-branch(1), mediagit-rebase(1), mediagit-cherry-pick(1)")]
@@ -307,7 +307,7 @@ impl MergeCmd {
                 }
             }
             println!(
-                "\n{} Conflict markers written. Resolve conflicts then run 'mediagit merge --continue'",
+                "\n{} Conflict markers written. Resolve conflicts, 'add' them, then run 'mediagit merge --continue-merge <branch>'",
                 style("→").cyan()
             );
             std::process::exit(1);
@@ -458,6 +458,14 @@ impl MergeCmd {
         let merge_head = mediagit_dir.join("MERGE_HEAD");
         let merge_msg = mediagit_dir.join("MERGE_MSG");
         let merge_mode = mediagit_dir.join("MERGE_MODE");
+        let orig_head = mediagit_dir.join("ORIG_HEAD");
+
+        // A merge was actually in progress only if any of this state exists.
+        // Guards the "no merge in progress" case: without it, aborting when
+        // there's nothing to abort would still forcibly reset the working
+        // tree and index, destroying unrelated staged/working changes.
+        let had_merge_state =
+            merge_head.exists() || merge_msg.exists() || merge_mode.exists() || orig_head.exists();
 
         let mut cleaned = 0;
 
@@ -474,6 +482,42 @@ impl MergeCmd {
         if merge_mode.exists() {
             std::fs::remove_file(&merge_mode).context("Failed to remove MERGE_MODE")?;
             cleaned += 1;
+        }
+
+        if had_merge_state {
+            // Restore the working tree to the pre-merge commit and clear the
+            // index. An empty index means "clean" (a normal commit clears it
+            // too); leaving apply_merge_to_workdir's staged conflict entries
+            // behind made `status` report everything as staged after an
+            // abort, and left conflict-marker files sitting in the working
+            // tree.
+            let pre_merge_oid = if orig_head.exists() {
+                let content =
+                    std::fs::read_to_string(&orig_head).context("Failed to read ORIG_HEAD")?;
+                Some(Oid::from_hex(content.trim())?)
+            } else {
+                let refdb = RefDatabase::new(&mediagit_dir);
+                refdb.resolve("HEAD").await.ok()
+            };
+
+            if let Some(pre_merge_oid) = pre_merge_oid {
+                let storage = create_storage_backend(&repo_root).await?;
+                let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
+                let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
+                checkout_mgr
+                    .checkout_commit(&pre_merge_oid)
+                    .await
+                    .context("Failed to restore working directory on merge abort")?;
+            }
+
+            let mut index = Index::load(&repo_root)?;
+            index.clear();
+            index.save(&repo_root)?;
+
+            if orig_head.exists() {
+                std::fs::remove_file(&orig_head).context("Failed to remove ORIG_HEAD")?;
+                cleaned += 1;
+            }
         }
 
         if !self.quiet {
@@ -559,8 +603,24 @@ impl MergeCmd {
 
         let commit_oid = commit.write(&odb).await?;
 
-        // Update HEAD (force=false, safe update)
-        refdb.update("HEAD", commit_oid, false).await?;
+        // Update HEAD. HEAD is normally a SYMBOLIC ref pointing at
+        // refs/heads/<branch>. Resolve HEAD's target branch and write the merge
+        // commit there directly, mirroring how a normal `commit` updates the
+        // branch ref (commit.rs uses Ref::new_direct + write, NOT update()).
+        // update(force=false) rejects ANY change (it is not a real
+        // fast-forward check), which would wrongly fail merge completion.
+        // Detached HEAD (a direct ref) still updates "HEAD" directly.
+        let head_ref = refdb.read("HEAD").await?;
+        match head_ref.target {
+            Some(branch) => {
+                refdb.write(&Ref::new_direct(branch, commit_oid)).await?;
+            }
+            None => {
+                refdb
+                    .write(&Ref::new_direct("HEAD".to_string(), commit_oid))
+                    .await?;
+            }
+        }
 
         // Record reflog
         let reflog = Reflog::new(&mediagit_dir);

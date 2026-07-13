@@ -361,8 +361,16 @@ impl GcsBackend {
         project_id: impl Into<String>,
         bucket_name: impl Into<String>,
     ) -> anyhow::Result<Self> {
-        let project_id = project_id.into();
-        let bucket_name = bucket_name.into();
+        Self::with_default_credentials_and_config(GcsConfig::new(project_id, bucket_name)).await
+    }
+
+    /// Same as [`Self::with_default_credentials`] but takes a full
+    /// [`GcsConfig`] (e.g. to set `prefix`) instead of just project/bucket.
+    pub async fn with_default_credentials_and_config(
+        gcs_config: GcsConfig,
+    ) -> anyhow::Result<Self> {
+        let project_id = gcs_config.project_id.clone();
+        let bucket_name = gcs_config.bucket_name.clone();
 
         if project_id.is_empty() {
             return Err(anyhow::anyhow!("project_id cannot be empty"));
@@ -387,7 +395,6 @@ impl GcsBackend {
             );
         }
 
-        let gcs_config = GcsConfig::new(project_id.clone(), bucket_name.clone());
         let (storage, control) = Self::build_clients(&gcs_config).await?;
 
         let signer = match google_cloud_auth::credentials::Builder::default().build_signer() {

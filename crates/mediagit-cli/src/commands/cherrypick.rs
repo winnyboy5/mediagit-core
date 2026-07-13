@@ -16,7 +16,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_versioning::{
-    CheckoutManager, Commit, Index, MergeEngine, ObjectDatabase, Oid, Ref, RefDatabase, Tree,
+    apply_merge_to_workdir, CheckoutManager, Commit, Index, MergeEngine, ObjectDatabase, Oid, Ref,
+    RefDatabase, Tree,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -121,16 +122,20 @@ impl CherryPickCmd {
                 .apply_commit(&odb, &refdb, repo_root, &commit_oid)
                 .await
             {
-                Ok(()) => {
+                Ok(merged_tree_oid) => {
                     picked_commits.push(commit_oid);
 
                     if !self.no_commit {
-                        // Create commit automatically
+                        // Create commit automatically, using the merged tree
+                        // produced by the 3-way merge above (not an index
+                        // rebuild, which would drop every file not touched
+                        // by this commit).
                         self.create_cherry_pick_commit(
                             odb.as_ref(),
                             &refdb,
                             repo_root,
                             &commit_oid,
+                            Some(merged_tree_oid),
                         )
                         .await?;
                     }
@@ -179,7 +184,7 @@ impl CherryPickCmd {
         refdb: &RefDatabase,
         repo_root: &PathBuf,
         commit_oid: &Oid,
-    ) -> Result<()> {
+    ) -> Result<Oid> {
         // Load the commit
         let commit = Commit::read(odb.as_ref(), commit_oid)
             .await
@@ -204,27 +209,52 @@ impl CherryPickCmd {
             .await?;
 
         if !merge_result.conflicts.is_empty() {
-            // Write conflict markers to files
-            self.write_conflicts(repo_root, &merge_result)?;
+            // Write conflict markers via the shared, binary-aware writer (matches
+            // merge.rs's continue-merge path) instead of the old bespoke
+            // write_conflicts, which Debug-printed OIDs into files and
+            // corrupted binaries.
+            let ours_commit = Commit::read(odb.as_ref(), &current_oid).await?;
+            let theirs_commit = Commit::read(odb.as_ref(), commit_oid).await?;
+            let ours_tree = Tree::read(odb.as_ref(), &ours_commit.tree).await?;
+            let theirs_tree = Tree::read(odb.as_ref(), &theirs_commit.tree).await?;
+
+            let mut index = Index::load(repo_root)?;
+
+            apply_merge_to_workdir(
+                &merge_result,
+                &ours_tree,
+                &theirs_tree,
+                odb,
+                repo_root,
+                &mut index,
+                *commit_oid,
+                current_oid,
+            )
+            .await?;
+
+            index.save(repo_root)?;
+
             anyhow::bail!("Merge conflicts detected");
         }
 
-        // Checkout the merged tree if merge was successful
-        if let Some(tree_oid) = merge_result.tree_oid {
-            let checkout_mgr = CheckoutManager::new(odb.as_ref(), repo_root);
-            let commit_to_checkout = Commit {
-                tree: tree_oid,
-                parents: vec![current_oid],
-                author: commit.author.clone(),
-                committer: commit.committer.clone(),
-                message: commit.message.clone(),
-            };
-            // Write temporary commit to get OID for checkout
-            let temp_oid = commit_to_checkout.write(odb.as_ref()).await?;
-            checkout_mgr.checkout_commit(&temp_oid).await?;
-        }
+        let tree_oid = merge_result
+            .tree_oid
+            .context("merge produced no tree during cherry-pick")?;
 
-        Ok(())
+        // Checkout the merged tree
+        let checkout_mgr = CheckoutManager::new(odb.as_ref(), repo_root);
+        let commit_to_checkout = Commit {
+            tree: tree_oid,
+            parents: vec![current_oid],
+            author: commit.author.clone(),
+            committer: commit.committer.clone(),
+            message: commit.message.clone(),
+        };
+        // Write temporary commit to get OID for checkout
+        let temp_oid = commit_to_checkout.write(odb.as_ref()).await?;
+        checkout_mgr.checkout_commit(&temp_oid).await?;
+
+        Ok(tree_oid)
     }
 
     async fn create_cherry_pick_commit(
@@ -233,6 +263,7 @@ impl CherryPickCmd {
         refdb: &RefDatabase,
         repo_root: &std::path::Path,
         original_oid: &Oid,
+        merged_tree_oid: Option<Oid>,
     ) -> Result<()> {
         // Load original commit for message
         let original_commit = Commit::read(odb, original_oid).await?;
@@ -246,17 +277,24 @@ impl CherryPickCmd {
             ));
         }
 
-        // Build tree from index
-        let index = Index::load(repo_root)?;
-        let mut tree = Tree::new();
-        for entry in index.entries() {
-            tree.add_entry(mediagit_versioning::TreeEntry::new(
-                entry.path.to_string_lossy().to_string(),
-                mediagit_versioning::FileMode::Regular,
-                entry.oid,
-            ));
-        }
-        let tree_oid = tree.write(odb).await?;
+        // Use the merged tree from the 3-way merge when available. Only fall
+        // back to rebuilding from the index (manual conflict resolution via
+        // `--continue`, where no merge result exists) when it isn't.
+        let tree_oid = match merged_tree_oid {
+            Some(oid) => oid,
+            None => {
+                let index = Index::load(repo_root)?;
+                let mut tree = Tree::new();
+                for entry in index.entries() {
+                    tree.add_entry(mediagit_versioning::TreeEntry::new(
+                        entry.path.to_string_lossy().to_string(),
+                        mediagit_versioning::FileMode::Regular,
+                        entry.oid,
+                    ));
+                }
+                tree.write(odb).await?
+            }
+        };
 
         // Get current HEAD as parent
         let current_oid = refdb.resolve("HEAD").await?;
@@ -315,7 +353,7 @@ impl CherryPickCmd {
 
         if let Some(current) = &state.current_commit {
             let current_oid = Oid::from_hex(current)?;
-            self.create_cherry_pick_commit(&odb, &refdb, repo_root, &current_oid)
+            self.create_cherry_pick_commit(&odb, &refdb, repo_root, &current_oid, None)
                 .await?;
         }
 
@@ -457,36 +495,6 @@ impl CherryPickCmd {
         let state_json = serde_json::to_string_pretty(&state)?;
         std::fs::write(mediagit_dir.join("CHERRY_PICK_STATE"), state_json)?;
 
-        Ok(())
-    }
-
-    fn write_conflicts(
-        &self,
-        repo_root: &std::path::Path,
-        merge_result: &mediagit_versioning::MergeResult,
-    ) -> Result<()> {
-        // Write conflict markers to files
-        for conflict in &merge_result.conflicts {
-            let file_path = repo_root.join(&conflict.path);
-
-            // Build conflict marker content
-            let ours_content = conflict
-                .ours
-                .as_ref()
-                .map(|s| format!("{:?}", s.oid))
-                .unwrap_or_else(|| "(deleted)".to_string());
-            let theirs_content = conflict
-                .theirs
-                .as_ref()
-                .map(|s| format!("{:?}", s.oid))
-                .unwrap_or_else(|| "(deleted)".to_string());
-
-            let conflict_content = format!(
-                "<<<<<<< HEAD\n{}\n=======\n{}\n>>>>>>> cherry-pick\n",
-                ours_content, theirs_content
-            );
-            std::fs::write(&file_path, conflict_content)?;
-        }
         Ok(())
     }
 

@@ -48,17 +48,15 @@ pub struct InitCmd {
     #[arg(value_name = "PATH")]
     pub path: Option<String>,
 
-    /// Don't create initial branch
-    #[arg(long)]
-    pub bare: bool,
-
     /// Initial branch name (default: main)
     #[arg(long, value_name = "BRANCH")]
     pub initial_branch: Option<String>,
 
-    /// Template directory
-    #[arg(long, value_name = "PATH")]
-    pub template: Option<String>,
+    /// Compatibility alias: MediaGit repositories always use the .mediagit
+    /// layout, so this creates the same structure as a plain init. Commonly
+    /// used when seeding a server-side repository directory.
+    #[arg(long)]
+    pub bare: bool,
 
     /// Quiet mode - minimal output
     #[arg(short, long)]
@@ -99,6 +97,7 @@ impl InitCmd {
 
         // Create initial branch
         let initial_branch = self.initial_branch.as_deref().unwrap_or("main");
+        validate_branch_name(initial_branch)?;
         let branch_ref_name = format!("refs/heads/{}", initial_branch);
 
         // Create HEAD pointing to initial branch (symbolic ref)
@@ -206,6 +205,42 @@ impl InitCmd {
 
         Ok(())
     }
+}
+
+/// Validate `--initial-branch` before it's written into HEAD as a symbolic
+/// ref. An empty or malformed name would leave HEAD as e.g.
+/// `ref: refs/heads/` — a repo that's born broken.
+fn validate_branch_name(name: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        anyhow::bail!("initial branch name must not be empty");
+    }
+    if name.chars().any(char::is_whitespace) {
+        anyhow::bail!(
+            "initial branch name must not contain whitespace: {:?}",
+            name
+        );
+    }
+    if name.starts_with('/') || name.ends_with('/') || name.starts_with('.') || name.ends_with('.')
+    {
+        anyhow::bail!(
+            "initial branch name must not start or end with '/' or '.': {:?}",
+            name
+        );
+    }
+    if name.contains("..") || name.contains("@{") || name.ends_with(".lock") {
+        anyhow::bail!(
+            "initial branch name contains an invalid sequence: {:?}",
+            name
+        );
+    }
+    const FORBIDDEN: &[char] = &['~', '^', ':', '?', '*', '[', '`'];
+    if name.chars().any(|c| FORBIDDEN.contains(&c)) {
+        anyhow::bail!(
+            "initial branch name contains an invalid character: {:?}",
+            name
+        );
+    }
+    Ok(())
 }
 
 /// Generate a fresh per-repo CDC seed for new repositories.

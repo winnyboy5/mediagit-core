@@ -17,12 +17,12 @@ use crate::repo::create_storage_backend;
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
-use mediagit_versioning::{FsckChecker, FsckOptions, FsckRepair, IssueSeverity};
+use mediagit_versioning::{FsckChecker, FsckOptions, FsckRepair, IssueSeverity, RefDatabase};
 
 /// Check repository integrity with comprehensive verification
 ///
 /// The fsck command performs a comprehensive integrity check of your MediaGit repository:
-/// - Verifies SHA-256 checksums of all objects
+/// - Verifies BLAKE3 checksums of all objects
 /// - Validates references point to existing commits
 /// - Checks commit graph connectivity
 /// - Detects missing or corrupted objects
@@ -122,8 +122,11 @@ impl FsckCmd {
             .await
             .context("Failed to open repository. Is this a MediaGit repository?")?;
 
-        // Create FSCK checker
-        let checker = FsckChecker::new(storage.clone());
+        // Create RefDatabase for accurate ref listing
+        let refdb = RefDatabase::new(&mediagit_dir);
+
+        // Create FSCK checker with RefDatabase
+        let checker = FsckChecker::new_with_refdb(storage.clone(), Some(refdb));
 
         // Configure options
         let options = self.build_options();

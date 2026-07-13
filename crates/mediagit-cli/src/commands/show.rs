@@ -65,6 +65,13 @@ impl ShowCmd {
 
         // Resolve object ID using revision parser (supports HEAD~N)
         let object_str = self.object.as_deref().unwrap_or("HEAD");
+
+        // `<rev>:<path>` — historical file access. Split on the FIRST ':' so
+        // OIDs/refs never contain one; only the path may.
+        if let Some((rev, path)) = object_str.split_once(':') {
+            return Self::show_path_at_revision(rev, path, &refdb, &odb).await;
+        }
+
         let oid = resolve_revision(object_str, &refdb, &odb)
             .await
             .context(format!("Cannot resolve object: {}", object_str))?;
@@ -229,6 +236,87 @@ impl ShowCmd {
         }
 
         Ok(())
+    }
+
+    /// Print the raw bytes of `path` as it existed in `rev` (historical file
+    /// access, e.g. `show <oid>:frame.txt`). `rev` may be an OID, branch, or
+    /// tag (annotated tags are peeled to their target commit).
+    async fn show_path_at_revision(
+        rev: &str,
+        path: &str,
+        refdb: &RefDatabase,
+        odb: &ObjectDatabase,
+    ) -> Result<()> {
+        let oid = resolve_revision(rev, refdb, odb)
+            .await
+            .context(format!("Cannot resolve revision: {}", rev))?;
+        let commit_oid = Self::peel_to_commit(oid, odb).await?;
+        let data = odb.read(&commit_oid).await?;
+        let commit =
+            Commit::deserialize(&data).context(format!("Object {} is not a commit", commit_oid))?;
+
+        let file_oid = Self::find_path_in_tree(odb, &commit.tree, path)
+            .await
+            .context(format!("Path '{}' not found in revision '{}'", path, rev))?;
+        let blob = odb
+            .read(&file_oid)
+            .await
+            .context(format!("Failed to read blob for '{}'", path))?;
+
+        use std::io::Write;
+        std::io::stdout().write_all(&blob)?;
+        Ok(())
+    }
+
+    /// Follow a Tag object to its target, repeating until a Commit is
+    /// reached (lightweight tags/branches/OIDs already point at a commit and
+    /// return immediately).
+    pub(crate) async fn peel_to_commit(mut oid: Oid, odb: &ObjectDatabase) -> Result<Oid> {
+        loop {
+            let data = odb
+                .read(&oid)
+                .await
+                .context(format!("Failed to read object {}", oid))?;
+            if Commit::deserialize(&data).is_ok() {
+                return Ok(oid);
+            }
+            match Tag::deserialize(&data) {
+                Ok(tag) => oid = tag.target,
+                Err(_) => anyhow::bail!("Object {} is not a commit or tag", oid),
+            }
+        }
+    }
+
+    /// Walk a tree by path components (`a/b/c`) and return the OID of the
+    /// leaf blob.
+    pub(crate) async fn find_path_in_tree(
+        odb: &ObjectDatabase,
+        tree_oid: &Oid,
+        path: &str,
+    ) -> Result<Oid> {
+        let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        if components.is_empty() {
+            anyhow::bail!("Empty path");
+        }
+
+        let mut current_tree_oid = *tree_oid;
+        for (i, component) in components.iter().enumerate() {
+            let tree_data = odb.read(&current_tree_oid).await?;
+            let tree = Tree::deserialize(&tree_data)?;
+            let entry = tree
+                .entries
+                .get(*component)
+                .ok_or_else(|| anyhow::anyhow!("'{}' not found", component))?;
+
+            if i == components.len() - 1 {
+                return Ok(entry.oid);
+            }
+            if entry.mode != mediagit_versioning::FileMode::Directory {
+                anyhow::bail!("'{}' is not a directory", component);
+            }
+            current_tree_oid = entry.oid;
+        }
+        unreachable!("loop always returns on the last component")
     }
 
     /// Print a `media: ...` metadata line for a changed file, if applicable.

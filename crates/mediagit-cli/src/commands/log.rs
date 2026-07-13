@@ -15,7 +15,7 @@ use super::super::repo::{create_storage_backend, find_repo_root};
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
-use mediagit_versioning::{resolve_revision, Commit, ObjectDatabase, Oid, RefDatabase, Tree};
+use mediagit_versioning::{resolve_revision, Commit, ObjectDatabase, Oid, RefDatabase, Tag, Tree};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -131,9 +131,11 @@ impl LogCmd {
 
         // Get starting commit OID
         let start_oid = if let Some(revision) = &self.revision {
-            resolve_revision(revision, &refdb, &odb)
+            let oid = resolve_revision(revision, &refdb, &odb)
                 .await
-                .with_context(|| format!("Invalid revision: {}", revision))?
+                .with_context(|| format!("Invalid revision: {}", revision))?;
+            // Peel annotated tags (resolve to a tag object, not a commit).
+            Self::peel_to_commit(oid, &odb).await?
         } else {
             // Use HEAD
             match refdb.read("HEAD").await {
@@ -378,6 +380,25 @@ impl LogCmd {
         }
 
         Ok(())
+    }
+
+    /// Follow a Tag object to its target, repeating until a Commit is
+    /// reached (branches/OIDs already point at a commit and return
+    /// immediately).
+    async fn peel_to_commit(mut oid: Oid, odb: &ObjectDatabase) -> Result<Oid> {
+        loop {
+            let data = odb
+                .read(&oid)
+                .await
+                .context(format!("Failed to read object {}", oid))?;
+            if Commit::deserialize(&data).is_ok() {
+                return Ok(oid);
+            }
+            match Tag::deserialize(&data) {
+                Ok(tag) => oid = tag.target,
+                Err(_) => anyhow::bail!("Object {} is not a commit or tag", oid),
+            }
+        }
     }
 
     /// Format a commit using a template string

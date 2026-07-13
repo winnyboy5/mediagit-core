@@ -14,7 +14,7 @@
 //! Object-graph reachability walker.
 //!
 //! Computes the set of OIDs reachable from a set of root commits, walking
-//! commits → trees → blobs. Supports a `stop_at` cutoff set: any OID in
+//! commits → trees → tags → blobs. Supports a `stop_at` cutoff set: any OID in
 //! `stop_at` is neither visited nor recursed into, which is exactly what the
 //! pack-negotiation path needs ("collect everything reachable from `want`
 //! that is not already reachable from `have`").

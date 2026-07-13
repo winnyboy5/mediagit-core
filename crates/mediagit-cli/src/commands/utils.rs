@@ -46,6 +46,7 @@ pub fn categorize_extension(ext: &str) -> &'static str {
         "psd" | "psb" | "ai" | "ait" | "indd" | "idml" | "eps" | "pdf" | "xd" => "creative",
         "glb" | "gltf" | "fbx" | "obj" | "blend" | "ma" | "mb" | "abc" | "usd" | "usda"
         | "usdc" | "usdz" | "stl" | "ply" => "3d",
+        "safetensors" | "parquet" | "npz" | "onnx" | "gguf" => "model/data",
         "docx" | "xlsx" | "pptx" | "doc" | "xls" | "ppt" | "odt" | "ods" | "odp" => "office",
         _ => "other",
     }

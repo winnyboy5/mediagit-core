@@ -34,11 +34,11 @@ Open commit message in the default text editor.
 ### `--allow-empty`
 Allow creating a commit with no changes.
 
-### `--include`
-Add untracked files to the index and include them in this commit.
+### `--include <PATHS>...`
+Stage the listed paths before committing. Useful for including files in a single step instead of separate `add` and `commit` commands.
 
 ### `-s, --signoff`
-Add a `Signed-off-by` trailer to the commit message.
+Add a `Signed-off-by` trailer to the commit message. If the trailer is already present, it will not be duplicated.
 
 ### `--dry-run`
 Show what would be committed without creating the commit.
@@ -52,9 +52,9 @@ Override the commit author.
 - **Format**: `"Name <email@example.com>"`
 
 ### `--date <DATE>`
-Override the author date.
+Override the author/committer date.
 
-- **Format**: ISO 8601 or Unix timestamp
+- **Format**: RFC3339 (e.g., `2026-01-15T10:30:00Z` or `2026-01-15T10:30:00+05:30`)
 
 > **Note**: `-a`/`--all` is not supported. MediaGit's `add` performs chunking and
 > delta encoding, so auto-staging from `commit` is intentionally disabled. Use

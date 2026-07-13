@@ -253,7 +253,17 @@ impl ContentChunker {
             )
         };
 
-        if has_structure_parser {
+        let cap_bytes = container_chunk_cap_bytes();
+        if has_structure_parser && file_size > cap_bytes {
+            debug!(
+                path = %path.display(),
+                file_size,
+                cap_bytes,
+                "Container file exceeds chunk cap, using StreamCDC instead of format-aware walker"
+            );
+        }
+
+        if has_structure_parser && file_size <= cap_bytes {
             let file = std::fs::File::open(path)
                 .map_err(|e| anyhow::anyhow!("Failed to open file '{}': {}", path.display(), e))?;
 

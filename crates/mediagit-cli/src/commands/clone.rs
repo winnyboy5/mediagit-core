@@ -21,7 +21,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_versioning::{CheckoutManager, ObjectDatabase, RefDatabase};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -66,21 +66,146 @@ pub struct CloneCmd {
 
 impl CloneCmd {
     pub async fn execute(&self) -> Result<()> {
+        // MediaGit's remote clone protocol speaks HTTP(S) only; anything
+        // else is treated as a local repository path (a directory
+        // containing `.mediagit`).
+        if self.url.starts_with("http://") || self.url.starts_with("https://") {
+            self.execute_remote().await
+        } else {
+            self.execute_local().await
+        }
+    }
+
+    /// Clone from a local MediaGit repository. Copies the `.mediagit`
+    /// control directory verbatim (objects incl. namespace dirs, refs,
+    /// config — not the staged index, not the source's working files),
+    /// fixes up the storage path + `origin` remote in the copied config,
+    /// then materializes the working tree via the same `CheckoutManager`
+    /// path the remote clone uses.
+    async fn execute_local(&self) -> Result<()> {
         let start_time = Instant::now();
 
-        // Validate URL scheme before reqwest/url gives an opaque "scheme is not allowed".
-        // MediaGit's clone protocol currently speaks HTTP(S) only.
-        if !(self.url.starts_with("http://") || self.url.starts_with("https://")) {
+        let source_dir = dunce::canonicalize(&self.url)
+            .with_context(|| format!("Local clone source not found: '{}'", self.url))?;
+        let source_mediagit = source_dir.join(".mediagit");
+        if !source_mediagit.is_dir() {
             anyhow::bail!(
                 "unsupported remote URL '{}'.\n\n\
-                 `mediagit clone` currently supports http:// and https:// URLs only.\n\
-                 To clone a local repository, copy the directory directly:\n    \
-                 cp -r <src> <dst>\n\
+                 `mediagit clone` supports http:// and https:// URLs, or a path to an\n\
+                 existing local MediaGit repository (a directory containing `.mediagit`).\n\
                  To serve a local repo over HTTP, run:\n    \
                  mediagit-server -c mediagit-server.toml",
                 self.url
             );
         }
+
+        let target_dir = match &self.directory {
+            Some(dir) => PathBuf::from(dir),
+            None => PathBuf::from(source_dir.file_name().ok_or_else(|| {
+                anyhow::anyhow!("Could not determine repository name from '{}'", self.url)
+            })?),
+        };
+
+        if !self.quiet {
+            println!(
+                "{} Cloning into '{}'...",
+                style("📦").cyan().bold(),
+                target_dir.display()
+            );
+        }
+        if target_dir.exists() {
+            anyhow::bail!("Destination path '{}' already exists", target_dir.display());
+        }
+        std::fs::create_dir_all(&target_dir).context("Failed to create target directory")?;
+        // Canonicalize so the fixed-up `base_path` we write below is
+        // absolute (matching how `init` writes it) — a relative path here
+        // gets joined onto `repo_root` a second time by
+        // `create_inner_storage_backend`, doubling the prefix.
+        let target_dir =
+            dunce::canonicalize(&target_dir).context("Failed to resolve target directory")?;
+
+        let clone_result: Result<()> = async {
+            let storage_path = target_dir.join(".mediagit");
+            copy_dir_skip(&source_mediagit, &storage_path, Path::new("index"))
+                .context("Failed to copy .mediagit directory")?;
+
+            // The copied config's filesystem `base_path` is still the
+            // SOURCE repo's absolute objects path (baked in at `init`
+            // time) — repoint it at the target's own copy, and record
+            // `origin` as the source we cloned from.
+            let mut config = mediagit_config::Config::load(&target_dir)
+                .await
+                .context("Failed to load copied config")?;
+            if let mediagit_config::StorageConfig::FileSystem(ref mut fs) = config.storage {
+                fs.base_path = storage_path.join("objects").display().to_string();
+            }
+            config.remotes.insert(
+                "origin".to_string(),
+                mediagit_config::RemoteConfig::new(source_dir.display().to_string()),
+            );
+            config.save(&target_dir)?;
+
+            let storage = create_storage_backend(&target_dir).await?;
+            let odb = Arc::new(ObjectDatabase::with_smart_compression(
+                Arc::clone(&storage),
+                1000,
+            ));
+            let refdb = RefDatabase::new(&storage_path);
+
+            // Default branch: explicit --branch, else whatever the copied
+            // HEAD already points to (the source repo's own default).
+            let branch = match &self.branch {
+                Some(b) => b.clone(),
+                None => refdb
+                    .read("HEAD")
+                    .await
+                    .ok()
+                    .and_then(|h| h.target)
+                    .and_then(|t| t.strip_prefix("refs/heads/").map(str::to_string))
+                    .unwrap_or_else(|| "main".to_string()),
+            };
+            let ref_name = format!("refs/heads/{}", branch);
+            let oid = refdb
+                .read(&ref_name)
+                .await
+                .ok()
+                .and_then(|r| r.oid)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Branch '{}' not found in source repository", branch)
+                })?;
+            refdb.update_symbolic("HEAD", &ref_name).await?;
+
+            let progress = ProgressTracker::new(self.quiet);
+            let checkout_pb = progress.spinner("Checking out files...");
+            let checkout_mgr = CheckoutManager::new(&odb, &target_dir);
+            let files_count = checkout_mgr.checkout_fresh(&oid).await?;
+            checkout_pb.finish_with_message(format!("Checked out {} files", files_count));
+
+            if !self.quiet {
+                println!(
+                    "\n{} Cloned into '{}' ({} files, {:.2}s)",
+                    style("✅").green().bold(),
+                    target_dir.display(),
+                    files_count,
+                    start_time.elapsed().as_secs_f64()
+                );
+            }
+
+            let _ = crate::auto_gc::maybe_run(&target_dir, crate::auto_gc::TriggerMode::PostClone)
+                .await;
+            Ok(())
+        }
+        .await;
+
+        if clone_result.is_err() {
+            let _ = std::fs::remove_dir_all(&target_dir);
+            println!("cleaned up partial clone at {}", target_dir.display());
+        }
+        clone_result
+    }
+
+    async fn execute_remote(&self) -> Result<()> {
+        let start_time = Instant::now();
 
         // Determine target directory
         let target_dir = self.get_target_directory()?;
@@ -107,6 +232,12 @@ impl CloneCmd {
         let init_spinner = progress.spinner("Creating directory...");
         std::fs::create_dir_all(&target_dir).context("Failed to create target directory")?;
 
+        // Steps 2-9 can all fail (network, refs, checkout) after target_dir
+        // has been created. Wrap them so any failure cleans up the partial
+        // clone directory before the error propagates (NOTE-RM-3). We always
+        // own target_dir here — the exists() check above already bailed if
+        // it was there before this clone, so it's safe to remove on failure.
+        let clone_result: Result<()> = async {
         // Step 2: Initialize repository
         init_spinner.set_message("Initializing repository...");
         let storage_path = target_dir.join(".mediagit");
@@ -387,7 +518,15 @@ url = "{}"
         let _ =
             crate::auto_gc::maybe_run(&target_dir, crate::auto_gc::TriggerMode::PostClone).await;
 
-        Ok(())
+            Ok(())
+        }
+        .await;
+
+        if clone_result.is_err() {
+            let _ = std::fs::remove_dir_all(&target_dir);
+            println!("cleaned up partial clone at {}", target_dir.display());
+        }
+        clone_result
     }
 
     /// Extract repository name from URL and determine target directory
@@ -412,4 +551,24 @@ url = "{}"
 
         Ok(PathBuf::from(name))
     }
+}
+
+/// Recursively copy `src` to `dst`, skipping any entry whose path relative
+/// to `src` equals `skip_relative` (used to exclude the source's staged
+/// index from a local clone's copied `.mediagit`).
+fn copy_dir_skip(src: &Path, dst: &Path, skip_relative: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        if Path::new(&entry.file_name()) == skip_relative {
+            continue;
+        }
+        let dst_path = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_skip(&entry.path(), &dst_path, Path::new(""))?;
+        } else {
+            std::fs::copy(entry.path(), &dst_path)?;
+        }
+    }
+    Ok(())
 }

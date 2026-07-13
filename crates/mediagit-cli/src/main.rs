@@ -26,7 +26,7 @@ use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use commands::*;
-use mediagit_observability::{init_tracing, LogFormat};
+use mediagit_observability::LogFormat;
 use std::io;
 
 #[derive(Parser)]
@@ -255,13 +255,28 @@ fn preprocess_args(args: Vec<String>) -> Vec<String> {
             _ => None,
         };
         if let Some((_cmd, known_subcmds, positional_action)) = default_action {
+            // Check if -h/--help appears before any positional argument
+            let has_help = args[pos + 1..]
+                .iter()
+                .take_while(|a| a.starts_with('-'))
+                .any(|a| a == "-h" || a == "--help");
+
             let next_positional = args[pos + 1..]
                 .iter()
                 .find(|a| !a.starts_with('-'))
                 .map(|s| s.as_str());
             let inject: Option<&str> = match next_positional {
+                None if has_help => None, // --help → don't inject, let clap show real help
                 None => Some("list"),
                 Some(s) if known_subcmds.contains(&s) => None,
+                // BUG-CLI-B2: an unrecognized word after `branch` used to be
+                // silently routed to `create` (so `branch unprotect` created
+                // a branch named "unprotect"). `branch`'s own after_help
+                // says `branch <name>` isn't valid, so leave unknown words
+                // untouched here and let clap reject them as an unrecognized
+                // subcommand instead of guessing. `tag`/`remote` keep the
+                // create/list sugar.
+                Some(_) if subcmd == "branch" => None,
                 Some(_) => Some(positional_action),
             };
             if let Some(verb) = inject {
@@ -332,8 +347,11 @@ async fn async_main(cli: Cli) -> Result<()> {
         let level = if cli.verbose { "info" } else { "warn" };
         let format = LogFormat::Pretty; // Pretty format for CLI output
 
-        // Initialize with appropriate log level
-        init_tracing(format, Some(level)).ok(); // Ignore errors if already initialized
+        // Initialize with appropriate log level, explicitly writing to stderr
+        let config = mediagit_observability::LogConfig::new()
+            .with_format(format)
+            .with_level(level);
+        mediagit_observability::init_tracing_with_config(config).ok(); // Ignore errors if already initialized
     }
 
     // Handle color output

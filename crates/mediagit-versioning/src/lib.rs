@@ -15,7 +15,7 @@
 //! Versioning and object database for MediaGit
 //!
 //! This crate implements the core version control functionality:
-//! - Content-addressable object database with SHA-256 addressing
+//! - Content-addressable object database with BLAKE3 addressing
 //! - Automatic content deduplication
 //! - LRU caching for performance
 //! - Observable metrics for deduplication efficiency
@@ -24,7 +24,7 @@
 //!
 //! The object database (ODB) provides Git-compatible content-addressable storage:
 //!
-//! - **Content Addressing**: Objects are identified by SHA-256 hash of their content
+//! - **Content Addressing**: Objects are identified by BLAKE3 hash of their content
 //! - **Automatic Deduplication**: Identical content is stored only once
 //! - **LRU Caching**: Frequently accessed objects cached with Moka
 //! - **Pluggable Storage**: Works with any `StorageBackend` implementation

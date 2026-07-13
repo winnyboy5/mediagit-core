@@ -128,13 +128,14 @@ For files exceeding type-specific thresholds (5-10MB), MediaGit automatically ch
 - **Example**: `5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03`
 
 ### Path Mapping
-Objects stored with 2-character prefix for directory sharding:
+Objects are stored under a per-repo namespace directory with a two-level hash
+fanout on the OID itself (storage layout v2):
 ```
 OID: 5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03
-Path: objects/58/91b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03
+Path: <repo_namespace>/objects/58/91/5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03
 ```
 
-**Benefit**: Prevents single directory with millions of files (filesystem optimization)
+**Benefit**: Prevents single directory with millions of files (filesystem optimization). The `repo_namespace` prefix also lets one storage root or bucket safely host multiple repositories.
 
 ## Caching Strategy
 

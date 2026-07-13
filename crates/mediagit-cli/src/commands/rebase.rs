@@ -15,7 +15,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_versioning::{
-    Commit, LcaFinder, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Signature,
+    CheckoutManager, Commit, LcaFinder, MergeEngine, MergeStrategy, ObjectDatabase, ObjectType,
+    Oid, Ref, RefDatabase, Signature, Tree,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -33,10 +34,6 @@ pub struct RebaseCmd {
     /// Branch to rebase (defaults to current)
     #[arg(value_name = "BRANCH")]
     pub branch: Option<String>,
-
-    /// Interactive rebase (not yet implemented)
-    #[arg(short, long, hide = true)]
-    pub interactive: bool,
 
     /// Rebase merge commits (not yet implemented)
     #[arg(short = 'm', long, hide = true)]
@@ -91,10 +88,7 @@ impl RebaseCmd {
             anyhow::bail!("A rebase is already in progress. Use --continue, --skip, or --abort.");
         }
 
-        // Interactive and merge rebases not yet supported
-        if self.interactive {
-            anyhow::bail!("Interactive rebase not yet implemented. Use non-interactive rebase.");
-        }
+        // Merge rebases not yet supported
         if self.rebase_merges {
             anyhow::bail!("Rebase with merge commits not yet implemented.");
         }
@@ -219,6 +213,13 @@ impl RebaseCmd {
                     refdb.write(&new_ref).await?;
                 }
 
+                // Sync the working directory to the newly rebased tree
+                let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
+                checkout_mgr
+                    .checkout_commit(&new_head)
+                    .await
+                    .context("Failed to update working directory after rebase")?;
+
                 // Clear rebase state on success
                 RebaseState::clear(&repo_root)?;
 
@@ -245,11 +246,12 @@ impl RebaseCmd {
         odb: &Arc<ObjectDatabase>,
         _refdb: &RefDatabase,
         state: &mut RebaseState,
-        commits: &[Commit],
+        commits: &[(Oid, Commit)],
     ) -> Result<Oid> {
         let mut new_parent = state.new_parent;
+        let merge_engine = MergeEngine::new(odb.clone());
 
-        for original_commit in commits.iter() {
+        for (original_oid, original_commit) in commits.iter() {
             // Update state for current commit
             if !state.commits_remaining.is_empty() {
                 state.advance();
@@ -267,9 +269,47 @@ impl RebaseCmd {
                 );
             }
 
-            // Create new commit with same changes but new parent
+            // Replay this commit's actual change via a real 3-way merge instead
+            // of copying its tree verbatim (which silently drops/overwrites
+            // anything the new base has that this commit's snapshot doesn't).
+            //   base   = tree of this commit's own parent (what it changed FROM)
+            //   ours   = tree of the new parent (what we're replaying onto)
+            //   theirs = tree of this commit (what it changed TO)
+            let base_tree = match original_commit.parents.first() {
+                Some(parent_oid) => {
+                    let data = odb.read(parent_oid).await?;
+                    Commit::deserialize(&data)?.tree
+                }
+                None => Tree::new().write(odb).await?,
+            };
+
+            let new_parent_data = odb.read(&new_parent).await?;
+            let ours_tree = Commit::deserialize(&new_parent_data)?.tree;
+
+            let merge_result = merge_engine
+                .merge_trees(
+                    &base_tree,
+                    &ours_tree,
+                    &original_commit.tree,
+                    MergeStrategy::Recursive,
+                )
+                .await?;
+
+            if merge_result.has_conflicts() {
+                anyhow::bail!(
+                    "rebase stopped: conflict replaying commit {} '{}'",
+                    &original_oid.to_hex()[..7],
+                    original_commit.message.lines().next().unwrap_or("")
+                );
+            }
+
+            let merged_tree = merge_result
+                .tree_oid
+                .context("merge produced no tree during rebase")?;
+
+            // Create new commit with the merged tree and new parent
             let new_commit = Commit {
-                tree: original_commit.tree,
+                tree: merged_tree,
                 parents: vec![new_parent],
                 author: original_commit.author.clone(),
                 committer: Signature::now(
@@ -298,7 +338,7 @@ impl RebaseCmd {
         odb: &Arc<ObjectDatabase>,
         base_oid: &Oid,
         head_oid: &Oid,
-    ) -> Result<Vec<Commit>> {
+    ) -> Result<Vec<(Oid, Commit)>> {
         let mut commits = Vec::new();
         let mut visited = HashSet::new();
         let mut current = *head_oid;
@@ -313,7 +353,7 @@ impl RebaseCmd {
             let data = odb.read(&current).await?;
             let commit = Commit::deserialize(&data)?;
 
-            commits.push(commit.clone());
+            commits.push((current, commit.clone()));
 
             // Follow first parent
             if let Some(parent) = commit.parents.first() {
@@ -433,6 +473,12 @@ impl RebaseCmd {
                 refdb.write(&new_ref).await?;
             }
 
+            let checkout_mgr = CheckoutManager::new(&odb, repo_root);
+            checkout_mgr
+                .checkout_commit(&state.new_parent)
+                .await
+                .context("Failed to update working directory after rebase")?;
+
             RebaseState::clear(repo_root)?;
 
             if !self.quiet {
@@ -456,6 +502,12 @@ impl RebaseCmd {
                     let new_ref = Ref::new_direct("HEAD".to_string(), new_head);
                     refdb.write(&new_ref).await?;
                 }
+
+                let checkout_mgr = CheckoutManager::new(&odb, repo_root);
+                checkout_mgr
+                    .checkout_commit(&new_head)
+                    .await
+                    .context("Failed to update working directory after rebase")?;
 
                 RebaseState::clear(repo_root)?;
 
@@ -508,13 +560,13 @@ impl RebaseCmd {
         &self,
         odb: &Arc<ObjectDatabase>,
         state: &RebaseState,
-    ) -> Result<Vec<Commit>> {
+    ) -> Result<Vec<(Oid, Commit)>> {
         let mut commits = Vec::new();
 
         for oid in &state.commits_remaining {
             let data = odb.read(oid).await?;
             let commit = Commit::deserialize(&data)?;
-            commits.push(commit);
+            commits.push((*oid, commit));
         }
 
         Ok(commits)
@@ -603,16 +655,11 @@ mod tests {
         assert!(err.to_string().contains("Cannot resolve branch"));
     }
 
-    #[tokio::test]
-    async fn execute_interactive_is_not_implemented_error() {
-        let temp = TempDir::new().unwrap();
-        init_repo_with_commit(temp.path()).await;
-
-        let cmd = parse(&["main", "-i"]).unwrap();
-        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Interactive rebase not yet implemented"));
+    #[test]
+    fn interactive_flag_is_rejected_at_parse_time() {
+        // -i/--interactive was removed from clap (unbuilt feature, pre-GA)
+        assert!(parse(&["main", "-i"]).is_err());
+        assert!(parse(&["main", "--interactive"]).is_err());
     }
 
     #[tokio::test]

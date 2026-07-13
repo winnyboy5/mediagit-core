@@ -212,8 +212,24 @@ impl StashCmd {
             }
         }
 
-        // BUG-3 fix: Check BOTH index and working-tree changes
-        if index.is_empty() && working_tree_changes.is_empty() {
+        // Untracked/new files: `checkout_commit` below (restore to HEAD) removes
+        // ANY file not in the target tree, with no concept of "untracked" - so
+        // an untracked WIP file is silently destroyed unless stash captures it
+        // first (DES-3). Captured by default since the reset is destructive
+        // regardless of `-u`; the flag is accepted for git-compatible parsing.
+        let mut untracked_changes: Vec<(PathBuf, Oid)> = Vec::new();
+        for path in &working_files {
+            if head_files.contains_key(path) || index.contains(path) {
+                continue;
+            }
+            let full_path = repo_root.join(path);
+            if let Ok(content) = std::fs::read(&full_path) {
+                untracked_changes.push((path.clone(), Oid::hash(&content)));
+            }
+        }
+
+        // BUG-3 fix: Check index, working-tree changes, AND untracked files
+        if index.is_empty() && working_tree_changes.is_empty() && untracked_changes.is_empty() {
             if !opts.quiet {
                 println!("{} No changes to stash", style("ℹ").blue());
             }
@@ -232,8 +248,9 @@ impl StashCmd {
             ));
         }
 
-        // 2. Override with working-tree modifications (write blobs to ODB)
-        for (path, _working_oid) in &working_tree_changes {
+        // 2. Override with working-tree modifications and untracked files
+        //    (write blobs to ODB)
+        for (path, _oid) in working_tree_changes.iter().chain(untracked_changes.iter()) {
             let full_path = repo_root.join(path);
             if let Ok(content) = std::fs::read(&full_path) {
                 let blob_oid = odb

@@ -203,7 +203,7 @@ impl SparseFilter {
             SparseMode::Pattern => self
                 .matcher
                 .as_ref()
-                .map(|m| m.matched(rel_path, false).is_ignore())
+                .map(|m| m.matched_path_or_any_parents(rel_path, false).is_ignore())
                 .unwrap_or(true),
         }
     }
@@ -272,6 +272,27 @@ mod tests {
         assert_eq!(filter.mode(), SparseMode::Pattern);
         assert!(filter.is_included(Path::new("assets/wood.png")));
         assert!(!filter.is_included(Path::new("assets/track.wav")));
+    }
+
+    #[test]
+    fn pattern_mode_dir_star_matches_nested_files() {
+        let dir = TempDir::new().unwrap();
+        SparseFilter::write(dir.path(), SparseMode::Pattern, &["assets/*".to_string()]).unwrap();
+        let filter = SparseFilter::load(dir.path()).unwrap();
+        assert!(filter.is_included(Path::new("assets/wood.png")));
+        assert!(filter.is_included(Path::new("assets/textures/wood.png")));
+        assert!(filter.is_included(Path::new("assets/textures/deep/wood.png")));
+        assert!(!filter.is_included(Path::new("readme.md")));
+    }
+
+    #[test]
+    fn pattern_mode_dir_slash_matches_nested_files() {
+        let dir = TempDir::new().unwrap();
+        SparseFilter::write(dir.path(), SparseMode::Pattern, &["assets/".to_string()]).unwrap();
+        let filter = SparseFilter::load(dir.path()).unwrap();
+        assert!(filter.is_included(Path::new("assets/wood.png")));
+        assert!(filter.is_included(Path::new("assets/textures/deep/wood.png")));
+        assert!(!filter.is_included(Path::new("readme.md")));
     }
 
     #[test]

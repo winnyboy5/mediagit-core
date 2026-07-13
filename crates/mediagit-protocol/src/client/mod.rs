@@ -54,6 +54,19 @@ struct PackLocInfo {
     compressed_hash: Option<String>,
 }
 
+/// Result of a `ProtocolClient::repair_remote` chunk-healing pass (BUG-RM-3).
+#[derive(Debug, Clone, Default)]
+pub struct RepairReport {
+    /// Number of chunk ids strong-verified against the remote.
+    pub verified: usize,
+    /// Chunks the remote reported as invalid and that were successfully
+    /// re-uploaded from the local ODB.
+    pub repaired: usize,
+    /// Chunks the remote reported as invalid but could not be repaired
+    /// (missing/unreadable locally, or the re-upload itself failed).
+    pub unrepairable: Vec<String>,
+}
+
 /// Statistics from a push operation
 #[derive(Debug, Clone, Default)]
 pub struct PushStats {
@@ -290,6 +303,37 @@ impl ProtocolClient {
             .context("Failed to parse refs response")
     }
 
+    /// Get all refs from the remote repository, treating 404 as an empty ref list.
+    ///
+    /// Only for push: a 404 before the first push means the repo doesn't exist yet
+    /// and will be auto-created. Clone/fetch/pull must keep erroring on 404.
+    pub async fn get_refs_or_empty(&self) -> Result<RefsResponse> {
+        let url = format!("{}/info/refs", self.base_url);
+        tracing::debug!("GET {}", url);
+
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .context("Failed to send GET /info/refs")?;
+
+        if response.status().as_u16() == 404 {
+            return Ok(RefsResponse {
+                refs: Vec::new(),
+                capabilities: Vec::new(),
+            });
+        }
+        if !response.status().is_success() {
+            anyhow::bail!("GET /info/refs failed with status: {}", response.status());
+        }
+
+        response
+            .json::<RefsResponse>()
+            .await
+            .context("Failed to parse refs response")
+    }
+
     /// Update remote refs
     pub async fn update_refs(&self, request: RefUpdateRequest) -> Result<RefUpdateResponse> {
         let url = format!("{}/refs/update", self.base_url);
@@ -384,12 +428,25 @@ pub(crate) async fn download_chunk_direct(
     // Disabled when MEDIAGIT_RANGE_PARALLEL=0 or size_hint is too small.
     let range_parallel: usize = std::env::var("MEDIAGIT_RANGE_PARALLEL")
         .ok()
-        .and_then(|s| s.parse().ok())
+        .and_then(|s| {
+            s.parse().ok().or_else(|| {
+                tracing::warn!(
+                    "MEDIAGIT_RANGE_PARALLEL='{}' is not a valid usize, using default 4",
+                    s
+                );
+                None
+            })
+        })
         .unwrap_or(4)
         .clamp(0, 16);
     let range_threshold: u64 = std::env::var("MEDIAGIT_RANGE_PARALLEL_THRESHOLD")
         .ok()
-        .and_then(|s| s.parse().ok())
+        .and_then(|s| {
+            s.parse().ok().or_else(|| {
+                tracing::warn!("MEDIAGIT_RANGE_PARALLEL_THRESHOLD='{}' is not a valid u64, using default 4 MiB", s);
+                None
+            })
+        })
         .unwrap_or(4 * 1024 * 1024); // 4 MiB — fires on typical media chunks (512 KB – 32 MB)
 
     if range_parallel > 1 && size_hint >= range_threshold {

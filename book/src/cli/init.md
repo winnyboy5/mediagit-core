@@ -40,7 +40,10 @@ Name of the initial branch.
 - **Default**: `main`
 
 ### `--bare`
-Create a bare repository without a working directory.
+Compatibility alias. MediaGit repositories always use the `.mediagit` layout,
+so this creates exactly the same structure as a plain `init`. Commonly used
+when seeding a server-side repository directory
+(`mediagit init --bare <data-dir>/<repo>`).
 
 ## Examples
 
@@ -68,12 +71,6 @@ $ mediagit init --storage-backend s3
 $ mediagit init --initial-branch develop
 ✓ Initialized empty MediaGit repository in .mediagit/
 ✓ Created initial branch: develop
-```
-
-### Initialize bare repository
-```bash
-$ mediagit init --bare repo.git
-✓ Initialized bare MediaGit repository in repo.git/
 ```
 
 ## Repository Structure

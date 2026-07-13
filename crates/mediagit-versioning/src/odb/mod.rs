@@ -40,6 +40,38 @@ const MAX_CACHEABLE_OBJECT_SIZE: usize = 10 * 1024 * 1024;
 /// Uses Moka's weigher to bound by total byte size instead of entry count.
 const DEFAULT_CACHE_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
+/// Default byte budget for `base_chunk_cache` (256 MiB). Previously this
+/// cache was bounded by *entry count* (64 entries) with no size weigher —
+/// with chunks up to 32 MiB each, 64 entries could balloon to multiple GB.
+/// Override via `MEDIAGIT_CHUNK_CACHE_BYTES`.
+const DEFAULT_BASE_CHUNK_CACHE_BYTES: u64 = 256 * 1024 * 1024;
+
+fn base_chunk_cache_bytes() -> u64 {
+    match std::env::var("MEDIAGIT_CHUNK_CACHE_BYTES") {
+        Ok(v) => v.parse::<u64>().unwrap_or_else(|_| {
+            warn!(
+                "MEDIAGIT_CHUNK_CACHE_BYTES='{}' is not a valid u64, using default {}",
+                v, DEFAULT_BASE_CHUNK_CACHE_BYTES
+            );
+            DEFAULT_BASE_CHUNK_CACHE_BYTES
+        }),
+        Err(_) => DEFAULT_BASE_CHUNK_CACHE_BYTES,
+    }
+}
+
+/// Build the byte-weighted `base_chunk_cache` used by every `ObjectDatabase`
+/// constructor. Weighed by `Arc<Vec<u8>>::len()` so a handful of large
+/// chunks can't blow past the configured byte budget the way a plain
+/// entry-count cache could.
+fn build_base_chunk_cache() -> Cache<Oid, Arc<Vec<u8>>> {
+    Cache::builder()
+        .max_capacity(base_chunk_cache_bytes())
+        .weigher(|_key: &Oid, value: &Arc<Vec<u8>>| -> u32 {
+            value.len().try_into().unwrap_or(u32::MAX)
+        })
+        .build()
+}
+
 use crate::chunking::{ChunkManifest, ChunkRef, ChunkStrategy, ContentChunker};
 use crate::delta::{Delta, DeltaDecoder, DeltaEncoder};
 use crate::{ObjectType, OdbMetrics, Oid};
@@ -298,6 +330,15 @@ pub struct ObjectDatabase {
     /// Tracks committed chunk-delta pairs (chunk_id, base_id) to prevent TOCTOU cycles.
     /// In-memory O(1) check inside a short-held lock; all network IO happens outside the lock.
     delta_written_pairs: Arc<Mutex<std::collections::HashSet<(Oid, Oid)>>>,
+
+    /// Lazily-built set of OIDs embedded in pack indexes. `None` until the
+    /// first `chunk_exists()` call (or a repack) populates it — packs are
+    /// immutable once written and only ever grow in number, so this can be
+    /// extended in place by `repack()` instead of reloading from scratch.
+    /// Without this, `chunk_exists()` only checked `chunks/` and
+    /// `chunk-deltas/`, so post-repack (which deletes the loose copies)
+    /// every chunk looked "new" and push dedup re-uploaded everything.
+    pack_membership: Arc<RwLock<Option<std::collections::HashSet<Oid>>>>,
 }
 
 impl Clone for ObjectDatabase {
@@ -315,6 +356,7 @@ impl Clone for ObjectDatabase {
             similarity_detector: self.similarity_detector.clone(),
             base_chunk_cache: self.base_chunk_cache.clone(),
             delta_written_pairs: self.delta_written_pairs.clone(),
+            pack_membership: self.pack_membership.clone(),
         }
     }
 }

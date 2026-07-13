@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 pub struct RefInfo {
     /// Reference name (e.g., "refs/heads/main", "refs/tags/v1.0.0")
     pub name: String,
-    /// Object ID (SHA-256 hash) the ref points to
+    /// Object ID (BLAKE3 hash) the ref points to
     pub oid: String,
     /// For symbolic refs, the target ref name
     pub target: Option<String>,

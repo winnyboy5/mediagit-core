@@ -78,6 +78,7 @@ pub struct UpstreamReport {
 pub enum StagedKind {
     Added,
     Modified,
+    Deleted,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -437,12 +438,21 @@ impl StatusCmd {
         // mediagit_versioning::sparse. Applies to human and --json alike;
         // porcelain runs its own copy above and is untouched by this filter.
         let sparse = SparseFilter::load(&repo_root).unwrap_or_else(|_| SparseFilter::disabled());
+        // Staged deletions (via `mediagit rm` / `add -A` picking up a removed
+        // file, see Index::mark_deleted) belong under "Changes to be
+        // committed"; a deletion that hasn't been staged (still in HEAD,
+        // absent from working dir, not in index.deleted_entries) stays under
+        // "Changes not staged for commit". Both skip sparse-excluded paths —
+        // their absence is expected, not a real deletion.
         let mut deleted_files = Vec::new();
+        let mut staged_deletions = Vec::new();
         for path in head_files.keys() {
-            if !working_files.contains(path) && !index_files.contains_key(path) {
-                if !sparse.is_included(path) {
-                    continue;
-                }
+            if !sparse.is_included(path) {
+                continue;
+            }
+            if index.is_deleted(path) {
+                staged_deletions.push(path.clone());
+            } else if !working_files.contains(path) && !index_files.contains_key(path) {
                 deleted_files.push(path.clone());
             }
         }
@@ -475,6 +485,10 @@ impl StatusCmd {
                         println!("A  {}", entry.path.display());
                     }
                 }
+                // Staged deletions
+                for path in &staged_deletions {
+                    println!("D  {}", path.display());
+                }
                 // Modified unstaged files
                 for path in &modified_files {
                     println!(" M {}", path.display());
@@ -504,7 +518,7 @@ impl StatusCmd {
         // Build the single-source-of-truth report. Human rendering below
         // reads from `report`, not from the raw collections above; --json
         // serializes `report` directly.
-        let staged: Vec<StagedFileReport> = index
+        let mut staged: Vec<StagedFileReport> = index
             .entries()
             .map(|entry| {
                 let kind = if head_files.contains_key(&entry.path) {
@@ -518,6 +532,12 @@ impl StatusCmd {
                 }
             })
             .collect();
+        for path in &staged_deletions {
+            staged.push(StagedFileReport {
+                path: path.display().to_string(),
+                kind: StagedKind::Deleted,
+            });
+        }
         let modified: Vec<String> = modified_files
             .iter()
             .map(|p| p.display().to_string())
@@ -650,7 +670,16 @@ impl StatusCmd {
             println!();
 
             for entry in &report.staged {
-                let status_prefix = if self.short { "A " } else { "  new file:   " };
+                let (long_prefix, short_prefix) = match entry.kind {
+                    StagedKind::Added => ("  new file:   ", "A "),
+                    StagedKind::Modified => ("  modified:   ", "M "),
+                    StagedKind::Deleted => ("  deleted:    ", "D "),
+                };
+                let status_prefix = if self.short {
+                    short_prefix
+                } else {
+                    long_prefix
+                };
                 output::success(&format!("{}{}", status_prefix, entry.path));
                 if let Some(summary) = media_by_path.get(entry.path.as_str()) {
                     println!("   {}", style(summary).dim());

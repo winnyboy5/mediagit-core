@@ -27,6 +27,99 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+/// Stage files for commit (reusable by other commands like commit --include)
+///
+/// This function performs the same staging logic as the add command, allowing
+/// other commands to stage files without reimplementing the chunking/hashing/delta logic.
+pub async fn stage_files_for_commit(paths: &[String], repo_root: &std::path::Path) -> Result<u64> {
+    if paths.is_empty() {
+        return Ok(0);
+    }
+
+    let repo_root =
+        dunce::canonicalize(repo_root).unwrap_or_else(|_| std::path::PathBuf::from(repo_root));
+
+    // Initialize storage backend
+    let storage_path = repo_root.join(".mediagit");
+    let storage = create_storage_backend(&repo_root).await?;
+    let odb =
+        ObjectDatabase::with_optimizations(storage, 1000, Some(ChunkStrategy::MediaAware), true, 0);
+
+    // Load index
+    let mut index = Index::load(&repo_root)?;
+
+    // Load HEAD for unchanged detection
+    let refdb = RefDatabase::new(&storage_path);
+    let head_files: Arc<std::collections::HashMap<std::path::PathBuf, Oid>> = {
+        let mut files = std::collections::HashMap::new();
+        if let Ok(head_oid) = refdb.resolve("HEAD").await {
+            if let Ok(commit_data) = odb.read(&head_oid).await {
+                if let Ok(commit) = mediagit_versioning::format::deserialize::<Commit>(&commit_data)
+                {
+                    if let Ok(tree_data) = odb.read(&commit.tree).await {
+                        if let Ok(tree) =
+                            mediagit_versioning::format::deserialize::<Tree>(&tree_data)
+                        {
+                            for entry in tree.iter() {
+                                files.insert(std::path::PathBuf::from(&entry.name), entry.oid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Arc::new(files)
+    };
+
+    let index_files: Arc<std::collections::HashMap<std::path::PathBuf, (u64, Option<u64>)>> = {
+        let mut map = std::collections::HashMap::new();
+        for entry in index.entries() {
+            map.insert(entry.path.clone(), (entry.size, entry.mtime));
+        }
+        Arc::new(map)
+    };
+
+    // Stage each path sequentially
+    let mut added_count = 0u64;
+    for path_str in paths {
+        let path = std::path::Path::new(path_str);
+        if path.is_file() {
+            if let Ok(abs_path) = dunce::canonicalize(path) {
+                match AddCmd::process_single_file(
+                    &abs_path,
+                    &repo_root,
+                    &odb,
+                    &head_files,
+                    &index_files,
+                    true,
+                    None,
+                )
+                .await
+                {
+                    Ok((Some(file_result), _)) => {
+                        let entry = IndexEntry::new(
+                            file_result.relative_path,
+                            file_result.oid,
+                            file_result.mode,
+                            file_result.file_size,
+                            file_result.mtime,
+                        );
+                        index.add_entry(entry);
+                        added_count += 1;
+                    }
+                    Ok((None, _)) => {} // unchanged, skip
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+
+    // Save index
+    index.save(&repo_root).context("Failed to save index")?;
+
+    Ok(added_count)
+}
+
 /// Add file contents to the staging area
 ///
 /// Stages changes to files for inclusion in the next commit. This command
@@ -58,10 +151,6 @@ pub struct AddCmd {
     /// Add all changes
     #[arg(short = 'A', long)]
     pub all: bool,
-
-    /// Interactively choose hunks to add
-    #[arg(short, long)]
-    pub patch: bool,
 
     /// Show what would be staged
     #[arg(long)]
@@ -104,13 +193,31 @@ pub struct AddCmd {
     pub jobs: Option<usize>,
 }
 
+/// Default global in-flight byte budget for parallel file processing (512 MiB).
+/// Override via `MEDIAGIT_ADD_MAX_INFLIGHT_BYTES`.
+const DEFAULT_ADD_MAX_INFLIGHT_BYTES: u64 = 512 * 1024 * 1024;
+
+fn add_max_inflight_bytes() -> u64 {
+    match std::env::var("MEDIAGIT_ADD_MAX_INFLIGHT_BYTES") {
+        Ok(v) => v.parse::<u64>().unwrap_or_else(|_| {
+            tracing::warn!(
+                "MEDIAGIT_ADD_MAX_INFLIGHT_BYTES='{}' is not a valid u64, using default {}",
+                v,
+                DEFAULT_ADD_MAX_INFLIGHT_BYTES
+            );
+            DEFAULT_ADD_MAX_INFLIGHT_BYTES
+        }),
+        Err(_) => DEFAULT_ADD_MAX_INFLIGHT_BYTES,
+    }
+}
+
 /// Result from processing a single file in parallel
-struct FileResult {
-    relative_path: PathBuf,
-    oid: Oid,
-    file_size: u64,
-    mode: u32,
-    mtime: Option<u64>,
+pub struct FileResult {
+    pub relative_path: PathBuf,
+    pub oid: Oid,
+    pub file_size: u64,
+    pub mode: u32,
+    pub mtime: Option<u64>,
 }
 
 impl AddCmd {
@@ -206,17 +313,33 @@ impl AddCmd {
             Arc::new(files)
         };
 
-        // Expand paths (globs, directories) into file list
-        let files_to_add = self.expand_paths(&repo_root)?;
+        // Tracked paths = union of HEAD tree paths and current index paths.
+        // Used by `-u`/`--update` to restrict staging to already-tracked
+        // files (never untracked ones) — see expand_paths.
+        let tracked_paths: std::collections::HashSet<PathBuf> = head_files
+            .keys()
+            .cloned()
+            .chain(index_files.keys().cloned())
+            .collect();
 
-        // Calculate total bytes for progress bar
+        // Expand paths (globs, directories) into file list
+        let files_to_add = self.expand_paths(&repo_root, &tracked_paths)?;
+
+        // Calculate total bytes for progress bar. Statting every file up
+        // front can take a while on large trees with no feedback yet, so
+        // show a spinner for this scan phase (separate from the byte/file
+        // progress bar created below).
         let (total_files, total_bytes) = if !self.quiet && !files_to_add.is_empty() {
+            let scan_tracker = ProgressTracker::new(self.quiet);
+            let scan_spinner =
+                scan_tracker.spinner(&format!("scanning {} files…", files_to_add.len()));
             let mut bytes = 0u64;
             for f in &files_to_add {
                 if let Ok(meta) = std::fs::metadata(f) {
                     bytes += meta.len();
                 }
             }
+            scan_spinner.finish_and_clear();
             (files_to_add.len() as u64, bytes)
         } else {
             (files_to_add.len() as u64, 0)
@@ -251,12 +374,27 @@ impl AddCmd {
                 let max_concurrent = self.jobs.unwrap_or_else(|| num_cpus::get().min(8));
                 let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
 
+                // Global in-flight byte budget: the file-count semaphore above
+                // admits up to `max_concurrent` files regardless of size, so
+                // e.g. 8 concurrent 300MB in-memory reads can spike RAM well
+                // past what any single-file threshold suggests. Permits are
+                // granted in 1 MiB units; a file larger than the whole budget
+                // is capped to `total_byte_permits` so it still runs (alone)
+                // instead of deadlocking.
+                const BYTES_PER_PERMIT: u64 = 1024 * 1024;
+                let total_byte_permits = (add_max_inflight_bytes() / BYTES_PER_PERMIT)
+                    .max(1)
+                    .min(u32::MAX as u64) as u32;
+                let byte_semaphore =
+                    Arc::new(tokio::sync::Semaphore::new(total_byte_permits as usize));
+
                 let mut file_tasks = tokio::task::JoinSet::new();
                 let skipped = Arc::new(AtomicU64::new(0));
 
                 #[allow(clippy::unnecessary_to_owned)]
                 for file_path in files_to_add.iter().cloned() {
                     let sem = semaphore.clone();
+                    let byte_semaphore = byte_semaphore.clone();
                     let odb = odb.clone();
                     let head_files = head_files.clone();
                     let index_files = index_files.clone();
@@ -271,6 +409,17 @@ impl AddCmd {
                             .acquire()
                             .await
                             .map_err(|_| anyhow::anyhow!("Semaphore closed"))?;
+
+                        let file_size = tokio::fs::metadata(&file_path)
+                            .await
+                            .map(|m| m.len())
+                            .unwrap_or(0);
+                        let needed_permits = (file_size.div_ceil(BYTES_PER_PERMIT).max(1) as u32)
+                            .min(total_byte_permits);
+                        let _byte_permit = byte_semaphore
+                            .acquire_many_owned(needed_permits)
+                            .await
+                            .map_err(|_| anyhow::anyhow!("Byte semaphore closed"))?;
 
                         // Per-chunk/file byte callback: updates progress_bytes + bar position
                         // Called incrementally for large streaming files (per chunk),
@@ -433,7 +582,10 @@ impl AddCmd {
             added_count = files_to_add.len() as u64;
         }
 
-        // Detect deleted files: files in HEAD but not in working directory
+        // Detect deleted files: files in HEAD but not in working directory.
+        // Git semantics: deletions are staged only when the pathspec covers
+        // them — `add -A`/`-u`/`add .` sweep the repo, while `add <file>`
+        // must not stage unrelated deletions.
         let mut deleted_count = 0;
 
         let working_files: std::collections::HashSet<PathBuf> = files_to_add
@@ -442,9 +594,46 @@ impl AddCmd {
             .map(|p| p.to_path_buf())
             .collect();
 
+        // Pathspec prefixes (repo-relative, '/'-normalized) that scope which
+        // deletions may be staged when neither -A nor -u is given.
+        let deletion_scopes: Vec<String> = if self.all || self.update {
+            vec![String::new()] // whole repo
+        } else {
+            self.paths
+                .iter()
+                .map(|p| {
+                    let joined = if Path::new(p).is_absolute() {
+                        PathBuf::from(p)
+                    } else {
+                        std::env::current_dir().unwrap_or_default().join(p)
+                    };
+                    let rel = joined
+                        .strip_prefix(&repo_root)
+                        .map(|r| r.to_path_buf())
+                        .unwrap_or_else(|_| PathBuf::from(p));
+                    let s = rel.to_string_lossy().replace('\\', "/");
+                    if s == "." {
+                        String::new()
+                    } else {
+                        s
+                    }
+                })
+                .collect()
+        };
+
         for head_path in head_files.as_ref().keys() {
             let head_path_normalized =
                 PathBuf::from(head_path.to_string_lossy().replace('\\', "/"));
+
+            let head_str = head_path_normalized.to_string_lossy().to_string();
+            let in_scope = deletion_scopes.iter().any(|scope| {
+                scope.is_empty()
+                    || head_str == *scope
+                    || head_str.starts_with(&format!("{}/", scope.trim_end_matches('/')))
+            });
+            if !in_scope {
+                continue;
+            }
 
             let exists_in_working_dir = working_files.iter().any(|wp| {
                 wp.to_string_lossy().replace('\\', "/") == head_path_normalized.to_string_lossy()
@@ -453,13 +642,16 @@ impl AddCmd {
             if !exists_in_working_dir {
                 let full_path = repo_root.join(head_path);
                 if !full_path.exists() {
-                    if !self.dry_run {
-                        index.mark_deleted(head_path.clone());
-                        if self.verbose {
-                            output::detail("deleted", &head_path.display().to_string());
+                    // Stage deletion unless --ignore-removal is set
+                    if !self.ignore_removal {
+                        if !self.dry_run {
+                            index.mark_deleted(head_path.clone());
+                            if self.verbose {
+                                output::detail("deleted", &head_path.display().to_string());
+                            }
                         }
+                        deleted_count += 1;
                     }
-                    deleted_count += 1;
                 }
             }
         }
@@ -514,7 +706,7 @@ impl AddCmd {
     /// Returns `Ok(Some(FileResult))` if file was staged,
     /// `Ok(None)` if file was skipped (unchanged from HEAD),
     /// `Err` on failure.
-    async fn process_single_file(
+    pub async fn process_single_file(
         file_path: &Path,
         repo_root: &Path,
         odb: &ObjectDatabase,
@@ -720,8 +912,26 @@ impl AddCmd {
         }
     }
 
-    /// Expand paths (globs, directories) into a list of files to add
-    fn expand_paths(&self, repo_root: &Path) -> Result<Vec<PathBuf>> {
+    /// Resolve `path` to a repo-relative path for `.mediagitignore` matching.
+    /// `strip_prefix(repo_root)` alone fails when `path` is relative (e.g. a
+    /// walk started from `add .`), which silently skipped the ignore check
+    /// (BUG-GD-1). Canonicalizing first makes the match relative-path-safe.
+    fn ignore_relative_path(path: &Path, repo_root: &Path) -> Option<PathBuf> {
+        dunce::canonicalize(path)
+            .ok()?
+            .strip_prefix(repo_root)
+            .ok()
+            .map(|p| p.to_path_buf())
+    }
+
+    /// Expand paths (globs, directories) into a list of files to add.
+    /// `tracked_paths` (repo-relative) is consulted only by the `-u`/`--update`
+    /// branch, to restrict candidates to already-tracked files.
+    fn expand_paths(
+        &self,
+        repo_root: &Path,
+        tracked_paths: &std::collections::HashSet<PathBuf>,
+    ) -> Result<Vec<PathBuf>> {
         use crate::ignore_rules::IgnoreMatcher;
         use crate::output;
 
@@ -757,15 +967,24 @@ impl AddCmd {
             return Ok(files);
         }
 
-        // If --update (-u) is set, collect all tracked files that exist in working dir
+        // If --update (-u) is set, collect only already-tracked files that
+        // still exist in the working dir (never untracked files).
         if self.update && self.paths.is_empty() {
+            let mut candidates = Vec::new();
             self.collect_files_recursive(
                 repo_root,
                 repo_root,
                 &mediagit_dir,
                 &matcher,
-                &mut files,
+                &mut candidates,
             )?;
+            for path in candidates {
+                if let Ok(rel) = path.strip_prefix(repo_root) {
+                    if tracked_paths.contains(rel) {
+                        files.push(path);
+                    }
+                }
+            }
             return Ok(files);
         }
 
@@ -782,8 +1001,10 @@ impl AddCmd {
                                     if p.is_file() && Self::is_outside_mediagit(&p, &mediagit_dir) {
                                         // Check .mediagitignore for explicit glob results
                                         if let Some(ref m) = matcher {
-                                            if let Ok(rel) = p.strip_prefix(repo_root) {
-                                                if m.is_ignored(rel, false) {
+                                            if let Some(rel) =
+                                                Self::ignore_relative_path(&p, repo_root)
+                                            {
+                                                if m.is_ignored(&rel, false) {
                                                     if self.verbose {
                                                         output::detail(
                                                             "ignored (.mediagitignore)",
@@ -828,8 +1049,8 @@ impl AddCmd {
             if path.is_file() && Self::is_outside_mediagit(path, &mediagit_dir) {
                 // Check .mediagitignore for explicitly-named files
                 if let Some(ref m) = matcher {
-                    if let Ok(rel) = path.strip_prefix(repo_root) {
-                        if m.is_ignored(rel, false) {
+                    if let Some(rel) = Self::ignore_relative_path(path, repo_root) {
+                        if m.is_ignored(&rel, false) {
                             if !self.quiet {
                                 output::warning(&format!(
                                     "'{}' is ignored by .mediagitignore — use --force to override",
@@ -882,9 +1103,9 @@ impl AddCmd {
 
             // Check .mediagitignore before descending into dirs or staging files
             if let Some(ref m) = matcher {
-                if let Ok(rel) = path.strip_prefix(repo_root) {
+                if let Some(rel) = Self::ignore_relative_path(&path, repo_root) {
                     let is_dir = path.is_dir();
-                    if m.is_ignored(rel, is_dir) {
+                    if m.is_ignored(&rel, is_dir) {
                         if self.verbose {
                             output::detail(
                                 "ignored (.mediagitignore)",

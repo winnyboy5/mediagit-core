@@ -333,11 +333,12 @@ async fn create_inner_storage_backend(
         mediagit_config::StorageConfig::S3(s3_config) => {
             if let Some(endpoint) = &s3_config.endpoint {
                 // S3-compatible (MinIO, DigitalOcean Spaces, etc.)
-                let storage = mediagit_storage::MinIOBackend::new(
+                let storage = mediagit_storage::MinIOBackend::new_with_prefix(
                     endpoint,
                     &s3_config.bucket,
                     s3_config.access_key_id.as_deref().unwrap_or(""),
                     s3_config.secret_access_key.as_deref().unwrap_or(""),
+                    &s3_config.prefix,
                 )
                 .await
                 .context("Failed to initialize S3-compatible storage backend")?;
@@ -345,11 +346,12 @@ async fn create_inner_storage_backend(
             } else {
                 // AWS S3
                 let aws_endpoint = format!("https://s3.{}.amazonaws.com", s3_config.region);
-                let storage = mediagit_storage::MinIOBackend::new(
+                let storage = mediagit_storage::MinIOBackend::new_with_prefix(
                     &aws_endpoint,
                     &s3_config.bucket,
                     s3_config.access_key_id.as_deref().unwrap_or(""),
                     s3_config.secret_access_key.as_deref().unwrap_or(""),
+                    &s3_config.prefix,
                 )
                 .await
                 .context("Failed to initialize AWS S3 storage backend")?;
@@ -358,17 +360,19 @@ async fn create_inner_storage_backend(
         }
         mediagit_config::StorageConfig::Azure(azure_config) => {
             let storage = if let Some(conn_str) = &azure_config.connection_string {
-                mediagit_storage::AzureBackend::with_connection_string(
+                mediagit_storage::AzureBackend::with_connection_string_and_prefix(
                     &azure_config.container,
                     conn_str,
+                    &azure_config.prefix,
                 )
                 .await
                 .context("Failed to initialize Azure storage backend")?
             } else if let Some(account_key) = &azure_config.account_key {
-                mediagit_storage::AzureBackend::with_account_key(
+                mediagit_storage::AzureBackend::with_account_key_and_prefix(
                     &azure_config.account_name,
                     &azure_config.container,
                     account_key,
+                    &azure_config.prefix,
                 )
                 .await
                 .context("Failed to initialize Azure storage backend")?
@@ -380,21 +384,20 @@ async fn create_inner_storage_backend(
         mediagit_config::StorageConfig::GCS(gcs_config) => {
             let credentials_path = gcs_config.credentials_path.as_deref().unwrap_or("");
 
+            let mut config =
+                mediagit_storage::GcsConfig::new(&gcs_config.project_id, &gcs_config.bucket);
+            if !gcs_config.prefix.is_empty() {
+                config.prefix = Some(gcs_config.prefix.clone());
+            }
+
             let storage = if credentials_path.is_empty() {
-                mediagit_storage::GcsBackend::with_default_credentials(
-                    &gcs_config.project_id,
-                    &gcs_config.bucket,
-                )
-                .await
-                .context("Failed to initialize GCS storage backend")?
+                mediagit_storage::GcsBackend::with_default_credentials_and_config(config)
+                    .await
+                    .context("Failed to initialize GCS storage backend")?
             } else {
-                mediagit_storage::GcsBackend::new(
-                    &gcs_config.project_id,
-                    &gcs_config.bucket,
-                    credentials_path,
-                )
-                .await
-                .context("Failed to initialize GCS storage backend")?
+                mediagit_storage::GcsBackend::with_config(config, credentials_path)
+                    .await
+                    .context("Failed to initialize GCS storage backend")?
             };
             Ok(Arc::new(storage))
         }

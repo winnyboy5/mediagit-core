@@ -114,9 +114,17 @@ async fn model3d_summary(data: &[u8], filename: &str) -> mediagit_media::Result<
     let info = mediagit_media::Model3DParser::new()
         .parse(data, filename)
         .await?;
+    let verts = info
+        .vertex_count
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "n/a".to_string());
+    let faces = info
+        .face_count
+        .map(|f| f.to_string())
+        .unwrap_or_else(|| "n/a".to_string());
     Ok(format!(
         "media: {:?} {} verts, {} faces, {} object(s)",
-        info.format, info.vertex_count, info.face_count, info.object_count
+        info.format, verts, faces, info.object_count
     ))
 }
 

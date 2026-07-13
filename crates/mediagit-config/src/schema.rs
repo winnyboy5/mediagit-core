@@ -103,6 +103,15 @@ pub struct Config {
     /// on first open after this fix — see `check_or_write_layout_marker`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_id: Option<String>,
+
+    /// Config schema version (distinct from `layout_version`, which tracks
+    /// the on-disk *object storage* layout and is authoritative via the
+    /// `LAYOUT` marker — this field is config.toml's own schema version,
+    /// migrated by `crate::migration::MigrationManager`). Missing on any
+    /// config.toml written before this field existed, which is exactly what
+    /// `#[serde(default)]` (-> 0) is for: an absent field means "v0".
+    #[serde(default)]
+    pub config_version: u32,
 }
 
 /// Current on-disk layout version new repos are initialized with.
@@ -155,7 +164,17 @@ impl Config {
     }
 
     /// Load config from repository root
+    ///
+    /// If the loaded config's `config_version` is behind
+    /// `migration::CONFIG_VERSION`, runs `MigrationManager` to bring it up to
+    /// date, backs up the original to `config.toml.bak`, and writes the
+    /// migrated config back before returning it. This never touches object
+    /// storage layout (`layout_version` / the `LAYOUT` marker) — only the
+    /// config.toml schema.
     pub async fn load(repo_root: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
+        use crate::migration::{
+            MigrationManager, MigrationV0ToV1, MigrationV1ToV2, CONFIG_VERSION,
+        };
         use crate::ConfigLoader;
         let config_path = repo_root.as_ref().join(".mediagit/config.toml");
 
@@ -165,7 +184,50 @@ impl Config {
         }
 
         let loader = ConfigLoader::new();
-        Ok(loader.load_file(&config_path).await?)
+        let config: Config = loader.load_file(&config_path).await?;
+
+        if config.config_version >= CONFIG_VERSION {
+            return Ok(config);
+        }
+
+        tracing::info!(
+            from_version = config.config_version,
+            to_version = CONFIG_VERSION,
+            path = %config_path.display(),
+            "Migrating config.toml to current schema version"
+        );
+
+        let backup_path = config_path.with_file_name(format!(
+            "{}.bak",
+            config_path
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("Invalid config path: {}", config_path.display()))?
+                .to_string_lossy()
+        ));
+        std::fs::copy(&config_path, &backup_path).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to back up config.toml to {} before migration: {}",
+                backup_path.display(),
+                e
+            )
+        })?;
+
+        let mut manager = MigrationManager::new();
+        manager.register(Box::new(MigrationV0ToV1));
+        manager.register(Box::new(MigrationV1ToV2));
+
+        let value = serde_json::to_value(&config)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize config for migration: {}", e))?;
+        let migrated_value = manager
+            .migrate(value, config.config_version, CONFIG_VERSION)
+            .map_err(|e| anyhow::anyhow!("Config migration failed: {}", e))?;
+        let mut migrated: Config = serde_json::from_value(migrated_value)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize migrated config: {}", e))?;
+        migrated.config_version = CONFIG_VERSION;
+
+        migrated.save(repo_root.as_ref())?;
+
+        Ok(migrated)
     }
 
     /// Save config to repository root
@@ -912,6 +974,7 @@ impl Default for Config {
             repo_namespace: None,
             layout_version: default_layout_version(),
             repo_id: None,
+            config_version: crate::migration::CONFIG_VERSION,
         }
     }
 }

@@ -39,6 +39,10 @@ serde_json.workspace = true
 # Regex for metadata parsing
 regex-lite = "0.1"
 
+# Compressed .blend header peek (Blender <3.0 gzip, >=3.0 zstd)
+flate2.workspace = true
+zstd.workspace = true
+
 [package.metadata.cargo-machete]
 ignored = ["kamadak-exif"]  # used via `exif::` re-export
 

@@ -2213,6 +2213,89 @@ impl ProtocolClient {
         }
         Ok(total_chunks_uploaded)
     }
+
+    /// Force-heal remote chunk storage (BUG-RM-3: one corrupt chunk object
+    /// permanently bricks a remote, because push dedup and pack-index checks
+    /// both treat "server already has it" as sufficient and never re-check
+    /// content).
+    ///
+    /// Walks the FULL object closure reachable from `commit_oids` — no
+    /// "have" diffing against the remote's current refs, since a poisoned
+    /// chunk is by definition one the server already believes it has (that's
+    /// exactly what makes it invisible to ordinary push). Every chunk id
+    /// referenced by any chunked blob in the closure is strong-verified via
+    /// `POST /chunks/verify-integrity` (BLAKE3 re-hash, always run — never
+    /// gated behind `MEDIAGIT_STRONG_VERIFY`). Any chunk the server reports
+    /// invalid is re-uploaded unconditionally via `PUT /chunks/:id`, which
+    /// the server always overwrites with no existence check (see
+    /// `mediagit-server::handlers::chunks::upload_chunk`) — so this bypasses
+    /// the "already present" dedup that `/chunks/check` and the pack index
+    /// would otherwise apply.
+    pub async fn repair_remote(
+        &self,
+        odb: &ObjectDatabase,
+        commit_oids: Vec<Oid>,
+    ) -> Result<RepairReport> {
+        if commit_oids.is_empty() {
+            return Ok(RepairReport::default());
+        }
+
+        let objects = self
+            .collect_reachable_objects(odb, commit_oids, Vec::new())
+            .await?;
+
+        let mut chunk_hexes: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for (oid, obj_type) in &objects {
+            if *obj_type == ObjectType::Blob && odb.is_chunked(oid).await.unwrap_or(false) {
+                if let Some(manifest) = odb.get_chunk_manifest(oid).await? {
+                    for c in &manifest.chunks {
+                        let hex = c.id.to_hex();
+                        if seen.insert(hex.clone()) {
+                            chunk_hexes.push(hex);
+                        }
+                    }
+                }
+            }
+        }
+
+        if chunk_hexes.is_empty() {
+            return Ok(RepairReport::default());
+        }
+
+        let invalid = self.strong_verify_chunks(&chunk_hexes).await?;
+        let verified = chunk_hexes.len();
+
+        let mut repaired = 0usize;
+        let mut unrepairable = Vec::new();
+        for hex in invalid {
+            let oid = match Oid::from_hex(&hex) {
+                Ok(o) => o,
+                Err(_) => {
+                    unrepairable.push(hex);
+                    continue;
+                }
+            };
+            let data = match odb.get_compressed_chunk(&oid).await {
+                Ok(d) => d,
+                Err(_) => {
+                    unrepairable.push(hex);
+                    continue;
+                }
+            };
+            let url = format!("{}/chunks/{}", self.base_url, hex);
+            match self.client.put(&url).body(data).send().await {
+                Ok(r) if r.status().is_success() => repaired += 1,
+                _ => unrepairable.push(hex),
+            }
+        }
+
+        Ok(RepairReport {
+            verified,
+            repaired,
+            unrepairable,
+        })
+    }
 }
 
 /// Detect an object's type by reading it and trying each deserializer in

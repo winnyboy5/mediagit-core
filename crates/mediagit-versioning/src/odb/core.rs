@@ -40,8 +40,9 @@ impl ObjectDatabase {
             similarity_detector: Arc::new(RwLock::new(crate::similarity::SimilarityDetector::new(
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
             ))),
-            base_chunk_cache: Cache::new(64),
+            base_chunk_cache: build_base_chunk_cache(),
             delta_written_pairs: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            pack_membership: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -83,8 +84,9 @@ impl ObjectDatabase {
             similarity_detector: Arc::new(RwLock::new(crate::similarity::SimilarityDetector::new(
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
             ))),
-            base_chunk_cache: Cache::new(64),
+            base_chunk_cache: build_base_chunk_cache(),
             delta_written_pairs: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            pack_membership: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -115,8 +117,9 @@ impl ObjectDatabase {
             similarity_detector: Arc::new(RwLock::new(crate::similarity::SimilarityDetector::new(
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
             ))),
-            base_chunk_cache: Cache::new(64),
+            base_chunk_cache: build_base_chunk_cache(),
             delta_written_pairs: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            pack_membership: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -153,8 +156,9 @@ impl ObjectDatabase {
             similarity_detector: Arc::new(RwLock::new(crate::similarity::SimilarityDetector::new(
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
             ))),
-            base_chunk_cache: Cache::new(64),
+            base_chunk_cache: build_base_chunk_cache(),
             delta_written_pairs: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            pack_membership: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -185,8 +189,9 @@ impl ObjectDatabase {
             similarity_detector: Arc::new(RwLock::new(crate::similarity::SimilarityDetector::new(
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
             ))),
-            base_chunk_cache: Cache::new(64),
+            base_chunk_cache: build_base_chunk_cache(),
             delta_written_pairs: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            pack_membership: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -586,24 +591,38 @@ impl ObjectDatabase {
 
         let mut stats = RepackStats::default();
 
-        // List all loose objects
+        // List all loose objects (commits/trees/tags/small blobs, bare-hex
+        // keys) and loose chunks (content-addressed pieces of chunked/large
+        // files under "chunks/"). Most repo bytes in a media-VCS live in
+        // chunks, not bare-hex objects — see list_loose_chunks() docs.
         let loose_objects = self.list_loose_objects().await?;
-        stats.loose_objects_found = loose_objects.len();
+        let loose_chunks = self.list_loose_chunks().await?;
+        stats.loose_objects_found = loose_objects.len() + loose_chunks.len();
 
-        if loose_objects.is_empty() {
+        if loose_objects.is_empty() && loose_chunks.is_empty() {
             info!("No loose objects to repack");
             return Ok(stats);
         }
 
-        let objects_to_pack = if max_objects > 0 && loose_objects.len() > max_objects {
-            &loose_objects[..max_objects]
+        // max_objects caps the combined total; whole objects are prioritized,
+        // chunks fill the remainder.
+        let (objects_to_pack, chunks_to_pack): (&[Oid], &[Oid]) = if max_objects == 0 {
+            (&loose_objects[..], &loose_chunks[..])
+        } else if loose_objects.len() >= max_objects {
+            (&loose_objects[..max_objects], &[])
         } else {
-            &loose_objects[..]
+            let remaining = max_objects - loose_objects.len();
+            (
+                &loose_objects[..],
+                &loose_chunks[..remaining.min(loose_chunks.len())],
+            )
         };
 
         info!(
-            total_loose = loose_objects.len(),
-            packing = objects_to_pack.len(),
+            total_loose_objects = loose_objects.len(),
+            total_loose_chunks = loose_chunks.len(),
+            packing_objects = objects_to_pack.len(),
+            packing_chunks = chunks_to_pack.len(),
             "Found loose objects"
         );
 
@@ -683,7 +702,26 @@ impl ObjectDatabase {
             }
         }
 
-        stats.objects_packed = packed_oids.len();
+        // Add loose chunks to the pack. Chunks are already compressed on
+        // disk and already delta-deduplicated against sibling chunks (see
+        // chunk-deltas/), so unlike whole objects we store the existing
+        // compressed bytes as-is instead of re-running whole-object delta
+        // detection against them.
+        let mut packed_chunk_oids = Vec::new();
+        for chunk_id in chunks_to_pack {
+            match self.get_compressed_chunk(chunk_id).await {
+                Ok(compressed) => {
+                    total_original_size += compressed.len() as u64;
+                    pack_writer.add_object(*chunk_id, ObjectType::Blob, &compressed);
+                    packed_chunk_oids.push(*chunk_id);
+                }
+                Err(e) => {
+                    warn!(chunk_id = %chunk_id, error = %e, "Failed to read chunk for packing");
+                }
+            }
+        }
+
+        stats.objects_packed = packed_oids.len() + packed_chunk_oids.len();
 
         if stats.objects_packed == 0 {
             info!("No objects were successfully packed");
@@ -702,6 +740,19 @@ impl ObjectDatabase {
         // Store pack file
         self.storage.put(&pack_key, &pack_data).await?;
 
+        // Extend the pack-membership set in place if it's already loaded, so
+        // chunk_exists() sees these OIDs immediately without a full pack
+        // rescan. If it hasn't been loaded yet, leave it as None — the next
+        // chunk_exists() call will lazily build it from all packs including
+        // this new one.
+        {
+            let mut guard = self.pack_membership.write().await;
+            if let Some(set) = guard.as_mut() {
+                set.extend(packed_oids.iter().copied());
+                set.extend(packed_chunk_oids.iter().copied());
+            }
+        }
+
         info!(
             pack_id,
             size = pack_data.len(),
@@ -718,6 +769,14 @@ impl ObjectDatabase {
                 let object_key = oid.to_hex();
                 if let Err(e) = self.storage.delete(&object_key).await {
                     warn!(oid = %oid, error = %e, "Failed to remove loose object");
+                } else {
+                    removed += 1;
+                }
+            }
+            for chunk_id in &packed_chunk_oids {
+                let chunk_key = format!("chunks/{}", chunk_id.to_hex());
+                if let Err(e) = self.storage.delete(&chunk_key).await {
+                    warn!(chunk_id = %chunk_id, error = %e, "Failed to remove loose chunk");
                 } else {
                     removed += 1;
                 }
@@ -819,6 +878,32 @@ impl ObjectDatabase {
         }
 
         debug!(count = oids.len(), "Listed loose objects");
+        Ok(oids)
+    }
+
+    /// List all loose chunks in the object database
+    ///
+    /// Scans the `chunks/` namespace and returns OIDs of all loose chunk
+    /// objects — the content-addressed pieces that large/chunked files are
+    /// split into. These live under `chunks/<hex>` (not a bare-hex key like
+    /// commits/trees/tags/small blobs), so `list_loose_objects()` never sees
+    /// them: its `hex::decode()` on a `"chunks/<hex>"` key fails because of
+    /// the slash, and the entry is silently dropped. Without this, `repack`
+    /// only ever bundled the small metadata objects and reported "0 objects
+    /// packed" on repos where nearly all bytes live in chunks.
+    async fn list_loose_chunks(&self) -> anyhow::Result<Vec<Oid>> {
+        let mut oids = Vec::new();
+
+        let keys = self.storage.list_objects("chunks/").await?;
+        for key in keys {
+            if let Some(hex) = key.strip_prefix("chunks/") {
+                if let Ok(oid) = Oid::from_hex(hex) {
+                    oids.push(oid);
+                }
+            }
+        }
+
+        debug!(count = oids.len(), "Listed loose chunks");
         Ok(oids)
     }
 }

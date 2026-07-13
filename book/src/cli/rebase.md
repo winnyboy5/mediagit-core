@@ -27,14 +27,6 @@ Upstream branch to rebase onto (default: configured upstream).
 #### `<branch>`
 Branch to rebase (default: current branch).
 
-### Interactive Rebase
-
-#### `-i`, `--interactive`
-Make a list of commits to be rebased and open in editor for modification.
-
-#### `--edit-todo`
-Edit rebase todo list during `--continue`.
-
 ### Rebase Control
 
 #### `--continue`
@@ -133,44 +125,6 @@ Applying: Add quality metrics
 Successfully rebased and updated refs/heads/feature/optimize.
 ```
 
-### Interactive rebase
-
-```bash
-$ mediagit rebase -i HEAD~3
-
-# Editor opens with:
-pick a3c8f9d Add video optimization
-pick b4d7e1a Update compression settings
-pick c5e9f2b Add quality metrics
-
-# Rebase b4d7e1a..c5e9f2b onto b4d7e1a (3 commands)
-#
-# Commands:
-# p, pick <commit> = use commit
-# r, reword <commit> = use commit, but edit the commit message
-# e, edit <commit> = use commit, but stop for amending
-# s, squash <commit> = use commit, but meld into previous commit
-# f, fixup <commit> = like "squash", but discard this commit's log message
-# d, drop <commit> = remove commit
-
-# Modify to:
-pick a3c8f9d Add video optimization
-squash b4d7e1a Update compression settings
-reword c5e9f2b Add quality metrics
-
-# Save and close editor
-[detached HEAD d6f0a3c] Add video optimization with compression updates
- Date: Mon Jan 15 14:30:22 2024 -0800
- 2 files changed
-
-# Editor opens for reword
-Add comprehensive quality metrics
-
-Added detailed quality tracking for video optimization workflow.
-
-Successfully rebased and updated refs/heads/feature/optimize.
-```
-
 ### Rebase onto different branch
 
 ```bash
@@ -211,28 +165,6 @@ $ mediagit rebase -s recursive -X theirs main
 # Automatically resolve conflicts using 'theirs' version
 ```
 
-### Squash commits interactively
-
-```bash
-$ mediagit rebase -i HEAD~5
-
-# Editor shows:
-pick a3c8f9d Add video file
-pick b4d7e1a Fix typo
-pick c5e9f2b Update video
-pick d6f0a3c Fix formatting
-pick e7g1b4d Final video version
-
-# Change to:
-pick a3c8f9d Add video file
-fixup b4d7e1a Fix typo
-fixup c5e9f2b Update video
-fixup d6f0a3c Fix formatting
-fixup e7g1b4d Final video version
-
-# Results in single commit with all changes
-```
-
 ### Rebase preserving merges
 
 ```bash
@@ -261,34 +193,6 @@ D---E---F---G  main
 ```
 
 Note: A', B', C' are new commits with same changes but different OIDs.
-
-## Interactive Rebase Commands
-
-### Available Commands
-
-- **pick** (p): Use commit as-is
-- **reword** (r): Use commit but edit message
-- **edit** (e): Use commit but stop to amend
-- **squash** (s): Meld into previous commit, combine messages
-- **fixup** (f): Meld into previous commit, discard message
-- **drop** (d): Remove commit
-- **exec** (x): Run shell command
-- **break** (b): Stop here (continue with `mediagit rebase --continue`)
-
-### Example Todo List
-
-```bash
-pick a3c8f9d Add initial video processing
-reword b4d7e1a Update compression algo
-edit c5e9f2b Optimize for size
-squash d6f0a3c Small compression tweak
-fixup e7g1b4d Fix typo
-exec cargo test
-pick f8h2c5e Add quality metrics
-drop g9i3d6f Experimental change that didn't work
-break
-pick h0j4e7g Final optimization pass
-```
 
 ## Media-Aware Rebase
 
@@ -371,46 +275,12 @@ chunk_reuse = true
 
 ## Common Workflows
 
-### Clean up commits before push
-
-```bash
-$ mediagit rebase -i origin/main
-# Squash "fix typo" commits
-# Reword commit messages for clarity
-# Drop experimental commits
-```
-
 ### Update feature branch with latest main
 
 ```bash
 $ mediagit checkout feature/my-feature
 $ mediagit rebase main
 # Apply feature commits on top of latest main
-```
-
-### Fix commit in middle of history
-
-```bash
-$ mediagit rebase -i HEAD~5
-# Mark commit as 'edit'
-# Make changes
-$ mediagit add .
-$ mediagit commit --amend
-$ mediagit rebase --continue
-```
-
-### Split commit into multiple
-
-```bash
-$ mediagit rebase -i HEAD~3
-# Mark commit as 'edit'
-$ mediagit reset HEAD^
-# Stage and commit changes in multiple commits
-$ mediagit add file1.mp4
-$ mediagit commit -m "Add first video"
-$ mediagit add file2.mp4
-$ mediagit commit -m "Add second video"
-$ mediagit rebase --continue
 ```
 
 ## Resolving Conflicts
@@ -448,24 +318,6 @@ $ mediagit add file2.json
 $ mediagit rebase --continue
 
 # Repeat until complete
-```
-
-## Autosquash Feature
-
-Create fixup commits automatically:
-
-```bash
-# Make commit
-$ mediagit commit -m "Add video processing"
-# OID: a3c8f9d
-
-# Later, fix something in that commit
-$ mediagit add video.mp4
-$ mediagit commit --fixup a3c8f9d
-
-# When rebasing
-$ mediagit rebase -i --autosquash main
-# Fixup commits automatically placed and marked
 ```
 
 ## Notes

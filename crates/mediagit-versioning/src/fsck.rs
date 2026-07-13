@@ -14,7 +14,7 @@
 //! File System Check (FSCK) - Repository integrity verification and repair
 //!
 //! This module provides comprehensive repository integrity checking:
-//! - **Checksum verification**: Verify SHA-256 hashes match object content
+//! - **Checksum verification**: Verify BLAKE3 hashes match object content
 //! - **Reference validation**: Ensure all refs point to valid commits
 //! - **Missing object detection**: Find referenced but missing objects
 //! - **Commit graph validation**: Verify parent and tree relationships
@@ -47,7 +47,7 @@
 //! ```
 
 use crate::odb::ObjectDatabase;
-use crate::{Commit, ObjectType, Oid, Ref, RefType, Tag, Tree};
+use crate::{Commit, ObjectType, Oid, Ref, RefDatabase, RefType, Tag, Tree};
 use mediagit_storage::StorageBackend;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -303,17 +303,25 @@ pub struct FsckChecker {
     storage: Arc<dyn StorageBackend>,
     /// Object database for reading and verifying objects
     odb: Arc<ObjectDatabase>,
+    /// Reference database for listing refs
+    refdb: Option<RefDatabase>,
 }
 
 impl FsckChecker {
-    /// Create a new FSCK checker
-    pub fn new(storage: Arc<dyn StorageBackend>) -> Self {
+    /// Create a new FSCK checker with optional RefDatabase
+    pub fn new_with_refdb(storage: Arc<dyn StorageBackend>, refdb: Option<RefDatabase>) -> Self {
         // Create ODB with smart compression to handle all compression types
         let odb = ObjectDatabase::with_smart_compression(storage.clone(), 10_000_000); // 10MB cache
         Self {
             storage,
             odb: Arc::new(odb),
+            refdb,
         }
+    }
+
+    /// Create a new FSCK checker (backward compat, no refdb)
+    pub fn new(storage: Arc<dyn StorageBackend>) -> Self {
+        Self::new_with_refdb(storage, None)
     }
 
     /// Run comprehensive integrity check
@@ -395,7 +403,7 @@ impl FsckChecker {
         debug!("Enumerating objects in storage");
 
         // List all objects in storage
-        let objects = self.list_all_objects().await?;
+        let objects = self.list_all_objects(report).await?;
         info!("Found {} objects to check", objects.len());
 
         let max_check = if options.max_objects > 0 {
@@ -868,7 +876,7 @@ impl FsckChecker {
         debug!("Detecting dangling objects");
 
         // Get all objects
-        let all_objects = self.list_all_objects().await?;
+        let all_objects = self.list_all_objects(report).await?;
 
         // Get all referenced objects
         let refs = self.list_all_refs().await?;
@@ -914,9 +922,9 @@ impl FsckChecker {
             visited.insert(*oid);
             referenced.insert(*oid);
 
-            // Use oid.to_hex() - LocalBackend handles "objects/" prefix and sharding
-            let key = oid.to_hex();
-            if let Ok(data) = self.storage.get(&key).await {
+            // Routed through the ODB (pack-aware, decompresses) rather than raw
+            // storage, so dangling detection isn't fooled by packed objects.
+            if let Ok(data) = self.odb.read(oid).await {
                 if let Ok(commit) = crate::format::deserialize::<Commit>(&data) {
                     referenced.insert(commit.tree);
                     for parent in commit.parents {
@@ -936,31 +944,87 @@ impl FsckChecker {
         })
     }
 
-    /// List all objects in storage
-    async fn list_all_objects(&self) -> anyhow::Result<Vec<Oid>> {
-        let mut objects = Vec::new();
+    /// List all objects in storage, including objects packed into `packs/*.pack`.
+    ///
+    /// Previously this only collected bare loose OIDs, so after `gc --repack`
+    /// (which deletes loose objects, leaving only packs) fsck/verify checked 0
+    /// objects and reported the repo as clean. Packed objects are enumerated
+    /// via `PackReader::list_objects()` (same reader the ODB's `read_from_packs`
+    /// uses), not a hand-rolled parser.
+    ///
+    /// A pack that fails to read or fails its own checksum verification is
+    /// corruption in its own right (e.g. a flipped byte in the trailing
+    /// checksum) and is reported as a `ChecksumMismatch` issue rather than
+    /// silently skipped — silently skipping would just reproduce the
+    /// "0 objects, PERFECT" blind spot for a corrupted pack.
+    async fn list_all_objects(&self, report: &mut FsckReport) -> anyhow::Result<Vec<Oid>> {
+        use crate::pack::PackReader;
 
-        // List all objects from storage
-        // This assumes the storage backend provides a way to list objects
-        // For now, we'll scan the objects directory structure
-        // List all objects (LocalBackend already operates within objects/ directory)
+        let mut objects = HashSet::new();
+
+        // Loose objects (LocalBackend already operates within objects/ directory,
+        // returning bare hex OIDs with no "objects/" prefix).
         let object_keys = self.storage.list_objects("").await?;
-
         for key in object_keys {
-            // LocalBackend returns hex OIDs directly (no "objects/" prefix)
-            // The key is already the hex string
             if key.len() == 64 {
                 if let Ok(oid) = Oid::from_hex(&key) {
-                    objects.push(oid);
+                    objects.insert(oid);
                 }
             }
         }
 
-        Ok(objects)
+        // Packed objects: read each pack and list the OIDs it contains.
+        let pack_keys = self.storage.list_objects("packs/").await?;
+        for pack_key in pack_keys.iter().filter(|k| k.ends_with(".pack")) {
+            let Ok(pack_data) = self.storage.get(pack_key).await else {
+                report.add_issue(FsckIssue::new(
+                    IssueSeverity::Error,
+                    IssueCategory::ChecksumMismatch,
+                    format!("Pack file unreadable: {}", pack_key),
+                ));
+                continue;
+            };
+            match PackReader::new(pack_data) {
+                Ok(reader) => objects.extend(reader.list_objects()),
+                Err(e) => {
+                    report.add_issue(FsckIssue::new(
+                        IssueSeverity::Error,
+                        IssueCategory::ChecksumMismatch,
+                        format!("Pack file corrupt: {}: {}", pack_key, e),
+                    ));
+                }
+            }
+        }
+
+        Ok(objects.into_iter().collect())
     }
 
     /// List all references
     async fn list_all_refs(&self) -> anyhow::Result<Vec<Ref>> {
+        // If RefDatabase is available, use it (more reliable than storage for refs)
+        if let Some(ref refdb) = self.refdb {
+            let mut refs = Vec::new();
+
+            // List branches, tags, remotes via refdb namespaces
+            for namespace in ["heads", "remotes", "tags"] {
+                if let Ok(ref_names) = refdb.list(namespace).await {
+                    for name in ref_names {
+                        if let Ok(r) = refdb.read(&name).await {
+                            refs.push(r);
+                        }
+                    }
+                }
+            }
+
+            // Also add HEAD
+            if let Ok(head) = refdb.read("HEAD").await {
+                refs.push(head);
+            }
+
+            return Ok(refs);
+        }
+
+        // Fallback: List all ref files from storage
         let mut refs = Vec::new();
 
         // List all ref files
@@ -985,14 +1049,21 @@ impl FsckChecker {
     }
 
     /// Check if an object exists
+    ///
+    /// Routed through the ODB's `read` (pack-aware, falls back to
+    /// `read_from_packs`) rather than raw loose storage, so packed objects
+    /// aren't reported missing after `gc --repack`.
     async fn object_exists(&self, oid: &Oid) -> anyhow::Result<bool> {
-        // Use oid.to_hex() - LocalBackend handles "objects/" prefix and sharding
-        let key = oid.to_hex();
-        self.storage.exists(&key).await
+        Ok(self.odb.read(oid).await.is_ok())
     }
 
     /// Check if a reference exists
     async fn ref_exists(&self, ref_name: &str) -> anyhow::Result<bool> {
+        // Refs live in the RefDatabase (postcard-encoded), not as raw storage
+        // keys — a raw exists() check false-positives "missing ref" warnings.
+        if let Some(refdb) = &self.refdb {
+            return refdb.exists(ref_name).await;
+        }
         self.storage.exists(ref_name).await
     }
 }

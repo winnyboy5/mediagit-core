@@ -195,7 +195,7 @@ async fn proxy_put_chunk(
 ///
 /// A mock "bucket" server serves the raw chunk bytes.  The client resolves the
 /// presigned URL, fetches the bytes directly (never hitting the proxy route),
-/// verifies the SHA-256 hash, and writes the chunk into the local ODB.
+/// verifies the BLAKE3 hash, and writes the chunk into the local ODB.
 #[tokio::test]
 async fn presigned_download_happy_path() {
     // ── setup: server-side repo dirs ────────────────────────────────────────

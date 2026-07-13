@@ -211,8 +211,14 @@ impl InfoOpts {
             print_json(&info)
         } else {
             println!("format: {:?}", info.format);
-            println!("vertex_count: {}", info.vertex_count);
-            println!("face_count: {}", info.face_count);
+            match info.vertex_count {
+                Some(v) => println!("vertex_count: {v}"),
+                None => println!("vertex_count: n/a (not parsed)"),
+            }
+            match info.face_count {
+                Some(f) => println!("face_count: {f}"),
+                None => println!("face_count: n/a (not parsed)"),
+            }
             println!("object_count: {}", info.object_count);
             println!("materials: {}", info.materials.len());
             println!("textures: {}", info.textures.len());

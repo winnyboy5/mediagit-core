@@ -126,7 +126,7 @@ pub use azure::AzureBackend;
 pub use b2_spaces::B2SpacesBackend;
 pub use error::{StorageError, StorageResult};
 #[cfg(feature = "gcs")]
-pub use gcs::GcsBackend;
+pub use gcs::{GcsBackend, GcsConfig};
 pub use local::LocalBackend;
 pub use minio::MinIOBackend;
 pub use namespaced::{generate_repo_id, sanitize_namespace, NamespacedBackend};
@@ -687,8 +687,9 @@ pub const LAYOUT_MARKER_KEY: &str = "LAYOUT";
 /// - Marker present with a *different* `repo_id` → namespace collision: two
 ///   independently-created repos computed the same namespace against this
 ///   storage root/bucket. Hard error naming both the namespace and the
-///   conflicting repo_id, with a hint to set `storage.repo_namespace` or
-///   `MEDIAGIT_REPO_NAMESPACE`.
+///   conflicting repo_id, with a hint to set the top-level `repo_namespace`
+///   key in config.toml (BUG-RM-2: NOT nested under `[storage]` — that key
+///   is silently ignored) or `MEDIAGIT_REPO_NAMESPACE`.
 /// - Marker present with a matching `repo_id` → no-op.
 pub async fn check_or_write_layout_marker(
     storage: &dyn StorageBackend,
@@ -730,8 +731,9 @@ pub async fn check_or_write_layout_marker(
                          repo_id '{found}', but this repository is '{repo_id}'. Two independently \
                          created repositories appear to share the same namespace on this storage \
                          root/bucket — continuing would risk one repo's `gc` deleting the other's \
-                         objects. Set a distinct `storage.repo_namespace` in config.toml or the \
-                         MEDIAGIT_REPO_NAMESPACE environment variable for one of them."
+                         objects. Set a distinct top-level `repo_namespace` key in config.toml \
+                         (not nested under `[storage]`) or the MEDIAGIT_REPO_NAMESPACE \
+                         environment variable for one of them."
                     );
                 }
             }

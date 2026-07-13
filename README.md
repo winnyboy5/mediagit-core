@@ -212,7 +212,7 @@ mediagit-server --config server.toml
 
 ## CLI Reference
 
-All 28 MediaGit commands, grouped by workflow:
+All 31 MediaGit commands, grouped by workflow:
 
 ### Repository Setup
 | Command | Description |
@@ -257,6 +257,15 @@ All 28 MediaGit commands, grouped by workflow:
 | `mediagit fetch [remote]` | Download remote changes without merging |
 | `mediagit pull [remote]` | Fetch and integrate remote changes into current branch |
 | `mediagit push [remote]` | Upload local commits to the remote repository |
+| `mediagit download <path>` | Download a single file from a remote repository by path, without a full clone |
+
+**Push Semantics**: By default, `mediagit push` uploads only the current branch, matching Git behavior. Use `--all` to push all local branches, `--tags` to push all tags, or `--follow-tags` to include tags reachable from pushed commits. On first push to a remote without a configured upstream, use `mediagit push -u [remote] [branch]` to set upstream tracking.
+
+### Media & Sparse Checkout
+| Command | Description |
+|---------|-------------|
+| `mediagit media info <path>` | Inspect media file metadata (image, video, audio, PSD, 3D formats) |
+| `mediagit sparse-checkout <set\|list\|disable>` | Materialize only part of the working tree |
 
 ### Undoing Changes
 | Command | Description |
@@ -801,6 +810,19 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] HTTP/2 adaptive window tuning (2–4× WAN throughput)
 - [x] Raw file serving endpoints (`GET /{repo}/files/{*path}`, `GET /{repo}/tree`)
 - [x] `/health` route alias alongside `/healthz`
+
+### v0.2.8-beta.1 — July 2026
+*Object-store layout v2, client auth, and reachability tooling*
+
+- [x] Object-store layout v2: per-repo namespace, true two-level hash fanout, `LAYOUT` marker
+- [x] Client authentication: config → env → none precedence (`MEDIAGIT_TOKEN`, `MEDIAGIT_API_KEY`)
+- [x] `download` command — single-file fetch from a remote without a full clone
+- [x] Parallel checkout across multiple worker threads
+- [x] Roaring-bitmap reachability index for faster `gc`/`fsck` (`MEDIAGIT_BITMAP`)
+- [x] `ObjectType::Tag` with SSH/ed25519 tag signing (`MEDIAGIT_SIGN`, `MEDIAGIT_SIGN_KEY`)
+- [x] Sparse checkout — cone mode and pattern mode (`sparse-checkout set|list|disable`)
+- [x] `media info` — inspect image/video/audio/PSD/3D metadata without touching the ODB
+- [x] `status` ahead/behind tracking-branch counters and `--json` output
 
 ### v0.3.0 and beyond
 

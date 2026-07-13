@@ -423,8 +423,9 @@ impl BranchCmd {
 
         let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
-        let _storage = create_storage_backend(&repo_root).await?;
+        let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
+        let odb = mediagit_versioning::ObjectDatabase::with_smart_compression(storage, 1000);
 
         // Validate branch name
         if opts.name.contains("..") || opts.name.starts_with('/') || opts.name.ends_with('/') {
@@ -445,7 +446,10 @@ impl BranchCmd {
         // keep working), then fall back to `refs/remotes/<input>` when the
         // user wrote something like `origin/feat-a`.
         let start_oid = if let Some(start_point) = &opts.start_point {
-            match refdb.resolve(start_point).await {
+            // Route through the shared resolver so OIDs (full/abbrev), tags, and
+            // HEAD~N all work as start points (BUG-VFX-2), then keep the
+            // remote-shorthand fallback for `origin/feat` style inputs.
+            match mediagit_versioning::resolve_revision(start_point, &refdb, &odb).await {
                 Ok(oid) => oid,
                 Err(primary_err) => {
                     let looks_like_remote_shorthand = start_point.contains('/')
@@ -631,12 +635,25 @@ impl BranchCmd {
             opts.branch
         ))?;
 
+        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
+
+        // BUG-CLI-B1: refuse to clobber uncommitted changes to tracked files.
+        // Checked before HEAD is updated / the working tree is touched.
+        if !opts.force {
+            if let Some(current_oid) = current_commit_oid {
+                if Self::has_uncommitted_changes(&repo_root, &odb, &current_oid).await? {
+                    anyhow::bail!(
+                        "working tree has uncommitted changes; commit/stash or use --force"
+                    );
+                }
+            }
+        }
+
         // Update HEAD to point to the branch
         let head = Ref::new_symbolic("HEAD".to_string(), branch_ref_name.clone());
         refdb.write(&head).await?;
 
         // Update working directory to match the target branch's commit
-        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
         let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
 
         let checkout_pb = progress.spinner("Updating working directory");
@@ -707,6 +724,46 @@ impl BranchCmd {
         }
 
         Ok(())
+    }
+
+    /// BUG-CLI-B1: detect uncommitted changes to tracked files before a
+    /// branch switch would silently overwrite them. Mirrors `status`'s
+    /// modified-file detection (HEAD tree vs working-directory hash), but
+    /// treats any tracked file whose working content differs from HEAD as
+    /// uncommitted — staged or not, a switch would blow it away either way.
+    async fn has_uncommitted_changes(
+        repo_root: &std::path::Path,
+        odb: &mediagit_versioning::ObjectDatabase,
+        head_oid: &Oid,
+    ) -> Result<bool> {
+        let commit_data = odb.read(head_oid).await?;
+        let commit =
+            mediagit_versioning::format::deserialize::<mediagit_versioning::Commit>(&commit_data)?;
+        let tree_data = odb.read(&commit.tree).await?;
+        let tree =
+            mediagit_versioning::format::deserialize::<mediagit_versioning::Tree>(&tree_data)?;
+
+        for entry in tree.iter() {
+            let full_path = repo_root.join(&entry.name);
+            let working_oid = match std::fs::metadata(&full_path) {
+                Ok(metadata) if metadata.len() >= super::utils::STREAMING_THRESHOLD => {
+                    match Oid::from_file(&full_path) {
+                        Ok(oid) => oid,
+                        Err(_) => continue,
+                    }
+                }
+                Ok(_) => match std::fs::read(&full_path) {
+                    Ok(content) => Oid::hash(&content),
+                    Err(_) => continue,
+                },
+                // File missing from the working tree — not this guard's concern.
+                Err(_) => continue,
+            };
+            if working_oid != entry.oid {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     async fn delete(&self, opts: &DeleteOpts) -> Result<()> {

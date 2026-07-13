@@ -593,42 +593,67 @@ pub async fn apply_merge_to_workdir(
         let ours_bytes = read_blob_opt(odb, conflict.ours.as_ref().map(|s| s.oid)).await?;
         let theirs_bytes = read_blob_opt(odb, conflict.theirs.as_ref().map(|s| s.oid)).await?;
 
-        // Build conflict marker content
-        let mut marker = Vec::new();
-        marker.extend_from_slice(b"<<<<<<< ours\n");
-        if let Some(ref ob) = ours_bytes {
-            marker.extend_from_slice(ob);
-            if !ob.ends_with(b"\n") {
-                marker.push(b'\n');
-            }
-        }
-        marker.extend_from_slice(b"=======\n");
-        if let Some(ref tb) = theirs_bytes {
-            marker.extend_from_slice(tb);
-            if !tb.ends_with(b"\n") {
-                marker.push(b'\n');
-            }
-        }
-        marker.extend_from_slice(b">>>>>>> theirs\n");
+        // Binary detection: a NUL byte in either side means inline text markers
+        // would corrupt the file (e.g. a 74MB PSD becoming 149MB of "merged" garbage).
+        let is_binary = ours_bytes.as_deref().is_some_and(contains_nul_byte)
+            || theirs_bytes.as_deref().is_some_and(contains_nul_byte);
 
-        // Write marker file to workdir
         let dest = workdir.join(path_str);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create dirs for {}", path_str))?;
         }
-        std::fs::write(&dest, &marker)
-            .with_context(|| format!("Failed to write conflict file {}", path_str))?;
 
-        // Write the conflict blob to ODB so we can reference it
-        let conflict_oid = odb.write(ObjectType::Blob, &marker).await?;
+        // (stage-0 oid, stage-0 content) written to the workdir/index for this path.
+        let (stage0_oid, stage0_len) = if is_binary {
+            // Binary conflict: write ONE side (ours, falling back to theirs)
+            // unmodified. The conflict is still flagged via the stage1/2/3
+            // entries below; the user resolves by picking a side.
+            let (side_oid, side_bytes) = match (&conflict.ours, ours_bytes.as_ref()) {
+                (Some(cs), Some(b)) => (cs.oid, b),
+                _ => match (&conflict.theirs, theirs_bytes.as_ref()) {
+                    (Some(cs), Some(b)) => (cs.oid, b),
+                    _ => anyhow::bail!(
+                        "Binary conflict at {} has neither ours nor theirs content",
+                        path_str
+                    ),
+                },
+            };
+            std::fs::write(&dest, side_bytes)
+                .with_context(|| format!("Failed to write conflict file {}", path_str))?;
+            (side_oid, side_bytes.len())
+        } else {
+            // Text conflict: inline markers as before.
+            let mut marker = Vec::new();
+            marker.extend_from_slice(b"<<<<<<< ours\n");
+            if let Some(ref ob) = ours_bytes {
+                marker.extend_from_slice(ob);
+                if !ob.ends_with(b"\n") {
+                    marker.push(b'\n');
+                }
+            }
+            marker.extend_from_slice(b"=======\n");
+            if let Some(ref tb) = theirs_bytes {
+                marker.extend_from_slice(tb);
+                if !tb.ends_with(b"\n") {
+                    marker.push(b'\n');
+                }
+            }
+            marker.extend_from_slice(b">>>>>>> theirs\n");
 
-        // Stage the conflict blob at stage 0 (the marker file itself)
+            std::fs::write(&dest, &marker)
+                .with_context(|| format!("Failed to write conflict file {}", path_str))?;
+
+            let conflict_oid = odb.write(ObjectType::Blob, &marker).await?;
+            (conflict_oid, marker.len())
+        };
+
+        // Stage the workdir content at stage 0
         let index_entry = IndexEntry::new(
             std::path::PathBuf::from(path_str),
-            conflict_oid,
+            stage0_oid,
             0o100644,
-            marker.len() as u64,
+            stage0_len as u64,
             None,
         );
         index.add_entry(index_entry);
@@ -680,6 +705,12 @@ pub async fn apply_merge_to_workdir(
         .context("Failed to write ORIG_HEAD")?;
 
     Ok(())
+}
+
+/// Heuristic binary detector: a NUL byte anywhere in the content means it's
+/// not safe to inline as text (mirrors the common git/diff convention).
+fn contains_nul_byte(bytes: &[u8]) -> bool {
+    bytes.contains(&0)
 }
 
 /// Helper: read a blob from ODB by OID, returning None if the OID is absent.

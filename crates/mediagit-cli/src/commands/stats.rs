@@ -177,17 +177,20 @@ impl StatsCmd {
             if stats.original_bytes > 0 {
                 println!("  Original size: {}", HumanBytes(stats.original_bytes));
                 println!("  Storage used:  {}", HumanBytes(total_stored));
-                let ratio = total_stored as f64 / stats.original_bytes as f64;
-                let saved_pct = if stats.original_bytes > total_stored {
-                    (1.0 - ratio) * 100.0
+                if stats.original_bytes > total_stored {
+                    let ratio = total_stored as f64 / stats.original_bytes as f64;
+                    let saved_pct = (1.0 - ratio) * 100.0;
+                    println!(
+                        "  Compression:   {:.1}x ratio ({:.1}% saved)",
+                        1.0 / ratio.max(0.001),
+                        saved_pct
+                    );
                 } else {
-                    0.0
-                };
-                println!(
-                    "  Compression:   {:.1}x ratio ({:.1}% saved)",
-                    1.0 / ratio.max(0.001),
-                    saved_pct
-                );
+                    let overhead_pct = ((total_stored - stats.original_bytes) as f64
+                        / stats.original_bytes as f64)
+                        * 100.0;
+                    println!("  Compression:   {:.1}% overhead", overhead_pct);
+                }
             } else {
                 println!("  Storage used: {}", HumanBytes(total_stored));
             }
@@ -593,6 +596,7 @@ impl StatsCmd {
                     || name.ends_with(".wav")
                     || name.ends_with(".flac")
                     || name.ends_with(".aac")
+                    || name.ends_with(".ogg")
                     || name.ends_with(".jpg")
                     || name.ends_with(".jpeg")
                     || name.ends_with(".png")
@@ -604,7 +608,12 @@ impl StatsCmd {
                     || name.ends_with(".blend")
                     || name.ends_with(".fbx")
                     || name.ends_with(".obj")
-                    || name.ends_with(".gltf");
+                    || name.ends_with(".gltf")
+                    || name.ends_with(".safetensors")
+                    || name.ends_with(".parquet")
+                    || name.ends_with(".npz")
+                    || name.ends_with(".onnx")
+                    || name.ends_with(".gguf");
 
                 let is_text = name.ends_with(".txt")
                     || name.ends_with(".md")
@@ -716,20 +725,29 @@ impl StatsCmd {
 
         // Show chunked file compression ratios from manifest data
         if stats.manifest_count > 0 && stats.original_bytes > 0 {
-            let ratio = stats.chunk_bytes as f64 / stats.original_bytes as f64;
-            let space_saved = if stats.original_bytes > stats.chunk_bytes {
-                (1.0 - ratio) * 100.0
+            if stats.original_bytes > stats.chunk_bytes {
+                let ratio = stats.chunk_bytes as f64 / stats.original_bytes as f64;
+                let space_saved = (1.0 - ratio) * 100.0;
+                println!(
+                    "  Chunked files: {} manifests, {} original → {} stored ({:.1}x, {:.1}% saved)",
+                    stats.manifest_count,
+                    HumanBytes(stats.original_bytes),
+                    HumanBytes(stats.chunk_bytes),
+                    1.0 / ratio.max(0.001),
+                    space_saved,
+                );
             } else {
-                0.0
-            };
-            println!(
-                "  Chunked files: {} manifests, {} original → {} stored ({:.1}x, {:.1}% saved)",
-                stats.manifest_count,
-                HumanBytes(stats.original_bytes),
-                HumanBytes(stats.chunk_bytes),
-                1.0 / ratio.max(0.001),
-                space_saved,
-            );
+                let overhead_pct = ((stats.chunk_bytes - stats.original_bytes) as f64
+                    / stats.original_bytes as f64)
+                    * 100.0;
+                println!(
+                    "  Chunked files: {} manifests, {} original → {} stored (+{:.1}% overhead)",
+                    stats.manifest_count,
+                    HumanBytes(stats.original_bytes),
+                    HumanBytes(stats.chunk_bytes),
+                    overhead_pct,
+                );
+            }
 
             // Per-category breakdown (sorted by original size descending)
             if !stats.category_stats.is_empty() {
