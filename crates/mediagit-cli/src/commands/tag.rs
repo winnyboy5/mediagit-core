@@ -48,6 +48,9 @@ pub enum TagSubcommand {
 
 /// Create a new tag
 #[derive(Parser, Debug)]
+#[command(
+    long_about = "Create a new tag.\n\nSigning is controlled by MEDIAGIT_SIGN environment variable.\nWhen MEDIAGIT_SIGN=true, tags are signed using the key specified in MEDIAGIT_SIGN_KEY.\nThe signature uses SSHSIG format with namespace 'mediagit-tag'."
+)]
 pub struct CreateOpts {
     /// Tag name
     #[arg(value_name = "NAME")]
@@ -570,7 +573,18 @@ impl TagCmd {
                     opts.name
                 ));
             }
-            Err(_) => None, // missing/unreadable -> treat as lightweight tag
+            Err(_) => {
+                // If a sidecar exists, this proves it was an annotated tag and the
+                // object loss is a corruption, not a lightweight tag.
+                let sidecar_ref = format!("refs/tag-meta/{}", opts.name);
+                if refdb.exists(&sidecar_ref).await.unwrap_or(false) {
+                    return Err(anyhow::anyhow!(
+                        "Tag '{}': annotated tag object is missing (sidecar proves it was annotated)",
+                        opts.name
+                    ));
+                }
+                None // no sidecar -> treat as lightweight tag
+            }
         };
 
         match data.as_deref().and_then(|d| Tag::deserialize(d).ok()) {

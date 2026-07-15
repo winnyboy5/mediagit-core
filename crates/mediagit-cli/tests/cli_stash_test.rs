@@ -272,3 +272,55 @@ fn test_stash_help() {
         .success()
         .stdout(predicate::str::contains("stash"));
 }
+
+// ============================================================================
+// Stash Clear Non-Interactive Safety Tests
+// ============================================================================
+
+#[test]
+fn test_stash_clear_non_interactive_requires_force() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+
+    add_and_commit(
+        temp_dir.path(),
+        "file.txt",
+        "Initial content",
+        "Initial commit",
+    );
+
+    // Create a stash
+    fs::write(temp_dir.path().join("file.txt"), "Modified content").unwrap();
+    mediagit()
+        .arg("stash")
+        .arg("save")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+
+    // Verify stash exists
+    mediagit()
+        .arg("stash")
+        .arg("list")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("stash@{0}"));
+
+    // Try to clear without --force (non-interactive) - should fail
+    mediagit()
+        .arg("stash")
+        .arg("clear")
+        .current_dir(temp_dir.path())
+        .assert()
+        .failure();
+
+    // Verify stash is still intact after failed clear
+    mediagit()
+        .arg("stash")
+        .arg("list")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("stash@{0}"));
+}

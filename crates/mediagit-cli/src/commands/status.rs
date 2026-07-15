@@ -261,7 +261,7 @@ impl StatusCmd {
         let repo_root = dunce::canonicalize(find_repo_root()?)
             .unwrap_or_else(|_| find_repo_root().expect("repo root"));
 
-        if !self.quiet && !self.json {
+        if !self.quiet && !self.json && !self.porcelain {
             output::header("Repository Status");
         }
 
@@ -783,7 +783,9 @@ impl StatusCmd {
     }
 
     // ISS-005 fix: Helper function to scan working directory
-    fn scan_working_directory(
+    // QA-001: made pub(crate) so `branch switch` can reuse it for the
+    // untracked-collision guard instead of duplicating the scan.
+    pub(crate) fn scan_working_directory(
         &self,
         repo_root: &Path,
         matcher: &Option<IgnoreMatcher>,

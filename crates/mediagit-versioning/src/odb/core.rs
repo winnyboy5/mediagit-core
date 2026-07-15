@@ -195,11 +195,23 @@ impl ObjectDatabase {
         }
     }
 
-    /// Get reference to the underlying storage backend
+    /// Read a reachability bitmap (`bitmaps/<oid>.bitmap`) by its storage key.
     ///
-    /// Useful for creating transactions or accessing storage directly.
-    pub fn storage(&self) -> &Arc<dyn StorageBackend> {
-        &self.storage
+    /// Raw passthrough: bitmaps live outside the content-addressed object
+    /// model (keyed by commit OID, not by a hash of their own bytes), so
+    /// they don't go through `exists()`/pack-membership like objects do.
+    pub async fn get_bitmap(&self, key: &str) -> anyhow::Result<Vec<u8>> {
+        self.storage.get(key).await
+    }
+
+    /// Store a reachability bitmap at the given storage key.
+    pub async fn put_bitmap(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
+        self.storage.put(key, data).await
+    }
+
+    /// Delete a reachability bitmap at the given storage key.
+    pub async fn delete_bitmap(&self, key: &str) -> anyhow::Result<()> {
+        self.storage.delete(key).await
     }
 
     /// Write an object to the database
@@ -451,7 +463,17 @@ impl ObjectDatabase {
 
         // Also check for chunked object (stored as manifest + chunks)
         let manifest_key = format!("manifests/{}", oid.to_hex());
-        self.storage.exists(&manifest_key).await
+        if self.storage.exists(&manifest_key).await? {
+            return Ok(true);
+        }
+
+        // Also check pack membership: `gc --repack` bundles loose objects
+        // into a pack and (with remove_loose) deletes the loose copy, so a
+        // miss above doesn't mean "we don't have it" — it may live only in
+        // a pack now. Mirrors `chunk_exists()`'s union semantics.
+        self.ensure_pack_membership_loaded().await?;
+        let guard = self.pack_membership.read().await;
+        Ok(guard.as_ref().is_some_and(|set| set.contains(oid)))
     }
 
     /// Verify object integrity
@@ -797,8 +819,9 @@ impl ObjectDatabase {
 
     /// Resolve an abbreviated OID prefix to a full OID.
     ///
-    /// Scans loose objects for keys matching the given hex prefix.
-    /// Returns an error if zero or more than one object matches.
+    /// Scans loose objects and pack-embedded objects for keys matching the
+    /// given hex prefix. Returns an error if zero or more than one object
+    /// matches.
     pub async fn resolve_abbreviated_oid(&self, abbrev: &str) -> anyhow::Result<Oid> {
         if abbrev.len() < 4 {
             anyhow::bail!(
@@ -834,6 +857,21 @@ impl ObjectDatabase {
                         let mut bytes = [0u8; 32];
                         bytes.copy_from_slice(&oid_bytes);
                         matches.push(Oid::from(bytes));
+                    }
+                }
+            }
+        }
+
+        // Also match against pack-embedded objects (post-`gc --repack`, the
+        // loose copy may be gone, so the storage prefix-scan above misses
+        // them — see `exists()`'s pack-membership union for the same gap).
+        self.ensure_pack_membership_loaded().await?;
+        {
+            let guard = self.pack_membership.read().await;
+            if let Some(set) = guard.as_ref() {
+                for oid in set.iter() {
+                    if oid.to_hex().starts_with(abbrev) && !matches.contains(oid) {
+                        matches.push(*oid);
                     }
                 }
             }

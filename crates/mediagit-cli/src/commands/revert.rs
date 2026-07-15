@@ -50,7 +50,7 @@ pub struct RevertCmd {
     pub message: Option<String>,
 
     /// Continue after conflicts
-    #[arg(id = "continue", long = "continue", conflicts_with_all = ["abort", "skip", "commits"])]
+    #[arg(id = "continue", long = "continue", alias = "continue-revert", hide = true, conflicts_with_all = ["abort", "skip", "commits"])]
     pub continue_revert: bool,
 
     /// Abort current revert

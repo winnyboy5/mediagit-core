@@ -15,8 +15,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_versioning::{
-    CheckoutManager, Commit, LcaFinder, MergeEngine, MergeStrategy, ObjectDatabase, ObjectType,
-    Oid, Ref, RefDatabase, Signature, Tree,
+    resolve_revision, CheckoutManager, Commit, LcaFinder, MergeEngine, MergeStrategy,
+    ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Signature, Tree,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -52,7 +52,7 @@ pub struct RebaseCmd {
     pub abort: bool,
 
     /// Continue after resolving conflicts
-    #[arg(long)]
+    #[arg(long = "continue", alias = "continue-rebase", hide = true)]
     pub continue_rebase: bool,
 
     /// Skip current commit
@@ -99,7 +99,7 @@ impl RebaseCmd {
         let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
 
         // Resolve upstream branch
-        let upstream_oid = self.resolve_branch(&refdb, &self.upstream).await?;
+        let upstream_oid = resolve_revision(&self.upstream, &refdb, &odb).await?;
 
         // Get current HEAD
         let head = refdb.read("HEAD").await?;
@@ -368,28 +368,6 @@ impl RebaseCmd {
         Ok(commits)
     }
 
-    async fn resolve_branch(&self, refdb: &RefDatabase, branch: &str) -> Result<Oid> {
-        // Try as direct OID
-        if let Ok(oid) = Oid::from_hex(branch) {
-            return Ok(oid);
-        }
-
-        // Try as reference
-        let ref_result = refdb.read(branch).await;
-        match ref_result {
-            Ok(r) => r.oid.context(format!("Branch {} has no commit", branch)),
-            Err(_) => {
-                // Try with refs/heads prefix
-                let with_prefix = format!("refs/heads/{}", branch);
-                let ref_result = refdb.read(&with_prefix).await;
-                match ref_result {
-                    Ok(r) => r.oid.context(format!("Branch {} has no commit", branch)),
-                    Err(_) => anyhow::bail!("Cannot resolve branch: {}", branch),
-                }
-            }
-        }
-    }
-
     async fn abort_rebase(&self, repo_root: &std::path::Path) -> Result<()> {
         // Check if rebase is in progress
         if !RebaseState::in_progress(repo_root) {
@@ -652,7 +630,33 @@ mod tests {
 
         let cmd = parse(&["does-not-exist"]).unwrap();
         let err = execute_in(temp.path(), &cmd).await.unwrap_err();
-        assert!(err.to_string().contains("Cannot resolve branch"));
+        assert!(err.to_string().contains("Cannot resolve revision"));
+    }
+
+    #[tokio::test]
+    async fn execute_upstream_resolves_via_refs_remotes() {
+        // QA-004: `pull -r` passes a tracking ref like "origin/main" as the
+        // upstream, which only exists under refs/remotes. Rebase must resolve
+        // it instead of failing with "Cannot resolve revision".
+        let temp = TempDir::new().unwrap();
+        let head_oid = init_repo_with_commit(temp.path()).await;
+
+        let refdb = RefDatabase::new(temp.path().join(".mediagit"));
+        refdb
+            .write(&Ref::new_direct(
+                "refs/remotes/origin/main".to_string(),
+                head_oid,
+            ))
+            .await
+            .unwrap();
+
+        let cmd = parse(&["origin/main"]).unwrap();
+        let result = execute_in(temp.path(), &cmd).await;
+        assert!(
+            result.is_ok(),
+            "expected resolution to succeed: {:?}",
+            result
+        );
     }
 
     #[test]

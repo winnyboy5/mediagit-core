@@ -287,36 +287,35 @@ impl ShowCmd {
         }
     }
 
-    /// Walk a tree by path components (`a/b/c`) and return the OID of the
-    /// leaf blob.
+    /// Look up `path` (`a/b/c`) in the commit's tree and return the OID of
+    /// the blob.
+    ///
+    /// Commits build a single-level (flat) tree keyed by full relative path
+    /// (see `commit.rs`); no nested `Directory` entries are ever produced.
+    // ponytail: flat-tree direct key lookup, no subtree walk needed.
+    // Upgrade path: nested trees, if that's ever adopted.
     pub(crate) async fn find_path_in_tree(
         odb: &ObjectDatabase,
         tree_oid: &Oid,
         path: &str,
     ) -> Result<Oid> {
-        let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-        if components.is_empty() {
+        let normalized = path.replace('\\', "/");
+        let key = normalized
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("/");
+        if key.is_empty() {
             anyhow::bail!("Empty path");
         }
 
-        let mut current_tree_oid = *tree_oid;
-        for (i, component) in components.iter().enumerate() {
-            let tree_data = odb.read(&current_tree_oid).await?;
-            let tree = Tree::deserialize(&tree_data)?;
-            let entry = tree
-                .entries
-                .get(*component)
-                .ok_or_else(|| anyhow::anyhow!("'{}' not found", component))?;
-
-            if i == components.len() - 1 {
-                return Ok(entry.oid);
-            }
-            if entry.mode != mediagit_versioning::FileMode::Directory {
-                anyhow::bail!("'{}' is not a directory", component);
-            }
-            current_tree_oid = entry.oid;
-        }
-        unreachable!("loop always returns on the last component")
+        let tree_data = odb.read(tree_oid).await?;
+        let tree = Tree::deserialize(&tree_data)?;
+        let entry = tree
+            .entries
+            .get(key.as_str())
+            .ok_or_else(|| anyhow::anyhow!("'{}' not found", path))?;
+        Ok(entry.oid)
     }
 
     /// Print a `media: ...` metadata line for a changed file, if applicable.

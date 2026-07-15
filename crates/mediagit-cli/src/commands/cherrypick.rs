@@ -30,7 +30,7 @@ pub struct CherryPickCmd {
     pub commits: Vec<String>,
 
     /// Continue cherry-pick after resolving conflicts
-    #[arg(long)]
+    #[arg(long = "continue", alias = "continue-pick", hide = true)]
     pub continue_pick: bool,
 
     /// Abort cherry-pick operation
@@ -522,31 +522,16 @@ impl CherryPickCmd {
         }
 
         // Try short hash prefix matching (e.g., 7-char hashes from `log --oneline`)
+        // via the central resolver, which also matches pack-embedded objects
+        // (post-`gc --repack`, not just loose ones).
         let looks_like_hex = commit_ref.len() >= 4
             && commit_ref.len() < 64
             && commit_ref.chars().all(|c| c.is_ascii_hexdigit());
         if looks_like_hex {
             if let Ok(storage) = create_storage_backend(repo_root).await {
-                if let Ok(keys) = storage.list_objects(commit_ref).await {
-                    let matches: Vec<_> = keys
-                        .into_iter()
-                        .filter(|k| k.starts_with(commit_ref) && k.len() == 64)
-                        .collect();
-                    match matches.len() {
-                        1 => {
-                            if let Ok(oid) = Oid::from_hex(&matches[0]) {
-                                return Ok(oid);
-                            }
-                        }
-                        n if n > 1 => {
-                            anyhow::bail!(
-                                "Ambiguous short hash '{}' matches {} objects. Use a longer prefix.",
-                                commit_ref,
-                                n
-                            );
-                        }
-                        _ => {}
-                    }
+                let odb = ObjectDatabase::with_smart_compression(storage, 1000);
+                if let Ok(oid) = odb.resolve_abbreviated_oid(commit_ref).await {
+                    return Ok(oid);
                 }
             }
         }

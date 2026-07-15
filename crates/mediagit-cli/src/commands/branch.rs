@@ -16,6 +16,8 @@ use crate::progress::{OperationStats, ProgressTracker};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use mediagit_versioning::{Oid, Ref, RefDatabase, Reflog, ReflogEntry};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 /// Manage branches
@@ -647,6 +649,29 @@ impl BranchCmd {
                     );
                 }
             }
+
+            // QA-001: refuse to clobber untracked files that collide with a
+            // path tracked by the target branch. The dirty-check above only
+            // covers files tracked by the *current* HEAD; an untracked file
+            // is invisible to it and would otherwise be silently overwritten.
+            let collisions = Self::untracked_collision_paths(
+                &repo_root,
+                &odb,
+                current_commit_oid.as_ref(),
+                &target_commit_oid,
+            )
+            .await?;
+            if !collisions.is_empty() {
+                let list = collisions
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                anyhow::bail!(
+                    "switch would overwrite untracked file(s): {}; commit, stash, or use -f",
+                    list
+                );
+            }
         }
 
         // Update HEAD to point to the branch
@@ -764,6 +789,110 @@ impl BranchCmd {
             }
         }
         Ok(false)
+    }
+
+    /// QA-001: paths that are untracked in the working directory but would
+    /// be materialized by checking out `target_commit_oid` — i.e. a switch
+    /// would silently overwrite them. Mirrors `status`'s untracked-file
+    /// definition (working dir scan minus current-HEAD tree minus index
+    /// minus ignored), intersected with the target tree's paths.
+    async fn untracked_collision_paths(
+        repo_root: &std::path::Path,
+        odb: &mediagit_versioning::ObjectDatabase,
+        current_commit_oid: Option<&Oid>,
+        target_commit_oid: &Oid,
+    ) -> Result<Vec<PathBuf>> {
+        use crate::ignore_rules::IgnoreMatcher;
+        use mediagit_versioning::Index;
+
+        // Paths tracked by the branch we're switching away from — never
+        // "untracked", even though the index is cleared after every switch.
+        let mut head_files: HashSet<PathBuf> = HashSet::new();
+        if let Some(oid) = current_commit_oid {
+            let commit_data = odb.read(oid).await?;
+            let commit = mediagit_versioning::format::deserialize::<mediagit_versioning::Commit>(
+                &commit_data,
+            )?;
+            Self::collect_tree_paths(odb, &commit.tree, Path::new(""), &mut head_files).await?;
+        }
+
+        let index = Index::load(repo_root)?;
+        let index_files: HashSet<PathBuf> =
+            index.entries().map(|entry| entry.path.clone()).collect();
+
+        let mut ignored_files: HashSet<PathBuf> = HashSet::new();
+        let matcher = IgnoreMatcher::new(repo_root).ok();
+        // Single status-equivalent scan of the working directory (perf budget).
+        let status_cmd = super::status::StatusCmd {
+            tracked: false,
+            untracked: false,
+            ignored: false,
+            short: false,
+            porcelain: false,
+            branch: false,
+            quiet: true,
+            verbose: false,
+            json: false,
+        };
+        let working_files =
+            status_cmd.scan_working_directory(repo_root, &matcher, &mut ignored_files)?;
+
+        let untracked: HashSet<PathBuf> = working_files
+            .into_iter()
+            .filter(|path| {
+                !head_files.contains(path)
+                    && !index_files.contains(path)
+                    && !ignored_files.contains(path)
+            })
+            .collect();
+
+        if untracked.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let target_commit_data = odb.read(target_commit_oid).await?;
+        let target_commit = mediagit_versioning::format::deserialize::<mediagit_versioning::Commit>(
+            &target_commit_data,
+        )?;
+        let mut target_files: HashSet<PathBuf> = HashSet::new();
+        Self::collect_tree_paths(odb, &target_commit.tree, Path::new(""), &mut target_files)
+            .await?;
+
+        let mut collisions: Vec<PathBuf> = untracked.intersection(&target_files).cloned().collect();
+        collisions.sort();
+        Ok(collisions)
+    }
+
+    /// Recursively collect every file path in a tree (directories expanded),
+    /// relative to the tree root. Skips stage-debris entries (legacy
+    /// merge-conflict artifacts) the same way checkout does.
+    fn collect_tree_paths<'a>(
+        odb: &'a mediagit_versioning::ObjectDatabase,
+        tree_oid: &'a Oid,
+        prefix: &'a std::path::Path,
+        paths: &'a mut HashSet<PathBuf>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>> {
+        Box::pin(async move {
+            let tree_data = odb.read(tree_oid).await?;
+            let tree =
+                mediagit_versioning::format::deserialize::<mediagit_versioning::Tree>(&tree_data)?;
+
+            for entry in tree.iter() {
+                if mediagit_versioning::is_stage_debris_key(&entry.name) {
+                    continue;
+                }
+                let entry_path = prefix.join(&entry.name);
+                match entry.mode {
+                    mediagit_versioning::FileMode::Directory => {
+                        Self::collect_tree_paths(odb, &entry.oid, &entry_path, paths).await?;
+                    }
+                    _ => {
+                        paths.insert(entry_path);
+                    }
+                }
+            }
+            Ok(())
+        })
     }
 
     async fn delete(&self, opts: &DeleteOpts) -> Result<()> {

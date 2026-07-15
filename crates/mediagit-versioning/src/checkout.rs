@@ -19,7 +19,7 @@
 //! capped at 8).
 
 use crate::sparse::SparseFilter;
-use crate::{Commit, FileMode, ObjectDatabase, Oid, Tree};
+use crate::{is_stage_debris_key, Commit, FileMode, ObjectDatabase, Oid, Tree};
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -811,6 +811,17 @@ impl<'a> CheckoutManager<'a> {
             let mut files = HashMap::new();
 
             for entry in tree.iter() {
+                if is_stage_debris_key(&entry.name) {
+                    // Legacy poisoned tree from before the merge-conflict
+                    // ::stageN debris was fixed at the source: skip rather
+                    // than materialize an illegal colon path (breaks on
+                    // Windows, os error 123).
+                    warn!(
+                        "Skipping stage-debris tree entry (not materialized): {}",
+                        prefix.join(&entry.name).display()
+                    );
+                    continue;
+                }
                 let entry_path = prefix.join(&entry.name);
 
                 match entry.mode {
@@ -1778,6 +1789,54 @@ mod tests {
             files_parallel, files_serial,
             "sparse-filtered parallel and serial checkout must produce identical worktrees"
         );
+
+        Ok(())
+    }
+
+    /// QA-002: a hand-crafted (legacy-poisoned) tree with a `::stageN`
+    /// debris entry must be skipped during checkout rather than
+    /// materialized as an illegal colon path (os error 123 on Windows).
+    /// The rest of the tree still checks out normally.
+    #[tokio::test]
+    async fn test_checkout_skips_stage_debris_tree_entry() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let repo_root = temp_dir.path();
+        let storage_path = repo_root.join(".mediagit");
+        fs::create_dir_all(&storage_path)?;
+
+        let storage = Arc::new(LocalBackend::new(&storage_path).await?);
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let good_blob = odb.write(ObjectType::Blob, b"good content").await?;
+        let debris_blob = odb.write(ObjectType::Blob, b"debris content").await?;
+
+        let mut tree = Tree::new();
+        tree.add_entry(TreeEntry::new(
+            "good.bin".to_string(),
+            FileMode::Regular,
+            good_blob,
+        ));
+        tree.add_entry(TreeEntry::new(
+            "x.bin::stage1".to_string(),
+            FileMode::Regular,
+            debris_blob,
+        ));
+        let tree_oid = tree.write(&odb).await?;
+
+        let commit = Commit::new(
+            tree_oid,
+            Signature::now("Test".to_string(), "test@example.com".to_string()),
+            Signature::now("Test".to_string(), "test@example.com".to_string()),
+            "poisoned tree".to_string(),
+        );
+        let commit_oid = commit.write(&odb).await?;
+
+        let checkout_mgr = CheckoutManager::new(&odb, repo_root);
+        let files_updated = checkout_mgr.checkout_commit(&commit_oid).await?;
+
+        assert_eq!(files_updated, 1, "only the non-debris entry is written");
+        assert!(repo_root.join("good.bin").exists());
+        assert!(!repo_root.join("x.bin::stage1").exists());
 
         Ok(())
     }

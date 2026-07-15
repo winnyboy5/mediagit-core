@@ -23,6 +23,7 @@ use clap::Parser;
 use console::style;
 use futures::StreamExt;
 use mediagit_versioning::{ObjectDatabase, Ref, RefDatabase};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -31,9 +32,11 @@ use std::time::Instant;
 /// Downloads objects and refs from a remote repository and updates
 /// remote tracking refs (refs/remotes/<remote>/<branch>). Does not
 /// modify local branches or working directory.
+///
+/// By default, fetches only the current branch from the remote.
 #[derive(Parser, Debug)]
 #[command(after_help = "EXAMPLES:
-    # Fetch current branch from origin
+    # Fetch current branch from origin (default)
     mediagit fetch
 
     # Fetch from a specific remote
@@ -129,6 +132,36 @@ impl FetchCmd {
         let remote_refs = client.get_refs().await?;
         fetch_spinner.finish_with_message("Remote refs fetched");
 
+        // Compute the full local have-set ONCE for this fetch (moved ahead of
+        // the branch-fetch machinery below so tag-fetching can reuse it too).
+        // The server expands these OIDs into a full object closure and prunes
+        // anything already on the client from the pack walk.
+        let local_have = collect_local_have(&refdb, &odb).await;
+        if self.verbose {
+            println!("  Local have-set: {} refs", local_have.len());
+        }
+
+        // Tags auto-fetch like git — tag objects are tiny, so there's no
+        // --tags flag to opt in. Runs unconditionally (even if no branches
+        // need updating below) so a plain `fetch` always picks up new tags.
+        // Shared with `clone` (see fetch_tags below). A tag's target commit
+        // (or an annotated tag's .meta blob) may not be reachable from any
+        // branch we fetch below, so fetch_tags downloads its own object
+        // closure for anything missing from the local ODB.
+        let tags_updated = fetch_tags(
+            &refdb,
+            &odb,
+            &storage_path,
+            &remote_refs.refs,
+            &client,
+            &local_have,
+            self.verbose,
+        )
+        .await?;
+        if tags_updated > 0 && !self.quiet {
+            println!("  {} Fetched {} tag(s)", style("🏷").cyan(), tags_updated);
+        }
+
         // Filter to branches (refs/heads/*)
         let remote_branches: Vec<_> = remote_refs
             .refs
@@ -183,16 +216,6 @@ impl FetchCmd {
         // Create refs/remotes/<remote>/ directory if needed
         let remotes_dir = storage_path.join("refs").join("remotes").join(remote);
         std::fs::create_dir_all(&remotes_dir)?;
-
-        // Compute the full local have-set ONCE for this fetch. Every branch
-        // we pull below uses the same haves; walking refs per-branch would
-        // be pointless work. This enables incremental fetch — the server
-        // expands these OIDs into a full object closure and prunes anything
-        // already on the client from the pack walk.
-        let local_have = collect_local_have(&refdb, &odb).await;
-        if self.verbose {
-            println!("  Local have-set: {} refs", local_have.len());
-        }
 
         // Max parallel branch fetches for --all. Default 4.
         // Set MEDIAGIT_FETCH_BRANCH_CONCURRENCY=1 to force sequential.
@@ -507,4 +530,124 @@ impl FetchCmd {
 
         Ok(pruned)
     }
+}
+
+/// Write tag refs (`refs/tags/*`) and restore annotated tag `.meta` sidecars
+/// (`refs/tag-meta/*`) advertised by the remote into the local ref database.
+///
+/// Shared by `clone` and `fetch` — tags auto-fetch like git (tag objects are
+/// tiny), so there is no `--tags` flag. Idempotent: re-running with an
+/// unchanged remote just rewrites the same OIDs/content.
+///
+/// A tag's target commit isn't necessarily reachable from any branch we
+/// fetch elsewhere (e.g. a tag on an unmerged or deleted branch), and an
+/// annotated tag's `.meta` blob is never reachable from a commit tree at
+/// all — so both are fetched here via their own `want` request whenever
+/// they're missing from the local ODB, reusing the same pack machinery
+/// `clone`/branch-fetch use.
+///
+/// Returns the number of `refs/tags/*` refs written.
+pub(crate) async fn fetch_tags(
+    refdb: &RefDatabase,
+    odb: &ObjectDatabase,
+    storage_path: &Path,
+    remote_refs: &[mediagit_protocol::RefInfo],
+    client: &mediagit_protocol::ProtocolClient,
+    local_have: &[String],
+    verbose: bool,
+) -> Result<usize> {
+    let mut tag_count = 0;
+    // Collect tag-meta refs for a second pass after tag refs are written.
+    let mut tag_meta_refs: Vec<(String, String)> = Vec::new();
+
+    for ref_info in remote_refs {
+        if ref_info.name.starts_with("refs/tags/") {
+            if let Ok(tag_oid) = mediagit_versioning::Oid::from_hex(&ref_info.oid) {
+                if !odb.exists(&tag_oid).await.unwrap_or(false) {
+                    match client
+                        .download_pack_streaming(
+                            odb,
+                            vec![ref_info.oid.clone()],
+                            local_have.to_vec(),
+                        )
+                        .await
+                    {
+                        Ok(chunked) if !chunked.is_empty() => {
+                            if let Err(e) = client
+                                .download_chunked_objects(odb, &chunked, |_, _, _| {})
+                                .await
+                            {
+                                tracing::warn!(
+                                    "Failed to download chunked objects for tag {}: {}",
+                                    ref_info.name,
+                                    e
+                                );
+                                continue;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to fetch objects for tag {}: {}",
+                                ref_info.name,
+                                e
+                            );
+                            continue;
+                        }
+                    }
+                }
+                let tag_ref = Ref::new_direct(ref_info.name.clone(), tag_oid);
+                refdb.write(&tag_ref).await?;
+                tag_count += 1;
+                if verbose {
+                    println!(
+                        "  Created tag ref: {} -> {}",
+                        ref_info.name,
+                        &ref_info.oid[..8]
+                    );
+                }
+            }
+        } else if let Some(tag_name) = ref_info.name.strip_prefix("refs/tag-meta/") {
+            tag_meta_refs.push((tag_name.to_string(), ref_info.oid.clone()));
+        }
+    }
+
+    // Restore annotated tag .meta sidecars from ODB blobs.
+    for (tag_name, blob_oid_hex) in &tag_meta_refs {
+        if let Ok(blob_oid) = mediagit_versioning::Oid::from_hex(blob_oid_hex) {
+            // The meta blob is never reachable from a commit tree — it's a
+            // floating object referenced only by refs/tag-meta/<name> — so
+            // fetch it explicitly rather than assuming pull_streaming above
+            // already pulled it in.
+            if !odb.exists(&blob_oid).await.unwrap_or(false) {
+                if let Err(e) = client
+                    .download_pack_streaming(odb, vec![blob_oid_hex.clone()], vec![])
+                    .await
+                {
+                    tracing::warn!("Failed to download tag meta blob for {}: {}", tag_name, e);
+                    continue;
+                }
+            }
+            match odb.read(&blob_oid).await {
+                Ok(meta_bytes) => {
+                    let meta_dir = storage_path.join("refs").join("tags");
+                    if let Err(e) = tokio::fs::create_dir_all(&meta_dir).await {
+                        tracing::warn!("Failed to create tags dir: {}", e);
+                        continue;
+                    }
+                    let meta_path = meta_dir.join(format!("{}.meta", tag_name));
+                    if let Err(e) = tokio::fs::write(&meta_path, &meta_bytes).await {
+                        tracing::warn!("Failed to write tag meta for {}: {}", tag_name, e);
+                    } else if verbose {
+                        println!("  Restored annotated tag meta: {}.meta", tag_name);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to read tag meta blob {}: {}", blob_oid_hex, e);
+                }
+            }
+        }
+    }
+
+    Ok(tag_count)
 }

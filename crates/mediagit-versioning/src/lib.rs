@@ -106,7 +106,7 @@ pub use config::{ChunkingStrategyConfig, StorageConfig};
 pub use conflict::{Conflict, ConflictDetector, ConflictSide, ConflictStats, ConflictType};
 pub use delta::{Delta, DeltaDecoder, DeltaEncoder};
 pub use diff::{ModifiedEntry, ThreeWayDiff, TreeDiff, TreeDiffer};
-pub use index::{Index, IndexEntry};
+pub use index::{is_stage_debris_key, Index, IndexEntry};
 pub use lca::{LcaFinder, LcaResult};
 pub use merge::{apply_merge_to_workdir, FastForwardInfo, MergeEngine, MergeResult, MergeStrategy};
 pub use metrics::OdbMetrics;

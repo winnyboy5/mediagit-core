@@ -549,6 +549,107 @@ mod tests {
         assert!(err.to_string().to_lowercase().contains("prefix"));
     }
 
+    /// QA-010: after `gc --repack` bundles a loose object into a pack and
+    /// deletes the loose copy, both `exists()` and `resolve_abbreviated_oid()`
+    /// must still find it via pack membership — not just the loose scan.
+    #[tokio::test]
+    async fn test_exists_and_resolve_abbreviated_oid_after_repack_removes_loose() {
+        let storage = Arc::new(MockBackend::new());
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let oid = odb
+            .write(ObjectType::Blob, b"packed-only-object-fixture")
+            .await
+            .unwrap();
+        // Force a real storage/pack lookup instead of a cache hit.
+        odb.invalidate_cache(&oid).await;
+
+        let stats = odb.repack(0, true).await.unwrap();
+        assert_eq!(stats.loose_objects_removed, 1, "loose copy must be removed");
+
+        assert!(
+            odb.exists(&oid).await.unwrap(),
+            "packed-only object must still report as existing"
+        );
+
+        let abbrev = &oid.to_hex()[..8];
+        let resolved = odb
+            .resolve_abbreviated_oid(abbrev)
+            .await
+            .expect("packed-only object must resolve by short hash");
+        assert_eq!(resolved, oid);
+    }
+
+    /// QA-006b: `put_compressed_chunk` must decompress + hash-verify the
+    /// payload against its declared chunk_id before persisting anything.
+    #[tokio::test]
+    async fn test_put_compressed_chunk_accepts_valid_payload() {
+        let storage = Arc::new(MockBackend::new());
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let content = b"valid chunk payload".to_vec();
+        let chunk_id = Oid::hash(&content);
+        let compressed = odb.compressor.compress(&content).unwrap();
+
+        odb.put_compressed_chunk(&chunk_id, &compressed)
+            .await
+            .unwrap();
+        assert!(odb.chunk_exists(&chunk_id).await.unwrap());
+        assert_eq!(odb.get_chunk(&chunk_id).await.unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn test_put_compressed_chunk_rejects_hash_mismatch() {
+        let storage = Arc::new(MockBackend::new());
+        let odb = ObjectDatabase::new(storage, 100);
+
+        // Well-formed compressed bytes that decompress successfully, but to
+        // content that does NOT hash to the declared id (e.g. an attacker
+        // or a corrupted transport relabeling one chunk as another).
+        let real_content = b"the real chunk content".to_vec();
+        let compressed = odb.compressor.compress(&real_content).unwrap();
+        let wrong_id = Oid::hash(b"a completely different payload");
+
+        let err = odb
+            .put_compressed_chunk(&wrong_id, &compressed)
+            .await
+            .expect_err("content/id mismatch must be rejected");
+        assert!(
+            err.to_string().contains("integrity"),
+            "unexpected error: {}",
+            err
+        );
+        assert!(
+            !odb.chunk_exists(&wrong_id).await.unwrap(),
+            "mismatched chunk must not be persisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_put_compressed_chunk_rejects_flipped_byte() {
+        let storage = Arc::new(MockBackend::new());
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let content = b"chunk payload for bit-flip integrity test".to_vec();
+        let chunk_id = Oid::hash(&content);
+        let mut compressed = odb.compressor.compress(&content).unwrap();
+        let last = compressed.len() - 1;
+        compressed[last] ^= 0xFF;
+
+        // Corruption is rejected whether it surfaces as a decompression
+        // failure or a hash mismatch — either way, nothing gets stored.
+        assert!(
+            odb.put_compressed_chunk(&chunk_id, &compressed)
+                .await
+                .is_err(),
+            "flipped-byte payload must be rejected"
+        );
+        assert!(
+            !odb.chunk_exists(&chunk_id).await.unwrap(),
+            "rejected chunk must not be stored"
+        );
+    }
+
     #[tokio::test]
     async fn test_verify() {
         let storage = Arc::new(MockBackend::new());

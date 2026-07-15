@@ -318,7 +318,7 @@ pub async fn download_pack(
         let mut bitmap_hits = 0usize;
         for have in &have_oids {
             let key = mediagit_versioning::bitmap_key(have);
-            let hit = match odb.storage().get(&key).await {
+            let hit = match odb.get_bitmap(&key).await {
                 Ok(bytes) => mediagit_versioning::ReachabilityBitmap::deserialize(&bytes),
                 Err(_) => None,
             };
@@ -759,8 +759,7 @@ pub async fn update_refs(
                             Ok(bitmap) => match bitmap.serialize() {
                                 Ok(bytes) => {
                                     let key = mediagit_versioning::bitmap_key(&new_oid);
-                                    if let Err(e) = odb_for_bitmap.storage().put(&key, &bytes).await
-                                    {
+                                    if let Err(e) = odb_for_bitmap.put_bitmap(&key, &bytes).await {
                                         tracing::warn!(
                                             "Failed to persist bitmap for '{}' ({}): {}",
                                             ref_name,
@@ -780,7 +779,7 @@ pub async fn update_refs(
                                         if old_oid != new_oid {
                                             let old_key = mediagit_versioning::bitmap_key(&old_oid);
                                             if let Err(e) =
-                                                odb_for_bitmap.storage().delete(&old_key).await
+                                                odb_for_bitmap.delete_bitmap(&old_key).await
                                             {
                                                 tracing::warn!(
                                                     "Failed to delete previous bitmap for '{}' ({}): {}",

@@ -1,0 +1,9 @@
+# QA-suite template - Google Cloud Storage. Tokens substituted by scripts\lib\remote.ps1.
+# Copied from dev-tests\dev-server\config.gcs.toml; credentials_path line is appended only
+# when GOOGLE_APPLICATION_CREDENTIALS is set in the caller's environment (else GCS SDK falls
+# back to ADC, same behavior as gcs.rs's own env-var fallback).
+[storage]
+backend = "gcs"
+bucket = "{{BUCKET}}"
+project_id = "{{PROJECT}}"
+{{CREDS_LINE}}

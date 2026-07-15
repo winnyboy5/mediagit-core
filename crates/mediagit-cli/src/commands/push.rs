@@ -28,13 +28,21 @@ use std::time::Instant;
 /// Pushes local commits to a remote repository, updating the remote
 /// references to point to the new commits. This makes your local changes
 /// available to others.
+///
+/// By default, pushes only the current branch to the remote.
 #[derive(Parser, Debug)]
 #[command(after_help = "EXAMPLES:
-    # Push current branch to origin
+    # Push current branch to origin (default)
     mediagit push
 
     # Push specific branch to origin
     mediagit push origin main
+
+    # Push all branches
+    mediagit push --all
+
+    # Push all tags
+    mediagit push --tags
 
     # Push and set upstream tracking
     mediagit push -u origin feature-branch

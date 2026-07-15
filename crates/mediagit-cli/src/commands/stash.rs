@@ -485,10 +485,9 @@ impl StashCmd {
                 Ok(answer) => answer,
                 Err(_) => {
                     // Non-interactive context (pipe, script, CI) — require --force to proceed
-                    eprintln!(
+                    anyhow::bail!(
                         "stdin is not a terminal. Use 'mediagit stash clear --force' to clear without confirmation."
                     );
-                    return Ok(());
                 }
             };
 

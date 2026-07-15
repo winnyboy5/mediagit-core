@@ -40,9 +40,6 @@ use std::time::Instant;
     # Preview what would be pulled
     mediagit pull --dry-run
 
-    # Continue pull after resolving conflicts
-    mediagit pull --continue
-
 SEE ALSO:
     mediagit-push(1), mediagit-fetch(1), mediagit-merge(1), mediagit-rebase(1)")]
 pub struct PullCmd {
@@ -79,7 +76,7 @@ pub struct PullCmd {
     pub abort: bool,
 
     /// Continue after resolving conflicts
-    #[arg(long)]
+    #[arg(long = "continue", alias = "continue-pull", hide = true)]
     pub continue_pull: bool,
 
     /// Quiet mode

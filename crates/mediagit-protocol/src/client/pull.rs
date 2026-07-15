@@ -817,9 +817,6 @@ impl ProtocolClient {
                                 }
                                 if stream_to_disk {
                                     // B4: stream proxy response to temp file to reduce peak RAM.
-                                    // Chunk IDs are BLAKE3(uncompressed); proxy returns compressed
-                                    // bytes — hash cannot be verified here without decompressing.
-                                    // Integrity is verified at read time via decompression.
                                     use futures::StreamExt as _;
                                     use tokio::io::AsyncWriteExt as _;
                                     let temp_path =

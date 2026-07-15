@@ -193,7 +193,7 @@ impl BisectCmd {
         println!(
             "{} Marked {} as good",
             style("✓").green(),
-            style(good_oid.to_hex()).yellow()
+            style(&good_oid.to_hex()[..7]).yellow()
         );
 
         // Narrow the range and check out the next midpoint (or declare complete)
@@ -225,7 +225,7 @@ impl BisectCmd {
         println!(
             "{} Marked {} as bad",
             style("✓").green(),
-            style(bad_oid.to_hex()).yellow()
+            style(&bad_oid.to_hex()[..7]).yellow()
         );
 
         // Narrow the range and check out the next midpoint (or declare complete)
@@ -257,7 +257,7 @@ impl BisectCmd {
         println!(
             "{} Skipped {}",
             style("→").cyan(),
-            style(skip_oid.to_hex()).yellow()
+            style(&skip_oid.to_hex()[..7]).yellow()
         );
 
         // Find next commit to test
@@ -323,7 +323,7 @@ impl BisectCmd {
         std::fs::remove_file(&state_path)?;
 
         println!("{} Bisect session ended", style("✓").green());
-        println!("  Reset to {}", style(reset_oid.to_hex()).yellow());
+        println!("  Reset to {}", style(&reset_oid.to_hex()[..7]).yellow());
 
         Ok(())
     }
@@ -471,7 +471,7 @@ impl BisectCmd {
             println!();
             println!(
                 "{} is the first bad commit",
-                style(bad_oid.to_hex()).red().bold()
+                style(&bad_oid.to_hex()[..7]).red().bold()
             );
             println!();
             println!("{}", style("Bisect log:").bold());
@@ -503,7 +503,10 @@ impl BisectCmd {
             style("→").cyan(),
             style(candidates.len() - 1).yellow()
         );
-        println!("  Current commit: {}", style(next_oid.to_hex()).yellow());
+        println!(
+            "  Current commit: {}",
+            style(&next_oid.to_hex()[..7]).yellow()
+        );
         println!();
         println!("After testing, mark the commit:");
         println!(
@@ -612,31 +615,16 @@ impl BisectCmd {
         }
 
         // Try short hash prefix matching (e.g., 7-char hashes from `log --oneline`)
+        // via the central resolver, which also matches pack-embedded objects
+        // (post-`gc --repack`, not just loose ones).
         let looks_like_hex = commit_ref.len() >= 4
             && commit_ref.len() < 64
             && commit_ref.chars().all(|c| c.is_ascii_hexdigit());
         if looks_like_hex {
             if let Ok(storage) = create_storage_backend(repo_root).await {
-                if let Ok(keys) = storage.list_objects(commit_ref).await {
-                    let matches: Vec<_> = keys
-                        .into_iter()
-                        .filter(|k| k.starts_with(commit_ref) && k.len() == 64)
-                        .collect();
-                    match matches.len() {
-                        1 => {
-                            if let Ok(oid) = Oid::from_hex(&matches[0]) {
-                                return Ok(oid);
-                            }
-                        }
-                        n if n > 1 => {
-                            anyhow::bail!(
-                                "Ambiguous short hash '{}' matches {} objects. Use a longer prefix.",
-                                commit_ref,
-                                n
-                            );
-                        }
-                        _ => {}
-                    }
+                let odb = ObjectDatabase::with_smart_compression(storage, 1000);
+                if let Ok(oid) = odb.resolve_abbreviated_oid(commit_ref).await {
+                    return Ok(oid);
                 }
             }
         }

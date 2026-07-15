@@ -399,8 +399,6 @@ url = "{}"
         // will be fetched on-demand when user runs `pull origin branch` or `branch switch`.
         // Also write tag refs (refs/tags/*) received from the server.
         let mut other_branches = Vec::new();
-        // Collect tag-meta refs for second pass after ODB objects are available
-        let mut tag_meta_refs: Vec<(String, String)> = Vec::new();
         for ref_info in &remote_refs.refs {
             if ref_info.name.starts_with("refs/heads/") {
                 let branch_name = ref_info
@@ -430,49 +428,25 @@ url = "{}"
                         other_branches.push(branch_name.to_string());
                     }
                 }
-            } else if ref_info.name.starts_with("refs/tags/") {
-                // Write tag ref directly
-                if let Ok(tag_oid) = mediagit_versioning::Oid::from_hex(&ref_info.oid) {
-                    let tag_ref =
-                        mediagit_versioning::Ref::new_direct(ref_info.name.clone(), tag_oid);
-                    refdb.write(&tag_ref).await?;
-                    if self.verbose {
-                        println!(
-                            "  Created tag ref: {} -> {}",
-                            ref_info.name,
-                            &ref_info.oid[..8]
-                        );
-                    }
-                }
-            } else if let Some(tag_name) = ref_info.name.strip_prefix("refs/tag-meta/") {
-                // Record for second pass: blob OID -> .meta file
-                tag_meta_refs.push((tag_name.to_string(), ref_info.oid.clone()));
             }
         }
 
-        // Restore annotated tag .meta sidecars from ODB blobs
-        for (tag_name, blob_oid_hex) in &tag_meta_refs {
-            if let Ok(blob_oid) = mediagit_versioning::Oid::from_hex(blob_oid_hex) {
-                match odb.read(&blob_oid).await {
-                    Ok(meta_bytes) => {
-                        let meta_dir = storage_path.join("refs").join("tags");
-                        if let Err(e) = tokio::fs::create_dir_all(&meta_dir).await {
-                            tracing::warn!("Failed to create tags dir: {}", e);
-                            continue;
-                        }
-                        let meta_path = meta_dir.join(format!("{}.meta", tag_name));
-                        if let Err(e) = tokio::fs::write(&meta_path, &meta_bytes).await {
-                            tracing::warn!("Failed to write tag meta for {}: {}", tag_name, e);
-                        } else if self.verbose {
-                            println!("  Restored annotated tag meta: {}.meta", tag_name);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to read tag meta blob {}: {}", blob_oid_hex, e);
-                    }
-                }
-            }
-        }
+        // Write tag refs (refs/tags/*) and restore annotated tag .meta
+        // sidecars (refs/tag-meta/*) received from the server. Shared with
+        // `fetch` — see commands::fetch::fetch_tags. Pass the default branch
+        // tip as the have-set: a tag pointing at (or behind) it needs no
+        // extra download; anything else fetch_tags pulls on its own.
+        let clone_have = vec![remote_oid.to_hex()];
+        super::fetch::fetch_tags(
+            &refdb,
+            &odb,
+            &storage_path,
+            &remote_refs.refs,
+            &client,
+            &clone_have,
+            self.verbose,
+        )
+        .await?;
 
         // Show available branches to user
         if !other_branches.is_empty() && !self.quiet {

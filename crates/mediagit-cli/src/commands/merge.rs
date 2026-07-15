@@ -16,8 +16,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_versioning::{
-    apply_merge_to_workdir, CheckoutManager, Commit, Index, MergeEngine, MergeStrategy,
-    ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Reflog, ReflogEntry, Signature,
+    apply_merge_to_workdir, resolve_revision, CheckoutManager, Commit, Index, MergeEngine,
+    MergeStrategy, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Reflog, ReflogEntry,
+    Signature,
 };
 use std::sync::Arc;
 
@@ -46,14 +47,14 @@ use std::sync::Arc;
     mediagit merge --abort
 
     # Continue merge after resolving conflicts
-    mediagit merge --continue-merge
+    mediagit merge --continue
 
 SEE ALSO:
     mediagit-branch(1), mediagit-rebase(1), mediagit-cherry-pick(1)")]
 pub struct MergeCmd {
     /// Branch to merge
-    #[arg(value_name = "BRANCH", required = true)]
-    pub branch: String,
+    #[arg(value_name = "BRANCH", required = false)]
+    pub branch: Option<String>,
 
     /// Merge message
     #[arg(short, long, value_name = "MESSAGE")]
@@ -88,7 +89,7 @@ pub struct MergeCmd {
     pub abort: bool,
 
     /// Continue after resolving conflicts
-    #[arg(long)]
+    #[arg(long = "continue", alias = "continue-merge", hide = true)]
     pub continue_merge: bool,
 
     /// Quiet mode
@@ -102,6 +103,11 @@ pub struct MergeCmd {
 
 impl MergeCmd {
     pub async fn execute(&self) -> Result<()> {
+        // Validate that branch and --continue are mutually exclusive
+        if self.continue_merge && self.branch.is_some() {
+            anyhow::bail!("--continue takes no branch argument");
+        }
+
         // Handle abort/continue first
         if self.abort {
             return self.abort_merge().await;
@@ -109,6 +115,12 @@ impl MergeCmd {
         if self.continue_merge {
             return self.continue_merge_process().await;
         }
+
+        // Ensure branch is provided (it's optional in the struct to allow --continue)
+        let branch = self
+            .branch
+            .as_ref()
+            .context("branch argument is required")?;
 
         // Find repository root
         let repo_root = find_repo_root()?;
@@ -118,7 +130,7 @@ impl MergeCmd {
         let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
 
         // Resolve branch to OID
-        let their_oid = self.resolve_branch(&refdb).await?;
+        let their_oid = resolve_revision(branch, &refdb, &odb).await?;
 
         // Get current HEAD commit
         let head = refdb.read("HEAD").await?;
@@ -147,7 +159,7 @@ impl MergeCmd {
             println!(
                 "{} Merging {} into {}...",
                 style("🔀").cyan().bold(),
-                style(&self.branch).yellow(),
+                style(branch).yellow(),
                 style("HEAD").cyan()
             );
             println!("{} Analyzing commit history...", style("🔍").cyan());
@@ -188,7 +200,7 @@ impl MergeCmd {
                 let message = self
                     .message
                     .clone()
-                    .unwrap_or_else(|| format!("Squash merge branch '{}' into HEAD", self.branch));
+                    .unwrap_or_else(|| format!("Squash merge branch '{}' into HEAD", branch));
                 let squash_commit = Commit {
                     tree: their_commit.tree,
                     parents: vec![our_oid],
@@ -216,7 +228,7 @@ impl MergeCmd {
                     commit_oid,
                     "user",
                     "user@mediagit",
-                    &format!("merge {}: squash merge (ff)", self.branch),
+                    &format!("merge {}: squash merge (ff)", branch),
                 );
                 let _ = reflog.append("HEAD", &entry).await;
                 if !self.quiet {
@@ -258,7 +270,7 @@ impl MergeCmd {
 
                     // Record reflog entry
                     let reflog = Reflog::new(&storage_path);
-                    let reflog_msg = format!("merge {}: fast-forward", self.branch);
+                    let reflog_msg = format!("merge {}: fast-forward", branch);
                     let entry =
                         ReflogEntry::now(our_oid, their_oid, "user", "user@mediagit", &reflog_msg);
                     let _ = reflog.append("HEAD", &entry).await;
@@ -307,7 +319,7 @@ impl MergeCmd {
                 }
             }
             println!(
-                "\n{} Conflict markers written. Resolve conflicts, 'add' them, then run 'mediagit merge --continue-merge <branch>'",
+                "\n{} Conflict markers written. Resolve conflicts, 'add' them, then run 'mediagit merge --continue'",
                 style("→").cyan()
             );
             std::process::exit(1);
@@ -339,9 +351,9 @@ impl MergeCmd {
 
             let message = self.message.clone().unwrap_or_else(|| {
                 if self.squash {
-                    format!("Squash merge branch '{}' into HEAD", self.branch)
+                    format!("Squash merge branch '{}' into HEAD", branch)
                 } else {
-                    format!("Merge branch '{}' into HEAD", self.branch)
+                    format!("Merge branch '{}' into HEAD", branch)
                 }
             });
 
@@ -393,9 +405,9 @@ impl MergeCmd {
             // Record reflog entry
             let reflog = Reflog::new(&storage_path);
             let reflog_msg = if self.squash {
-                format!("merge {}: squash merge", self.branch)
+                format!("merge {}: squash merge", branch)
             } else {
-                format!("merge {}: merge commit", self.branch)
+                format!("merge {}: merge commit", branch)
             };
             let entry = ReflogEntry::now(our_oid, commit_oid, "user", "user@mediagit", &reflog_msg);
             let _ = reflog.append("HEAD", &entry).await;
@@ -420,32 +432,6 @@ impl MergeCmd {
         Ok(())
     }
 
-    async fn resolve_branch(&self, refdb: &RefDatabase) -> Result<Oid> {
-        // Try as direct OID
-        if let Ok(oid) = Oid::from_hex(&self.branch) {
-            return Ok(oid);
-        }
-
-        // Try as reference
-        let ref_result = refdb.read(&self.branch).await;
-        match ref_result {
-            Ok(r) => r
-                .oid
-                .context(format!("Branch {} has no commit", self.branch)),
-            Err(_) => {
-                // Try with refs/heads prefix
-                let with_prefix = format!("refs/heads/{}", self.branch);
-                let ref_result = refdb.read(&with_prefix).await;
-                match ref_result {
-                    Ok(r) => r
-                        .oid
-                        .context(format!("Branch {} has no commit", self.branch)),
-                    Err(_) => anyhow::bail!("Cannot resolve branch: {}", self.branch),
-                }
-            }
-        }
-    }
-
     async fn abort_merge(&self) -> Result<()> {
         if !self.quiet {
             println!("{} Aborting merge...", style("✗").red());
@@ -466,6 +452,10 @@ impl MergeCmd {
         // tree and index, destroying unrelated staged/working changes.
         let had_merge_state =
             merge_head.exists() || merge_msg.exists() || merge_mode.exists() || orig_head.exists();
+
+        if !had_merge_state {
+            anyhow::bail!("There is no merge to abort (no merge in progress)");
+        }
 
         let mut cleaned = 0;
 
@@ -564,13 +554,28 @@ impl MergeCmd {
         }
 
         // Load index and create tree
-        let index = mediagit_versioning::Index::load(&repo_root)?;
+        let mut index = mediagit_versioning::Index::load(&repo_root)?;
         if index.is_empty() {
             anyhow::bail!("No changes staged. Use 'add' to stage resolved files.");
         }
 
         let storage = create_storage_backend(&repo_root).await?;
         let odb = mediagit_versioning::ObjectDatabase::with_smart_compression(storage, 1000);
+
+        // Legacy on-disk indexes from before the merge fix may still carry
+        // ::stageN debris entries; skip them from the tree and purge them so
+        // they don't linger.
+        let debris_paths: Vec<std::path::PathBuf> = index
+            .entries()
+            .filter(|e| mediagit_versioning::is_stage_debris_key(&e.path.to_string_lossy()))
+            .map(|e| e.path.clone())
+            .collect();
+        for path in &debris_paths {
+            index.remove_entry(path);
+        }
+        if !debris_paths.is_empty() {
+            index.save(&repo_root)?;
+        }
 
         let mut tree = mediagit_versioning::Tree::new();
         for entry in index.entries() {
@@ -671,7 +676,7 @@ mod tests {
     #[test]
     fn parse_basic_branch() {
         let cmd = parse(&["feature-branch"]).unwrap();
-        assert_eq!(cmd.branch, "feature-branch");
+        assert_eq!(cmd.branch, Some("feature-branch".to_string()));
         assert!(!cmd.no_ff);
         assert!(!cmd.ff_only);
         assert!(!cmd.squash);
@@ -680,8 +685,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_missing_branch_is_error() {
-        assert!(parse(&[]).is_err());
+    fn parse_branch_is_optional() {
+        let cmd = parse(&[]).unwrap();
+        assert_eq!(cmd.branch, None);
     }
 
     #[test]
@@ -700,7 +706,7 @@ mod tests {
             "-v",
         ])
         .unwrap();
-        assert_eq!(cmd.branch, "feature");
+        assert_eq!(cmd.branch, Some("feature".to_string()));
         assert_eq!(cmd.message.as_deref(), Some("custom message"));
         assert!(cmd.no_ff);
         assert_eq!(cmd.strategy.as_deref(), Some("recursive"));
@@ -712,10 +718,22 @@ mod tests {
 
     #[test]
     fn parse_abort_and_continue_flags() {
-        let cmd = parse(&["feature", "--abort"]).unwrap();
+        let cmd = parse(&["--abort"]).unwrap();
         assert!(cmd.abort);
 
-        let cmd = parse(&["feature", "--continue-merge"]).unwrap();
+        let cmd = parse(&["--continue-merge"]).unwrap();
+        assert!(cmd.continue_merge);
+    }
+
+    #[test]
+    fn parse_continue_flag_new_spelling() {
+        let cmd = parse(&["--continue"]).unwrap();
+        assert!(cmd.continue_merge);
+    }
+
+    #[test]
+    fn parse_continue_flag_old_spelling() {
+        let cmd = parse(&["--continue-merge"]).unwrap();
         assert!(cmd.continue_merge);
     }
 
@@ -745,7 +763,32 @@ mod tests {
 
         let cmd = parse(&["does-not-exist"]).unwrap();
         let err = execute_in(temp.path(), &cmd).await.unwrap_err();
-        assert!(err.to_string().contains("Cannot resolve branch"));
+        assert!(err.to_string().contains("Cannot resolve revision"));
+    }
+
+    #[tokio::test]
+    async fn execute_branch_resolves_via_refs_remotes() {
+        // QA-004: "merge origin/x" must resolve refs/remotes tracking refs,
+        // not just refs/heads.
+        let temp = TempDir::new().unwrap();
+        let head_oid = init_repo_with_commit(temp.path()).await;
+
+        let refdb = RefDatabase::new(temp.path().join(".mediagit"));
+        refdb
+            .write(&Ref::new_direct(
+                "refs/remotes/origin/main".to_string(),
+                head_oid,
+            ))
+            .await
+            .unwrap();
+
+        let cmd = parse(&["origin/main"]).unwrap();
+        let result = execute_in(temp.path(), &cmd).await;
+        assert!(
+            result.is_ok(),
+            "expected resolution to succeed: {:?}",
+            result
+        );
     }
 
     #[tokio::test]
@@ -764,18 +807,30 @@ mod tests {
         let temp = TempDir::new().unwrap();
         init_repo_with_commit(temp.path()).await;
 
-        let cmd = parse(&["main", "--continue-merge"]).unwrap();
+        let cmd = parse(&["--continue-merge"]).unwrap();
         let err = execute_in(temp.path(), &cmd).await.unwrap_err();
         assert!(err.to_string().contains("No merge in progress"));
     }
 
     #[tokio::test]
-    async fn abort_merge_with_no_state_is_ok_and_cleans_nothing() {
+    async fn abort_merge_with_no_state_is_error() {
         let temp = TempDir::new().unwrap();
         init_repo_with_commit(temp.path()).await;
 
-        let cmd = parse(&["main", "--abort"]).unwrap();
-        // abort_merge() only removes state files if present; no state == Ok.
-        execute_in(temp.path(), &cmd).await.unwrap();
+        let cmd = parse(&["--abort"]).unwrap();
+        // git semantics: aborting when no merge is in progress is an error.
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("no merge in progress"));
+    }
+
+    #[tokio::test]
+    async fn continue_merge_with_branch_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        // --continue with a branch should error
+        let cmd = parse(&["--continue", "feature"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("--continue takes no branch"));
     }
 }

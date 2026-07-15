@@ -192,7 +192,14 @@ claudedocs/
 .mcp.json
 test-files/
 docs/
-dev-tests/
+dev-tests/*
+!dev-tests/qa-suite/
+!dev-tests/qa-suite/scripts/lib/
+dev-tests/qa-suite/work/
+dev-tests/qa-suite/logs/
+dev-tests/qa-suite/reports/
+dev-tests/qa-suite/fixtures-synthetic/
+dev-tests/qa-suite/.venv/
 test-archives/
 
 # Storage emulator test data

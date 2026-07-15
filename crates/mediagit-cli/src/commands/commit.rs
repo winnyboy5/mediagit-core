@@ -212,6 +212,12 @@ impl CommitCmd {
 
         // Then, add/update entries from index (these override parent entries with same name)
         for entry in index.entries() {
+            let path_str = entry.path.to_string_lossy();
+            // Legacy on-disk indexes from before the merge fix may still
+            // carry ::stageN debris entries; never let them reach a tree.
+            if mediagit_versioning::is_stage_debris_key(&path_str) {
+                continue;
+            }
             let file_mode = if entry.mode & 0o111 != 0 {
                 FileMode::Executable
             } else {
@@ -219,11 +225,7 @@ impl CommitCmd {
             };
 
             // Use full path, not just filename
-            tree.add_entry(TreeEntry::new(
-                entry.path.to_string_lossy().to_string(),
-                file_mode,
-                entry.oid,
-            ));
+            tree.add_entry(TreeEntry::new(path_str.to_string(), file_mode, entry.oid));
         }
 
         let tree_bytes = tree.serialize()?;

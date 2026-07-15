@@ -478,3 +478,131 @@ fn test_branch_help() {
         .success()
         .stdout(predicate::str::contains("branch"));
 }
+
+// ============================================================================
+// QA-001: `branch switch` must refuse to clobber an untracked file that
+// collides with a path tracked by the target branch.
+// ============================================================================
+
+/// main: base.txt. topic: base.txt + topic.txt (committed). Leaves HEAD on
+/// main with topic.txt absent from the working tree.
+fn setup_collision_repo(temp_dir: &TempDir) {
+    init_repo(temp_dir.path());
+    add_and_commit(temp_dir.path(), "base.txt", "base content", "base");
+
+    mediagit()
+        .arg("branch")
+        .arg("create")
+        .arg("topic")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("topic")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    add_and_commit(
+        temp_dir.path(),
+        "topic.txt",
+        "topic content",
+        "topic adds topic.txt",
+    );
+
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("main")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_branch_switch_refuses_untracked_collision() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_collision_repo(&temp_dir);
+
+    // Untracked file on main at a path `topic` tracks — a plain switch would
+    // silently clobber it.
+    fs::write(temp_dir.path().join("topic.txt"), "dirty untracked content").unwrap();
+
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("topic")
+        .current_dir(temp_dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("topic.txt"));
+
+    // Bytes must survive the refused switch untouched.
+    let content = fs::read_to_string(temp_dir.path().join("topic.txt")).unwrap();
+    assert_eq!(content, "dirty untracked content");
+}
+
+#[test]
+fn test_branch_switch_force_overwrites_untracked_collision() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_collision_repo(&temp_dir);
+
+    fs::write(temp_dir.path().join("topic.txt"), "dirty untracked content").unwrap();
+
+    // --force preserves today's behavior: the guard is bypassed.
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("topic")
+        .arg("-f")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(temp_dir.path().join("topic.txt")).unwrap();
+    assert_eq!(content, "topic content");
+}
+
+#[test]
+fn test_branch_switch_noncolliding_untracked_proceeds() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_collision_repo(&temp_dir);
+
+    // Untracked file whose path the target branch does not track at all.
+    fs::write(temp_dir.path().join("scratch.txt"), "scratch content").unwrap();
+
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("topic")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(temp_dir.path().join("scratch.txt")).unwrap();
+    assert_eq!(content, "scratch content");
+    assert!(temp_dir.path().join("topic.txt").exists());
+}
+
+#[test]
+fn test_branch_switch_ignored_collision_proceeds() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_collision_repo(&temp_dir);
+
+    // topic.txt is .mediagitignore'd on main, so it's not "untracked" by the
+    // guard's definition — matches git: ignored files stay overwritable.
+    fs::write(temp_dir.path().join(".mediagitignore"), "topic.txt\n").unwrap();
+    fs::write(temp_dir.path().join("topic.txt"), "ignored dirty content").unwrap();
+
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("topic")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(temp_dir.path().join("topic.txt")).unwrap();
+    assert_eq!(content, "topic content");
+}

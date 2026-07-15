@@ -32,7 +32,6 @@ use super::super::repo::find_repo_root;
 #[derive(Parser, Debug)]
 #[command(after_help = "MODES:
     --soft   Only move HEAD
-    --mixed  Move HEAD and reset index (default)
     --hard   Move HEAD, reset index, and reset working tree
 
 EXAMPLES:

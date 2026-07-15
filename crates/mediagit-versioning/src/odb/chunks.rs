@@ -1409,14 +1409,23 @@ impl ObjectDatabase {
 
     /// List all pack files in the database
     ///
-    /// Returns a list of pack file keys
+    /// Returns a list of pack file keys. Matches both legacy `gc --repack`
+    /// packs (`packs/<id>.pack`) and Track F cloud packs (`packs/<pack_oid>`,
+    /// no extension — the server-side pack registry's JSONL manifests live
+    /// on local disk under `.mediagit/packs/`, never in this storage prefix,
+    /// so any non-`.pack` key here is a cloud-pack object). Both share the
+    /// same on-disk envelope (`PackReader` parses either), so a plain
+    /// extension filter previously excluded cloud packs from this search,
+    /// making `read_from_packs` unable to find chunk-delta base chunks that
+    /// landed only inside a cloud pack.
     async fn list_pack_files(&self) -> anyhow::Result<Vec<String>> {
         let pack_keys = self.storage.list_objects("packs/").await?;
 
-        // Filter for .pack files only
         let pack_files: Vec<String> = pack_keys
             .into_iter()
-            .filter(|key| key.ends_with(".pack"))
+            .filter(|key| {
+                key.ends_with(".pack") || !key.rsplit('/').next().unwrap_or("").contains('.')
+            })
             .collect();
 
         debug!(count = pack_files.len(), "Found pack files");
@@ -2370,8 +2379,40 @@ impl ObjectDatabase {
 
     /// Store raw compressed chunk data (no compression)
     ///
-    /// Used when receiving pre-compressed chunks from remote.
+    /// Used when receiving pre-compressed chunks from remote. Decompresses
+    /// the payload and verifies it hashes to the declared `chunk_id` BEFORE
+    /// persisting anything — a corrupted or tampered chunk from an
+    /// untrusted transport must never be admitted into the store under a
+    /// hash it doesn't match (QA-006b: corruption admitted here propagates
+    /// silently through every later reader). On mismatch the chunk is not
+    /// stored at all. The send fast path (`get_compressed_chunk` above) is
+    /// unaffected — this only guards the receive/write boundary.
     pub async fn put_compressed_chunk(&self, chunk_id: &Oid, data: &[u8]) -> anyhow::Result<()> {
+        let decompressed = if let Some(smart_comp) = &self.smart_compressor {
+            decompress_typed_blocking(smart_comp.clone(), data.to_vec())
+                .await
+                .map_err(|e| anyhow::anyhow!("Chunk {} failed to decompress: {}", chunk_id, e))?
+        } else {
+            match CompressionAlgorithm::detect(data) {
+                CompressionAlgorithm::None => data.to_vec(),
+                _ => decompress_blocking(self.compressor.clone(), data.to_vec())
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("Chunk {} failed to decompress: {}", chunk_id, e)
+                    })?,
+            }
+        };
+
+        let computed = Oid::hash(&decompressed);
+        if computed != *chunk_id {
+            anyhow::bail!(
+                "Chunk integrity check failed for chunk {}: expected {}, computed {} — refusing to store",
+                chunk_id,
+                chunk_id,
+                computed
+            );
+        }
+
         let chunk_key = format!("chunks/{}", chunk_id.to_hex());
         self.storage
             .put(&chunk_key, data)
@@ -2435,7 +2476,10 @@ impl ObjectDatabase {
     /// Reads each pack file once (to parse its trailing index) — cheap
     /// relative to a per-call full-pack scan, and never re-run once loaded
     /// except to extend it (`repack()` does this directly).
-    async fn ensure_pack_membership_loaded(&self) -> anyhow::Result<()> {
+    ///
+    /// `pub(super)`: also used by `odb::core`'s `exists()` and
+    /// `resolve_abbreviated_oid()` for pack-membership union semantics.
+    pub(super) async fn ensure_pack_membership_loaded(&self) -> anyhow::Result<()> {
         {
             let guard = self.pack_membership.read().await;
             if guard.is_some() {

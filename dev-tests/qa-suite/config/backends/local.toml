@@ -1,0 +1,6 @@
+# QA-suite template - local filesystem backend (no cloud credentials required).
+# Used for backend name "local": lets 05_branching-style remote checks (pull -r, fetch,
+# push --repair, etc.) run against a real mediagit-server without any cloud/MinIO dependency.
+[storage]
+backend = "filesystem"
+base_path = "{{BASE_PATH}}"

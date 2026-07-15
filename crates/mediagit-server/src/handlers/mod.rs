@@ -27,8 +27,8 @@ use mediagit_protocol::{
 use mediagit_security::auth::AuthUser;
 use mediagit_storage::{AzureBackend, GcsBackend, LocalBackend, MinIOBackend, StorageBackend};
 use mediagit_versioning::{
-    resolve_revision, Commit, LcaFinder, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Reflog,
-    ReflogEntry, StreamingPackWriter, Tag, Tree,
+    resolve_revision, Commit, FileMode, LcaFinder, ObjectDatabase, ObjectType, Oid, Ref,
+    RefDatabase, Reflog, ReflogEntry, StreamingPackWriter, Tag, Tree, TreeEntry,
 };
 use std::path::Path as StdPath;
 use std::sync::Arc;
@@ -573,7 +573,22 @@ fn validate_file_path(path: &str) -> Result<(), StatusCode> {
     Ok(())
 }
 
-/// Walk the commit tree to resolve a file path to its blob OID.
+/// Normalize a `/`-joined path for flat-tree lookups: collapses empty
+/// segments (leading/trailing/duplicate slashes) so `"a//b/"` and `"a/b"`
+/// key the same tree entry.
+fn normalize_flat_path(path: &str) -> String {
+    path.split('/')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Resolve a file path to its blob OID.
+///
+/// Commits build a single-level (flat) tree keyed by full relative path
+/// (see `commit.rs`); no nested `Directory` entries are ever produced, so
+/// this is a direct key lookup rather than a per-component subtree walk.
+// ponytail: flat-tree lookup. Upgrade path: nested trees, if ever adopted.
 async fn resolve_path_to_blob(
     odb: &ObjectDatabase,
     refdb: &RefDatabase,
@@ -591,38 +606,40 @@ async fn resolve_path_to_blob(
     let commit =
         Commit::deserialize(&commit_data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let mut current_oid = commit.tree;
-    let components: Vec<&str> = file_path.split('/').filter(|s| !s.is_empty()).collect();
-    if components.is_empty() {
+    let tree_data = odb
+        .read(&commit.tree)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    let tree = Tree::deserialize(&tree_data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let key = normalize_flat_path(file_path);
+    if key.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
-
-    for (i, component) in components.iter().enumerate() {
-        let tree_data = odb
-            .read(&current_oid)
-            .await
-            .map_err(|_| StatusCode::NOT_FOUND)?;
-        let tree = Tree::deserialize(&tree_data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let entry = tree.entries.get(*component).ok_or(StatusCode::NOT_FOUND)?;
-
-        if i == components.len() - 1 {
-            if entry.is_tree() {
-                // Path points to a directory, not a file
-                return Err(StatusCode::BAD_REQUEST);
-            }
-            return Ok(entry.oid);
-        } else {
-            if !entry.is_tree() {
-                return Err(StatusCode::NOT_FOUND);
-            }
-            current_oid = entry.oid;
-        }
+    let entry = tree
+        .entries
+        .get(key.as_str())
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if entry.is_tree() {
+        // Path points to a directory, not a file
+        return Err(StatusCode::BAD_REQUEST);
     }
-    Err(StatusCode::NOT_FOUND)
+    Ok(entry.oid)
 }
 
-/// Walk the commit tree to resolve a directory path to its Tree object.
-/// Empty `dir_path` returns the root tree.
+/// Resolve a directory path to a synthesized Tree listing its immediate
+/// children. Empty `dir_path` lists the root.
+///
+/// Commits build a single-level (flat) tree keyed by full relative path
+/// (see `commit.rs`), so there is no real subtree object to walk to for a
+/// "directory" — instead this scans the BTreeMap's sorted key range
+/// starting at the path prefix and stops as soon as a key no longer starts
+/// with it (cheap prefix scan, not a full-table scan), synthesizing one
+/// entry per immediate child: a plain segment is a file entry (copied
+/// as-is), a segment followed by `/` collapses to a deduplicated directory
+/// entry.
+// ponytail: flat-tree prefix scan. Upgrade path: nested trees, if ever
+// adopted — this whole function goes away in favor of a plain tree read.
 async fn resolve_path_to_tree(
     odb: &ObjectDatabase,
     refdb: &RefDatabase,
@@ -640,28 +657,48 @@ async fn resolve_path_to_tree(
     let commit =
         Commit::deserialize(&commit_data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let mut current_oid = commit.tree;
-    let components: Vec<&str> = dir_path.split('/').filter(|s| !s.is_empty()).collect();
-
-    for component in &components {
-        let tree_data = odb
-            .read(&current_oid)
-            .await
-            .map_err(|_| StatusCode::NOT_FOUND)?;
-        let tree = Tree::deserialize(&tree_data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let entry = tree.entries.get(*component).ok_or(StatusCode::NOT_FOUND)?;
-        if !entry.is_tree() {
-            return Err(StatusCode::NOT_FOUND);
-        }
-        current_oid = entry.oid;
-    }
-
-    let tree_data = odb
-        .read(&current_oid)
+    let root_data = odb
+        .read(&commit.tree)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
-    let tree = Tree::deserialize(&tree_data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok((commit_oid, tree))
+    let root_tree = Tree::deserialize(&root_data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let prefix = normalize_flat_path(dir_path);
+    let scan_prefix = if prefix.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", prefix)
+    };
+
+    let mut listing = Tree::new();
+    let mut seen_dirs = std::collections::HashSet::new();
+    let mut any_match = prefix.is_empty();
+    for (key, entry) in root_tree.entries.range(scan_prefix.clone()..) {
+        let Some(rest) = key.strip_prefix(scan_prefix.as_str()) else {
+            break;
+        };
+        any_match = true;
+        match rest.split_once('/') {
+            Some((dir, _)) => {
+                if seen_dirs.insert(dir.to_string()) {
+                    let dir_full_path = format!("{}{}", scan_prefix, dir);
+                    listing.add_entry(TreeEntry::new(
+                        dir.to_string(),
+                        FileMode::Directory,
+                        Oid::hash(dir_full_path.as_bytes()),
+                    ));
+                }
+            }
+            None => {
+                listing.add_entry(TreeEntry::new(rest.to_string(), entry.mode, entry.oid));
+            }
+        }
+    }
+    if !any_match {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    Ok((commit_oid, listing))
 }
 
 /// Shared logic for tree listing (used by both `list_tree` and `list_tree_root`)

@@ -23,6 +23,12 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// True when a path is a leftover `::stageN` merge-conflict key. These are
+/// write-only debris (no reader anywhere) and must never reach a committed tree.
+pub fn is_stage_debris_key(path: &str) -> bool {
+    path.ends_with("::stage1") || path.ends_with("::stage2") || path.ends_with("::stage3")
+}
+
 /// An entry in the staging area index
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IndexEntry {

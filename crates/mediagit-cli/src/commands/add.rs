@@ -668,10 +668,20 @@ impl AddCmd {
 
         if !self.quiet {
             if added_count > 0 {
-                output::success(&format!("Staged {} file(s)", added_count));
+                let msg = if self.dry_run {
+                    format!("Would stage {} file(s)", added_count)
+                } else {
+                    format!("Staged {} file(s)", added_count)
+                };
+                output::success(&msg);
             }
             if deleted_count > 0 {
-                output::success(&format!("Staged {} deletion(s)", deleted_count));
+                let msg = if self.dry_run {
+                    format!("Would stage {} deletion(s)", deleted_count)
+                } else {
+                    format!("Staged {} deletion(s)", deleted_count)
+                };
+                output::success(&msg);
             }
             if skipped_count > 0 && self.verbose {
                 output::info(&format!("Skipped {} unchanged file(s)", skipped_count));

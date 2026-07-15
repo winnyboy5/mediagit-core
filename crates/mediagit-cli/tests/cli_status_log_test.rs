@@ -158,6 +158,43 @@ fn test_status_porcelain() {
 }
 
 #[test]
+fn test_status_porcelain_no_emoji() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+
+    fs::write(temp_dir.path().join("file.txt"), "Content").unwrap();
+
+    let output = mediagit()
+        .arg("status")
+        .arg("--porcelain")
+        .current_dir(temp_dir.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "porcelain status should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Verify first line exists and contains no emoji characters
+    if !stdout.is_empty() {
+        let first_line = stdout.lines().next().unwrap_or("");
+
+        // Common emoji indicators (looser check that catches most common emojis)
+        // Porcelain format should be: "A  file.txt" or "M  file.txt", etc.
+        // No decorative headers or emoji should be present
+        assert!(
+            !first_line.contains("✓")
+                && !first_line.contains("✗")
+                && !first_line.contains("→")
+                && !first_line.contains("⚠")
+                && !first_line.contains("Repository Status"),
+            "porcelain first line should not contain emoji or decorative headers: {}",
+            first_line
+        );
+    }
+}
+
+#[test]
 fn test_status_branch() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());

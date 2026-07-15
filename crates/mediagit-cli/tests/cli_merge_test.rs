@@ -446,3 +446,91 @@ fn test_merge_verbose() {
         .assert()
         .success();
 }
+
+// ============================================================================
+// QA-002 regression: `merge --continue-merge` must not leave `::stageN`
+// conflict-index debris in the committed tree, and a later branch switch
+// must not try to materialize a `file.bin::stage1`-style colon path (illegal
+// on Windows, os error 123).
+// ============================================================================
+
+#[test]
+fn test_merge_continue_purges_stage_debris_and_branch_switch_round_trips() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+
+    // Base commit on main.
+    add_and_commit(temp_dir.path(), "file.bin", "base content", "base");
+
+    // Diverge on `side`.
+    create_and_switch_branch(temp_dir.path(), "side");
+    add_and_commit(temp_dir.path(), "file.bin", "side content", "side change");
+
+    // Diverge differently on `main` (real 3-way conflict, common base present).
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("main")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    add_and_commit(temp_dir.path(), "file.bin", "main content", "main change");
+
+    // Merging `side` into `main` must conflict.
+    mediagit()
+        .arg("merge")
+        .arg("side")
+        .current_dir(temp_dir.path())
+        .assert()
+        .failure();
+
+    // Resolve and continue the merge.
+    fs::write(temp_dir.path().join("file.bin"), "resolved content").unwrap();
+    mediagit()
+        .arg("add")
+        .arg("file.bin")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("merge")
+        .arg("--continue")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+
+    // The committed merge tree must not contain any `::stageN` debris paths.
+    let show = mediagit()
+        .arg("show")
+        .arg("HEAD")
+        .current_dir(temp_dir.path())
+        .output()
+        .unwrap();
+    let show_text = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        !show_text.contains("::stage"),
+        "committed tree must not contain stage-debris entries: {show_text}"
+    );
+
+    // Branch-switch round trip: away to `side` (no debris in its tree), then
+    // back to `main` (the merge commit's tree). Pre-fix this failed with
+    // "os error 123" trying to materialize `file.bin::stage1/2`.
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("side")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("main")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+
+    assert!(temp_dir.path().join("file.bin").exists());
+    assert!(!temp_dir.path().join("file.bin::stage1").exists());
+    assert!(!temp_dir.path().join("file.bin::stage2").exists());
+}
