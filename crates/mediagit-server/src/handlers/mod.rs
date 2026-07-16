@@ -39,11 +39,13 @@ use crate::state::{AppState, PackLoc};
 
 pub(crate) mod browse;
 pub(crate) mod chunks;
+pub(crate) mod locks;
 pub(crate) mod repo;
 pub(crate) mod transfer;
 
 pub use browse::*;
 pub use chunks::*;
+pub use locks::*;
 pub use repo::*;
 pub use transfer::*;
 

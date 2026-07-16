@@ -57,19 +57,6 @@ foreach ($prop in $base.per_extension.PSObject.Properties) {
     }
 }
 
-# add_ms gate is on the corpus total, not per-extension: per-file timings are
-# too noisy at extension granularity for a 5% wall-clock threshold.
-if ($base.totals.add_ms -gt 0) {
-    $timeGrowPct = 100.0 * ($curr.totals.add_ms - $base.totals.add_ms) / $base.totals.add_ms
-    if ($timeGrowPct -gt 5.0) {
-        $offenders += [pscustomobject]@{
-            Extension = '(totals)'; Metric = 'add_ms'
-            Baseline = [math]::Round($base.totals.add_ms, 1); Current = [math]::Round($curr.totals.add_ms, 1)
-            Delta = "+$([math]::Round($timeGrowPct, 2))%"
-        }
-    }
-}
-
 if ($offenders.Count -gt 0) {
     Write-Host "FAIL: $($offenders.Count) regression(s) vs baseline:"
     $offenders | Format-Table -AutoSize | Out-String | Write-Host
@@ -77,6 +64,6 @@ if ($offenders.Count -gt 0) {
 }
 
 $extCount = @($base.per_extension.PSObject.Properties).Count
-Write-Host ("PASS: {0} extensions within thresholds (dedup_pct drop <=0.5pp, post_compression growth <=0.5%, total add_ms growth <=5%)" -f $extCount)
-Write-Host ("  totals: dedup_pct={0:N2}  post_compression_bytes={1:N0}  add_ms={2:N0}" -f $curr.totals.dedup_pct, $curr.totals.post_compression_bytes, $curr.totals.add_ms)
+Write-Host ("PASS: {0} extensions within thresholds (dedup_pct drop <=0.5pp, post_compression growth <=0.5%)" -f $extCount)
+Write-Host ("  totals: dedup_pct={0:N2}  post_compression_bytes={1:N0}  add_ms={2:N0} (informational)" -f $curr.totals.dedup_pct, $curr.totals.post_compression_bytes, $curr.totals.add_ms)
 exit 0

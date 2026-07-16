@@ -113,6 +113,23 @@ async fn main() -> Result<()> {
         rl_state,
     );
 
+    // P0-4: refuse to bind a non-loopback address with auth disabled — that's
+    // an open server on the network with zero credentials. Loopback-only binds
+    // are still allowed (matches today's local-dev default). Escape hatch for
+    // operators who really want this: MEDIAGIT_ALLOW_INSECURE_BIND=1.
+    if !config.enable_auth
+        && !is_loopback_host(&config.host)
+        && std::env::var("MEDIAGIT_ALLOW_INSECURE_BIND").as_deref() != Ok("1")
+    {
+        anyhow::bail!(
+            "refusing to start: host '{}' is not loopback-only and `enable_auth` is false \
+             in the server config (config keys: enable_auth, host). Either set `enable_auth = true` \
+             (and configure `jwt_secret`), bind to 127.0.0.1/localhost, or set \
+             MEDIAGIT_ALLOW_INSECURE_BIND=1 to override at your own risk.",
+            config.host
+        );
+    }
+
     // Create repos directory if it doesn't exist
     std::fs::create_dir_all(&config.repos_dir)?;
     tracing::info!("Repositories directory: {:?}", config.repos_dir);
@@ -134,6 +151,45 @@ async fn main() -> Result<()> {
                 .with_presigned_ttl(config.presigned_url_ttl_seconds),
         )
     };
+
+    // P1-1: optional Prometheus /metrics endpoint on a separate listener, off
+    // by default. Set MEDIAGIT_METRICS_ADDR=host:port to enable (e.g.
+    // 127.0.0.1:9090). Pure wiring of the existing mediagit-metrics crate —
+    // no metric-recording calls are added to request handlers here.
+    if let Ok(metrics_addr) = std::env::var("MEDIAGIT_METRICS_ADDR") {
+        match metrics_addr.rsplit_once(':') {
+            Some((bind_address, port_str)) if port_str.parse::<u16>().is_ok() => {
+                let port: u16 = port_str.parse().expect("checked above");
+                let bind_address = bind_address.to_string();
+                match mediagit_metrics::MetricsRegistry::new() {
+                    Ok(registry) => {
+                        let metrics_config = mediagit_metrics::MetricsConfig {
+                            port,
+                            enabled: true,
+                            bind_address,
+                        };
+                        tracing::info!("Metrics endpoint ENABLED on {}", metrics_addr);
+                        let server =
+                            mediagit_metrics::MetricsServer::with_config(registry, metrics_config);
+                        tokio::spawn(async move {
+                            if let Err(e) = server.serve().await {
+                                tracing::error!("Metrics server error: {}", e);
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to create metrics registry: {}", e);
+                    }
+                }
+            }
+            _ => {
+                tracing::error!(
+                    "MEDIAGIT_METRICS_ADDR='{}' is not a valid host:port address; metrics endpoint not started",
+                    metrics_addr
+                );
+            }
+        }
+    }
 
     // Build router with optional rate limiting
     let (app, _cleanup_task) = if config.enable_rate_limiting {
@@ -188,15 +244,24 @@ async fn main() -> Result<()> {
         // Spawn HTTP server task
         let http_server = tokio::spawn(async move {
             let listener = tokio::net::TcpListener::bind(&http_bind_addr).await?;
-            axum::serve(listener, app).await
+            axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown_signal())
+                .await
         });
 
         // Spawn HTTPS server task
+        let https_handle = axum_server::Handle::new();
+        let https_shutdown_handle = https_handle.clone();
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            https_shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
+        });
         let https_server = tokio::spawn(async move {
             let addr: std::net::SocketAddr = https_bind_addr
                 .parse()
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
             axum_server::bind_rustls(addr, rustls_config)
+                .handle(https_handle)
                 .serve(https_app.into_make_service())
                 .await
         });
@@ -216,10 +281,52 @@ async fn main() -> Result<()> {
         tracing::info!("Press Ctrl+C to stop");
 
         let listener = tokio::net::TcpListener::bind(&http_bind_addr).await?;
-        axum::serve(listener, app).await?;
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await?;
     }
 
     Ok(())
+}
+
+/// Check whether `host` only ever resolves to the local machine (loopback).
+/// Used to gate the P0-4 insecure-bind refusal: a loopback bind with auth
+/// disabled is still local-only and safe for dev; anything else (0.0.0.0, a
+/// real interface IP, or a hostname) with auth off is an open server.
+fn is_loopback_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+/// Resolves when the process receives Ctrl+C (all platforms) or SIGTERM
+/// (unix only). Used to drive `.with_graceful_shutdown(...)` so in-flight
+/// requests (e.g. a multi-GB chunk upload) finish instead of being hard-cut.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("Received Ctrl+C, starting graceful shutdown"),
+        _ = terminate => tracing::info!("Received SIGTERM, starting graceful shutdown"),
+    }
 }
 
 /// Build axum-server RustlsConfig from Certificate

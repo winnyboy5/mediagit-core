@@ -3608,6 +3608,7 @@ dependencies = [
  "governor",
  "mediagit-compression",
  "mediagit-config",
+ "mediagit-metrics",
  "mediagit-protocol",
  "mediagit-security",
  "mediagit-storage",

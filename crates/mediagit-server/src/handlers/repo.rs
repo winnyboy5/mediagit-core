@@ -716,8 +716,39 @@ pub async fn update_refs(
             None
         };
 
-        // Update the ref
         let new_oid = Oid::from_hex(&update.new_oid).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+        // B3: server-enforced file locking. Reject the push if any commit
+        // between the current tip (pre_write_oid) and new_oid touches a path
+        // locked by someone other than the pusher. check_push_locks
+        // short-circuits before any tree walk when the repo has zero locks.
+        let pusher = auth_user.as_ref().map(|u| u.user_id.as_str());
+        match crate::locks::check_push_locks(
+            &state,
+            &repo,
+            &repo_path,
+            &odb,
+            pre_write_oid,
+            new_oid,
+            pusher,
+        )
+        .await
+        {
+            Ok(Some(lock_error)) => {
+                tracing::warn!("Push to '{}' rejected: {}", update.name, lock_error);
+                results.push(RefUpdateResult {
+                    ref_name: update.name.clone(),
+                    success: false,
+                    error: Some(lock_error),
+                });
+                all_success = false;
+                continue;
+            }
+            Ok(None) => {}
+            Err(status) => return Err(status),
+        }
+
+        // Update the ref
         let ref_update = Ref::new_direct(update.name.clone(), new_oid);
 
         match refdb.write(&ref_update).await {
@@ -1000,6 +1031,81 @@ pub async fn complete_pack(
         "Pack manifest registered"
     );
     Ok(StatusCode::CREATED)
+}
+
+/// Remove chunk entries from a pack's persisted JSONL manifest and the
+/// in-memory pack_index (QA-013 A1). Used by `verify_chunk_integrity` when a
+/// packed chunk's content no longer matches its claimed hash — eviction lets
+/// subsequent locate/get calls fall through to a loose re-upload instead of
+/// repeatedly serving corrupt bytes from the pack.
+///
+/// No-op if the manifest file is missing; still drops any stale in-memory
+/// entries in that case.
+pub(crate) async fn evict_pack_entries(
+    state: &AppState,
+    repo_path: &std::path::Path,
+    repo: &str,
+    pack_oid: &str,
+    chunk_oids: &[String],
+) -> Result<(), StatusCode> {
+    let shard = if pack_oid.len() >= 2 {
+        &pack_oid[..2]
+    } else {
+        "00"
+    };
+    let manifest_path = repo_path
+        .join(".mediagit")
+        .join("packs")
+        .join(shard)
+        .join(format!("{}.jsonl", pack_oid));
+
+    // Hold the same write lock complete_pack uses so eviction can't race a
+    // concurrent complete_pack append (F9 concurrency guard).
+    let mut idx = state.pack_index.write().await;
+
+    let content = match tokio::fs::read_to_string(&manifest_path).await {
+        Ok(c) => c,
+        Err(_) => {
+            if let Some(repo_idx) = idx.get_mut(repo) {
+                for id in chunk_oids {
+                    repo_idx.remove(id);
+                }
+            }
+            return Ok(());
+        }
+    };
+
+    let evict_set: std::collections::HashSet<&str> =
+        chunk_oids.iter().map(|s| s.as_str()).collect();
+    let mut kept = String::new();
+    for line in content.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(entry) = serde_json::from_str::<PackIndexLine>(line) {
+            if evict_set.contains(entry.chunk_oid.as_str()) {
+                continue;
+            }
+        }
+        kept.push_str(line);
+        kept.push('\n');
+    }
+
+    let tmp_path = manifest_path.with_extension("jsonl.tmp");
+    tokio::fs::write(&tmp_path, kept.as_bytes())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    tokio::fs::rename(&tmp_path, &manifest_path)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if let Some(repo_idx) = idx.get_mut(repo) {
+        for id in chunk_oids {
+            repo_idx.remove(id);
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]

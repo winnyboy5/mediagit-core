@@ -19,12 +19,39 @@ function Write-QaRow([string]$Path, [string[]]$Header, [object[]]$Values) {
 
 # Run mediagit against a repo. Returns @{Exit; Sec; Out} - Out is combined stdout+stderr text.
 # Full output also appended to $QA.Logs\<Phase>-cmds.log for post-hoc digging.
+# Enforces $TimeoutSec: on timeout, kills process tree and returns exit 124.
 function Invoke-MG([string]$Repo, [string[]]$MgArgs, [string]$Phase = "misc", [int]$TimeoutSec = 600) {
   $sw = [Diagnostics.Stopwatch]::StartNew()
   $allArgs = if ($Repo) { @("-C", $Repo) + $MgArgs } else { $MgArgs }
-  $out = & $QA.MG @allArgs 2>&1 | Out-String
-  $code = $LASTEXITCODE
-  $sw.Stop()
+  # Quote each arg (A6 tests spaces/unicode paths); escape embedded quotes.
+  $argLine = ($allArgs | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join " "
+
+  $proc = New-Object System.Diagnostics.Process
+  $proc.StartInfo.FileName = $QA.MG
+  $proc.StartInfo.Arguments = $argLine
+  $proc.StartInfo.UseShellExecute = $false
+  $proc.StartInfo.RedirectStandardOutput = $true
+  $proc.StartInfo.RedirectStandardError = $true
+  $proc.StartInfo.CreateNoWindow = $true
+
+  $proc.Start() | Out-Null
+  # Threadpool drain: ReadToEnd-after-WaitForExit deadlocks once the child fills
+  # the pipe buffer; async tasks drain continuously without the PS event loop.
+  $outTask = $proc.StandardOutput.ReadToEndAsync()
+  $errTask = $proc.StandardError.ReadToEndAsync()
+
+  if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+    taskkill /T /F /PID $proc.Id 2>$null | Out-Null
+    $proc.WaitForExit() | Out-Null   # pipes close on kill; tasks then complete
+    $sw.Stop()
+    $out = $outTask.Result + $errTask.Result + "`n[TIMEOUT after $TimeoutSec seconds]"
+    $code = 124
+  } else {
+    $sw.Stop()
+    $out = $outTask.Result + $errTask.Result
+    $code = $proc.ExitCode
+  }
+
   $log = Join-Path $QA.Logs "$Phase-cmds.log"
   ("### mediagit {0}  (repo={1} exit={2} sec={3:n1})" -f ($MgArgs -join " "), $Repo, $code, $sw.Elapsed.TotalSeconds) | Add-Content $log
   $out | Add-Content $log

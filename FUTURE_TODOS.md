@@ -311,6 +311,23 @@ Adobe Illustrator `.ai` files are effectively an all-opaque edge case that defea
 with per-stream OID keying). **Do not attempt again** with the whole-file normalization
 approach for AI/PDF without first validating opaque-stream ratio on target files.
 
+> **Status 2026-07-16 (C1 measurement spike, `dev-tests/transform-spike/RESULTS.md`):**
+> Re-measured with a per-file 20%-opaque gate (the fix this post-mortem recommended).
+> Gate (+15pp savings AND ≥90% stream reproducibility) cleared by **no format**:
+> - **PNG is also ~100% opaque** — real-world PNG encoders are not bit-reproducible
+>   by flate2 even with the `zlib-rs` backend. Extends this post-mortem beyond AI.
+> - **flate2's default miniz_oxide backend gives 0% reproducibility on everything** —
+>   any future recompression work MUST use the `zlib-rs` feature.
+> - **ONNX contains no zlib streams** — out of scope for this transform class entirely.
+> - **Standard PDF** is the only directional positive (+8.5pp, 83.3% repro on a
+>   synthetic corpus) — below gate; revisit only with a real-world PDF corpus and a
+>   recompressor with zlib strategy control.
+> - `.ai` negative control reproduced the 2026-04-07 finding exactly (100% opaque).
+> - The ungated whole-file approach would have regressed PNG by −3.3pp — the failure
+>   mode generalizes; the per-file opaque gate correctly prevents it.
+>
+> **Decision:** reversible-inflate transform (C2) not shipped. DELTA-001 stays closed.
+
 ---
 
 ### 6. `mediagit download` CLI Subcommand

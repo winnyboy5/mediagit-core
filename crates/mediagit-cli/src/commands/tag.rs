@@ -92,9 +92,9 @@ pub struct ListOpts {
     #[arg(value_name = "PATTERN")]
     pub pattern: Option<String>,
 
-    /// Show verbose output (include commit info)
-    #[arg(short = 'n', long)]
-    pub verbose: bool,
+    /// Show commit info for each tag (git-style `-n`)
+    #[arg(short = 'n', long = "info")]
+    pub show_info: bool,
 
     /// Sort tags
     #[arg(long, value_name = "KEY", default_value = "refname")]
@@ -348,7 +348,7 @@ impl TagCmd {
         tags = self.sort_tags(tags, &opts.sort, opts.reverse);
 
         // Display tags
-        if opts.verbose {
+        if opts.show_info {
             self.list_verbose(&refdb, tags).await?;
         } else {
             self.list_simple(tags);
@@ -812,7 +812,7 @@ mod tests {
         let cmd = TagCmd {
             subcommand: TagSubcommand::List(ListOpts {
                 pattern: None,
-                verbose: false,
+                show_info: false,
                 sort: "refname".to_string(),
                 reverse: false,
             }),
@@ -839,7 +839,7 @@ mod tests {
         let cmd = TagCmd {
             subcommand: TagSubcommand::List(ListOpts {
                 pattern: Some("v1.*".to_string()),
-                verbose: false,
+                show_info: false,
                 sort: "refname".to_string(),
                 reverse: false,
             }),
@@ -945,7 +945,7 @@ mod tests {
         let cmd = TagCmd {
             subcommand: TagSubcommand::List(ListOpts {
                 pattern: None,
-                verbose: false,
+                show_info: false,
                 sort: "version".to_string(),
                 reverse: false,
             }),

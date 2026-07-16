@@ -187,37 +187,102 @@ impl ProtocolClient {
         Ok(r.missing)
     }
 
-    /// POST /:repo/chunks/verify-integrity — BLAKE3 re-hash of every stored chunk.
-    /// Only called when `MEDIAGIT_STRONG_VERIFY=1`. Returns chunk ids whose stored
-    /// content does not match their claimed hash.
+    /// POST /:repo/chunks/verify-integrity — BLAKE3 re-hash of every stored chunk
+    /// (loose or packed — the server falls through to the pack index on a loose
+    /// miss). Only called when `MEDIAGIT_STRONG_VERIFY=1` or by `repair_remote`.
+    /// Returns chunk ids whose stored content does not match their claimed hash.
+    ///
+    /// When `evict_invalid` is set, the server drops any invalid entry it finds
+    /// in a cloud pack from that pack's manifest so it isn't served again.
+    /// Requests are batched at 10k chunk ids per POST.
     pub(crate) async fn strong_verify_chunks(
         &self,
         chunk_ids: &[String],
+        evict_invalid: bool,
     ) -> anyhow::Result<Vec<String>> {
         #[derive(serde::Serialize)]
         struct Req<'a> {
             chunk_ids: &'a [String],
+            evict_invalid: bool,
         }
         #[derive(serde::Deserialize)]
         struct Resp {
             invalid: Vec<String>,
+            #[serde(default)]
+            #[allow(dead_code)]
+            evicted: Vec<String>,
         }
 
+        const BATCH_SIZE: usize = 10_000;
         let url = format!("{}/chunks/verify-integrity", self.base_url);
-        let resp = self
-            .client
-            .post(&url)
-            .json(&Req { chunk_ids })
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            anyhow::bail!("POST /chunks/verify-integrity returned {}", resp.status());
+        let mut invalid = Vec::new();
+        for batch in chunk_ids.chunks(BATCH_SIZE) {
+            let resp = self
+                .client
+                .post(&url)
+                .json(&Req {
+                    chunk_ids: batch,
+                    evict_invalid,
+                })
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                anyhow::bail!("POST /chunks/verify-integrity returned {}", resp.status());
+            }
+            let r = resp
+                .json::<Resp>()
+                .await
+                .context("parse /chunks/verify-integrity")?;
+            invalid.extend(r.invalid);
         }
-        let r = resp
-            .json::<Resp>()
-            .await
-            .context("parse /chunks/verify-integrity")?;
-        Ok(r.invalid)
+        Ok(invalid)
+    }
+
+    /// POST /:repo/objects/verify-integrity — read + BLAKE3 re-hash whole
+    /// objects (commits/trees/blobs) server-side. Companion to
+    /// `strong_verify_chunks` for blobs stored un-chunked, which the
+    /// chunk-manifest walk never covers. Same eviction + batching semantics.
+    pub(crate) async fn strong_verify_objects(
+        &self,
+        oids: &[String],
+        evict_invalid: bool,
+    ) -> anyhow::Result<Vec<String>> {
+        #[derive(serde::Serialize)]
+        struct Req<'a> {
+            oids: &'a [String],
+            evict_invalid: bool,
+        }
+        #[derive(serde::Deserialize)]
+        struct Resp {
+            invalid: Vec<String>,
+            #[serde(default)]
+            #[allow(dead_code)]
+            evicted: Vec<String>,
+        }
+
+        const BATCH_SIZE: usize = 10_000;
+        let url = format!("{}/objects/verify-integrity", self.base_url);
+        let mut invalid = Vec::new();
+        for batch in oids.chunks(BATCH_SIZE) {
+            let resp = self
+                .client
+                .post(&url)
+                .json(&Req {
+                    oids: batch,
+                    evict_invalid,
+                })
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                anyhow::bail!("POST /objects/verify-integrity returned {}", resp.status());
+            }
+            let r = resp
+                .json::<Resp>()
+                .await
+                .context("parse /objects/verify-integrity")?;
+            invalid.extend(r.invalid);
+        }
+        Ok(invalid)
     }
     /// Ask the server which of the given chunk IDs exist as chunk-deltas.
     ///

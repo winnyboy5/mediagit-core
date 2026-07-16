@@ -328,85 +328,85 @@ impl ProtocolClient {
         let pack_ids: Vec<String> = by_pack.keys().cloned().collect();
         let presign_map = self.request_pack_download_urls(&pack_ids).await;
 
-        let tasks: Vec<_> = by_pack
+        // No presigned GET (e.g. GCS + ADC): batch-fetch via the server proxy
+        // instead of dropping the pack and falling all the way back to one
+        // per-chunk HTTP round-trip each. MEDIAGIT_PACK_PROXY_BATCH=0 restores
+        // the old drop-and-per-chunk-fallback behavior.
+        let use_batch_proxy = std::env::var("MEDIAGIT_PACK_PROXY_BATCH")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+
+        enum PackFetchTask {
+            Presigned {
+                chunks: Vec<(String, u64, u32)>,
+                url: String,
+                pack_oid: String,
+            },
+            Batch {
+                chunks: Vec<(String, u64, u32)>,
+                pack_oid: String,
+            },
+        }
+
+        let tasks: Vec<PackFetchTask> = by_pack
             .into_iter()
             .filter_map(|(pack_oid, mut chunks)| {
-                let url = presign_map
-                    .get(&pack_oid)
-                    .and_then(|o| o.as_ref())
-                    .map(|p| p.url.clone())?;
                 chunks.sort_unstable_by_key(|(_, off, _)| *off);
-                Some((chunks, url, pack_oid))
+                match presign_map.get(&pack_oid).and_then(|o| o.as_ref()) {
+                    Some(p) => Some(PackFetchTask::Presigned {
+                        chunks,
+                        url: p.url.clone(),
+                        pack_oid,
+                    }),
+                    None if use_batch_proxy => Some(PackFetchTask::Batch { chunks, pack_oid }),
+                    None => None,
+                }
             })
             .collect();
 
         let client = self.client.clone();
+        let base_url = self.base_url.clone();
         // Clone odb so it can move into concurrent async tasks (all fields are Arc-wrapped).
         let odb = odb.clone();
 
         let written_set: std::collections::HashSet<Oid> = futures::stream::iter(tasks)
-            .map(|(chunks, url, pack_oid)| {
+            .map(|task| {
                 let client = client.clone();
+                let base_url = base_url.clone();
                 let cmg = coalesce_max_gap;
                 let cmb = coalesce_max_bytes;
                 let comp_hashes = std::sync::Arc::clone(&compressed_hashes);
                 let odb = odb.clone();
                 let progress = on_progress.clone();
                 async move {
-                    let ranges = coalesce_chunk_ranges(&chunks, cmg, cmb);
-                    let mut out: Vec<(Oid, Vec<u8>)> = Vec::new();
-
-                    for (range_start, range_end) in ranges {
-                        let hdr = format!("bytes={}-{}", range_start, range_end.saturating_sub(1));
-                        let resp = client
-                            .get(&url)
-                            .header("Range", &hdr)
-                            .send()
-                            .await
-                            .with_context(|| format!("Range-GET {} range {}", pack_oid, hdr))?;
-
-                        let status = resp.status().as_u16();
-                        if status != 200 && status != 206 {
-                            anyhow::bail!("Range-GET returned {} for pack {}", status, pack_oid);
+                    let out: Vec<(Oid, Vec<u8>)> = match task {
+                        PackFetchTask::Presigned {
+                            chunks,
+                            url,
+                            pack_oid,
+                        } => {
+                            fetch_pack_slices_presigned(
+                                &client,
+                                &url,
+                                &pack_oid,
+                                &chunks,
+                                cmg,
+                                cmb,
+                                &comp_hashes,
+                            )
+                            .await?
                         }
-
-                        let body = resp.bytes().await.context("read Range-GET body")?;
-
-                        for (hex, off, len) in &chunks {
-                            if *off < range_start || *off + *len as u64 > range_end {
-                                continue;
-                            }
-                            let rel = (*off - range_start) as usize;
-                            let slice_end = rel + *len as usize;
-                            if slice_end > body.len() || *len < 5 {
-                                tracing::warn!(chunk = %hex, "pack slice bounds error");
-                                continue;
-                            }
-                            // Pack object layout: type(1) + size(4) + data
-                            let data = &body[rel + 5..slice_end];
-
-                            let oid = match Oid::from_hex(hex) {
-                                Ok(o) => o,
-                                Err(_) => continue,
-                            };
-
-                            // Per-slice compressed-hash verify when manifest includes it.
-                            if let Some(expected) = comp_hashes.get(hex.as_str()) {
-                                let computed = Oid::hash(data).to_hex();
-                                if &computed != expected {
-                                    tracing::warn!(
-                                        chunk = %hex,
-                                        expected = %expected,
-                                        computed = %computed,
-                                        "compressed-hash mismatch on pack slice; skipping"
-                                    );
-                                    continue;
-                                }
-                            }
-
-                            out.push((oid, data.to_vec()));
+                        PackFetchTask::Batch { chunks, pack_oid } => {
+                            fetch_pack_slices_batch(
+                                &client,
+                                &base_url,
+                                &pack_oid,
+                                &chunks,
+                                &comp_hashes,
+                            )
+                            .await?
                         }
-                    }
+                    };
                     // Write to ODB and report progress as each chunk arrives, without
                     // buffering all pack results first (eliminates the collect().await pattern).
                     let mut written: Vec<Oid> = Vec::new();
@@ -446,5 +446,251 @@ impl ProtocolClient {
             );
         }
         Ok(written_set)
+    }
+}
+
+/// Fetch requested (chunk_oid, offset, length) slices out of one pack via
+/// presigned Range-GET requests directly against cloud storage.
+///
+/// Returns the (Oid, compressed_bytes) pairs that passed bounds + per-slice
+/// compressed-hash verification. Entries that fail either check are silently
+/// skipped (logged), not errored — the caller falls back to the per-chunk
+/// path for anything missing from the returned set.
+#[allow(clippy::too_many_arguments)]
+async fn fetch_pack_slices_presigned(
+    client: &reqwest::Client,
+    url: &str,
+    pack_oid: &str,
+    chunks: &[(String, u64, u32)],
+    coalesce_max_gap: u64,
+    coalesce_max_bytes: u64,
+    comp_hashes: &std::collections::HashMap<String, String>,
+) -> Result<Vec<(Oid, Vec<u8>)>> {
+    let ranges = coalesce_chunk_ranges(chunks, coalesce_max_gap, coalesce_max_bytes);
+    let mut out: Vec<(Oid, Vec<u8>)> = Vec::new();
+
+    for (range_start, range_end) in ranges {
+        let hdr = format!("bytes={}-{}", range_start, range_end.saturating_sub(1));
+        let resp = client
+            .get(url)
+            .header("Range", &hdr)
+            .send()
+            .await
+            .with_context(|| format!("Range-GET {} range {}", pack_oid, hdr))?;
+
+        let status = resp.status().as_u16();
+        if status != 200 && status != 206 {
+            anyhow::bail!("Range-GET returned {} for pack {}", status, pack_oid);
+        }
+
+        let body = resp.bytes().await.context("read Range-GET body")?;
+
+        for (hex, off, len) in chunks {
+            if *off < range_start || *off + *len as u64 > range_end {
+                continue;
+            }
+            let rel = (*off - range_start) as usize;
+            let slice_end = rel + *len as usize;
+            if slice_end > body.len() || *len < 5 {
+                tracing::warn!(chunk = %hex, "pack slice bounds error");
+                continue;
+            }
+            // Pack object layout: type(1) + size(4) + data
+            let data = &body[rel + 5..slice_end];
+
+            let oid = match Oid::from_hex(hex) {
+                Ok(o) => o,
+                Err(_) => continue,
+            };
+
+            // Per-slice compressed-hash verify when manifest includes it.
+            if let Some(expected) = comp_hashes.get(hex.as_str()) {
+                let computed = Oid::hash(data).to_hex();
+                if &computed != expected {
+                    tracing::warn!(
+                        chunk = %hex,
+                        expected = %expected,
+                        computed = %computed,
+                        "compressed-hash mismatch on pack slice; skipping"
+                    );
+                    continue;
+                }
+            }
+
+            out.push((oid, data.to_vec()));
+        }
+    }
+    Ok(out)
+}
+
+/// Fetch requested (chunk_oid, offset, length) slices out of one pack via
+/// the server-proxied `POST /packs/batch-get` endpoint (D2) — used when no
+/// presigned GET URL is available (e.g. GCS + ADC), so pulling a pack's
+/// worth of chunks costs one request instead of one per chunk.
+///
+/// Frame format matches `batch_get_pack_chunks` on the server:
+/// `[chunk_oid: 32 raw bytes][len: u32 LE][data: len bytes]`, one frame per
+/// requested entry in request order. A zero-length frame is a miss (entry
+/// not found in the server's pack index) and is skipped here, falling
+/// through to the per-chunk path same as a presigned-slice verify failure.
+///
+/// On HTTP 404 (server predates this endpoint) returns `Ok(vec![])` rather
+/// than erroring, so only this pack's chunks fall back to per-chunk —
+/// other packs in the same pull are unaffected.
+async fn fetch_pack_slices_batch(
+    client: &reqwest::Client,
+    base_url: &str,
+    pack_oid: &str,
+    chunks: &[(String, u64, u32)],
+    comp_hashes: &std::collections::HashMap<String, String>,
+) -> Result<Vec<(Oid, Vec<u8>)>> {
+    #[derive(serde::Serialize)]
+    struct Entry<'a> {
+        chunk_oid: &'a str,
+        offset: u64,
+        length: u32,
+    }
+    #[derive(serde::Serialize)]
+    struct Req<'a> {
+        pack_oid: &'a str,
+        entries: Vec<Entry<'a>>,
+    }
+
+    let entries: Vec<Entry> = chunks
+        .iter()
+        .map(|(hex, off, len)| Entry {
+            chunk_oid: hex,
+            offset: *off,
+            length: *len,
+        })
+        .collect();
+
+    let url = format!("{}/packs/batch-get", base_url);
+    let resp = client
+        .post(&url)
+        .json(&Req { pack_oid, entries })
+        .send()
+        .await
+        .with_context(|| format!("POST /packs/batch-get for pack {}", pack_oid))?;
+
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        tracing::debug!(pack = %pack_oid, "batch-get 404 (old server); pack falls back to per-chunk");
+        return Ok(Vec::new());
+    }
+    if !resp.status().is_success() {
+        anyhow::bail!("batch-get returned {} for pack {}", resp.status(), pack_oid);
+    }
+
+    let body = resp.bytes().await.context("read batch-get body")?;
+    let frames = parse_batch_get_frames(&body, pack_oid);
+
+    let mut out: Vec<(Oid, Vec<u8>)> = Vec::new();
+    for (oid, data) in frames {
+        if data.is_empty() {
+            // Miss frame — entry not in server's pack index. Falls through
+            // to per-chunk fallback for this one chunk.
+            continue;
+        }
+        let hex = oid.to_hex();
+        if let Some(expected) = comp_hashes.get(hex.as_str()) {
+            let computed = Oid::hash(&data).to_hex();
+            if &computed != expected {
+                tracing::warn!(
+                    chunk = %hex,
+                    expected = %expected,
+                    computed = %computed,
+                    "compressed-hash mismatch on batch-get slice; skipping"
+                );
+                continue;
+            }
+        }
+        out.push((oid, data));
+    }
+    Ok(out)
+}
+
+/// Parse a batch-get response body into `(chunk_oid, data)` frames.
+///
+/// Frame format: `[chunk_oid: 32 raw bytes][len: u32 LE][data: len bytes]`,
+/// repeated. A frame with `data` empty is a valid "miss" marker (caller
+/// decides how to treat it). Stops (without erroring) on a truncated
+/// trailing frame — the whole body is untrusted network input.
+fn parse_batch_get_frames(body: &[u8], pack_oid: &str) -> Vec<(Oid, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos + 36 <= body.len() {
+        let oid_bytes: [u8; 32] = body[pos..pos + 32]
+            .try_into()
+            .expect("slice is exactly 32 bytes");
+        let oid = Oid::from_bytes(oid_bytes);
+        pos += 32;
+        let len = u32::from_le_bytes(
+            body[pos..pos + 4]
+                .try_into()
+                .expect("slice is exactly 4 bytes"),
+        ) as usize;
+        pos += 4;
+        if pos + len > body.len() {
+            tracing::warn!(pack = %pack_oid, "batch-get response truncated mid-frame");
+            break;
+        }
+        let data = body[pos..pos + len].to_vec();
+        pos += len;
+        out.push((oid, data));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(oid: &Oid, data: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(oid.as_bytes());
+        buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        buf.extend_from_slice(data);
+        buf
+    }
+
+    #[test]
+    fn parses_multiple_frames_including_a_miss() {
+        let oid_a = Oid::hash(b"chunk a");
+        let oid_b = Oid::hash(b"chunk b");
+        let mut body = Vec::new();
+        body.extend_from_slice(&frame(&oid_a, b"payload-a"));
+        body.extend_from_slice(&frame(&oid_b, &[])); // miss frame
+
+        let frames = parse_batch_get_frames(&body, "pack1");
+
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].0, oid_a);
+        assert_eq!(frames[0].1, b"payload-a");
+        assert_eq!(frames[1].0, oid_b);
+        assert!(frames[1].1.is_empty());
+    }
+
+    #[test]
+    fn stops_cleanly_on_truncated_trailing_frame() {
+        let oid_a = Oid::hash(b"chunk a");
+        let mut body = frame(&oid_a, b"full payload");
+        // Append a truncated second frame: valid header, claims 100 bytes,
+        // but the body ends after only a few.
+        let oid_b = Oid::hash(b"chunk b");
+        body.extend_from_slice(oid_b.as_bytes());
+        body.extend_from_slice(&100u32.to_le_bytes());
+        body.extend_from_slice(b"short");
+
+        let frames = parse_batch_get_frames(&body, "pack1");
+
+        // Only the complete first frame is returned; no panic on the truncated tail.
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].0, oid_a);
+        assert_eq!(frames[0].1, b"full payload");
+    }
+
+    #[test]
+    fn empty_body_parses_to_no_frames() {
+        assert!(parse_batch_get_frames(&[], "pack1").is_empty());
     }
 }

@@ -102,7 +102,7 @@ branch protect	--require-reviews	no	OK
 branch protect	--unprotect	no	OK
 tag	-(bare invocation)	no	OK
 tag list	-(bare invocation)	no	OK
-tag list	-n,--verbose	no	ERRTEXT-EXIT0
+tag list	-n,--info	no	ERRTEXT-EXIT0
 tag list	--sort	yes	OK
 tag list	--reverse	no	OK
 tag create	-(bare invocation)	no	OK

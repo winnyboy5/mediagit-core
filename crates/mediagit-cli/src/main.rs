@@ -98,6 +98,9 @@ enum Commands {
     /// Manage tags
     Tag(TagCmd),
 
+    /// Manage server-enforced file locks
+    Lock(LockCmd),
+
     /// Merge branches
     Merge(MergeCmd),
 
@@ -252,6 +255,7 @@ fn preprocess_args(args: Vec<String>) -> Vec<String> {
                 &["list", "add", "remove", "rename", "show", "set-url", "help"][..],
                 "list",
             )),
+            "lock" => Some(("lock", &["create", "unlock", "list", "help"][..], "create")),
             _ => None,
         };
         if let Some((_cmd, known_subcmds, positional_action)) = default_action {
@@ -398,6 +402,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             let repo_path = std::env::current_dir()?;
             cmd.execute(repo_path).await
         }
+        Some(Commands::Lock(cmd)) => cmd.execute().await,
         Some(Commands::Merge(cmd)) => cmd.execute().await,
         Some(Commands::Rebase(cmd)) => cmd.execute().await,
         Some(Commands::CherryPick(cmd)) => cmd.execute().await,

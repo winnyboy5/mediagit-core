@@ -1202,14 +1202,14 @@ impl ProtocolClient {
 
             // Optional strong verify: decompress + BLAKE3 every chunk server-side.
             // Gated by MEDIAGIT_STRONG_VERIFY=1; endpoint unavailability is non-fatal.
-            // Skipped in pack mode — chunks live at packs/<oid>, not chunks/<hex>.
+            // Runs in pack mode too — the server consults the pack index on a
+            // loose miss, so packed chunks are pack-valid to verify.
             if std::env::var("MEDIAGIT_STRONG_VERIFY").as_deref() == Ok("1")
                 && !full_chunks.is_empty()
-                && !cloud_packs
             {
                 let hexes: Vec<String> = full_chunks.iter().map(|c| c.to_hex()).collect();
                 tracing::debug!(count = hexes.len(), "Running strong chunk integrity verify");
-                match self.strong_verify_chunks(&hexes).await {
+                match self.strong_verify_chunks(&hexes, false).await {
                     Ok(invalid) if !invalid.is_empty() => {
                         anyhow::bail!(
                             "Strong verify found {} chunk(s) with corrupted content: {:?}",
@@ -2259,15 +2259,39 @@ impl ProtocolClient {
             }
         }
 
-        if chunk_hexes.is_empty() {
-            return Ok(RepairReport::default());
-        }
-
-        let invalid = self.strong_verify_chunks(&chunk_hexes).await?;
-        let verified = chunk_hexes.len();
-
         let mut repaired = 0usize;
         let mut unrepairable = Vec::new();
+
+        // Phase 1: whole objects (commits/trees/un-chunked blobs). The chunk
+        // walk below never sees these — CHK20's poisoned blob was one.
+        let object_hexes: Vec<String> = objects.iter().map(|(oid, _)| oid.to_hex()).collect();
+        let invalid_objects = self.strong_verify_objects(&object_hexes, true).await?;
+        if !invalid_objects.is_empty() {
+            let invalid_set: HashSet<&str> = invalid_objects.iter().map(|s| s.as_str()).collect();
+            let to_reupload: Vec<(Oid, ObjectType)> = objects
+                .iter()
+                .filter(|(oid, _)| invalid_set.contains(oid.to_hex().as_str()))
+                .cloned()
+                .collect();
+            let n = to_reupload.len();
+            let (pack_data, _) = self.generate_pack(odb, to_reupload).await?;
+            match self.upload_pack(&pack_data).await {
+                Ok(()) => repaired += n,
+                Err(_) => unrepairable.extend(invalid_objects.iter().cloned()),
+            }
+        }
+
+        if chunk_hexes.is_empty() {
+            return Ok(RepairReport {
+                verified: object_hexes.len(),
+                repaired,
+                unrepairable,
+            });
+        }
+
+        let invalid = self.strong_verify_chunks(&chunk_hexes, true).await?;
+        let verified = object_hexes.len() + chunk_hexes.len();
+
         for hex in invalid {
             let oid = match Oid::from_hex(&hex) {
                 Ok(o) => o,

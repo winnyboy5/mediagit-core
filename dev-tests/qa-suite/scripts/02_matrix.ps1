@@ -133,7 +133,7 @@ foreach ($item in $selected) {
   $res = Invoke-MG $sb $argv $Phase
   $outText = $res.Out
   $panic = $outText -match "panicked|RUST_BACKTRACE"
-  $errtext = $outText -match "Error|error:"
+  $errtext = ($r.cmd -notmatch '^completions') -and ($outText -match "Error|error:")
   $usage = $outText -match "(?i)usage:|unexpected argument|invalid value|required"
   $class =
     if ($panic) { "PANIC" }

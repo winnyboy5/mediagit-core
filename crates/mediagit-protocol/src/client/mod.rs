@@ -210,10 +210,13 @@ pub(crate) fn http_pool_max() -> usize {
 }
 
 pub(crate) mod browse;
+pub(crate) mod locks;
 pub(crate) mod packs;
 pub(crate) mod pull;
 pub(crate) mod push;
 pub(crate) mod transfer;
+
+pub use locks::LockInfo;
 
 impl ProtocolClient {
     /// Create a new protocol client

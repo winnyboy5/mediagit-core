@@ -62,12 +62,6 @@ pub struct RegisterRequest {
     pub username: String,
     pub email: String,
     pub password: String,
-    #[serde(default = "default_role")]
-    pub role: Role,
-}
-
-fn default_role() -> Role {
-    Role::Write
 }
 
 /// User login request
@@ -175,7 +169,10 @@ pub async fn register_handler(
 
     // Create user with unique ID
     let user_id = uuid::Uuid::new_v4().to_string();
-    let user = User::new(user_id, req.username, req.email, req.role);
+    // Self-registration always creates a Write-role account; there is no
+    // client-controlled `role` field (P0-1: prevents an unauthenticated
+    // caller from minting an Admin account via the request body).
+    let user = User::new(user_id, req.username, req.email, Role::Write);
 
     // Register user
     match auth_service
@@ -376,7 +373,6 @@ mod tests {
             username: "testuser".to_string(),
             email: "test@example.com".to_string(),
             password: "password123".to_string(),
-            role: Role::Write,
         };
 
         let result = register_handler(State(Arc::clone(&auth_service)), Json(register_req)).await;
@@ -425,7 +421,6 @@ mod tests {
             username: "testuser".to_string(),
             email: "test@example.com".to_string(),
             password: "short".to_string(), // Too short
-            role: Role::Write,
         };
 
         let result = register_handler(State(auth_service), Json(register_req)).await;
@@ -444,7 +439,6 @@ mod tests {
             username: "testuser".to_string(),
             email: "test@example.com".to_string(),
             password: "password123".to_string(),
-            role: Role::Write,
         };
 
         let (_, auth_response) =

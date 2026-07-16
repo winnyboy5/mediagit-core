@@ -22,6 +22,8 @@ use mediagit_security::auth::{ApiKeyAuth, AuthLayer, AuthService, JwtAuth};
 use mediagit_storage::StorageBackend;
 use mediagit_versioning::ObjectDatabase;
 
+use crate::locks::LockRecord;
+
 /// Unique request ID generator
 static REQUEST_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -176,6 +178,11 @@ pub struct AppState {
     /// Populated from local JSONL on first locate hit; updated on complete_pack.
     pub pack_index: RwLock<HashMap<String, HashMap<String, PackLoc>>>,
 
+    /// Server-enforced file locks (Tracks B1-B3): repo -> path -> LockRecord.
+    /// Lazily loaded per repo from `.mediagit/locks.jsonl` on first access,
+    /// following the same double-checked pattern as `storage_backends`.
+    pub locks: RwLock<HashMap<String, HashMap<String, LockRecord>>>,
+
     /// Authentication layer (optional - can be disabled for development)
     pub auth_layer: Option<Arc<AuthLayer>>,
 
@@ -199,6 +206,7 @@ impl AppState {
             storage_backends: RwLock::new(HashMap::new()),
             odb_cache: RwLock::new(HashMap::new()),
             pack_index: RwLock::new(HashMap::new()),
+            locks: RwLock::new(HashMap::new()),
             auth_layer: None,
             auth_service: None,
             bitmap_hits: AtomicU64::new(0),
@@ -225,6 +233,7 @@ impl AppState {
             storage_backends: RwLock::new(HashMap::new()),
             odb_cache: RwLock::new(HashMap::new()),
             pack_index: RwLock::new(HashMap::new()),
+            locks: RwLock::new(HashMap::new()),
             auth_layer: Some(auth_layer),
             auth_service: Some(auth_service),
             bitmap_hits: AtomicU64::new(0),
@@ -247,6 +256,7 @@ impl AppState {
             storage_backends: RwLock::new(HashMap::new()),
             odb_cache: RwLock::new(HashMap::new()),
             pack_index: RwLock::new(HashMap::new()),
+            locks: RwLock::new(HashMap::new()),
             auth_layer: Some(auth_layer),
             auth_service: Some(auth_service),
             bitmap_hits: AtomicU64::new(0),

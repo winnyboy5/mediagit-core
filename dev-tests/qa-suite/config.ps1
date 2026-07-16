@@ -28,3 +28,7 @@ $QA.Reports   = Join-Path $QA.Root ("reports\" + $QA.RunId)
 foreach ($d in @($QA.Work, $QA.Fixtures, $QA.Logs, $QA.Reports)) {
   if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
 }
+
+# Prevent editor hangs in matrix rows
+$env:EDITOR = 'cmd /c rem'
+$env:GIT_EDITOR = 'cmd /c rem'

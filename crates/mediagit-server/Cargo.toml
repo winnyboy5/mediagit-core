@@ -57,6 +57,7 @@ mediagit-compression = { path = "../mediagit-compression" }
 mediagit-storage = { path = "../mediagit-storage", features = ["all"] }
 mediagit-config = { path = "../mediagit-config" }
 mediagit-security = { path = "../mediagit-security", features = ["all"] }
+mediagit-metrics = { path = "../mediagit-metrics" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

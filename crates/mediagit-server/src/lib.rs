@@ -42,6 +42,7 @@
 pub mod auth_routes;
 pub mod config;
 pub mod handlers;
+pub mod locks;
 pub mod security;
 pub mod state;
 
@@ -56,7 +57,7 @@ use axum::{
     http::StatusCode,
     middleware,
     response::IntoResponse,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use std::sync::Arc;
@@ -108,6 +109,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/{repo}/chunks/verify-integrity",
             post(handlers::verify_chunk_integrity),
         )
+        .route(
+            "/{repo}/objects/verify-integrity",
+            post(handlers::verify_object_integrity),
+        )
         .route("/{repo}/chunks/mpu/start", post(handlers::mpu_start))
         .route("/{repo}/chunks/mpu/complete", post(handlers::mpu_complete))
         .route("/{repo}/chunks/mpu/abort", post(handlers::mpu_abort))
@@ -152,6 +157,18 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/{repo}/packs/rebuild-index",
             post(handlers::rebuild_pack_index),
         )
+        // D2: batch-fetch multiple chunk slices out of one pack in a single
+        // request — for backends with no presigned GET (GCS + ADC).
+        .route(
+            "/{repo}/packs/batch-get",
+            post(handlers::batch_get_pack_chunks),
+        )
+        // Server-enforced file locking (Tracks B1-B3)
+        .route(
+            "/{repo}/locks",
+            get(handlers::list_locks).post(handlers::create_lock),
+        )
+        .route("/{repo}/locks/{lock_id}", delete(handlers::delete_lock))
         .with_state(Arc::clone(&state));
 
     // Apply authentication middleware to Git routes if enabled
@@ -284,6 +301,10 @@ pub fn create_router_with_rate_limit(
             "/{repo}/chunks/verify-integrity",
             post(handlers::verify_chunk_integrity),
         )
+        .route(
+            "/{repo}/objects/verify-integrity",
+            post(handlers::verify_object_integrity),
+        )
         .route("/{repo}/chunks/mpu/start", post(handlers::mpu_start))
         .route("/{repo}/chunks/mpu/complete", post(handlers::mpu_complete))
         .route("/{repo}/chunks/mpu/abort", post(handlers::mpu_abort))
@@ -328,6 +349,18 @@ pub fn create_router_with_rate_limit(
             "/{repo}/packs/rebuild-index",
             post(handlers::rebuild_pack_index),
         )
+        // D2: batch-fetch multiple chunk slices out of one pack in a single
+        // request — for backends with no presigned GET (GCS + ADC).
+        .route(
+            "/{repo}/packs/batch-get",
+            post(handlers::batch_get_pack_chunks),
+        )
+        // Server-enforced file locking (Tracks B1-B3)
+        .route(
+            "/{repo}/locks",
+            get(handlers::list_locks).post(handlers::create_lock),
+        )
+        .route("/{repo}/locks/{lock_id}", delete(handlers::delete_lock))
         .with_state(Arc::clone(&state));
 
     // Apply middleware layers

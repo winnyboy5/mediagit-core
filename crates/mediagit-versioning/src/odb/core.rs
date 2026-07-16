@@ -551,6 +551,21 @@ impl ObjectDatabase {
         self.cache.invalidate(oid).await;
     }
 
+    /// Delete a loose object's storage entry and drop it from the cache.
+    ///
+    /// Repair-path primitive (QA-013): `write()` dedups on `exists()`, so a
+    /// corrupt-but-present object can only be replaced by deleting it first.
+    /// Only removes the loose `<hex>` key — pack-resident objects are not
+    /// touched (pack repair is `gc --repack` territory).
+    pub async fn delete_object(&self, oid: &Oid) -> anyhow::Result<()> {
+        self.cache.invalidate(oid).await;
+        let key = oid.to_hex();
+        if self.storage.exists(&key).await? {
+            self.storage.delete(&key).await?;
+        }
+        Ok(())
+    }
+
     /// Clear all cached objects
     ///
     /// Removes all entries from the cache.
