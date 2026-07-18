@@ -5,7 +5,7 @@ Show commit history.
 ## Synopsis
 
 ```bash
-mediagit log [OPTIONS] [<revision-range>] [[--] <path>...]
+mediagit log [OPTIONS] [<revision>] [[--] <path>...]
 ```
 
 ## Description
@@ -215,34 +215,33 @@ c5e9f2b Quick fix: correct video resolution
 h0j4e7g Add training video series
 ```
 
-### Branch comparison
+### Branch history
 
 ```bash
-$ mediagit log main..feature/video-opt --oneline
+$ mediagit log feature/video-opt --oneline
 c5e9f2b Optimize video encoding parameters
 i1k5f8h Add batch processing script
 j2l6g9i Update compression profiles
 ```
 
-## Revision Ranges
+## Starting Revisions
 
-Show commits in a range:
+`log` walks history from a single starting revision (branch, tag, commit
+hash, `HEAD~N`, or a full ref path). Git-style `A..B` / `A...B` range
+syntax is **not supported**.
 
 ```bash
-# Commits in branch2 not in branch1
-$ mediagit log branch1..branch2
+# Commits reachable from a branch
+$ mediagit log feature/video-opt
 
-# Commits in either branch, but not both
-$ mediagit log branch1...branch2
-
-# Commits reachable from tag
+# Commits reachable from a tag
 $ mediagit log v1.0.0
 
-# Commits since tag
-$ mediagit log v1.0.0..HEAD
+# Starting N commits back
+$ mediagit log HEAD~5
 
-# All commits not in origin/main
-$ mediagit log origin/main..HEAD
+# All branches
+$ mediagit log --all
 ```
 
 ## Exit Status

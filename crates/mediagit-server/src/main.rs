@@ -136,12 +136,30 @@ async fn main() -> Result<()> {
 
     // Setup shared state with optional authentication
     let state = if config.enable_auth {
-        let jwt_secret = config.jwt_secret.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("JWT secret is required when authentication is enabled")
-        })?;
+        // I2: MEDIAGIT_JWT_SECRET env var wins over the TOML `jwt_secret` key
+        // (lets operators keep the secret out of the config file / repo).
+        let env_jwt_secret = std::env::var("MEDIAGIT_JWT_SECRET")
+            .ok()
+            .filter(|s| !s.is_empty());
+        if env_jwt_secret.is_some() && config.jwt_secret.is_some() {
+            tracing::warn!(
+                "Both MEDIAGIT_JWT_SECRET env var and `jwt_secret` in the config file are set; \
+                 using the env var"
+            );
+        }
+        let jwt_secret = env_jwt_secret
+            .as_deref()
+            .or(config.jwt_secret.as_deref())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "JWT secret is required when authentication is enabled \
+                     (set `jwt_secret` in the config file or the MEDIAGIT_JWT_SECRET env var)"
+                )
+            })?;
         tracing::info!("Authentication is ENABLED");
+        let auth_store_dir = config.resolved_auth_store_dir();
         Arc::new(
-            AppState::new_with_full_auth(config.repos_dir.clone(), jwt_secret)
+            AppState::new_with_full_auth(config.repos_dir.clone(), jwt_secret, &auth_store_dir)?
                 .with_presigned_ttl(config.presigned_url_ttl_seconds),
         )
     } else {
@@ -151,6 +169,79 @@ async fn main() -> Result<()> {
                 .with_presigned_ttl(config.presigned_url_ttl_seconds),
         )
     };
+
+    // I1: startup probe — validate every repo's storage backend construction
+    // before we start accepting traffic, so a bad S3/Azure/GCS config surfaces
+    // as a boot failure instead of a 500 on a client's first request.
+    // MEDIAGIT_STARTUP_PROBE=0 disables it.
+    if std::env::var("MEDIAGIT_STARTUP_PROBE").as_deref() != Ok("0") {
+        let repo_dirs: Vec<PathBuf> = std::fs::read_dir(&config.repos_dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if repo_dirs.is_empty() {
+            tracing::debug!("Startup probe: no repos found under {:?}, skipping", config.repos_dir);
+        } else {
+            let repo_count = repo_dirs.len();
+            tracing::info!(
+                "Startup probe: validating storage backend for {} repo(s)...",
+                repo_count
+            );
+            let probe_state = Arc::clone(&state);
+            let probe = async move {
+                use futures::stream::{self, StreamExt};
+                stream::iter(repo_dirs.into_iter().map(|repo_path| {
+                    let probe_state = Arc::clone(&probe_state);
+                    async move {
+                        let result =
+                            mediagit_server::handlers::get_or_init_storage(&probe_state, &repo_path)
+                                .await;
+                        (repo_path, result)
+                    }
+                }))
+                .buffer_unordered(4)
+                .collect::<Vec<_>>()
+                .await
+            };
+
+            let results = tokio::time::timeout(std::time::Duration::from_secs(30), probe)
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "startup probe timed out after 30s validating {} repo(s); \
+                         set MEDIAGIT_STARTUP_PROBE=0 to skip this check",
+                        repo_count
+                    )
+                })?;
+
+            let mut failed = 0;
+            for (repo_path, result) in results {
+                if let Err(status) = result {
+                    failed += 1;
+                    tracing::error!(
+                        "Startup probe failed for repo {:?}: storage backend init returned {}",
+                        repo_path,
+                        status
+                    );
+                }
+            }
+            if failed > 0 {
+                anyhow::bail!(
+                    "startup probe failed for {} of {} repo(s); see errors above for details, \
+                     or set MEDIAGIT_STARTUP_PROBE=0 to skip this check",
+                    failed,
+                    repo_count
+                );
+            }
+            tracing::info!("Startup probe passed for {} repo(s)", repo_count);
+        }
+    }
 
     // P1-1: optional Prometheus /metrics endpoint on a separate listener, off
     // by default. Set MEDIAGIT_METRICS_ADDR=host:port to enable (e.g.
@@ -212,14 +303,32 @@ async fn main() -> Result<()> {
         tracing::warn!("Rate limiting is DISABLED - not suitable for production!");
         (create_router(Arc::clone(&state)), false)
     };
+    // I4: CORS is off unless `cors_allowed_origins` is set in config.
+    let app = mediagit_server::apply_cors_layer(app, config.cors_allowed_origins.as_deref());
 
     // Start HTTP server (always enabled)
     let http_bind_addr = config.bind_addr();
     tracing::info!("Starting HTTP server on {}", http_bind_addr);
 
-    // If TLS is enabled, start both HTTP and HTTPS servers concurrently
-    #[cfg(feature = "tls")]
+    // If TLS is enabled, start both HTTP and HTTPS servers concurrently.
+    // I5: the two `#[cfg(...)]` blocks below (rather than gating the whole
+    // if/else on `#[cfg(feature = "tls")]`) exist so a non-tls build with
+    // `enable_tls = true` fails loudly at boot instead of silently falling
+    // through — previously the entire if/else (HTTP-only branch included)
+    // vanished under `#[cfg(feature = "tls")]`, so a non-tls build never
+    // bound anything.
     if config.enable_tls {
+        #[cfg(not(feature = "tls"))]
+        {
+            anyhow::bail!(
+                "enable_tls=true in configuration but this binary was built without the `tls` \
+                 feature; refusing to silently fall back to plain HTTP. Rebuild with \
+                 `--features tls` or set `enable_tls = false`."
+            );
+        }
+
+        #[cfg(feature = "tls")]
+        {
         let https_bind_addr = config.tls_bind_addr();
         tracing::info!("Starting HTTPS server on {}", https_bind_addr);
 
@@ -232,6 +341,8 @@ async fn main() -> Result<()> {
 
         // Create HTTPS app (clone of router)
         let https_app = create_router(Arc::clone(&state));
+        let https_app =
+            mediagit_server::apply_cors_layer(https_app, config.cors_allowed_origins.as_deref());
 
         // Run both servers concurrently
         tracing::info!(
@@ -274,6 +385,7 @@ async fn main() -> Result<()> {
             result = https_server => {
                 result??;
             }
+        }
         }
     } else {
         // HTTP only mode

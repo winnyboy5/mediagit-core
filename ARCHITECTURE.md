@@ -1,5 +1,7 @@
 # MediaGit Architecture
 
+**Version**: 0.3.0-rc.1
+
 > **Media-first version control** built on Git semantics with intelligent compression,
 > content-defined chunking, delta encoding, and media-aware merging.
 
@@ -9,7 +11,7 @@
 
 ```mermaid
 graph TD
-    subgraph CLI["mediagit-cli (28 commands)"]
+    subgraph CLI["mediagit-cli (32 commands)"]
         ADD["add"]
         COMMIT["commit"]
         PUSH["push"]
@@ -54,11 +56,11 @@ graph TD
 
 ---
 
-## Workspace Crates (14+)
+## Workspace Crates (14)
 
 | Crate | Role | Key Modules |
 |-------|------|-------------|
-| **mediagit-cli** | CLI binary (28 commands) | `commands/`, main entry |
+| **mediagit-cli** | CLI binary (32 commands) | `commands/`, main entry |
 | **mediagit-versioning** | Core VCS engine | `odb/` & `chunking/` (submodules), index, refs, tree, commit, delta, similarity, cloud packs (`streaming_pack`, `streaming_index`, `pack`, `transaction`) |
 | **mediagit-compression** | Smart compression | Zstd, Brotli, Zlib, Store; `SmartCompressor` with type+size awareness |
 | **mediagit-media** | Media parsing & merging | Image, PSD, Video, Audio, 3D, VFX parsers & merge strategies |
@@ -75,7 +77,7 @@ graph TD
 
 ---
 
-## CLI Commands (28)
+## CLI Commands (32)
 
 ### Core Workflow
 | Command | Description |
@@ -100,6 +102,11 @@ graph TD
 | `bisect` | Binary search for bug-introducing commit |
 | `reflog` | Show reference logs (when branch tips were updated) |
 
+### File Locking
+| Command | Description |
+|---------|-------------|
+| `lock` | Manage server-enforced file locks (`create`/`unlock`/`list`) |
+
 ### Remote Operations
 | Command | Description |
 |---------|-------------|
@@ -108,6 +115,13 @@ graph TD
 | `pull` | Fetch and merge remote changes |
 | `fetch` | Fetch all remote refs without merging |
 | `remote` | Manage remote repositories |
+| `download` | Download a single file from a remote repository by path |
+
+### Media & Sparse Checkout
+| Command | Description |
+|---------|-------------|
+| `media` | Inspect media file metadata (image/video/audio/PSD/3D) |
+| `sparse-checkout` | Manage sparse checkout (partial working tree) |
 
 ### File & History Operations
 | Command | Description |
@@ -713,6 +727,21 @@ graph TD
 
 ---
 
+## Server-Enforced File Locking
+
+**Crate**: `mediagit-server` · **Key file**: `locks.rs` · **CLI**: `crates/mediagit-cli/src/commands/lock.rs`
+
+Path-based locks let a team reserve non-mergeable binary assets (e.g. a PSD or a level file) so two people don't clobber each other's work.
+
+- **Keying**: locks are keyed by repo-relative path, not object id.
+- **Storage**: the in-memory map on `AppState` is the hot-path source of truth; it's mirrored to `<repo>/.mediagit/locks.jsonl` (`{"v":1}` header, tmp+rename writes) purely so locks survive a server restart.
+- **Enforcement point**: `check_push_locks` runs at push time. It walks the commits between the ref's old and new OID (`TreeDiffer`) to compute touched paths, then rejects the push if any touched path is locked by someone other than the pusher.
+- **Identity**: the authenticated pusher's `user_id` is compared against the lock owner. On a no-auth server there's no provable identity at push time, so any touched, locked path always rejects the push.
+- **CLI**: `mediagit lock create <path> [--owner <name>]`, `mediagit lock unlock <path>|--id <LOCK_ID> [--force]` (`--force` releases someone else's lock and requires `repo:admin`), `mediagit lock list [--json]`.
+- **Env knobs**: `MEDIAGIT_LOCKS_ENFORCE=0` disables enforcement entirely; `MEDIAGIT_LOCKS_MAX_COMMITS` (default 1000) caps how many commits the touched-paths walk will traverse — exceeding it fails **open** (warns and allows the push) rather than stalling a large push on lock computation.
+
+---
+
 ## Cloud Packs
 
 **Crate**: `mediagit-versioning` · **Key files**: `streaming_pack.rs` (`StreamingPackWriter` / `StreamingPackReader`, `CloudPackResult`, `finalize_cloud()`, `PackKind::CloudObject`), `streaming_index.rs` (`StreamingPackIndex`, O(1) memory), `pack.rs`, `transaction.rs` (`PackTransaction`) · **Server**: `handlers/transfer.rs`, `chunks.rs`, `repo.rs`
@@ -793,6 +822,27 @@ flowchart TD
 | **User** | `auth/user.rs` | User model and permissions |
 | **TLS** | `tls/cert.rs`, `tls/config.rs` | Certificate management |
 | **Audit** | `audit.rs` | Security event logging |
+
+### Path-Traversal Hardening
+
+`validate_object_key()` (`crates/mediagit-storage/src/lib.rs:651-694`) is the single choke point every `StorageBackend` implementation and wrapper (`NamespacedBackend`, `local::LocalBackend`) must call before turning a caller-supplied key into a filesystem path or remote object key. It rejects absolute paths, Windows drive/UNC prefixes, and `..`/`..\` traversal components (normalizing backslashes first so the check is platform-independent) — without it, a user-controlled chunk/pack id containing `..` could escape the repo's storage root or, once namespaced, escape into another tenant's namespace. Server handlers add a second layer of hex-id guards on untrusted path segments (e.g. `crates/mediagit-server/src/handlers/chunks.rs:507,517` reject any `chunk_id`/delta-base header that isn't exactly 64 hex characters) before those ids ever reach the storage layer.
+
+---
+
+## Authentication & Authorization
+
+**Crate**: `mediagit-security` (JWT/API keys) · **Server**: `crates/mediagit-server/src/handlers/mod.rs`
+
+- **Tokens**: JWT access tokens (24h) + refresh tokens (30d); API keys as a long-lived alternative for machine clients.
+- **Persistence**: users, API keys, and per-repo grants are persisted to `users.jsonl` / `api_keys.jsonl` / `grants.jsonl` under `auth_store_dir`. Writes are atomic (tmp file + rename); each file starts with a `{"v":1}` version header, and a corrupt file is a **hard load-time error** — never silently dropped or reset.
+- **Per-repo grants**: `GrantLevel` is ordered `Read < Write < Admin`. `check_permission()` (`crates/mediagit-server/src/handlers/mod.rs:69-119`) checks in order:
+  1. Auth disabled → allow everything.
+  2. No authenticated user → reject.
+  3. Admin role (flat `user:manage` permission) → always allowed, regardless of grants.
+  4. Zero-grants deployment or `MEDIAGIT_GRANTS_ENFORCE=0` → fall back to the flat role-permission check (pre-grants behavior).
+  5. Otherwise, per-repo grant lookup: the user's grant level for the repo must be at or above the level implied by the required permission.
+- **Admin routes**: `/auth/users`, `/auth/users/{id}/grants`, `/auth/keys` — user and grant management, gated on the admin role.
+- **Env knobs**: `MEDIAGIT_AUTH_PERSIST` (enable disk persistence), `MEDIAGIT_GRANTS_ENFORCE` (`0` to disable per-repo grant checks and fall back to flat roles).
 
 ---
 
@@ -996,6 +1046,20 @@ flowchart TD
 
 ---
 
+## Reachability Bitmaps
+
+**Crate**: `mediagit-versioning` · **Key file**: `bitmap.rs`
+
+A Roaring-bitmap-backed reachability index that speeds up pack negotiation, `gc`, and `fsck` on large repos.
+
+- **Purpose**: persists a commit's full object closure — everything `walk_reachable` would visit from it (commits/trees/blobs) — as a compact, versioned artifact under the `bitmaps/` storage namespace. When a valid bitmap exists for a commit tip, callers skip the BFS walk (one ODB read per object) entirely.
+- **Correctness contract**: this is **derived data** — a pure speedup, never a correctness dependency. Any miss, staleness, corruption, or format-version mismatch silently falls back to `walk_reachable`; it must never error the caller. `gc` may prune bitmaps for commits no longer reachable, and a missing/stale bitmap is never treated as a corruption signal.
+- **Format versioning**: `BITMAP_FORMAT_VERSION` is bumped whenever the on-disk format changes; readers reject any other version by falling back to BFS rather than erroring.
+- **Env knob**: `MEDIAGIT_BITMAP` (default ON) — set to `0`/`false`/`off` to disable both generation and consumption; every caller then falls back to BFS.
+- **Scope**: the id space is local to a single bitmap file (per-commit), not a global cross-commit numbering — sufficient for today's single-bitmap lookups; multi-bitmap set algebra (cheap AND/OR across commits) is future scope.
+
+---
+
 ## Configuration
 
 **File**: `.mediagit/config.toml`
@@ -1029,9 +1093,9 @@ merge = "refs/heads/main"
 
 ---
 
-## Performance Benchmarks (v0.2.7-beta.1)
+## Performance Benchmarks (Historical — v0.2.7-beta.1)
 
-> Measured via deep test suite on Windows, release build, 23 formats, 459/459 tests. Last run: 2026-05-25 (AWS/Azure/GCS backends).
+> **Historical measurements**, not re-verified against the current v0.3.0-rc.1 release. Captured via deep test suite on Windows, release build, 23 formats, 459/459 tests. Last run: 2026-05-25 (AWS/Azure/GCS backends). See `README.md` for storage-savings and throughput numbers validated on v0.3.0-rc.1 (614/614 deep-tests, July 2026 QA campaign).
 
 ### Storage Savings by Category
 

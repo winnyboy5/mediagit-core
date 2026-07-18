@@ -363,8 +363,8 @@ async fn presigned_download_fallback_to_proxy() {
         total_size: chunk_data.len() as u64,
         filename: Some("proxy-test.bin".to_string()),
     };
-    // Serialize and PUT the manifest.
-    let manifest_bytes = postcard::to_allocvec(&manifest).unwrap();
+    // Serialize and PUT the manifest (magic-enveloped, as real clients do).
+    let manifest_bytes = manifest.to_bytes().unwrap();
     let manifest_url = format!("{}/{}/manifests/{}", server_url, repo, file_oid.to_hex());
     let resp = http_client
         .put(&manifest_url)

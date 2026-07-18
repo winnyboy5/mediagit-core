@@ -415,10 +415,7 @@ impl StatsCmd {
         // compression-ratio breakdown).
         for manifest_key in &manifest_keys {
             if let Ok(data) = storage.get(manifest_key).await {
-                if let Ok(manifest) = mediagit_versioning::format::deserialize::<
-                    mediagit_versioning::ChunkManifest,
-                >(&data)
-                {
+                if let Ok(manifest) = mediagit_versioning::ChunkManifest::from_bytes(&data) {
                     stats.original_bytes += manifest.total_size;
 
                     let category = manifest

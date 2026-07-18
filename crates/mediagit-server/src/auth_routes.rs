@@ -16,8 +16,9 @@
 //! Provides HTTP endpoints for user authentication and management.
 
 use axum::{
+    extract::DefaultBodyLimit,
     middleware,
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use std::sync::Arc;
@@ -26,6 +27,8 @@ use mediagit_security::auth::{
     auth_middleware, login_handler, logout_handler, me_handler, refresh_handler, register_handler,
     ApiKeyAuth, AuthLayer, AuthService,
 };
+
+use crate::state::AppState;
 
 /// Create authentication router with all auth endpoints
 ///
@@ -58,7 +61,54 @@ pub fn create_auth_router(auth_service: Arc<AuthService>) -> Router {
         .route("/auth/logout", post(logout_handler))
         .route("/auth/refresh", post(refresh_handler))
         .merge(protected)
+        // I3: auth payloads are small JSON bodies; cap well below the 2 GiB
+        // default used for media chunk/pack uploads.
+        .layer(DefaultBodyLimit::max(1024 * 1024))
         .with_state(auth_service)
+}
+
+/// Create the admin router (H3): user, grant, and API-key management
+/// endpoints, all gated on the flat `user:manage` permission (Admin role).
+///
+/// # Endpoints
+/// - GET    /auth/users              - list users (id, username, role)
+/// - DELETE /auth/users/{id}         - remove a user (cascades their grants)
+/// - POST   /auth/users/{id}/grants  - upsert a per-repo grant
+/// - DELETE /auth/users/{id}/grants  - remove a per-repo grant
+/// - GET    /auth/keys               - list API keys (metadata only)
+/// - DELETE /auth/keys/{id}          - revoke an API key
+///
+/// Unlike [`create_auth_router`], this takes `Arc<AppState>` rather than
+/// `Arc<AuthService>`: grant mutations must go through `AppState::grants` —
+/// the same `GrantsStore` instance `check_permission` reads for repo-level
+/// enforcement — not `AuthService::grants_store`, a separate in-memory
+/// instance that only agrees with `AppState::grants` at boot.
+///
+/// Only meaningful when `state.auth_service` (and therefore
+/// `state.auth_layer`) is `Some`; callers merge it conditionally right
+/// alongside `create_auth_router` (see `lib.rs`).
+pub fn create_admin_router(state: Arc<AppState>) -> Router {
+    let auth_layer = state
+        .auth_layer
+        .clone()
+        .expect("create_admin_router requires auth to be enabled");
+
+    Router::new()
+        .route("/auth/users", get(crate::handlers::list_users))
+        .route("/auth/users/{id}", delete(crate::handlers::delete_user))
+        .route(
+            "/auth/users/{id}/grants",
+            post(crate::handlers::upsert_grant).delete(crate::handlers::remove_grant),
+        )
+        .route("/auth/keys", get(crate::handlers::list_keys))
+        .route("/auth/keys/{id}", delete(crate::handlers::revoke_key))
+        .layer(middleware::from_fn(move |req, next| {
+            auth_middleware(Arc::clone(&auth_layer), req, next)
+        }))
+        // Admin payloads are small JSON bodies too (H3), same cap as the
+        // rest of /auth/*.
+        .layer(DefaultBodyLimit::max(1024 * 1024))
+        .with_state(state)
 }
 
 #[cfg(test)]

@@ -159,28 +159,27 @@ Pre-load frequently accessed objects:
 ## Compression Integration
 
 ### Algorithm Selection
+The `CompressionAlgorithm` enum itself has four members — `None`, `Zlib` (Git-compatible), `Zstd`, `Brotli` — and selection is driven by detected `ObjectType` (`CompressionStrategy::for_object_type` in `mediagit-compression`), not by file extension directly:
 ```rust
-fn select_compression(path: &Path, size: u64) -> CompressionAlgorithm {
-    match path.extension() {
-        // Already compressed media
-        Some("mp4" | "mov" | "jpg" | "png") => CompressionAlgorithm::None,
-
-        // Lossless audio (uncompressed — good zstd ratio)
-        Some("wav" | "flac" | "aiff") => CompressionAlgorithm::Zstd,
-
-        // Text and code
-        Some("txt" | "md" | "rs" | "py") => CompressionAlgorithm::Brotli,
-
-        // Large binaries
-        Some("psd" | "blend" | "fbx") if size > 10_MB => {
-            CompressionAlgorithm::ZstdWithDelta
+fn select_compression(obj_type: ObjectType) -> CompressionStrategy {
+    match obj_type {
+        // Already compressed media: store as-is
+        ObjectType::Mp4 | ObjectType::Mov | ObjectType::Jpeg | ObjectType::Png => {
+            CompressionStrategy::Store
         }
 
+        // Lossless audio (uncompressed — good zstd ratio)
+        ObjectType::Wav | ObjectType::Aiff => CompressionStrategy::Zstd(CompressionLevel::Best),
+
+        // Text and code
+        ObjectType::Text => CompressionStrategy::Brotli(CompressionLevel::Default),
+
         // Default
-        _ => CompressionAlgorithm::Zstd,
+        _ => CompressionStrategy::Zstd(CompressionLevel::Default),
     }
 }
 ```
+Chunk-level delta (base chunk as a zstd dictionary) is a separate mechanism applied by the ODB on top of this compression choice — see [Delta Encoding](./delta-encoding.md).
 
 ### Compression Levels
 - **Fast**: zstd level 1 (150 MB/s compression)
@@ -233,18 +232,19 @@ if actual_oid != oid {
 - Read every object
 - Verify BLAKE3 hash
 - Report corrupted objects
-- Optionally repair from remote
+
+`mediagit fsck` additionally checks connectivity and finds dangling/unreachable objects, and supports `--repair` to fix repairable issues locally.
 
 ### Repair Operations
 ```bash
-# Verify repository
+# Verify repository (fast checksum + ref check)
 mediagit verify
 
-# Fetch missing/corrupted objects from remote
-mediagit verify --fetch-missing
+# Comprehensive integrity check with repair
+mediagit fsck --repair
 
-# Aggressive repair (expensive)
-mediagit verify --repair --fetch-missing
+# Re-verify every chunk reachable from pushed refs and repair from remote
+mediagit push --repair
 ```
 
 ## Performance Optimization
@@ -364,11 +364,12 @@ Storage: 7 GB instead of 10 GB (30% savings)
 ### Backend Requirements
 ```rust
 #[async_trait]
-pub trait Backend {
+pub trait StorageBackend: Send + Sync + Debug {
     async fn get(&self, key: &str) -> Result<Vec<u8>>;
     async fn put(&self, key: &str, data: &[u8]) -> Result<()>;
     async fn exists(&self, key: &str) -> Result<bool>;
     async fn delete(&self, key: &str) -> Result<()>;
+    async fn list_objects(&self, prefix: &str) -> Result<Vec<String>>;
 }
 ```
 

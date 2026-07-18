@@ -86,7 +86,7 @@ pub async fn create_lock(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<CreateLockRequest>,
 ) -> Result<Response, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled(), &state.grants, &repo)?;
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -123,7 +123,7 @@ pub async fn list_locks(
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
 ) -> Result<Json<ListLocksResponse>, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled(), &state.grants, &repo)?;
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -147,7 +147,7 @@ pub async fn delete_lock(
     auth_user: Option<Extension<AuthUser>>,
     axum::extract::Query(query): axum::extract::Query<DeleteLockQuery>,
 ) -> Result<StatusCode, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled(), &state.grants, &repo)?;
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -156,7 +156,7 @@ pub async fn delete_lock(
 
     let force = query.force.as_deref() == Some("1");
     if force {
-        check_permission(auth_user.as_deref(), "repo:admin", state.is_auth_enabled())?;
+        check_permission(auth_user.as_deref(), "repo:admin", state.is_auth_enabled(), &state.grants, &repo)?;
     }
 
     let record = locks::find_lock_by_id(&state, &repo, &repo_path, &lock_id).await?;

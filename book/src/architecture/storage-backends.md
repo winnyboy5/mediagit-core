@@ -16,12 +16,14 @@ MediaGit supports 7 storage backends through a unified trait-based abstraction. 
 
 ```rust
 #[async_trait]
-pub trait Backend: Send + Sync {
+pub trait StorageBackend: Send + Sync + Debug {
     async fn get(&self, key: &str) -> Result<Vec<u8>>;
     async fn put(&self, key: &str, data: &[u8]) -> Result<()>;
     async fn exists(&self, key: &str) -> Result<bool>;
     async fn delete(&self, key: &str) -> Result<()>;
-    async fn list(&self, prefix: &str) -> Result<Vec<String>>;
+    async fn list_objects(&self, prefix: &str) -> Result<Vec<String>>;
+    async fn head(&self, key: &str) -> Result<Option<u64>>;
+    // + presign_put / presign_get / MPU trio (default Ok(None), overridden per backend)
 }
 ```
 

@@ -21,6 +21,7 @@ Detailed comparison of MediaGit and Git Large File Storage (Git-LFS).
 | **Delta encoding** | Yes — chunk-level deltas | No |
 | **Parallel ingestion** | Yes — multi-core (`--jobs`) | No |
 | **Cloud backends** | S3, Azure, GCS, MinIO, B2, DO Spaces | LFS server (varies by host) |
+| **File locking** | Yes — server-enforced (`mediagit lock create/unlock/list`) | Yes — server-enforced (`git lfs lock/unlock`) |
 | **No file size limit** | Practical limit: disk/network | Host-specific (e.g., 2 GB on GitHub free) |
 | **Format-aware compression** | Yes — JPEG/MP4 stored as-is | No — always uploads raw bytes |
 | **Offline history** | Full history locally | Pointer only; content fetched on demand |

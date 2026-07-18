@@ -172,9 +172,9 @@ impl PushCmd {
         // Initialize protocol client. Honour [performance] upload_concurrency
         // from the repo config so users can tune parallel chunk fan-out
         // without setting MEDIAGIT_UPLOAD_CONCURRENCY in the env.
-        let mut client = mediagit_protocol::ProtocolClient::new(remote_url).with_credentials(
-            crate::repo::resolve_credentials(&repo_root, &config, remote),
-        );
+        let credentials = crate::repo::resolve_credentials(&repo_root, &config, remote);
+        let mut client =
+            mediagit_protocol::ProtocolClient::new(remote_url).with_credentials(credentials.clone());
         if let Some(n) = config.performance.upload_concurrency {
             client = client.with_concurrent_uploads(n);
         }
@@ -247,6 +247,7 @@ impl PushCmd {
             };
 
             let response = client.update_refs(request).await?;
+            crate::repo::remember_credentials(&config, remote, &credentials);
 
             // Report results
             for result in &response.results {
@@ -362,6 +363,7 @@ impl PushCmd {
 
         // Get remote refs to check current state (404 = repo not created yet, treated as empty)
         let remote_refs = client.get_refs_or_empty().await?;
+        crate::repo::remember_credentials(&config, remote, &credentials);
 
         // Append tag refs when --tags or --follow-tags is specified
         if self.tags || self.follow_tags {

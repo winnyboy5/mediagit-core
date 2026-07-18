@@ -17,13 +17,15 @@
 
 use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
 
 use super::{
     credentials::CredentialsStore,
+    grants::GrantsStore,
     user::{Role, User},
-    AuthError, JwtAuth, TokenPair,
+    AuthError, AuthResult, JwtAuth, TokenPair,
 };
 
 /// Shared authentication service state
@@ -31,6 +33,7 @@ use super::{
 pub struct AuthService {
     pub jwt_auth: Arc<JwtAuth>,
     pub credentials_store: Arc<CredentialsStore>,
+    pub grants_store: Arc<GrantsStore>,
 }
 
 impl AuthService {
@@ -39,6 +42,7 @@ impl AuthService {
         Self {
             jwt_auth: Arc::new(JwtAuth::new(jwt_secret)),
             credentials_store: Arc::new(CredentialsStore::new()),
+            grants_store: Arc::new(GrantsStore::new()),
         }
     }
 
@@ -50,7 +54,19 @@ impl AuthService {
         Self {
             jwt_auth,
             credentials_store,
+            grants_store: Arc::new(GrantsStore::new()),
         }
+    }
+
+    /// Create an authentication service whose credentials and grants are
+    /// persisted under `store_dir` (see [`CredentialsStore::load_or_new`],
+    /// [`GrantsStore::load_or_new`]).
+    pub fn new_with_store_dir(jwt_secret: &str, store_dir: &Path) -> AuthResult<Self> {
+        Ok(Self {
+            jwt_auth: Arc::new(JwtAuth::new(jwt_secret)),
+            credentials_store: Arc::new(CredentialsStore::load_or_new(store_dir)?),
+            grants_store: Arc::new(GrantsStore::load_or_new(store_dir)?),
+        })
     }
 }
 

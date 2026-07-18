@@ -729,7 +729,7 @@ impl GarbageCollector {
             let manifest_key = format!("manifests/{}", oid.to_hex());
             match self.storage.get(&manifest_key).await {
                 Ok(data) => {
-                    match mediagit_versioning::format::deserialize::<ChunkManifest>(&data) {
+                    match ChunkManifest::from_bytes(&data) {
                         Ok(manifest) => {
                             for chunk_ref in &manifest.chunks {
                                 let chunk_key = format!("chunks/{}", chunk_ref.id.to_hex());
@@ -861,9 +861,7 @@ impl GarbageCollector {
             if reachable.contains(oid) {
                 let manifest_key = format!("manifests/{}", oid.to_hex());
                 if let Ok(data) = self.storage.get(&manifest_key).await {
-                    if let Ok(manifest) =
-                        mediagit_versioning::format::deserialize::<ChunkManifest>(&data)
-                    {
+                    if let Ok(manifest) = ChunkManifest::from_bytes(&data) {
                         for chunk_ref in &manifest.chunks {
                             reachable_chunk_ids.insert(chunk_ref.id.to_hex());
                         }

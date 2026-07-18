@@ -36,13 +36,16 @@
 
 pub mod apikey;
 pub mod credentials;
+pub mod grants;
 pub mod handlers;
 pub mod jwt;
 pub mod middleware;
+mod persist;
 pub mod user;
 
 pub use apikey::{ApiKey, ApiKeyAuth};
 pub use credentials::{CredentialsStore, UserCredentials};
+pub use grants::{GrantsStore, Level as GrantLevel};
 pub use handlers::{
     login_handler, logout_handler, me_handler, refresh_handler, register_handler, AuthResponse,
     AuthService, ErrorResponse, LoginRequest, RefreshRequest, RegisterRequest, UserInfo,

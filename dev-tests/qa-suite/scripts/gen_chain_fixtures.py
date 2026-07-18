@@ -9,6 +9,9 @@ Produces (fixtures-synthetic/chains/):
   aria_v1..v5.flac   same chain re-exported as FLAC
   car_v1..v3.glb     from test-files GLB: v2 rename node, v3 modify material factor
 
+Produces (fixtures-synthetic/ml/):
+  data_v1..v3.parquet  v1 = ~20MB table, v2 = append 10% rows, v3 = append 10% rows + rewrite 1 column
+
 Sources in test-files/ are never modified.
 """
 import os
@@ -17,6 +20,8 @@ import numpy as np
 import soundfile as sf
 from PIL import Image, ImageDraw, ImageEnhance
 import pygltflib
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 ROOT = "D:/own/saas/mediagit-core"
 TF = os.environ.get("MG_QA_TESTFILES", os.path.join(ROOT, "test-files"))
@@ -118,6 +123,52 @@ def gltf_chain():
         assert r.nodes and r.materials, f
 
 
+def parquet_chain():
+    """v1 = ~20MB table; v2 = append 10% rows; v3 = append 10% rows + rewrite 1 column."""
+    # ponytail: deterministic RNG seeded 42; table size ~20MB to match typical data science workflows
+    rng = np.random.default_rng(42)
+    n_features = 10
+    row_bytes = 8 + n_features * 4 + 4 + 32  # id(int64) + features(float32) + label(float32) + text(~32 bytes)
+    base_rows = int(20 * 1024 * 1024 / row_bytes)  # ~20 MB target
+
+    ml_dir = os.path.join(os.path.dirname(OUT), "ml")
+    os.makedirs(ml_dir, exist_ok=True)
+
+    def pm(name):
+        return os.path.join(ml_dir, name)
+
+    def make_table(n_rows, start_id, label_seed):
+        cols = {"id": np.arange(start_id, start_id + n_rows, dtype=np.int64)}
+        for i in range(n_features):
+            cols[f"feature_{i}"] = rng.standard_normal(n_rows).astype(np.float32)
+        label_rng = np.random.default_rng(label_seed)
+        cols["label"] = label_rng.standard_normal(n_rows).astype(np.float32)
+        cols["metadata"] = [f"row_{i}_v{label_seed // 100}" for i in range(n_rows)]
+        return pa.table(cols)
+
+    # v1: base table
+    t1 = make_table(base_rows, 0, 100)
+    pq.write_table(t1, pm("data_v1.parquet"), compression="snappy")
+    v1_size = os.path.getsize(pm("data_v1.parquet")) / (1024 * 1024)
+
+    # v2: append 10% rows (realistic data ingestion)
+    extra_rows_v2 = int(base_rows * 0.10)
+    t2_extra = make_table(extra_rows_v2, base_rows, 200)
+    t2 = pa.concat_tables([t1, t2_extra])
+    pq.write_table(t2, pm("data_v2.parquet"), compression="snappy")
+    v2_size = os.path.getsize(pm("data_v2.parquet")) / (1024 * 1024)
+
+    # v3: append 10% more rows + rewrite label column (simulates model retraining)
+    extra_rows_v3 = int(base_rows * 0.10)
+    t3_extra = make_table(extra_rows_v3, base_rows + extra_rows_v2, 300)
+    t3 = pa.concat_tables([t2, t3_extra])
+    new_label = np.random.default_rng(999).standard_normal(t3.num_rows).astype(np.float32)
+    label_idx = t3.schema.get_field_index("label")
+    t3 = t3.set_column(label_idx, "label", pa.array(new_label))
+    pq.write_table(t3, pm("data_v3.parquet"), compression="snappy")
+    v3_size = os.path.getsize(pm("data_v3.parquet")) / (1024 * 1024)
+
+
 def demo():
     import hashlib
 
@@ -140,6 +191,17 @@ def demo():
     for f in os.listdir(OUT):
         if f.endswith((".jpg", ".png")):
             Image.open(p(f)).verify()
+    # parquet: v1..v3 exist and differ
+    ml_dir = os.path.join(os.path.dirname(OUT), "ml")
+    if os.path.exists(ml_dir):
+        for i in range(1, 4):
+            fpath = os.path.join(ml_dir, f"data_v{i}.parquet")
+            if os.path.exists(fpath):
+                assert pq.read_table(fpath).num_rows > 0, f"data_v{i}.parquet is empty"
+        h1 = sha(os.path.join(ml_dir, "data_v1.parquet"))
+        h2 = sha(os.path.join(ml_dir, "data_v2.parquet"))
+        h3 = sha(os.path.join(ml_dir, "data_v3.parquet"))
+        assert h1 != h2 and h2 != h3, "parquet: versions should differ"
     print("[demo] chains self-check OK")
 
 
@@ -149,4 +211,5 @@ if __name__ == "__main__":
     svg_chain()
     audio_chain()
     gltf_chain()
+    parquet_chain()
     demo()

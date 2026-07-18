@@ -216,7 +216,9 @@ burst_size = 200
 
 ## Environment Variable Overrides
 
-All configuration values can be overridden using environment variables with the `MEDIAGIT_` prefix.
+Configuration values can be overridden using environment variables with the `MEDIAGIT_` prefix **when loading through `load_with_overrides`** — a library API of this crate.
+
+> **Note**: the `mediagit` CLI and `mediagit-server` load config via `Config::load()`, which does **not** apply these overrides — so the env vars below have no effect on a normal MediaGit run. For the env vars that actually affect MediaGit, see `CONFIGURATION.md` (repo root) and `docs/env-knobs.md`.
 
 ### Common Overrides
 

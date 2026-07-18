@@ -8,7 +8,10 @@
 #   A4 corrupt chunk at rest -> fsck DETECT, recover via re-clone from intact remote
 #   A5 read-only file in worktree
 #   A6 path with spaces + unicode filename
-# (disk-full is out of scope per campaign brief)
+#   A7 backend outage mid-push (docker stop/start mediagit-minio) -> clean fail, retry ok
+#   A8 disk-full (capability-gated: needs admin for a small VHD volume) -> clean fail, recover
+#   A9 server-enforced lock e2e (push rejected/force-unlock/retry) + no-auth force-required variant
+#   A10 batch-get-disabled fallback -> clone still succeeds via per-chunk path
 #
 # Output: $QA.Logs\abuse_results.tsv (drill, pass, detail)
 
@@ -42,6 +45,39 @@ function New-QaBinaryFixture([string]$Path, [int]$SizeMB, [int]$Seed) {
 function Test-QaFsckClean([string]$Repo) {
   $r = Invoke-MG $Repo @("fsck") $Phase
   return -not (($r.Out -match "(?i)corrupt|missing|error|failed") -or ($r.Exit -ne 0))
+}
+
+# Capability probe for A7: is the named docker container reachable at all?
+# False on any docker error (daemon not running, container missing, docker
+# not installed) - callers SKIP rather than fail when this is false.
+function Test-QaDockerAvailable([string]$Container) {
+  try {
+    & docker inspect -f "{{.State.Status}}" $Container *> $null
+    return ($LASTEXITCODE -eq 0)
+  } catch { return $false }
+}
+
+# Poll a MinIO endpoint's health-live probe until it responds or times out.
+function Wait-QaMinioUp([string]$Endpoint, [int]$TimeoutSec = 30) {
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
+    try {
+      $r = Invoke-WebRequest -Uri "$Endpoint/minio/health/live" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+      if ($r.StatusCode -eq 200) { return $true }
+    } catch {}
+    Start-Sleep -Milliseconds 500
+  }
+  return $false
+}
+
+# Capability probe for A8: disk-full needs a small fixed-size volume, which on
+# Windows needs diskpart's "attach vdisk" - that needs admin. No admin = SKIP.
+function Test-QaAdminRights {
+  try {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $pr = New-Object Security.Principal.WindowsPrincipal($id)
+    return $pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  } catch { return $false }
 }
 
 # ---------------------------------------------------------------------------
@@ -269,6 +305,291 @@ function Drill-A6-SpacesAndUnicodePaths {
 }
 
 # ---------------------------------------------------------------------------
+# A7: kill MinIO mid-push (docker stop mediagit-minio); the push must fail
+# cleanly (nonzero exit, no panic), a restarted MinIO must let a retried push
+# succeed, and a fresh clone must be hash-exact and fsck-clean.
+# Capability-gated: SKIPs cleanly when the "mediagit-minio" container isn't
+# reachable (docker not installed/running, or a differently-named container).
+# ---------------------------------------------------------------------------
+function Drill-A7-BackendOutage {
+  $drill = "A7-backend-outage"
+  $container = "mediagit-minio"
+  if (-not (Test-QaDockerAvailable $container)) {
+    Rec $drill "SKIP" "docker container '$container' not reachable (docker not installed/running, or container missing)"
+    return
+  }
+
+  $srv = $null
+  $stoppedContainer = $false
+  try {
+    $srv = Start-QaServer -Backend "minio" -Phase "$Phase-A7"
+    $repo = New-SandboxRepo "a7-outage" $Phase
+    # 600MB, same sizing rationale as A2: large enough that the push is still
+    # mid-transfer ~2s in, so the docker stop lands mid-push rather than after.
+    New-QaBinaryFixture (Join-Path $repo "big.bin") 600 77001
+    $origHash = Get-QaHash (Join-Path $repo "big.bin")
+    Invoke-MG $repo @("add", ".") $Phase -TimeoutSec 1200 | Out-Null
+    Invoke-MG $repo @("commit", "-m", "c1") $Phase | Out-Null
+    Invoke-MG $repo @("remote", "add", "origin", $srv.Url) $Phase | Out-Null
+
+    # Bound the client push so a mid-transfer backend outage fails fast with a
+    # clear error instead of hanging on retries. 60s >> a normal localhost push
+    # (~seconds) but well inside the 120s WaitForExit window below.
+    $env:MEDIAGIT_PUSH_DEADLINE_SECS = "60"
+    $p = Start-Process $QA.MG -ArgumentList @("-C", $repo, "push", "origin") -PassThru -NoNewWindow `
+      -RedirectStandardOutput (Join-Path $QA.Logs "a7-push.out") -RedirectStandardError (Join-Path $QA.Logs "a7-push.err")
+    Start-Sleep -Milliseconds 2000
+    & docker stop $container *> $null
+    $stoppedContainer = $true
+
+    $exited = $p.WaitForExit(120000)
+    Remove-Item Env:\MEDIAGIT_PUSH_DEADLINE_SECS -ErrorAction SilentlyContinue
+    if (-not $exited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+    $outText = "" + (Get-Content (Join-Path $QA.Logs "a7-push.out") -Raw -ErrorAction SilentlyContinue) `
+                   + (Get-Content (Join-Path $QA.Logs "a7-push.err") -Raw -ErrorAction SilentlyContinue)
+    $panic = $outText -match "panicked"
+    $cleanFail = $exited -and ($p.ExitCode -ne 0) -and (-not $panic)
+
+    & docker start $container *> $null
+    $stoppedContainer = $false
+    $up = Wait-QaMinioUp $QA.MinioEndpoint 30
+
+    $fsckLocal = Test-QaFsckClean $repo
+    $retry = Invoke-MG $repo @("push", "origin") $Phase -TimeoutSec 3600
+    $clone = Join-Path $QA.Work "a7-clone"
+    if (Test-Path $clone) { Remove-Item -Recurse -Force $clone }
+    $cl = Invoke-MG $null @("clone", $srv.Url, $clone) $Phase -TimeoutSec 3600
+    $cloneHashOk = (Test-Path (Join-Path $clone "big.bin")) -and
+                   ((Get-QaHash (Join-Path $clone "big.bin")) -eq $origHash)
+    $fsckClone = if ($cl.Exit -eq 0) { Test-QaFsckClean $clone } else { $false }
+
+    $pass = $up -and $cleanFail -and $fsckLocal -and ($retry.Exit -eq 0) -and ($cl.Exit -eq 0) -and $cloneHashOk -and $fsckClone
+    Rec $drill $pass "minio-restarted=$up push-exited=$exited push-exit=$($p.ExitCode) panic=$panic clean-fail=$cleanFail local-fsck=$fsckLocal retry-push=$($retry.Exit) clone=$($cl.Exit) clone-hash-ok=$cloneHashOk clone-fsck=$fsckClone"
+  } catch {
+    if ($stoppedContainer) { & docker start $container *> $null }
+    if ("$_" -match "^SKIP:") { Rec $drill "SKIP" "$_" } else { Rec $drill $false "unexpected error: $_" }
+  } finally {
+    if ($stoppedContainer) { & docker start $container *> $null }
+    Stop-QaServer $srv
+  }
+}
+
+# ---------------------------------------------------------------------------
+# A8: disk-full. Capability-gated - needs admin rights to attach a small
+# fixed-size VHD via diskpart (subst doesn't shrink the underlying volume, so
+# it can't simulate ENOSPC). SKIPs cleanly without admin; on a capable
+# machine, writes an oversized fixture into a repo living on a tiny volume,
+# expects a clean add failure, then frees space and verifies full recovery.
+# ---------------------------------------------------------------------------
+function Drill-A8-DiskFull {
+  $drill = "A8-disk-full"
+  if (-not (Test-QaAdminRights)) {
+    Rec $drill "SKIP" "requires admin rights to attach a small fixed-size VHD via diskpart; not available on this host"
+    return
+  }
+
+  $vhd = Join-Path $QA.Work "a8-tiny.vhd"
+  $driveLetter = $null
+  $attached = $false
+  try {
+    if (Test-Path $vhd) { Remove-Item -Force $vhd }
+    $sizeMB = 100
+    $driveLetter = 90..70 | ForEach-Object { [char]$_ } | Where-Object { -not (Test-Path "$($_):\") } | Select-Object -First 1
+    if (-not $driveLetter) { throw "SKIP: no free drive letter available for the tiny volume" }
+
+    $dpScript = @"
+create vdisk file="$vhd" maximum=$sizeMB type=fixed
+select vdisk file="$vhd"
+attach vdisk
+create partition primary
+format fs=ntfs quick label=QAA8
+assign letter=$driveLetter
+"@
+    $dpFile = Join-Path $QA.Work "a8-diskpart.txt"
+    $dpScript | Set-Content $dpFile -Encoding ASCII
+    $dpOut = & diskpart /s $dpFile 2>&1
+    if (-not (Test-Path "$($driveLetter):\")) { throw "SKIP: diskpart failed to create/attach/format the tiny volume: $dpOut" }
+    $attached = $true
+
+    $repo = New-SandboxRepo "$($driveLetter):\a8-repo" $Phase
+    # Fixture bigger than the whole 100MB volume, so add() runs out of space
+    # partway through writing chunks into .mediagit on that volume - the
+    # source lives on the normal (large) work drive, only the repo is tiny.
+    $srcFixture = Join-Path $QA.Work "a8-src.bin"
+    New-QaBinaryFixture $srcFixture 150 78001
+    Copy-Item $srcFixture (Join-Path $repo "big.bin")
+
+    $a = Invoke-MG $repo @("add", "big.bin") $Phase -TimeoutSec 300
+    $panic = $a.Out -match "panicked"
+    $cleanFail = ($a.Exit -ne 0) -and (-not $panic)
+
+    # Free the volume back up and verify full recovery: no partial state left
+    # behind, and a normal add+commit on the same repo succeeds afterward.
+    Remove-Item -Force (Join-Path $repo "big.bin") -ErrorAction SilentlyContinue
+    $fsckAfterClear = Test-QaFsckClean $repo
+    New-QaBinaryFixture (Join-Path $repo "small.bin") 2 78002
+    $retryAdd = Invoke-MG $repo @("add", "small.bin") $Phase
+    $retryCommit = Invoke-MG $repo @("commit", "-m", "after disk-full recovery") $Phase
+    $fsckOk = Test-QaFsckClean $repo
+
+    $pass = $cleanFail -and $fsckAfterClear -and ($retryAdd.Exit -eq 0) -and ($retryCommit.Exit -eq 0) -and $fsckOk
+    Rec $drill $pass "add-exit=$($a.Exit) panic=$panic clean-fail=$cleanFail fsck-after-clear=$fsckAfterClear retry-add=$($retryAdd.Exit) retry-commit=$($retryCommit.Exit) final-fsck=$fsckOk"
+  } catch {
+    if ("$_" -match "^SKIP:") { Rec $drill "SKIP" "$_" } else { Rec $drill $false "unexpected error: $_" }
+  } finally {
+    if ($attached -and $driveLetter) {
+      $dpCleanup = Join-Path $QA.Work "a8-diskpart-cleanup.txt"
+      @"
+select vdisk file="$vhd"
+detach vdisk
+"@ | Set-Content $dpCleanup -Encoding ASCII
+      & diskpart /s $dpCleanup 2>&1 | Out-Null
+    }
+    if (Test-Path $vhd) { Remove-Item -Force $vhd -ErrorAction SilentlyContinue }
+  }
+}
+
+# ---------------------------------------------------------------------------
+# A9: server-enforced file lock e2e. user1 (alice) locks a shared path;
+# user2 (bob) touching that path is rejected on push with the lock error
+# string; force-unlock releases it; bob's retry succeeds.
+# No-auth variant (same server - this qa-suite never enables auth): a
+# no-auth server has no proven pusher/requester identity, so (a) a push from
+# *anyone* touching a locked path is rejected regardless of who's asking, and
+# (b) a plain (non-force) unlock always 403s, even for the "owner" name that
+# created the lock - --force is the only way to release a lock at all.
+# ---------------------------------------------------------------------------
+function Drill-A9-LockE2E {
+  $drill = "A9-lock-e2e"
+  $drillNoAuth = "A9-lock-noauth-variant"
+  $srv = $null
+  $noAuthDone = $false
+  try {
+    $srv = Start-QaServer -Backend "minio" -Phase "$Phase-A9"
+    $seed = New-SandboxRepo "a9-seed" $Phase
+    New-QaBinaryFixture (Join-Path $seed "shared.bin") 4 79001
+    Invoke-MG $seed @("add", ".") $Phase | Out-Null
+    Invoke-MG $seed @("commit", "-m", "base") $Phase | Out-Null
+    Invoke-MG $seed @("remote", "add", "origin", $srv.Url) $Phase | Out-Null
+    Invoke-MG $seed @("push", "origin") $Phase -TimeoutSec 1200 | Out-Null
+
+    $alice = Join-Path $QA.Work "a9-alice"; $bob = Join-Path $QA.Work "a9-bob"
+    foreach ($c in @($alice, $bob)) { if (Test-Path $c) { Remove-Item -Recurse -Force $c } }
+    Invoke-MG $null @("clone", $srv.Url, $alice) $Phase | Out-Null
+    Invoke-MG $null @("clone", $srv.Url, $bob) $Phase | Out-Null
+
+    # user1 (alice) locks the shared path
+    $lc = Invoke-MG $alice @("lock", "create", "shared.bin", "--owner", "alice") $Phase
+    $lockCreated = ($lc.Exit -eq 0) -and ($lc.Out -match "Locked")
+
+    # duplicate lock attempt must surface the "already locked" error string
+    $dup = Invoke-MG $bob @("lock", "create", "shared.bin", "--owner", "bob") $Phase
+    $dupRejected = ($dup.Exit -ne 0) -and ($dup.Out -match "is already locked by")
+
+    # user2 (bob) touches the locked path and pushes -> must be rejected
+    New-QaBinaryFixture (Join-Path $bob "shared.bin") 4 79002
+    Invoke-MG $bob @("add", "shared.bin") $Phase | Out-Null
+    Invoke-MG $bob @("commit", "-m", "bob edits shared") $Phase | Out-Null
+    $pushBlocked = Invoke-MG $bob @("push", "origin") $Phase
+    $pushRejected = ($pushBlocked.Exit -ne 0) -and ($pushBlocked.Out -match "is locked by")
+
+    # no-auth variant: this server proves no requester identity, so a plain
+    # (non-force) unlock always 403s - even bob "naming himself" doesn't
+    # matter, nobody can prove they're the owner without auth.
+    $plainUnlock = Invoke-MG $bob @("lock", "unlock", "shared.bin") $Phase
+    $plainUnlockRejected = ($plainUnlock.Exit -ne 0)
+
+    Rec $drillNoAuth ($dupRejected -and $plainUnlockRejected) ("dup-lock-rejected=$dupRejected " +
+      "(out has 'is already locked by') plain-unlock-rejected=$plainUnlockRejected (exit=$($plainUnlock.Exit), no-auth so no owner can be proven)")
+    $noAuthDone = $true
+
+    # force-unlock releases it - the only way anyone can unlock on a no-auth
+    # deployment, per the doc comments on the server's delete_lock handler.
+    $forceUnlock = Invoke-MG $bob @("lock", "unlock", "shared.bin", "--force") $Phase
+    $forceOk = ($forceUnlock.Exit -eq 0)
+
+    # user2 retries the push -> must now succeed
+    $retryPush = Invoke-MG $bob @("push", "origin") $Phase -TimeoutSec 1200
+    $retryOk = ($retryPush.Exit -eq 0)
+
+    $reclone = Join-Path $QA.Work "a9-reclone"
+    if (Test-Path $reclone) { Remove-Item -Recurse -Force $reclone }
+    $cl = Invoke-MG $null @("clone", $srv.Url, $reclone) $Phase -TimeoutSec 1200
+    $fsckOk = if ($cl.Exit -eq 0) { Test-QaFsckClean $reclone } else { $false }
+    $bobHashOk = (Test-Path (Join-Path $reclone "shared.bin")) -and
+                 ((Get-QaHash (Join-Path $reclone "shared.bin")) -eq (Get-QaHash (Join-Path $bob "shared.bin")))
+
+    $pass = $lockCreated -and $pushRejected -and $forceOk -and $retryOk -and ($cl.Exit -eq 0) -and $fsckOk -and $bobHashOk
+    Rec $drill $pass "lock-created=$lockCreated push-rejected=$pushRejected (out has 'is locked by') force-unlock=$forceOk retry-push=$retryOk clone=$($cl.Exit) fsck=$fsckOk hash-ok=$bobHashOk"
+  } catch {
+    $skip = "$_" -match "^SKIP:"
+    $tag = if ($skip) { "SKIP" } else { $false }
+    $detail = if ($skip) { "$_" } else { "unexpected error: $_" }
+    if (-not $noAuthDone) { Rec $drillNoAuth $tag $detail }
+    Rec $drill $tag $detail
+  } finally { Stop-QaServer $srv }
+}
+
+# ---------------------------------------------------------------------------
+# A10: batch-get-disabled fallback. Server started with
+# MEDIAGIT_DISABLE_BATCH_GET=1 (POST /packs/batch-get always 404s - see the
+# "Drill/compat knob ... QA A10" comment in chunks.rs); a clone of a
+# pack-bearing repo must still succeed by falling back to the per-chunk path,
+# hash-exact. The "server saw fewer batch requests" angle is logged as an
+# informational, best-effort note only - MinIO always presigns direct-to-
+# bucket transfers, so the server-side request log is not a reliable signal
+# here and must never gate the drill.
+# ---------------------------------------------------------------------------
+function Drill-A10-BatchGetFallback {
+  $drill = "A10-batch-get-fallback"
+  $srv = $null
+  $prevDisable = $env:MEDIAGIT_DISABLE_BATCH_GET
+  try {
+    $env:MEDIAGIT_DISABLE_BATCH_GET = "1"
+    $srv = Start-QaServer -Backend "minio" -Phase "$Phase-A10"
+    $repo = New-SandboxRepo "a10-src" $Phase
+    # Several files across several commits so a push-side pack actually forms.
+    for ($i = 1; $i -le 5; $i++) {
+      New-QaBinaryFixture (Join-Path $repo "asset$i.bin") 6 (80000 + $i)
+      Invoke-MG $repo @("add", "asset$i.bin") $Phase | Out-Null
+      Invoke-MG $repo @("commit", "-m", "asset $i") $Phase | Out-Null
+    }
+    Invoke-MG $repo @("remote", "add", "origin", $srv.Url) $Phase | Out-Null
+    $push = Invoke-MG $repo @("push", "origin") $Phase -TimeoutSec 1200
+
+    $clone = Join-Path $QA.Work "a10-clone"
+    if (Test-Path $clone) { Remove-Item -Recurse -Force $clone }
+    $cl = Invoke-MG $null @("clone", $srv.Url, $clone) $Phase -TimeoutSec 1800
+
+    $hashesOk = $true
+    for ($i = 1; $i -le 5; $i++) {
+      $srcH = Get-QaHash (Join-Path $repo "asset$i.bin")
+      $dstPath = Join-Path $clone "asset$i.bin"
+      if (-not (Test-Path $dstPath) -or ((Get-QaHash $dstPath) -ne $srcH)) { $hashesOk = $false }
+    }
+    $fsckOk = if ($cl.Exit -eq 0) { Test-QaFsckClean $clone } else { $false }
+
+    # Best-effort, informational only - never a gate (see header comment).
+    $srvLog = Join-Path $QA.Logs "server-minio-$Phase-A10.out.log"
+    $batchHits = 0; $chunkHits = 0
+    if (Test-Path $srvLog) {
+      $batchHits = (Select-String -Path $srvLog -Pattern "packs/batch-get" -ErrorAction SilentlyContinue | Measure-Object).Count
+      $chunkHits = (Select-String -Path $srvLog -Pattern "/chunks/" -ErrorAction SilentlyContinue | Measure-Object).Count
+    }
+    Write-QaLog $Phase ("A10 informational (best-effort, not gated): server-log batch-get hits=$batchHits " +
+      "per-chunk hits=$chunkHits - MinIO presigns direct-to-bucket transfers, so this count is not a reliable signal")
+
+    $pass = ($push.Exit -eq 0) -and ($cl.Exit -eq 0) -and $hashesOk -and $fsckOk
+    Rec $drill $pass "push=$($push.Exit) clone=$($cl.Exit) hashes-ok=$hashesOk fsck=$fsckOk batch-get-disabled=true batch-hits=$batchHits chunk-hits=$chunkHits"
+  } catch {
+    if ("$_" -match "^SKIP:") { Rec $drill "SKIP" "$_" } else { Rec $drill $false "unexpected error: $_" }
+  } finally {
+    Stop-QaServer $srv
+    $env:MEDIAGIT_DISABLE_BATCH_GET = $prevDisable
+  }
+}
+
+# ---------------------------------------------------------------------------
 Write-QaLog $Phase "=== 07_abuse start ==="
 
 Drill-A1-KillMidAdd
@@ -277,6 +598,10 @@ Drill-A3-ConcurrentDoublePush
 Drill-A4-CorruptChunkAtRest
 Drill-A5-ReadOnlyFile
 Drill-A6-SpacesAndUnicodePaths
+Drill-A7-BackendOutage
+Drill-A8-DiskFull
+Drill-A9-LockE2E
+Drill-A10-BatchGetFallback
 
 Write-QaLog $Phase "=== 07_abuse done: overall=$(if ($script:AllPass) { 'PASS' } else { 'FAIL' }) ==="
 if ($script:AllPass) { exit 0 } else { exit 1 }

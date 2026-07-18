@@ -11,7 +11,7 @@ graph TB
     Core --> Versioning[Versioning Engine<br/>Merge/LCA]
     Core --> Media[Media Intelligence<br/>PSD/Video/Audio]
 
-    ODB --> Storage[Storage Abstraction<br/>trait Backend]
+    ODB --> Storage[Storage Abstraction<br/>trait StorageBackend]
     Versioning --> Storage
 
     Storage --> Compression[Compression Layer<br/>zstd/brotli/delta]
@@ -44,7 +44,7 @@ graph TB
 - **Location**: `crates/mediagit-versioning/`, `crates/mediagit-media/`
 
 ### 3. Storage Abstraction
-- **Design**: Trait-based abstraction (`Backend` trait)
+- **Design**: Trait-based abstraction (`StorageBackend` trait)
 - **Implementations**: 7 storage backends (local, S3, Azure, GCS, B2, MinIO, Spaces)
 - **Benefits**: Easy backend switching, testability, cloud-agnostic design
 - **Location**: `crates/mediagit-storage/`
@@ -98,7 +98,7 @@ sequenceDiagram
 
 ### Trait-Based Abstraction
 - **Why**: Decouple logic from storage implementation
-- **How**: `Backend` trait with 7 implementations
+- **How**: `StorageBackend` trait with 7 implementations
 - **Benefit**: Easy testing (mock backends), cloud provider flexibility
 
 ## Performance Characteristics
@@ -169,8 +169,8 @@ sequenceDiagram
 - Example: Custom video frame merging
 
 ### Storage Backend Development
-- Implement `Backend` trait
-- Provide `get`, `put`, `exists`, `delete`, `list` operations
+- Implement `StorageBackend` trait
+- Provide `get`, `put`, `exists`, `delete`, `list_objects` operations
 - Example: IPFS backend, SFTP backend
 
 ### Media Format Support

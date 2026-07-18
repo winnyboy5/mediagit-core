@@ -4,6 +4,15 @@ param()
 . (Join-Path $PSScriptRoot "lib\common.ps1")
 $Phase = "04_economics"
 
+# Pin the CDC seed for economics measurement: every `mediagit init` otherwise
+# draws a random seed, and v3+ dedup on shifted-content chains (wav fade/append/
+# trim) swings 2-4pp on boundary alignment alone (I11 RCA 2026-07-16: same
+# release binary spanned 94.6-99.5 across three seed draws). A regression gate
+# must be deterministic; real-world unpinned behavior is covered by every other
+# phase. Value is arbitrary but MUST stay fixed - changing it re-anchors every
+# threshold below.
+$env:MEDIAGIT_CDC_SEED = "20260716"
+
 $OUT = Join-Path $QA.Logs "economics.tsv"
 $HEADER = @("family", "version", "fileMB", "odbGrowthMB", "savedPct", "addSec")
 
@@ -48,7 +57,7 @@ $videoFiles = Get-ChildItem (Join-Path $QA.TestFiles "video-variants") -File -EA
 if ($videoFiles) { $families["video-variants"] = @($videoFiles | ForEach-Object { $_.FullName }) }
 
 # ---- anchor gates: v11 measured floors minus 5pt tolerance, keyed on latest version's savedPct ----
-$anchors = @{ wav = 94.0; glb = 95.0; safetensors = 48.0 }  # safetensors rebased 69->48: campaign 20260714 observed 50.9, 20260715 50.0 on this harness metric (see registry calibration note)
+$anchors = @{ wav = 94.0; glb = 95.0; safetensors = 44.0 }  # safetensors rebased 48->44 on 2026-07-16: prior 48 was calibrated on lucky RANDOM-seed draws (48.9-50.9); under the pinned seed above the deterministic value is 45.5 (I11 RCA). wav pinned-seed value: 95.3.
 
 $gateFailCount = 0
 foreach ($fam in $families.Keys) {
@@ -129,7 +138,12 @@ $dedupExe = Join-Path $QA.RepoRoot "target\release\examples\dedup_report.exe"
 if ((Test-Path $compareScript) -and (Test-Path $baseline) -and (Test-Path $dedupExe)) {
   $currentJson = Join-Path $QA.Logs "dedup-current.json"
   # dedup_report.exe prints JSON to stdout and a PEAK_RSS_MB diagnostic line to stderr - drop stderr so it can't corrupt the JSON.
+  # dedup_report has no repo config (seed 0 = deterministic) and its baseline
+  # was locked under that regime - shield it from this phase's pinned seed.
+  $savedSeed = $env:MEDIAGIT_CDC_SEED
+  Remove-Item Env:MEDIAGIT_CDC_SEED -ErrorAction SilentlyContinue
   $reportOut = & $dedupExe 2>$null
+  $env:MEDIAGIT_CDC_SEED = $savedSeed
   $reportOut | Set-Content $currentJson
   $global:LASTEXITCODE = 0
   & powershell -NoProfile -File $compareScript -Baseline $baseline -Current $currentJson 2>&1 | Add-Content (Join-Path $QA.Logs "$Phase-cmds.log")

@@ -84,14 +84,6 @@ $ mediagit commit -m "Update brand identity assets
  Compression: 156.8 MB → 28.4 MB (81.9% savings)
 ```
 
-### Amend last commit
-```bash
-$ mediagit commit --amend -m "Add promotional video assets (final version)"
-[main d6f0a3c] Add promotional video assets (final version)
- 5 files changed
- ℹ Amended previous commit
-```
-
 ### Commit with verbose output
 ```bash
 $ mediagit commit -v -m "Add product photography"

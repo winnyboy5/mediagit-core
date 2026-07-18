@@ -172,6 +172,27 @@ impl ProtocolClient {
             message: format!("Found {} objects", stats.objects_count),
         });
 
+        // A7: bound the total wall time spent on network uploads so a mid-push
+        // backend outage fails fast with a clear error instead of hanging on
+        // retries forever. Absolute deadline (not stall-based): the default is
+        // generous enough that a real large push won't trip it; lower
+        // MEDIAGIT_PUSH_DEADLINE_SECS to fail faster on a dead backend.
+        // ponytail: absolute deadline, upgrade to a progress-reset stall
+        // deadline if multi-hour legit pushes ever false-trip it.
+        let push_deadline_secs = std::env::var("MEDIAGIT_PUSH_DEADLINE_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&s| s > 0)
+            .unwrap_or(3600);
+        let push_deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(push_deadline_secs);
+        let deadline_err = || {
+            anyhow::anyhow!(
+                "push aborted: exceeded MEDIAGIT_PUSH_DEADLINE_SECS ({push_deadline_secs}s) \
+                 uploading to remote; the storage backend may be unavailable"
+            )
+        };
+
         if !objects.is_empty() {
             // Phase 2: Generate pack with progress
             let total_objects = objects.len() as u64;
@@ -204,7 +225,9 @@ impl ProtocolClient {
                 message: "Uploading pack...".to_string(),
             });
 
-            self.upload_pack(&pack_data).await?;
+            tokio::time::timeout_at(push_deadline, self.upload_pack(&pack_data))
+                .await
+                .map_err(|_| deadline_err())??;
 
             on_progress(PushProgress {
                 phase: PushPhase::Uploading,
@@ -215,15 +238,21 @@ impl ProtocolClient {
 
             // Phase 4: Upload chunked objects (large files)
             if !chunked_oids.is_empty() {
-                self.upload_chunked_objects(odb, &chunked_oids, |bytes_done, bytes_total| {
-                    on_progress(PushProgress {
-                        phase: PushPhase::Uploading,
-                        current: bytes_done,
-                        total: bytes_total,
-                        message: String::new(),
-                    });
-                })
-                .await?;
+                let upload = self.upload_chunked_objects(
+                    odb,
+                    &chunked_oids,
+                    |bytes_done, bytes_total| {
+                        on_progress(PushProgress {
+                            phase: PushPhase::Uploading,
+                            current: bytes_done,
+                            total: bytes_total,
+                            message: String::new(),
+                        });
+                    },
+                );
+                tokio::time::timeout_at(push_deadline, upload)
+                    .await
+                    .map_err(|_| deadline_err())??;
             }
         } else {
             tracing::info!("No new objects to push");
@@ -231,7 +260,9 @@ impl ProtocolClient {
 
         // Update refs
         let request = RefUpdateRequest { updates, force };
-        let response = self.update_refs(request).await?;
+        let response = tokio::time::timeout_at(push_deadline, self.update_refs(request))
+            .await
+            .map_err(|_| deadline_err())??;
         Ok((response, stats))
     }
 
@@ -1369,8 +1400,7 @@ impl ProtocolClient {
         }
 
         // Upload manifest last (ensures all chunks exist first)
-        let manifest_data = mediagit_versioning::format::serialize(&manifest)
-            .context("Failed to serialize manifest")?;
+        let manifest_data = manifest.to_bytes().context("Failed to serialize manifest")?;
         self.upload_manifest(oid, &manifest_data).await?;
 
         tracing::debug!(oid = %oid, "Manifest uploaded");
@@ -2201,8 +2231,7 @@ impl ProtocolClient {
             }
 
             // Upload manifest last (ensures all chunks exist first)
-            let manifest_data = mediagit_versioning::format::serialize(&manifest)
-                .context("Failed to serialize manifest")?;
+            let manifest_data = manifest.to_bytes().context("Failed to serialize manifest")?;
             self.upload_manifest(oid, &manifest_data).await?;
 
             tracing::debug!(oid = %oid, "Manifest uploaded");

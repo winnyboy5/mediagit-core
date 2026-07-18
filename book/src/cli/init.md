@@ -95,7 +95,7 @@ The generated `config.toml` contains the full default configuration. Key section
 ```toml
 [app]
 name = "mediagit"
-version = "0.2.8-beta.1"   # matches current binary version
+version = "0.3.0-rc.1"   # matches current binary version
 environment = "development"
 port = 8080
 
@@ -137,4 +137,4 @@ The `[compression]` section is written for reference but is not read at runtime.
 
 - [mediagit add](./add.md) - Add files to the staging area
 - [mediagit commit](./commit.md) - Record changes to the repository
-- [mediagit config](./config.md) - Get and set repository options
+- [Configuration Reference](../reference/config.md) - Repository configuration options

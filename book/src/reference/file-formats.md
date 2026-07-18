@@ -92,16 +92,17 @@ objects/ab/cdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890cd
 
 ### Object Storage
 
-Objects are stored compressed (Zstd) or uncompressed (Store), depending on the file type. The compression strategy is selected automatically per file extension:
+Objects are stored via one of four strategies — Store, Zstd, Brotli, or (internal-only) Zlib — selected automatically per file type by `SmartCompressor`:
 
 | Format class | Strategy |
 |---|---|
-| JPEG, PNG, WebP, MP4, MOV, ZIP, docx, PDF, AI | Store (no compression) |
-| PSD, 3D models (OBJ, FBX, GLB, STL, PLY) | Zstd Best |
-| WAV, FLAC | Zstd Default |
-| Text, JSON, TOML, CSV | Zstd Default |
+| JPEG, PNG, GIF, WebP, AVIF, HEIC, MP4, MOV, MKV, MP3, AAC, Opus, ZIP, docx/xlsx/pptx, AI/InDesign | Store (already compressed) |
+| TIFF, BMP, RAW, EXR, HDR, DPX, WAV, AIFF, 3D models (OBJ, FBX, GLB, STL, PLY) | Zstd Best |
+| FLAC, ALAC, PDF, SVG, PSD, After Effects/Premiere/Resolve/Blender/Maya/Houdini project files | Zstd Default |
+| Text, JSON, XML, YAML, TOML, CSV | Brotli Default (Zstd Default above 500 MB) |
+| Unknown/binary | Zstd Default (safe fallback) |
 
-Delta objects reference a base object and store only the difference.
+See [`CompressionStrategy::for_object_type`](../architecture/compression.md) for the full per-format mapping. Delta objects reference a base object and store only the difference.
 
 ---
 

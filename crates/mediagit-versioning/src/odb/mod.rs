@@ -580,6 +580,194 @@ mod tests {
         assert_eq!(resolved, oid);
     }
 
+    /// `MEDIAGIT_REPACK_CHUNKS` is a process-global env var, but `cargo test`
+    /// runs test functions from this file concurrently on separate threads
+    /// within the same process. Every test below that sets/reads it must
+    /// hold this lock for its whole body so it can't observe (or clobber)
+    /// another such test's value mid-run.
+    static REPACK_CHUNKS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// I9: loose chunks default-route into Track-F-style cloud packs
+    /// (`MEDIAGIT_REPACK_CHUNKS` unset = enabled). Packed chunks must stay
+    /// byte-identical and readable via the pack-fallback path in
+    /// `get_chunk`, and the loose `chunks/<hex>` keys must be gone.
+    #[tokio::test]
+    async fn test_repack_chunks_into_cloud_pack_readable_after_loose_removed() {
+        let _env_lock = REPACK_CHUNKS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MEDIAGIT_REPACK_CHUNKS");
+
+        let storage = Arc::new(MockBackend::new());
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let mut fixtures = Vec::new();
+        for i in 0..5u8 {
+            let content = vec![i; 4096 + i as usize * 17];
+            let chunk_id = Oid::hash(&content);
+            let compressed = odb.compressor.compress(&content).unwrap();
+            odb.put_compressed_chunk(&chunk_id, &compressed)
+                .await
+                .unwrap();
+            fixtures.push((chunk_id, content));
+        }
+
+        let stats = odb.repack(0, true).await.unwrap();
+        assert_eq!(stats.objects_packed, 5);
+        assert_eq!(stats.loose_objects_removed, 5);
+
+        for (chunk_id, _) in &fixtures {
+            let key = format!("chunks/{}", chunk_id.to_hex());
+            assert!(
+                !odb.storage.exists(&key).await.unwrap(),
+                "loose chunk {} must be removed after cloud-pack repack",
+                chunk_id
+            );
+        }
+
+        for (chunk_id, content) in &fixtures {
+            let data = odb.get_chunk(chunk_id).await.unwrap();
+            assert_eq!(
+                &data, content,
+                "chunk {} must read back byte-identical from the cloud pack",
+                chunk_id
+            );
+        }
+
+        // A JSONL manifest must have been written under packs/<shard>/.
+        let pack_keys = odb.storage.list_objects("packs/").await.unwrap();
+        assert!(
+            pack_keys.iter().any(|k| k.ends_with(".jsonl")),
+            "cloud-pack repack must persist a JSONL chunk index: {:?}",
+            pack_keys
+        );
+    }
+
+    /// I9 knob: `MEDIAGIT_REPACK_CHUNKS=0` must reproduce the pre-I9
+    /// behavior exactly — chunks folded into the monolithic `PackWriter`
+    /// pack, no JSONL manifest written.
+    #[tokio::test]
+    async fn test_repack_chunks_knob_disabled_matches_legacy_behavior() {
+        let _env_lock = REPACK_CHUNKS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("MEDIAGIT_REPACK_CHUNKS", "0");
+
+        let storage = Arc::new(MockBackend::new());
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let content = vec![7u8; 5000];
+        let chunk_id = Oid::hash(&content);
+        let compressed = odb.compressor.compress(&content).unwrap();
+        odb.put_compressed_chunk(&chunk_id, &compressed)
+            .await
+            .unwrap();
+
+        let stats = odb.repack(0, true).await.unwrap();
+        assert_eq!(stats.objects_packed, 1);
+        assert_eq!(stats.loose_objects_removed, 1);
+
+        let pack_keys = odb.storage.list_objects("packs/").await.unwrap();
+        assert!(
+            pack_keys.iter().all(|k| !k.ends_with(".jsonl")),
+            "MEDIAGIT_REPACK_CHUNKS=0 must not produce a JSONL manifest: {:?}",
+            pack_keys
+        );
+        assert!(
+            pack_keys.iter().any(|k| k.ends_with(".pack")),
+            "MEDIAGIT_REPACK_CHUNKS=0 must still produce a legacy .pack file: {:?}",
+            pack_keys
+        );
+
+        let data = odb.get_chunk(&chunk_id).await.unwrap();
+        assert_eq!(data, content);
+
+        std::env::remove_var("MEDIAGIT_REPACK_CHUNKS");
+    }
+
+    /// Storage wrapper that fails `put()` for any key containing
+    /// `fail_substring`, used to simulate a crash partway through a
+    /// multi-step durable write sequence.
+    #[derive(Debug)]
+    struct FailOnKeyBackend {
+        inner: Arc<dyn StorageBackend>,
+        fail_substring: String,
+    }
+
+    #[async_trait::async_trait]
+    impl StorageBackend for FailOnKeyBackend {
+        async fn get(&self, key: &str) -> anyhow::Result<Vec<u8>> {
+            self.inner.get(key).await
+        }
+        async fn put(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
+            if key.contains(&self.fail_substring) {
+                anyhow::bail!("simulated crash writing {}", key);
+            }
+            self.inner.put(key, data).await
+        }
+        async fn exists(&self, key: &str) -> anyhow::Result<bool> {
+            self.inner.exists(key).await
+        }
+        async fn delete(&self, key: &str) -> anyhow::Result<()> {
+            self.inner.delete(key).await
+        }
+        async fn list_objects(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+            self.inner.list_objects(prefix).await
+        }
+        async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+            self.inner.head(key).await
+        }
+    }
+
+    /// I9 abort-safety: a crash between "pack bytes stored" and "JSONL index
+    /// persisted" must leave the loose chunk untouched — `seal_chunk_cloud_pack`
+    /// only deletes loose chunks after the JSONL write succeeds.
+    #[tokio::test]
+    async fn test_repack_chunks_cloud_pack_abort_before_index_persist_keeps_loose_chunk() {
+        let _env_lock = REPACK_CHUNKS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MEDIAGIT_REPACK_CHUNKS");
+
+        let inner = Arc::new(MockBackend::new());
+        let failing: Arc<dyn StorageBackend> = Arc::new(FailOnKeyBackend {
+            inner: inner.clone(),
+            fail_substring: ".jsonl".to_string(),
+        });
+        let odb = ObjectDatabase::new(failing, 100);
+
+        let content = vec![9u8; 4096];
+        let chunk_id = Oid::hash(&content);
+        let compressed = odb.compressor.compress(&content).unwrap();
+        odb.put_compressed_chunk(&chunk_id, &compressed)
+            .await
+            .unwrap();
+
+        let result = odb.repack(0, true).await;
+        assert!(
+            result.is_err(),
+            "repack must propagate the simulated JSONL-write failure"
+        );
+
+        // The loose chunk must survive: the pack bytes may already be
+        // written, but nothing is deleted because the JSONL write (which
+        // gates deletion) never succeeded.
+        let key = format!("chunks/{}", chunk_id.to_hex());
+        assert!(
+            inner.exists(&key).await.unwrap(),
+            "loose chunk must survive a crash before the index is durably persisted"
+        );
+
+        // Recovery: re-running repack against the real backend succeeds and
+        // packs the still-present loose chunk.
+        let odb2 = ObjectDatabase::new(inner.clone(), 100);
+        let stats = odb2.repack(0, true).await.unwrap();
+        assert_eq!(stats.objects_packed, 1);
+        assert_eq!(stats.loose_objects_removed, 1);
+        let data = odb2.get_chunk(&chunk_id).await.unwrap();
+        assert_eq!(data, content);
+    }
+
     /// QA-006b: `put_compressed_chunk` must decompress + hash-verify the
     /// payload against its declared chunk_id before persisting anything.
     #[tokio::test]

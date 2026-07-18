@@ -4,7 +4,7 @@ MediaGit configuration reference.
 
 ## Repository Configuration
 
-Located in `.mediagit/config`:
+Located in `.mediagit/config.toml`:
 
 ```toml
 [storage]

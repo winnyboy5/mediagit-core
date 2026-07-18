@@ -590,6 +590,13 @@ pub struct ChunkRef {
     pub codec_hint: CodecHint,
 }
 
+/// Magic bytes identifying a chunk manifest envelope (distinct from bare postcard bodies).
+const MANIFEST_MAGIC: &[u8; 4] = b"MGCM";
+
+/// Current chunk manifest format version. Bump when the body layout changes,
+/// and teach `ChunkManifest::from_bytes` how to read the new version.
+const MANIFEST_VERSION: u8 = 1;
+
 /// Chunk manifest for reconstructing chunked objects
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkManifest {
@@ -602,6 +609,57 @@ pub struct ChunkManifest {
 }
 
 impl ChunkManifest {
+    /// Serialize to the on-disk envelope: `MAGIC (4 bytes) | VERSION (1 byte) | postcard body`.
+    ///
+    /// The envelope lets a future reader detect a manifest format change before
+    /// postcard (a non-self-describing, positional format) attempts to parse it.
+    pub fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
+        let body = crate::format::serialize(self)?;
+        let mut out = Vec::with_capacity(MANIFEST_MAGIC.len() + 1 + body.len());
+        out.extend_from_slice(MANIFEST_MAGIC);
+        out.push(MANIFEST_VERSION);
+        out.extend_from_slice(&body);
+        Ok(out)
+    }
+
+    /// Deserialize from the on-disk envelope, validating magic and version
+    /// before touching the postcard body. Unknown magic or a version newer
+    /// than this build supports is a hard error, never a silent fallback.
+    pub fn from_bytes(data: &[u8]) -> anyhow::Result<Self> {
+        let header_len = MANIFEST_MAGIC.len() + 1;
+        if data.len() < header_len {
+            anyhow::bail!(
+                "ChunkManifest data too short: expected at least {} header bytes, got {}",
+                header_len,
+                data.len()
+            );
+        }
+        let (magic, rest) = data.split_at(MANIFEST_MAGIC.len());
+        if magic != MANIFEST_MAGIC {
+            anyhow::bail!(
+                "ChunkManifest magic mismatch: expected {:?}, got {:?} (not a chunk manifest, or corrupted)",
+                MANIFEST_MAGIC,
+                magic
+            );
+        }
+        let version = rest[0];
+        if version > MANIFEST_VERSION {
+            anyhow::bail!(
+                "ChunkManifest version {} is newer than the highest version this build supports ({}); \
+                upgrade mediagit to read this repository",
+                version,
+                MANIFEST_VERSION
+            );
+        }
+        crate::format::deserialize(&rest[1..]).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to deserialize chunk manifest body (version {}): {}",
+                version,
+                e
+            )
+        })
+    }
+
     /// Create manifest from chunks
     pub fn from_chunks(chunks: Vec<ContentChunk>, filename: Option<String>) -> Self {
         let total_size = chunks.iter().map(|c| c.size as u64).sum();
@@ -635,6 +693,63 @@ mod tests {
         mkv_codec_id_to_hint, parse_ebml_elements, parse_mp4_atoms, read_ebml_id, read_ebml_size,
     };
     use super::*;
+
+    #[test]
+    fn test_manifest_envelope_roundtrip() {
+        let manifest = ChunkManifest {
+            chunks: vec![ChunkRef {
+                id: Oid::hash(b"chunk-a"),
+                offset: 0,
+                size: 42,
+                chunk_type: ChunkType::Generic,
+                codec_hint: CodecHint::default(),
+            }],
+            total_size: 42,
+            filename: Some("test.bin".to_string()),
+        };
+
+        let bytes = manifest.to_bytes().unwrap();
+        let decoded = ChunkManifest::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.total_size, manifest.total_size);
+        assert_eq!(decoded.filename, manifest.filename);
+        assert_eq!(decoded.chunks.len(), manifest.chunks.len());
+        assert_eq!(decoded.chunks[0].id, manifest.chunks[0].id);
+    }
+
+    #[test]
+    fn test_manifest_envelope_truncated() {
+        let manifest = ChunkManifest {
+            chunks: vec![],
+            total_size: 0,
+            filename: None,
+        };
+        let bytes = manifest.to_bytes().unwrap();
+        assert!(ChunkManifest::from_bytes(&bytes[..3]).is_err());
+    }
+
+    #[test]
+    fn test_manifest_envelope_bad_magic() {
+        let manifest = ChunkManifest {
+            chunks: vec![],
+            total_size: 0,
+            filename: None,
+        };
+        let mut bytes = manifest.to_bytes().unwrap();
+        bytes[0] = b'X';
+        assert!(ChunkManifest::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_manifest_envelope_future_version_rejected() {
+        let manifest = ChunkManifest {
+            chunks: vec![],
+            total_size: 0,
+            filename: None,
+        };
+        let mut bytes = manifest.to_bytes().unwrap();
+        bytes[MANIFEST_MAGIC.len()] = MANIFEST_VERSION + 1;
+        assert!(ChunkManifest::from_bytes(&bytes).is_err());
+    }
 
     #[tokio::test]
     async fn test_fixed_chunking() {

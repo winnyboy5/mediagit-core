@@ -648,6 +648,54 @@ pub fn prefixed_key(prefix: &Option<String>, key: &str) -> String {
     }
 }
 
+/// Reject storage keys/prefixes that could escape the intended storage root
+/// via path traversal, absolute paths, or Windows drive/UNC prefixes.
+///
+/// This is the single choke point every [`StorageBackend`] implementation
+/// and wrapper (notably [`NamespacedBackend`] and [`local::LocalBackend`])
+/// must call before turning a caller-supplied key into a filesystem path or
+/// remote object key. Without it, a user-controlled id containing `..`
+/// reaches [`local::LocalBackend`]'s path join unrejected and can write or
+/// read outside the repo's storage root (or, once namespaced, outside the
+/// per-repo namespace — a cross-tenant escape).
+///
+/// Deliberately does NOT reject an empty string: `list_objects("")` (list
+/// everything under a namespace) is a legitimate call with an empty prefix,
+/// and the individual backends already enforce "key cannot be empty" for
+/// `get`/`put`/`exists`/`delete`/`head` on their own.
+///
+/// Handles both `/`- and `\`-based traversal — this runs on Windows, where a
+/// literal `..\` in a key is just as dangerous as `../`.
+pub fn validate_object_key(key: &str) -> anyhow::Result<()> {
+    // Normalize backslashes to forward slashes before parsing with `Path` so
+    // `..\win`-style traversal is caught the same way on every platform,
+    // not just Windows (where `\` is already a native separator).
+    let normalized = key.replace('\\', "/");
+    let path = std::path::Path::new(&normalized);
+
+    if path.is_absolute() {
+        anyhow::bail!("invalid storage key '{key}': absolute paths are not allowed");
+    }
+
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                anyhow::bail!(
+                    "invalid storage key '{key}': path traversal ('..') is not allowed"
+                );
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                anyhow::bail!(
+                    "invalid storage key '{key}': absolute or drive-rooted paths are not allowed"
+                );
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
 /// The reserved key used for the layout-version marker written at the
 /// storage root (under the namespace, once wrapped in
 /// [`NamespacedBackend`]). Not part of the logical object key space —
@@ -850,6 +898,31 @@ mod tests {
     fn trait_is_object_safe() {
         // Verify the trait can be used as a trait object
         fn _check_object_safe(_: &dyn StorageBackend) {}
+    }
+
+    #[test]
+    fn validate_object_key_rejects_traversal_and_absolute_paths() {
+        assert!(validate_object_key("../x").is_err());
+        assert!(validate_object_key("chunks/../../etc").is_err());
+        assert!(validate_object_key("/abs/path").is_err());
+        assert!(validate_object_key("..\\win").is_err());
+        // Already-decoded form of `chunks/..%2f` after axum's percent-decoding.
+        assert!(validate_object_key("chunks/../").is_err());
+        assert!(validate_object_key("C:\\x").is_err());
+    }
+
+    #[test]
+    fn validate_object_key_accepts_legit_keys() {
+        let hex = "deadbeef00112233445566778899aabbccddeeff00112233445566778899aa";
+        assert!(validate_object_key(&format!("chunks/{hex}")).is_ok());
+        assert!(validate_object_key(&format!("packs/{hex}")).is_ok());
+        assert!(validate_object_key(&format!("manifests/{hex}")).is_ok());
+        assert!(validate_object_key(&format!("chunk-deltas/{hex}.meta")).is_ok());
+        assert!(validate_object_key(&format!("myrepo/chunks/{hex}")).is_ok());
+        assert!(validate_object_key(LAYOUT_MARKER_KEY).is_ok());
+        assert!(validate_object_key(&format!("myrepo/{LAYOUT_MARKER_KEY}")).is_ok());
+        // Empty is allowed (list_objects("") lists everything).
+        assert!(validate_object_key("").is_ok());
     }
 
     #[test]

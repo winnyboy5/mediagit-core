@@ -27,7 +27,15 @@ if (-not $env:GCS_PROJECT_ID)   { $env:GCS_PROJECT_ID   = _TomlVal $gcs "project
 if (-not $env:GCS_BUCKET_NAME)  { $env:GCS_BUCKET_NAME  = _TomlVal $gcs "bucket" }
 if (-not $env:GOOGLE_APPLICATION_CREDENTIALS) {
   $credPath = _TomlVal $gcs "credentials_path"
-  if ($credPath -and (Test-Path $credPath)) { $env:GOOGLE_APPLICATION_CREDENTIALS = $credPath }
+  # credentials_path in the TOML may be relative; consumers (server per-run dirs) have a
+  # different cwd, so export an absolute path or GCS pushes 500 on "file not found".
+  if ($credPath -and -not [IO.Path]::IsPathRooted($credPath)) {
+    foreach ($base in @($devServer, (Get-Location).Path)) {
+      $cand = Join-Path $base $credPath
+      if (Test-Path $cand) { $credPath = (Resolve-Path $cand).Path; break }
+    }
+  }
+  if ($credPath -and (Test-Path $credPath)) { $env:GOOGLE_APPLICATION_CREDENTIALS = (Resolve-Path $credPath).Path }
 }
 
 $set = @("AWS_ACCESS_KEY_ID","AWS_SECRET_ACCESS_KEY","AZURE_STORAGE_ACCOUNT","AZURE_STORAGE_KEY","GCS_PROJECT_ID","GOOGLE_APPLICATION_CREDENTIALS") |

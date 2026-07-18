@@ -710,11 +710,11 @@ pub struct RemoteConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_fetch: Option<bool>,
 
-    /// JWT bearer token for this remote (client auth, M2). Highest-precedence
-    /// credential source — checked before `MEDIAGIT_TOKEN`/`MEDIAGIT_API_KEY`.
-    /// Stored in plaintext in `config.toml`; a world/group-readable config
-    /// file triggers a warning when this is read (see `resolve_credentials`
-    /// in `mediagit-cli/src/repo.rs`).
+    /// JWT bearer token for this remote (client auth, M2). Lowest-precedence
+    /// credential source — `MEDIAGIT_TOKEN`/`MEDIAGIT_API_KEY` env vars and
+    /// the OS keychain are checked first (see `resolve_credentials` in
+    /// `mediagit-cli/src/repo.rs`). Stored in plaintext in `config.toml`; a
+    /// world/group-readable config file triggers a warning when this is read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
 

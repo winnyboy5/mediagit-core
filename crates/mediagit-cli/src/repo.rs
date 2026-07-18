@@ -133,31 +133,27 @@ pub fn find_repo_root_from(start: &std::path::Path) -> Result<PathBuf> {
     }
 }
 
-/// Resolve client credentials for talking to `remote_name` (M2 client auth).
+/// Resolve client credentials for talking to `remote_name` (M2 client auth,
+/// OS-keychain tier added for I10).
 ///
-/// Precedence: per-remote config (`remotes.<name>.token` / `.api_key` in
-/// config.toml) → env `MEDIAGIT_TOKEN` / `MEDIAGIT_API_KEY` → none. `token`
-/// wins over `api_key` if a remote somehow has both set. Threaded into
-/// `ProtocolClient::with_credentials` by every remote command (fetch, pull,
-/// push, clone, download).
+/// Precedence: env `MEDIAGIT_TOKEN` / `MEDIAGIT_API_KEY` → OS keychain
+/// (skipped entirely if `MEDIAGIT_NO_KEYRING` is set) → per-remote config
+/// (`remotes.<name>.token` / `.api_key` in config.toml). `token` wins over
+/// `api_key` within the config tier if a remote somehow has both set.
+/// Threaded into `ProtocolClient::with_credentials` by every remote command
+/// (fetch, pull, push, clone, download, lock).
 ///
 /// Missing/no remote entry (e.g. `clone`, which has no repo config yet) or
-/// unknown `remote_name` falls straight through to the env-var checks.
+/// unknown `remote_name` falls straight through to the next tier.
+///
+/// Callers should follow up with [`remember_credentials`] once these
+/// credentials have been accepted by the server, so the next invocation can
+/// skip straight to the (faster, no file/env lookup) keychain tier.
 pub fn resolve_credentials(
     repo_root: &Path,
     config: &mediagit_config::Config,
     remote_name: &str,
 ) -> mediagit_protocol::Credentials {
-    if let Some(remote) = config.remotes.get(remote_name) {
-        if let Some(token) = remote.token.as_deref().filter(|t| !t.trim().is_empty()) {
-            warn_if_config_world_readable(repo_root);
-            return mediagit_protocol::Credentials::Bearer(token.to_string());
-        }
-        if let Some(key) = remote.api_key.as_deref().filter(|k| !k.trim().is_empty()) {
-            warn_if_config_world_readable(repo_root);
-            return mediagit_protocol::Credentials::ApiKey(key.to_string());
-        }
-    }
     if let Some(token) = std::env::var("MEDIAGIT_TOKEN")
         .ok()
         .filter(|t| !t.trim().is_empty())
@@ -170,7 +166,91 @@ pub fn resolve_credentials(
     {
         return mediagit_protocol::Credentials::ApiKey(key);
     }
+    if !keyring_disabled() {
+        if let Some(creds) = keyring_read(&keyring_account(config, remote_name)) {
+            return creds;
+        }
+    }
+    if let Some(remote) = config.remotes.get(remote_name) {
+        if let Some(token) = remote.token.as_deref().filter(|t| !t.trim().is_empty()) {
+            warn_if_config_world_readable(repo_root);
+            return mediagit_protocol::Credentials::Bearer(token.to_string());
+        }
+        if let Some(key) = remote.api_key.as_deref().filter(|k| !k.trim().is_empty()) {
+            warn_if_config_world_readable(repo_root);
+            return mediagit_protocol::Credentials::ApiKey(key.to_string());
+        }
+    }
     mediagit_protocol::Credentials::None
+}
+
+/// True if the OS-keychain tier should be skipped entirely (opt-out knob,
+/// I10) — resolution behaves exactly as it did before this feature existed.
+fn keyring_disabled() -> bool {
+    std::env::var_os("MEDIAGIT_NO_KEYRING").is_some()
+}
+
+/// Service name every MediaGit keychain entry is stored under.
+const KEYRING_SERVICE: &str = "mediagit";
+
+/// Keychain account key for a remote: the resolved remote URL when one is
+/// configured, else the bare remote name. The URL (not just "origin") keeps
+/// entries unambiguous across different repos/servers that both happen to
+/// name a remote "origin".
+fn keyring_account(config: &mediagit_config::Config, remote_name: &str) -> String {
+    config
+        .resolve_remote_url(remote_name)
+        .unwrap_or_else(|_| remote_name.to_string())
+}
+
+/// Read a previously-stored credential from the OS keychain. Any failure —
+/// locked/unavailable keychain service, missing entry, corrupt payload —
+/// degrades silently to `None`: a broken keyring must never break a
+/// push/fetch that would otherwise work off env or config.toml.
+fn keyring_read(account: &str) -> Option<mediagit_protocol::Credentials> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, account).ok()?;
+    let stored = entry.get_password().ok()?;
+    let (kind, value) = stored.split_once(':')?;
+    match kind {
+        "bearer" => Some(mediagit_protocol::Credentials::Bearer(value.to_string())),
+        "apikey" => Some(mediagit_protocol::Credentials::ApiKey(value.to_string())),
+        _ => None,
+    }
+}
+
+/// Write-through: persist `creds` into the OS keychain after the server has
+/// accepted a request made with them, so the next command for this remote
+/// resolves straight from the keychain tier instead of env/config.toml.
+///
+/// Call only after a successful (non-error) response — never speculatively
+/// — since the keychain tier is checked *before* config.toml: caching an
+/// untested or bad credential would silently shadow a subsequently-fixed
+/// `config.toml`/env value on every future run. No-op if `MEDIAGIT_NO_KEYRING`
+/// is set, `creds` is `Credentials::None`, or the keychain write fails
+/// (best-effort, same "never break a working command" rule as the read side).
+///
+/// ponytail: re-writing a value that was itself just read from the keychain
+/// (env/config-sourced vs. keychain-sourced credentials aren't distinguished
+/// by the caller) is a harmless idempotent no-op, so every call site can
+/// call this unconditionally after success rather than threading an extra
+/// "which tier did this come from" flag through every command.
+pub fn remember_credentials(
+    config: &mediagit_config::Config,
+    remote_name: &str,
+    creds: &mediagit_protocol::Credentials,
+) {
+    if keyring_disabled() {
+        return;
+    }
+    let payload = match creds {
+        mediagit_protocol::Credentials::Bearer(t) => format!("bearer:{t}"),
+        mediagit_protocol::Credentials::ApiKey(k) => format!("apikey:{k}"),
+        mediagit_protocol::Credentials::None => return,
+    };
+    if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, &keyring_account(config, remote_name))
+    {
+        let _ = entry.set_password(&payload);
+    }
 }
 
 /// True if `typed_url` and `remote_url` point at the same host for

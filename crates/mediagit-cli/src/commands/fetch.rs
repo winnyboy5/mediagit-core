@@ -111,9 +111,9 @@ impl FetchCmd {
         // Initialize protocol client and ODB. Honour [performance]
         // upload_concurrency from the repo config so users can tune parallel
         // chunk fan-out without setting MEDIAGIT_UPLOAD_CONCURRENCY in the env.
-        let mut client = mediagit_protocol::ProtocolClient::new(remote_url).with_credentials(
-            crate::repo::resolve_credentials(&repo_root, &config, remote),
-        );
+        let credentials = crate::repo::resolve_credentials(&repo_root, &config, remote);
+        let mut client =
+            mediagit_protocol::ProtocolClient::new(remote_url).with_credentials(credentials.clone());
         if let Some(n) = config.performance.upload_concurrency {
             client = client.with_concurrent_uploads(n);
         }
@@ -130,6 +130,7 @@ impl FetchCmd {
         // Get remote refs
         let fetch_spinner = progress.spinner("Fetching remote refs...");
         let remote_refs = client.get_refs().await?;
+        crate::repo::remember_credentials(&config, remote, &credentials);
         fetch_spinner.finish_with_message("Remote refs fetched");
 
         // Compute the full local have-set ONCE for this fetch (moved ahead of

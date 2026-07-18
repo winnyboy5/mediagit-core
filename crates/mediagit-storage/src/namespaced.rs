@@ -115,8 +115,12 @@ impl NamespacedBackend {
         &self.ns
     }
 
-    fn prefixed(&self, key: &str) -> String {
-        format!("{}/{}", self.ns, key)
+    /// Prefix `key` with the namespace, rejecting path-traversal/absolute
+    /// keys before the inner backend ever sees them (J6 fix — this is the
+    /// single choke point for every key-taking method on this wrapper).
+    fn prefixed(&self, key: &str) -> anyhow::Result<String> {
+        crate::validate_object_key(key)?;
+        Ok(format!("{}/{}", self.ns, key))
     }
 
     fn strip(&self, key: &str) -> Option<String> {
@@ -137,11 +141,11 @@ impl fmt::Debug for NamespacedBackend {
 #[async_trait]
 impl StorageBackend for NamespacedBackend {
     async fn get(&self, key: &str) -> anyhow::Result<Vec<u8>> {
-        self.inner.get(&self.prefixed(key)).await
+        self.inner.get(&self.prefixed(key)?).await
     }
 
     async fn get_range(&self, key: &str, offset: u64, len: u64) -> anyhow::Result<Vec<u8>> {
-        self.inner.get_range(&self.prefixed(key), offset, len).await
+        self.inner.get_range(&self.prefixed(key)?, offset, len).await
     }
 
     async fn get_streaming(
@@ -152,7 +156,7 @@ impl StorageBackend for NamespacedBackend {
             Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
         >,
     > {
-        self.inner.get_streaming(&self.prefixed(key)).await
+        self.inner.get_streaming(&self.prefixed(key)?).await
     }
 
     async fn get_streaming_range(
@@ -165,35 +169,35 @@ impl StorageBackend for NamespacedBackend {
         >,
     > {
         self.inner
-            .get_streaming_range(&self.prefixed(key), range)
+            .get_streaming_range(&self.prefixed(key)?, range)
             .await
     }
 
     async fn put_file(&self, key: &str, src: &std::path::Path) -> anyhow::Result<()> {
-        self.inner.put_file(&self.prefixed(key), src).await
+        self.inner.put_file(&self.prefixed(key)?, src).await
     }
 
     async fn put(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
-        self.inner.put(&self.prefixed(key), data).await
+        self.inner.put(&self.prefixed(key)?, data).await
     }
 
     async fn exists(&self, key: &str) -> anyhow::Result<bool> {
-        self.inner.exists(&self.prefixed(key)).await
+        self.inner.exists(&self.prefixed(key)?).await
     }
 
     async fn delete(&self, key: &str) -> anyhow::Result<()> {
-        self.inner.delete(&self.prefixed(key)).await
+        self.inner.delete(&self.prefixed(key)?).await
     }
 
     async fn list_objects(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
-        let namespaced_prefix = self.prefixed(prefix);
+        let namespaced_prefix = self.prefixed(prefix)?;
         let keys = self.inner.list_objects(&namespaced_prefix).await?;
         Ok(keys.into_iter().filter_map(|k| self.strip(&k)).collect())
     }
 
     async fn get_with_size_hint(&self, key: &str, size: Option<u64>) -> anyhow::Result<Vec<u8>> {
         self.inner
-            .get_with_size_hint(&self.prefixed(key), size)
+            .get_with_size_hint(&self.prefixed(key)?, size)
             .await
     }
 
@@ -204,7 +208,7 @@ impl StorageBackend for NamespacedBackend {
         len: u64,
     ) -> anyhow::Result<()> {
         self.inner
-            .put_streaming(&self.prefixed(key), reader, len)
+            .put_streaming(&self.prefixed(key)?, reader, len)
             .await
     }
 
@@ -215,7 +219,7 @@ impl StorageBackend for NamespacedBackend {
         ttl: std::time::Duration,
     ) -> anyhow::Result<Option<PresignedPut>> {
         self.inner
-            .presign_put(&self.prefixed(key), content_length, ttl)
+            .presign_put(&self.prefixed(key)?, content_length, ttl)
             .await
     }
 
@@ -224,7 +228,7 @@ impl StorageBackend for NamespacedBackend {
         key: &str,
         ttl: std::time::Duration,
     ) -> anyhow::Result<Option<PresignedDownload>> {
-        self.inner.presign_get(&self.prefixed(key), ttl).await
+        self.inner.presign_get(&self.prefixed(key)?, ttl).await
     }
 
     async fn create_presigned_mpu(
@@ -234,7 +238,7 @@ impl StorageBackend for NamespacedBackend {
         ttl: std::time::Duration,
     ) -> anyhow::Result<Option<PresignedMpu>> {
         self.inner
-            .create_presigned_mpu(&self.prefixed(key), total_size, ttl)
+            .create_presigned_mpu(&self.prefixed(key)?, total_size, ttl)
             .await
     }
 
@@ -245,18 +249,18 @@ impl StorageBackend for NamespacedBackend {
         parts: Vec<MpuCompletedPart>,
     ) -> anyhow::Result<()> {
         self.inner
-            .complete_presigned_mpu(&self.prefixed(key), upload_id, parts)
+            .complete_presigned_mpu(&self.prefixed(key)?, upload_id, parts)
             .await
     }
 
     async fn abort_presigned_mpu(&self, key: &str, upload_id: &str) -> anyhow::Result<()> {
         self.inner
-            .abort_presigned_mpu(&self.prefixed(key), upload_id)
+            .abort_presigned_mpu(&self.prefixed(key)?, upload_id)
             .await
     }
 
     async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
-        self.inner.head(&self.prefixed(key)).await
+        self.inner.head(&self.prefixed(key)?).await
     }
 }
 
@@ -344,6 +348,27 @@ mod tests {
         repo_a.delete("chunks/same-name").await.unwrap();
         assert!(!repo_a.exists("chunks/same-name").await.unwrap());
         assert!(repo_b.exists("chunks/same-name").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn traversal_key_is_rejected_before_reaching_inner_backend() {
+        // J6: a `..`-bearing key must error out of the wrapper and never
+        // touch the inner backend (no cross-namespace read/write).
+        let inner: Arc<dyn StorageBackend> = Arc::new(MockBackend::new());
+        let victim = NamespacedBackend::new(inner.clone(), "victim").unwrap();
+        victim.put("chunks/secret", b"victim-data").await.unwrap();
+
+        let attacker = NamespacedBackend::new(inner, "attacker").unwrap();
+        let traversal_key = "../victim/chunks/secret";
+
+        assert!(attacker.get(traversal_key).await.is_err());
+        assert!(attacker.put(traversal_key, b"pwned").await.is_err());
+        assert!(attacker.exists(traversal_key).await.is_err());
+        assert!(attacker.delete(traversal_key).await.is_err());
+        assert!(attacker.head(traversal_key).await.is_err());
+
+        // Victim's data must be untouched.
+        assert_eq!(victim.get("chunks/secret").await.unwrap(), b"victim-data");
     }
 
     #[tokio::test]

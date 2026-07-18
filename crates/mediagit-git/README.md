@@ -42,7 +42,6 @@ The code is retained as a starting point for the future migration tool milestone
 ## Dependencies
 
 - `git2` (0.20+): Will be used to read source git repository history during migration
-- `sha2` (0.10+): SHA-256 hashing
 - `serde` (1.0+): Serialization
 - `tokio` (1.48+): Async runtime
 - `thiserror` (2.0+): Error handling

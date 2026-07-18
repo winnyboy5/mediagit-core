@@ -142,9 +142,9 @@ impl PullCmd {
         // Initialize protocol client. Honour [performance] upload_concurrency
         // from the repo config so users can tune parallel chunk fan-out
         // without setting MEDIAGIT_UPLOAD_CONCURRENCY in the env.
-        let mut client = mediagit_protocol::ProtocolClient::new(remote_url).with_credentials(
-            crate::repo::resolve_credentials(&repo_root, &config, remote),
-        );
+        let credentials = crate::repo::resolve_credentials(&repo_root, &config, remote);
+        let mut client =
+            mediagit_protocol::ProtocolClient::new(remote_url).with_credentials(credentials.clone());
         if let Some(n) = config.performance.upload_concurrency {
             client = client.with_concurrent_uploads(n);
         }
@@ -185,6 +185,7 @@ impl PullCmd {
         // always see new remote branches even when current branch is synced
         // ================================================================
         let all_remote_refs = client.get_refs().await?;
+        crate::repo::remember_credentials(&config, remote, &credentials);
         let remote_branches: Vec<_> = all_remote_refs
             .refs
             .iter()

@@ -36,6 +36,7 @@
   - [reset](./cli/reset.md)
   - [revert](./cli/revert.md)
   - [tag](./cli/tag.md)
+  - [lock](./cli/lock.md)
 - [Remote Operations](./cli/remote-operations.md)
   - [clone](./cli/clone.md)
   - [remote](./cli/remote.md)
@@ -97,6 +98,7 @@
 # Reference
 
 - [Configuration Reference](./reference/config.md)
+- [Authentication](./reference/authentication.md)
 - [Environment Variables](./reference/environment.md)
 - [File Formats](./reference/file-formats.md)
 - [API Documentation](./reference/api.md)

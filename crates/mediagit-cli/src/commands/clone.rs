@@ -294,13 +294,14 @@ url = "{}"
         let clone_config = mediagit_config::Config::load(&target_dir)
             .await
             .unwrap_or_default();
-        let client = mediagit_protocol::ProtocolClient::new(self.url.clone()).with_credentials(
-            crate::repo::resolve_credentials(&target_dir, &clone_config, "origin"),
-        );
+        let credentials = crate::repo::resolve_credentials(&target_dir, &clone_config, "origin");
+        let client = mediagit_protocol::ProtocolClient::new(self.url.clone())
+            .with_credentials(credentials.clone());
 
         // Step 5: Get remote refs
         init_spinner.set_message("Fetching remote refs...");
         let remote_refs = client.get_refs().await?;
+        crate::repo::remember_credentials(&clone_config, "origin", &credentials);
         init_spinner.finish_with_message("Connected");
 
         // Inherit the remote's CDC seed (if advertised) so this clone produces

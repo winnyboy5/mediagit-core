@@ -9,14 +9,14 @@
 
 ## 🎯 Status
 
-**Version**: v0.2.8-beta.1
-**Status**: 🚧 **BETA**
+**Version**: v0.3.0-rc.1
+**Status**: 🚧 **RELEASE CANDIDATE**
 **Features**: 100% complete (all P0–P3 items implemented)
-**Last Validated**: June 2, 2026 — 614/614 deep tests on MinIO, AWS S3, Azure Blob, GCS (release build, Windows 11)
+**Last Validated**: July 16, 2026 — release-build QA campaign (`reports/20260716-172951`), STANDARD suite green on MinIO, AWS S3, Azure Blob, GCS, zero findings
 **🚨 WARNING 🚨**: This project is under active development. Be aware that large breaking changes may happen before 1.0 is reached.
 
 ✅ **614/614 deep-tests passing** across MinIO, AWS S3 (ap-south-1), Azure Blob (South India), Google Cloud Storage
-✅ **28 CLI commands validated end-to-end** — 0 crashes, 0 data corruption across all 4 cloud backends
+✅ **32 CLI commands validated end-to-end** — 0 crashes, 0 data corruption across all 4 cloud backends
 ✅ **27+ file types tested** (58 GB dataset) across video, audio, 3D, image, design, ML
 ✅ **26.3–26.5% storage savings** measured on cloud backends (compression + dedup + delta, validated June 2026)
 ✅ **Files up to 398 MB** staged and transferred; single-file scalability to 6 GB tested
@@ -86,7 +86,7 @@ Traditional Git struggles with large binary files. MediaGit solves this with:
 Instead of uploading thousands of individual chunk objects, MediaGit bundles chunks into **pack objects** (≤ 64 MiB / ≤ 1,024 chunks each) with an embedded index. This collapses ~10,000 small objects into hundreds of packs per repo, cutting API request count and storage costs. Clone uses pack-locate + Range-GET so only needed slices are fetched. F8 integrity verifies every slice's compressed hash on pull.
 
 - Deep tests: 463–467 chunked + 35 delta objects per backend — all fsck/F8 clean
-- 614/614 tests passing across MinIO, AWS, Azure, GCS (June 2, 2026)
+- Release-build QA campaign (`reports/20260716-172951`): STANDARD suite green across MinIO, AWS, Azure, GCS, zero findings (July 16, 2026)
 
 🔗 **Presigned-URL Transfer**
 
@@ -94,7 +94,9 @@ Uploads and downloads bypass the server entirely when the backend supports signi
 
 🔒 **Security**
 - AES-256-GCM encryption at rest
-- JWT + API key authentication
+- JWT + API key authentication, persisted to disk (`users.jsonl`/`api_keys.jsonl`/`grants.jsonl`, atomic writes; `MEDIAGIT_AUTH_PERSIST`)
+- Per-repo authorization grants (Read < Write < Admin; `MEDIAGIT_GRANTS_ENFORCE`) plus admin endpoints for user/key management
+- OS-keychain credential storage for CLI remote credentials (Windows Credential Manager; env → keychain → config.toml)
 - TLS 1.3 with certificate management
 - Rate limiting and DoS protection
 
@@ -126,19 +128,19 @@ curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/instal
 
 **Linux x86_64 — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-x86_64-linux.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.1/mediagit-0.3.0-rc.1-x86_64-linux.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **macOS Apple Silicon — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-aarch64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.1/mediagit-0.3.0-rc.1-aarch64-macos.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **Windows x86_64 (PowerShell):**
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-x86_64-windows.zip" -OutFile mediagit.zip
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.1/mediagit-0.3.0-rc.1-x86_64-windows.zip" -OutFile mediagit.zip
 Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 # Add to PATH:
 [Environment]::SetEnvironmentVariable("Path", "$env:Path;$env:LOCALAPPDATA\MediaGit\bin", "User")
@@ -147,8 +149,8 @@ Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 #### Docker
 
 ```bash
-docker pull ghcr.io/winnyboy5/mediagit-core:0.2.8-beta.1
-docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.8-beta.1 mediagit --version
+docker pull ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.1
+docker run --rm ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.1 mediagit --version
 ```
 
 #### From Source
@@ -168,11 +170,11 @@ cargo build --release
 
 | Platform | Archive |
 |----------|---------|
-| Linux x86_64 | `mediagit-0.2.8-beta.1-x86_64-linux.tar.gz` |
-| Linux ARM64 | `mediagit-0.2.8-beta.1-aarch64-linux.tar.gz` |
-| macOS Intel | `mediagit-0.2.8-beta.1-x86_64-macos.tar.gz` |
-| macOS Apple Silicon | `mediagit-0.2.8-beta.1-aarch64-macos.tar.gz` |
-| Windows x86_64 | `mediagit-0.2.8-beta.1-x86_64-windows.zip` |
+| Linux x86_64 | `mediagit-0.3.0-rc.1-x86_64-linux.tar.gz` |
+| Linux ARM64 | `mediagit-0.3.0-rc.1-aarch64-linux.tar.gz` |
+| macOS Intel | `mediagit-0.3.0-rc.1-x86_64-macos.tar.gz` |
+| macOS Apple Silicon | `mediagit-0.3.0-rc.1-aarch64-macos.tar.gz` |
+| Windows x86_64 | `mediagit-0.3.0-rc.1-x86_64-windows.zip` |
 
 Each archive includes `mediagit` (CLI) and `mediagit-server` binaries, plus a `.sha256` checksum file.
 
@@ -212,7 +214,7 @@ mediagit-server --config server.toml
 
 ## CLI Reference
 
-All 31 MediaGit commands, grouped by workflow:
+All 32 MediaGit commands, grouped by workflow:
 
 ### Repository Setup
 | Command | Description |
@@ -249,6 +251,13 @@ All 31 MediaGit commands, grouped by workflow:
 | Command | Description |
 |---------|-------------|
 | `mediagit tag <name>` | Create, list, or delete tags |
+
+### File Locking
+| Command | Description |
+|---------|-------------|
+| `mediagit lock create <path>` | Acquire a server-enforced lock on a file (e.g. a non-mergeable binary asset) |
+| `mediagit lock unlock <path>` | Release a lock (`--force` to release someone else's, requires `repo:admin`) |
+| `mediagit lock list` | List active locks |
 
 ### Remote Operations
 | Command | Description |
@@ -449,7 +458,7 @@ Compression strategy is selected automatically per file type. Pre-compressed for
 | **Cloud Backends** | S3, Azure, GCS, MinIO, B2 | Any LFS server | None native | HF Hub only | Proprietary |
 | **Offline Commits** | ✅ | ✅ (Git) | ❌ | ❌ | Not documented |
 | **Branching Cost** | ✅ Instant ref-based | ✅ (Git) | ⚠️ Copy-based | N/A | N/A |
-| **File Locking** | ❌ Roadmap | ✅ | ✅ | ❌ | Not documented |
+| **File Locking** | ✅ Server-enforced (`lock create/unlock/list`, push-time enforcement) | ✅ | ✅ | ❌ | Not documented |
 | **Max File Size** | No limit (u64) | 5 GB (GitHub.com) | No limit | No limit | No limit |
 | **Price** | **Free (AGPL-3.0)** | Free + server | Free ≤5; $39/user/mo | Free tier + Enterprise | Beta TBD |
 
@@ -578,6 +587,8 @@ gcloud auth login
 ## Documentation
 
 ### Guides
+- **[SETUP.md](./SETUP.md)** - Setup guide for client + server
+- **[CONFIGURATION.md](./CONFIGURATION.md)** - Complete client + server configuration reference
 - **[DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md)** - Complete setup for local, MinIO, AWS, Azure, GCS
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Project Architecture
 - **[comparison.md](comparison.md)** - Evidence-based comparison with Git LFS, Perforce, HF Xet, DVC, Diversion, and 6 other tools
@@ -865,7 +876,7 @@ aws iam get-user-policy --user-name mediagit-user --policy-name MediaGitS3Policy
 ```bash
 # The /releases/latest API returns 404 when only pre-releases exist.
 # Pass the version explicitly:
-VERSION=0.2.8-beta.1 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
+VERSION=0.3.0-rc.1 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 
 # Or on Windows PowerShell:
 iwr -UseBasicParsing https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.ps1 | iex
@@ -933,4 +944,4 @@ Special thanks to:
 
 **Made with 🦀 and ❤️ by the MediaGit Contributors**
 
-**Status**: Beta | **Version**: v0.2.8-beta.1 | **Updated**: June 2, 2026 | **Cloud-Validated**: 614/614 tests ✅
+**Status**: Release Candidate | **Version**: v0.3.0-rc.1 | **Updated**: July 16, 2026 | **Cloud-Validated**: QA campaign `20260716-172951` ✅

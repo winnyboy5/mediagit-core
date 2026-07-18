@@ -104,7 +104,11 @@ function Start-QaServer {
   $tplPath = Join-Path $QA.Root "config\backends\$($bc.Template)"
   if (-not (Test-Path $tplPath)) { throw "SKIP: missing template $tplPath" }
 
-  $srvDir = Join-Path $QA.Work "server-$Backend"
+  # Unique dir per invocation: multiple drills in one phase reuse the same backend, and a
+  # shared "server-$Backend" dir let a new drill's wipe race a lingering prior server
+  # (J3/A10 finding 2026-07-17). Old dirs are cheap and useful for post-mortem.
+  $script:QaSrvSeq = [int]$script:QaSrvSeq + 1
+  $srvDir = Join-Path $QA.Work "server-$Backend-$Phase-$($script:QaSrvSeq)"
   if (Test-Path $srvDir) { Remove-Item -Recurse -Force $srvDir -ErrorAction SilentlyContinue }
   New-Item -ItemType Directory -Path (Join-Path $srvDir "repos") -Force | Out-Null
 
@@ -160,8 +164,11 @@ function Stop-QaServer($Handle) {
   if (-not $Handle -or -not $Handle.Proc) { return }
   try {
     $procId = $Handle.Proc.Id
-    Get-CimInstance Win32_Process -Filter "ParentProcessId = $procId" -ErrorAction SilentlyContinue |
-      ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-    if (-not $Handle.Proc.HasExited) { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue }
+    # taskkill /T kills the whole tree in one shot; the prior child-enumeration approach
+    # left orphaned mediagit-server.exe processes behind (J3 finding 2026-07-17).
+    & taskkill /PID $procId /T /F 2>$null | Out-Null
+    if (-not $Handle.Proc.WaitForExit(5000)) {
+      Write-Warning "Stop-QaServer: pid $procId still alive 5s after taskkill /T /F"
+    }
   } catch {}
 }

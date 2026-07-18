@@ -28,7 +28,7 @@ pub async fn check_chunks_exist(
     Json(chunk_ids): Json<Vec<String>>,
 ) -> Result<Json<Vec<String>>, StatusCode> {
     // Check write permission
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled(), &state.grants, &repo)?;
 
     tracing::debug!(repo = %repo, chunk_count = chunk_ids.len(), "Checking chunk existence");
 
@@ -119,7 +119,12 @@ pub async fn upload_chunk(
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
     // Check write permission
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled(), &state.grants, &repo)?;
+
+    if !is_valid_hex_id(&chunk_id) {
+        tracing::warn!(repo = %repo, chunk_id = %chunk_id, "Rejecting upload_chunk: chunk_id is not a 64-char hex id");
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let upload_start = std::time::Instant::now();
     tracing::info!(
@@ -164,7 +169,12 @@ pub async fn upload_pack_proxy(
     auth_user: Option<Extension<AuthUser>>,
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled(), &state.grants, &repo)?;
+
+    if !is_valid_hex_id(&pack_id) {
+        tracing::warn!(repo = %repo, pack_id = %pack_id, "Rejecting upload_pack_proxy: pack_id is not a 64-char hex id");
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -192,7 +202,12 @@ pub async fn upload_manifest(
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
     // Check write permission
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled(), &state.grants, &repo)?;
+
+    if !is_valid_hex_id(&oid) {
+        tracing::warn!(repo = %repo, oid = %oid, "Rejecting upload_manifest: oid is not a 64-char hex id");
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     tracing::debug!(
         repo = %repo,
@@ -236,7 +251,12 @@ pub async fn download_chunk(
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
 ) -> Result<Response, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled(), &state.grants, &repo)?;
+
+    if !is_valid_hex_id(&chunk_id) {
+        tracing::warn!(repo = %repo, chunk_id = %chunk_id, "Rejecting download_chunk: chunk_id is not a 64-char hex id");
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     tracing::debug!(repo = %repo, chunk_id = %chunk_id, "Downloading chunk");
 
@@ -371,7 +391,7 @@ pub async fn check_chunk_deltas_exist(
     auth_user: Option<Extension<AuthUser>>,
     Json(chunk_ids): Json<Vec<String>>,
 ) -> Result<Json<std::collections::HashMap<String, String>>, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled(), &state.grants, &repo)?;
 
     tracing::debug!(repo = %repo, chunk_count = chunk_ids.len(), "Checking chunk-delta availability");
 
@@ -431,7 +451,7 @@ pub async fn download_chunk_delta(
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled(), &state.grants, &repo)?;
 
     tracing::debug!(repo = %repo, chunk_id = %chunk_id, "Downloading chunk-delta");
 
@@ -476,7 +496,7 @@ pub async fn upload_chunk_delta(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled(), &state.grants, &repo)?;
 
     let base_hex = headers
         .get(DELTA_BASE_HEADER)
@@ -554,7 +574,7 @@ pub async fn download_manifest(
     auth_user: Option<Extension<AuthUser>>,
 ) -> Result<impl IntoResponse, StatusCode> {
     // Check read permission
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled(), &state.grants, &repo)?;
 
     tracing::debug!(repo = %repo, oid = %oid, "Downloading manifest");
 
@@ -695,7 +715,18 @@ pub async fn batch_get_pack_chunks(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<BatchGetRequest>,
 ) -> Result<Response, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled(), &state.grants, &repo)?;
+
+    if !is_valid_hex_id(&req.pack_oid) {
+        tracing::warn!(repo = %repo, pack_oid = %req.pack_oid, "Rejecting batch_get_pack_chunks: pack_oid is not a 64-char hex id");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Drill/compat knob: simulate a pre-batch-get server so the client's
+    // 404 → per-chunk fallback path can be exercised end-to-end (QA A10).
+    if std::env::var("MEDIAGIT_DISABLE_BATCH_GET").as_deref() == Ok("1") {
+        return Err(StatusCode::NOT_FOUND);
+    }
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -907,20 +938,23 @@ mod batch_get_tests {
             .await
             .expect("storage");
 
+        // pack_oid must be a 64-char hex id (J6: batch_get_pack_chunks now
+        // rejects non-hex pack_oid at the HTTP boundary).
+        let pack_oid = "a".repeat(64);
         let (id_a, len_a) =
-            write_pack_entry(&state, &storage, &repo, "packA", 0, b"hello world").await;
+            write_pack_entry(&state, &storage, &repo, &pack_oid, 0, b"hello world").await;
         let (id_b, _) = write_pack_entry(
             &state,
             &storage,
             &repo,
-            "packA",
+            &pack_oid,
             len_a as u64,
             b"goodbye world",
         )
         .await;
 
         let req = BatchGetRequest {
-            pack_oid: "packA".to_string(),
+            pack_oid: pack_oid.clone(),
             entries: vec![
                 BatchGetEntry {
                     chunk_oid: id_a.clone(),
@@ -973,14 +1007,15 @@ mod batch_get_tests {
             .await
             .expect("storage");
 
+        let pack_oid = "a".repeat(64);
         let (id_a, len_a) =
-            write_pack_entry(&state, &storage, &repo, "packA", 0, b"real chunk").await;
+            write_pack_entry(&state, &storage, &repo, &pack_oid, 0, b"real chunk").await;
 
         // Bogus entry: not present in pack_index at all.
         let bogus_id = Oid::hash(b"never registered").to_hex();
 
         let req = BatchGetRequest {
-            pack_oid: "packA".to_string(),
+            pack_oid: pack_oid.clone(),
             entries: vec![
                 BatchGetEntry {
                     chunk_oid: id_a.clone(),
@@ -1016,5 +1051,77 @@ mod batch_get_tests {
         assert!(frames[0].1.is_empty(), "bogus entry must be zero-length");
         assert_eq!(frames[1].0, id_a);
         assert!(!frames[1].1.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod j6_path_traversal_tests {
+    use super::*;
+
+    /// J6: a `..`-bearing chunk_id must be rejected with 400 at the HTTP
+    /// boundary, and must never reach storage.put — i.e. nothing is written
+    /// outside the repo's own storage root.
+    #[tokio::test]
+    async fn upload_chunk_rejects_traversal_id_and_writes_nothing_outside_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = "test-repo".to_string();
+        let repo_path = tmp.path().join(&repo);
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let state = Arc::new(AppState::new(tmp.path().to_path_buf()));
+
+        let evil_id = "../../../../evil".to_string();
+        let outside_marker = tmp.path().parent().unwrap().join("evil");
+        let _ = tokio::fs::remove_file(&outside_marker).await;
+
+        let result = upload_chunk(
+            Path((repo, evil_id)),
+            State(Arc::clone(&state)),
+            None,
+            Bytes::from_static(b"pwned"),
+        )
+        .await;
+
+        assert_eq!(result, Err(StatusCode::BAD_REQUEST));
+        assert!(
+            !outside_marker.exists(),
+            "traversal upload must not escape the repo storage root"
+        );
+    }
+
+    /// Same guard on the download path: a traversal chunk_id must 400, not
+    /// leak an out-of-repo file's bytes back to the client.
+    #[tokio::test]
+    async fn download_chunk_rejects_traversal_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = "test-repo".to_string();
+        let repo_path = tmp.path().join(&repo);
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let state = Arc::new(AppState::new(tmp.path().to_path_buf()));
+
+        let evil_id = "../secrets".to_string();
+        let result = download_chunk(Path((repo, evil_id)), State(state), None).await;
+
+        assert!(matches!(result, Err(StatusCode::BAD_REQUEST)));
+    }
+
+    /// Non-hex (but non-traversal) ids must also 400 — the guard is a hex
+    /// shape check, not just a `..` denylist.
+    #[tokio::test]
+    async fn upload_chunk_rejects_non_hex_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = "test-repo".to_string();
+        let repo_path = tmp.path().join(&repo);
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let state = Arc::new(AppState::new(tmp.path().to_path_buf()));
+
+        let result = upload_chunk(
+            Path((repo, "not-a-valid-hex-id".to_string())),
+            State(Arc::clone(&state)),
+            None,
+            Bytes::from_static(b"data"),
+        )
+        .await;
+
+        assert_eq!(result, Err(StatusCode::BAD_REQUEST));
     }
 }

@@ -310,7 +310,8 @@ impl ProtocolClient {
         }
 
         let data = response.bytes().await?;
-        mediagit_versioning::format::deserialize(&data).context("Failed to deserialize manifest")
+        mediagit_versioning::ChunkManifest::from_bytes(&data)
+            .context("Failed to deserialize manifest")
     }
     /// Download a single chunk from the remote server
     pub async fn download_chunk(&self, chunk_id: &Oid) -> Result<Vec<u8>> {
@@ -448,9 +449,8 @@ impl ProtocolClient {
                             );
                         }
                         let data = resp.bytes().await?;
-                        let manifest: ChunkManifest =
-                            mediagit_versioning::format::deserialize(&data)
-                                .context("Failed to deserialize manifest")?;
+                        let manifest = ChunkManifest::from_bytes(&data)
+                            .context("Failed to deserialize manifest")?;
 
                         // 2. Check which chunks are already local (parallel filesystem stats).
                         let obj_total = manifest.chunks.len();

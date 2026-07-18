@@ -135,9 +135,14 @@ Concurrent writes to the same branch follow a push/pull model similar to Git.
 
 ## What compression algorithm does MediaGit use?
 
-Zstd (level 3 by default) for compressible formats, and Store (no compression) for already-compressed formats like JPEG, MP4, ZIP, PDF, and AI files. The algorithm is selected automatically per file type.
+MediaGit's `SmartCompressor` picks one of four strategies automatically per file type — you don't choose an algorithm yourself:
 
-You can tune the global level in `.mediagit/config.toml`:
+- **Store** (no recompression) for already-compressed formats: JPEG, PNG, MP4, ZIP, AI/InDesign, Office documents
+- **Zstd** (Best or Default level, depending on format) for uncompressed images (TIFF, RAW, EXR), PSD/3D models/creative project files, PDF/SVG, and as the safe fallback for unknown binary data
+- **Brotli** (Default level) for text/code formats (TXT, JSON, XML, YAML, TOML, CSV) — falls back to Zstd above 500 MB, where Brotli's encode cost stops paying off
+- **Zlib** only for internal Git-compatible objects (not used on media files)
+
+You can tune the global fallback level in `.mediagit/config.toml`:
 
 ```toml
 [compression]

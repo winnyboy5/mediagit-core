@@ -24,7 +24,7 @@ use mediagit_protocol::{
     RefInfo, RefUpdateRequest, RefUpdateResponse, RefUpdateResult, RefsResponse, WantRequest,
     WantResponse,
 };
-use mediagit_security::auth::AuthUser;
+use mediagit_security::auth::{AuthUser, GrantLevel, GrantsStore};
 use mediagit_storage::{AzureBackend, GcsBackend, LocalBackend, MinIOBackend, StorageBackend};
 use mediagit_versioning::{
     resolve_revision, Commit, FileMode, LcaFinder, ObjectDatabase, ObjectType, Oid, Ref,
@@ -37,23 +37,41 @@ use tokio_util::io::ReaderStream;
 
 use crate::state::{AppState, PackLoc};
 
+pub(crate) mod admin;
 pub(crate) mod browse;
 pub(crate) mod chunks;
 pub(crate) mod locks;
 pub(crate) mod repo;
 pub(crate) mod transfer;
 
+pub use admin::*;
 pub use browse::*;
 pub use chunks::*;
 pub use locks::*;
 pub use repo::*;
 pub use transfer::*;
 
-/// Helper function to check if user has required permission
+/// Helper function to check if user has required permission.
+///
+/// Order of checks (H2):
+/// 1. Auth disabled -> allow everything (unchanged pre-H2 behavior).
+/// 2. No authenticated user -> reject.
+/// 3. Admin role (flat `user:manage` permission, unique to `Role::Admin`)
+///    always allowed, regardless of per-repo grants.
+/// 4. Backward compat: `MEDIAGIT_GRANTS_ENFORCE=0`, or no grants have ever
+///    been recorded ([`GrantsStore::is_empty`]) -> fall back to the flat
+///    role permission check exactly as before H2.
+/// 5. Otherwise, per-repo grant lookup: the user's grant level for `repo`
+///    must be at or above the level implied by `required_permission`
+///    (`read ⊂ write ⊂ admin`). A permission string that isn't
+///    repo-scoped (e.g. `user:manage`) isn't covered by grants and falls
+///    back to the flat check.
 fn check_permission(
     auth_user: Option<&AuthUser>,
     required_permission: &str,
     auth_enabled: bool,
+    grants: &GrantsStore,
+    repo: &str,
 ) -> Result<(), StatusCode> {
     // If auth is disabled, allow all requests
     if !auth_enabled {
@@ -63,16 +81,50 @@ fn check_permission(
     // If auth is enabled but no user found, reject
     let user = auth_user.ok_or(StatusCode::UNAUTHORIZED)?;
 
-    // Check if user has the required permission
-    if user.permissions.contains(&required_permission.to_string()) {
-        Ok(())
-    } else {
-        tracing::warn!(
-            "User {} lacks permission: {}",
-            user.user_id,
-            required_permission
-        );
-        Err(StatusCode::FORBIDDEN)
+    // Admin role always allowed, regardless of per-repo grants.
+    if user.permissions.contains(&"user:manage".to_string()) {
+        return Ok(());
+    }
+
+    let flat_check = || {
+        if user.permissions.contains(&required_permission.to_string()) {
+            Ok(())
+        } else {
+            tracing::warn!(
+                "User {} lacks permission: {}",
+                user.user_id,
+                required_permission
+            );
+            Err(StatusCode::FORBIDDEN)
+        }
+    };
+
+    // Backward compat: a zero-grants deployment (or an explicit opt-out)
+    // behaves exactly like the pre-H2 flat permission check.
+    let grants_enforced = std::env::var("MEDIAGIT_GRANTS_ENFORCE").as_deref() != Ok("0")
+        && !grants.is_empty();
+    if !grants_enforced {
+        return flat_check();
+    }
+
+    let required_level = match required_permission {
+        "repo:read" => GrantLevel::Read,
+        "repo:write" => GrantLevel::Write,
+        "repo:admin" => GrantLevel::Admin,
+        _ => return flat_check(),
+    };
+
+    match grants.get(&user.user_id, repo) {
+        Some(level) if level >= required_level => Ok(()),
+        _ => {
+            tracing::warn!(
+                "User {} lacks {}-level grant on repo {}",
+                user.user_id,
+                required_permission,
+                repo
+            );
+            Err(StatusCode::FORBIDDEN)
+        }
     }
 }
 
@@ -80,7 +132,7 @@ fn check_permission(
 /// constructing it on first use. Constructing a backend (especially Azure/S3)
 /// is expensive — TLS handshake plus a bucket/container existence RTT — so we
 /// build it once per repo per server lifetime and reuse the `Arc` from then on.
-async fn get_or_init_storage(
+pub async fn get_or_init_storage(
     state: &AppState,
     repo_path: &StdPath,
 ) -> Result<Arc<dyn StorageBackend>, StatusCode> {
@@ -558,6 +610,31 @@ fn parse_chunk_delta_meta(meta_bytes: &[u8]) -> Option<String> {
 /// Header carrying the base chunk OID (hex) for a chunk-delta upload.
 pub const DELTA_BASE_HEADER: &str = "x-mediagit-delta-base";
 
+/// True if `s` is a 64-char lowercase-hex BLAKE3 id — the only shape a
+/// legitimate chunk_id/pack_id/oid ever takes.
+///
+/// J6 (path-traversal fix): validated at the HTTP boundary, before any
+/// `format!("chunks/{}", id)`-style storage key is built from a caller
+/// path/body param, so a `..`-bearing id fails fast with 400 instead of
+/// reaching the storage layer (which independently rejects it too, but
+/// that surfaces as a 500 and does the filesystem/key work first).
+fn is_valid_hex_id(s: &str) -> bool {
+    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Looser sibling of [`is_valid_hex_id`]: any non-empty all-hex string,
+/// without the exact-64-char requirement.
+///
+/// Used on the presign/MPU endpoints, which never read or write chunk
+/// *content* under the id (they only mint a signed URL or start/finish a
+/// multipart upload) and whose existing test suite exercises them with
+/// shortened placeholder ids (e.g. `"aabbcc"`) rather than full BLAKE3 hex.
+/// Still closes the J6 hole: every character it accepts is a hex digit, so
+/// `.`, `/`, and `\` (the traversal alphabet) can never appear.
+fn is_hex_str(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 fn default_ref_head() -> String {
     "HEAD".to_string()
 }
@@ -715,7 +792,7 @@ async fn list_tree_impl(
     if !dir_path.is_empty() {
         validate_file_path(&dir_path)?;
     }
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled(), &state.grants, &repo)?;
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -826,4 +903,126 @@ async fn load_jsonl_index(
     let mut idx = state.pack_index.write().await;
     idx.insert(repo.to_string(), repo_entries);
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use mediagit_security::auth::middleware::AuthMethod;
+
+    /// `MEDIAGIT_GRANTS_ENFORCE` is a process-wide env var (like
+    /// `MEDIAGIT_AUTH_PERSIST` in `persist.rs`). Only one test below
+    /// mutates it; every other test relies on it being unset, so mutators
+    /// take the write side and everyone else takes the read side to avoid
+    /// observing a torn value under `cargo test`'s multi-threaded runner.
+    static GRANTS_ENV_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+    fn user(permissions: &[&str]) -> AuthUser {
+        AuthUser {
+            user_id: "user1".to_string(),
+            permissions: permissions.iter().map(|p| p.to_string()).collect(),
+            auth_method: AuthMethod::Jwt,
+        }
+    }
+
+    #[test]
+    fn auth_disabled_allows_everyone() {
+        let _guard = GRANTS_ENV_LOCK.read().unwrap();
+        let grants = GrantsStore::new();
+        assert!(check_permission(None, "repo:read", false, &grants, "repoA").is_ok());
+    }
+
+    #[test]
+    fn no_user_rejected_when_auth_enabled() {
+        let _guard = GRANTS_ENV_LOCK.read().unwrap();
+        let grants = GrantsStore::new();
+        assert_eq!(
+            check_permission(None, "repo:read", true, &grants, "repoA").unwrap_err(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[test]
+    fn zero_grants_backward_compat_uses_flat_role() {
+        let _guard = GRANTS_ENV_LOCK.read().unwrap();
+        // Empty store -> pre-H2 behavior: flat role permissions decide,
+        // regardless of which repo is being accessed.
+        let grants = GrantsStore::new();
+        let reader = user(&["repo:read"]);
+        assert!(check_permission(Some(&reader), "repo:read", true, &grants, "repoA").is_ok());
+        assert!(check_permission(Some(&reader), "repo:write", true, &grants, "repoA").is_err());
+    }
+
+    #[tokio::test]
+    async fn admin_role_bypasses_grants_entirely() {
+        let _guard = GRANTS_ENV_LOCK.read().unwrap();
+        let grants = GrantsStore::new();
+        grants.grant("other", "repoA", GrantLevel::Read).await.unwrap();
+        let admin = user(&["repo:read", "repo:write", "repo:admin", "user:manage"]);
+
+        // Admin has no grant recorded at all for repoB, yet still passes.
+        assert!(check_permission(Some(&admin), "repo:admin", true, &grants, "repoA").is_ok());
+        assert!(check_permission(Some(&admin), "repo:write", true, &grants, "repoB").is_ok());
+    }
+
+    #[tokio::test]
+    async fn per_repo_grant_allow_deny_matrix() {
+        let _guard = GRANTS_ENV_LOCK.read().unwrap();
+        let grants = GrantsStore::new();
+        // Flat role says read-only, but the per-repo grant says write —
+        // once grants are active (store non-empty) the grant wins.
+        let requester = user(&["repo:read"]);
+        grants.grant("user1", "repoA", GrantLevel::Write).await.unwrap();
+
+        assert!(check_permission(Some(&requester), "repo:read", true, &grants, "repoA").is_ok());
+        assert!(check_permission(Some(&requester), "repo:write", true, &grants, "repoA").is_ok());
+        assert!(check_permission(Some(&requester), "repo:admin", true, &grants, "repoA").is_err());
+
+        // No grant recorded for repoB -> denied even though the flat role
+        // has "repo:read", because the store is non-empty (grants active).
+        assert!(check_permission(Some(&requester), "repo:read", true, &grants, "repoB").is_err());
+    }
+
+    #[tokio::test]
+    async fn grants_enforce_opt_out_falls_back_to_flat_role() {
+        let _guard = GRANTS_ENV_LOCK.write().unwrap();
+        std::env::set_var("MEDIAGIT_GRANTS_ENFORCE", "0");
+
+        let grants = GrantsStore::new();
+        grants.grant("user1", "repoA", GrantLevel::Read).await.unwrap();
+        let requester = user(&["repo:read", "repo:write"]);
+
+        // Grant only covers Read, but MEDIAGIT_GRANTS_ENFORCE=0 disables
+        // per-repo enforcement entirely, so the flat role (which has
+        // "repo:write") is used instead.
+        let result = check_permission(Some(&requester), "repo:write", true, &grants, "repoA");
+
+        std::env::remove_var("MEDIAGIT_GRANTS_ENFORCE");
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn concurrent_grant_mutations_are_safe() {
+        let _guard = GRANTS_ENV_LOCK.read().unwrap();
+        let grants = Arc::new(GrantsStore::new());
+        let mut tasks = Vec::new();
+        for i in 0..20 {
+            let grants = Arc::clone(&grants);
+            tasks.push(tokio::spawn(async move {
+                let user_id = format!("user{}", i % 5);
+                grants
+                    .grant(&user_id, "repoA", GrantLevel::Write)
+                    .await
+                    .unwrap();
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+        for i in 0..5 {
+            let user_id = format!("user{}", i);
+            assert_eq!(grants.get(&user_id, "repoA"), Some(GrantLevel::Write));
+        }
+    }
 }

@@ -77,9 +77,10 @@ $ mediagit download textures/rock.png
 ## Authentication
 
 In repo-relative mode, `download` resolves credentials exactly like
-`push`/`pull`/`fetch`/`clone`: per-remote `config.toml`
-(`remotes.origin.token` / `.api_key`) first, then the `MEDIAGIT_TOKEN` /
-`MEDIAGIT_API_KEY` environment variables, then none.
+`push`/`pull`/`fetch`/`clone`: the `MEDIAGIT_TOKEN` / `MEDIAGIT_API_KEY`
+environment variables first, then the OS keychain (skipped when
+`MEDIAGIT_NO_KEYRING` is set), then per-remote `config.toml`
+(`remotes.origin.token` / `.api_key`), then none.
 
 In full-URL mode, credentials are attached **only if the typed URL's host
 matches one of the current repository's configured remotes** (scheme, host,

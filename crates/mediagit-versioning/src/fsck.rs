@@ -1379,6 +1379,34 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_fsck_detects_over_deep_chunk_delta_chain() {
+        // Chain longer than MAX_DELTA_DEPTH hops, terminating at a valid
+        // full chunk (not a cycle, not missing) — must still surface as a
+        // warning so operators know to repack before a depth-bounded client
+        // walk (MAX_DELTA_DEPTH-capped) fails to resolve it.
+        let full = Oid::hash(b"fsck-deep-full");
+        let chain: Vec<Oid> = (0..12)
+            .map(|i| Oid::hash(format!("fsck-deep-{i}").as_bytes()))
+            .collect();
+        let mut entries: Vec<(&Oid, &Oid)> = (0..chain.len() - 1)
+            .map(|i| (&chain[i], &chain[i + 1]))
+            .collect();
+        entries.push((&chain[chain.len() - 1], &full));
+        let checker = checker_with_metas(&entries, &[&full]).await;
+
+        let mut report = FsckReport::new();
+        checker.check_chunk_deltas(&mut report).await.unwrap();
+
+        assert!(
+            report.issues.iter().any(|i| i.category
+                == IssueCategory::InvalidFormat
+                && i.severity == IssueSeverity::Warning),
+            "chain deeper than MAX_DELTA_DEPTH must be reported as a warning, got: {:?}",
+            report.issues
+        );
+    }
+
     #[test]
     fn test_fsck_issue_creation() {
         let issue = FsckIssue::new(
@@ -1752,7 +1780,7 @@ mod tests {
         let manifest_key = format!("manifests/{}", blob_oid.to_hex());
         let manifest_bytes = storage.get(&manifest_key).await.unwrap();
         let manifest: crate::chunking::ChunkManifest =
-            crate::format::deserialize(&manifest_bytes).unwrap();
+            crate::chunking::ChunkManifest::from_bytes(&manifest_bytes).unwrap();
         let victim = &manifest.chunks[0];
         let chunk_key = format!("chunks/{}", victim.id.to_hex());
 

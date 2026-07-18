@@ -4,13 +4,33 @@ Consolidated and **priority-ordered** registry of planned features, code-level T
 known limitations for MediaGit. Items are sourced from documentation, source code, and
 historical claudedocs analyses.
 
-> Last updated: 2026-07-07 | v0.2.8-beta.1 | Items 1 (.mediagitignore) + 4 (Streaming Format-Aware Chunker, S1–S5) + Push Progress/Throughput fixes + BLAKE3 + B2/B4/B7 pipeline + **5 (Phase-3 Track F / cloud packs, F1–F11)** + Presigned-URL transfer (W1–W5) + God-file refactor (handlers/ smart_compressor/ client/ odb/ chunking/) + Server direct file-serving endpoints + **5c (Smart-media cycle P0–P5: dedup harness/gate, keyed CDC seed, codec detection, blend/STL/PLY walkers, pHash image delta, show/stats media metadata)** + chunk-delta cycle fix + fsck chunk-delta validation + zstd Best 22→19 (3.2× add speedup) **DONE**
+> Last updated: 2026-07-18 | v0.3.0-rc.1 | Items 1 (.mediagitignore) + 4 (Streaming Format-Aware Chunker, S1–S5) + Push Progress/Throughput fixes + BLAKE3 + B2/B4/B7 pipeline + **5 (Phase-3 Track F / cloud packs, F1–F11)** + Presigned-URL transfer (W1–W5) + God-file refactor (handlers/ smart_compressor/ client/ odb/ chunking/) + Server direct file-serving endpoints + **5c (Smart-media cycle P0–P5: dedup harness/gate, keyed CDC seed, codec detection, blend/STL/PLY walkers, pHash image delta, show/stats media metadata)** + chunk-delta cycle fix + fsck chunk-delta validation + zstd Best 22→19 (3.2× add speedup) + **Server file locking (MEDIAGIT_LOCKS_ENFORCE) + Auth persistence (users.jsonl, api_keys.jsonl, grants.jsonl, per-repo MEDIAGIT_GRANTS_ENFORCE) + OS-keychain credential storage + path-traversal validation + push --repair + verify-integrity endpoints + compat-fixture freeze gate** **DONE**
 
 **Priority levels:**
 - **P0** — Quick win or active blocker — ≤1 day effort, implement immediately
 - **P1** — High impact, near-term — 1-2 weeks, next milestone target
 - **P2** — Medium impact or complex — 2-6 weeks, planned but not urgent
 - **P3** — Low priority / long-term — deferred until triggered by demand
+
+---
+
+## ⚠ P0 — Security Remediation: leaked secrets in git history (2026-07-18)
+
+`.mcp.json` (Morph API key), `enc_key`/`enc_key.pub` (OpenSSH ed25519 pair), and an
+Anthropic API key were committed to a **public** repo (github.com/winnyboy5/mediagit-core).
+Treat both API keys as fully compromised regardless of any cleanup — scrubbing history
+never un-leaks a key.
+
+- [ ] 1. **REVOKE the Anthropic API key (`sk-ant-api03-t5EdN1…`)** — **USER ACTION**, Anthropic console, do immediately
+- [ ] 2. **REVOKE the Morph API key (`sk-3uQSl4Vrz…`)** — **USER ACTION**, Morph console, do immediately
+- [x] 3. `git rm --cached .mcp.json enc_key enc_key.pub` — done 2026-07-18 (staged deletions in working tree; `.mcp.json` kept on disk for local MCP config)
+- [x] 4. `.gitignore` — `enc_key`/`enc_key.pub` added 2026-07-18 (L224-225); `.mcp.json` (L195) and `.env` (L65) were already covered
+- [x] 5. `enc_key` usage check — done 2026-07-18: **zero references** in crates/, scripts/, dev-tests/ → orphan artifact; files deleted from disk (recoverable from git history until step 7 runs)
+- [x] 6. Key rotation — **not needed**: the pair is used by nothing; deleted instead (see 5). If a future use surfaces, generate a fresh pair — never restore this one
+- [ ] 7. **Scrub git history** — **DEFERRED** until (a) the pending GA-cycle commit lands and (b) a verified mirror backup exists (`git clone --mirror` to a separate location, then confirm non-empty). Then:
+       `git filter-repo --path .mcp.json --path enc_key --path enc_key.pub --invert-paths`
+       (`.env` dropped from the path list — it was **never committed**, verified 2026-07-18.)
+       Post-scrub: force-push **all** branches/tags, all collaborators re-clone, and because the repo is public, request cached-view purge via GitHub Support. `git-filter-repo` is not installed yet (`pip install git-filter-repo`).
 
 ---
 
@@ -327,6 +347,24 @@ approach for AI/PDF without first validating opaque-stream ratio on target files
 >   mode generalizes; the per-file opaque gate correctly prevents it.
 >
 > **Decision:** reversible-inflate transform (C2) not shipped. DELTA-001 stays closed.
+
+> **Status 2026-07-16 (G0 spike, `dev-tests/transform-spike/G0_RESULTS.md`):** the OTHER
+> sanctioned path — stream-by-stream keyed matching + compressed-bytes delta ("What
+> would be needed", option 2 above) — is now ALSO measured dead on the reference pair:
+> - `test-label-org.ai` → `test-label-alt.ai` (129→216 MB): only **50.6% of container
+>   keys survive** an Illustrator save — the assumption that object numbering is stable
+>   across versions is false for real .ai files.
+> - Stream-keyed delta scored **−2.2pp vs baseline** on that pair and loses badly to
+>   what the production CDC pipeline already achieves on it (27.4%).
+> - Small-fixture rows showed apparent gains (+7.9/+33.4pp) but FAILED the shuffled-key
+>   negative control — small-sample confound, not mechanism. Any future measurement
+>   MUST include that control.
+> - Projected mixed corpus: 26.5% → 26.2%. Gate (≥30%) not met.
+>
+> **Decision:** DELTA-001 remains closed. Both sanctioned approaches (inflate
+> normalization, stream-keyed delta) are measured dead. Closing AI further would
+> require semantic Illustrator-format parsing (private format) — not scheduled.
+> The honest M-C position: ~26.5% mixed is the pipeline's ceiling on this corpus.
 
 ---
 

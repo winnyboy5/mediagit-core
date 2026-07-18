@@ -216,14 +216,13 @@ MediaGit separates storage interface from implementation:
 
 ```mermaid
 graph TB
-    App[Application Code] --> Trait[Backend Trait]
+    App[Application Code] --> Trait[StorageBackend Trait]
     Trait --> Local[LocalBackend]
     Trait --> S3[S3Backend]
     Trait --> Azure[AzureBackend]
-    Trait --> GCS[GCSBackend]
-    Trait --> B2[B2Backend]
+    Trait --> GCS[GcsBackend]
+    Trait --> B2Spaces[B2SpacesBackend<br/>B2 + DO Spaces]
     Trait --> MinIO[MinIOBackend]
-    Trait --> Spaces[SpacesBackend]
 
     style Trait fill:#e1f5ff
 ```
@@ -231,12 +230,14 @@ graph TB
 ### Backend Trait
 ```rust
 #[async_trait]
-pub trait Backend: Send + Sync {
+pub trait StorageBackend: Send + Sync + Debug {
     async fn get(&self, key: &str) -> Result<Vec<u8>>;
     async fn put(&self, key: &str, data: &[u8]) -> Result<()>;
     async fn exists(&self, key: &str) -> Result<bool>;
     async fn delete(&self, key: &str) -> Result<()>;
-    async fn list(&self, prefix: &str) -> Result<Vec<String>>;
+    async fn list_objects(&self, prefix: &str) -> Result<Vec<String>>;
+    async fn head(&self, key: &str) -> Result<Option<u64>>;
+    // + presign_put / presign_get / MPU trio (default Ok(None), overridden per backend)
 }
 ```
 

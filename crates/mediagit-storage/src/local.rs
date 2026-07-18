@@ -322,6 +322,18 @@ impl LocalBackend {
         p.join(s1).join(s2).join(&base)
     }
 
+    /// Validate `key` (J6: reject path traversal / absolute / drive-rooted
+    /// keys) before computing its physical path. Every production entry
+    /// point that turns a caller-supplied key into a filesystem path must
+    /// go through this instead of calling [`Self::object_path`] directly —
+    /// that raw method has no validation and is only safe to call with keys
+    /// already known-good (as the unit tests below do, to pin the mapping
+    /// table itself).
+    fn object_path_checked(&self, key: &str) -> anyhow::Result<PathBuf> {
+        crate::validate_object_key(key)?;
+        Ok(self.object_path(key))
+    }
+
     /// Ensure parent directory exists, creating it if necessary
     ///
     /// # Arguments
@@ -375,7 +387,7 @@ impl LocalBackend {
             return Err(anyhow::anyhow!("key cannot be empty"));
         }
 
-        let path = self.object_path(key);
+        let path = self.object_path_checked(key)?;
         let file = std::fs::File::open(&path)?;
 
         // SAFETY: The file is opened read-only and we assume it won't be modified
@@ -402,7 +414,7 @@ impl LocalBackend {
             return Err(anyhow::anyhow!("key cannot be empty"));
         }
 
-        let path = self.object_path(key);
+        let path = self.object_path_checked(key)?;
         let metadata = fs::metadata(&path).await?;
         Ok(metadata.len())
     }
@@ -429,7 +441,7 @@ impl LocalBackend {
             tracing::debug!(key = %key, size = size, "Using mmap for large file");
             Ok(MmapOrVec::Mmap(self.get_mmap(key)?))
         } else {
-            Ok(MmapOrVec::Vec(fs::read(self.object_path(key)).await?))
+            Ok(MmapOrVec::Vec(fs::read(self.object_path_checked(key)?).await?))
         }
     }
 }
@@ -461,7 +473,7 @@ impl StorageBackend for LocalBackend {
             return Err(anyhow::anyhow!("key cannot be empty"));
         }
 
-        let path = self.object_path(key);
+        let path = self.object_path_checked(key)?;
 
         match fs::read(&path).await {
             Ok(data) => Ok(data),
@@ -482,7 +494,7 @@ impl StorageBackend for LocalBackend {
         >,
     > {
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
-        let path = self.object_path(key);
+        let path = self.object_path_checked(key)?;
         let mut file = tokio::fs::File::open(&path).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 anyhow::anyhow!("object not found: {}", key)
@@ -536,7 +548,7 @@ impl StorageBackend for LocalBackend {
             return Err(anyhow::anyhow!("key cannot be empty"));
         }
 
-        let path = self.object_path(key);
+        let path = self.object_path_checked(key)?;
 
         // Windows-specific transient errors require retry with backoff:
         //
@@ -644,7 +656,7 @@ impl StorageBackend for LocalBackend {
         if key.is_empty() {
             return Err(anyhow::anyhow!("key cannot be empty"));
         }
-        let dest = self.object_path(key);
+        let dest = self.object_path_checked(key)?;
         self.ensure_parent_dir(&dest).await?;
         match fs::rename(src, &dest).await {
             Ok(()) => Ok(()),
@@ -675,7 +687,7 @@ impl StorageBackend for LocalBackend {
             return Err(anyhow::anyhow!("key cannot be empty"));
         }
 
-        let path = self.object_path(key);
+        let path = self.object_path_checked(key)?;
         match fs::try_exists(&path).await {
             Ok(exists) => Ok(exists),
             Err(e) => Err(e.into()),
@@ -687,7 +699,7 @@ impl StorageBackend for LocalBackend {
             return Err(anyhow::anyhow!("key cannot be empty"));
         }
 
-        let path = self.object_path(key);
+        let path = self.object_path_checked(key)?;
         match tokio::fs::metadata(&path).await {
             Ok(m) => Ok(Some(m.len())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -712,7 +724,7 @@ impl StorageBackend for LocalBackend {
             return Err(anyhow::anyhow!("key cannot be empty"));
         }
 
-        let path = self.object_path(key);
+        let path = self.object_path_checked(key)?;
 
         match fs::remove_file(&path).await {
             Ok(()) => Ok(()),
@@ -958,6 +970,25 @@ mod tests {
         backend.delete("nonexistent").await.unwrap();
         // Deleting again should also succeed
         backend.delete("nonexistent").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_traversal_key_rejected_and_never_written_outside_root() {
+        // J6: a `..`-bearing key must error instead of joining onto a path
+        // outside `root`.
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path()).await.unwrap();
+        let outside_marker = temp_dir.path().parent().unwrap().join("pwned.txt");
+        let _ = fs::remove_file(&outside_marker);
+
+        let traversal_key = "../pwned.txt";
+        assert!(backend.put(traversal_key, b"pwned").await.is_err());
+        assert!(backend.get(traversal_key).await.is_err());
+        assert!(backend.exists(traversal_key).await.is_err());
+        assert!(backend.delete(traversal_key).await.is_err());
+        assert!(backend.head(traversal_key).await.is_err());
+
+        assert!(!outside_marker.exists());
     }
 
     #[tokio::test]

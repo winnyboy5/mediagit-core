@@ -107,16 +107,28 @@ impl LockCmd {
 
     /// Build a `ProtocolClient` for `remote_opt` (defaults to "origin"),
     /// following the same remote-URL + credential resolution as
-    /// push/pull/fetch.
-    async fn build_client(&self, remote_opt: &Option<String>) -> Result<ProtocolClient> {
+    /// push/pull/fetch. Also returns the config, resolved remote name, and
+    /// the credentials used, so callers can write them through to the
+    /// keychain (`crate::repo::remember_credentials`) after their first
+    /// request succeeds.
+    async fn build_client(
+        &self,
+        remote_opt: &Option<String>,
+    ) -> Result<(
+        ProtocolClient,
+        mediagit_config::Config,
+        String,
+        mediagit_protocol::Credentials,
+    )> {
         let repo_root = find_repo_root()?;
         let config = mediagit_config::Config::load(&repo_root).await?;
-        let remote = remote_opt.as_deref().unwrap_or("origin");
+        let remote = remote_opt.as_deref().unwrap_or("origin").to_string();
         let remote_url = config
-            .resolve_remote_url(remote)
+            .resolve_remote_url(&remote)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let credentials = crate::repo::resolve_credentials(&repo_root, &config, remote);
-        Ok(ProtocolClient::new(remote_url).with_credentials(credentials))
+        let credentials = crate::repo::resolve_credentials(&repo_root, &config, &remote);
+        let client = ProtocolClient::new(remote_url).with_credentials(credentials.clone());
+        Ok((client, config, remote, credentials))
     }
 
     /// Resolve the owner identity for a new lock: `--owner` >
@@ -139,10 +151,11 @@ impl LockCmd {
     }
 
     async fn create(&self, opts: &CreateOpts) -> Result<()> {
-        let client = self.build_client(&opts.remote).await?;
+        let (client, config, remote, credentials) = self.build_client(&opts.remote).await?;
         let owner = self.resolve_owner(opts.owner.clone()).await?;
 
         let info = client.create_lock(&opts.path, Some(owner)).await?;
+        crate::repo::remember_credentials(&config, &remote, &credentials);
         output::success(&format!(
             "Locked '{}' as {} (id {})",
             info.path, info.owner, info.lock_id
@@ -155,13 +168,14 @@ impl LockCmd {
             anyhow::bail!("mediagit lock unlock requires a PATH or --id <LOCK_ID>");
         }
 
-        let client = self.build_client(&opts.remote).await?;
+        let (client, config, remote, credentials) = self.build_client(&opts.remote).await?;
 
         let lock_id = if let Some(id) = &opts.lock_id {
             id.clone()
         } else {
             let path = opts.path.as_ref().unwrap();
             let locks = client.list_locks().await?;
+            crate::repo::remember_credentials(&config, &remote, &credentials);
             locks
                 .into_iter()
                 .find(|l| &l.path == path)
@@ -170,13 +184,15 @@ impl LockCmd {
         };
 
         client.delete_lock(&lock_id, opts.force).await?;
+        crate::repo::remember_credentials(&config, &remote, &credentials);
         output::success(&format!("Unlocked {}", lock_id));
         Ok(())
     }
 
     async fn list(&self, opts: &ListOpts) -> Result<()> {
-        let client = self.build_client(&opts.remote).await?;
+        let (client, config, remote, credentials) = self.build_client(&opts.remote).await?;
         let locks = client.list_locks().await?;
+        crate::repo::remember_credentials(&config, &remote, &credentials);
 
         if opts.json {
             let json: Vec<_> = locks

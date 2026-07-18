@@ -72,7 +72,7 @@ From http://media-server.example.com/my-project
 
 ```bash
 # Review changes from remote
-mediagit log origin/main..main --oneline
+mediagit log origin/main --oneline
 
 # Merge fetched changes
 mediagit merge origin/main

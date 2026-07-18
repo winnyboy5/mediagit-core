@@ -75,6 +75,17 @@ pub struct ServerConfig {
     /// Rate limiting: burst size
     #[serde(default = "default_rate_limit_burst")]
     pub rate_limit_burst: u32,
+
+    /// Directory where auth state (users.jsonl, api_keys.jsonl) is
+    /// persisted. Defaults to a sibling `auth/` directory next to
+    /// `repos_dir` when unset — see [`ServerConfig::resolved_auth_store_dir`].
+    pub auth_store_dir: Option<PathBuf>,
+
+    /// Allowed CORS origins (exact match, e.g. "https://app.example.com").
+    /// When unset (the default), no CORS layer is added — the server keeps
+    /// today's behavior of emitting no CORS headers at all.
+    #[serde(default)]
+    pub cors_allowed_origins: Option<Vec<String>>,
 }
 
 fn default_port() -> u16 {
@@ -122,6 +133,8 @@ impl Default for ServerConfig {
             enable_rate_limiting: false,
             rate_limit_rps: default_rate_limit_rps(),
             rate_limit_burst: default_rate_limit_burst(),
+            auth_store_dir: None,
+            cors_allowed_origins: None,
         }
     }
 }
@@ -169,6 +182,18 @@ impl ServerConfig {
     /// Get the full TLS bind address
     pub fn tls_bind_addr(&self) -> String {
         format!("{}:{}", self.host, self.tls_port)
+    }
+
+    /// Resolve the directory where auth state (users.jsonl, api_keys.jsonl)
+    /// is persisted: `auth_store_dir` if set, otherwise a sibling `auth/`
+    /// directory next to `repos_dir`.
+    pub fn resolved_auth_store_dir(&self) -> PathBuf {
+        self.auth_store_dir.clone().unwrap_or_else(|| {
+            self.repos_dir
+                .parent()
+                .map(|p| p.join("auth"))
+                .unwrap_or_else(|| PathBuf::from("auth"))
+        })
     }
 
     /// Build TlsConfig from server configuration

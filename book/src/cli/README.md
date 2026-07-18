@@ -25,6 +25,7 @@ Working with branches:
 - [reset](./reset.md) - Reset current branch to a commit
 - [revert](./revert.md) - Revert a commit by creating an inverse commit
 - [tag](./tag.md) - Create and manage tags
+- [lock](./lock.md) - Manage server-enforced file locks
 
 ### Remote Operations
 Collaborating with remotes:
@@ -33,6 +34,11 @@ Collaborating with remotes:
 - [fetch](./fetch.md) - Fetch from remote without merging
 - [push](./push.md) - Push changes to remote
 - [pull](./pull.md) - Fetch and merge from remote
+- [download](./download.md) - Download a single file from a remote repository by path
+
+### Media and Working Tree
+- [media](./media.md) - Inspect media file metadata (image/video/audio/PSD/3D)
+- [sparse-checkout](./sparse-checkout.md) - Manage sparse checkout (partial working tree)
 
 ### History and Diagnostics
 Inspecting repository state:
@@ -44,6 +50,10 @@ Repository maintenance:
 - [fsck](./fsck.md) - File system check
 - [verify](./verify.md) - Verify object integrity
 - [stats](./stats.md) - Repository statistics
+
+### Other
+- `version` - Show version information
+- `completions` - Generate shell completions
 
 ## Global Options
 

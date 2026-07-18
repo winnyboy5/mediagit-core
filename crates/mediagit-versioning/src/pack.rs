@@ -41,7 +41,7 @@ use crate::{ObjectType, Oid};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Magic bytes for delta-encoded objects in pack files
 const DELTA_MAGIC: &[u8; 5] = b"DELTA";
@@ -132,12 +132,13 @@ impl PackHeader {
         let object_count = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
         let kind = PackKind::from_byte(data[12]);
 
-        if version != PACK_VERSION {
-            warn!(
-                expected = PACK_VERSION,
-                actual = version,
-                "Pack version mismatch"
-            );
+        if version > PACK_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "unsupported pack version {version}, this build supports up to PACK_VERSION {PACK_VERSION}"
+                ),
+            ));
         }
 
         Ok(Self {
@@ -815,6 +816,22 @@ mod tests {
         assert_eq!(decoded.version, PACK_VERSION);
         assert_eq!(decoded.object_count, 42);
         assert_eq!(decoded.kind, PackKind::Local);
+    }
+
+    #[test]
+    fn test_pack_header_future_version_rejected() {
+        let mut header = PackHeader::new(1);
+        header.version = PACK_VERSION + 1;
+        let bytes = header.to_bytes();
+        assert!(PackHeader::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_pack_header_current_version_ok() {
+        let mut header = PackHeader::new(1);
+        header.version = PACK_VERSION;
+        let bytes = header.to_bytes();
+        assert!(PackHeader::from_bytes(&bytes).is_ok());
     }
 
     #[test]

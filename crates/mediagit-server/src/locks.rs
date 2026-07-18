@@ -55,6 +55,11 @@ struct LockFileHeader {
     v: u32,
 }
 
+/// Current on-disk version for `locks.jsonl` headers (`{"v":N}`). A header
+/// with a different version is a hard error at load — never silently
+/// accepted (format-freeze policy).
+const LOCKS_CURRENT_VERSION: u32 = 1;
+
 fn locks_file_path(repo_path: &Path) -> std::path::PathBuf {
     repo_path.join(".mediagit").join("locks.jsonl")
 }
@@ -96,7 +101,16 @@ async fn load_locks_file(path: &Path) -> anyhow::Result<HashMap<String, LockReco
             continue;
         }
         if i == 0 {
-            // Header line ({"v":1}) — nothing to act on today, just skip it.
+            let header: LockFileHeader = serde_json::from_str(line)
+                .map_err(|e| anyhow::anyhow!("corrupt locks file {}: bad header: {}", path.display(), e))?;
+            if header.v != LOCKS_CURRENT_VERSION {
+                anyhow::bail!(
+                    "unsupported locks file version {} in {}, this build supports v{}",
+                    header.v,
+                    path.display(),
+                    LOCKS_CURRENT_VERSION
+                );
+            }
             continue;
         }
         if let Ok(rec) = serde_json::from_str::<LockRecord>(line) {
@@ -107,7 +121,9 @@ async fn load_locks_file(path: &Path) -> anyhow::Result<HashMap<String, LockReco
 }
 
 async fn save_locks_file(path: &Path, locks: &HashMap<String, LockRecord>) -> anyhow::Result<()> {
-    let mut content = serde_json::to_string(&LockFileHeader { v: 1 })?;
+    let mut content = serde_json::to_string(&LockFileHeader {
+        v: LOCKS_CURRENT_VERSION,
+    })?;
     content.push('\n');
     for rec in locks.values() {
         content.push_str(&serde_json::to_string(rec)?);
@@ -551,6 +567,21 @@ mod tests {
             .unwrap();
         let mut lines = content.lines();
         assert_eq!(lines.next().unwrap(), r#"{"v":1}"#);
+    }
+
+    #[tokio::test]
+    async fn load_rejects_future_version_header() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo1");
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let path = locks_file_path(&repo_path);
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&path, "{\"v\":2}\n").await.unwrap();
+
+        let result = load_locks_file(&path).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

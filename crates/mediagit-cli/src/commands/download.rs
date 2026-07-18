@@ -142,7 +142,8 @@ impl DownloadCmd {
             }
             mediagit_protocol::Credentials::None
         };
-        let client = mediagit_protocol::ProtocolClient::new(base_url).with_credentials(credentials);
+        let client =
+            mediagit_protocol::ProtocolClient::new(base_url).with_credentials(credentials.clone());
 
         let ref_name = match &self.r#ref {
             Some(r) => r.clone(),
@@ -173,6 +174,9 @@ impl DownloadCmd {
                 return Err(e);
             }
         };
+        if attach_credentials {
+            crate::repo::remember_credentials(&config, "origin", &credentials);
+        }
 
         if !self.quiet {
             output::success(&format!(

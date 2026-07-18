@@ -247,5 +247,4 @@ $ mediagit add --force important.tmp
 
 - [mediagit status](./status.md) - Show the working tree status
 - [mediagit commit](./commit.md) - Record changes to the repository
-- [mediagit restore](./restore.md) - Restore working tree files
 - [mediagit diff](./diff.md) - Show changes between commits
