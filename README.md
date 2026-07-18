@@ -822,11 +822,12 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] Raw file serving endpoints (`GET /{repo}/files/{*path}`, `GET /{repo}/tree`)
 - [x] `/health` route alias alongside `/healthz`
 
-### v0.2.8-beta.1 — July 2026
-*Object-store layout v2, client auth, and reachability tooling*
+
+### v0.3.0-rc.1 — July 2026
+*Object-store layout v2, client auth, and reachability tooling, GA hardening: server-enforced locking, durable auth, format freeze*
 
 - [x] Object-store layout v2: per-repo namespace, true two-level hash fanout, `LAYOUT` marker
-- [x] Client authentication: config → env → none precedence (`MEDIAGIT_TOKEN`, `MEDIAGIT_API_KEY`)
+- [x] Client authentication: env → keychain → config → none precedence (`MEDIAGIT_TOKEN`, `MEDIAGIT_API_KEY`)
 - [x] `download` command — single-file fetch from a remote without a full clone
 - [x] Parallel checkout across multiple worker threads
 - [x] Roaring-bitmap reachability index for faster `gc`/`fsck` (`MEDIAGIT_BITMAP`)
@@ -834,10 +835,17 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] Sparse checkout — cone mode and pattern mode (`sparse-checkout set|list|disable`)
 - [x] `media info` — inspect image/video/audio/PSD/3D metadata without touching the ODB
 - [x] `status` ahead/behind tracking-branch counters and `--json` output
+- [x] Server-enforced file locking — `lock create|unlock|list`, push-time enforcement (`MEDIAGIT_LOCKS_ENFORCE`)
+- [x] Auth persistence — `users.jsonl` / `api_keys.jsonl` / `grants.jsonl` survive server restarts (`MEDIAGIT_AUTH_PERSIST`)
+- [x] Per-repo authorization grants (Read < Write < Admin) + admin endpoints (`/auth/users`, `/auth/keys`, grants)
+- [x] OS-keychain credential storage on the client (`MEDIAGIT_NO_KEYRING` to opt out)
+- [x] Path-traversal hardening — object-key validation at the storage boundary + server hex-id guards
+- [x] `push --repair` — pack-aware re-upload of corrupted remote chunks and objects
+- [x] Server-side integrity verification endpoints (chunks + objects, strong BLAKE3 re-hash)
+- [x] `gc --repack` chunk consolidation into cloud packs
+- [x] Format freeze + compatibility promise — persisted/wire formats frozen as of this release (see `FORMATS.md` §11)
 
-### v0.3.0 and beyond
 
-See [FUTURE_TODOS.md](./FUTURE_TODOS.md) for planned features.
 
 ---
 
@@ -931,7 +939,7 @@ Special thanks to:
 
 - **Lines of Code**: 85,000+ (Rust, 218 source files across 14 crates)
 - **Features**: 100% complete (all P0–P3 items)
-- **Test Coverage**: 1,529 unit/integration tests; **614/614 deep-tests** across MinIO, AWS S3, Azure Blob, GCS (validated 2026-06-02)
+- **Test Coverage**: 1,765+ unit/integration tests (validated 2026-07-16); **614/614 deep-tests** across MinIO, AWS S3, Azure Blob, GCS (validated 2026-06-02)
 - **Staging Throughput**: 25–240 MB/s for small files; 2.8–5.2 MB/s for chunked large files (WAV/PSD/GLB)
 - **Network Throughput**: 134–267 MB/s push (local server, pack negotiation); WAN-bound on cloud backends
 - **Storage Savings**: **26.3–26.5%** validated on 4 cloud backends (June 2026); ~30% average across mixed media projects
