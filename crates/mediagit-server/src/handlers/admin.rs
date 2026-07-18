@@ -89,7 +89,13 @@ pub async fn list_users(
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
 ) -> Result<Json<Vec<AdminUserInfo>>, StatusCode> {
-    check_permission(auth_user.as_deref(), "user:manage", state.is_auth_enabled(), &state.grants, "")?;
+    check_permission(
+        auth_user.as_deref(),
+        "user:manage",
+        state.is_auth_enabled(),
+        &state.grants,
+        "",
+    )?;
     let auth_service = state.auth_service().ok_or(StatusCode::NOT_FOUND)?;
     let users = auth_service.credentials_store.list_users().await;
     Ok(Json(users.into_iter().map(AdminUserInfo::from).collect()))
@@ -101,7 +107,13 @@ pub async fn delete_user(
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
 ) -> Result<StatusCode, StatusCode> {
-    check_permission(auth_user.as_deref(), "user:manage", state.is_auth_enabled(), &state.grants, "")?;
+    check_permission(
+        auth_user.as_deref(),
+        "user:manage",
+        state.is_auth_enabled(),
+        &state.grants,
+        "",
+    )?;
     let auth_service = state.auth_service().ok_or(StatusCode::NOT_FOUND)?;
     auth_service
         .credentials_store
@@ -123,7 +135,13 @@ pub async fn upsert_grant(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<GrantRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    check_permission(auth_user.as_deref(), "user:manage", state.is_auth_enabled(), &state.grants, "")?;
+    check_permission(
+        auth_user.as_deref(),
+        "user:manage",
+        state.is_auth_enabled(),
+        &state.grants,
+        "",
+    )?;
     state
         .grants
         .grant(&id, &req.repo, req.level)
@@ -139,7 +157,13 @@ pub async fn remove_grant(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<GrantRepoRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    check_permission(auth_user.as_deref(), "user:manage", state.is_auth_enabled(), &state.grants, "")?;
+    check_permission(
+        auth_user.as_deref(),
+        "user:manage",
+        state.is_auth_enabled(),
+        &state.grants,
+        "",
+    )?;
     state
         .grants
         .revoke(&id, &req.repo)
@@ -153,7 +177,13 @@ pub async fn list_keys(
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
 ) -> Result<Json<Vec<AdminKeyInfo>>, StatusCode> {
-    check_permission(auth_user.as_deref(), "user:manage", state.is_auth_enabled(), &state.grants, "")?;
+    check_permission(
+        auth_user.as_deref(),
+        "user:manage",
+        state.is_auth_enabled(),
+        &state.grants,
+        "",
+    )?;
     let auth_layer = state.auth().ok_or(StatusCode::NOT_FOUND)?;
     let keys = auth_layer.api_key_auth().list_all_keys().await;
     Ok(Json(keys.into_iter().map(AdminKeyInfo::from).collect()))
@@ -165,7 +195,13 @@ pub async fn revoke_key(
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
 ) -> Result<StatusCode, StatusCode> {
-    check_permission(auth_user.as_deref(), "user:manage", state.is_auth_enabled(), &state.grants, "")?;
+    check_permission(
+        auth_user.as_deref(),
+        "user:manage",
+        state.is_auth_enabled(),
+        &state.grants,
+        "",
+    )?;
     let auth_layer = state.auth().ok_or(StatusCode::NOT_FOUND)?;
     auth_layer
         .api_key_auth()

@@ -173,8 +173,8 @@ impl PushCmd {
         // from the repo config so users can tune parallel chunk fan-out
         // without setting MEDIAGIT_UPLOAD_CONCURRENCY in the env.
         let credentials = crate::repo::resolve_credentials(&repo_root, &config, remote);
-        let mut client =
-            mediagit_protocol::ProtocolClient::new(remote_url).with_credentials(credentials.clone());
+        let mut client = mediagit_protocol::ProtocolClient::new(remote_url)
+            .with_credentials(credentials.clone());
         if let Some(n) = config.performance.upload_concurrency {
             client = client.with_concurrent_uploads(n);
         }

@@ -28,7 +28,13 @@ pub async fn check_chunks_exist(
     Json(chunk_ids): Json<Vec<String>>,
 ) -> Result<Json<Vec<String>>, StatusCode> {
     // Check write permission
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     tracing::debug!(repo = %repo, chunk_count = chunk_ids.len(), "Checking chunk existence");
 
@@ -119,7 +125,13 @@ pub async fn upload_chunk(
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
     // Check write permission
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     if !is_valid_hex_id(&chunk_id) {
         tracing::warn!(repo = %repo, chunk_id = %chunk_id, "Rejecting upload_chunk: chunk_id is not a 64-char hex id");
@@ -169,7 +181,13 @@ pub async fn upload_pack_proxy(
     auth_user: Option<Extension<AuthUser>>,
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     if !is_valid_hex_id(&pack_id) {
         tracing::warn!(repo = %repo, pack_id = %pack_id, "Rejecting upload_pack_proxy: pack_id is not a 64-char hex id");
@@ -202,7 +220,13 @@ pub async fn upload_manifest(
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
     // Check write permission
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     if !is_valid_hex_id(&oid) {
         tracing::warn!(repo = %repo, oid = %oid, "Rejecting upload_manifest: oid is not a 64-char hex id");
@@ -251,7 +275,13 @@ pub async fn download_chunk(
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
 ) -> Result<Response, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     if !is_valid_hex_id(&chunk_id) {
         tracing::warn!(repo = %repo, chunk_id = %chunk_id, "Rejecting download_chunk: chunk_id is not a 64-char hex id");
@@ -391,7 +421,13 @@ pub async fn check_chunk_deltas_exist(
     auth_user: Option<Extension<AuthUser>>,
     Json(chunk_ids): Json<Vec<String>>,
 ) -> Result<Json<std::collections::HashMap<String, String>>, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     tracing::debug!(repo = %repo, chunk_count = chunk_ids.len(), "Checking chunk-delta availability");
 
@@ -451,7 +487,13 @@ pub async fn download_chunk_delta(
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     tracing::debug!(repo = %repo, chunk_id = %chunk_id, "Downloading chunk-delta");
 
@@ -496,7 +538,13 @@ pub async fn upload_chunk_delta(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     let base_hex = headers
         .get(DELTA_BASE_HEADER)
@@ -574,7 +622,13 @@ pub async fn download_manifest(
     auth_user: Option<Extension<AuthUser>>,
 ) -> Result<impl IntoResponse, StatusCode> {
     // Check read permission
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     tracing::debug!(repo = %repo, oid = %oid, "Downloading manifest");
 
@@ -715,7 +769,13 @@ pub async fn batch_get_pack_chunks(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<BatchGetRequest>,
 ) -> Result<Response, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     if !is_valid_hex_id(&req.pack_oid) {
         tracing::warn!(repo = %repo, pack_oid = %req.pack_oid, "Rejecting batch_get_pack_chunks: pack_oid is not a 64-char hex id");

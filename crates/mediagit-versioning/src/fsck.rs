@@ -1399,9 +1399,11 @@ mod tests {
         checker.check_chunk_deltas(&mut report).await.unwrap();
 
         assert!(
-            report.issues.iter().any(|i| i.category
-                == IssueCategory::InvalidFormat
-                && i.severity == IssueSeverity::Warning),
+            report
+                .issues
+                .iter()
+                .any(|i| i.category == IssueCategory::InvalidFormat
+                    && i.severity == IssueSeverity::Warning),
             "chain deeper than MAX_DELTA_DEPTH must be reported as a warning, got: {:?}",
             report.issues
         );

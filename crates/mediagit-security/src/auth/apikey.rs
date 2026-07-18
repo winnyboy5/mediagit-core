@@ -172,9 +172,8 @@ impl ApiKeyAuth {
     pub async fn revoke_key(&self, key_id: &str) -> AuthResult<()> {
         {
             let mut keys = self.keys.write().await;
-            keys.remove(key_id).ok_or_else(|| {
-                AuthError::UserNotFound(format!("API key not found: {}", key_id))
-            })?;
+            keys.remove(key_id)
+                .ok_or_else(|| AuthError::UserNotFound(format!("API key not found: {}", key_id)))?;
         }
 
         self.persist().await
@@ -233,7 +232,9 @@ impl Default for ApiKeyAuth {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+// Tests hold the process-global env lock across awaits to serialize
+// env-var access (see persist::ENV_LOCK).
+#[allow(clippy::unwrap_used, clippy::await_holding_lock)]
 mod tests {
     use super::*;
 

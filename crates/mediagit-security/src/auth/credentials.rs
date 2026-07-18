@@ -325,7 +325,9 @@ impl Default for CredentialsStore {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+// Tests hold the process-global env lock across awaits to serialize
+// env-var access (see persist::ENV_LOCK).
+#[allow(clippy::unwrap_used, clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use crate::auth::user::Role;
@@ -491,9 +493,12 @@ mod tests {
     async fn corrupt_store_file_hard_errors() {
         let _guard = persist::ENV_LOCK.read().unwrap();
         let tmp = tempfile::tempdir().unwrap();
-        tokio::fs::write(tmp.path().join("users.jsonl"), b"{\"v\":1}\nnot valid json\n")
-            .await
-            .unwrap();
+        tokio::fs::write(
+            tmp.path().join("users.jsonl"),
+            b"{\"v\":1}\nnot valid json\n",
+        )
+        .await
+        .unwrap();
 
         let result = CredentialsStore::load_or_new(tmp.path());
         assert!(result.is_err(), "corrupt store file must hard-error");

@@ -357,9 +357,12 @@ mod tests {
     async fn full_auth_hard_errors_on_corrupt_store() {
         let repos = tempfile::tempdir().unwrap();
         let auth_dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(auth_dir.path().join("users.jsonl"), b"{\"v\":1}\nnot json\n")
-            .await
-            .unwrap();
+        tokio::fs::write(
+            auth_dir.path().join("users.jsonl"),
+            b"{\"v\":1}\nnot json\n",
+        )
+        .await
+        .unwrap();
 
         let result = AppState::new_with_full_auth(
             repos.path().to_path_buf(),

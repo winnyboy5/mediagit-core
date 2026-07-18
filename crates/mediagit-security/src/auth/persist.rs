@@ -146,6 +146,7 @@ pub(crate) async fn save_jsonl<T: Serialize>(path: &Path, records: &[T]) -> Resu
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

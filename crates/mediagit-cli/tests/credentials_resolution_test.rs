@@ -162,7 +162,11 @@ fn keychain_tier_write_through_and_read_back() {
     };
     cleanup();
 
-    remember_credentials(&config, "origin", &Credentials::Bearer("keychain-token".to_string()));
+    remember_credentials(
+        &config,
+        "origin",
+        &Credentials::Bearer("keychain-token".to_string()),
+    );
     let result = resolve_credentials(repo_root, &config, "origin");
 
     cleanup();

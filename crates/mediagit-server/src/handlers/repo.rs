@@ -28,7 +28,13 @@ pub async fn get_refs(
     })?;
 
     // Check permission: repo:read required
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -120,7 +126,13 @@ pub async fn upload_pack(
     tracing::info!("POST /{}/objects/pack (streaming)", repo);
 
     // Check permission: repo:write required
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -248,7 +260,13 @@ pub async fn download_pack(
     tracing::info!("GET /{}/objects/pack", repo);
 
     // Check permission: repo:read required
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     // Get request ID from header (required to prevent race conditions)
     let request_id = headers
@@ -519,7 +537,13 @@ pub async fn request_objects(
     );
 
     // Check permission: repo:read required
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     // Generate unique request ID to prevent race conditions between concurrent clients
     let request_id = crate::state::generate_request_id();
@@ -546,7 +570,13 @@ pub async fn update_refs(
     tracing::info!("POST /{}/refs/update ({} updates)", repo, req.updates.len());
 
     // Check permission: repo:write required
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -906,7 +936,13 @@ pub async fn complete_pack(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<CompletePackRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     crate::security::validate_repo_name(&repo).map_err(|_| StatusCode::BAD_REQUEST)?;
     let repo_path = state.repos_dir.join(&repo);
@@ -1133,7 +1169,13 @@ pub async fn locate_chunks(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<LocateChunksRequest>,
 ) -> Result<Json<std::collections::HashMap<String, LocatedChunk>>, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     crate::security::validate_repo_name(&repo).map_err(|_| StatusCode::BAD_REQUEST)?;
     let repo_path = state.repos_dir.join(&repo);
@@ -1207,7 +1249,13 @@ pub async fn rebuild_pack_index(
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
 ) -> Result<Json<RebuildIndexResponse>, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     crate::security::validate_repo_name(&repo).map_err(|_| StatusCode::BAD_REQUEST)?;
     let repo_path = state.repos_dir.join(&repo);

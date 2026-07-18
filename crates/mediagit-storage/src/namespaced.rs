@@ -145,7 +145,9 @@ impl StorageBackend for NamespacedBackend {
     }
 
     async fn get_range(&self, key: &str, offset: u64, len: u64) -> anyhow::Result<Vec<u8>> {
-        self.inner.get_range(&self.prefixed(key)?, offset, len).await
+        self.inner
+            .get_range(&self.prefixed(key)?, offset, len)
+            .await
     }
 
     async fn get_streaming(

@@ -36,11 +36,7 @@ fn test_state_with_tokens() -> (Arc<AppState>, String, String) {
     let api_key_auth = Arc::new(ApiKeyAuth::new());
     let jwt_secret = "test-secret-key-for-admin-tests";
 
-    let state = Arc::new(AppState::new_with_auth(
-        repos_dir,
-        jwt_secret,
-        api_key_auth,
-    ));
+    let state = Arc::new(AppState::new_with_auth(repos_dir, jwt_secret, api_key_auth));
 
     let jwt_auth = JwtAuth::new(jwt_secret);
     let admin_token = jwt_auth
@@ -259,7 +255,11 @@ async fn delete_user_cascades_grants() {
         .register_user(user, "password123")
         .await
         .unwrap();
-    state.grants.grant("victim", "repoA", mediagit_security::auth::GrantLevel::Read).await.unwrap();
+    state
+        .grants
+        .grant("victim", "repoA", mediagit_security::auth::GrantLevel::Read)
+        .await
+        .unwrap();
     assert_eq!(
         state.grants.get("victim", "repoA"),
         Some(mediagit_security::auth::GrantLevel::Read)
@@ -301,10 +301,7 @@ async fn list_users_returns_id_username_role_no_secrets() {
         .unwrap();
 
     let app = create_router(Arc::clone(&state));
-    let resp = app
-        .oneshot(get("/auth/users", Some(&admin)))
-        .await
-        .unwrap();
+    let resp = app.oneshot(get("/auth/users", Some(&admin))).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
@@ -397,10 +394,7 @@ async fn list_keys_returns_metadata_only() {
         .unwrap();
 
     let app = create_router(Arc::clone(&state));
-    let resp = app
-        .oneshot(get("/auth/keys", Some(&admin)))
-        .await
-        .unwrap();
+    let resp = app.oneshot(get("/auth/keys", Some(&admin))).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)

@@ -728,19 +728,17 @@ impl GarbageCollector {
         for oid in &reachable_manifest_oids {
             let manifest_key = format!("manifests/{}", oid.to_hex());
             match self.storage.get(&manifest_key).await {
-                Ok(data) => {
-                    match ChunkManifest::from_bytes(&data) {
-                        Ok(manifest) => {
-                            for chunk_ref in &manifest.chunks {
-                                let chunk_key = format!("chunks/{}", chunk_ref.id.to_hex());
-                                reachable_chunk_keys.insert(chunk_key);
-                            }
-                        }
-                        Err(e) => {
-                            debug!("Failed to deserialize manifest {}: {}", oid, e);
+                Ok(data) => match ChunkManifest::from_bytes(&data) {
+                    Ok(manifest) => {
+                        for chunk_ref in &manifest.chunks {
+                            let chunk_key = format!("chunks/{}", chunk_ref.id.to_hex());
+                            reachable_chunk_keys.insert(chunk_key);
                         }
                     }
-                }
+                    Err(e) => {
+                        debug!("Failed to deserialize manifest {}: {}", oid, e);
+                    }
+                },
                 Err(e) => {
                     debug!("Failed to read manifest {}: {}", oid, e);
                 }

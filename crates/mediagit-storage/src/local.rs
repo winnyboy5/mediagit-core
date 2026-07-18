@@ -441,7 +441,9 @@ impl LocalBackend {
             tracing::debug!(key = %key, size = size, "Using mmap for large file");
             Ok(MmapOrVec::Mmap(self.get_mmap(key)?))
         } else {
-            Ok(MmapOrVec::Vec(fs::read(self.object_path_checked(key)?).await?))
+            Ok(MmapOrVec::Vec(
+                fs::read(self.object_path_checked(key)?).await?,
+            ))
         }
     }
 }

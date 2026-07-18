@@ -101,8 +101,8 @@ fn check_permission(
 
     // Backward compat: a zero-grants deployment (or an explicit opt-out)
     // behaves exactly like the pre-H2 flat permission check.
-    let grants_enforced = std::env::var("MEDIAGIT_GRANTS_ENFORCE").as_deref() != Ok("0")
-        && !grants.is_empty();
+    let grants_enforced =
+        std::env::var("MEDIAGIT_GRANTS_ENFORCE").as_deref() != Ok("0") && !grants.is_empty();
     if !grants_enforced {
         return flat_check();
     }
@@ -792,7 +792,13 @@ async fn list_tree_impl(
     if !dir_path.is_empty() {
         validate_file_path(&dir_path)?;
     }
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -955,10 +961,15 @@ mod tests {
     }
 
     #[tokio::test]
+    // Deliberately holds the env lock across awaits (see GRANTS_ENV_LOCK).
+    #[allow(clippy::await_holding_lock)]
     async fn admin_role_bypasses_grants_entirely() {
         let _guard = GRANTS_ENV_LOCK.read().unwrap();
         let grants = GrantsStore::new();
-        grants.grant("other", "repoA", GrantLevel::Read).await.unwrap();
+        grants
+            .grant("other", "repoA", GrantLevel::Read)
+            .await
+            .unwrap();
         let admin = user(&["repo:read", "repo:write", "repo:admin", "user:manage"]);
 
         // Admin has no grant recorded at all for repoB, yet still passes.
@@ -967,13 +978,18 @@ mod tests {
     }
 
     #[tokio::test]
+    // Deliberately holds the env lock across awaits (see GRANTS_ENV_LOCK).
+    #[allow(clippy::await_holding_lock)]
     async fn per_repo_grant_allow_deny_matrix() {
         let _guard = GRANTS_ENV_LOCK.read().unwrap();
         let grants = GrantsStore::new();
         // Flat role says read-only, but the per-repo grant says write —
         // once grants are active (store non-empty) the grant wins.
         let requester = user(&["repo:read"]);
-        grants.grant("user1", "repoA", GrantLevel::Write).await.unwrap();
+        grants
+            .grant("user1", "repoA", GrantLevel::Write)
+            .await
+            .unwrap();
 
         assert!(check_permission(Some(&requester), "repo:read", true, &grants, "repoA").is_ok());
         assert!(check_permission(Some(&requester), "repo:write", true, &grants, "repoA").is_ok());
@@ -985,12 +1001,17 @@ mod tests {
     }
 
     #[tokio::test]
+    // Deliberately holds the env lock across awaits (see GRANTS_ENV_LOCK).
+    #[allow(clippy::await_holding_lock)]
     async fn grants_enforce_opt_out_falls_back_to_flat_role() {
         let _guard = GRANTS_ENV_LOCK.write().unwrap();
         std::env::set_var("MEDIAGIT_GRANTS_ENFORCE", "0");
 
         let grants = GrantsStore::new();
-        grants.grant("user1", "repoA", GrantLevel::Read).await.unwrap();
+        grants
+            .grant("user1", "repoA", GrantLevel::Read)
+            .await
+            .unwrap();
         let requester = user(&["repo:read", "repo:write"]);
 
         // Grant only covers Read, but MEDIAGIT_GRANTS_ENFORCE=0 disables
@@ -1003,6 +1024,8 @@ mod tests {
     }
 
     #[tokio::test]
+    // Deliberately holds the env lock across awaits (see GRANTS_ENV_LOCK).
+    #[allow(clippy::await_holding_lock)]
     async fn concurrent_grant_mutations_are_safe() {
         let _guard = GRANTS_ENV_LOCK.read().unwrap();
         let grants = Arc::new(GrantsStore::new());

@@ -592,6 +592,8 @@ mod tests {
     /// byte-identical and readable via the pack-fallback path in
     /// `get_chunk`, and the loose `chunks/<hex>` keys must be gone.
     #[tokio::test]
+    // Deliberately holds the env lock across awaits (see REPACK_CHUNKS_ENV_LOCK).
+    #[allow(clippy::await_holding_lock)]
     async fn test_repack_chunks_into_cloud_pack_readable_after_loose_removed() {
         let _env_lock = REPACK_CHUNKS_ENV_LOCK
             .lock()
@@ -647,6 +649,8 @@ mod tests {
     /// behavior exactly — chunks folded into the monolithic `PackWriter`
     /// pack, no JSONL manifest written.
     #[tokio::test]
+    // Deliberately holds the env lock across awaits (see REPACK_CHUNKS_ENV_LOCK).
+    #[allow(clippy::await_holding_lock)]
     async fn test_repack_chunks_knob_disabled_matches_legacy_behavior() {
         let _env_lock = REPACK_CHUNKS_ENV_LOCK
             .lock()
@@ -723,6 +727,8 @@ mod tests {
     /// persisted" must leave the loose chunk untouched — `seal_chunk_cloud_pack`
     /// only deletes loose chunks after the JSONL write succeeds.
     #[tokio::test]
+    // Deliberately holds the env lock across awaits (see REPACK_CHUNKS_ENV_LOCK).
+    #[allow(clippy::await_holding_lock)]
     async fn test_repack_chunks_cloud_pack_abort_before_index_persist_keeps_loose_chunk() {
         let _env_lock = REPACK_CHUNKS_ENV_LOCK
             .lock()

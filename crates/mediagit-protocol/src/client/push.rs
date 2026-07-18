@@ -238,18 +238,15 @@ impl ProtocolClient {
 
             // Phase 4: Upload chunked objects (large files)
             if !chunked_oids.is_empty() {
-                let upload = self.upload_chunked_objects(
-                    odb,
-                    &chunked_oids,
-                    |bytes_done, bytes_total| {
+                let upload =
+                    self.upload_chunked_objects(odb, &chunked_oids, |bytes_done, bytes_total| {
                         on_progress(PushProgress {
                             phase: PushPhase::Uploading,
                             current: bytes_done,
                             total: bytes_total,
                             message: String::new(),
                         });
-                    },
-                );
+                    });
                 tokio::time::timeout_at(push_deadline, upload)
                     .await
                     .map_err(|_| deadline_err())??;
@@ -1400,7 +1397,9 @@ impl ProtocolClient {
         }
 
         // Upload manifest last (ensures all chunks exist first)
-        let manifest_data = manifest.to_bytes().context("Failed to serialize manifest")?;
+        let manifest_data = manifest
+            .to_bytes()
+            .context("Failed to serialize manifest")?;
         self.upload_manifest(oid, &manifest_data).await?;
 
         tracing::debug!(oid = %oid, "Manifest uploaded");
@@ -2231,7 +2230,9 @@ impl ProtocolClient {
             }
 
             // Upload manifest last (ensures all chunks exist first)
-            let manifest_data = manifest.to_bytes().context("Failed to serialize manifest")?;
+            let manifest_data = manifest
+                .to_bytes()
+                .context("Failed to serialize manifest")?;
             self.upload_manifest(oid, &manifest_data).await?;
 
             tracing::debug!(oid = %oid, "Manifest uploaded");

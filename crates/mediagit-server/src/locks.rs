@@ -101,8 +101,9 @@ async fn load_locks_file(path: &Path) -> anyhow::Result<HashMap<String, LockReco
             continue;
         }
         if i == 0 {
-            let header: LockFileHeader = serde_json::from_str(line)
-                .map_err(|e| anyhow::anyhow!("corrupt locks file {}: bad header: {}", path.display(), e))?;
+            let header: LockFileHeader = serde_json::from_str(line).map_err(|e| {
+                anyhow::anyhow!("corrupt locks file {}: bad header: {}", path.display(), e)
+            })?;
             if header.v != LOCKS_CURRENT_VERSION {
                 anyhow::bail!(
                     "unsupported locks file version {} in {}, this build supports v{}",

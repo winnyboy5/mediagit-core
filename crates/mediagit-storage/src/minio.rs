@@ -622,11 +622,7 @@ impl MinIOBackend {
         // concurrent chains can be mid-backoff against a down backend at once. Waiting
         // for a permit is a plain async yield — it never blocks a tokio worker thread,
         // so it can't itself starve the accept loop the way unbounded retry chains do.
-        let _permit = self
-            .op_sem
-            .acquire()
-            .await
-            .expect("op_sem is never closed");
+        let _permit = self.op_sem.acquire().await.expect("op_sem is never closed");
 
         let mut retry_count = 0;
         let mut delay_ms = self.config.initial_retry_delay_ms;

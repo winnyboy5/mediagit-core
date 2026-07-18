@@ -186,7 +186,10 @@ async fn main() -> Result<()> {
             .unwrap_or_default();
 
         if repo_dirs.is_empty() {
-            tracing::debug!("Startup probe: no repos found under {:?}, skipping", config.repos_dir);
+            tracing::debug!(
+                "Startup probe: no repos found under {:?}, skipping",
+                config.repos_dir
+            );
         } else {
             let repo_count = repo_dirs.len();
             tracing::info!(
@@ -199,9 +202,11 @@ async fn main() -> Result<()> {
                 stream::iter(repo_dirs.into_iter().map(|repo_path| {
                     let probe_state = Arc::clone(&probe_state);
                     async move {
-                        let result =
-                            mediagit_server::handlers::get_or_init_storage(&probe_state, &repo_path)
-                                .await;
+                        let result = mediagit_server::handlers::get_or_init_storage(
+                            &probe_state,
+                            &repo_path,
+                        )
+                        .await;
                         (repo_path, result)
                     }
                 }))
@@ -329,63 +334,65 @@ async fn main() -> Result<()> {
 
         #[cfg(feature = "tls")]
         {
-        let https_bind_addr = config.tls_bind_addr();
-        tracing::info!("Starting HTTPS server on {}", https_bind_addr);
+            let https_bind_addr = config.tls_bind_addr();
+            tracing::info!("Starting HTTPS server on {}", https_bind_addr);
 
-        // Build TLS configuration
-        let tls_config = config.build_tls_config()?;
-        let certificate = tls_config.load_certificate()?;
+            // Build TLS configuration
+            let tls_config = config.build_tls_config()?;
+            let certificate = tls_config.load_certificate()?;
 
-        // Build axum-server RustlsConfig from certificate
-        let rustls_config = build_axum_rustls_config(&certificate)?;
+            // Build axum-server RustlsConfig from certificate
+            let rustls_config = build_axum_rustls_config(&certificate)?;
 
-        // Create HTTPS app (clone of router)
-        let https_app = create_router(Arc::clone(&state));
-        let https_app =
-            mediagit_server::apply_cors_layer(https_app, config.cors_allowed_origins.as_deref());
+            // Create HTTPS app (clone of router)
+            let https_app = create_router(Arc::clone(&state));
+            let https_app = mediagit_server::apply_cors_layer(
+                https_app,
+                config.cors_allowed_origins.as_deref(),
+            );
 
-        // Run both servers concurrently
-        tracing::info!(
-            "MediaGit server listening on HTTP: {} and HTTPS: {}",
-            http_bind_addr,
-            https_bind_addr
-        );
-        tracing::info!("Press Ctrl+C to stop");
+            // Run both servers concurrently
+            tracing::info!(
+                "MediaGit server listening on HTTP: {} and HTTPS: {}",
+                http_bind_addr,
+                https_bind_addr
+            );
+            tracing::info!("Press Ctrl+C to stop");
 
-        // Spawn HTTP server task
-        let http_server = tokio::spawn(async move {
-            let listener = tokio::net::TcpListener::bind(&http_bind_addr).await?;
-            axum::serve(listener, app)
-                .with_graceful_shutdown(shutdown_signal())
-                .await
-        });
+            // Spawn HTTP server task
+            let http_server = tokio::spawn(async move {
+                let listener = tokio::net::TcpListener::bind(&http_bind_addr).await?;
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(shutdown_signal())
+                    .await
+            });
 
-        // Spawn HTTPS server task
-        let https_handle = axum_server::Handle::new();
-        let https_shutdown_handle = https_handle.clone();
-        tokio::spawn(async move {
-            shutdown_signal().await;
-            https_shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
-        });
-        let https_server = tokio::spawn(async move {
-            let addr: std::net::SocketAddr = https_bind_addr
-                .parse()
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-            axum_server::bind_rustls(addr, rustls_config)
-                .handle(https_handle)
-                .serve(https_app.into_make_service())
-                .await
-        });
+            // Spawn HTTPS server task
+            let https_handle = axum_server::Handle::new();
+            let https_shutdown_handle = https_handle.clone();
+            tokio::spawn(async move {
+                shutdown_signal().await;
+                https_shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
+            });
+            let https_server = tokio::spawn(async move {
+                let addr: std::net::SocketAddr = https_bind_addr
+                    .parse()
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+                axum_server::bind_rustls(addr, rustls_config)
+                    .handle(https_handle)
+                    .serve(https_app.into_make_service())
+                    .await
+            });
 
-        // Wait for both servers (or either to fail)
-        tokio::select! {
-            result = http_server => {
-                result??;
+            // Wait for both servers (or either to fail)
+            tokio::select! {
+                result = http_server => {
+                    result??;
+                }
+                result = https_server => {
+                    result??;
+                }
             }
-            result = https_server => {
-                result??;
-            }
-        }
         }
     } else {
         // HTTP only mode

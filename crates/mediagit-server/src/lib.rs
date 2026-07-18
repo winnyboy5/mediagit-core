@@ -97,10 +97,7 @@ pub fn apply_cors_layer(router: Router, origins: Option<&[String]>) -> Router {
         return router;
     };
 
-    let allowed_origins: Vec<_> = origins
-        .iter()
-        .filter_map(|o| o.parse().ok())
-        .collect();
+    let allowed_origins: Vec<_> = origins.iter().filter_map(|o| o.parse().ok()).collect();
 
     let cors = CorsLayer::new()
         .allow_origin(allowed_origins)
@@ -111,7 +108,10 @@ pub fn apply_cors_layer(router: Router, origins: Option<&[String]>) -> Router {
             Method::DELETE,
             Method::OPTIONS,
         ])
-        .allow_headers([HeaderName::from_static("authorization"), HeaderName::from_static("content-type")]);
+        .allow_headers([
+            HeaderName::from_static("authorization"),
+            HeaderName::from_static("content-type"),
+        ]);
 
     router.layer(cors)
 }

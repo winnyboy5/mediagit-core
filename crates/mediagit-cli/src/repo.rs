@@ -247,8 +247,7 @@ pub fn remember_credentials(
         mediagit_protocol::Credentials::ApiKey(k) => format!("apikey:{k}"),
         mediagit_protocol::Credentials::None => return,
     };
-    if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, &keyring_account(config, remote_name))
-    {
+    if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, &keyring_account(config, remote_name)) {
         let _ = entry.set_password(&payload);
     }
 }

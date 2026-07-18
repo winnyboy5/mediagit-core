@@ -53,7 +53,13 @@ pub async fn presign_pack_uploads(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<PresignPackUploadsRequest>,
 ) -> Result<Json<std::collections::HashMap<String, Option<PresignedPutJson>>>, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     if !req.pack_ids.iter().all(|id| is_hex_str(id)) {
         tracing::warn!(repo = %repo, "Rejecting presign_pack_uploads: a pack_id is not hex");
@@ -139,7 +145,13 @@ pub async fn presign_chunk_uploads(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<PresignChunkUploadsRequest>,
 ) -> Result<Json<std::collections::HashMap<String, Option<PresignedPutJson>>>, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     if !req.chunk_ids.iter().all(|id| is_hex_str(id)) {
         tracing::warn!(repo = %repo, "Rejecting presign_chunk_uploads: a chunk_id is not hex");
@@ -242,7 +254,13 @@ pub async fn presign_chunk_downloads(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<PresignDownloadUrlsRequest>,
 ) -> Result<Json<std::collections::HashMap<String, Option<PresignedGetJson>>>, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     if !req.chunks.iter().all(|id| is_hex_str(id)) {
         tracing::warn!(repo = %repo, "Rejecting presign_chunk_downloads: a chunk id is not hex");
@@ -332,7 +350,13 @@ pub async fn complete_chunk_uploads(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<CompleteUploadRequest>,
 ) -> Result<Json<CompleteUploadResponse>, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     if !req.chunk_ids.iter().all(|id| is_valid_hex_id(id)) {
         tracing::warn!(repo = %repo, "Rejecting complete_chunk_uploads: a chunk_id is not a 64-char hex id");
@@ -419,7 +443,13 @@ pub async fn verify_chunk_integrity(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<VerifyIntegrityRequest>,
 ) -> Result<Json<VerifyIntegrityResponse>, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     if !req.chunk_ids.iter().all(|id| is_valid_hex_id(id)) {
         tracing::warn!(repo = %repo, "Rejecting verify_chunk_integrity: a chunk_id is not a 64-char hex id");
@@ -595,7 +625,13 @@ pub async fn mpu_start(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<MpuStartRequest>,
 ) -> Result<Json<MpuStartResponse>, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     if !is_hex_str(&req.chunk_id) {
         tracing::warn!(repo = %repo, chunk_id = %req.chunk_id, "Rejecting mpu_start: chunk_id is not hex");
@@ -669,7 +705,13 @@ pub async fn mpu_complete(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<MpuCompleteRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     if !is_hex_str(&req.chunk_id) {
         tracing::warn!(repo = %repo, chunk_id = %req.chunk_id, "Rejecting mpu_complete: chunk_id is not hex");
@@ -714,7 +756,13 @@ pub async fn mpu_abort(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<MpuAbortRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     if !is_hex_str(&req.chunk_id) {
         tracing::warn!(repo = %repo, chunk_id = %req.chunk_id, "Rejecting mpu_abort: chunk_id is not hex");
@@ -748,7 +796,13 @@ pub async fn presign_pack_downloads(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<PresignPackDownloadRequest>,
 ) -> Result<Json<std::collections::HashMap<String, Option<PresignedGetJson>>>, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     crate::security::validate_repo_name(&repo).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -829,7 +883,13 @@ pub async fn verify_object_integrity(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<VerifyObjectsRequest>,
 ) -> Result<Json<VerifyObjectsResponse>, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled(), &state.grants, &repo)?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {

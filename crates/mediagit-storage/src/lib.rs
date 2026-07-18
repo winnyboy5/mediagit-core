@@ -680,9 +680,7 @@ pub fn validate_object_key(key: &str) -> anyhow::Result<()> {
     for component in path.components() {
         match component {
             std::path::Component::ParentDir => {
-                anyhow::bail!(
-                    "invalid storage key '{key}': path traversal ('..') is not allowed"
-                );
+                anyhow::bail!("invalid storage key '{key}': path traversal ('..') is not allowed");
             }
             std::path::Component::RootDir | std::path::Component::Prefix(_) => {
                 anyhow::bail!(

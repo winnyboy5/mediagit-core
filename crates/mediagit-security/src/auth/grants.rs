@@ -105,7 +105,7 @@ impl GrantsStore {
     }
 
     fn snapshot(&self) -> Vec<Grant> {
-        let grants = self.grants.read().unwrap();
+        let grants = self.grants.read().expect("grants lock poisoned");
         grants
             .iter()
             .map(|((user_id, repo), level)| Grant {
@@ -120,7 +120,7 @@ impl GrantsStore {
     /// grant for that pair.
     pub async fn grant(&self, user_id: &str, repo: &str, level: Level) -> AuthResult<()> {
         {
-            let mut grants = self.grants.write().unwrap();
+            let mut grants = self.grants.write().expect("grants lock poisoned");
             grants.insert((user_id.to_string(), repo.to_string()), level);
         }
         self.persist().await
@@ -129,7 +129,7 @@ impl GrantsStore {
     /// Revoke `user_id`'s grant on `repo`, if any.
     pub async fn revoke(&self, user_id: &str, repo: &str) -> AuthResult<()> {
         {
-            let mut grants = self.grants.write().unwrap();
+            let mut grants = self.grants.write().expect("grants lock poisoned");
             grants.remove(&(user_id.to_string(), repo.to_string()));
         }
         self.persist().await
@@ -141,7 +141,7 @@ impl GrantsStore {
     /// matching every other mutator — if the user held no grants.
     pub async fn remove_user(&self, user_id: &str) -> AuthResult<()> {
         {
-            let mut grants = self.grants.write().unwrap();
+            let mut grants = self.grants.write().expect("grants lock poisoned");
             grants.retain(|(u, _), _| u != user_id);
         }
         self.persist().await
@@ -151,7 +151,7 @@ impl GrantsStore {
     pub fn get(&self, user_id: &str, repo: &str) -> Option<Level> {
         self.grants
             .read()
-            .unwrap()
+            .expect("grants lock poisoned")
             .get(&(user_id.to_string(), repo.to_string()))
             .copied()
     }
@@ -160,7 +160,7 @@ impl GrantsStore {
     pub fn list_for_user(&self, user_id: &str) -> Vec<(String, Level)> {
         self.grants
             .read()
-            .unwrap()
+            .expect("grants lock poisoned")
             .iter()
             .filter(|((u, _), _)| u == user_id)
             .map(|((_, repo), level)| (repo.clone(), *level))
@@ -171,7 +171,7 @@ impl GrantsStore {
     pub fn list_for_repo(&self, repo: &str) -> Vec<(String, Level)> {
         self.grants
             .read()
-            .unwrap()
+            .expect("grants lock poisoned")
             .iter()
             .filter(|((_, r), _)| r == repo)
             .map(|((user_id, _), level)| (user_id.clone(), *level))
@@ -183,7 +183,7 @@ impl GrantsStore {
     /// enforcement is active — a zero-grants deployment behaves exactly like
     /// the pre-H2 flat permission check.
     pub fn is_empty(&self) -> bool {
-        self.grants.read().unwrap().is_empty()
+        self.grants.read().expect("grants lock poisoned").is_empty()
     }
 }
 
@@ -194,7 +194,9 @@ impl Default for GrantsStore {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+// Tests hold the process-global env lock across awaits to serialize
+// env-var access (see persist::ENV_LOCK).
+#[allow(clippy::unwrap_used, clippy::await_holding_lock)]
 mod tests {
     use super::*;
 
@@ -288,9 +290,12 @@ mod tests {
     async fn corrupt_store_file_hard_errors() {
         let _guard = persist::ENV_LOCK.read().unwrap();
         let tmp = tempfile::tempdir().unwrap();
-        tokio::fs::write(tmp.path().join("grants.jsonl"), b"{\"v\":1}\nnot valid json\n")
-            .await
-            .unwrap();
+        tokio::fs::write(
+            tmp.path().join("grants.jsonl"),
+            b"{\"v\":1}\nnot valid json\n",
+        )
+        .await
+        .unwrap();
 
         let result = GrantsStore::load_or_new(tmp.path());
         assert!(result.is_err(), "corrupt store file must hard-error");

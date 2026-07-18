@@ -21,16 +21,18 @@ Anthropic API key were committed to a **public** repo (github.com/winnyboy5/medi
 Treat both API keys as fully compromised regardless of any cleanup — scrubbing history
 never un-leaks a key.
 
-- [ ] 1. **REVOKE the Anthropic API key (`sk-ant-api03-t5EdN1…`)** — **USER ACTION**, Anthropic console, do immediately
-- [ ] 2. **REVOKE the Morph API key (`sk-3uQSl4Vrz…`)** — **USER ACTION**, Morph console, do immediately
+- [x] 1. **REVOKE the Anthropic API key (`sk-ant-api03-t5EdN1…`)** — done (user-confirmed 2026-07-18)
+- [x] 2. **REVOKE the Morph API key (`sk-3uQSl4Vrz…`)** — done (user-confirmed 2026-07-18). Note: `.mcp.json` (carrying this key) has been in history since `90f8cf8` and on **every branch** — the key was exposed for the file's whole lifetime, so revocation was the load-bearing fix.
 - [x] 3. `git rm --cached .mcp.json enc_key enc_key.pub` — done 2026-07-18 (staged deletions in working tree; `.mcp.json` kept on disk for local MCP config)
 - [x] 4. `.gitignore` — `enc_key`/`enc_key.pub` added 2026-07-18 (L224-225); `.mcp.json` (L195) and `.env` (L65) were already covered
 - [x] 5. `enc_key` usage check — done 2026-07-18: **zero references** in crates/, scripts/, dev-tests/ → orphan artifact; files deleted from disk (recoverable from git history until step 7 runs)
 - [x] 6. Key rotation — **not needed**: the pair is used by nothing; deleted instead (see 5). If a future use surfaces, generate a fresh pair — never restore this one
-- [ ] 7. **Scrub git history** — **DEFERRED** until (a) the pending GA-cycle commit lands and (b) a verified mirror backup exists (`git clone --mirror` to a separate location, then confirm non-empty). Then:
-       `git filter-repo --path .mcp.json --path enc_key --path enc_key.pub --invert-paths`
-       (`.env` dropped from the path list — it was **never committed**, verified 2026-07-18.)
-       Post-scrub: force-push **all** branches/tags, all collaborators re-clone, and because the repo is public, request cached-view purge via GitHub Support. `git-filter-repo` is not installed yet (`pip install git-filter-repo`).
+- [ ] 7. **Scrub git history** — scope verified 2026-07-18: **full-repo rewrite**, not a recent-commit trim. `.mcp.json` enters at `90f8cf8` and is carried by main + all ~58 remote branches (incl. every dependabot branch); `enc_key`/`enc_key.pub` enter at `82295e8` (feat/smart-media-handling only). `.env` was **never committed** (verified: absent from all trees in history) — excluded from the path list. `git-filter-repo` installed (`python -m git_filter_repo`). Agreed sequence:
+       1. USER commits the pending GA-cycle work on feat/smart-media-handling
+       2. Pristine backup: `git clone --mirror` to a separate location; verify non-empty **before** any rewrite (backup gate)
+       3. `python -m git_filter_repo --path .mcp.json --path enc_key --path enc_key.pub --invert-paths --force`
+       4. Force-push **all** branches + tags to origin (`git push origin --force --all` + `--tags`)
+       5. Post-push: close/regenerate dependabot PRs (branches invalidated), any collaborator re-clones, and request cached-view purge via GitHub Support (public repo — old commits stay servable from caches until purged)
 
 ---
 
