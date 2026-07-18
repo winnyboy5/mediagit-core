@@ -55,7 +55,7 @@ async fn write_entry_to_disk(
     full_path: &Path,
     oid: &Oid,
     mode: FileMode,
-    symlink_write_as_file_on_non_unix: bool,
+    _symlink_write_as_file_on_non_unix: bool,
 ) -> Result<()> {
     if let Some(parent) = full_path.parent() {
         fs::create_dir_all(parent)
@@ -97,7 +97,7 @@ async fn write_entry_to_disk(
 
             #[cfg(not(unix))]
             {
-                if symlink_write_as_file_on_non_unix {
+                if _symlink_write_as_file_on_non_unix {
                     fs::write(full_path, target.as_bytes()).with_context(|| {
                         format!("Failed to write symlink file: {}", full_path.display())
                     })?;

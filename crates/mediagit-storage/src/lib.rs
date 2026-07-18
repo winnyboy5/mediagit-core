@@ -671,6 +671,19 @@ pub fn validate_object_key(key: &str) -> anyhow::Result<()> {
     // `..\win`-style traversal is caught the same way on every platform,
     // not just Windows (where `\` is already a native separator).
     let normalized = key.replace('\\', "/");
+
+    // Explicit cross-platform check for Windows drive-letter paths (e.g.
+    // "C:/x" or "D:/foo").  On non-Windows hosts `std::path::Path` does NOT
+    // recognise these as absolute, so we catch them with a byte-level check.
+    {
+        let bytes = normalized.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            anyhow::bail!(
+                "invalid storage key '{key}': Windows drive-letter paths are not allowed"
+            );
+        }
+    }
+
     let path = std::path::Path::new(&normalized);
 
     if path.is_absolute() {
