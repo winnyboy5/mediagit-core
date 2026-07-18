@@ -353,6 +353,15 @@ function Drill-A7-BackendOutage {
     & docker start $container *> $null
     $stoppedContainer = $false
     $up = Wait-QaMinioUp $QA.MinioEndpoint 30
+    if (-not $up) {
+      # Docker Desktop's host port-proxy can stay wedged after `docker start`
+      # (seen 2026-07-19: container healthy, localhost:9000 dead for 14+ min).
+      # A full `docker restart` rebinds it; one retry keeps A7 from cascading
+      # into A9/A10 SKIPs on what is a host-networking hiccup, not a product bug.
+      Write-QaLog $Phase "A7: host port not back after docker start; retrying with docker restart $container"
+      & docker restart $container *> $null
+      $up = Wait-QaMinioUp $QA.MinioEndpoint 60
+    }
 
     $fsckLocal = Test-QaFsckClean $repo
     $retry = Invoke-MG $repo @("push", "origin") $Phase -TimeoutSec 3600

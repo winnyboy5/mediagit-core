@@ -15,7 +15,10 @@ $QA.TestFiles = _Env "MG_QA_TESTFILES"  (Join-Path $QA.RepoRoot "test-files")
 $QA.Tier      = (_Env "MG_QA_TIER" "STANDARD").ToUpper()                         # STANDARD | STRESS
 $QA.MaxFixtureMB = if ($QA.Tier -eq "STRESS") { 999999 } else { [int](_Env "MG_QA_MAX_MB" "500") }
 $QA.Backends  = (_Env "MG_QA_BACKENDS" "minio,aws,azure,gcs") -split "," | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ }
-$QA.MinioEndpoint  = _Env "MG_QA_MINIO"        "http://localhost:9000"
+# 127.0.0.1, not localhost: on Windows, localhost resolves ::1 first and a
+# wedged Docker Desktop wslrelay on ::1:9000 accepts-but-never-forwards,
+# hanging every S3 call (seen 2026-07-19 after the A7 outage drill).
+$QA.MinioEndpoint  = _Env "MG_QA_MINIO"        "http://127.0.0.1:9000"
 $QA.MinioAccessKey = _Env "MG_QA_MINIO_ACCESS" "minioadmin"
 $QA.MinioSecretKey = _Env "MG_QA_MINIO_SECRET" "minioadmin"
 $QA.Work      = _Env "MG_QA_WORKDIR" (Join-Path $QA.Root "work")

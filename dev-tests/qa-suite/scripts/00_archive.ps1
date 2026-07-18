@@ -75,7 +75,9 @@ foreach ($m in $moves) {
     }
   }
 
-  $done = (-not (Test-Path $src)) -and (Test-Path $dst)
+  # Source gone = nothing left to move. Don't require dest to exist: the archive
+  # dir itself may have been legitimately cleaned up since (2026-07-18 cleanup).
+  $done = -not (Test-Path $src)
   if (-not $done) { $allDone = $false }
   Write-QaRow $manifestPath $header @("MOVE", $src, $dst, $sizeMB, $done)
 }

@@ -97,7 +97,11 @@ function _QaBackendConfig([string]$Backend) {
 function Start-QaServer {
   param(
     [Parameter(Mandatory = $true)][ValidateSet("minio", "aws", "azure", "gcs", "local")][string]$Backend,
-    [Parameter(Mandatory = $true)][string]$Phase
+    [Parameter(Mandatory = $true)][string]$Phase,
+    # 07_auth: enable_auth=true + jwt_secret in server.toml. Auth store
+    # (users/api_keys/grants.jsonl) lands in <DataDir>\auth - the server's
+    # default auth_store_dir is a sibling "auth" dir next to repos_dir.
+    [switch]$EnableAuth
   )
 
   $bc = _QaBackendConfig $Backend
@@ -125,10 +129,14 @@ function Start-QaServer {
 
   $port = Get-QaFreePort
   $reposDirFwd = (Join-Path $srvDir "repos") -replace '\\', '/'
+  $authLines = ""
+  if ($EnableAuth) {
+    $authLines = "`nenable_auth = true`njwt_secret = `"qa-suite-jwt-secret-0123456789abcdef0123456789abcdef`""
+  }
   @"
 port = $port
 host = "127.0.0.1"
-repos_dir = "$reposDirFwd"
+repos_dir = "$reposDirFwd"$authLines
 "@ | Set-Content (Join-Path $srvDir "server.toml") -Encoding Ascii
 
   $outLog = Join-Path $QA.Logs "server-$Backend-$Phase.out.log"
@@ -155,7 +163,37 @@ repos_dir = "$reposDirFwd"
   }
 
   Write-QaLog $Phase "server $Backend up: $url/$repoName (pid $($proc.Id))"
-  return @{ Url = "$url/$repoName"; Proc = $proc; DataDir = $srvDir; Backend = $Backend }
+  return @{
+    Url = "$url/$repoName"; Proc = $proc; DataDir = $srvDir; Backend = $Backend
+    BaseUrl = $url; RepoName = $repoName
+    ConfigPath = (Join-Path $srvDir "server.toml")
+    OutLog = $outLog; ErrLog = $errLog
+  }
+}
+
+# Restart-QaServer <handle> -Phase <name>: kill the current process and start a
+# fresh one against the SAME server.toml/data dir. Used by 07_auth to pick up
+# an edited users.jsonl (auth store loads at boot only). Updates $Handle.Proc.
+function Restart-QaServer($Handle, [string]$Phase = "misc") {
+  Stop-QaServer $Handle
+  $proc = Start-Process -FilePath $QA.MGServer `
+    -ArgumentList @("--config", $Handle.ConfigPath) `
+    -PassThru -NoNewWindow -RedirectStandardOutput $Handle.OutLog -RedirectStandardError $Handle.ErrLog
+  $healthy = $false
+  for ($i = 0; $i -lt 40; $i++) {
+    if ($proc.HasExited) { break }
+    try {
+      $resp = Invoke-WebRequest -Uri "$($Handle.BaseUrl)/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+      if ($resp.StatusCode -eq 200) { $healthy = $true; break }
+    } catch {}
+    Start-Sleep -Milliseconds 500
+  }
+  if (-not $healthy) {
+    if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+    throw "Restart-QaServer: server did not become healthy again at $($Handle.BaseUrl)"
+  }
+  $Handle.Proc = $proc
+  Write-QaLog $Phase "server restarted: $($Handle.Url) (pid $($proc.Id))"
 }
 
 # Stop-QaServer <handle returned by Start-QaServer>. Kills the process tree; safe to call
