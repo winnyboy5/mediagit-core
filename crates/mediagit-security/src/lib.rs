@@ -37,6 +37,9 @@ pub mod kdf;
 // Audit logging module
 pub mod audit;
 
+// Tag signing (OpenSSH ed25519 key reuse; MediaGit-native signature format)
+pub mod sign;
+
 // Authentication module
 #[cfg(feature = "auth")]
 pub mod auth;

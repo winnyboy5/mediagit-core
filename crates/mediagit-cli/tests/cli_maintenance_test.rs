@@ -181,6 +181,212 @@ fn test_gc_verbose() {
 }
 
 // ============================================================================
+// Bitmap Maintenance Tests (M3, #2b)
+// ============================================================================
+
+/// `gc` must regenerate a reachability bitmap for every current branch tip,
+/// and must never treat the `bitmaps/` namespace as orphan data in the
+/// unreachable-object sweep (derived data — see `mediagit_versioning::bitmap`).
+#[test]
+fn test_gc_regenerates_bitmaps_for_branch_tips() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+
+    add_and_commit(temp_dir.path(), "a.txt", "content a", "commit A");
+
+    mediagit()
+        .arg("branch")
+        .arg("create")
+        .arg("feature")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("feature")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    add_and_commit(temp_dir.path(), "b.txt", "content b", "commit B");
+
+    // Two branch tips (main, feature) -> two bitmaps regenerated, none
+    // pruned (nothing unreachable yet).
+    mediagit()
+        .arg("gc")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Regenerated 2 bitmap(s), pruned 0 orphaned bitmap(s)",
+        ));
+}
+
+/// Deleting a branch makes its tip commit (and the bitmap seeded for it by
+/// the prior `gc`) unreachable. The next `gc` must prune that bitmap and
+/// must not flag it as corruption — `fsck` stays clean throughout.
+#[test]
+fn test_gc_prunes_bitmap_for_deleted_branch() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+
+    add_and_commit(temp_dir.path(), "a.txt", "content a", "commit A");
+    mediagit()
+        .arg("branch")
+        .arg("create")
+        .arg("feature")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("feature")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    add_and_commit(temp_dir.path(), "b.txt", "content b", "commit B");
+
+    // First gc: seeds bitmaps for both main (A) and feature (B).
+    mediagit()
+        .arg("gc")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+
+    // Switch off feature so it can be deleted, then delete it — B is now
+    // unreachable, but its bitmap file is still sitting on disk.
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("main")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("branch")
+        .arg("delete")
+        .arg("feature")
+        .arg("-D")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+
+    // Second gc: must prune exactly the orphaned (feature/B) bitmap and
+    // regenerate exactly the surviving (main/A) one. Reflog protection is
+    // disabled so B is truly unreachable (like git's gc.reflogExpire=now).
+    mediagit()
+        .arg("gc")
+        .env("MEDIAGIT_GC_REFLOG_HORIZON_DAYS", "0")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Regenerated 1 bitmap(s), pruned 1 orphaned bitmap(s)",
+        ));
+
+    // The prune must never register as a corruption finding.
+    mediagit()
+        .arg("fsck")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PERFECT"));
+}
+
+/// `MEDIAGIT_BITMAP=0` disables bitmap generation entirely — gc must not
+/// print the bitmap-maintenance step at all, and must still succeed.
+#[test]
+fn test_gc_skips_bitmap_maintenance_when_disabled() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+    add_and_commit(temp_dir.path(), "a.txt", "content a", "commit A");
+
+    mediagit()
+        .arg("gc")
+        .env("MEDIAGIT_BITMAP", "0")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("bitmap").not());
+}
+
+/// M5a regression: a commit reachable ONLY through an annotated tag (no
+/// branch points at it) must survive `gc` — this is the exact reachability
+/// gap the M3 review flagged for M5 to close (`walk_reachable`/gc's
+/// `build_reachability_set` must walk THROUGH a Tag object to its target).
+#[test]
+fn test_gc_preserves_commit_reachable_only_via_annotated_tag() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+
+    add_and_commit(temp_dir.path(), "a.txt", "content a", "commit A");
+    add_and_commit(temp_dir.path(), "b.txt", "content b", "commit B");
+
+    // Tag commit B (currently HEAD) with an annotated tag before it gets
+    // orphaned from the branch.
+    mediagit()
+        .arg("tag")
+        .arg("create")
+        .arg("relB")
+        .arg("-a")
+        .arg("-m")
+        .arg("release B")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+
+    // Read commit B's OID back out via `tag show` (parses the "Commit:"
+    // line) rather than the ref file directly — refs are postcard-binary,
+    // not plain hex text.
+    let show_output = mediagit()
+        .arg("tag")
+        .arg("show")
+        .arg("relB")
+        .current_dir(temp_dir.path())
+        .output()
+        .unwrap();
+    let show_stdout = String::from_utf8_lossy(&show_output.stdout);
+    let commit_b_oid = show_stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("Commit:  "))
+        .expect("tag show must print a Commit: line")
+        .trim()
+        .to_string();
+
+    // main moves back to A; B is now reachable ONLY through the tag.
+    mediagit()
+        .arg("reset")
+        .arg("--hard")
+        .arg("HEAD~1")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+
+    mediagit()
+        .arg("gc")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+
+    // Commit B's object must still be readable after gc.
+    mediagit()
+        .arg("show")
+        .arg(&commit_b_oid)
+        .current_dir(temp_dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("commit B"));
+
+    mediagit()
+        .arg("fsck")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PERFECT"));
+}
+
+// ============================================================================
 // Auto-GC Trigger Tests (post-commit/pull/clone)
 // ============================================================================
 

@@ -151,8 +151,21 @@ async fn push_preserves_chunk_deltas_on_server() {
     assert_eq!(uploaded, 2, "expected both chunks to be uploaded");
 
     // ── Assert server layout ────────────────────────────────────────────
-    let server_storage: Arc<dyn StorageBackend> =
+    // The server received these objects over HTTP through its own
+    // `build_storage_backend`, which wraps in `NamespacedBackend` (layout
+    // v2) namespaced by the sanitized repo-directory basename (this test
+    // repo carries no config.toml, so the server falls back to that
+    // default). This verification read must use the same wrap to find them.
+    let server_inner: Arc<dyn StorageBackend> =
         Arc::new(LocalBackend::new(&server_mediagit).await.unwrap());
+    let server_ns = mediagit_storage::sanitize_namespace(
+        &server_repo
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    );
+    let server_storage: Arc<dyn StorageBackend> =
+        Arc::new(mediagit_storage::NamespacedBackend::new(server_inner, server_ns).unwrap());
 
     let base_key = format!("chunks/{}", base_id.to_hex());
     assert!(

@@ -41,6 +41,8 @@ bytes = "1.9"
 toml = { workspace = true }
 futures = "0.3"
 clap = { workspace = true }
+uuid = { version = "1.10", features = ["v4"] }
+dialoguer = "0.12"
 
 # Security
 tower_governor = "0.8"
@@ -57,11 +59,11 @@ mediagit-compression = { path = "../mediagit-compression" }
 mediagit-storage = { path = "../mediagit-storage", features = ["all"] }
 mediagit-config = { path = "../mediagit-config" }
 mediagit-security = { path = "../mediagit-security", features = ["all"] }
+mediagit-metrics = { path = "../mediagit-metrics" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 reqwest = { workspace = true }
 futures = "0.3"
 async-trait = { workspace = true }
-postcard = { workspace = true }
 serde_json = { workspace = true }

@@ -117,59 +117,25 @@ MediaGit uses intelligent thresholds based on file characteristics:
 
 | File Type | Example | Threshold | Rationale |
 |-----------|---------|-----------|-----------|
-| **Creative/PDF** | AI, InDesign, PDF | 0.15 | Compressed streams shift bytes; structural similarity remains |
+| **Creative/PDF** | AI, InDesign, PDF, **PSD/PSB** | 0.15 | Compressed streams shift bytes; structural similarity remains (PSD's embedded compressed image/mask streams put it in this bucket, not Images) |
 | **Office** | DOCX, XLSX, PPTX | 0.20 | ZIP containers with shared structure |
+| **Blender** | BLEND, BLEND1 | 0.40 | Binary scene files, heavy per-edit diffs |
 | **Video** | MP4, MOV, AVI, MKV | 0.50 | Metadata/timeline changes significant |
 | **Audio** | WAV, AIFF, MP3, FLAC | 0.65 | Medium threshold |
-| **Images** | JPG, PNG, PSD | 0.70 | Perceptual similarity |
-| **3D Models** | OBJ, FBX, BLEND, glTF, GLB | 0.70 | Vertex/animation changes |
+| **Images** | JPG, PNG | 0.70 | Perceptual similarity |
+| **3D Models (interchange)** | OBJ, FBX, glTF, GLB | 0.70 | Vertex/animation changes |
 | **Text/Code** | TXT, PY, RS, JS | 0.85 | Small changes matter |
 | **Config** | JSON, YAML, TOML, XML | 0.95 | Exact matches preferred |
 | **Default** | Unknown types | 0.30 | Global minimum (`MIN_SIMILARITY_THRESHOLD`) |
+
+`similarity.rs` defines thresholds for many more type-specific buckets not shown above (Maya 0.50, Houdini 0.35, Cinema4D 0.40, NLE projects 0.25, DAW projects 0.55, CAD 0.45, Revit 0.30, game-engine assets 0.35–0.40, ML weights 0.15).
 
 **Lower threshold** = more aggressive compression (more files use delta)
 **Higher threshold** = more conservative (only very similar files use delta)
 
 ### Similarity Configuration
 
-Customize thresholds in `.mediagit/config`:
-
-```toml
-[compression.delta]
-# Enable similarity detection (default: true)
-auto_detect = true
-
-# Minimum savings threshold (default: 10%, 0.1)
-min_savings = 0.1
-
-# Per-file-type similarity thresholds (from similarity.rs)
-[compression.delta.thresholds]
-psd = 0.70        # Images (perceptual similarity)
-blend = 0.70      # 3D models
-fbx = 0.70        # 3D models
-wav = 0.65        # Audio files
-mp4 = 0.50        # Video (metadata changes)
-mov = 0.50        # Video
-ai = 0.15         # Creative/PDF containers
-pdf = 0.15        # PDF containers
-rs = 0.85         # Text/code
-default = 0.30    # Global minimum
-```
-
-**Change similarity aggressiveness**:
-```bash
-# Be more aggressive (compress more files)
-$ mediagit config set compression.delta.thresholds.default 0.65
-
-# Be more conservative (fewer deltas, safer)
-$ mediagit config set compression.delta.thresholds.default 0.85
-```
-
-**Disable delta for specific types**:
-```bash
-# Treat MP4s as already compressed (skip delta)
-$ mediagit config set compression.delta.thresholds.mp4 1.0
-```
+Per-file-type similarity thresholds are compiled-in constants in `get_similarity_threshold()` (`mediagit-versioning/src/similarity.rs`), keyed off file extension. There is no `mediagit config` CLI subcommand and no `[compression.delta.thresholds]` config section — thresholds are not currently user-configurable; changing aggressiveness requires editing `similarity.rs` and rebuilding.
 
 ### Similarity Detection Performance
 

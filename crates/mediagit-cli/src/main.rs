@@ -16,7 +16,9 @@
 mod auto_gc;
 mod commands;
 mod ignore_rules;
+mod media_meta;
 mod output;
+mod phash_index;
 mod progress;
 mod repo;
 
@@ -24,7 +26,7 @@ use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use commands::*;
-use mediagit_observability::{init_tracing, LogFormat};
+use mediagit_observability::LogFormat;
 use std::io;
 
 #[derive(Parser)]
@@ -81,6 +83,12 @@ enum Commands {
     /// Fetch remote changes without merging
     Fetch(FetchCmd),
 
+    /// Download a single file from a remote repository by path
+    Download(DownloadCmd),
+
+    /// Inspect media file metadata (image/video/audio/PSD/3D)
+    Media(MediaCmd),
+
     /// Manage remote repositories
     Remote(RemoteCmd),
 
@@ -89,6 +97,12 @@ enum Commands {
 
     /// Manage tags
     Tag(TagCmd),
+
+    /// Manage server-enforced file locks
+    Lock(LockCmd),
+
+    /// Manage authentication with a MediaGit server
+    Auth(AuthCmd),
 
     /// Merge branches
     Merge(MergeCmd),
@@ -138,6 +152,10 @@ enum Commands {
 
     /// Revert commits by creating inverse commits
     Revert(RevertCmd),
+
+    /// Manage sparse checkout (partial working tree)
+    #[command(name = "sparse-checkout")]
+    SparseCheckout(SparseCheckoutCmd),
 
     /// Show version information
     Version,
@@ -240,16 +258,32 @@ fn preprocess_args(args: Vec<String>) -> Vec<String> {
                 &["list", "add", "remove", "rename", "show", "set-url", "help"][..],
                 "list",
             )),
+            "lock" => Some(("lock", &["create", "unlock", "list", "help"][..], "create")),
             _ => None,
         };
         if let Some((_cmd, known_subcmds, positional_action)) = default_action {
+            // Check if -h/--help appears before any positional argument
+            let has_help = args[pos + 1..]
+                .iter()
+                .take_while(|a| a.starts_with('-'))
+                .any(|a| a == "-h" || a == "--help");
+
             let next_positional = args[pos + 1..]
                 .iter()
                 .find(|a| !a.starts_with('-'))
                 .map(|s| s.as_str());
             let inject: Option<&str> = match next_positional {
+                None if has_help => None, // --help → don't inject, let clap show real help
                 None => Some("list"),
                 Some(s) if known_subcmds.contains(&s) => None,
+                // BUG-CLI-B2: an unrecognized word after `branch` used to be
+                // silently routed to `create` (so `branch unprotect` created
+                // a branch named "unprotect"). `branch`'s own after_help
+                // says `branch <name>` isn't valid, so leave unknown words
+                // untouched here and let clap reject them as an unrecognized
+                // subcommand instead of guessing. `tag`/`remote` keep the
+                // create/list sugar.
+                Some(_) if subcmd == "branch" => None,
                 Some(_) => Some(positional_action),
             };
             if let Some(verb) = inject {
@@ -320,8 +354,11 @@ async fn async_main(cli: Cli) -> Result<()> {
         let level = if cli.verbose { "info" } else { "warn" };
         let format = LogFormat::Pretty; // Pretty format for CLI output
 
-        // Initialize with appropriate log level
-        init_tracing(format, Some(level)).ok(); // Ignore errors if already initialized
+        // Initialize with appropriate log level, explicitly writing to stderr
+        let config = mediagit_observability::LogConfig::new()
+            .with_format(format)
+            .with_level(level);
+        mediagit_observability::init_tracing_with_config(config).ok(); // Ignore errors if already initialized
     }
 
     // Handle color output
@@ -360,12 +397,16 @@ async fn async_main(cli: Cli) -> Result<()> {
         Some(Commands::Push(cmd)) => cmd.execute().await,
         Some(Commands::Pull(cmd)) => cmd.execute().await,
         Some(Commands::Fetch(cmd)) => cmd.execute().await,
+        Some(Commands::Download(cmd)) => cmd.execute().await,
+        Some(Commands::Media(cmd)) => cmd.execute().await,
         Some(Commands::Remote(cmd)) => cmd.execute().await,
         Some(Commands::Branch(cmd)) => cmd.execute().await,
         Some(Commands::Tag(cmd)) => {
             let repo_path = std::env::current_dir()?;
             cmd.execute(repo_path).await
         }
+        Some(Commands::Lock(cmd)) => cmd.execute().await,
+        Some(Commands::Auth(cmd)) => cmd.execute().await,
         Some(Commands::Merge(cmd)) => cmd.execute().await,
         Some(Commands::Rebase(cmd)) => cmd.execute().await,
         Some(Commands::CherryPick(cmd)) => cmd.execute().await,
@@ -382,6 +423,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         Some(Commands::Reflog(cmd)) => cmd.execute().await,
         Some(Commands::Reset(cmd)) => cmd.execute().await,
         Some(Commands::Revert(cmd)) => cmd.execute().await,
+        Some(Commands::SparseCheckout(cmd)) => cmd.execute().await,
         Some(Commands::Version) => {
             print_version();
             Ok(())
@@ -403,6 +445,8 @@ async fn async_main(cli: Cli) -> Result<()> {
             println!("  push         Update remote references");
             println!("  pull         Fetch and integrate remote changes");
             println!("  fetch        Fetch remote changes without merging");
+            println!("  download     Download a single file from a remote repository by path");
+            println!("  media        Inspect media file metadata (image/video/audio/PSD/3D)");
             println!("  remote       Manage remote repositories");
             println!("  branch       Manage branches");
             println!("  tag          Manage tags");
@@ -419,6 +463,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             println!("  fsck         Check repository integrity");
             println!("  verify       Verify commits and signatures");
             println!("  stats        Show repository statistics");
+            println!("  sparse-checkout  Manage sparse checkout (partial working tree)");
             println!();
             println!("Run 'mediagit <COMMAND> --help' for command-specific help");
             Ok(())
@@ -436,4 +481,24 @@ fn generate_completions(shell: Shell) -> Result<()> {
     let mut cmd = Cli::command();
     generate(shell, &mut cmd, "mediagit", &mut io::stdout());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `--server` is a subcommand-local flag (declared on `LoginOpts`), not
+    /// a value-taking *global* flag, so `preprocess_args` needs no change
+    /// for it to parse correctly (see the `preprocess_args` doc comment).
+    #[test]
+    fn auth_login_with_server_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "mediagit",
+            "auth",
+            "login",
+            "--server",
+            "https://example.com:3000",
+        ]);
+        assert!(cli.is_ok(), "{:?}", cli.err());
+    }
 }

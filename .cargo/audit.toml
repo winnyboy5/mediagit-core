@@ -40,7 +40,21 @@
 #   MediaGit uses tracing (not log) and never calls rand::rng() directly.
 #   Updated rand 0.9→0.9.4 and 0.10→0.10.1 (our direct deps).
 #
-# Review date: 2026-05-25
+# RUSTSEC-2026-0194, -0195: quick-xml 0.31.0 (DoS via duplicate attributes / namespace alloc)
+#   azure_core 0.21 → quick-xml 0.31.0. The Azure SDK for Rust hasn't
+#   released a version that uses quick-xml >= 0.41. The azure feature is
+#   optional in mediagit-storage and XML parsing is only used for Azure
+#   Blob Storage responses — not attacker-controlled input.
+#
+# RUSTSEC-2026-0174: http-types 2.12.0 (notice — ASCII invariant violation)
+#   azure_core 0.21 → http-types 2.12.0. Same root cause as quick-xml:
+#   pinned by the Azure SDK. Low severity notice, not an exploitable vuln.
+#
+# RUSTSEC-2026-0183, -0184: git2 0.20.4 (unsound — UB in Remote::list / BlameHunk)
+#   No patched git2 release available. Our code does not call Remote::list()
+#   or create BlameHunks from buffers, so these code paths are not reachable.
+#
+# Review date: 2026-07-18
 ignore = [
     "RUSTSEC-2023-0071",
     "RUSTSEC-2023-0089",
@@ -50,4 +64,9 @@ ignore = [
     "RUSTSEC-2026-0099",
     "RUSTSEC-2026-0104",
     "RUSTSEC-2026-0097",
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    "RUSTSEC-2026-0174",
+    "RUSTSEC-2026-0183",
+    "RUSTSEC-2026-0184",
 ]

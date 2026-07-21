@@ -28,7 +28,13 @@ pub async fn check_chunks_exist(
     Json(chunk_ids): Json<Vec<String>>,
 ) -> Result<Json<Vec<String>>, StatusCode> {
     // Check write permission
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     tracing::debug!(repo = %repo, chunk_count = chunk_ids.len(), "Checking chunk existence");
 
@@ -119,7 +125,18 @@ pub async fn upload_chunk(
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
     // Check write permission
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
+
+    if !is_valid_hex_id(&chunk_id) {
+        tracing::warn!(repo = %repo, chunk_id = %chunk_id, "Rejecting upload_chunk: chunk_id is not a 64-char hex id");
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let upload_start = std::time::Instant::now();
     tracing::info!(
@@ -164,7 +181,18 @@ pub async fn upload_pack_proxy(
     auth_user: Option<Extension<AuthUser>>,
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
+
+    if !is_valid_hex_id(&pack_id) {
+        tracing::warn!(repo = %repo, pack_id = %pack_id, "Rejecting upload_pack_proxy: pack_id is not a 64-char hex id");
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -192,7 +220,18 @@ pub async fn upload_manifest(
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
     // Check write permission
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
+
+    if !is_valid_hex_id(&oid) {
+        tracing::warn!(repo = %repo, oid = %oid, "Rejecting upload_manifest: oid is not a 64-char hex id");
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     tracing::debug!(
         repo = %repo,
@@ -236,7 +275,18 @@ pub async fn download_chunk(
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
 ) -> Result<Response, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
+
+    if !is_valid_hex_id(&chunk_id) {
+        tracing::warn!(repo = %repo, chunk_id = %chunk_id, "Rejecting download_chunk: chunk_id is not a 64-char hex id");
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     tracing::debug!(repo = %repo, chunk_id = %chunk_id, "Downloading chunk");
 
@@ -267,31 +317,9 @@ pub async fn download_chunk(
                 || chain.contains("not found")
                 || chain.contains("service error")
             {
-                // Before returning 404: check whether this chunk is stored as a delta.
-                // This catches the case where the client's POST /chunk-deltas/check probe
-                // failed silently (timeout / transport error) and the client is requesting
-                // a delta-only chunk via the wrong /chunks/ route.
-                let meta_key = format!("chunk-deltas/{}.meta", chunk_id);
-                if let Ok(meta_bytes) = storage.get(&meta_key).await {
-                    let meta_str = String::from_utf8_lossy(&meta_bytes);
-                    let base_hex = meta_str
-                        .strip_prefix("base:")
-                        .unwrap_or("")
-                        .trim()
-                        .to_string();
-                    tracing::warn!(
-                        chunk = %chunk_id,
-                        base = %base_hex,
-                        "Chunk requested as full but stored as delta; returning 409 for client re-route"
-                    );
-                    return Ok((
-                        StatusCode::CONFLICT,
-                        [("Content-Type", "application/json")],
-                        format!(r#"{{"kind":"delta","base_id":"{}"}}"#, base_hex).into_bytes(),
-                    )
-                        .into_response());
-                }
-                // Check pack index — chunk may exist inside a pack blob.
+                // Check pack index first — in-memory, free (D1: this used to run
+                // after the chunk-deltas storage GET below, costing an extra
+                // storage RTT on every packed-chunk proxy download).
                 let pack_loc = {
                     let idx = state.pack_index.read().await;
                     idx.get(&repo).and_then(|m| m.get(&chunk_id)).cloned()
@@ -335,6 +363,30 @@ pub async fn download_chunk(
                         }
                     }
                 }
+                // Not in pack index — check whether this chunk is stored as a delta.
+                // This catches the case where the client's POST /chunk-deltas/check probe
+                // failed silently (timeout / transport error) and the client is requesting
+                // a delta-only chunk via the wrong /chunks/ route.
+                let meta_key = format!("chunk-deltas/{}.meta", chunk_id);
+                if let Ok(meta_bytes) = storage.get(&meta_key).await {
+                    let meta_str = String::from_utf8_lossy(&meta_bytes);
+                    let base_hex = meta_str
+                        .strip_prefix("base:")
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    tracing::warn!(
+                        chunk = %chunk_id,
+                        base = %base_hex,
+                        "Chunk requested as full but stored as delta; returning 409 for client re-route"
+                    );
+                    return Ok((
+                        StatusCode::CONFLICT,
+                        [("Content-Type", "application/json")],
+                        format!(r#"{{"kind":"delta","base_id":"{}"}}"#, base_hex).into_bytes(),
+                    )
+                        .into_response());
+                }
                 tracing::warn!(chunk = %chunk_id, key = %chunk_key, "Chunk not found in storage");
                 Err(StatusCode::NOT_FOUND)
             } else {
@@ -369,7 +421,13 @@ pub async fn check_chunk_deltas_exist(
     auth_user: Option<Extension<AuthUser>>,
     Json(chunk_ids): Json<Vec<String>>,
 ) -> Result<Json<std::collections::HashMap<String, String>>, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     tracing::debug!(repo = %repo, chunk_count = chunk_ids.len(), "Checking chunk-delta availability");
 
@@ -429,7 +487,13 @@ pub async fn download_chunk_delta(
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     tracing::debug!(repo = %repo, chunk_id = %chunk_id, "Downloading chunk-delta");
 
@@ -474,7 +538,13 @@ pub async fn upload_chunk_delta(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     let base_hex = headers
         .get(DELTA_BASE_HEADER)
@@ -552,7 +622,13 @@ pub async fn download_manifest(
     auth_user: Option<Extension<AuthUser>>,
 ) -> Result<impl IntoResponse, StatusCode> {
     // Check read permission
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     tracing::debug!(repo = %repo, oid = %oid, "Downloading manifest");
 
@@ -579,4 +655,533 @@ pub async fn download_manifest(
         [("Content-Type", "application/octet-stream")],
         manifest_data,
     ))
+}
+
+// ============================================================================
+// D2: Batch pack-chunk proxy — for backends with no presigned GET (GCS+ADC)
+// ============================================================================
+
+/// One requested slice in a `POST /:repo/packs/batch-get` request.
+///
+/// `offset`/`length` are advisory only — the server never trusts them for the
+/// actual fetch. They exist so the client's request body is self-describing
+/// for debugging; the authoritative offset/length always come from the
+/// server's own `pack_index`.
+#[derive(serde::Deserialize)]
+pub struct BatchGetEntry {
+    pub chunk_oid: String,
+    #[allow(dead_code)]
+    pub offset: u64,
+    #[allow(dead_code)]
+    pub length: u32,
+}
+
+#[derive(serde::Deserialize)]
+pub struct BatchGetRequest {
+    pub pack_oid: String,
+    pub entries: Vec<BatchGetEntry>,
+}
+
+/// Process-wide cap on concurrent in-flight `batch-get` requests. Each one
+/// streams up to a whole pack object, so unbounded concurrency risks the
+/// same TCP/memory exhaustion the GCS upload path hit (see
+/// project_gcs_concurrent_upload_fix). Default 4, override via
+/// `MEDIAGIT_BATCH_GET_CONCURRENCY`.
+fn batch_get_semaphore() -> Arc<tokio::sync::Semaphore> {
+    static SEM: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    Arc::clone(SEM.get_or_init(|| {
+        let n: usize = std::env::var("MEDIAGIT_BATCH_GET_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(4);
+        Arc::new(tokio::sync::Semaphore::new(n))
+    }))
+}
+
+/// Coalesce adjacent/near (chunk_oid, offset, length) entries — sorted by
+/// offset — into byte ranges, same merge rule as the client's
+/// `coalesce_chunk_ranges` (mediagit-protocol client/mod.rs): merge when the
+/// gap since the current range end is within `max_gap` AND the merged range
+/// stays within `max_bytes`.
+fn coalesce_ranges(
+    entries: &[(String, u64, u32)],
+    max_gap: u64,
+    max_bytes: u64,
+) -> Vec<(u64, u64)> {
+    let mut ranges: Vec<(u64, u64)> = Vec::new();
+    if entries.is_empty() {
+        return ranges;
+    }
+    let mut cur_start = entries[0].1;
+    let mut cur_end = cur_start + entries[0].2 as u64;
+    for (_, off, len) in &entries[1..] {
+        let entry_end = off + *len as u64;
+        let gap = off.saturating_sub(cur_end);
+        let merged = entry_end - cur_start;
+        if gap <= max_gap && merged <= max_bytes {
+            cur_end = cur_end.max(entry_end);
+        } else {
+            ranges.push((cur_start, cur_end));
+            cur_start = *off;
+            cur_end = entry_end;
+        }
+    }
+    ranges.push((cur_start, cur_end));
+    ranges
+}
+
+/// Write one batch-get frame: `[chunk_oid: 32 raw bytes][len: u32 LE][data: len bytes]`.
+/// `payload` is the compressed chunk data with the 5-byte pack entry header
+/// already stripped — identical to what the presigned Range-GET client path
+/// verifies (mediagit-protocol client/packs.rs `pull_chunks_via_packs`).
+/// An empty `payload` is a valid "miss" frame (invalid/unindexed entry).
+async fn write_batch_frame<W: tokio::io::AsyncWrite + Unpin>(
+    w: &mut W,
+    chunk_oid_hex: &str,
+    payload: &[u8],
+) -> anyhow::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let oid = Oid::from_hex(chunk_oid_hex)?;
+    w.write_all(oid.as_bytes()).await?;
+    w.write_all(&(payload.len() as u32).to_le_bytes()).await?;
+    if !payload.is_empty() {
+        w.write_all(payload).await?;
+    }
+    Ok(())
+}
+
+/// POST /:repo/packs/batch-get — batch-fetch multiple chunk slices out of one
+/// pack object in a single request/response.
+///
+/// Exists for storage backends with no presigned-GET support (GCS + ADC):
+/// without this, every packed chunk pull falls back to one server-proxy RTT
+/// per chunk via `GET /chunks/:id`. This collapses a whole pack's worth of
+/// chunk pulls into one request.
+///
+/// Streams `[chunk_oid:32][len:u32 LE][data:len]` frames, one per requested
+/// entry, in request order. Entries not found in the server's `pack_index`
+/// for the given `pack_oid` come back as zero-length frames — the client
+/// treats those as a miss and falls back to the per-chunk path.
+pub async fn batch_get_pack_chunks(
+    Path(repo): Path<String>,
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    Json(req): Json<BatchGetRequest>,
+) -> Result<Response, StatusCode> {
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
+
+    if !is_valid_hex_id(&req.pack_oid) {
+        tracing::warn!(repo = %repo, pack_oid = %req.pack_oid, "Rejecting batch_get_pack_chunks: pack_oid is not a 64-char hex id");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Drill/compat knob: simulate a pre-batch-get server so the client's
+    // 404 → per-chunk fallback path can be exercised end-to-end (QA A10).
+    if std::env::var("MEDIAGIT_DISABLE_BATCH_GET").as_deref() == Ok("1") {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let repo_path = state.repos_dir.join(&repo);
+    if !repo_path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let storage = get_or_init_storage(&state, &repo_path).await?;
+
+    // Lazy-load pack index from JSONL if not yet warm (mirrors locate_chunks).
+    {
+        let idx = state.pack_index.read().await;
+        if !idx.contains_key(&repo) {
+            drop(idx);
+            load_jsonl_index(&state, &repo, &repo_path).await?;
+        }
+    }
+
+    // Validate every requested entry against the server's own pack_index —
+    // never trust client-supplied offset/length for the actual fetch. Entries
+    // that don't resolve (unknown chunk, or resolve to a different pack) are
+    // served as zero-length "miss" frames instead of erroring the request.
+    let mut valid: Vec<(String, u64, u32)> = Vec::new();
+    let mut invalid: Vec<String> = Vec::new();
+    {
+        let idx = state.pack_index.read().await;
+        let repo_idx = idx.get(&repo);
+        for e in &req.entries {
+            match repo_idx.and_then(|m| m.get(&e.chunk_oid)) {
+                Some(loc) if loc.pack_oid == req.pack_oid && loc.length >= 5 => {
+                    valid.push((e.chunk_oid.clone(), loc.offset, loc.length));
+                }
+                _ => invalid.push(e.chunk_oid.clone()),
+            }
+        }
+    }
+
+    let pack_key = format!("packs/{}", req.pack_oid);
+    let pack_size = storage.head(&pack_key).await.map_err(|e| {
+        tracing::error!(pack = %req.pack_oid, err = %e, "batch-get: head() failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let Some(pack_size) = pack_size else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    // ponytail: whole-pack read ceiling is the pack size (Track F caps packs
+    // at 64 MiB), not a strict 32 MiB bound. Only taken when >=50% of the
+    // pack is wanted, so it's rarely worse than the coalesced-range path,
+    // which itself buffers at most `MAX_RANGE_BYTES` (8 MiB) at a time.
+    let total_wanted: u64 = valid.iter().map(|(_, _, len)| *len as u64).sum();
+    let whole_pack = pack_size > 0 && total_wanted.saturating_mul(2) >= pack_size;
+
+    let semaphore = batch_get_semaphore();
+    let permit = semaphore
+        .acquire_owned()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    const MAX_GAP_BYTES: u64 = 1_048_576;
+    const MAX_RANGE_BYTES: u64 = 8_388_608;
+
+    let (reader, writer) = tokio::io::duplex(256 * 1024);
+
+    tokio::spawn(async move {
+        let _permit = permit;
+        let mut w = writer;
+        let result: anyhow::Result<()> = async {
+            for chunk_oid in &invalid {
+                write_batch_frame(&mut w, chunk_oid, &[]).await?;
+            }
+            if valid.is_empty() {
+                return Ok(());
+            }
+
+            if whole_pack {
+                let data = storage.get_with_size_hint(&pack_key, Some(pack_size)).await?;
+                for (chunk_oid, offset, length) in &valid {
+                    let start = *offset as usize + 5; // skip [type:1][size:4]
+                    let end = *offset as usize + *length as usize;
+                    match data.get(start..end) {
+                        Some(payload) => write_batch_frame(&mut w, chunk_oid, payload).await?,
+                        None => {
+                            tracing::warn!(chunk = %chunk_oid, pack = %req.pack_oid, "batch-get: pack_index entry out of bounds");
+                            write_batch_frame(&mut w, chunk_oid, &[]).await?;
+                        }
+                    }
+                }
+            } else {
+                let mut sorted = valid.clone();
+                sorted.sort_unstable_by_key(|(_, off, _)| *off);
+                let ranges = coalesce_ranges(&sorted, MAX_GAP_BYTES, MAX_RANGE_BYTES);
+                for (range_start, range_end) in ranges {
+                    let buf = storage
+                        .get_range(&pack_key, range_start, range_end - range_start)
+                        .await?;
+                    for (chunk_oid, offset, length) in &sorted {
+                        if *offset < range_start || *offset + *length as u64 > range_end {
+                            continue;
+                        }
+                        let rel = (*offset - range_start) as usize + 5; // skip header
+                        let rel_end = (*offset - range_start) as usize + *length as usize;
+                        match buf.get(rel..rel_end) {
+                            Some(payload) => write_batch_frame(&mut w, chunk_oid, payload).await?,
+                            None => {
+                                tracing::warn!(chunk = %chunk_oid, pack = %req.pack_oid, "batch-get: range slice out of bounds");
+                                write_batch_frame(&mut w, chunk_oid, &[]).await?;
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!(pack = %req.pack_oid, err = %e, "batch-get: stream write failed");
+        }
+    });
+
+    let stream = ReaderStream::new(reader);
+    let body = axum::body::Body::from_stream(stream);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/octet-stream")
+        .body(body)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+#[cfg(test)]
+mod batch_get_tests {
+    use super::*;
+    use mediagit_compression::{Compressor, SmartCompressor};
+    /// Writes one packed chunk (valid, decompressible) and registers it in the
+    /// in-memory pack_index. Mirrors `write_corrupt_pack_entry` in
+    /// handlers/transfer.rs but keeps the payload intact for round-trip tests.
+    ///
+    /// `storage` must be the same `Arc<dyn StorageBackend>` the handler under
+    /// test will resolve via `get_or_init_storage` (i.e. namespace-prefixed
+    /// per layout v2) — writing through a bare `LocalBackend` instead lands
+    /// keys outside the namespace prefix the handler reads from.
+    async fn write_pack_entry(
+        state: &AppState,
+        storage: &Arc<dyn StorageBackend>,
+        repo: &str,
+        pack_oid: &str,
+        offset: u64,
+        content: &[u8],
+    ) -> (String, u32) {
+        let chunk_id = Oid::hash(content).to_hex();
+        let compressor = SmartCompressor::new();
+        let compressed = compressor.compress(content).expect("compress");
+
+        let mut entry_bytes = vec![0u8; 5]; // [type:1][size:4] header, unused by reader
+        entry_bytes.extend_from_slice(&compressed);
+        let length = entry_bytes.len() as u32;
+
+        let pack_key = format!("packs/{}", pack_oid);
+        let mut pack_bytes = storage.get(&pack_key).await.unwrap_or_default();
+        // Pad to offset if needed (single-entry tests use offset == current len).
+        if (pack_bytes.len() as u64) < offset {
+            pack_bytes.resize(offset as usize, 0);
+        }
+        pack_bytes.truncate(offset as usize);
+        pack_bytes.extend_from_slice(&entry_bytes);
+        storage.put(&pack_key, &pack_bytes).await.expect("put pack");
+
+        let loc = PackLoc {
+            pack_oid: pack_oid.to_string(),
+            offset,
+            length,
+            compressed_hash: Some(Oid::hash(&compressed).to_hex()),
+        };
+        {
+            let mut idx = state.pack_index.write().await;
+            idx.entry(repo.to_string())
+                .or_default()
+                .insert(chunk_id.clone(), loc);
+        }
+        (chunk_id, length)
+    }
+
+    async fn read_all_frames(reader: impl tokio::io::AsyncRead + Unpin) -> Vec<(String, Vec<u8>)> {
+        use tokio::io::AsyncReadExt;
+        let mut r = reader;
+        let mut buf = Vec::new();
+        r.read_to_end(&mut buf).await.unwrap();
+        let mut out = Vec::new();
+        let mut pos = 0usize;
+        while pos + 36 <= buf.len() {
+            let oid_bytes: [u8; 32] = buf[pos..pos + 32].try_into().unwrap();
+            let oid = Oid::from_bytes(oid_bytes);
+            pos += 32;
+            let len = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
+            pos += 4;
+            let data = buf[pos..pos + len].to_vec();
+            pos += len;
+            out.push((oid.to_hex(), data));
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn batch_get_returns_correct_frames_for_two_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = "test-repo".to_string();
+        let repo_path = tmp.path().join(&repo);
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let state = Arc::new(AppState::new(tmp.path().to_path_buf()));
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+
+        // pack_oid must be a 64-char hex id (J6: batch_get_pack_chunks now
+        // rejects non-hex pack_oid at the HTTP boundary).
+        let pack_oid = "a".repeat(64);
+        let (id_a, len_a) =
+            write_pack_entry(&state, &storage, &repo, &pack_oid, 0, b"hello world").await;
+        let (id_b, _) = write_pack_entry(
+            &state,
+            &storage,
+            &repo,
+            &pack_oid,
+            len_a as u64,
+            b"goodbye world",
+        )
+        .await;
+
+        let req = BatchGetRequest {
+            pack_oid: pack_oid.clone(),
+            entries: vec![
+                BatchGetEntry {
+                    chunk_oid: id_a.clone(),
+                    offset: 0,
+                    length: len_a,
+                },
+                BatchGetEntry {
+                    chunk_oid: id_b.clone(),
+                    offset: 0,
+                    length: 0,
+                },
+            ],
+        };
+
+        let resp = batch_get_pack_chunks(
+            Path(repo.clone()),
+            State(Arc::clone(&state)),
+            None,
+            Json(req),
+        )
+        .await
+        .expect("handler ok");
+        let body = resp.into_body();
+        let reader = tokio_util::io::StreamReader::new(
+            body.into_data_stream()
+                .map(|r| r.map_err(std::io::Error::other)),
+        );
+        let frames = read_all_frames(reader).await;
+
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].0, id_a);
+        assert!(!frames[0].1.is_empty());
+        assert_eq!(frames[1].0, id_b);
+        assert!(!frames[1].1.is_empty());
+
+        // Decompress and verify content round-trips.
+        let compressor = SmartCompressor::new();
+        let decompressed_a = compressor.decompress(&frames[0].1).expect("decompress a");
+        assert_eq!(decompressed_a, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn batch_get_bogus_entry_returns_zero_length_frame() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = "test-repo".to_string();
+        let repo_path = tmp.path().join(&repo);
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let state = Arc::new(AppState::new(tmp.path().to_path_buf()));
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+
+        let pack_oid = "a".repeat(64);
+        let (id_a, len_a) =
+            write_pack_entry(&state, &storage, &repo, &pack_oid, 0, b"real chunk").await;
+
+        // Bogus entry: not present in pack_index at all.
+        let bogus_id = Oid::hash(b"never registered").to_hex();
+
+        let req = BatchGetRequest {
+            pack_oid: pack_oid.clone(),
+            entries: vec![
+                BatchGetEntry {
+                    chunk_oid: id_a.clone(),
+                    offset: 0,
+                    length: len_a,
+                },
+                BatchGetEntry {
+                    chunk_oid: bogus_id.clone(),
+                    offset: 9999, // client lies about offset; server must ignore this
+                    length: 100,
+                },
+            ],
+        };
+
+        let resp = batch_get_pack_chunks(
+            Path(repo.clone()),
+            State(Arc::clone(&state)),
+            None,
+            Json(req),
+        )
+        .await
+        .expect("handler ok");
+        let body = resp.into_body();
+        let reader = tokio_util::io::StreamReader::new(
+            body.into_data_stream()
+                .map(|r| r.map_err(std::io::Error::other)),
+        );
+        let frames = read_all_frames(reader).await;
+
+        assert_eq!(frames.len(), 2);
+        // Invalid entries are written first, ahead of valid ones.
+        assert_eq!(frames[0].0, bogus_id);
+        assert!(frames[0].1.is_empty(), "bogus entry must be zero-length");
+        assert_eq!(frames[1].0, id_a);
+        assert!(!frames[1].1.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod j6_path_traversal_tests {
+    use super::*;
+
+    /// J6: a `..`-bearing chunk_id must be rejected with 400 at the HTTP
+    /// boundary, and must never reach storage.put — i.e. nothing is written
+    /// outside the repo's own storage root.
+    #[tokio::test]
+    async fn upload_chunk_rejects_traversal_id_and_writes_nothing_outside_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = "test-repo".to_string();
+        let repo_path = tmp.path().join(&repo);
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let state = Arc::new(AppState::new(tmp.path().to_path_buf()));
+
+        let evil_id = "../../../../evil".to_string();
+        let outside_marker = tmp.path().parent().unwrap().join("evil");
+        let _ = tokio::fs::remove_file(&outside_marker).await;
+
+        let result = upload_chunk(
+            Path((repo, evil_id)),
+            State(Arc::clone(&state)),
+            None,
+            Bytes::from_static(b"pwned"),
+        )
+        .await;
+
+        assert_eq!(result, Err(StatusCode::BAD_REQUEST));
+        assert!(
+            !outside_marker.exists(),
+            "traversal upload must not escape the repo storage root"
+        );
+    }
+
+    /// Same guard on the download path: a traversal chunk_id must 400, not
+    /// leak an out-of-repo file's bytes back to the client.
+    #[tokio::test]
+    async fn download_chunk_rejects_traversal_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = "test-repo".to_string();
+        let repo_path = tmp.path().join(&repo);
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let state = Arc::new(AppState::new(tmp.path().to_path_buf()));
+
+        let evil_id = "../secrets".to_string();
+        let result = download_chunk(Path((repo, evil_id)), State(state), None).await;
+
+        assert!(matches!(result, Err(StatusCode::BAD_REQUEST)));
+    }
+
+    /// Non-hex (but non-traversal) ids must also 400 — the guard is a hex
+    /// shape check, not just a `..` denylist.
+    #[tokio::test]
+    async fn upload_chunk_rejects_non_hex_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = "test-repo".to_string();
+        let repo_path = tmp.path().join(&repo);
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let state = Arc::new(AppState::new(tmp.path().to_path_buf()));
+
+        let result = upload_chunk(
+            Path((repo, "not-a-valid-hex-id".to_string())),
+            State(Arc::clone(&state)),
+            None,
+            Bytes::from_static(b"data"),
+        )
+        .await;
+
+        assert_eq!(result, Err(StatusCode::BAD_REQUEST));
+    }
 }

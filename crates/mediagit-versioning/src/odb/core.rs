@@ -13,6 +13,37 @@
 
 use super::*;
 
+/// `MEDIAGIT_REPACK_CHUNKS` — gate for consolidating loose chunks into
+/// Track-F-style cloud packs during `gc --repack` (GA I9). Default enabled;
+/// `0` reproduces the pre-I9 behavior exactly (loose chunks folded into the
+/// same monolithic `PackWriter` pack as loose objects, no JSONL manifest).
+fn repack_chunks_cloud_enabled() -> bool {
+    std::env::var("MEDIAGIT_REPACK_CHUNKS")
+        .ok()
+        .and_then(|v| v.parse::<u8>().ok())
+        .map(|v| v != 0)
+        .unwrap_or(true)
+}
+
+/// Byte cap per cloud pack produced by chunk repacking. Shares the env var
+/// name with `PackBuilder` (mediagit-protocol, F1-F11 push path) so a
+/// repacked repo's packs look like ones produced by a normal push.
+fn repack_pack_bytes_cap() -> u64 {
+    std::env::var("MEDIAGIT_PACK_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(64 * 1024 * 1024)
+}
+
+/// Chunk-count cap per cloud pack produced by chunk repacking (see
+/// `repack_pack_bytes_cap`).
+fn repack_pack_chunks_cap() -> u32 {
+    std::env::var("MEDIAGIT_PACK_CHUNKS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1024)
+}
+
 impl ObjectDatabase {
     pub fn new(storage: Arc<dyn StorageBackend>, cache_capacity: u64) -> Self {
         info!(
@@ -35,12 +66,14 @@ impl ObjectDatabase {
             compression_enabled: true,
             smart_compressor: None,
             chunk_strategy: None,
+            cdc_seed: 0,
             delta_enabled: true, // ✅ CRITICAL FIX: Enable delta compression by default for storage savings
             similarity_detector: Arc::new(RwLock::new(crate::similarity::SimilarityDetector::new(
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
             ))),
-            base_chunk_cache: Cache::new(64),
+            base_chunk_cache: build_base_chunk_cache(),
             delta_written_pairs: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            pack_membership: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -77,12 +110,14 @@ impl ObjectDatabase {
             compression_enabled,
             smart_compressor: None,
             chunk_strategy: None,
+            cdc_seed: 0,
             delta_enabled: true, // ✅ Enable delta compression for storage savings
             similarity_detector: Arc::new(RwLock::new(crate::similarity::SimilarityDetector::new(
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
             ))),
-            base_chunk_cache: Cache::new(64),
+            base_chunk_cache: build_base_chunk_cache(),
             delta_written_pairs: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            pack_membership: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -108,12 +143,14 @@ impl ObjectDatabase {
             compression_enabled: true,
             smart_compressor: Some(Arc::new(SmartCompressor::new())),
             chunk_strategy: None,
+            cdc_seed: 0,
             delta_enabled: true, // ✅ CRITICAL FIX: Enable delta compression for 70-90% storage savings
             similarity_detector: Arc::new(RwLock::new(crate::similarity::SimilarityDetector::new(
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
             ))),
-            base_chunk_cache: Cache::new(64),
+            base_chunk_cache: build_base_chunk_cache(),
             delta_written_pairs: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            pack_membership: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -123,6 +160,7 @@ impl ObjectDatabase {
         cache_capacity: u64,
         chunk_strategy: Option<ChunkStrategy>,
         delta_enabled: bool,
+        cdc_seed: u64,
     ) -> Self {
         info!(
             capacity = cache_capacity,
@@ -144,12 +182,14 @@ impl ObjectDatabase {
             compression_enabled: true,
             smart_compressor: Some(Arc::new(SmartCompressor::new())),
             chunk_strategy,
+            cdc_seed,
             delta_enabled,
             similarity_detector: Arc::new(RwLock::new(crate::similarity::SimilarityDetector::new(
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
             ))),
-            base_chunk_cache: Cache::new(64),
+            base_chunk_cache: build_base_chunk_cache(),
             delta_written_pairs: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            pack_membership: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -175,20 +215,34 @@ impl ObjectDatabase {
             compression_enabled: false,
             smart_compressor: None,
             chunk_strategy: None,
+            cdc_seed: 0,
             delta_enabled: false,
             similarity_detector: Arc::new(RwLock::new(crate::similarity::SimilarityDetector::new(
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
             ))),
-            base_chunk_cache: Cache::new(64),
+            base_chunk_cache: build_base_chunk_cache(),
             delta_written_pairs: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            pack_membership: Arc::new(RwLock::new(None)),
         }
     }
 
-    /// Get reference to the underlying storage backend
+    /// Read a reachability bitmap (`bitmaps/<oid>.bitmap`) by its storage key.
     ///
-    /// Useful for creating transactions or accessing storage directly.
-    pub fn storage(&self) -> &Arc<dyn StorageBackend> {
-        &self.storage
+    /// Raw passthrough: bitmaps live outside the content-addressed object
+    /// model (keyed by commit OID, not by a hash of their own bytes), so
+    /// they don't go through `exists()`/pack-membership like objects do.
+    pub async fn get_bitmap(&self, key: &str) -> anyhow::Result<Vec<u8>> {
+        self.storage.get(key).await
+    }
+
+    /// Store a reachability bitmap at the given storage key.
+    pub async fn put_bitmap(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
+        self.storage.put(key, data).await
+    }
+
+    /// Delete a reachability bitmap at the given storage key.
+    pub async fn delete_bitmap(&self, key: &str) -> anyhow::Result<()> {
+        self.storage.delete(key).await
     }
 
     /// Write an object to the database
@@ -440,7 +494,17 @@ impl ObjectDatabase {
 
         // Also check for chunked object (stored as manifest + chunks)
         let manifest_key = format!("manifests/{}", oid.to_hex());
-        self.storage.exists(&manifest_key).await
+        if self.storage.exists(&manifest_key).await? {
+            return Ok(true);
+        }
+
+        // Also check pack membership: `gc --repack` bundles loose objects
+        // into a pack and (with remove_loose) deletes the loose copy, so a
+        // miss above doesn't mean "we don't have it" — it may live only in
+        // a pack now. Mirrors `chunk_exists()`'s union semantics.
+        self.ensure_pack_membership_loaded().await?;
+        let guard = self.pack_membership.read().await;
+        Ok(guard.as_ref().is_some_and(|set| set.contains(oid)))
     }
 
     /// Verify object integrity
@@ -518,6 +582,21 @@ impl ObjectDatabase {
         self.cache.invalidate(oid).await;
     }
 
+    /// Delete a loose object's storage entry and drop it from the cache.
+    ///
+    /// Repair-path primitive (QA-013): `write()` dedups on `exists()`, so a
+    /// corrupt-but-present object can only be replaced by deleting it first.
+    /// Only removes the loose `<hex>` key — pack-resident objects are not
+    /// touched (pack repair is `gc --repack` territory).
+    pub async fn delete_object(&self, oid: &Oid) -> anyhow::Result<()> {
+        self.cache.invalidate(oid).await;
+        let key = oid.to_hex();
+        if self.storage.exists(&key).await? {
+            self.storage.delete(&key).await?;
+        }
+        Ok(())
+    }
+
     /// Clear all cached objects
     ///
     /// Removes all entries from the cache.
@@ -580,26 +659,53 @@ impl ObjectDatabase {
 
         let mut stats = RepackStats::default();
 
-        // List all loose objects
+        // List all loose objects (commits/trees/tags/small blobs, bare-hex
+        // keys) and loose chunks (content-addressed pieces of chunked/large
+        // files under "chunks/"). Most repo bytes in a media-VCS live in
+        // chunks, not bare-hex objects — see list_loose_chunks() docs.
         let loose_objects = self.list_loose_objects().await?;
-        stats.loose_objects_found = loose_objects.len();
+        let loose_chunks = self.list_loose_chunks().await?;
+        stats.loose_objects_found = loose_objects.len() + loose_chunks.len();
 
-        if loose_objects.is_empty() {
+        if loose_objects.is_empty() && loose_chunks.is_empty() {
             info!("No loose objects to repack");
             return Ok(stats);
         }
 
-        let objects_to_pack = if max_objects > 0 && loose_objects.len() > max_objects {
-            &loose_objects[..max_objects]
+        // max_objects caps the combined total; whole objects are prioritized,
+        // chunks fill the remainder.
+        let (objects_to_pack, chunks_to_pack): (&[Oid], &[Oid]) = if max_objects == 0 {
+            (&loose_objects[..], &loose_chunks[..])
+        } else if loose_objects.len() >= max_objects {
+            (&loose_objects[..max_objects], &[])
         } else {
-            &loose_objects[..]
+            let remaining = max_objects - loose_objects.len();
+            (
+                &loose_objects[..],
+                &loose_chunks[..remaining.min(loose_chunks.len())],
+            )
         };
 
         info!(
-            total_loose = loose_objects.len(),
-            packing = objects_to_pack.len(),
+            total_loose_objects = loose_objects.len(),
+            total_loose_chunks = loose_chunks.len(),
+            packing_objects = objects_to_pack.len(),
+            packing_chunks = chunks_to_pack.len(),
             "Found loose objects"
         );
+
+        // I9: when enabled (default), loose chunks are consolidated into
+        // Track-F-style cloud packs (see `repack_chunks_into_cloud_packs`)
+        // instead of the monolithic `PackWriter` pack below. `legacy_chunks_to_pack`
+        // is empty in that case so the loop just below packs nothing for chunks,
+        // leaving `MEDIAGIT_REPACK_CHUNKS=0` as an exact reproduction of the
+        // pre-I9 combined-pack behavior.
+        let chunks_cloud_mode = repack_chunks_cloud_enabled();
+        let legacy_chunks_to_pack: &[Oid] = if chunks_cloud_mode {
+            &[]
+        } else {
+            chunks_to_pack
+        };
 
         // Create pack writer
         let mut pack_writer = PackWriter::new();
@@ -677,47 +783,103 @@ impl ObjectDatabase {
             }
         }
 
-        stats.objects_packed = packed_oids.len();
+        // Add loose chunks to the pack (legacy path only — empty when
+        // `chunks_cloud_mode` is active; see prelude above). Chunks are
+        // already compressed on disk and already delta-deduplicated against
+        // sibling chunks (see chunk-deltas/), so unlike whole objects we
+        // store the existing compressed bytes as-is instead of re-running
+        // whole-object delta detection against them.
+        let mut legacy_packed_chunk_oids = Vec::new();
+        for chunk_id in legacy_chunks_to_pack {
+            match self.get_compressed_chunk(chunk_id).await {
+                Ok(compressed) => {
+                    total_original_size += compressed.len() as u64;
+                    pack_writer.add_object(*chunk_id, ObjectType::Blob, &compressed);
+                    legacy_packed_chunk_oids.push(*chunk_id);
+                }
+                Err(e) => {
+                    warn!(chunk_id = %chunk_id, error = %e, "Failed to read chunk for packing");
+                }
+            }
+        }
+
+        let legacy_total_packed = packed_oids.len() + legacy_packed_chunk_oids.len();
+
+        if legacy_total_packed > 0 {
+            // Finalize pack
+            let pack_data = pack_writer.finalize();
+            stats.pack_size += pack_data.len() as u64;
+            stats.bytes_saved += total_original_size.saturating_sub(pack_data.len() as u64);
+
+            // Generate pack file name with timestamp
+            let pack_id = format!("pack-{}", chrono::Utc::now().timestamp());
+            let pack_key = format!("packs/{}.pack", pack_id);
+
+            // Store pack file
+            self.storage.put(&pack_key, &pack_data).await?;
+
+            // Extend the pack-membership set in place if it's already loaded, so
+            // chunk_exists() sees these OIDs immediately without a full pack
+            // rescan. If it hasn't been loaded yet, leave it as None — the next
+            // chunk_exists() call will lazily build it from all packs including
+            // this new one.
+            {
+                let mut guard = self.pack_membership.write().await;
+                if let Some(set) = guard.as_mut() {
+                    set.extend(packed_oids.iter().copied());
+                    set.extend(legacy_packed_chunk_oids.iter().copied());
+                }
+            }
+
+            info!(
+                pack_id,
+                size = pack_data.len(),
+                objects = legacy_total_packed,
+                deltas = stats.delta_objects,
+                "Pack file created"
+            );
+
+            // Remove loose objects if requested
+            if remove_loose {
+                let mut removed = 0;
+                for oid in &packed_oids {
+                    // Use oid.to_hex() for consistency - LocalBackend handles path sharding
+                    let object_key = oid.to_hex();
+                    if let Err(e) = self.storage.delete(&object_key).await {
+                        warn!(oid = %oid, error = %e, "Failed to remove loose object");
+                    } else {
+                        removed += 1;
+                    }
+                }
+                for chunk_id in &legacy_packed_chunk_oids {
+                    let chunk_key = format!("chunks/{}", chunk_id.to_hex());
+                    if let Err(e) = self.storage.delete(&chunk_key).await {
+                        warn!(chunk_id = %chunk_id, error = %e, "Failed to remove loose chunk");
+                    } else {
+                        removed += 1;
+                    }
+                }
+                stats.loose_objects_removed += removed;
+                info!(removed, "Removed loose objects");
+            }
+        }
+
+        // I9: consolidate the remainder of `chunks_to_pack` into cloud packs
+        // (no-op when `chunks_cloud_mode` is false — `chunks_to_pack` was
+        // already fully drained into `legacy_packed_chunk_oids` above).
+        let cloud_packed_chunk_oids = if chunks_cloud_mode && !chunks_to_pack.is_empty() {
+            self.repack_chunks_into_cloud_packs(chunks_to_pack, remove_loose, &mut stats)
+                .await?
+        } else {
+            Vec::new()
+        };
+
+        stats.objects_packed =
+            packed_oids.len() + legacy_packed_chunk_oids.len() + cloud_packed_chunk_oids.len();
 
         if stats.objects_packed == 0 {
             info!("No objects were successfully packed");
             return Ok(stats);
-        }
-
-        // Finalize pack
-        let pack_data = pack_writer.finalize();
-        stats.pack_size = pack_data.len() as u64;
-        stats.bytes_saved = total_original_size.saturating_sub(stats.pack_size);
-
-        // Generate pack file name with timestamp
-        let pack_id = format!("pack-{}", chrono::Utc::now().timestamp());
-        let pack_key = format!("packs/{}.pack", pack_id);
-
-        // Store pack file
-        self.storage.put(&pack_key, &pack_data).await?;
-
-        info!(
-            pack_id,
-            size = pack_data.len(),
-            objects = stats.objects_packed,
-            deltas = stats.delta_objects,
-            "Pack file created"
-        );
-
-        // Remove loose objects if requested
-        if remove_loose {
-            let mut removed = 0;
-            for oid in &packed_oids {
-                // Use oid.to_hex() for consistency - LocalBackend handles path sharding
-                let object_key = oid.to_hex();
-                if let Err(e) = self.storage.delete(&object_key).await {
-                    warn!(oid = %oid, error = %e, "Failed to remove loose object");
-                } else {
-                    removed += 1;
-                }
-            }
-            stats.loose_objects_removed = removed;
-            info!(removed, "Removed loose objects");
         }
 
         info!(
@@ -730,10 +892,202 @@ impl ObjectDatabase {
         Ok(stats)
     }
 
+    /// Consolidate loose chunks into Track-F-style cloud packs during
+    /// `gc --repack` (GA I9, gated by `MEDIAGIT_REPACK_CHUNKS`).
+    ///
+    /// Uses the same envelope/caps as the push-time `PackBuilder`
+    /// (mediagit-protocol): `StreamingPackWriter` with `PackKind::CloudObject`,
+    /// capped at `MEDIAGIT_PACK_BYTES` (default 64 MiB) / `MEDIAGIT_PACK_CHUNKS`
+    /// (default 1024) per pack, plus a JSONL chunk-index manifest at
+    /// `packs/<shard>/<pack_oid>.jsonl` — the exact schema and path
+    /// `complete_pack`/`load_jsonl_index` (mediagit-server) expect, so a
+    /// repacked repo's chunks are servable the same way freshly-pushed ones
+    /// are.
+    ///
+    /// Abort-safety per pack (see `seal_chunk_cloud_pack`): store pack bytes
+    /// -> persist JSONL index -> extend in-memory `pack_membership` -> delete
+    /// loose chunks, in that order. A crash before the JSONL write leaves the
+    /// loose chunks untouched; a crash after leaves the pack fully readable
+    /// via `read_from_packs`/`get_chunk` regardless of whether the loose
+    /// copies were removed yet.
+    ///
+    /// Memory bound: one pack in flight, streamed to a temp file on disk
+    /// (never buffered whole in RAM — `finalize_cloud` re-reads it in 64 KiB
+    /// chunks to checksum) plus one loose chunk being read/decompressed at a
+    /// time.
+    async fn repack_chunks_into_cloud_packs(
+        &self,
+        chunk_ids: &[Oid],
+        remove_loose: bool,
+        stats: &mut RepackStats,
+    ) -> anyhow::Result<Vec<Oid>> {
+        use crate::pack::PackKind;
+        use crate::streaming_pack::StreamingPackWriter;
+
+        let bytes_cap = repack_pack_bytes_cap();
+        let chunks_cap = repack_pack_chunks_cap();
+        let temp_dir = std::env::temp_dir();
+
+        let mut packed_chunk_oids: Vec<Oid> = Vec::new();
+        let mut writer: Option<StreamingPackWriter<tokio::fs::File>> = None;
+        // (chunk_id, compressed_hash_hex, compressed_len) for the pack currently open.
+        let mut pending: Vec<(Oid, String, u64)> = Vec::new();
+        let mut cur_bytes: u64 = 0;
+
+        for chunk_id in chunk_ids {
+            let compressed = match self.get_compressed_chunk(chunk_id).await {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(chunk_id = %chunk_id, error = %e, "Failed to read chunk for cloud-pack repack");
+                    continue;
+                }
+            };
+
+            if writer.is_none() {
+                writer = Some(
+                    StreamingPackWriter::new_open_ended(PackKind::CloudObject, &temp_dir).await?,
+                );
+            }
+            let w = writer.as_mut().expect("writer just initialized above");
+            w.write_object(*chunk_id, ObjectType::Blob, &compressed)
+                .await?;
+
+            let compressed_hash = Oid::hash(&compressed).to_hex();
+            cur_bytes += compressed.len() as u64 + 5; // +5 header bytes, matches PackBuilder's accounting
+            pending.push((*chunk_id, compressed_hash, compressed.len() as u64));
+
+            if cur_bytes >= bytes_cap || pending.len() as u32 >= chunks_cap {
+                let sealed_writer = writer.take().expect("writer present when cap hit");
+                self.seal_chunk_cloud_pack(
+                    sealed_writer,
+                    &mut pending,
+                    remove_loose,
+                    stats,
+                    &mut packed_chunk_oids,
+                )
+                .await?;
+                cur_bytes = 0;
+            }
+        }
+
+        if let Some(w) = writer.take() {
+            if !pending.is_empty() {
+                self.seal_chunk_cloud_pack(
+                    w,
+                    &mut pending,
+                    remove_loose,
+                    stats,
+                    &mut packed_chunk_oids,
+                )
+                .await?;
+            }
+        }
+
+        Ok(packed_chunk_oids)
+    }
+
+    /// Finalize one cloud pack of loose chunks and durably register it.
+    /// See `repack_chunks_into_cloud_packs` for the abort-safety ordering.
+    async fn seal_chunk_cloud_pack(
+        &self,
+        writer: crate::streaming_pack::StreamingPackWriter<tokio::fs::File>,
+        pending: &mut Vec<(Oid, String, u64)>,
+        remove_loose: bool,
+        stats: &mut RepackStats,
+        packed_chunk_oids: &mut Vec<Oid>,
+    ) -> anyhow::Result<()> {
+        let result = writer.finalize_cloud().await?;
+        let pack_oid_hex = hex::encode(&result.pack_oid);
+
+        // 1. Store the pack bytes first — a crash here leaves at worst an
+        //    orphaned temp pack object, never a lost loose chunk (nothing
+        //    below this point has run yet).
+        let pack_key = format!("packs/{}", pack_oid_hex);
+        self.storage.put_file(&pack_key, &result.temp_path).await?;
+        let _ = tokio::fs::remove_file(&result.temp_path).await;
+
+        // 2. Persist the JSONL chunk index — durable via `StorageBackend::put`
+        //    (tmp+rename on `LocalBackend`; a single atomic PUT on cloud
+        //    backends). Field names match `complete_pack`'s `PackIndexLine`
+        //    exactly so `load_jsonl_index` (mediagit-server) can pick this up.
+        //
+        //    Key deliberately has NO manual shard component: `LocalBackend::
+        //    object_path()` special-cases a key whose immediate parent is
+        //    literally "packs" (`dir_components.last() == Some("packs")`) into
+        //    a single shard level derived from the basename itself — the same
+        //    rule that shards the pack object's own key just above. Adding a
+        //    shard component here defeats that special case (parent becomes
+        //    "<shard>" instead of "packs") and falls through to the generic
+        //    two-level object shard instead, double-nesting the manifest.
+        let pending_meta: std::collections::HashMap<Oid, String> = pending
+            .iter()
+            .map(|(id, hash, _)| (*id, hash.clone()))
+            .collect();
+
+        let mut jsonl = String::new();
+        for loc in &result.index {
+            let compressed_hash = pending_meta.get(&loc.chunk_oid).map(|h| h.as_str());
+            let line = serde_json::json!({
+                "chunk_oid": loc.chunk_oid.to_hex(),
+                "pack_oid": pack_oid_hex,
+                "offset": loc.offset,
+                "length": loc.length,
+                "compressed_hash": compressed_hash,
+            });
+            jsonl.push_str(&line.to_string());
+            jsonl.push('\n');
+        }
+        let manifest_key = format!("packs/{}.jsonl", pack_oid_hex);
+        self.storage.put(&manifest_key, jsonl.as_bytes()).await?;
+
+        // 3. Update in-memory pack membership before touching loose copies,
+        //    so a reader racing this repack never sees a chunk as "gone"
+        //    (loose deleted) without it also being visible in the pack index.
+        {
+            let mut guard = self.pack_membership.write().await;
+            if let Some(set) = guard.as_mut() {
+                set.extend(pending.iter().map(|(id, _, _)| *id));
+            }
+        }
+
+        let original_bytes: u64 = pending.iter().map(|(_, _, len)| len).sum();
+        stats.pack_size += result.byte_len;
+        stats.bytes_saved += original_bytes.saturating_sub(result.byte_len);
+
+        // 4. Only now remove the loose copies — everything needed to read
+        //    these chunks back out of the pack is already durable.
+        let mut removed = 0usize;
+        if remove_loose {
+            for (chunk_id, _, _) in pending.iter() {
+                let chunk_key = format!("chunks/{}", chunk_id.to_hex());
+                if let Err(e) = self.storage.delete(&chunk_key).await {
+                    warn!(chunk_id = %chunk_id, error = %e, "Failed to remove loose chunk after cloud-pack repack");
+                } else {
+                    removed += 1;
+                }
+            }
+            stats.loose_objects_removed += removed;
+        }
+
+        info!(
+            pack_oid = pack_oid_hex,
+            chunks = pending.len(),
+            pack_size = result.byte_len,
+            loose_removed = removed,
+            "Cloud pack created from loose chunks (repack)"
+        );
+
+        packed_chunk_oids.extend(pending.iter().map(|(id, _, _)| *id));
+        pending.clear();
+
+        Ok(())
+    }
+
     /// Resolve an abbreviated OID prefix to a full OID.
     ///
-    /// Scans loose objects for keys matching the given hex prefix.
-    /// Returns an error if zero or more than one object matches.
+    /// Scans loose objects and pack-embedded objects for keys matching the
+    /// given hex prefix. Returns an error if zero or more than one object
+    /// matches.
     pub async fn resolve_abbreviated_oid(&self, abbrev: &str) -> anyhow::Result<Oid> {
         if abbrev.len() < 4 {
             anyhow::bail!(
@@ -769,6 +1123,21 @@ impl ObjectDatabase {
                         let mut bytes = [0u8; 32];
                         bytes.copy_from_slice(&oid_bytes);
                         matches.push(Oid::from(bytes));
+                    }
+                }
+            }
+        }
+
+        // Also match against pack-embedded objects (post-`gc --repack`, the
+        // loose copy may be gone, so the storage prefix-scan above misses
+        // them — see `exists()`'s pack-membership union for the same gap).
+        self.ensure_pack_membership_loaded().await?;
+        {
+            let guard = self.pack_membership.read().await;
+            if let Some(set) = guard.as_ref() {
+                for oid in set.iter() {
+                    if oid.to_hex().starts_with(abbrev) && !matches.contains(oid) {
+                        matches.push(*oid);
                     }
                 }
             }
@@ -813,6 +1182,32 @@ impl ObjectDatabase {
         }
 
         debug!(count = oids.len(), "Listed loose objects");
+        Ok(oids)
+    }
+
+    /// List all loose chunks in the object database
+    ///
+    /// Scans the `chunks/` namespace and returns OIDs of all loose chunk
+    /// objects — the content-addressed pieces that large/chunked files are
+    /// split into. These live under `chunks/<hex>` (not a bare-hex key like
+    /// commits/trees/tags/small blobs), so `list_loose_objects()` never sees
+    /// them: its `hex::decode()` on a `"chunks/<hex>"` key fails because of
+    /// the slash, and the entry is silently dropped. Without this, `repack`
+    /// only ever bundled the small metadata objects and reported "0 objects
+    /// packed" on repos where nearly all bytes live in chunks.
+    async fn list_loose_chunks(&self) -> anyhow::Result<Vec<Oid>> {
+        let mut oids = Vec::new();
+
+        let keys = self.storage.list_objects("chunks/").await?;
+        for key in keys {
+            if let Some(hex) = key.strip_prefix("chunks/") {
+                if let Ok(oid) = Oid::from_hex(hex) {
+                    oids.push(oid);
+                }
+            }
+        }
+
+        debug!(count = oids.len(), "Listed loose chunks");
         Ok(oids)
     }
 }

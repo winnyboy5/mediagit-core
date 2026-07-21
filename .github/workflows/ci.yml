@@ -59,6 +59,16 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # GNU ld runs out of memory (SIGBUS/core-dump) linking the heaviest test
+      # binary (gcs_integration_tests: aws-sdk + azure + gcs + openssl-sys +
+      # aws-lc-sys + criterion) on the 7 GB x86_64 runner, even with
+      # split-debuginfo=unpacked + jobs=2. mold links the same binary with a
+      # fraction of the peak RAM. Native x86_64 Linux only — the aarch64 entry
+      # builds inside the `cross` docker image, which has its own toolchain.
+      - name: Setup mold linker
+        if: matrix.os == 'ubuntu-latest' && !matrix.cross
+        uses: rui314/setup-mold@v1
+
       - name: Install cross (for ARM cross-compilation)
         if: matrix.cross
         run: cargo install cross --git https://github.com/cross-rs/cross
@@ -158,6 +168,11 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
 
       - uses: Swatinem/rust-cache@v2
+
+      # Same heavy cloud-SDK link as the `test` job — use mold to avoid the
+      # GNU ld OOM/SIGBUS crash when linking gcs_integration_tests et al.
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
 
       - name: Start storage emulators
         run: docker compose -f docker-compose.test.yml up -d

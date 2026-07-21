@@ -14,7 +14,7 @@
 //! File System Check (FSCK) - Repository integrity verification and repair
 //!
 //! This module provides comprehensive repository integrity checking:
-//! - **Checksum verification**: Verify SHA-256 hashes match object content
+//! - **Checksum verification**: Verify BLAKE3 hashes match object content
 //! - **Reference validation**: Ensure all refs point to valid commits
 //! - **Missing object detection**: Find referenced but missing objects
 //! - **Commit graph validation**: Verify parent and tree relationships
@@ -47,7 +47,7 @@
 //! ```
 
 use crate::odb::ObjectDatabase;
-use crate::{Commit, Oid, Ref, RefType};
+use crate::{Commit, ObjectType, Oid, Ref, RefDatabase, RefType, Tag, Tree};
 use mediagit_storage::StorageBackend;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -244,6 +244,10 @@ pub struct FsckOptions {
     /// Detect dangling objects
     pub check_dangling: bool,
 
+    /// Validate chunk-delta chains (cycles, broken bases, excessive depth).
+    /// Cheap: reads only the tiny `chunk-deltas/*.meta` sidecars.
+    pub check_chunk_deltas: bool,
+
     /// Maximum objects to check (0 = unlimited)
     pub max_objects: u64,
 
@@ -258,6 +262,7 @@ impl Default for FsckOptions {
             check_refs: true,
             check_connectivity: true,
             check_dangling: false, // Expensive operation
+            check_chunk_deltas: true,
             max_objects: 0,
             verbose: false,
         }
@@ -272,6 +277,7 @@ impl FsckOptions {
             check_refs: true,
             check_connectivity: true,
             check_dangling: true,
+            check_chunk_deltas: true,
             max_objects: 0,
             verbose: true,
         }
@@ -284,6 +290,7 @@ impl FsckOptions {
             check_refs: true,
             check_connectivity: false,
             check_dangling: false,
+            check_chunk_deltas: false,
             max_objects: 0,
             verbose: false,
         }
@@ -296,17 +303,25 @@ pub struct FsckChecker {
     storage: Arc<dyn StorageBackend>,
     /// Object database for reading and verifying objects
     odb: Arc<ObjectDatabase>,
+    /// Reference database for listing refs
+    refdb: Option<RefDatabase>,
 }
 
 impl FsckChecker {
-    /// Create a new FSCK checker
-    pub fn new(storage: Arc<dyn StorageBackend>) -> Self {
+    /// Create a new FSCK checker with optional RefDatabase
+    pub fn new_with_refdb(storage: Arc<dyn StorageBackend>, refdb: Option<RefDatabase>) -> Self {
         // Create ODB with smart compression to handle all compression types
         let odb = ObjectDatabase::with_smart_compression(storage.clone(), 10_000_000); // 10MB cache
         Self {
             storage,
             odb: Arc::new(odb),
+            refdb,
         }
+    }
+
+    /// Create a new FSCK checker (backward compat, no refdb)
+    pub fn new(storage: Arc<dyn StorageBackend>) -> Self {
+        Self::new_with_refdb(storage, None)
     }
 
     /// Run comprehensive integrity check
@@ -363,6 +378,12 @@ impl FsckChecker {
             self.check_dangling(&mut report).await?;
         }
 
+        // Step 5: Validate chunk-delta chains
+        if options.check_chunk_deltas {
+            info!("Validating chunk-delta chains...");
+            self.check_chunk_deltas(&mut report).await?;
+        }
+
         info!(
             objects_checked = report.objects_checked,
             refs_checked = report.refs_checked,
@@ -382,7 +403,7 @@ impl FsckChecker {
         debug!("Enumerating objects in storage");
 
         // List all objects in storage
-        let objects = self.list_all_objects().await?;
+        let objects = self.list_all_objects(report).await?;
         info!("Found {} objects to check", objects.len());
 
         let max_check = if options.max_objects > 0 {
@@ -541,6 +562,19 @@ impl FsckChecker {
         // Traverse from all branch heads
         for r in refs {
             if let Some(oid) = r.oid {
+                let is_annotated_tag = r.namespace() == Some("tags")
+                    && self
+                        .check_and_traverse_tag(
+                            &r,
+                            oid,
+                            &mut visited,
+                            &mut referenced_objects,
+                            report,
+                        )
+                        .await?;
+                if is_annotated_tag {
+                    continue;
+                }
                 self.traverse_commit(&oid, &mut visited, &mut referenced_objects, report)
                     .await?;
             }
@@ -571,10 +605,12 @@ impl FsckChecker {
             visited.insert(*oid);
             referenced_objects.insert(*oid);
 
-            // Try to read commit
-            // Use oid.to_hex() - LocalBackend handles "objects/" prefix and sharding
-            let key = oid.to_hex();
-            let data = match self.storage.get(&key).await {
+            // Read via the ODB (not raw storage) so compressed/smart-compressed
+            // commit objects are decompressed before deserialization — a direct
+            // `self.storage.get()` here previously fed compressed bytes straight
+            // into `format::deserialize`, corrupting every connectivity check on
+            // a repo written through the normal (compressed) ODB write path.
+            let data = match self.odb.read(oid).await {
                 Ok(d) => d,
                 Err(_) => {
                     report.add_issue(
@@ -629,12 +665,222 @@ impl FsckChecker {
         })
     }
 
+    /// Validate and traverse a `refs/tags/*` ref's target.
+    ///
+    /// Returns `Ok(true)` if `oid` deserialized as a [`Tag`] object
+    /// (annotated tag) — in that case this method already did all the
+    /// necessary work (structure validation + walking through to the
+    /// target) and the caller must not also call `traverse_commit(oid, ..)`
+    /// on it. Returns `Ok(false)` for a lightweight tag (oid is a commit
+    /// directly), leaving the caller to fall back to `traverse_commit`.
+    async fn check_and_traverse_tag(
+        &self,
+        r: &Ref,
+        oid: Oid,
+        visited: &mut HashSet<Oid>,
+        referenced_objects: &mut HashSet<Oid>,
+        report: &mut FsckReport,
+    ) -> anyhow::Result<bool> {
+        // Via the ODB, not raw storage, so a compressed Tag object decompresses
+        // before deserialization (same fix as traverse_commit below).
+        let Ok(data) = self.odb.read(&oid).await else {
+            // Missing object: let the generic traverse_commit path below
+            // report it via its own "missing" issue for a uniform message.
+            return Ok(false);
+        };
+        let Ok(tag) = Tag::deserialize(&data) else {
+            // Not a Tag object -> lightweight tag, oid is a commit.
+            return Ok(false);
+        };
+
+        visited.insert(oid);
+        referenced_objects.insert(oid);
+
+        // Validate: target exists.
+        if !self.object_exists(&tag.target).await? {
+            report.add_issue(
+                FsckIssue::new(
+                    IssueSeverity::Error,
+                    IssueCategory::BrokenReference,
+                    format!("Tag {} ({}) target {} is missing", r.name, oid, tag.target),
+                )
+                .with_ref(r.name.clone())
+                .with_oid(oid),
+            );
+            return Ok(true);
+        }
+        referenced_objects.insert(tag.target);
+
+        // Validate: declared target_type matches the actual target object.
+        if let Ok(target_data) = self.odb.read(&tag.target).await {
+            let type_matches = match tag.target_type {
+                ObjectType::Commit => Commit::deserialize(&target_data).is_ok(),
+                ObjectType::Tree => Tree::deserialize(&target_data).is_ok(),
+                ObjectType::Tag => Tag::deserialize(&target_data).is_ok(),
+                // Any bytes are a valid blob; nothing to falsify.
+                ObjectType::Blob => true,
+            };
+            if !type_matches {
+                report.add_issue(
+                    FsckIssue::new(
+                        IssueSeverity::Error,
+                        IssueCategory::InvalidFormat,
+                        format!(
+                            "Tag {} ({}) declares target_type {} but target {} does not match",
+                            r.name, oid, tag.target_type, tag.target
+                        ),
+                    )
+                    .with_ref(r.name.clone())
+                    .with_oid(oid),
+                );
+            }
+        }
+
+        // Walk through to the target so its own closure is checked too.
+        match tag.target_type {
+            ObjectType::Commit => {
+                self.traverse_commit(&tag.target, visited, referenced_objects, report)
+                    .await?;
+            }
+            // Tree/Blob/Tag targets: existence and type already validated
+            // above; check_connectivity's scope (matching its pre-existing
+            // behavior for other refs) only descends into commit graphs.
+            ObjectType::Tree | ObjectType::Blob | ObjectType::Tag => {}
+        }
+
+        Ok(true)
+    }
+
+    /// Validate chunk-delta chains: every `chunk-deltas/<id>.meta` must lead,
+    /// via `base:` links, to a full chunk within `MAX_DELTA_DEPTH` hops —
+    /// never to a cycle (unreconstructable, data-loss; see the 2026-07-07
+    /// A→B→C→A incident) and never to a missing base.
+    ///
+    /// One `list_objects` pass loads all metas into a map; chains are then
+    /// walked in memory, so cost is O(number of chunk deltas), independent of
+    /// chunk sizes.
+    async fn check_chunk_deltas(&self, report: &mut FsckReport) -> anyhow::Result<()> {
+        let keys = self.storage.list_objects("chunk-deltas/").await?;
+
+        // delta chunk id -> base chunk id
+        let mut bases: std::collections::HashMap<Oid, Oid> = std::collections::HashMap::new();
+        for key in &keys {
+            let Some(hex) = key
+                .strip_prefix("chunk-deltas/")
+                .and_then(|k| k.strip_suffix(".meta"))
+            else {
+                continue;
+            };
+            let Ok(id) = Oid::from_hex(hex) else {
+                report.add_issue(FsckIssue::new(
+                    IssueSeverity::Warning,
+                    IssueCategory::InvalidFormat,
+                    format!("chunk-delta meta with unparseable id: {}", key),
+                ));
+                continue;
+            };
+            let Ok(bytes) = self.storage.get(key).await else {
+                continue;
+            };
+            let base = std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|s| s.trim().strip_prefix("base:"))
+                // Tolerate the extended "base:<hex>:depth:<n>" form.
+                .map(|rest| rest.split(':').next().unwrap_or(rest).trim())
+                .and_then(|hex| Oid::from_hex(hex).ok());
+            match base {
+                Some(b) => {
+                    bases.insert(id, b);
+                }
+                None => {
+                    report.add_issue(
+                        FsckIssue::new(
+                            IssueSeverity::Error,
+                            IssueCategory::InvalidFormat,
+                            format!("chunk-delta meta is malformed: {}", key),
+                        )
+                        .with_oid(id),
+                    );
+                }
+            }
+        }
+
+        for &id in bases.keys() {
+            let mut visited = std::collections::HashSet::new();
+            let mut current = id;
+            loop {
+                if !visited.insert(current) {
+                    report.add_issue(
+                        FsckIssue::new(
+                            IssueSeverity::Error,
+                            IssueCategory::CircularReference,
+                            format!(
+                                "chunk-delta cycle: chain from {} revisits {} — chunks on this \
+                                 loop have no full copy and cannot be reconstructed",
+                                id.to_hex(),
+                                current.to_hex()
+                            ),
+                        )
+                        .with_oid(id),
+                    );
+                    break;
+                }
+                match bases.get(&current) {
+                    Some(&next) => current = next,
+                    None => {
+                        // Chain terminates: base must exist as a full chunk.
+                        // Routed through the ODB's `chunk_exists` (pack-aware)
+                        // rather than raw `storage.exists`, which only sees
+                        // loose chunks and false-positives "missing base
+                        // chunk" after `gc --repack` moves chunks into a
+                        // pack (QA-005).
+                        if !self.odb.chunk_exists(&current).await.unwrap_or(false) {
+                            report.add_issue(
+                                FsckIssue::new(
+                                    IssueSeverity::Error,
+                                    IssueCategory::MissingObject,
+                                    format!(
+                                        "chunk-delta chain from {} ends at missing base chunk {}",
+                                        id.to_hex(),
+                                        current.to_hex()
+                                    ),
+                                )
+                                .with_oid(id),
+                            );
+                        } else if visited.len() > crate::odb::MAX_DELTA_DEPTH as usize {
+                            report.add_issue(
+                                FsckIssue::new(
+                                    IssueSeverity::Warning,
+                                    IssueCategory::InvalidFormat,
+                                    format!(
+                                        "chunk-delta chain from {} is {} hops deep (max {})",
+                                        id.to_hex(),
+                                        visited.len(),
+                                        crate::odb::MAX_DELTA_DEPTH
+                                    ),
+                                )
+                                .with_oid(id),
+                            );
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        debug!(
+            chunk_deltas = bases.len(),
+            "chunk-delta chain check complete"
+        );
+        Ok(())
+    }
+
     /// Detect dangling (unreferenced) objects
     async fn check_dangling(&self, report: &mut FsckReport) -> anyhow::Result<()> {
         debug!("Detecting dangling objects");
 
         // Get all objects
-        let all_objects = self.list_all_objects().await?;
+        let all_objects = self.list_all_objects(report).await?;
 
         // Get all referenced objects
         let refs = self.list_all_refs().await?;
@@ -643,7 +889,7 @@ impl FsckChecker {
         for r in refs {
             if let Some(oid) = r.oid {
                 let mut visited = HashSet::new();
-                self.collect_referenced_objects(&oid, &mut visited, &mut referenced)
+                self.collect_referenced_objects(&oid, &mut visited, &mut referenced, report)
                     .await?;
             }
         }
@@ -667,11 +913,21 @@ impl FsckChecker {
     }
 
     /// Collect all objects referenced from a commit
+    ///
+    /// Previously this only recognized `Commit` and `Tag` objects, so a
+    /// commit's `Tree` was never deserialized — every blob and chunk
+    /// manifest it points to was left out of `referenced`, and
+    /// `check_dangling`/`FsckRepair::remove_dangling_object` would then
+    /// delete every live file in the repo as "dangling" (QA-007 data loss).
+    /// Trees in this VCS are single-level (`BTreeMap<full relative path,
+    /// TreeEntry>`, no subtrees), so a flat scan of `entries` is enough —
+    /// no recursion needed here.
     fn collect_referenced_objects<'a>(
         &'a self,
         oid: &'a Oid,
         visited: &'a mut HashSet<Oid>,
         referenced: &'a mut HashSet<Oid>,
+        report: &'a mut FsckReport,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + 'a>> {
         Box::pin(async move {
             if visited.contains(oid) {
@@ -680,14 +936,55 @@ impl FsckChecker {
             visited.insert(*oid);
             referenced.insert(*oid);
 
-            // Use oid.to_hex() - LocalBackend handles "objects/" prefix and sharding
-            let key = oid.to_hex();
-            if let Ok(data) = self.storage.get(&key).await {
+            // Routed through the ODB (pack-aware, decompresses) rather than raw
+            // storage, so dangling detection isn't fooled by packed objects.
+            if let Ok(data) = self.odb.read(oid).await {
                 if let Ok(commit) = crate::format::deserialize::<Commit>(&data) {
                     referenced.insert(commit.tree);
+                    // Recurse into the tree itself (not just record its oid)
+                    // so the Tree arm below actually runs and walks its
+                    // entries -- otherwise every blob is still never marked
+                    // referenced (QA-007).
+                    self.collect_referenced_objects(&commit.tree, visited, referenced, report)
+                        .await?;
                     for parent in commit.parents {
-                        self.collect_referenced_objects(&parent, visited, referenced)
+                        self.collect_referenced_objects(&parent, visited, referenced, report)
                             .await?;
+                    }
+                } else if let Ok(tag) = crate::format::deserialize::<Tag>(&data) {
+                    referenced.insert(tag.target);
+                    if tag.target_type == ObjectType::Commit {
+                        self.collect_referenced_objects(&tag.target, visited, referenced, report)
+                            .await?;
+                    }
+                } else if let Ok(tree) = crate::format::deserialize::<Tree>(&data) {
+                    for (name, entry) in &tree.entries {
+                        // A chunked blob's pack members are its chunks, which are
+                        // referenced via the blob's manifest — expand it here or
+                        // every packed chunk shows up as a dangling-object info.
+                        // insert() returning true = first sighting of this blob.
+                        if referenced.insert(entry.oid) {
+                            if let Ok(Some(manifest)) =
+                                self.odb.get_chunk_manifest(&entry.oid).await
+                            {
+                                for chunk in &manifest.chunks {
+                                    referenced.insert(chunk.id);
+                                }
+                            }
+                        }
+                        if crate::is_stage_debris_key(name) {
+                            report.add_issue(
+                                FsckIssue::new(
+                                    IssueSeverity::Warning,
+                                    IssueCategory::InvalidFormat,
+                                    format!(
+                                        "tree {} entry '{}' is merge-stage debris; re-commit",
+                                        oid, name
+                                    ),
+                                )
+                                .with_oid(entry.oid),
+                            );
+                        }
                     }
                 }
             }
@@ -696,31 +993,108 @@ impl FsckChecker {
         })
     }
 
-    /// List all objects in storage
-    async fn list_all_objects(&self) -> anyhow::Result<Vec<Oid>> {
-        let mut objects = Vec::new();
+    /// List all objects in storage, including objects packed into `packs/*.pack`.
+    ///
+    /// Previously this only collected bare loose OIDs, so after `gc --repack`
+    /// (which deletes loose objects, leaving only packs) fsck/verify checked 0
+    /// objects and reported the repo as clean. Packed objects are enumerated
+    /// via `PackReader::list_objects()` (same reader the ODB's `read_from_packs`
+    /// uses), not a hand-rolled parser.
+    ///
+    /// A pack that fails to read or fails its own checksum verification is
+    /// corruption in its own right (e.g. a flipped byte in the trailing
+    /// checksum) and is reported as a `ChecksumMismatch` issue rather than
+    /// silently skipped — silently skipping would just reproduce the
+    /// "0 objects, PERFECT" blind spot for a corrupted pack.
+    async fn list_all_objects(&self, report: &mut FsckReport) -> anyhow::Result<Vec<Oid>> {
+        use crate::pack::PackReader;
 
-        // List all objects from storage
-        // This assumes the storage backend provides a way to list objects
-        // For now, we'll scan the objects directory structure
-        // List all objects (LocalBackend already operates within objects/ directory)
+        let mut objects = HashSet::new();
+
+        // Loose objects (LocalBackend already operates within objects/ directory,
+        // returning bare hex OIDs with no "objects/" prefix).
         let object_keys = self.storage.list_objects("").await?;
-
         for key in object_keys {
-            // LocalBackend returns hex OIDs directly (no "objects/" prefix)
-            // The key is already the hex string
             if key.len() == 64 {
                 if let Ok(oid) = Oid::from_hex(&key) {
-                    objects.push(oid);
+                    objects.insert(oid);
                 }
             }
         }
 
-        Ok(objects)
+        // Chunked-blob manifests: a chunked blob's OID exists only as
+        // `manifests/<oid>` (no bare loose key), so without this it was
+        // never added to `objects` and its content never reached
+        // `verify_object` -> `odb.read` -> `read_chunked`'s per-chunk
+        // BLAKE3 verification. At-rest chunk corruption was invisible
+        // (QA-006a).
+        let manifest_keys = self.storage.list_objects("manifests/").await?;
+        for key in manifest_keys {
+            if let Some(hex) = key.strip_prefix("manifests/") {
+                if let Ok(oid) = Oid::from_hex(hex) {
+                    objects.insert(oid);
+                }
+            }
+        }
+
+        // Packed objects: read each pack and list the OIDs it contains.
+        // Covers both legacy `gc --repack` packs (`packs/<id>.pack`) and
+        // Track F cloud packs (`packs/<oid_hex>`, no extension) — same
+        // envelope, PackReader parses either (see odb list_pack_files).
+        let pack_keys = self.storage.list_objects("packs/").await?;
+        for pack_key in pack_keys
+            .iter()
+            .filter(|k| k.ends_with(".pack") || !k.rsplit('/').next().unwrap_or("").contains('.'))
+        {
+            let Ok(pack_data) = self.storage.get(pack_key).await else {
+                report.add_issue(FsckIssue::new(
+                    IssueSeverity::Error,
+                    IssueCategory::ChecksumMismatch,
+                    format!("Pack file unreadable: {}", pack_key),
+                ));
+                continue;
+            };
+            match PackReader::new(pack_data) {
+                Ok(reader) => objects.extend(reader.list_objects()),
+                Err(e) => {
+                    report.add_issue(FsckIssue::new(
+                        IssueSeverity::Error,
+                        IssueCategory::ChecksumMismatch,
+                        format!("Pack file corrupt: {}: {}", pack_key, e),
+                    ));
+                }
+            }
+        }
+
+        Ok(objects.into_iter().collect())
     }
 
     /// List all references
     async fn list_all_refs(&self) -> anyhow::Result<Vec<Ref>> {
+        // If RefDatabase is available, use it (more reliable than storage for refs)
+        if let Some(ref refdb) = self.refdb {
+            let mut refs = Vec::new();
+
+            // List branches, tags, remotes via refdb namespaces
+            for namespace in ["heads", "remotes", "tags"] {
+                if let Ok(ref_names) = refdb.list(namespace).await {
+                    for name in ref_names {
+                        if let Ok(r) = refdb.read(&name).await {
+                            refs.push(r);
+                        }
+                    }
+                }
+            }
+
+            // Also add HEAD
+            if let Ok(head) = refdb.read("HEAD").await {
+                refs.push(head);
+            }
+
+            return Ok(refs);
+        }
+
+        // Fallback: List all ref files from storage
         let mut refs = Vec::new();
 
         // List all ref files
@@ -745,14 +1119,21 @@ impl FsckChecker {
     }
 
     /// Check if an object exists
+    ///
+    /// Routed through the ODB's `read` (pack-aware, falls back to
+    /// `read_from_packs`) rather than raw loose storage, so packed objects
+    /// aren't reported missing after `gc --repack`.
     async fn object_exists(&self, oid: &Oid) -> anyhow::Result<bool> {
-        // Use oid.to_hex() - LocalBackend handles "objects/" prefix and sharding
-        let key = oid.to_hex();
-        self.storage.exists(&key).await
+        Ok(self.odb.read(oid).await.is_ok())
     }
 
     /// Check if a reference exists
     async fn ref_exists(&self, ref_name: &str) -> anyhow::Result<bool> {
+        // Refs live in the RefDatabase (postcard-encoded), not as raw storage
+        // keys — a raw exists() check false-positives "missing ref" warnings.
+        if let Some(refdb) = &self.refdb {
+            return refdb.exists(ref_name).await;
+        }
         self.storage.exists(ref_name).await
     }
 }
@@ -843,9 +1224,25 @@ impl FsckRepair {
     }
 
     /// Repair a corrupted object by removing it
+    ///
+    /// `storage.delete(&key)` only touches the loose object path. If `oid`
+    /// isn't present there — e.g. it lives inside a pack — the delete is a
+    /// silent no-op, but the old code still returned `Ok(true)` and the
+    /// caller counted it as repaired (QA-007: "Successfully repaired 67
+    /// issues" while nothing changed, because the objects were packed).
+    /// Now: only claim success when a loose file actually existed to remove.
     async fn repair_corrupted_object(&self, oid: &Oid, dry_run: bool) -> anyhow::Result<bool> {
         // Use oid.to_hex() - LocalBackend handles "objects/" prefix and sharding
         let key = oid.to_hex();
+
+        if !self.storage.exists(&key).await.unwrap_or(false) {
+            warn!(
+                "Cannot remove corrupted object {}: not present as a loose file \
+                 (likely packed); requires a repack, not a targeted delete",
+                oid
+            );
+            return Ok(false);
+        }
 
         if dry_run {
             info!("[DRY RUN] Would remove corrupted object: {}", oid);
@@ -870,9 +1267,22 @@ impl FsckRepair {
     }
 
     /// Remove a dangling object
+    ///
+    /// Same packed-object honesty check as `repair_corrupted_object`: a
+    /// dangling packed object can't be removed with a bare loose delete, so
+    /// don't claim it was repaired.
     async fn remove_dangling_object(&self, oid: &Oid, dry_run: bool) -> anyhow::Result<bool> {
         // Use oid.to_hex() - LocalBackend handles "objects/" prefix and sharding
         let key = oid.to_hex();
+
+        if !self.storage.exists(&key).await.unwrap_or(false) {
+            warn!(
+                "Cannot remove dangling object {}: not present as a loose file \
+                 (likely packed); requires a repack, not a targeted delete",
+                oid
+            );
+            return Ok(false);
+        }
 
         if dry_run {
             info!("[DRY RUN] Would remove dangling object: {}", oid);
@@ -888,6 +1298,116 @@ impl FsckRepair {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mediagit_storage::mock::MockBackend;
+
+    async fn checker_with_metas(entries: &[(&Oid, &Oid)], full_chunks: &[&Oid]) -> FsckChecker {
+        let storage = Arc::new(MockBackend::new());
+        for (id, base) in entries {
+            storage
+                .put(
+                    &format!("chunk-deltas/{}.meta", id.to_hex()),
+                    format!("base:{}", base.to_hex()).as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+        for id in full_chunks {
+            storage
+                .put(&format!("chunks/{}", id.to_hex()), b"full chunk data")
+                .await
+                .unwrap();
+        }
+        FsckChecker::new(storage)
+    }
+
+    #[tokio::test]
+    async fn test_fsck_detects_chunk_delta_cycle() {
+        // The 2026-07-07 AWS incident shape: A→B→C→A, no full copy anywhere.
+        let a = Oid::hash(b"fsck-a");
+        let b = Oid::hash(b"fsck-b");
+        let c = Oid::hash(b"fsck-c");
+        let checker = checker_with_metas(&[(&a, &b), (&b, &c), (&c, &a)], &[]).await;
+
+        let mut report = FsckReport::new();
+        checker.check_chunk_deltas(&mut report).await.unwrap();
+
+        let cycles: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.category == IssueCategory::CircularReference)
+            .collect();
+        assert!(
+            !cycles.is_empty(),
+            "A→B→C→A chunk-delta cycle must be reported"
+        );
+        assert!(report.has_errors());
+    }
+
+    #[tokio::test]
+    async fn test_fsck_detects_missing_chunk_delta_base() {
+        let a = Oid::hash(b"fsck-orphan");
+        let missing = Oid::hash(b"fsck-missing-base");
+        let checker = checker_with_metas(&[(&a, &missing)], &[]).await;
+
+        let mut report = FsckReport::new();
+        checker.check_chunk_deltas(&mut report).await.unwrap();
+
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.category == IssueCategory::MissingObject),
+            "chain ending at a missing base chunk must be reported"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fsck_healthy_chunk_delta_chain_is_clean() {
+        let a = Oid::hash(b"fsck-h1");
+        let b = Oid::hash(b"fsck-h2");
+        let full = Oid::hash(b"fsck-full");
+        let checker = checker_with_metas(&[(&a, &b), (&b, &full)], &[&full]).await;
+
+        let mut report = FsckReport::new();
+        checker.check_chunk_deltas(&mut report).await.unwrap();
+
+        assert_eq!(
+            report.total_issues(),
+            0,
+            "healthy A→B→full chain must produce no issues, got: {:?}",
+            report.issues
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fsck_detects_over_deep_chunk_delta_chain() {
+        // Chain longer than MAX_DELTA_DEPTH hops, terminating at a valid
+        // full chunk (not a cycle, not missing) — must still surface as a
+        // warning so operators know to repack before a depth-bounded client
+        // walk (MAX_DELTA_DEPTH-capped) fails to resolve it.
+        let full = Oid::hash(b"fsck-deep-full");
+        let chain: Vec<Oid> = (0..12)
+            .map(|i| Oid::hash(format!("fsck-deep-{i}").as_bytes()))
+            .collect();
+        let mut entries: Vec<(&Oid, &Oid)> = (0..chain.len() - 1)
+            .map(|i| (&chain[i], &chain[i + 1]))
+            .collect();
+        entries.push((&chain[chain.len() - 1], &full));
+        let checker = checker_with_metas(&entries, &[&full]).await;
+
+        let mut report = FsckReport::new();
+        checker.check_chunk_deltas(&mut report).await.unwrap();
+
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.category == IssueCategory::InvalidFormat
+                    && i.severity == IssueSeverity::Warning),
+            "chain deeper than MAX_DELTA_DEPTH must be reported as a warning, got: {:?}",
+            report.issues
+        );
+    }
 
     #[test]
     fn test_fsck_issue_creation() {
@@ -943,5 +1463,352 @@ mod tests {
         let quick = FsckOptions::quick();
         assert!(!quick.check_dangling);
         assert!(!quick.check_connectivity);
+    }
+
+    async fn write_ref(storage: &Arc<MockBackend>, name: &str, oid: Oid) {
+        let r = Ref::new_direct(name.to_string(), oid);
+        let bytes = crate::format::serialize(&r).unwrap();
+        storage.put(name, &bytes).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_fsck_flags_tag_with_missing_target() {
+        let storage = Arc::new(MockBackend::new());
+
+        let bogus_target = Oid::hash(b"fsck-tag-missing-target");
+        let author = crate::Signature::now("t".to_string(), "t@e".to_string());
+        let tag = Tag::new(
+            bogus_target,
+            ObjectType::Commit,
+            "v1.0.0".to_string(),
+            author,
+            "release".to_string(),
+        );
+        let tag_bytes = tag.serialize().unwrap();
+        let tag_oid = Oid::hash(&tag_bytes);
+        storage.put(&tag_oid.to_hex(), &tag_bytes).await.unwrap();
+        write_ref(&storage, "refs/tags/v1.0.0", tag_oid).await;
+
+        let checker = FsckChecker::new(storage);
+        let mut report = FsckReport::new();
+        checker.check_connectivity(&mut report).await.unwrap();
+
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.category == IssueCategory::BrokenReference
+                    && i.message.contains("target")),
+            "missing tag target must be reported, got: {:?}",
+            report.issues
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fsck_flags_tag_with_wrong_target_type() {
+        let storage = Arc::new(MockBackend::new());
+
+        // Target actually stored is a blob, but the tag declares Commit.
+        let blob_data = b"just a blob, not a commit";
+        let blob_oid = Oid::hash(blob_data);
+        storage.put(&blob_oid.to_hex(), blob_data).await.unwrap();
+
+        let author = crate::Signature::now("t".to_string(), "t@e".to_string());
+        let tag = Tag::new(
+            blob_oid,
+            ObjectType::Commit,
+            "v1.0.0".to_string(),
+            author,
+            "release".to_string(),
+        );
+        let tag_bytes = tag.serialize().unwrap();
+        let tag_oid = Oid::hash(&tag_bytes);
+        storage.put(&tag_oid.to_hex(), &tag_bytes).await.unwrap();
+        write_ref(&storage, "refs/tags/v1.0.0", tag_oid).await;
+
+        let checker = FsckChecker::new(storage);
+        let mut report = FsckReport::new();
+        checker.check_connectivity(&mut report).await.unwrap();
+
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.category == IssueCategory::InvalidFormat
+                    && i.message.contains("target_type")),
+            "target_type mismatch must be reported, got: {:?}",
+            report.issues
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fsck_healthy_annotated_tag_is_clean_and_walks_target() {
+        let storage = Arc::new(MockBackend::new());
+
+        // Build a real commit -> tree -> blob chain.
+        let blob_data = b"file contents";
+        let blob_oid = Oid::hash(blob_data);
+        storage.put(&blob_oid.to_hex(), blob_data).await.unwrap();
+
+        let mut tree = Tree::new();
+        tree.add_entry(crate::TreeEntry::new(
+            "a.txt".to_string(),
+            crate::FileMode::Regular,
+            blob_oid,
+        ));
+        let tree_bytes = crate::format::serialize(&tree).unwrap();
+        let tree_oid = Oid::hash(&tree_bytes);
+        storage.put(&tree_oid.to_hex(), &tree_bytes).await.unwrap();
+
+        let author = crate::Signature::now("t".to_string(), "t@e".to_string());
+        let commit = Commit::new(tree_oid, author.clone(), author.clone(), "msg".to_string());
+        let commit_bytes = crate::format::serialize(&commit).unwrap();
+        let commit_oid = Oid::hash(&commit_bytes);
+        storage
+            .put(&commit_oid.to_hex(), &commit_bytes)
+            .await
+            .unwrap();
+
+        let tag = Tag::new(
+            commit_oid,
+            ObjectType::Commit,
+            "v1.0.0".to_string(),
+            author,
+            "release".to_string(),
+        );
+        let tag_bytes = tag.serialize().unwrap();
+        let tag_oid = Oid::hash(&tag_bytes);
+        storage.put(&tag_oid.to_hex(), &tag_bytes).await.unwrap();
+        write_ref(&storage, "refs/tags/v1.0.0", tag_oid).await;
+
+        let checker = FsckChecker::new(storage);
+        let mut report = FsckReport::new();
+        checker.check_connectivity(&mut report).await.unwrap();
+
+        assert_eq!(
+            report.total_issues(),
+            0,
+            "healthy annotated tag must produce no issues, got: {:?}",
+            report.issues
+        );
+    }
+
+    /// Builds a minimal but real commit -> tree -> blob chain (one tracked
+    /// file "a.txt") with `refs/heads/main` pointing at the commit. Returns
+    /// (blob_oid, tree_oid, commit_oid).
+    async fn write_referenced_chain(storage: &Arc<MockBackend>) -> (Oid, Oid, Oid) {
+        let blob_data = b"referenced contents";
+        let blob_oid = Oid::hash(blob_data);
+        storage.put(&blob_oid.to_hex(), blob_data).await.unwrap();
+
+        let mut tree = Tree::new();
+        tree.add_entry(crate::TreeEntry::new(
+            "a.txt".to_string(),
+            crate::FileMode::Regular,
+            blob_oid,
+        ));
+        let tree_bytes = crate::format::serialize(&tree).unwrap();
+        let tree_oid = Oid::hash(&tree_bytes);
+        storage.put(&tree_oid.to_hex(), &tree_bytes).await.unwrap();
+
+        let author = crate::Signature::now("t".to_string(), "t@e".to_string());
+        let commit = Commit::new(tree_oid, author.clone(), author, "msg".to_string());
+        let commit_bytes = crate::format::serialize(&commit).unwrap();
+        let commit_oid = Oid::hash(&commit_bytes);
+        storage
+            .put(&commit_oid.to_hex(), &commit_bytes)
+            .await
+            .unwrap();
+        write_ref(storage, "refs/heads/main", commit_oid).await;
+
+        (blob_oid, tree_oid, commit_oid)
+    }
+
+    // QA-007 regression: `collect_referenced_objects` previously only
+    // recognized Commit/Tag objects, never Tree, so every blob reachable
+    // only via a tree entry (i.e. every normal tracked file) was wrongly
+    // classified dangling and `fsck --repair` deleted it. These four tests
+    // pin the fix: a healthy repo loses nothing, a genuine orphan is
+    // removed exactly, a packed object is never claimed "repaired", and
+    // at-rest chunk corruption (QA-006a) is now detected.
+
+    #[tokio::test]
+    async fn test_fsck_repair_leaves_healthy_repo_untouched() {
+        let storage = Arc::new(MockBackend::new());
+        write_referenced_chain(&storage).await;
+
+        let before: HashSet<String> = storage
+            .list_objects("")
+            .await
+            .unwrap()
+            .into_iter()
+            .collect();
+
+        let checker = FsckChecker::new(storage.clone());
+        let report = checker.check(FsckOptions::full()).await.unwrap();
+
+        let repair = FsckRepair::new(storage.clone());
+        let repaired = repair.repair(&report, false).await.unwrap();
+
+        let after: HashSet<String> = storage
+            .list_objects("")
+            .await
+            .unwrap()
+            .into_iter()
+            .collect();
+
+        assert_eq!(
+            repaired, 0,
+            "a healthy repo has nothing to repair, got report: {:?}",
+            report.issues
+        );
+        assert_eq!(
+            before, after,
+            "fsck --repair must not delete anything from a healthy repo"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fsck_repair_removes_only_genuine_dangling_blob() {
+        let storage = Arc::new(MockBackend::new());
+        let (blob_oid, tree_oid, commit_oid) = write_referenced_chain(&storage).await;
+
+        // Genuinely dangling: written, never referenced by any tree/commit.
+        let orphan_data = b"nobody points at me";
+        let orphan_oid = Oid::hash(orphan_data);
+        storage
+            .put(&orphan_oid.to_hex(), orphan_data)
+            .await
+            .unwrap();
+
+        let checker = FsckChecker::new(storage.clone());
+        let report = checker.check(FsckOptions::full()).await.unwrap();
+
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.category == IssueCategory::DanglingObject && i.oid == Some(orphan_oid)),
+            "orphan blob must be flagged dangling, got: {:?}",
+            report.issues
+        );
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|i| i.category == IssueCategory::DanglingObject
+                    && (i.oid == Some(blob_oid)
+                        || i.oid == Some(tree_oid)
+                        || i.oid == Some(commit_oid))),
+            "referenced blob/tree/commit must NOT be flagged dangling, got: {:?}",
+            report.issues
+        );
+
+        let repair = FsckRepair::new(storage.clone());
+        let repaired = repair.repair(&report, false).await.unwrap();
+        assert_eq!(
+            repaired, 1,
+            "exactly the orphan must be repaired, got report: {:?}",
+            report.issues
+        );
+
+        assert!(
+            !storage.exists(&orphan_oid.to_hex()).await.unwrap(),
+            "orphan blob must be deleted"
+        );
+        assert!(
+            storage.exists(&blob_oid.to_hex()).await.unwrap(),
+            "referenced blob must survive repair"
+        );
+        assert!(
+            storage.exists(&tree_oid.to_hex()).await.unwrap(),
+            "tree must survive repair"
+        );
+        assert!(
+            storage.exists(&commit_oid.to_hex()).await.unwrap(),
+            "commit must survive repair"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fsck_repair_refuses_to_delete_packed_object() {
+        let storage = Arc::new(MockBackend::new());
+        // Simulate a ChecksumMismatch issue for an object that is NOT
+        // present as a loose file (i.e. it lives only inside a pack).
+        // `storage.delete()` only ever touches the loose path, so repair
+        // must not claim success for something it can't actually remove.
+        let packed_oid = Oid::hash(b"lives-only-in-a-pack");
+
+        let mut report = FsckReport::new();
+        report.add_issue(
+            FsckIssue::new(
+                IssueSeverity::Error,
+                IssueCategory::ChecksumMismatch,
+                "simulated corruption in a packed object".to_string(),
+            )
+            .with_oid(packed_oid)
+            .repairable(),
+        );
+
+        let repair = FsckRepair::new(storage.clone());
+        let repaired = repair.repair(&report, false).await.unwrap();
+
+        assert_eq!(
+            repaired, 0,
+            "a packed (non-loose) object must never be reported as repaired"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fsck_detects_flipped_byte_in_loose_chunk() {
+        use crate::chunking::ChunkStrategy;
+
+        let storage = Arc::new(MockBackend::new());
+        let writer = ObjectDatabase::with_optimizations(
+            storage.clone(),
+            100,
+            Some(ChunkStrategy::Fixed { size: 256 * 1024 }),
+            false,
+            0,
+        );
+
+        // 2MB of varied content so it actually chunks (> 1MB threshold).
+        let data: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let blob_oid = writer
+            .write_chunked(ObjectType::Blob, &data, "big.bin")
+            .await
+            .expect("write_chunked should succeed");
+
+        let manifest_key = format!("manifests/{}", blob_oid.to_hex());
+        let manifest_bytes = storage.get(&manifest_key).await.unwrap();
+        let manifest: crate::chunking::ChunkManifest =
+            crate::chunking::ChunkManifest::from_bytes(&manifest_bytes).unwrap();
+        let victim = &manifest.chunks[0];
+        let chunk_key = format!("chunks/{}", victim.id.to_hex());
+
+        let mut bytes = storage.get(&chunk_key).await.unwrap();
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0xFF;
+        storage.put(&chunk_key, &bytes).await.unwrap();
+
+        // Pre-fix, list_all_objects never enumerated manifests/, so
+        // blob_oid never reached verify_object and this corruption was
+        // invisible (QA-006a).
+        let checker = FsckChecker::new(storage);
+        let mut report = FsckReport::new();
+        checker
+            .check_objects(&mut report, &FsckOptions::default())
+            .await
+            .unwrap();
+
+        assert!(
+            report.issues.iter().any(|i| i.oid == Some(blob_oid)
+                && matches!(
+                    i.category,
+                    IssueCategory::ChecksumMismatch | IssueCategory::InvalidFormat
+                )),
+            "corrupted chunk content must be detected by fsck, got: {:?}",
+            report.issues
+        );
     }
 }

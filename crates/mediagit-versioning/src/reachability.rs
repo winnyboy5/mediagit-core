@@ -14,7 +14,7 @@
 //! Object-graph reachability walker.
 //!
 //! Computes the set of OIDs reachable from a set of root commits, walking
-//! commits → trees → blobs. Supports a `stop_at` cutoff set: any OID in
+//! commits → trees → tags → blobs. Supports a `stop_at` cutoff set: any OID in
 //! `stop_at` is neither visited nor recursed into, which is exactly what the
 //! pack-negotiation path needs ("collect everything reachable from `want`
 //! that is not already reachable from `have`").
@@ -22,17 +22,32 @@
 //! Unknown or unreadable OIDs are skipped silently — callers often feed in
 //! stale haves from clients and must not fail the whole walk on one bad OID.
 
-use crate::{Commit, ObjectDatabase, Oid, Tree};
+use crate::{Commit, ObjectDatabase, Oid, Tag, Tree};
 use std::collections::{HashSet, VecDeque};
 
 /// Walk the full object closure reachable from `roots`, stopping at any OID
 /// present in `stop_at`.
 ///
 /// Returns the set of visited OIDs (not including anything in `stop_at`).
-/// Traverses commits → (parents, tree) and trees → (entries). Blobs are leaf
-/// nodes. Chunked blobs are detected via [`ObjectDatabase::is_chunked`] and
-/// added to the result without reading their data — matching the existing
-/// pack-walker behavior in `mediagit-server`.
+/// Traverses commits → (parents, tree), trees → (entries), and tags →
+/// (target). Blobs are leaf nodes. Chunked blobs are detected via
+/// [`ObjectDatabase::is_chunked`] and added to the result without reading
+/// their data — matching the existing pack-walker behavior in
+/// `mediagit-server`.
+///
+/// # Sniff order (Commit, Tree, Tag, else blob leaf)
+///
+/// Object bytes carry no self-describing type tag, so each candidate type is
+/// tried by attempting a postcard deserialize and checking whether it
+/// succeeds. postcard's `from_bytes` requires the *entire* input to be
+/// consumed, so an accidental cross-type "successful" parse would need an
+/// exact structural and byte-count match between two different types — already
+/// an accepted, vanishingly small risk in the pre-existing Commit/Tree
+/// ordering. Tag is tried last, after Commit and Tree, for two reasons: (1)
+/// it preserves today's behavior for the two hot-path types unchanged, and
+/// (2) if a collision were ever to occur, resolving in favor of Commit/Tree
+/// over Tag is the safer default (those are integrity-critical for the
+/// entire history graph; a tag is leaf metadata pointing *at* history).
 ///
 /// # Leniency
 ///
@@ -72,7 +87,7 @@ where
             Err(_) => continue,
         };
 
-        // Try commit, then tree, then fall through as blob (leaf).
+        // Try commit, then tree, then tag, then fall through as blob (leaf).
         if let Ok(commit) = Commit::deserialize(&data) {
             enqueue(commit.tree, stop_at, &mut visited, &mut queue);
             for parent in commit.parents {
@@ -85,6 +100,11 @@ where
             for entry in tree.iter() {
                 enqueue(entry.oid, stop_at, &mut visited, &mut queue);
             }
+            continue;
+        }
+
+        if let Ok(tag) = Tag::deserialize(&data) {
+            enqueue(tag.target, stop_at, &mut visited, &mut queue);
             continue;
         }
 
@@ -226,6 +246,34 @@ mod tests {
         assert!(visited.contains(&c1));
         assert!(visited.contains(&c2));
         assert!(visited.contains(&c3));
+        assert!(visited.contains(&t1));
+        assert!(visited.contains(&b1));
+    }
+
+    #[tokio::test]
+    async fn walk_reachable_from_annotated_tag_visits_target_closure() {
+        // Regression for the M3-review-flagged gap: walking from a Tag OID
+        // must walk THROUGH the tag to its target's full closure, not treat
+        // the tag as an opaque blob leaf.
+        let (_tmp, odb) = make_odb().await;
+        let (c1, t1, b1) = write_commit(&odb, b"v1", "a.txt", vec![]).await;
+
+        let author = Signature::now("t".to_string(), "t@e".to_string());
+        let tag = crate::Tag::new(
+            c1,
+            crate::ObjectType::Commit,
+            "v1.0.0".to_string(),
+            author,
+            "release".to_string(),
+        );
+        let tag_oid = tag.write(&odb).await.unwrap();
+
+        let visited = walk_reachable(&odb, [tag_oid], &HashSet::new())
+            .await
+            .unwrap();
+        assert_eq!(visited.len(), 4, "expected tag+c1+t1+b1, got {:?}", visited);
+        assert!(visited.contains(&tag_oid));
+        assert!(visited.contains(&c1));
         assert!(visited.contains(&t1));
         assert!(visited.contains(&b1));
     }

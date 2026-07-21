@@ -1,0 +1,79 @@
+# dedup_report corpus manifest
+#
+# One relative path per line. Lines above the `# pairs` marker are resolved
+# against the corpus root (MEDIAGIT_BENCH_CORPUS env var, default:
+# repo-root `test-files/`). Lines below the marker are resolved against
+# `dev-tests/dedup-pairs/` (fixed, not affected by MEDIAGIT_BENCH_CORPUS) and
+# are v1/v2 edit pairs used for delta-hit-rate measurement.
+#
+# Curated to stay well under ~3GB so a gate run completes in minutes.
+# Full test-files/ corpus is ~42GB; only a representative slice is listed here.
+# Comments (#) and blank lines are ignored.
+
+# --- Video containers (mp4/mov/mkv) ---
+video-variants/trimmed-3s.mp4
+video-variants/h265-reencode.mp4
+video-variants/bbb-5s-h264.mkv
+video-variants/bbb-5s-h264.mov
+video-variants/remux-mkv.mkv
+101394-video-720.mp4
+video-variants/remux-faststart.mp4
+video-variants/prores-pcm-audio.mov
+video-variants/prores-pcm.mov
+
+# --- Audio (wav/flac/ogg) ---
+_Quando_le_sere_al_placido__(Ferruccio_Giannini).wav
+_Amir_Tangsiri__Dokhtare_Koli.flac
+pioneer-master/pioneer-master/data/sounds/Interface/Click.ogg
+pioneer-master/pioneer-master/data/sounds/warning.ogg
+pioneer-master/pioneer-master/data/music/core/near-spacestation/docking.ogg
+pioneer-master/pioneer-master/data/music/core/ship-destroyed/tombstone.ogg
+pioneer-master/pioneer-master/data/music/core/map-core/starchart.ogg
+
+# --- Creative containers (ai/eps/psd) ---
+12690118_5053480.ai
+12690118_5053481.eps
+psd/26952784_food_flyer_19.psd
+
+# --- 3D interchange formats (stl/ply/fbx/glb) ---
+1900s_telephone.stl
+39-stl/stl/Dragon 2.5_stl.stl
+93-ply/ply/Dragon 2.5_ply.ply
+56-fbx/fbx/Dragon 2.5_fbx.fbx
+56-fbx/fbx/Dragon_Baked_Actions_fbx_7.4_binary.fbx
+1965_ac_shelby_427_cobra_sc.glb
+
+# --- Blender scene files ---
+pioneer-master/pioneer-master/data/models/misc/test_gun/test_gun.blend
+27-blender/blender/Dragon_2.5_For_Animations.blend
+
+# --- Raster images (jpg/png) ---
+caricature-photo-effect/10785859.jpg
+39-stl/stl/textures/Floor_S.jpg
+Medieval Village MegaKit[Standard]/Medieval Village MegaKit[Standard]/Textures/T_Brick_Normal.png
+pioneer-master/pioneer-master/data/galaxy_colour.png
+
+# --- Archives (zip) ---
+1965-ac-shelby-427-cobra-sc/source/FINAL_MODEL_427.zip
+
+# pairs
+wav_v1.wav
+wav_v2.wav
+flac_v1.flac
+flac_v2.flac
+fbx_v1.fbx
+fbx_v2.fbx
+stl_v1.stl
+stl_v2.stl
+blend_v1.blend
+blend_v2.blend
+ai_v1.ai
+ai_v2.ai
+ply_v1.ply
+ply_v2.ply
+parquet_v1.parquet
+parquet_v2.parquet
+safetensors_v1.safetensors
+safetensors_v2.safetensors
+fbxfair_v1.fbx
+fbxfair_v2.fbx

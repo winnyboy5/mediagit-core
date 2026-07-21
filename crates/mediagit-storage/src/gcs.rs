@@ -361,8 +361,16 @@ impl GcsBackend {
         project_id: impl Into<String>,
         bucket_name: impl Into<String>,
     ) -> anyhow::Result<Self> {
-        let project_id = project_id.into();
-        let bucket_name = bucket_name.into();
+        Self::with_default_credentials_and_config(GcsConfig::new(project_id, bucket_name)).await
+    }
+
+    /// Same as [`Self::with_default_credentials`] but takes a full
+    /// [`GcsConfig`] (e.g. to set `prefix`) instead of just project/bucket.
+    pub async fn with_default_credentials_and_config(
+        gcs_config: GcsConfig,
+    ) -> anyhow::Result<Self> {
+        let project_id = gcs_config.project_id.clone();
+        let bucket_name = gcs_config.bucket_name.clone();
 
         if project_id.is_empty() {
             return Err(anyhow::anyhow!("project_id cannot be empty"));
@@ -387,7 +395,6 @@ impl GcsBackend {
             );
         }
 
-        let gcs_config = GcsConfig::new(project_id.clone(), bucket_name.clone());
         let (storage, control) = Self::build_clients(&gcs_config).await?;
 
         let signer = match google_cloud_auth::credentials::Builder::default().build_signer() {
@@ -429,6 +436,8 @@ impl GcsBackend {
     /// stream returns however much exists (validated by the caller against the
     /// size hint).
     async fn get_range(&self, key: &str, offset: u64, len: u64) -> anyhow::Result<Vec<u8>> {
+        let key = crate::prefixed_key(&self.config.prefix, key);
+        let key = key.as_str();
         let bucket_path = self.bucket_path();
         let mut resp = self
             .storage
@@ -901,7 +910,8 @@ impl StorageBackend for GcsBackend {
         let Some(signer) = self.signer.as_ref() else {
             return Ok(None);
         };
-        let url = SignedUrlBuilder::for_object(self.bucket_path(), key)
+        let key = crate::prefixed_key(&self.config.prefix, key);
+        let url = SignedUrlBuilder::for_object(self.bucket_path(), &key)
             .with_method(http::Method::PUT)
             .with_expiration(ttl)
             .sign_with(signer)
@@ -935,7 +945,8 @@ impl StorageBackend for GcsBackend {
         let Some(signer) = self.signer.as_ref() else {
             return Ok(None);
         };
-        let url = SignedUrlBuilder::for_object(self.bucket_path(), key)
+        let key = crate::prefixed_key(&self.config.prefix, key);
+        let url = SignedUrlBuilder::for_object(self.bucket_path(), &key)
             .with_method(http::Method::GET)
             .with_expiration(ttl)
             .sign_with(signer)
@@ -1002,6 +1013,34 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("service account file not found"));
+    }
+
+    /// Name-composition regression test for the GCS-prefix bug (layout v2,
+    /// M1 Step 5): the wire object name must compose exactly
+    /// `<gcs_prefix>/<ns>/<key>` — prefix applied once, no double-prefix
+    /// with the `NamespacedBackend` wrapper. This exercises the same
+    /// `crate::prefixed_key` helper every GCS method calls, at the pure
+    /// function level (no live GCS connection needed); live verification is
+    /// deferred to the cloud matrix phase.
+    #[test]
+    fn test_prefix_and_namespace_compose_exactly_once() {
+        let gcs_prefix = Some("backups".to_string());
+        // Key as it arrives at GcsBackend AFTER NamespacedBackend has
+        // already prepended "<ns>/".
+        let namespaced_key = "myrepo/chunks/deadbeef";
+
+        let wire_key = crate::prefixed_key(&gcs_prefix, namespaced_key);
+        assert_eq!(wire_key, "backups/myrepo/chunks/deadbeef");
+
+        // No backend prefix configured: namespace is the only prefix.
+        let wire_key_no_gcs_prefix = crate::prefixed_key(&None, namespaced_key);
+        assert_eq!(wire_key_no_gcs_prefix, "myrepo/chunks/deadbeef");
+
+        // list_objects's strip must exactly reverse the composition.
+        let backend_prefix = gcs_prefix.as_deref().unwrap_or("");
+        let strip_prefix = format!("{}/", backend_prefix.trim_end_matches('/'));
+        let logical = wire_key.strip_prefix(&strip_prefix).unwrap();
+        assert_eq!(logical, namespaced_key);
     }
 
     #[test]

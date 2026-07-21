@@ -28,7 +28,13 @@ pub async fn get_refs(
     })?;
 
     // Check permission: repo:read required
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -92,9 +98,21 @@ pub async fn get_refs(
         }
     }
 
+    // Advertise the repo's CDC seed (if any) so clones inherit matching chunk
+    // boundaries. Omitted entirely when the seed is 0 (legacy repos / repos
+    // without the field) to keep the capability list unchanged for them.
+    let mut capabilities = vec!["pack-v1".to_string()];
+    let cdc_seed = mediagit_config::Config::load(&repo_path)
+        .await
+        .map(|c| c.cdc_seed)
+        .unwrap_or(0);
+    if cdc_seed != 0 {
+        capabilities.push(format!("cdc-seed={}", cdc_seed));
+    }
+
     Ok(Json(RefsResponse {
         refs: ref_infos,
-        capabilities: vec!["pack-v1".to_string()],
+        capabilities,
     }))
 }
 
@@ -108,7 +126,13 @@ pub async fn upload_pack(
     tracing::info!("POST /{}/objects/pack (streaming)", repo);
 
     // Check permission: repo:write required
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -236,7 +260,13 @@ pub async fn download_pack(
     tracing::info!("GET /{}/objects/pack", repo);
 
     // Check permission: repo:read required
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     // Get request ID from header (required to prevent race conditions)
     let request_id = headers
@@ -287,6 +317,12 @@ pub async fn download_pack(
     // subtrees and blobs reachable from a parent commit — is pruned from the
     // pack walk below. Unknown haves (stale or forged) are silently skipped
     // by `walk_reachable`, which is the whole point of having it be lenient.
+    //
+    // M3 bitmap short-circuit: for each have OID with a valid, current-
+    // version bitmap (`bitmaps/<oid>.bitmap`), use its precomputed closure
+    // instead of walking the ODB. Any miss/stale/corrupt/version-mismatch/
+    // disabled falls back to BFS for that OID — bitmaps are a pure speedup,
+    // never a correctness dependency (see `mediagit_versioning::bitmap`).
     let have_oids: Vec<Oid> = have_list
         .iter()
         .filter_map(|s| Oid::from_hex(s).ok())
@@ -294,6 +330,44 @@ pub async fn download_pack(
     // Fast path: empty have-set (clone) skips the expensive BFS expansion.
     let stop_at = if have_oids.is_empty() {
         std::collections::HashSet::new()
+    } else if mediagit_versioning::bitmap_enabled() {
+        let mut stop_at = std::collections::HashSet::new();
+        let mut bfs_roots = Vec::new();
+        let mut bitmap_hits = 0usize;
+        for have in &have_oids {
+            let key = mediagit_versioning::bitmap_key(have);
+            let hit = match odb.get_bitmap(&key).await {
+                Ok(bytes) => mediagit_versioning::ReachabilityBitmap::deserialize(&bytes),
+                Err(_) => None,
+            };
+            match hit {
+                Some(bitmap) => {
+                    bitmap_hits += 1;
+                    state
+                        .bitmap_hits
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    stop_at.extend(bitmap.to_oid_set());
+                }
+                None => bfs_roots.push(*have),
+            }
+        }
+        if !bfs_roots.is_empty() {
+            let empty: std::collections::HashSet<Oid> = std::collections::HashSet::new();
+            let bfs_extra = mediagit_versioning::walk_reachable(&odb, bfs_roots, &empty)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to expand have-closure: {}", e);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+            stop_at.extend(bfs_extra);
+        }
+        tracing::info!(
+            "Have-closure: {} bitmap hit(s), {} BFS fallback root(s) of {} have OIDs",
+            bitmap_hits,
+            have_oids.len() - bitmap_hits,
+            have_oids.len()
+        );
+        stop_at
     } else {
         let empty: std::collections::HashSet<Oid> = std::collections::HashSet::new();
         mediagit_versioning::walk_reachable(&odb, have_oids, &empty)
@@ -463,7 +537,13 @@ pub async fn request_objects(
     );
 
     // Check permission: repo:read required
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     // Generate unique request ID to prevent race conditions between concurrent clients
     let request_id = crate::state::generate_request_id();
@@ -490,7 +570,13 @@ pub async fn update_refs(
     tracing::info!("POST /{}/refs/update ({} updates)", repo, req.updates.len());
 
     // Check permission: repo:write required
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -660,8 +746,39 @@ pub async fn update_refs(
             None
         };
 
-        // Update the ref
         let new_oid = Oid::from_hex(&update.new_oid).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+        // B3: server-enforced file locking. Reject the push if any commit
+        // between the current tip (pre_write_oid) and new_oid touches a path
+        // locked by someone other than the pusher. check_push_locks
+        // short-circuits before any tree walk when the repo has zero locks.
+        let pusher = auth_user.as_ref().map(|u| u.user_id.as_str());
+        match crate::locks::check_push_locks(
+            &state,
+            &repo,
+            &repo_path,
+            &odb,
+            pre_write_oid,
+            new_oid,
+            pusher,
+        )
+        .await
+        {
+            Ok(Some(lock_error)) => {
+                tracing::warn!("Push to '{}' rejected: {}", update.name, lock_error);
+                results.push(RefUpdateResult {
+                    ref_name: update.name.clone(),
+                    success: false,
+                    error: Some(lock_error),
+                });
+                all_success = false;
+                continue;
+            }
+            Ok(None) => {}
+            Err(status) => return Err(status),
+        }
+
+        // Update the ref
         let ref_update = Ref::new_direct(update.name.clone(), new_oid);
 
         match refdb.write(&ref_update).await {
@@ -683,6 +800,73 @@ pub async fn update_refs(
                     ReflogEntry::now(old_oid_for_log, new_oid, &actor_name, &actor_email, &msg);
                 if let Err(e) = reflog.append(&update.name, &entry).await {
                     tracing::warn!("Failed to write reflog for '{}': {}", update.name, e);
+                }
+
+                // M3 (#2b): post-receive bitmap generation for the new tip.
+                // Derived data — generated in the background so it never adds
+                // push latency; a failure here is logged and otherwise
+                // ignored (walk_reachable BFS fallback covers the miss).
+                if mediagit_versioning::bitmap_enabled() {
+                    let odb_for_bitmap = Arc::clone(&odb);
+                    let ref_name = update.name.clone();
+                    let old_oid = pre_write_oid;
+                    tokio::spawn(async move {
+                        match mediagit_versioning::ReachabilityBitmap::generate(
+                            odb_for_bitmap.as_ref(),
+                            new_oid,
+                        )
+                        .await
+                        {
+                            Ok(bitmap) => match bitmap.serialize() {
+                                Ok(bytes) => {
+                                    let key = mediagit_versioning::bitmap_key(&new_oid);
+                                    if let Err(e) = odb_for_bitmap.put_bitmap(&key, &bytes).await {
+                                        tracing::warn!(
+                                            "Failed to persist bitmap for '{}' ({}): {}",
+                                            ref_name,
+                                            new_oid,
+                                            e
+                                        );
+                                    } else if let Some(old_oid) = old_oid {
+                                        // Retention: prune the previous tip's bitmap now that
+                                        // the new tip's bitmap is safely persisted. Two refs
+                                        // pointing at the same tip share one bitmap key;
+                                        // deleting it when one ref moves off it is safe because
+                                        // bitmaps are pure speedup — a miss falls back to the
+                                        // BFS walk, and gc/next-push regenerates as needed.
+                                        // Steady state is ~one bitmap per ref; gc's
+                                        // regenerate_and_prune_bitmaps remains the backstop for
+                                        // orphans (deleted branches, forced moves).
+                                        if old_oid != new_oid {
+                                            let old_key = mediagit_versioning::bitmap_key(&old_oid);
+                                            if let Err(e) =
+                                                odb_for_bitmap.delete_bitmap(&old_key).await
+                                            {
+                                                tracing::warn!(
+                                                    "Failed to delete previous bitmap for '{}' ({}): {}",
+                                                    ref_name,
+                                                    old_oid,
+                                                    e
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => tracing::warn!(
+                                    "Failed to serialize bitmap for '{}' ({}): {}",
+                                    ref_name,
+                                    new_oid,
+                                    e
+                                ),
+                            },
+                            Err(e) => tracing::warn!(
+                                "Failed to generate bitmap for '{}' ({}): {}",
+                                ref_name,
+                                new_oid,
+                                e
+                            ),
+                        }
+                    });
                 }
 
                 results.push(RefUpdateResult {
@@ -729,6 +913,19 @@ pub struct CompletePackRequest {
     pub manifest: Vec<ManifestEntry>,
 }
 
+/// Pack-manifest parity check (M1): returns the first manifest entry (if
+/// any) whose `[offset, offset+length)` range exceeds `pack_size`. Pulled out
+/// as a pure function so the boundary logic is unit-testable without an HTTP
+/// harness or a live storage backend.
+fn first_entry_exceeding_pack_size(
+    manifest: &[ManifestEntry],
+    pack_size: u64,
+) -> Option<&ManifestEntry> {
+    manifest
+        .iter()
+        .find(|entry| entry.offset.saturating_add(entry.length as u64) > pack_size)
+}
+
 /// POST /{repo}/packs/complete — Register a finished cloud pack and its chunk manifest.
 ///
 /// Server HEADs the pack object before accepting the manifest so a crash between
@@ -739,7 +936,13 @@ pub async fn complete_pack(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<CompletePackRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     crate::security::validate_repo_name(&repo).map_err(|_| StatusCode::BAD_REQUEST)?;
     let repo_path = state.repos_dir.join(&repo);
@@ -749,8 +952,9 @@ pub async fn complete_pack(
     let storage = get_or_init_storage(&state, &repo_path).await?;
 
     let pack_key = format!("packs/{}", req.pack_oid);
+    let pack_size: u64;
     match storage.head(&pack_key).await {
-        Ok(Some(_)) => {}
+        Ok(Some(size)) => pack_size = size,
         Ok(None) => {
             tracing::warn!(
                 repo = %repo,
@@ -771,7 +975,7 @@ pub async fn complete_pack(
             );
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             match storage.head(&pack_key).await {
-                Ok(Some(_)) => {}
+                Ok(Some(size)) => pack_size = size,
                 _ => {
                     tracing::error!(
                         repo = %repo,
@@ -782,6 +986,25 @@ pub async fn complete_pack(
                 }
             }
         }
+    }
+
+    // Pack-manifest parity check: every manifest entry's byte range must fit
+    // within the pack object's actual (HEAD-reported) size. A manifest
+    // claiming ranges beyond the real pack — from a truncated upload, a
+    // client bug, or a malicious request — would silently corrupt every
+    // future chunk read through this pack, so it's rejected here rather
+    // than accepted and discovered later at read time.
+    if let Some(bad) = first_entry_exceeding_pack_size(&req.manifest, pack_size) {
+        tracing::error!(
+            repo = %repo,
+            pack = %req.pack_oid,
+            pack_size,
+            chunk = %bad.chunk_oid,
+            offset = bad.offset,
+            length = bad.length,
+            "complete_pack: manifest entry range exceeds pack size (parity check failed)"
+        );
+        return Err(StatusCode::BAD_REQUEST);
     }
 
     // Persist to JSONL under <repo>/.mediagit/packs/<shard>/<pack_oid>.jsonl
@@ -846,6 +1069,81 @@ pub async fn complete_pack(
     Ok(StatusCode::CREATED)
 }
 
+/// Remove chunk entries from a pack's persisted JSONL manifest and the
+/// in-memory pack_index (QA-013 A1). Used by `verify_chunk_integrity` when a
+/// packed chunk's content no longer matches its claimed hash — eviction lets
+/// subsequent locate/get calls fall through to a loose re-upload instead of
+/// repeatedly serving corrupt bytes from the pack.
+///
+/// No-op if the manifest file is missing; still drops any stale in-memory
+/// entries in that case.
+pub(crate) async fn evict_pack_entries(
+    state: &AppState,
+    repo_path: &std::path::Path,
+    repo: &str,
+    pack_oid: &str,
+    chunk_oids: &[String],
+) -> Result<(), StatusCode> {
+    let shard = if pack_oid.len() >= 2 {
+        &pack_oid[..2]
+    } else {
+        "00"
+    };
+    let manifest_path = repo_path
+        .join(".mediagit")
+        .join("packs")
+        .join(shard)
+        .join(format!("{}.jsonl", pack_oid));
+
+    // Hold the same write lock complete_pack uses so eviction can't race a
+    // concurrent complete_pack append (F9 concurrency guard).
+    let mut idx = state.pack_index.write().await;
+
+    let content = match tokio::fs::read_to_string(&manifest_path).await {
+        Ok(c) => c,
+        Err(_) => {
+            if let Some(repo_idx) = idx.get_mut(repo) {
+                for id in chunk_oids {
+                    repo_idx.remove(id);
+                }
+            }
+            return Ok(());
+        }
+    };
+
+    let evict_set: std::collections::HashSet<&str> =
+        chunk_oids.iter().map(|s| s.as_str()).collect();
+    let mut kept = String::new();
+    for line in content.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(entry) = serde_json::from_str::<PackIndexLine>(line) {
+            if evict_set.contains(entry.chunk_oid.as_str()) {
+                continue;
+            }
+        }
+        kept.push_str(line);
+        kept.push('\n');
+    }
+
+    let tmp_path = manifest_path.with_extension("jsonl.tmp");
+    tokio::fs::write(&tmp_path, kept.as_bytes())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    tokio::fs::rename(&tmp_path, &manifest_path)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if let Some(repo_idx) = idx.get_mut(repo) {
+        for id in chunk_oids {
+            repo_idx.remove(id);
+        }
+    }
+
+    Ok(())
+}
+
 #[derive(serde::Deserialize)]
 pub struct LocateChunksRequest {
     pub chunk_ids: Vec<String>,
@@ -871,7 +1169,13 @@ pub async fn locate_chunks(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<LocateChunksRequest>,
 ) -> Result<Json<std::collections::HashMap<String, LocatedChunk>>, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     crate::security::validate_repo_name(&repo).map_err(|_| StatusCode::BAD_REQUEST)?;
     let repo_path = state.repos_dir.join(&repo);
@@ -945,7 +1249,13 @@ pub async fn rebuild_pack_index(
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
 ) -> Result<Json<RebuildIndexResponse>, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     crate::security::validate_repo_name(&repo).map_err(|_| StatusCode::BAD_REQUEST)?;
     let repo_path = state.repos_dir.join(&repo);
@@ -969,4 +1279,50 @@ pub async fn rebuild_pack_index(
     Ok(Json(RebuildIndexResponse {
         indexed_chunks: count,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(chunk_oid: &str, offset: u64, length: u32) -> ManifestEntry {
+        ManifestEntry {
+            chunk_oid: chunk_oid.to_string(),
+            offset,
+            length,
+            compressed_hash: None,
+        }
+    }
+
+    #[test]
+    fn parity_check_passes_when_all_entries_fit() {
+        let manifest = vec![entry("a", 0, 100), entry("b", 100, 200)];
+        assert!(first_entry_exceeding_pack_size(&manifest, 300).is_none());
+    }
+
+    #[test]
+    fn parity_check_passes_at_exact_boundary() {
+        // offset + length == pack_size is valid (exclusive upper bound).
+        let manifest = vec![entry("a", 0, 300)];
+        assert!(first_entry_exceeding_pack_size(&manifest, 300).is_none());
+    }
+
+    #[test]
+    fn parity_check_flags_entry_exceeding_pack_size() {
+        let manifest = vec![entry("a", 0, 100), entry("b", 100, 201)];
+        let bad = first_entry_exceeding_pack_size(&manifest, 300).unwrap();
+        assert_eq!(bad.chunk_oid, "b");
+    }
+
+    #[test]
+    fn parity_check_handles_offset_overflow_without_panicking() {
+        let manifest = vec![entry("a", u64::MAX - 1, 100)];
+        let bad = first_entry_exceeding_pack_size(&manifest, 300).unwrap();
+        assert_eq!(bad.chunk_oid, "a");
+    }
+
+    #[test]
+    fn parity_check_empty_manifest_passes() {
+        assert!(first_entry_exceeding_pack_size(&[], 0).is_none());
+    }
 }

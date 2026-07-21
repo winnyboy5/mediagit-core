@@ -85,6 +85,9 @@ Remove remote branches that don't exist locally.
 
 ### MediaGit-Specific Options
 
+#### `--repair`
+Verify remote chunk integrity and force re-upload any chunk the server reports as corrupted, using the local repository as the source of truth. Runs even if refs are already up to date (useful for recovering from a poisoned remote). Always runs a full strong verify (BLAKE3 re-hash) — not gated by `MEDIAGIT_STRONG_VERIFY`.
+
 #### `--optimize-transfer`
 Enable transfer optimizations for media files.
 

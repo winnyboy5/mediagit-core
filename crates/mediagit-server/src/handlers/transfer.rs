@@ -53,7 +53,18 @@ pub async fn presign_pack_uploads(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<PresignPackUploadsRequest>,
 ) -> Result<Json<std::collections::HashMap<String, Option<PresignedPutJson>>>, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
+
+    if !req.pack_ids.iter().all(|id| is_hex_str(id)) {
+        tracing::warn!(repo = %repo, "Rejecting presign_pack_uploads: a pack_id is not hex");
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -134,7 +145,19 @@ pub async fn presign_chunk_uploads(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<PresignChunkUploadsRequest>,
 ) -> Result<Json<std::collections::HashMap<String, Option<PresignedPutJson>>>, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
+
+    if !req.chunk_ids.iter().all(|id| is_hex_str(id)) {
+        tracing::warn!(repo = %repo, "Rejecting presign_chunk_uploads: a chunk_id is not hex");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
         return Err(StatusCode::NOT_FOUND);
@@ -231,7 +254,18 @@ pub async fn presign_chunk_downloads(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<PresignDownloadUrlsRequest>,
 ) -> Result<Json<std::collections::HashMap<String, Option<PresignedGetJson>>>, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
+
+    if !req.chunks.iter().all(|id| is_hex_str(id)) {
+        tracing::warn!(repo = %repo, "Rejecting presign_chunk_downloads: a chunk id is not hex");
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -316,7 +350,18 @@ pub async fn complete_chunk_uploads(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<CompleteUploadRequest>,
 ) -> Result<Json<CompleteUploadResponse>, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
+
+    if !req.chunk_ids.iter().all(|id| is_valid_hex_id(id)) {
+        tracing::warn!(repo = %repo, "Rejecting complete_chunk_uploads: a chunk_id is not a 64-char hex id");
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -376,11 +421,20 @@ pub async fn complete_chunk_uploads(
 #[derive(serde::Deserialize)]
 pub struct VerifyIntegrityRequest {
     chunk_ids: Vec<String>,
+    /// Evict invalid entries found in a cloud pack from the pack index so
+    /// subsequent locate/get calls fall through to a loose re-upload instead
+    /// of repeatedly serving corrupt bytes from the pack (QA-013 A1).
+    #[serde(default)]
+    evict_invalid: bool,
 }
 
 #[derive(serde::Serialize)]
 pub struct VerifyIntegrityResponse {
     invalid: Vec<String>,
+    /// Chunk ids that were invalid, found in a pack, and evicted from the
+    /// pack index (only populated when `evict_invalid` was set).
+    #[serde(default)]
+    evicted: Vec<String>,
 }
 
 pub async fn verify_chunk_integrity(
@@ -389,7 +443,18 @@ pub async fn verify_chunk_integrity(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<VerifyIntegrityRequest>,
 ) -> Result<Json<VerifyIntegrityResponse>, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
+
+    if !req.chunk_ids.iter().all(|id| is_valid_hex_id(id)) {
+        tracing::warn!(repo = %repo, "Rejecting verify_chunk_integrity: a chunk_id is not a 64-char hex id");
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -398,28 +463,67 @@ pub async fn verify_chunk_integrity(
     let storage = get_or_init_storage(&state, &repo_path).await?;
     let compressor = std::sync::Arc::new(SmartCompressor::new());
 
-    let invalid: Vec<String> = futures::stream::iter(req.chunk_ids)
+    // Lazy-load pack index from JSONL if not yet warm (mirrors locate_chunks).
+    // Without this, a verify on a freshly restarted server sees an empty index,
+    // misses packed chunks, and never evicts poisoned entries (CHK20).
+    {
+        let idx = state.pack_index.read().await;
+        if !idx.contains_key(&repo) {
+            drop(idx);
+            crate::handlers::load_jsonl_index(&state, &repo, &repo_path).await?;
+        }
+    }
+
+    // Each result is (chunk_id, pack_loc) where pack_loc is Some(..) when the
+    // chunk was (attempted to be) served from a cloud pack rather than a loose
+    // object — needed below to evict the entry from the right pack manifest.
+    let results: Vec<(String, Option<PackLoc>)> = futures::stream::iter(req.chunk_ids)
         .map(|chunk_id_hex| {
             let storage = Arc::clone(&storage);
             let compressor = std::sync::Arc::clone(&compressor);
+            let state = Arc::clone(&state);
+            let repo = repo.clone();
             async move {
                 let key = format!("chunks/{}", chunk_id_hex);
-                let compressed = match storage.get(&key).await {
-                    Ok(data) => data,
-                    Err(_) => return Some(chunk_id_hex),
+                let (bytes, pack_loc) = match storage.get(&key).await {
+                    Ok(data) => (Some(data), None),
+                    Err(_) => {
+                        // Loose miss — the chunk may live only inside a cloud pack.
+                        let loc = {
+                            let idx = state.pack_index.read().await;
+                            idx.get(&repo).and_then(|m| m.get(&chunk_id_hex)).cloned()
+                        };
+                        match &loc {
+                            Some(l) if l.length >= 5 => {
+                                let pack_key = format!("packs/{}", l.pack_oid);
+                                // Skip 5-byte pack entry header [type:1][size:4].
+                                let data_offset = l.offset + 5;
+                                let data_len = (l.length as u64) - 5;
+                                match storage.get_range(&pack_key, data_offset, data_len).await {
+                                    Ok(data) => (Some(data), loc),
+                                    Err(_) => (None, loc),
+                                }
+                            }
+                            _ => (None, loc),
+                        }
+                    }
+                };
+
+                let Some(compressed) = bytes else {
+                    return Some((chunk_id_hex, pack_loc));
                 };
                 let decompressed =
                     match tokio::task::spawn_blocking(move || compressor.decompress(&compressed))
                         .await
                     {
                         Ok(Ok(data)) => data,
-                        _ => return Some(chunk_id_hex),
+                        _ => return Some((chunk_id_hex, pack_loc)),
                     };
                 let hash_hex = blake3::hash(&decompressed).to_hex().to_string();
                 if hash_hex == chunk_id_hex {
                     None
                 } else {
-                    Some(chunk_id_hex)
+                    Some((chunk_id_hex, pack_loc))
                 }
             }
         })
@@ -428,12 +532,44 @@ pub async fn verify_chunk_integrity(
         .collect()
         .await;
 
+    let invalid: Vec<String> = results.iter().map(|(id, _)| id.clone()).collect();
+
+    let evict_enabled = req.evict_invalid
+        && std::env::var("MEDIAGIT_REPAIR_EVICT_PACK_ENTRIES")
+            .as_deref()
+            .unwrap_or("1")
+            != "0";
+
+    let mut evicted: Vec<String> = Vec::new();
+    if evict_enabled {
+        // Group by pack_oid so each pack's manifest is rewritten at most once.
+        let mut by_pack: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for (id, loc) in results {
+            if let Some(loc) = loc {
+                by_pack.entry(loc.pack_oid).or_default().push(id);
+            }
+        }
+        for (pack_oid, ids) in by_pack {
+            match evict_pack_entries(&state, &repo_path, &repo, &pack_oid, &ids).await {
+                Ok(()) => evicted.extend(ids),
+                Err(status) => tracing::warn!(
+                    repo = %repo,
+                    pack = %pack_oid,
+                    ?status,
+                    "Failed to evict invalid pack entries"
+                ),
+            }
+        }
+    }
+
     tracing::debug!(
         repo = %repo,
         invalid_count = invalid.len(),
+        evicted_count = evicted.len(),
         "Chunk integrity verified"
     );
-    Ok(Json(VerifyIntegrityResponse { invalid }))
+    Ok(Json(VerifyIntegrityResponse { invalid, evicted }))
 }
 
 // ============================================================================
@@ -489,7 +625,18 @@ pub async fn mpu_start(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<MpuStartRequest>,
 ) -> Result<Json<MpuStartResponse>, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
+
+    if !is_hex_str(&req.chunk_id) {
+        tracing::warn!(repo = %repo, chunk_id = %req.chunk_id, "Rejecting mpu_start: chunk_id is not hex");
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -558,7 +705,18 @@ pub async fn mpu_complete(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<MpuCompleteRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
+
+    if !is_hex_str(&req.chunk_id) {
+        tracing::warn!(repo = %repo, chunk_id = %req.chunk_id, "Rejecting mpu_complete: chunk_id is not hex");
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -598,7 +756,18 @@ pub async fn mpu_abort(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<MpuAbortRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:write", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:write",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
+
+    if !is_hex_str(&req.chunk_id) {
+        tracing::warn!(repo = %repo, chunk_id = %req.chunk_id, "Rejecting mpu_abort: chunk_id is not hex");
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
@@ -627,9 +796,21 @@ pub async fn presign_pack_downloads(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<PresignPackDownloadRequest>,
 ) -> Result<Json<std::collections::HashMap<String, Option<PresignedGetJson>>>, StatusCode> {
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     crate::security::validate_repo_name(&repo).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    if !req.pack_ids.iter().all(|id| is_hex_str(id)) {
+        tracing::warn!(repo = %repo, "Rejecting presign_pack_downloads: a pack_id is not hex");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
         return Err(StatusCode::NOT_FOUND);
@@ -675,4 +856,249 @@ pub async fn presign_pack_downloads(
         .await;
 
     Ok(Json(entries.into_iter().collect()))
+}
+
+#[derive(serde::Deserialize)]
+pub struct VerifyObjectsRequest {
+    oids: Vec<String>,
+    /// Delete invalid loose objects so a follow-up re-push isn't skipped by
+    /// `odb.write`'s exists()-dedup (QA-013 object repair).
+    #[serde(default)]
+    evict_invalid: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct VerifyObjectsResponse {
+    invalid: Vec<String>,
+    evicted: Vec<String>,
+}
+
+/// POST /:repo/objects/verify-integrity — read + BLAKE3 re-hash whole objects
+/// (commits/trees/blobs) through the server's ODB. Complements the chunk-level
+/// verify above: `push --repair` needs this for blobs stored un-chunked, which
+/// the chunk-manifest walk never sees (CHK20's poisoned object was one).
+pub async fn verify_object_integrity(
+    Path(repo): Path<String>,
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    Json(req): Json<VerifyObjectsRequest>,
+) -> Result<Json<VerifyObjectsResponse>, StatusCode> {
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
+
+    let repo_path = state.repos_dir.join(&repo);
+    if !repo_path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let odb = std::sync::Arc::new(get_or_init_odb(&state, &repo_path).await?);
+
+    let invalid: Vec<String> = futures::stream::iter(req.oids)
+        .map(|oid_hex| {
+            let odb = std::sync::Arc::clone(&odb);
+            async move {
+                let Ok(oid) = mediagit_versioning::Oid::from_hex(&oid_hex) else {
+                    return Some(oid_hex);
+                };
+                match odb.read(&oid).await {
+                    Ok(data) if blake3::hash(&data).to_hex().to_string() == oid_hex => None,
+                    _ => Some(oid_hex),
+                }
+            }
+        })
+        .buffer_unordered(20)
+        .filter_map(|r| async move { r })
+        .collect()
+        .await;
+
+    let evict_enabled = req.evict_invalid
+        && std::env::var("MEDIAGIT_REPAIR_EVICT_PACK_ENTRIES")
+            .as_deref()
+            .unwrap_or("1")
+            != "0";
+
+    let mut evicted = Vec::new();
+    if evict_enabled {
+        for oid_hex in &invalid {
+            if let Ok(oid) = mediagit_versioning::Oid::from_hex(oid_hex) {
+                match odb.delete_object(&oid).await {
+                    Ok(()) => evicted.push(oid_hex.clone()),
+                    Err(e) => {
+                        tracing::warn!(oid = %oid_hex, error = %e, "Failed to evict invalid object")
+                    }
+                }
+            }
+        }
+    }
+
+    tracing::debug!(
+        repo = %repo,
+        invalid_count = invalid.len(),
+        evicted_count = evicted.len(),
+        "Object integrity verified"
+    );
+    Ok(Json(VerifyObjectsResponse { invalid, evicted }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serializes access to `MEDIAGIT_REPAIR_EVICT_PACK_ENTRIES` across the
+    /// tests below — env vars are process-global and tests run concurrently
+    /// under `#[tokio::test]` in the same binary.
+    static EVICT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Writes one packed chunk whose compressed bytes are corrupted — it will
+    /// not decompress back to content matching its claimed chunk id — and
+    /// registers it in both the in-memory pack_index and the persisted JSONL
+    /// manifest, mirroring what `complete_pack` writes for a real pack.
+    /// Returns the chunk's claimed (now-invalid) id.
+    async fn write_corrupt_pack_entry(
+        state: &AppState,
+        storage: &LocalBackend,
+        repo: &str,
+        repo_path: &std::path::Path,
+        pack_oid: &str,
+    ) -> String {
+        let content = b"the quick brown fox jumps over the lazy dog".to_vec();
+        let chunk_id = blake3::hash(&content).to_hex().to_string();
+        let compressor = SmartCompressor::new();
+        let mut compressed = compressor.compress(&content).expect("compress");
+        // Corrupt the compressed payload so decompress() no longer round-trips
+        // to content whose BLAKE3 matches chunk_id (or fails to decompress).
+        let last = compressed.len() - 1;
+        compressed[last] ^= 0xFF;
+
+        // [type:1][size:4] pack entry header — server only skips these bytes,
+        // content is irrelevant here.
+        let mut pack_bytes = vec![0u8; 5];
+        pack_bytes.extend_from_slice(&compressed);
+
+        let pack_key = format!("packs/{}", pack_oid);
+        storage.put(&pack_key, &pack_bytes).await.expect("put pack");
+
+        let loc = PackLoc {
+            pack_oid: pack_oid.to_string(),
+            offset: 0,
+            length: pack_bytes.len() as u32,
+            compressed_hash: None,
+        };
+        {
+            let mut idx = state.pack_index.write().await;
+            idx.entry(repo.to_string())
+                .or_default()
+                .insert(chunk_id.clone(), loc);
+        }
+
+        let shard = &pack_oid[..2];
+        let manifest_dir = repo_path.join(".mediagit").join("packs").join(shard);
+        tokio::fs::create_dir_all(&manifest_dir).await.unwrap();
+        let line = PackIndexLine {
+            chunk_oid: chunk_id.clone(),
+            pack_oid: pack_oid.to_string(),
+            offset: 0,
+            length: pack_bytes.len() as u32,
+            compressed_hash: None,
+        };
+        let jsonl = format!("{}\n", serde_json::to_string(&line).unwrap());
+        tokio::fs::write(manifest_dir.join(format!("{}.jsonl", pack_oid)), jsonl)
+            .await
+            .unwrap();
+
+        chunk_id
+    }
+
+    #[tokio::test]
+    async fn verify_detects_invalid_packed_chunk_and_evicts() {
+        let _guard = EVICT_ENV_LOCK.lock().await;
+        std::env::remove_var("MEDIAGIT_REPAIR_EVICT_PACK_ENTRIES"); // default: enabled
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = "test-repo".to_string();
+        let repo_path = tmp.path().join(&repo);
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let storage = LocalBackend::new(repo_path.join(".mediagit"))
+            .await
+            .expect("local backend");
+        let state = Arc::new(AppState::new(tmp.path().to_path_buf()));
+        let chunk_id =
+            write_corrupt_pack_entry(&state, &storage, &repo, &repo_path, "deadbeef00").await;
+
+        let req = VerifyIntegrityRequest {
+            chunk_ids: vec![chunk_id.clone()],
+            evict_invalid: true,
+        };
+        let resp = verify_chunk_integrity(
+            Path(repo.clone()),
+            State(Arc::clone(&state)),
+            None,
+            Json(req),
+        )
+        .await
+        .expect("handler ok")
+        .0;
+
+        assert_eq!(resp.invalid, vec![chunk_id.clone()]);
+        assert_eq!(resp.evicted, vec![chunk_id.clone()]);
+
+        // Evicted from the in-memory index.
+        {
+            let idx = state.pack_index.read().await;
+            assert!(idx.get(&repo).unwrap().get(&chunk_id).is_none());
+        }
+
+        // Evicted from the persisted JSONL manifest too.
+        let manifest_path = repo_path
+            .join(".mediagit")
+            .join("packs")
+            .join("de")
+            .join("deadbeef00.jsonl");
+        let content = tokio::fs::read_to_string(&manifest_path).await.unwrap();
+        assert!(!content.contains(&chunk_id));
+    }
+
+    #[tokio::test]
+    async fn verify_reports_only_when_eviction_disabled_by_knob() {
+        let _guard = EVICT_ENV_LOCK.lock().await;
+        std::env::set_var("MEDIAGIT_REPAIR_EVICT_PACK_ENTRIES", "0");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = "test-repo".to_string();
+        let repo_path = tmp.path().join(&repo);
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let storage = LocalBackend::new(repo_path.join(".mediagit"))
+            .await
+            .expect("local backend");
+        let state = Arc::new(AppState::new(tmp.path().to_path_buf()));
+        let chunk_id =
+            write_corrupt_pack_entry(&state, &storage, &repo, &repo_path, "cafebabe00").await;
+
+        let req = VerifyIntegrityRequest {
+            chunk_ids: vec![chunk_id.clone()],
+            evict_invalid: true,
+        };
+        let resp = verify_chunk_integrity(
+            Path(repo.clone()),
+            State(Arc::clone(&state)),
+            None,
+            Json(req),
+        )
+        .await
+        .expect("handler ok")
+        .0;
+
+        std::env::remove_var("MEDIAGIT_REPAIR_EVICT_PACK_ENTRIES");
+
+        // Still reported invalid, but report-only: nothing evicted.
+        assert_eq!(resp.invalid, vec![chunk_id.clone()]);
+        assert!(resp.evicted.is_empty());
+
+        let idx = state.pack_index.read().await;
+        assert!(idx.get(&repo).unwrap().get(&chunk_id).is_some());
+    }
 }

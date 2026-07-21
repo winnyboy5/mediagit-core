@@ -310,7 +310,8 @@ impl ProtocolClient {
         }
 
         let data = response.bytes().await?;
-        mediagit_versioning::format::deserialize(&data).context("Failed to deserialize manifest")
+        mediagit_versioning::ChunkManifest::from_bytes(&data)
+            .context("Failed to deserialize manifest")
     }
     /// Download a single chunk from the remote server
     pub async fn download_chunk(&self, chunk_id: &Oid) -> Result<Vec<u8>> {
@@ -393,7 +394,9 @@ impl ProtocolClient {
             .tcp_nodelay(true)
             .http1_only()
             .build()
-            .unwrap_or_else(|_| self.client.clone());
+            // Fallback must be credential-free: self.client carries auth
+            // default_headers, which must never reach presigned URLs.
+            .unwrap_or_else(|_| reqwest::Client::new());
 
         // ── Phase 1: manifests (fast — small metadata payloads) ──────────────
         // Download all manifests upfront to know total_chunks before any data
@@ -446,9 +449,8 @@ impl ProtocolClient {
                             );
                         }
                         let data = resp.bytes().await?;
-                        let manifest: ChunkManifest =
-                            mediagit_versioning::format::deserialize(&data)
-                                .context("Failed to deserialize manifest")?;
+                        let manifest = ChunkManifest::from_bytes(&data)
+                            .context("Failed to deserialize manifest")?;
 
                         // 2. Check which chunks are already local (parallel filesystem stats).
                         let obj_total = manifest.chunks.len();
@@ -815,9 +817,6 @@ impl ProtocolClient {
                                 }
                                 if stream_to_disk {
                                     // B4: stream proxy response to temp file to reduce peak RAM.
-                                    // Chunk IDs are BLAKE3(uncompressed); proxy returns compressed
-                                    // bytes — hash cannot be verified here without decompressing.
-                                    // Integrity is verified at read time via decompression.
                                     use futures::StreamExt as _;
                                     use tokio::io::AsyncWriteExt as _;
                                     let temp_path =

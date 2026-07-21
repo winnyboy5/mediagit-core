@@ -6,6 +6,29 @@ Using MediaGit in continuous integration and deployment pipelines.
 
 MediaGit's CI/CD integration enables automated testing, verification, and deployment of media asset repositories. The `mediagit-server` binary provides the HTTP API for remote operations, while standard CLI commands work in headless CI environments.
 
+## CI Authentication Flow
+
+```mermaid
+sequenceDiagram
+    participant Admin
+    participant Server as mediagit-server
+    participant CI as CI Runner
+    participant Repo as Remote Repo
+
+    Admin->>Server: mediagit auth key create --name ci<br/>(prints: ak_xxxxx)
+    Admin->>CI: Store key in CI secrets<br/>as MEDIAGIT_API_KEY
+    
+    CI->>CI: MEDIAGIT_API_KEY=ak_xxxxx<br/>mediagit add assets/
+    CI->>CI: mediagit commit -m "Auto update"
+    CI->>Server: mediagit push origin main<br/>(sends X-API-Key header)
+    Server-->>CI: ✓ Authenticated
+    Server->>Repo: Store objects & packs
+    Repo-->>Server: ✓ Stored
+    Server-->>CI: ✓ Push complete
+```
+
+This approach avoids passwords in CI — the API key is stored as a secret and never logged.
+
 ## GitHub Actions
 
 ### Basic CI Workflow
@@ -23,7 +46,7 @@ jobs:
 
       - name: Install MediaGit
         run: |
-          curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/latest/download/mediagit-0.2.8-beta.1-x86_64-linux.tar.gz \
+          curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/latest/download/mediagit-0.3.0-rc.1-x86_64-linux.tar.gz \
             | tar xz -C /usr/local/bin/
 
       - name: Verify repository integrity
@@ -55,7 +78,7 @@ jobs:
 
       - name: Install MediaGit
         run: |
-          VERSION="0.2.8-beta.1"
+          VERSION="0.3.0-rc.1"
           curl -fsSL "https://github.com/winnyboy5/mediagit-core/releases/download/v${VERSION}/mediagit-${VERSION}-x86_64-linux.tar.gz" \
             | tar xz -C /usr/local/bin/
 
@@ -163,7 +186,7 @@ validate-assets:
   image: ubuntu:22.04
   before_script:
     - apt-get update -qq && apt-get install -y -qq curl
-    - curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/latest/download/mediagit-0.2.8-beta.1-x86_64-linux.tar.gz
+    - curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/latest/download/mediagit-0.3.0-rc.1-x86_64-linux.tar.gz
         | tar xz -C /usr/local/bin/
   script:
     - mediagit fsck
@@ -189,7 +212,7 @@ MediaGit is designed for CI performance:
   uses: actions/cache@v4
   with:
     path: /usr/local/bin/mediagit
-    key: mediagit-${{ runner.os }}-0.2.8-beta.1
+    key: mediagit-${{ runner.os }}-0.3.0-rc.1
 ```
 
 ## Troubleshooting CI Issues

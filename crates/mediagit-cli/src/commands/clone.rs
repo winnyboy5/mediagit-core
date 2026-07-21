@@ -21,7 +21,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_versioning::{CheckoutManager, ObjectDatabase, RefDatabase};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -66,21 +66,146 @@ pub struct CloneCmd {
 
 impl CloneCmd {
     pub async fn execute(&self) -> Result<()> {
+        // MediaGit's remote clone protocol speaks HTTP(S) only; anything
+        // else is treated as a local repository path (a directory
+        // containing `.mediagit`).
+        if self.url.starts_with("http://") || self.url.starts_with("https://") {
+            self.execute_remote().await
+        } else {
+            self.execute_local().await
+        }
+    }
+
+    /// Clone from a local MediaGit repository. Copies the `.mediagit`
+    /// control directory verbatim (objects incl. namespace dirs, refs,
+    /// config — not the staged index, not the source's working files),
+    /// fixes up the storage path + `origin` remote in the copied config,
+    /// then materializes the working tree via the same `CheckoutManager`
+    /// path the remote clone uses.
+    async fn execute_local(&self) -> Result<()> {
         let start_time = Instant::now();
 
-        // Validate URL scheme before reqwest/url gives an opaque "scheme is not allowed".
-        // MediaGit's clone protocol currently speaks HTTP(S) only.
-        if !(self.url.starts_with("http://") || self.url.starts_with("https://")) {
+        let source_dir = dunce::canonicalize(&self.url)
+            .with_context(|| format!("Local clone source not found: '{}'", self.url))?;
+        let source_mediagit = source_dir.join(".mediagit");
+        if !source_mediagit.is_dir() {
             anyhow::bail!(
                 "unsupported remote URL '{}'.\n\n\
-                 `mediagit clone` currently supports http:// and https:// URLs only.\n\
-                 To clone a local repository, copy the directory directly:\n    \
-                 cp -r <src> <dst>\n\
+                 `mediagit clone` supports http:// and https:// URLs, or a path to an\n\
+                 existing local MediaGit repository (a directory containing `.mediagit`).\n\
                  To serve a local repo over HTTP, run:\n    \
                  mediagit-server -c mediagit-server.toml",
                 self.url
             );
         }
+
+        let target_dir = match &self.directory {
+            Some(dir) => PathBuf::from(dir),
+            None => PathBuf::from(source_dir.file_name().ok_or_else(|| {
+                anyhow::anyhow!("Could not determine repository name from '{}'", self.url)
+            })?),
+        };
+
+        if !self.quiet {
+            println!(
+                "{} Cloning into '{}'...",
+                style("📦").cyan().bold(),
+                target_dir.display()
+            );
+        }
+        if target_dir.exists() {
+            anyhow::bail!("Destination path '{}' already exists", target_dir.display());
+        }
+        std::fs::create_dir_all(&target_dir).context("Failed to create target directory")?;
+        // Canonicalize so the fixed-up `base_path` we write below is
+        // absolute (matching how `init` writes it) — a relative path here
+        // gets joined onto `repo_root` a second time by
+        // `create_inner_storage_backend`, doubling the prefix.
+        let target_dir =
+            dunce::canonicalize(&target_dir).context("Failed to resolve target directory")?;
+
+        let clone_result: Result<()> = async {
+            let storage_path = target_dir.join(".mediagit");
+            copy_dir_skip(&source_mediagit, &storage_path, Path::new("index"))
+                .context("Failed to copy .mediagit directory")?;
+
+            // The copied config's filesystem `base_path` is still the
+            // SOURCE repo's absolute objects path (baked in at `init`
+            // time) — repoint it at the target's own copy, and record
+            // `origin` as the source we cloned from.
+            let mut config = mediagit_config::Config::load(&target_dir)
+                .await
+                .context("Failed to load copied config")?;
+            if let mediagit_config::StorageConfig::FileSystem(ref mut fs) = config.storage {
+                fs.base_path = storage_path.join("objects").display().to_string();
+            }
+            config.remotes.insert(
+                "origin".to_string(),
+                mediagit_config::RemoteConfig::new(source_dir.display().to_string()),
+            );
+            config.save(&target_dir)?;
+
+            let storage = create_storage_backend(&target_dir).await?;
+            let odb = Arc::new(ObjectDatabase::with_smart_compression(
+                Arc::clone(&storage),
+                1000,
+            ));
+            let refdb = RefDatabase::new(&storage_path);
+
+            // Default branch: explicit --branch, else whatever the copied
+            // HEAD already points to (the source repo's own default).
+            let branch = match &self.branch {
+                Some(b) => b.clone(),
+                None => refdb
+                    .read("HEAD")
+                    .await
+                    .ok()
+                    .and_then(|h| h.target)
+                    .and_then(|t| t.strip_prefix("refs/heads/").map(str::to_string))
+                    .unwrap_or_else(|| "main".to_string()),
+            };
+            let ref_name = format!("refs/heads/{}", branch);
+            let oid = refdb
+                .read(&ref_name)
+                .await
+                .ok()
+                .and_then(|r| r.oid)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Branch '{}' not found in source repository", branch)
+                })?;
+            refdb.update_symbolic("HEAD", &ref_name).await?;
+
+            let progress = ProgressTracker::new(self.quiet);
+            let checkout_pb = progress.spinner("Checking out files...");
+            let checkout_mgr = CheckoutManager::new(&odb, &target_dir);
+            let files_count = checkout_mgr.checkout_fresh(&oid).await?;
+            checkout_pb.finish_with_message(format!("Checked out {} files", files_count));
+
+            if !self.quiet {
+                println!(
+                    "\n{} Cloned into '{}' ({} files, {:.2}s)",
+                    style("✅").green().bold(),
+                    target_dir.display(),
+                    files_count,
+                    start_time.elapsed().as_secs_f64()
+                );
+            }
+
+            let _ = crate::auto_gc::maybe_run(&target_dir, crate::auto_gc::TriggerMode::PostClone)
+                .await;
+            Ok(())
+        }
+        .await;
+
+        if clone_result.is_err() {
+            let _ = std::fs::remove_dir_all(&target_dir);
+            println!("cleaned up partial clone at {}", target_dir.display());
+        }
+        clone_result
+    }
+
+    async fn execute_remote(&self) -> Result<()> {
+        let start_time = Instant::now();
 
         // Determine target directory
         let target_dir = self.get_target_directory()?;
@@ -107,6 +232,12 @@ impl CloneCmd {
         let init_spinner = progress.spinner("Creating directory...");
         std::fs::create_dir_all(&target_dir).context("Failed to create target directory")?;
 
+        // Steps 2-9 can all fail (network, refs, checkout) after target_dir
+        // has been created. Wrap them so any failure cleans up the partial
+        // clone directory before the error propagates (NOTE-RM-3). We always
+        // own target_dir here — the exists() check above already bailed if
+        // it was there before this clone, so it's safe to remove on failure.
+        let clone_result: Result<()> = async {
         // Step 2: Initialize repository
         init_spinner.set_message("Initializing repository...");
         let storage_path = target_dir.join(".mediagit");
@@ -122,15 +253,30 @@ impl CloneCmd {
 
         // Step 3: Configure remote
         init_spinner.set_message("Configuring remote...");
+        // Layout v2: default namespace = sanitized basename of the clone
+        // target directory, matching `init`'s convention.
+        let namespace = target_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "repo".to_string());
         let config_content = format!(
-            r#"[remotes.origin]
+            r#"repo_namespace = "{}"
+layout_version = {}
+repo_id = "{}"
+
+[remotes.origin]
 url = "{}"
 "#,
+            mediagit_storage::sanitize_namespace(&namespace),
+            mediagit_config::CURRENT_LAYOUT_VERSION,
+            mediagit_storage::generate_repo_id(),
             self.url
         );
         std::fs::write(storage_path.join("config.toml"), config_content)?;
 
-        // Step 4: Initialize storage and fetch
+        // Step 4: Initialize storage and fetch. `create_storage_backend`
+        // performs the LAYOUT marker check/write itself (one of the two
+        // production wrap-points), keyed off the repo_id just written above.
         init_spinner.set_message("Connecting to remote...");
         let storage = create_storage_backend(&target_dir).await?;
         let odb = Arc::new(ObjectDatabase::with_smart_compression(
@@ -139,14 +285,78 @@ url = "{}"
         ));
         let refdb = RefDatabase::new(&storage_path);
 
-        // Initialize protocol client (no repo config yet for clone — use env
-        // MEDIAGIT_DOWNLOAD_CONCURRENCY to tune download concurrency).
-        let client = mediagit_protocol::ProtocolClient::new(self.url.clone());
+        // Initialize protocol client. config.toml was just written above with
+        // an empty `[remotes.origin]` (no token yet — clone predates the
+        // repo existing, so per-remote credentials can't be set ahead of
+        // time), so credential resolution here effectively falls through to
+        // env MEDIAGIT_TOKEN/MEDIAGIT_API_KEY. Also honours env
+        // MEDIAGIT_DOWNLOAD_CONCURRENCY to tune download concurrency.
+        let clone_config = mediagit_config::Config::load(&target_dir)
+            .await
+            .unwrap_or_default();
+        let (mut credentials, cred_source) =
+            crate::repo::resolve_credentials_tiered(&target_dir, &clone_config, "origin");
+        let mut client = mediagit_protocol::ProtocolClient::new(self.url.clone())
+            .with_credentials(credentials.clone());
 
         // Step 5: Get remote refs
         init_spinner.set_message("Fetching remote refs...");
-        let remote_refs = client.get_refs().await?;
+        // First authenticated call of this command — a cached keychain
+        // credential (e.g. from a prior `auth login`) may have expired; on a
+        // 401, invalidate it and retry once with the next tier (I11).
+        let remote_refs = match client.get_refs().await {
+            Ok(r) => r,
+            Err(e)
+                if crate::repo::invalidate_on_unauthorized(
+                    &clone_config,
+                    "origin",
+                    cred_source,
+                    &e,
+                ) =>
+            {
+                credentials =
+                    crate::repo::resolve_credentials(&target_dir, &clone_config, "origin");
+                client = mediagit_protocol::ProtocolClient::new(self.url.clone())
+                    .with_credentials(credentials.clone());
+                client.get_refs().await?
+            }
+            Err(e) => return Err(e),
+        };
+        crate::repo::remember_credentials(&clone_config, "origin", &credentials);
         init_spinner.finish_with_message("Connected");
+
+        // Inherit the remote's CDC seed (if advertised) so this clone produces
+        // matching chunk boundaries for better cross-clone dedup. Missing
+        // capability just leaves cdc_seed at 0 (legacy) — this only affects
+        // dedup ratio, never correctness (chunk storage is content-addressed).
+        if let Some(seed) = remote_refs.capabilities.iter().find_map(|c| {
+            c.strip_prefix("cdc-seed=")
+                .and_then(|v| v.parse::<u64>().ok())
+        }) {
+            let config_path = storage_path.join("config.toml");
+            let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+            // The freshly-written clone config already carries a top-level
+            // `cdc_seed = 0` line; replace its value in place. Prepending a
+            // second `cdc_seed` key produced invalid TOML (duplicate key) and
+            // broke every clone of a seeded repo.
+            let mut replaced = false;
+            let mut lines: Vec<String> = existing
+                .lines()
+                .map(|l| {
+                    if !replaced && l.trim_start().starts_with("cdc_seed") && l.contains('=') {
+                        replaced = true;
+                        format!("cdc_seed = {seed}")
+                    } else {
+                        l.to_string()
+                    }
+                })
+                .collect();
+            if !replaced {
+                lines.insert(0, format!("cdc_seed = {seed}"));
+            }
+            std::fs::write(&config_path, lines.join("\n") + "\n")?;
+        }
+
         let remote_ref_name = format!("refs/heads/{}", branch);
         let remote_ref = remote_refs
             .refs
@@ -217,13 +427,19 @@ url = "{}"
         let ref_update = mediagit_versioning::Ref::new_direct(remote_ref_name.clone(), remote_oid);
         refdb.write(&ref_update).await?;
 
+        // Upstream tracking (M2 plumbing, consumed by `status` in M4): the
+        // cloned default branch tracks origin's default branch by construction.
+        {
+            let mut tracking_config = mediagit_config::Config::load(&target_dir).await?;
+            tracking_config.set_branch_upstream(branch, "origin", remote_ref_name.clone());
+            tracking_config.save(&target_dir)?;
+        }
+
         // Step 8b: Create tracking refs for all remote branches (LAZY CLONE)
         // We only download objects for the default branch. Other branches' objects
         // will be fetched on-demand when user runs `pull origin branch` or `branch switch`.
         // Also write tag refs (refs/tags/*) received from the server.
         let mut other_branches = Vec::new();
-        // Collect tag-meta refs for second pass after ODB objects are available
-        let mut tag_meta_refs: Vec<(String, String)> = Vec::new();
         for ref_info in &remote_refs.refs {
             if ref_info.name.starts_with("refs/heads/") {
                 let branch_name = ref_info
@@ -253,49 +469,25 @@ url = "{}"
                         other_branches.push(branch_name.to_string());
                     }
                 }
-            } else if ref_info.name.starts_with("refs/tags/") {
-                // Write tag ref directly
-                if let Ok(tag_oid) = mediagit_versioning::Oid::from_hex(&ref_info.oid) {
-                    let tag_ref =
-                        mediagit_versioning::Ref::new_direct(ref_info.name.clone(), tag_oid);
-                    refdb.write(&tag_ref).await?;
-                    if self.verbose {
-                        println!(
-                            "  Created tag ref: {} -> {}",
-                            ref_info.name,
-                            &ref_info.oid[..8]
-                        );
-                    }
-                }
-            } else if let Some(tag_name) = ref_info.name.strip_prefix("refs/tag-meta/") {
-                // Record for second pass: blob OID -> .meta file
-                tag_meta_refs.push((tag_name.to_string(), ref_info.oid.clone()));
             }
         }
 
-        // Restore annotated tag .meta sidecars from ODB blobs
-        for (tag_name, blob_oid_hex) in &tag_meta_refs {
-            if let Ok(blob_oid) = mediagit_versioning::Oid::from_hex(blob_oid_hex) {
-                match odb.read(&blob_oid).await {
-                    Ok(meta_bytes) => {
-                        let meta_dir = storage_path.join("refs").join("tags");
-                        if let Err(e) = tokio::fs::create_dir_all(&meta_dir).await {
-                            tracing::warn!("Failed to create tags dir: {}", e);
-                            continue;
-                        }
-                        let meta_path = meta_dir.join(format!("{}.meta", tag_name));
-                        if let Err(e) = tokio::fs::write(&meta_path, &meta_bytes).await {
-                            tracing::warn!("Failed to write tag meta for {}: {}", tag_name, e);
-                        } else if self.verbose {
-                            println!("  Restored annotated tag meta: {}.meta", tag_name);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to read tag meta blob {}: {}", blob_oid_hex, e);
-                    }
-                }
-            }
-        }
+        // Write tag refs (refs/tags/*) and restore annotated tag .meta
+        // sidecars (refs/tag-meta/*) received from the server. Shared with
+        // `fetch` — see commands::fetch::fetch_tags. Pass the default branch
+        // tip as the have-set: a tag pointing at (or behind) it needs no
+        // extra download; anything else fetch_tags pulls on its own.
+        let clone_have = vec![remote_oid.to_hex()];
+        super::fetch::fetch_tags(
+            &refdb,
+            &odb,
+            &storage_path,
+            &remote_refs.refs,
+            &client,
+            &clone_have,
+            self.verbose,
+        )
+        .await?;
 
         // Show available branches to user
         if !other_branches.is_empty() && !self.quiet {
@@ -341,7 +533,15 @@ url = "{}"
         let _ =
             crate::auto_gc::maybe_run(&target_dir, crate::auto_gc::TriggerMode::PostClone).await;
 
-        Ok(())
+            Ok(())
+        }
+        .await;
+
+        if clone_result.is_err() {
+            let _ = std::fs::remove_dir_all(&target_dir);
+            println!("cleaned up partial clone at {}", target_dir.display());
+        }
+        clone_result
     }
 
     /// Extract repository name from URL and determine target directory
@@ -366,4 +566,24 @@ url = "{}"
 
         Ok(PathBuf::from(name))
     }
+}
+
+/// Recursively copy `src` to `dst`, skipping any entry whose path relative
+/// to `src` equals `skip_relative` (used to exclude the source's staged
+/// index from a local clone's copied `.mediagit`).
+fn copy_dir_skip(src: &Path, dst: &Path, skip_relative: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        if Path::new(&entry.file_name()) == skip_relative {
+            continue;
+        }
+        let dst_path = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_skip(&entry.path(), &dst_path, Path::new(""))?;
+        } else {
+            std::fs::copy(entry.path(), &dst_path)?;
+        }
+    }
+    Ok(())
 }

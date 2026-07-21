@@ -49,6 +49,20 @@ const REPO_MARKER: &str = ".mediagit/no-autogc";
 /// background optimization and must never break the operation that triggered
 /// it (a failed gc should not fail the commit/pull/clone the user invoked).
 pub async fn maybe_run(repo_root: &Path, mode: TriggerMode) -> Result<()> {
+    // Stale upload-journal sweep runs regardless of the auto-gc enable knob
+    // below — it isn't garbage collection, it's housekeeping for a resumable-
+    // upload mechanism, and MEDIAGIT_NO_AUTO_GC shouldn't accidentally leave
+    // `.mediagit/upload/*.journal` growing forever. Age-based and idempotent
+    // (see `UploadJournal::sweep_stale`), so running it on every trigger is
+    // cheap and safe.
+    let swept = mediagit_protocol::journal::UploadJournal::sweep_stale(
+        repo_root,
+        mediagit_protocol::journal::DEFAULT_JOURNAL_MAX_AGE,
+    );
+    if swept > 0 {
+        debug!(swept, "swept stale upload journals");
+    }
+
     if !is_enabled(repo_root) {
         debug!(?mode, "auto-gc disabled for this repo/invocation");
         return Ok(());

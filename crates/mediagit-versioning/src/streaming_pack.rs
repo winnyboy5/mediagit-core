@@ -149,17 +149,12 @@ impl<R: AsyncRead + Unpin> StreamingPackReader<R> {
         }
 
         // Parse object type
-        let obj_type = match type_byte {
-            1 => ObjectType::Blob,
-            2 => ObjectType::Tree,
-            3 => ObjectType::Commit,
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Invalid object type: {}", type_byte),
-                ))
-            }
-        };
+        let obj_type = ObjectType::from_u8(type_byte).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid object type: {}", type_byte),
+            )
+        })?;
 
         // Calculate OID
         let oid = Oid::hash(&obj_data);
@@ -282,12 +277,9 @@ impl<W: AsyncWrite + Unpin> StreamingPackWriter<W> {
     ) -> io::Result<()> {
         let entry_offset = self.current_offset;
 
-        // Write object header
-        let type_byte: u8 = match obj_type {
-            ObjectType::Blob => 1,
-            ObjectType::Tree => 2,
-            ObjectType::Commit => 3,
-        };
+        // Write object header. `ObjectType::to_u8`/`from_u8` are the single
+        // source of truth for the wire byte value (matches `pack.rs`).
+        let type_byte: u8 = obj_type.to_u8();
 
         let size = data.len() as u32;
         let mut header = Vec::with_capacity(5);

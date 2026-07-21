@@ -16,6 +16,8 @@ use crate::progress::{OperationStats, ProgressTracker};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use mediagit_versioning::{Oid, Ref, RefDatabase, Reflog, ReflogEntry};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 /// Manage branches
@@ -161,6 +163,13 @@ pub struct SwitchOpts {
     /// Create and switch to new branch
     #[arg(short, long)]
     pub create: bool,
+
+    /// When used with --create, set up upstream tracking. If `branch` looks
+    /// like `<remote>/<name>` (e.g. `origin/feat-a`), the new local branch
+    /// is named `<name>`, started from the `<remote>/<name>` tracking ref
+    /// instead of HEAD, and set to track it.
+    #[arg(long)]
+    pub track: bool,
 
     /// Force switch even if local changes
     #[arg(short = 'f', long)]
@@ -416,8 +425,9 @@ impl BranchCmd {
 
         let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
-        let _storage = create_storage_backend(&repo_root).await?;
+        let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
+        let odb = mediagit_versioning::ObjectDatabase::with_smart_compression(storage, 1000);
 
         // Validate branch name
         if opts.name.contains("..") || opts.name.starts_with('/') || opts.name.ends_with('/') {
@@ -438,7 +448,10 @@ impl BranchCmd {
         // keep working), then fall back to `refs/remotes/<input>` when the
         // user wrote something like `origin/feat-a`.
         let start_oid = if let Some(start_point) = &opts.start_point {
-            match refdb.resolve(start_point).await {
+            // Route through the shared resolver so OIDs (full/abbrev), tags, and
+            // HEAD~N all work as start points (BUG-VFX-2), then keep the
+            // remote-shorthand fallback for `origin/feat` style inputs.
+            match mediagit_versioning::resolve_revision(start_point, &refdb, &odb).await {
                 Ok(oid) => oid,
                 Err(primary_err) => {
                     let looks_like_remote_shorthand = start_point.contains('/')
@@ -473,6 +486,53 @@ impl BranchCmd {
             output::success(&format!("Created branch '{}' at {}", opts.name, start_oid));
         }
 
+        // Upstream tracking (M2 plumbing, consumed by `status` in M4).
+        // Source is `--set-upstream <remote>/<branch>` if given, else the
+        // start point when `--track` was requested (matching git's
+        // "track what you branched from" convention).
+        if !opts.no_track {
+            let track_source = opts
+                .set_upstream
+                .as_deref()
+                .or_else(|| opts.track.then_some(opts.start_point.as_deref()).flatten());
+            if let Some(source) = track_source {
+                match source.split_once('/') {
+                    Some((remote, remote_branch)) => {
+                        let mut config = mediagit_config::Config::load(&repo_root).await?;
+                        config.set_branch_upstream(
+                            &opts.name,
+                            remote,
+                            format!("refs/heads/{}", remote_branch),
+                        );
+                        config.save(&repo_root)?;
+                        if !opts.quiet {
+                            output::info(&format!(
+                                "Branch '{}' set up to track '{}/{}'",
+                                opts.name, remote, remote_branch
+                            ));
+                        }
+                    }
+                    None if opts.set_upstream.is_some() => {
+                        anyhow::bail!(
+                            "--set-upstream expects <remote>/<branch> (got '{}')",
+                            source
+                        );
+                    }
+                    None => {
+                        // --track given but the start point doesn't look like
+                        // <remote>/<branch> (e.g. a bare OID or local ref) —
+                        // nothing to track against; not an error.
+                        if !opts.quiet {
+                            output::warning(&format!(
+                                "--track: start point '{}' doesn't look like <remote>/<branch>; no upstream recorded",
+                                source
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -490,10 +550,21 @@ impl BranchCmd {
         let refdb = RefDatabase::new(&storage_path);
 
         // Strip refs/heads/ prefix if already present
-        let branch_name = opts
+        let stripped = opts
             .branch
             .strip_prefix("refs/heads/")
             .unwrap_or(&opts.branch);
+
+        // `--track` shorthand: `branch switch -c --track origin/feat-a`
+        // creates a local branch named "feat-a" (not "origin/feat-a")
+        // tracking origin/feat-a, started from that remote-tracking ref
+        // instead of HEAD — mirrors `branch create`'s BUG-010 shorthand.
+        let track_shorthand = if opts.create && opts.track {
+            stripped.split_once('/')
+        } else {
+            None
+        };
+        let branch_name = track_shorthand.map(|(_, name)| name).unwrap_or(stripped);
         let branch_ref_name = format!("refs/heads/{}", branch_name);
 
         // OPTIMIZATION: Get current commit BEFORE updating HEAD
@@ -504,21 +575,53 @@ impl BranchCmd {
         if opts.create {
             // Check if branch already exists
             if refdb.read(&branch_ref_name).await.is_ok() {
-                anyhow::bail!("Branch '{}' already exists", opts.branch);
+                anyhow::bail!("Branch '{}' already exists", branch_name);
             }
 
-            // Get current HEAD for start point (resolve symbolic ref)
-            let start_oid = refdb
-                .resolve("HEAD")
-                .await
-                .context("HEAD has no commit yet")?;
+            let start_oid = if let Some((remote, remote_branch)) = track_shorthand {
+                let remote_tracking_ref = format!("refs/remotes/{}/{}", remote, remote_branch);
+                refdb.resolve(&remote_tracking_ref).await.with_context(|| {
+                    format!(
+                        "--track: remote-tracking ref '{}' not found",
+                        remote_tracking_ref
+                    )
+                })?
+            } else {
+                // Get current HEAD for start point (resolve symbolic ref)
+                refdb
+                    .resolve("HEAD")
+                    .await
+                    .context("HEAD has no commit yet")?
+            };
 
             // Create the branch reference
             let branch_ref = Ref::new_direct(branch_ref_name.clone(), start_oid);
             refdb.write(&branch_ref).await?;
 
             if !opts.quiet {
-                output::success(&format!("Created branch '{}'", opts.branch));
+                output::success(&format!("Created branch '{}'", branch_name));
+            }
+
+            // Upstream tracking (M2 plumbing, consumed by `status` in M4).
+            if let Some((remote, remote_branch)) = track_shorthand {
+                let mut config = mediagit_config::Config::load(&repo_root).await?;
+                config.set_branch_upstream(
+                    branch_name,
+                    remote,
+                    format!("refs/heads/{}", remote_branch),
+                );
+                config.save(&repo_root)?;
+                if !opts.quiet {
+                    output::info(&format!(
+                        "Branch '{}' set up to track '{}/{}'",
+                        branch_name, remote, remote_branch
+                    ));
+                }
+            } else if opts.track && !opts.quiet {
+                output::warning(&format!(
+                    "--track: '{}' doesn't look like <remote>/<branch>; no upstream recorded",
+                    opts.branch
+                ));
             }
         } else {
             // Verify branch exists
@@ -534,12 +637,48 @@ impl BranchCmd {
             opts.branch
         ))?;
 
+        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
+
+        // BUG-CLI-B1: refuse to clobber uncommitted changes to tracked files.
+        // Checked before HEAD is updated / the working tree is touched.
+        if !opts.force {
+            if let Some(current_oid) = current_commit_oid {
+                if Self::has_uncommitted_changes(&repo_root, &odb, &current_oid).await? {
+                    anyhow::bail!(
+                        "working tree has uncommitted changes; commit/stash or use --force"
+                    );
+                }
+            }
+
+            // QA-001: refuse to clobber untracked files that collide with a
+            // path tracked by the target branch. The dirty-check above only
+            // covers files tracked by the *current* HEAD; an untracked file
+            // is invisible to it and would otherwise be silently overwritten.
+            let collisions = Self::untracked_collision_paths(
+                &repo_root,
+                &odb,
+                current_commit_oid.as_ref(),
+                &target_commit_oid,
+            )
+            .await?;
+            if !collisions.is_empty() {
+                let list = collisions
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                anyhow::bail!(
+                    "switch would overwrite untracked file(s): {}; commit, stash, or use -f",
+                    list
+                );
+            }
+        }
+
         // Update HEAD to point to the branch
         let head = Ref::new_symbolic("HEAD".to_string(), branch_ref_name.clone());
         refdb.write(&head).await?;
 
         // Update working directory to match the target branch's commit
-        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
         let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
 
         let checkout_pb = progress.spinner("Updating working directory");
@@ -589,7 +728,7 @@ impl BranchCmd {
         index.save(&repo_root)?;
 
         if !opts.quiet {
-            output::success(&format!("Switched to branch '{}'", opts.branch));
+            output::success(&format!("Switched to branch '{}'", branch_name));
             if files_updated > 0 {
                 output::info(&format!(
                     "Updated {} file(s) in working directory",
@@ -610,6 +749,150 @@ impl BranchCmd {
         }
 
         Ok(())
+    }
+
+    /// BUG-CLI-B1: detect uncommitted changes to tracked files before a
+    /// branch switch would silently overwrite them. Mirrors `status`'s
+    /// modified-file detection (HEAD tree vs working-directory hash), but
+    /// treats any tracked file whose working content differs from HEAD as
+    /// uncommitted — staged or not, a switch would blow it away either way.
+    async fn has_uncommitted_changes(
+        repo_root: &std::path::Path,
+        odb: &mediagit_versioning::ObjectDatabase,
+        head_oid: &Oid,
+    ) -> Result<bool> {
+        let commit_data = odb.read(head_oid).await?;
+        let commit =
+            mediagit_versioning::format::deserialize::<mediagit_versioning::Commit>(&commit_data)?;
+        let tree_data = odb.read(&commit.tree).await?;
+        let tree =
+            mediagit_versioning::format::deserialize::<mediagit_versioning::Tree>(&tree_data)?;
+
+        for entry in tree.iter() {
+            let full_path = repo_root.join(&entry.name);
+            let working_oid = match std::fs::metadata(&full_path) {
+                Ok(metadata) if metadata.len() >= super::utils::STREAMING_THRESHOLD => {
+                    match Oid::from_file(&full_path) {
+                        Ok(oid) => oid,
+                        Err(_) => continue,
+                    }
+                }
+                Ok(_) => match std::fs::read(&full_path) {
+                    Ok(content) => Oid::hash(&content),
+                    Err(_) => continue,
+                },
+                // File missing from the working tree — not this guard's concern.
+                Err(_) => continue,
+            };
+            if working_oid != entry.oid {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// QA-001: paths that are untracked in the working directory but would
+    /// be materialized by checking out `target_commit_oid` — i.e. a switch
+    /// would silently overwrite them. Mirrors `status`'s untracked-file
+    /// definition (working dir scan minus current-HEAD tree minus index
+    /// minus ignored), intersected with the target tree's paths.
+    async fn untracked_collision_paths(
+        repo_root: &std::path::Path,
+        odb: &mediagit_versioning::ObjectDatabase,
+        current_commit_oid: Option<&Oid>,
+        target_commit_oid: &Oid,
+    ) -> Result<Vec<PathBuf>> {
+        use crate::ignore_rules::IgnoreMatcher;
+        use mediagit_versioning::Index;
+
+        // Paths tracked by the branch we're switching away from — never
+        // "untracked", even though the index is cleared after every switch.
+        let mut head_files: HashSet<PathBuf> = HashSet::new();
+        if let Some(oid) = current_commit_oid {
+            let commit_data = odb.read(oid).await?;
+            let commit = mediagit_versioning::format::deserialize::<mediagit_versioning::Commit>(
+                &commit_data,
+            )?;
+            Self::collect_tree_paths(odb, &commit.tree, Path::new(""), &mut head_files).await?;
+        }
+
+        let index = Index::load(repo_root)?;
+        let index_files: HashSet<PathBuf> =
+            index.entries().map(|entry| entry.path.clone()).collect();
+
+        let mut ignored_files: HashSet<PathBuf> = HashSet::new();
+        let matcher = IgnoreMatcher::new(repo_root).ok();
+        // Single status-equivalent scan of the working directory (perf budget).
+        let status_cmd = super::status::StatusCmd {
+            tracked: false,
+            untracked: false,
+            ignored: false,
+            short: false,
+            porcelain: false,
+            branch: false,
+            quiet: true,
+            verbose: false,
+            json: false,
+        };
+        let working_files =
+            status_cmd.scan_working_directory(repo_root, &matcher, &mut ignored_files)?;
+
+        let untracked: HashSet<PathBuf> = working_files
+            .into_iter()
+            .filter(|path| {
+                !head_files.contains(path)
+                    && !index_files.contains(path)
+                    && !ignored_files.contains(path)
+            })
+            .collect();
+
+        if untracked.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let target_commit_data = odb.read(target_commit_oid).await?;
+        let target_commit = mediagit_versioning::format::deserialize::<mediagit_versioning::Commit>(
+            &target_commit_data,
+        )?;
+        let mut target_files: HashSet<PathBuf> = HashSet::new();
+        Self::collect_tree_paths(odb, &target_commit.tree, Path::new(""), &mut target_files)
+            .await?;
+
+        let mut collisions: Vec<PathBuf> = untracked.intersection(&target_files).cloned().collect();
+        collisions.sort();
+        Ok(collisions)
+    }
+
+    /// Recursively collect every file path in a tree (directories expanded),
+    /// relative to the tree root. Skips stage-debris entries (legacy
+    /// merge-conflict artifacts) the same way checkout does.
+    fn collect_tree_paths<'a>(
+        odb: &'a mediagit_versioning::ObjectDatabase,
+        tree_oid: &'a Oid,
+        prefix: &'a std::path::Path,
+        paths: &'a mut HashSet<PathBuf>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>> {
+        Box::pin(async move {
+            let tree_data = odb.read(tree_oid).await?;
+            let tree =
+                mediagit_versioning::format::deserialize::<mediagit_versioning::Tree>(&tree_data)?;
+
+            for entry in tree.iter() {
+                if mediagit_versioning::is_stage_debris_key(&entry.name) {
+                    continue;
+                }
+                let entry_path = prefix.join(&entry.name);
+                match entry.mode {
+                    mediagit_versioning::FileMode::Directory => {
+                        Self::collect_tree_paths(odb, &entry.oid, &entry_path, paths).await?;
+                    }
+                    _ => {
+                        paths.insert(entry_path);
+                    }
+                }
+            }
+            Ok(())
+        })
     }
 
     async fn delete(&self, opts: &DeleteOpts) -> Result<()> {

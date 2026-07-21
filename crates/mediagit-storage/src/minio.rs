@@ -219,6 +219,14 @@ pub struct MinIOBackend {
     // Limits concurrent create_multipart_upload calls to prevent overwhelming MinIO.
     // Env: MEDIAGIT_MINIO_MPU_CONCURRENCY (default 16). Set to 0 to disable.
     mpu_sem: Arc<Semaphore>,
+    // Bounds concurrent in-flight `with_retry` operations (put/get/exists/delete/head)
+    // against this backend. Without this, a backend outage lets every concurrent
+    // chunk request retry independently and unboundedly: each retry chain holds a
+    // socket/connection while sleeping through exponential backoff, and thousands of
+    // concurrent chains piling up over a multi-minute outage can exhaust process
+    // socket handles, which starves the server's own accept loop (A7 abuse drill).
+    // Env: MEDIAGIT_MINIO_OP_CONCURRENCY (default 64). Set to 0 to disable.
+    op_sem: Arc<Semaphore>,
     // Keep these for backward compatibility
     endpoint: String,
     bucket: String,
@@ -542,11 +550,17 @@ impl MinIOBackend {
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(16)
             .max(1);
+        let op_concurrency = std::env::var("MEDIAGIT_MINIO_OP_CONCURRENCY")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(64)
+            .max(1);
         Ok(MinIOBackend {
             client,
             config: Arc::new(config.clone()),
             stats: Arc::new(MinIOStats::new()),
             mpu_sem: Arc::new(Semaphore::new(mpu_concurrency)),
+            op_sem: Arc::new(Semaphore::new(op_concurrency)),
             endpoint: config.endpoint,
             bucket: config.bucket,
             _access_key: config.access_key,
@@ -603,6 +617,13 @@ impl MinIOBackend {
     where
         F: FnMut() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send>>,
     {
+        // Acquire before the retry loop (not per-attempt) so a single slow/retrying
+        // operation holds exactly one permit for its whole lifetime, capping how many
+        // concurrent chains can be mid-backoff against a down backend at once. Waiting
+        // for a permit is a plain async yield — it never blocks a tokio worker thread,
+        // so it can't itself starve the accept loop the way unbounded retry chains do.
+        let _permit = self.op_sem.acquire().await.expect("op_sem is never closed");
+
         let mut retry_count = 0;
         let mut delay_ms = self.config.initial_retry_delay_ms;
 
@@ -1503,11 +1524,108 @@ mod tests {
             config: Arc::new(cfg.clone()),
             stats: Arc::new(MinIOStats::new()),
             mpu_sem: Arc::new(Semaphore::new(16)),
+            op_sem: Arc::new(Semaphore::new(64)),
             endpoint: cfg.endpoint,
             bucket: cfg.bucket,
             _access_key: cfg.access_key,
             _secret_key: cfg.secret_key,
         }
+    }
+
+    /// Regression test for the A7 abuse-drill finding: during a sustained
+    /// backend outage, concurrent chunk uploads must not spin up unbounded
+    /// concurrent retry chains against the dead backend (each chain holds a
+    /// connection through several seconds of exponential backoff; thousands
+    /// of them piling up over a multi-minute outage exhausted process socket
+    /// handles and starved the server's own accept loop).
+    ///
+    /// `with_retry` now acquires one `op_sem` permit for its entire
+    /// (possibly-retrying) lifetime, so no more than `op_concurrency`
+    /// operations can be mid-backoff at once. This drives `with_retry`
+    /// directly with a synthetic always-fails operation (no real network),
+    /// so it's fast and deterministic: the assertion is an exact peak count,
+    /// not a timing heuristic.
+    #[tokio::test]
+    async fn with_retry_bounds_concurrent_operations() {
+        let op_concurrency = 3usize;
+        let backend = {
+            let creds = aws_sdk_s3::config::Credentials::new(
+                "ak".to_string(),
+                "sk".to_string(),
+                None,
+                None,
+                "synthetic",
+            );
+            let s3_config = aws_sdk_s3::config::Builder::new()
+                .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+                .endpoint_url("http://127.0.0.1:1")
+                .credentials_provider(creds)
+                .force_path_style(true)
+                .region(aws_sdk_s3::config::Region::new("us-east-1"))
+                .build();
+            let cfg = MinIOConfig {
+                endpoint: "http://127.0.0.1:1".to_string(),
+                bucket: "b".to_string(),
+                access_key: "ak".to_string(),
+                secret_key: "sk".to_string(),
+                max_retries: 2,
+                initial_retry_delay_ms: 100,
+                ..Default::default()
+            };
+            MinIOBackend {
+                client: Client::from_conf(s3_config),
+                config: Arc::new(cfg.clone()),
+                stats: Arc::new(MinIOStats::new()),
+                mpu_sem: Arc::new(Semaphore::new(16)),
+                op_sem: Arc::new(Semaphore::new(op_concurrency)),
+                endpoint: cfg.endpoint,
+                bucket: cfg.bucket,
+                _access_key: cfg.access_key,
+                _secret_key: cfg.secret_key,
+            }
+        };
+
+        let current = Arc::new(AtomicU64::new(0));
+        let peak = Arc::new(AtomicU64::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..9 {
+            let backend = backend.clone();
+            let current = current.clone();
+            let peak = peak.clone();
+            handles.push(tokio::spawn(async move {
+                let result: Result<()> = backend
+                    .with_retry(|| {
+                        let current = current.clone();
+                        let peak = peak.clone();
+                        Box::pin(async move {
+                            let now = current.fetch_add(1, Ordering::SeqCst) + 1;
+                            peak.fetch_max(now, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(30)).await;
+                            current.fetch_sub(1, Ordering::SeqCst);
+                            Err(anyhow!("simulated transient backend outage"))
+                        })
+                    })
+                    .await;
+                assert!(result.is_err(), "synthetic operation always errors");
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let observed_peak = peak.load(Ordering::SeqCst);
+        assert!(
+            observed_peak <= op_concurrency as u64,
+            "op_sem failed to bound concurrency: observed {observed_peak} concurrent \
+             retry chains against a {op_concurrency}-permit semaphore"
+        );
+        assert_eq!(
+            observed_peak, op_concurrency as u64,
+            "expected contention to actually reach the concurrency cap with 9 tasks \
+             racing for {op_concurrency} permits; got {observed_peak} — test may not be \
+             exercising real contention"
+        );
     }
 
     #[test]

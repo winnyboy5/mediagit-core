@@ -87,21 +87,18 @@ $ mediagit fsck --full
 ✅ Repository integrity: OK
 ```
 
-### Show dangling objects
+### Show lost/dangling objects
 
 ```bash
-$ mediagit fsck --dangling
+$ mediagit fsck --lost-found
 Checking objects: 100% (8,875/8,875), done.
 
-Dangling objects:
-  dangling commit a3c8f9d2e1b4f6a8c5d7e9f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1
-  dangling blob b4d7e1a9f2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9
-  dangling tree c5e9f2b4764f2dbcee52635b91fedb1b3dcf7ab4d5e6f7a8b9c0d1e2f3a4b5c6d7e8
+Dangling objects written to .mediagit/lost-found/:
+  commit/a3c8f9d
+  blob/b4d7e1a
+  tree/c5e9f2b
 
-Total dangling objects: 3 (127.3 MB)
-
-hint: Run 'mediagit fsck --lost-found' to save these objects
-hint: Run 'mediagit gc' to remove dangling objects
+3 objects saved for recovery
 ```
 
 ### Show unreachable objects
@@ -491,4 +488,3 @@ $ mediagit fsck --verify-chunks --verify-compression
 - [mediagit gc](./gc.md) - Garbage collection and optimization
 - [mediagit verify](./verify.md) - Verify specific objects
 - [mediagit stats](./stats.md) - Repository statistics
-- [mediagit prune](./prune.md) - Prune unreachable objects

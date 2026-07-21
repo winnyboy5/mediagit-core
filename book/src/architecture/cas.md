@@ -69,16 +69,19 @@ mediagit show 5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03
 ## Storage Layout
 
 ### Directory Sharding
-Objects stored with 2-character prefix:
+Objects are stored under a per-repo namespace directory, sharded two levels deep on the hash itself (storage layout v2):
 ```
-objects/
-  58/
-    91b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03
-  a3/
-    c5d3e8f2a1b7c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9
+<repo_namespace>/
+  objects/
+    58/
+      91/
+        5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03
+    a3/
+      c5/
+        a3c5d3e8f2a1b7c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9
 ```
 
-**Rationale**: Prevents millions of files in single directory (filesystem optimization).
+**Rationale**: Prevents millions of files in single directory (filesystem optimization). The `repo_namespace` prefix lets one storage root or bucket safely host multiple repositories.
 
 ## Collision Resistance
 

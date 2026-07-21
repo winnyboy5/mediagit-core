@@ -33,6 +33,9 @@ Add all modified and new files in the working directory.
 ### `-u, --update`
 Add only modified files that are already tracked (ignore new files).
 
+### `--ignore-removal`
+Stage additions and modifications but skip deleted files (do not stage deletions).
+
 ### `-n, --dry-run`
 Show what would be added without actually adding files.
 
@@ -244,5 +247,4 @@ $ mediagit add --force important.tmp
 
 - [mediagit status](./status.md) - Show the working tree status
 - [mediagit commit](./commit.md) - Record changes to the repository
-- [mediagit restore](./restore.md) - Restore working tree files
 - [mediagit diff](./diff.md) - Show changes between commits

@@ -64,7 +64,9 @@ fn test_init_with_path() {
 }
 
 #[test]
-fn test_init_bare_repository() {
+fn test_init_bare_is_compat_alias() {
+    // --bare is a documented compatibility alias (server-repo seeding across
+    // the QA harnesses): same .mediagit layout as a plain init.
     let temp_dir = TempDir::new().unwrap();
 
     mediagit()
@@ -74,8 +76,7 @@ fn test_init_bare_repository() {
         .assert()
         .success();
 
-    // Bare repos have objects directly in repo dir
-    assert!(temp_dir.path().join("objects").exists() || temp_dir.path().join(".mediagit").exists());
+    assert!(temp_dir.path().join(".mediagit").exists());
 }
 
 #[test]
@@ -260,11 +261,9 @@ fn test_init_nested_repos() {
 #[test]
 fn test_init_all_options() {
     let temp_dir = TempDir::new().unwrap();
-    let _template_dir = TempDir::new().unwrap();
 
     mediagit()
         .arg("init")
-        .arg("--bare")
         .arg("--initial-branch")
         .arg("main")
         .arg("--quiet")

@@ -50,7 +50,7 @@ pub struct RevertCmd {
     pub message: Option<String>,
 
     /// Continue after conflicts
-    #[arg(id = "continue", long = "continue", conflicts_with_all = ["abort", "skip", "commits"])]
+    #[arg(id = "continue", long = "continue", alias = "continue-revert", hide = true, conflicts_with_all = ["abort", "skip", "commits"])]
     pub continue_revert: bool,
 
     /// Abort current revert
@@ -111,7 +111,7 @@ impl RevertCmd {
             return self.do_continue(&repo_root, &storage_path).await;
         }
         if self.abort {
-            return self.do_abort(&storage_path).await;
+            return self.do_abort(&repo_root, &storage_path).await;
         }
         if self.skip {
             return self.do_skip(&storage_path).await;
@@ -165,7 +165,9 @@ impl RevertCmd {
                         style("⚠").yellow().bold()
                     );
                     println!("  Resolve conflicts and run 'mediagit revert --continue'");
-                    return Ok(());
+                    // Non-zero exit so CI can detect a conflict-stop instead of
+                    // silently reporting success (AUD-1).
+                    anyhow::bail!("Revert stopped due to conflicts");
                 }
                 return Err(e);
             }
@@ -409,7 +411,7 @@ impl RevertCmd {
         Ok(())
     }
 
-    async fn do_abort(&self, storage_path: &Path) -> Result<()> {
+    async fn do_abort(&self, repo_root: &Path, storage_path: &Path) -> Result<()> {
         let state_file = storage_path.join(REVERT_STATE_FILE);
         if !state_file.exists() {
             anyhow::bail!("No revert in progress");
@@ -426,6 +428,23 @@ impl RevertCmd {
         } else {
             refs.update("HEAD", state.original_head, true).await?;
         }
+
+        // Restore the working tree to the pre-revert commit and clear the
+        // index. An empty index means "clean" (a normal commit clears it
+        // too); do_revert_single_commit's save_tree_to_index left the index
+        // fully populated on conflict, so without this `status` would show
+        // everything staged after an abort.
+        let storage = create_storage_backend(repo_root).await?;
+        let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 10000));
+        let checkout_mgr = CheckoutManager::new(&odb, repo_root);
+        checkout_mgr
+            .checkout_commit(&state.original_head)
+            .await
+            .context("Failed to restore working directory on revert abort")?;
+
+        let mut index = Index::load(repo_root)?;
+        index.clear();
+        index.save(repo_root)?;
 
         fs::remove_file(&state_file).await?;
 

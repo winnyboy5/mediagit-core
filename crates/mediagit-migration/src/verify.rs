@@ -25,7 +25,7 @@ pub struct ObjectMetadata {
     /// Object size in bytes
     pub size: usize,
 
-    /// SHA-256 checksum (hex encoded)
+    /// BLAKE3 checksum (hex encoded)
     pub checksum: String,
 }
 

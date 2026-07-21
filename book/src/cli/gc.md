@@ -589,6 +589,5 @@ For media-heavy repositories, gc provides:
 ## See Also
 
 - [mediagit fsck](./fsck.md) - Verify repository integrity
-- [mediagit prune](./prune.md) - Prune unreachable objects
 - [mediagit verify](./verify.md) - Verify object integrity
 - [mediagit stats](./stats.md) - Show repository statistics

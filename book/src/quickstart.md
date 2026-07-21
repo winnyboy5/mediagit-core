@@ -18,15 +18,15 @@ curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/instal
 
 ```powershell
 # Windows (PowerShell)
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-x86_64-windows.zip" -OutFile mediagit.zip
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.1/mediagit-0.3.0-rc.1-x86_64-windows.zip" -OutFile mediagit.zip
 Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 ```
 
 ### Docker
 
 ```bash
-docker pull ghcr.io/winnyboy5/mediagit-core:0.2.8-beta.1
-docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.8-beta.1 mediagit --version
+docker pull ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.1
+docker run --rm ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.1 mediagit --version
 ```
 
 ### From Pre-built Binaries
@@ -35,11 +35,11 @@ Download the latest release for your platform from [GitHub Releases](https://git
 
 | Platform | Archive |
 |----------|---------|
-| Linux x86_64 | `mediagit-0.2.8-beta.1-x86_64-linux.tar.gz` |
-| Linux ARM64 | `mediagit-0.2.8-beta.1-aarch64-linux.tar.gz` |
-| macOS Intel | `mediagit-0.2.8-beta.1-x86_64-macos.tar.gz` |
-| macOS Apple Silicon | `mediagit-0.2.8-beta.1-aarch64-macos.tar.gz` |
-| Windows x86_64 | `mediagit-0.2.8-beta.1-x86_64-windows.zip` |
+| Linux x86_64 | `mediagit-0.3.0-rc.1-x86_64-linux.tar.gz` |
+| Linux ARM64 | `mediagit-0.3.0-rc.1-aarch64-linux.tar.gz` |
+| macOS Intel | `mediagit-0.3.0-rc.1-x86_64-macos.tar.gz` |
+| macOS Apple Silicon | `mediagit-0.3.0-rc.1-aarch64-macos.tar.gz` |
+| Windows x86_64 | `mediagit-0.3.0-rc.1-x86_64-windows.zip` |
 
 ### From Source
 
@@ -123,6 +123,43 @@ Date:   Mon Nov 24 2025 12:00:00
 
     Files: 3
     Size: 42.3 MB → 6.4 MB (84.8% savings)
+```
+
+## Your First Remote Push
+
+To collaborate with others, push your repository to a server:
+
+```bash
+# Initialize a remote server (see deployment guide for production)
+mediagit-server init --non-interactive --data-dir ./repos
+
+# Start the server
+mediagit-server --config mediagit-server.toml
+
+# From your repo, add a remote and push
+mediagit remote add origin http://127.0.0.1:3000/my-project
+mediagit push origin main
+```
+
+```mermaid
+flowchart LR
+    A["mediagit init<br/>local repo"] --> B["mediagit add files"]
+    B --> C["mediagit commit"]
+    C --> D["mediagit remote add<br/>origin"]
+    D --> E["mediagit push<br/>origin main"]
+    E --> F["mediagit clone<br/>from remote"]
+    
+    style A fill:#e3f2fd
+    style E fill:#fff3e0
+    style F fill:#f3e5f5
+```
+
+Other users can now clone your repository:
+
+```bash
+mediagit clone http://127.0.0.1:3000/my-project ./my-project
+cd my-project
+mediagit status
 ```
 
 ## Working with Branches

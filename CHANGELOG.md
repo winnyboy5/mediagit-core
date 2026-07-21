@@ -5,6 +5,114 @@ All notable changes to MediaGit will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.0-rc.1] - 2026-07-18
+
+Collaboration primitives, auth persistence, and a GA format freeze. Version
+bumped from `0.2.8-beta.1` — a compat promise is now in effect (see
+`docs/FORMATS.md` §11): breaking a frozen wire/persisted format requires a
+version bump and a hard-error reader, never a silent misparse. Verified by
+the 2026-07-16 release-build QA campaign (`reports/20260716-172951`):
+STANDARD suite green on all 4 backends (MinIO/AWS/Azure/GCS), zero findings.
+
+### Added
+- **Server-enforced file locking**: new `mediagit lock create|unlock|list`
+  command. Locks are stored server-side (`.mediagit/locks.jsonl`) with three
+  HTTP endpoints; `push` enforces locks by tree-diffing the pushed commit
+  range against active locks (`MEDIAGIT_LOCKS_ENFORCE`, default on;
+  `MEDIAGIT_LOCKS_MAX_COMMITS`, default 1000, fails open on oversized ranges).
+  `lock unlock --force` releases someone else's lock (requires `repo:admin`).
+- **Auth persistence**: users, API keys, and per-repo grants now persist to
+  `users.jsonl` / `api_keys.jsonl` / `grants.jsonl` (versioned `{"v":1}`
+  envelopes, atomic tmp+rename writes) instead of living only in memory.
+  `MEDIAGIT_AUTH_PERSIST` (default on).
+- **Per-repo authorization grants**: `GrantsStore` with a `Read ⊂ Write ⊂
+  Admin` hierarchy, checked per `{repo}` instead of globally
+  (`MEDIAGIT_GRANTS_ENFORCE`). Previously a `Write`-role user could push to
+  any repo name on the server.
+- **Admin endpoints**: `GET`/`DELETE /auth/users` (+ `/{id}/grants`),
+  `GET`/`DELETE /auth/keys` — gated on the `user:manage` permission,
+  metadata-only responses.
+- **OS-keychain credential storage** for CLI remote credentials (`keyring`
+  crate; Windows Credential Manager). Lookup order: env → keychain (service
+  `mediagit`, account = remote URL) → `config.toml`. Written through only
+  after a verified server response; `MEDIAGIT_NO_KEYRING` opts out; keychain
+  failures degrade silently to the existing config-file path.
+- **`gc --repack` chunk consolidation**: loose chunks are now folded into
+  Track-F cloud packs during repack (64 MiB / 1024-chunk caps, per-pack JSONL
+  index), not just loose objects. Abort-safe write order (pack → index →
+  memory → delete-loose). `MEDIAGIT_REPACK_CHUNKS=0` restores the previous
+  (loose-objects-only) behavior.
+- **Object-level and pack-aware repair**: `push --repair` and the server's
+  chunk verify-integrity endpoint (`/{repo}/chunks/verify-integrity`) now
+  detect and evict corrupted entries from Track-F cloud packs, not just loose
+  `chunks/` objects; `ObjectDatabase::delete_object` supports targeted
+  object-level repair.
+- **Startup backend connectivity probe** (`MEDIAGIT_STARTUP_PROBE`, default
+  on): storage backends are probed at boot instead of surfacing bad
+  credentials as a 500 on the first client request.
+- **`/metrics` endpoint** wired into the server binary behind
+  `MEDIAGIT_METRICS_ADDR` (off by default) — the `mediagit-metrics` crate was
+  previously built but never linked into `mediagit-server`.
+- **Graceful shutdown** on all serve paths (HTTP, HTTPS, HTTP+HTTPS
+  concurrent) — `ctrl_c`/SIGTERM now drains in-flight requests instead of
+  hard-stopping mid-upload.
+- **Client-side push deadline** (`MEDIAGIT_PUSH_DEADLINE_SECS`, default
+  3600s) — bounds `upload_pack`/`upload_chunked_objects`/`update_refs` so a
+  mid-push backend outage fails fast with a clear error instead of hanging.
+- **Format freeze + compat promise** (`docs/FORMATS.md`): all 10
+  persisted/wire formats inventoried and frozen — pack v3 header, chunk
+  manifest (`MGCM` envelope), chunk-delta `.meta`, `LAYOUT` v2 marker,
+  auth/locks JSONL, JWT claims, HTTP DTOs, BLAKE3 OID. Every versioned format
+  now hard-errors on an unknown or higher version instead of silently
+  misparsing.
+- New docs: `docs/OPERATIONS.md` (backup/restore), `docs/DEPLOYMENT.md` (TLS
+  direct + reverse proxy), `docs/BENCHMARKS.md`, `docs/PRODUCTION_ROADMAP.md`.
+
+### Changed
+- `enable_auth`/insecure-bind guard: the server now refuses to bind to a
+  non-loopback host with auth disabled (`MEDIAGIT_ALLOW_INSECURE_BIND=1`
+  overrides), instead of silently serving an open port.
+- JWT secret can now be supplied via `MEDIAGIT_JWT_SECRET` (wins over
+  `config.toml`), not TOML-only.
+- Per-route body limits: `/refs/update` and lock routes now cap at 1 MiB
+  (data-plane chunk/pack routes keep the 2 GiB cap).
+- Optional CORS support via `[server] cors_allowed_origins`; absent behaves
+  as before (no layer).
+- TLS: building with `enable_tls=true` on a non-`tls` cargo feature build is
+  now a hard startup error instead of a silent fallback to plain HTTP.
+
+### Fixed
+- **Path traversal (cross-tenant storage escape)**: layout-v2's
+  `LocalBackend::object_path` dropped the v1 `/`→`::` key encoding, and
+  user-supplied chunk/pack/manifest/OID ids reached storage joins
+  unvalidated — an authenticated write on one repo could read/write into
+  another repo's storage, bypassing `GrantsStore`. Fixed with key validation
+  (rejects `..`, absolute paths, drive prefixes) at both `NamespacedBackend`
+  and `LocalBackend`, plus hex-format guards on the affected handlers.
+- **Self-registration privilege escalation**: `POST /auth/register` accepted
+  a client-supplied `role` field with no restriction, letting an
+  unauthenticated caller mint an Admin account. `role` removed from
+  `RegisterRequest`; self-registration now always creates `Role::Write`.
+- **Clone manifest deserialization**: the parallel per-manifest fetch path in
+  `clone` used raw format-deserialize instead of `ChunkManifest::from_bytes`,
+  so the new `MGCM` envelope broke every clone of a chunked repo. Fixed; all
+  other manifest read sites were already correct.
+- **`create_router_with_rate_limit` never mounted `/auth/*`** — admin and
+  auth endpoints were unreachable whenever rate limiting was enabled. Fixed.
+- **Unbounded retry chains under backend outage**: a mid-push S3/MinIO
+  outage caused ~1.9k independent per-chunk retry chains to exhaust sockets
+  and stop the server from accepting new connections. Bounded by a semaphore
+  (`MEDIAGIT_MINIO_OP_CONCURRENCY`, default 64) held across each retry
+  lifetime.
+- fsck chunk-delta cycle-detection test coverage confirmed (the guard itself
+  was already correct; this closes a stale backlog entry).
+
+### Security
+- J6 security review: 1 HIGH finding (the path-traversal issue above), fixed
+  and verified. All other new surface (grants ordering, admin gating, JWT
+  default, keychain, API-key hashing) reviewed clean. Zero open P0/P1 at GA
+  go/no-go.
+
 ## [v0.2.8-beta.1] - 2026-06-02
 
 Cloud-pack hardening, the god-file refactor, and a full documentation accuracy

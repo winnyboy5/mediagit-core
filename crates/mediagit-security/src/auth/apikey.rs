@@ -16,14 +16,16 @@
 //! Provides secure API key generation and validation using SHA-256 hashing.
 
 use rand::RngExt;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
-use super::{AuthError, AuthResult};
+use super::{persist, AuthError, AuthResult};
 
 /// API Key structure
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiKey {
     /// Unique key identifier
     pub id: String,
@@ -44,18 +46,59 @@ pub struct ApiKey {
     pub created_at: i64,
 }
 
-/// API Key authentication handler
+/// API Key authentication handler, backed in-memory with optional JSONL
+/// persistence (mirrors [`super::credentials::CredentialsStore`]).
 pub struct ApiKeyAuth {
     /// Map of key ID -> API Key
     keys: RwLock<HashMap<String, ApiKey>>,
+
+    /// Path to `api_keys.jsonl` when persistence is enabled; `None` for a
+    /// purely in-memory store.
+    store_path: Option<PathBuf>,
 }
 
 impl ApiKeyAuth {
-    /// Create new API key authenticator
+    /// Create new API key authenticator (in-memory only, no persistence).
     pub fn new() -> Self {
         Self {
             keys: RwLock::new(HashMap::new()),
+            store_path: None,
         }
+    }
+
+    /// Load API keys persisted at `store_dir/api_keys.jsonl`, or start fresh
+    /// if the file doesn't exist yet (first boot). An existing-but-corrupt
+    /// file is a hard error. Set `MEDIAGIT_AUTH_PERSIST=0` to force
+    /// in-memory behavior even when a directory is given.
+    pub fn load_or_new(store_dir: &Path) -> AuthResult<Self> {
+        if !persist::persist_enabled() {
+            return Ok(Self::new());
+        }
+
+        let path = store_dir.join("api_keys.jsonl");
+        let records: Vec<ApiKey> = persist::load_jsonl(&path)?;
+
+        let mut keys = HashMap::new();
+        for key in records {
+            keys.insert(key.id.clone(), key);
+        }
+
+        Ok(Self {
+            keys: RwLock::new(keys),
+            store_path: Some(path),
+        })
+    }
+
+    /// Persist the current in-memory state to `api_keys.jsonl`. A no-op
+    /// when this store was constructed with [`ApiKeyAuth::new`] (no store
+    /// path).
+    async fn persist(&self) -> AuthResult<()> {
+        let Some(path) = &self.store_path else {
+            return Ok(());
+        };
+        let keys = self.keys.read().await;
+        let records: Vec<&ApiKey> = keys.values().collect();
+        persist::save_jsonl(path, &records).await
     }
 
     /// Generate new API key
@@ -94,8 +137,11 @@ impl ApiKeyAuth {
         };
 
         // Store the key
-        let mut keys = self.keys.write().await;
-        keys.insert(id, api_key.clone());
+        {
+            let mut keys = self.keys.write().await;
+            keys.insert(id, api_key.clone());
+        }
+        self.persist().await?;
 
         Ok((key, api_key))
     }
@@ -124,12 +170,13 @@ impl ApiKeyAuth {
 
     /// Revoke API key by ID
     pub async fn revoke_key(&self, key_id: &str) -> AuthResult<()> {
-        let mut keys = self.keys.write().await;
+        {
+            let mut keys = self.keys.write().await;
+            keys.remove(key_id)
+                .ok_or_else(|| AuthError::UserNotFound(format!("API key not found: {}", key_id)))?;
+        }
 
-        keys.remove(key_id)
-            .ok_or_else(|| AuthError::UserNotFound(format!("API key not found: {}", key_id)))?;
-
-        Ok(())
+        self.persist().await
     }
 
     /// List all API keys for a user
@@ -140,6 +187,14 @@ impl ApiKeyAuth {
             .filter(|k| k.user_id == user_id)
             .cloned()
             .collect()
+    }
+
+    /// List every API key across all users (H3 admin surface). Metadata
+    /// only — `key_hash` is included on `ApiKey` but the plaintext key was
+    /// never stored, so there's nothing secret to leak here.
+    pub async fn list_all_keys(&self) -> Vec<ApiKey> {
+        let keys = self.keys.read().await;
+        keys.values().cloned().collect()
     }
 
     /// Extract API key from header
@@ -177,7 +232,9 @@ impl Default for ApiKeyAuth {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+// Tests hold the process-global env lock across awaits to serialize
+// env-var access (see persist::ENV_LOCK).
+#[allow(clippy::unwrap_used, clippy::await_holding_lock)]
 mod tests {
     use super::*;
 
@@ -252,10 +309,86 @@ mod tests {
         assert_eq!(user_keys.len(), 2);
     }
 
+    #[tokio::test]
+    async fn test_list_all_keys() {
+        let api_key_auth = ApiKeyAuth::new();
+
+        api_key_auth
+            .generate_key("user123".to_string(), "Key 1".to_string(), vec![])
+            .await
+            .unwrap();
+        api_key_auth
+            .generate_key("user456".to_string(), "Key 2".to_string(), vec![])
+            .await
+            .unwrap();
+
+        let all_keys = api_key_auth.list_all_keys().await;
+        assert_eq!(all_keys.len(), 2);
+    }
+
     #[test]
     fn test_extract_from_header() {
         let key = "abc123xyz";
         let extracted = ApiKeyAuth::extract_from_header(key);
         assert_eq!(extracted, key);
+    }
+
+    // ---- H1: persistence ----
+
+    #[tokio::test]
+    async fn persists_and_reloads_across_restart() {
+        let _guard = persist::ENV_LOCK.read().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let api_key_auth = ApiKeyAuth::load_or_new(tmp.path()).unwrap();
+        let (plaintext_key, _) = api_key_auth
+            .generate_key("user123".to_string(), "Test Key".to_string(), vec![])
+            .await
+            .unwrap();
+
+        assert!(tmp.path().join("api_keys.jsonl").exists());
+
+        // Fresh authenticator from the same dir simulates a server restart.
+        let reloaded = ApiKeyAuth::load_or_new(tmp.path()).unwrap();
+        let validated = reloaded.validate_key(&plaintext_key).await;
+        assert!(validated.is_ok());
+        assert_eq!(validated.unwrap().user_id, "user123");
+    }
+
+    #[tokio::test]
+    async fn corrupt_store_file_hard_errors() {
+        let _guard = persist::ENV_LOCK.read().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            tmp.path().join("api_keys.jsonl"),
+            b"{\"v\":1}\nnot valid json\n",
+        )
+        .await
+        .unwrap();
+
+        let result = ApiKeyAuth::load_or_new(tmp.path());
+        assert!(result.is_err(), "corrupt store file must hard-error");
+    }
+
+    #[tokio::test]
+    async fn missing_store_file_starts_fresh() {
+        let _guard = persist::ENV_LOCK.read().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let api_key_auth = ApiKeyAuth::load_or_new(tmp.path()).unwrap();
+        assert_eq!(api_key_auth.list_user_keys("anyone").await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn persist_disabled_writes_no_files() {
+        let _guard = persist::ENV_LOCK.write().unwrap();
+        std::env::set_var("MEDIAGIT_AUTH_PERSIST", "0");
+        let tmp = tempfile::tempdir().unwrap();
+        let api_key_auth = ApiKeyAuth::load_or_new(tmp.path()).unwrap();
+        api_key_auth
+            .generate_key("user123".to_string(), "Test Key".to_string(), vec![])
+            .await
+            .unwrap();
+        std::env::remove_var("MEDIAGIT_AUTH_PERSIST");
+
+        assert!(!tmp.path().join("api_keys.jsonl").exists());
     }
 }

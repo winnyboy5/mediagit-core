@@ -397,3 +397,54 @@ fn test_serialization_roundtrip() {
     let yaml_str = serde_yaml::to_string(&config).unwrap();
     let _config_from_yaml: Config = serde_yaml::from_str(&yaml_str).unwrap();
 }
+
+#[tokio::test]
+async fn test_config_load_migrates_v0_config_and_backs_up() {
+    let temp_dir = TempDir::new().unwrap();
+    let mediagit_dir = temp_dir.path().join(".mediagit");
+    fs::create_dir_all(&mediagit_dir).unwrap();
+    let config_path = mediagit_dir.join("config.toml");
+
+    // v0-style config: written before `config_version` existed, so the key
+    // is entirely absent (not "config_version = 0").
+    let v0_toml = r#"
+[app]
+[storage]
+backend = "filesystem"
+base_path = "./data"
+[compression]
+[performance]
+[performance.cache]
+[performance.connection_pool]
+[performance.timeouts]
+[observability]
+[observability.metrics]
+[security]
+[security.rate_limiting]
+"#;
+    fs::write(&config_path, v0_toml).unwrap();
+
+    let config = Config::load(temp_dir.path()).await.unwrap();
+    assert_eq!(config.config_version, mediagit_config::CONFIG_VERSION);
+
+    // Original was backed up before being overwritten.
+    let backup_path = mediagit_dir.join("config.toml.bak");
+    assert!(
+        backup_path.exists(),
+        "expected config.toml.bak to be written"
+    );
+    let backup_content = fs::read_to_string(&backup_path).unwrap();
+    assert!(!backup_content.contains("config_version"));
+
+    // The migrated config was written back to config.toml.
+    let migrated_on_disk = fs::read_to_string(&config_path).unwrap();
+    assert!(migrated_on_disk.contains("config_version"));
+
+    // Loading again is a no-op (already current version), and does not
+    // touch the backup a second time.
+    let backup_mtime_before = fs::metadata(&backup_path).unwrap().modified().unwrap();
+    let reloaded = Config::load(temp_dir.path()).await.unwrap();
+    assert_eq!(reloaded.config_version, mediagit_config::CONFIG_VERSION);
+    let backup_mtime_after = fs::metadata(&backup_path).unwrap().modified().unwrap();
+    assert_eq!(backup_mtime_before, backup_mtime_after);
+}

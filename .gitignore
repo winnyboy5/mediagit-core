@@ -189,10 +189,20 @@ claudedocs/
 .taskmaster/
 .serena/
 .claude/
+.claude-flow/
+.swarm/
+.superpowers/
 .mcp.json
 test-files/
 docs/
-dev-tests/
+dev-tests/*
+!dev-tests/qa-suite/
+!dev-tests/qa-suite/scripts/lib/
+dev-tests/qa-suite/work/
+dev-tests/qa-suite/logs/
+dev-tests/qa-suite/reports/
+dev-tests/qa-suite/fixtures-synthetic/
+dev-tests/qa-suite/.venv/
 test-archives/
 
 # Storage emulator test data
@@ -201,3 +211,15 @@ test-archives/
 **/gcs_data/
 
 # Husky-rs hooks (already in .husky/)
+
+# Compat fixture (format-freeze gate): frozen bytes that MUST be tracked.
+# Overrides both `dev-tests/*` and `**/.mediagit/` above; placed last so these
+# negations win. See dev-tests/compat-fixture/README.md.
+!dev-tests/compat-fixture/
+!dev-tests/compat-fixture/**
+!dev-tests/compat-fixture/repo/.mediagit/
+!dev-tests/compat-fixture/repo/.mediagit/**
+
+# Leaked-secret remediation 2026-07-18 — never re-track
+enc_key
+enc_key.pub

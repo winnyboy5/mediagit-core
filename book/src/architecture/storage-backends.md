@@ -16,12 +16,14 @@ MediaGit supports 7 storage backends through a unified trait-based abstraction. 
 
 ```rust
 #[async_trait]
-pub trait Backend: Send + Sync {
+pub trait StorageBackend: Send + Sync + Debug {
     async fn get(&self, key: &str) -> Result<Vec<u8>>;
     async fn put(&self, key: &str, data: &[u8]) -> Result<()>;
     async fn exists(&self, key: &str) -> Result<bool>;
     async fn delete(&self, key: &str) -> Result<()>;
-    async fn list(&self, prefix: &str) -> Result<Vec<String>>;
+    async fn list_objects(&self, prefix: &str) -> Result<Vec<String>>;
+    async fn head(&self, key: &str) -> Result<Option<u64>>;
+    // + presign_put / presign_get / MPU trio (default Ok(None), overridden per backend)
 }
 ```
 
@@ -46,6 +48,40 @@ See individual backend documentation:
 - [DigitalOcean Spaces](./backend-do.md)
 
 ## Choosing a Backend
+
+```mermaid
+flowchart TD
+    A["Choose a Backend"] --> B{"Self-hosted<br/>or Cloud?"}
+    B -->|Self-hosted| C{"Compliance<br/>required?"}
+    B -->|Cloud| D{"Which<br/>cloud?"}
+    
+    C -->|Yes| E["MinIO"]
+    C -->|No| F["Local"]
+    
+    D -->|AWS| G["Amazon S3"]
+    D -->|Microsoft| H["Azure Blob"]
+    D -->|Google| I["Google Cloud<br/>Storage"]
+    D -->|Other| J{"On budget?"}
+    
+    J -->|Cost-conscious| K["Backblaze B2"]
+    J -->|DigitalOcean| L["Spaces"]
+    
+    E --> M["Highest control"]
+    F --> N["Fastest, dev-only"]
+    G --> O["Global, mature"]
+    H --> P["Azure ecosystem"]
+    I --> Q["GCP ecosystem"]
+    K --> R["Most economical"]
+    L --> S["Simple, managed"]
+    
+    style F fill:#c8e6c9
+    style E fill:#c8e6c9
+    style G fill:#bbdefb
+    style H fill:#bbdefb
+    style I fill:#bbdefb
+    style K fill:#fff9c4
+    style L fill:#fff9c4
+```
 
 | Backend | Best For | Cost | Performance |
 |---------|----------|------|-------------|

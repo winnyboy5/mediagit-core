@@ -15,7 +15,7 @@
 //! Versioning and object database for MediaGit
 //!
 //! This crate implements the core version control functionality:
-//! - Content-addressable object database with SHA-256 addressing
+//! - Content-addressable object database with BLAKE3 addressing
 //! - Automatic content deduplication
 //! - LRU caching for performance
 //! - Observable metrics for deduplication efficiency
@@ -24,7 +24,7 @@
 //!
 //! The object database (ODB) provides Git-compatible content-addressable storage:
 //!
-//! - **Content Addressing**: Objects are identified by SHA-256 hash of their content
+//! - **Content Addressing**: Objects are identified by BLAKE3 hash of their content
 //! - **Automatic Deduplication**: Identical content is stored only once
 //! - **LRU Caching**: Frequently accessed objects cached with Moka
 //! - **Pluggable Storage**: Works with any `StorageBackend` implementation
@@ -63,6 +63,7 @@
 
 pub mod hash;
 
+mod bitmap;
 mod branch;
 mod checkout;
 pub mod chunking;
@@ -86,11 +87,14 @@ mod reflog;
 mod refs;
 mod revision;
 mod similarity;
+mod sparse;
 mod streaming_index;
 mod streaming_pack;
+mod tag_object;
 mod transaction;
 mod tree;
 
+pub use bitmap::{bitmap_enabled, bitmap_key, ReachabilityBitmap};
 pub use branch::{BranchInfo, BranchManager, DetachedHead};
 pub use checkout::{CheckoutManager, CheckoutStats};
 pub use chunking::{
@@ -102,7 +106,7 @@ pub use config::{ChunkingStrategyConfig, StorageConfig};
 pub use conflict::{Conflict, ConflictDetector, ConflictSide, ConflictStats, ConflictType};
 pub use delta::{Delta, DeltaDecoder, DeltaEncoder};
 pub use diff::{ModifiedEntry, ThreeWayDiff, TreeDiff, TreeDiffer};
-pub use index::{Index, IndexEntry};
+pub use index::{is_stage_debris_key, Index, IndexEntry};
 pub use lca::{LcaFinder, LcaResult};
 pub use merge::{apply_merge_to_workdir, FastForwardInfo, MergeEngine, MergeResult, MergeStrategy};
 pub use metrics::OdbMetrics;
@@ -117,11 +121,13 @@ pub use reflog::{Reflog, ReflogEntry};
 pub use refs::{normalize_ref_name, Ref, RefDatabase, RefType};
 pub use revision::resolve_revision;
 pub use similarity::{ObjectMetadata, SimilarityDetector, SimilarityScore};
+pub use sparse::{SparseFilter, SparseMode};
 pub use streaming_index::StreamingPackIndex;
 pub use streaming_pack::{
     CloudChunkLoc, CloudPackResult, StreamingPackReader, StreamingPackWriter,
 };
-pub use transaction::{recover_incomplete_transactions, PackTransaction, RecoveryReport};
+pub use tag_object::Tag;
+pub use transaction::PackTransaction;
 pub use tree::{FileMode, Tree, TreeEntry};
 
 // Re-export fsck module

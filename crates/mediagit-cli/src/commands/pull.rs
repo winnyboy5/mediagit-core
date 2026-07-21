@@ -40,9 +40,6 @@ use std::time::Instant;
     # Preview what would be pulled
     mediagit pull --dry-run
 
-    # Continue pull after resolving conflicts
-    mediagit pull --continue
-
 SEE ALSO:
     mediagit-push(1), mediagit-fetch(1), mediagit-merge(1), mediagit-rebase(1)")]
 pub struct PullCmd {
@@ -79,7 +76,7 @@ pub struct PullCmd {
     pub abort: bool,
 
     /// Continue after resolving conflicts
-    #[arg(long)]
+    #[arg(long = "continue", alias = "continue-pull", hide = true)]
     pub continue_pull: bool,
 
     /// Quiet mode
@@ -145,13 +142,20 @@ impl PullCmd {
         // Initialize protocol client. Honour [performance] upload_concurrency
         // from the repo config so users can tune parallel chunk fan-out
         // without setting MEDIAGIT_UPLOAD_CONCURRENCY in the env.
-        let mut client = mediagit_protocol::ProtocolClient::new(remote_url);
-        if let Some(n) = config.performance.upload_concurrency {
-            client = client.with_concurrent_uploads(n);
-        }
-        if let Some(n) = config.performance.download_concurrency {
-            client = client.with_concurrent_downloads(n);
-        }
+        let (mut credentials, cred_source) =
+            crate::repo::resolve_credentials_tiered(&repo_root, &config, remote);
+        let build_client = |creds: mediagit_protocol::Credentials| {
+            let mut c =
+                mediagit_protocol::ProtocolClient::new(remote_url.clone()).with_credentials(creds);
+            if let Some(n) = config.performance.upload_concurrency {
+                c = c.with_concurrent_uploads(n);
+            }
+            if let Some(n) = config.performance.download_concurrency {
+                c = c.with_concurrent_downloads(n);
+            }
+            c
+        };
+        let mut client = build_client(credentials.clone());
 
         // Initialize ODB with smart compression for consistent read/write
         let odb = Arc::new(mediagit_versioning::ObjectDatabase::with_smart_compression(
@@ -185,7 +189,19 @@ impl PullCmd {
         // NOTE: This runs BEFORE the "already up to date" check so users
         // always see new remote branches even when current branch is synced
         // ================================================================
-        let all_remote_refs = client.get_refs().await?;
+        // First authenticated call of this command — a cached keychain
+        // credential may have expired; on a 401, invalidate it and retry
+        // once with the next tier (I11).
+        let all_remote_refs = match client.get_refs().await {
+            Ok(r) => r,
+            Err(e) if crate::repo::invalidate_on_unauthorized(&config, remote, cred_source, &e) => {
+                credentials = crate::repo::resolve_credentials(&repo_root, &config, remote);
+                client = build_client(credentials.clone());
+                client.get_refs().await?
+            }
+            Err(e) => return Err(e),
+        };
+        crate::repo::remember_credentials(&config, remote, &credentials);
         let remote_branches: Vec<_> = all_remote_refs
             .refs
             .iter()
@@ -386,19 +402,6 @@ impl PullCmd {
                 }
             }
 
-            let ref_update =
-                mediagit_versioning::Ref::new_direct(remote_ref.clone(), remote_oid_parsed);
-            refdb.write(&ref_update).await?;
-
-            if !self.quiet {
-                println!(
-                    "{} Updated {} to {}",
-                    style("✓").green(),
-                    remote_ref,
-                    &remote_oid[..8]
-                );
-            }
-
             // Integrate changes (merge or rebase) - ONLY if pulling the current branch
             // Check if we're pulling the current branch or a different one
             let is_pulling_current_branch = match &current_head_target {
@@ -406,7 +409,25 @@ impl PullCmd {
                 None => false, // Detached HEAD - don't auto-merge
             };
 
+            // Only write the local branch ref directly here when it's NOT the
+            // current branch. For the current branch, the local ref must only
+            // move as a RESULT of integration (fast-forward/rebase/merge)
+            // below, never before it -- writing it here would silently
+            // clobber a divergent local commit (BUG-RM-1).
             if !is_pulling_current_branch {
+                let ref_update =
+                    mediagit_versioning::Ref::new_direct(remote_ref.clone(), remote_oid_parsed);
+                refdb.write(&ref_update).await?;
+
+                if !self.quiet {
+                    println!(
+                        "{} Updated {} to {}",
+                        style("✓").green(),
+                        remote_ref,
+                        &remote_oid[..8]
+                    );
+                }
+
                 // Pulled a different branch - just update refs, don't merge into current
                 let branch_short = remote_ref
                     .strip_prefix("refs/heads/")
@@ -422,7 +443,34 @@ impl PullCmd {
             } else if self.rebase {
                 // Rebase integration using the RebaseCmd
                 let head = refdb.read("HEAD").await?;
-                if let Some(head_oid) = head.oid {
+                // HEAD is normally symbolic on a checked-out branch (oid: None,
+                // target: Some("refs/heads/<branch>")). Resolve the real head
+                // OID in that case instead of treating it as "no local commits"
+                // (BUG-RM-1: that wrongly took the fast-forward path and
+                // discarded divergent local commits).
+                let head_oid = match head.oid {
+                    Some(oid) => oid,
+                    None => refdb.resolve("HEAD").await?,
+                };
+
+                let lca_finder = mediagit_versioning::LcaFinder::new(Arc::clone(&odb));
+                if lca_finder
+                    .is_ancestor(&head_oid, &remote_oid_parsed)
+                    .await?
+                {
+                    // Local branch has no divergent commits -- plain fast-forward
+                    fast_forward_to(
+                        &refdb,
+                        &odb,
+                        &repo_root,
+                        &head,
+                        &remote_oid_parsed,
+                        &remote_oid,
+                        self.quiet,
+                        self.verbose,
+                    )
+                    .await?;
+                } else {
                     // Get upstream ref name (e.g., "origin/main" or just "main")
                     let upstream_name = if remote_ref.starts_with("refs/heads/") {
                         // Use remote tracking ref as upstream
@@ -443,7 +491,6 @@ impl PullCmd {
                     let rebase_cmd = RebaseCmd {
                         upstream: upstream_name,
                         branch: None, // Rebase current branch
-                        interactive: false,
                         rebase_merges: false,
                         keep_empty: false,
                         autosquash: false,
@@ -459,8 +506,23 @@ impl PullCmd {
                     if !self.quiet {
                         println!("{} Rebased successfully", style("✓").green().bold());
                     }
-                } else {
-                    // No local commits — fast-forward
+                }
+            } else {
+                // Merge integration - only for CURRENT branch
+                let head = refdb.read("HEAD").await?;
+                // See rebase branch above: resolve symbolic HEAD to its real
+                // OID instead of treating it as "no local commits" (BUG-RM-1).
+                let head_oid = match head.oid {
+                    Some(oid) => oid,
+                    None => refdb.resolve("HEAD").await?,
+                };
+
+                let lca_finder = mediagit_versioning::LcaFinder::new(Arc::clone(&odb));
+                if lca_finder
+                    .is_ancestor(&head_oid, &remote_oid_parsed)
+                    .await?
+                {
+                    // Local branch has no divergent commits -- plain fast-forward
                     fast_forward_to(
                         &refdb,
                         &odb,
@@ -472,21 +534,13 @@ impl PullCmd {
                         self.verbose,
                     )
                     .await?;
-                }
-            } else {
-                // Merge integration - only for CURRENT branch
-                let head = refdb.read("HEAD").await?;
-                if let Some(head_oid) = head.oid {
+                } else {
                     let merge_engine = mediagit_versioning::MergeEngine::new(Arc::clone(&odb));
 
                     if self.verbose {
                         let head_hex = head_oid.to_hex();
                         println!("  Merging {} into {}", &remote_oid[..8], &head_hex[..8]);
                     }
-
-                    // Parse remote OID
-                    let remote_oid_parsed = mediagit_versioning::Oid::from_hex(&remote_oid)
-                        .map_err(|e| anyhow::anyhow!("Invalid remote OID: {}", e))?;
 
                     let merge_result = merge_engine
                         .merge(&head_oid, &remote_oid_parsed, MergeStrategy::Recursive)
@@ -543,19 +597,6 @@ impl PullCmd {
                     } else {
                         anyhow::bail!("Merge failed: no tree result");
                     }
-                } else {
-                    // No local commits — fast-forward
-                    fast_forward_to(
-                        &refdb,
-                        &odb,
-                        &repo_root,
-                        &head,
-                        &remote_oid_parsed,
-                        &remote_oid,
-                        self.quiet,
-                        self.verbose,
-                    )
-                    .await?;
                 }
             }
         } else if !self.quiet {

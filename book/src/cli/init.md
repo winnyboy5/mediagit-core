@@ -40,7 +40,10 @@ Name of the initial branch.
 - **Default**: `main`
 
 ### `--bare`
-Create a bare repository without a working directory.
+Compatibility alias. MediaGit repositories always use the `.mediagit` layout,
+so this creates exactly the same structure as a plain `init`. Commonly used
+when seeding a server-side repository directory
+(`mediagit init --bare <data-dir>/<repo>`).
 
 ## Examples
 
@@ -70,12 +73,6 @@ $ mediagit init --initial-branch develop
 ✓ Created initial branch: develop
 ```
 
-### Initialize bare repository
-```bash
-$ mediagit init --bare repo.git
-✓ Initialized bare MediaGit repository in repo.git/
-```
-
 ## Repository Structure
 
 After initialization, the `.mediagit` directory contains:
@@ -98,7 +95,7 @@ The generated `config.toml` contains the full default configuration. Key section
 ```toml
 [app]
 name = "mediagit"
-version = "0.2.8-beta.1"   # matches current binary version
+version = "0.3.0-rc.1"   # matches current binary version
 environment = "development"
 port = 8080
 
@@ -140,4 +137,4 @@ The `[compression]` section is written for reference but is not read at runtime.
 
 - [mediagit add](./add.md) - Add files to the staging area
 - [mediagit commit](./commit.md) - Record changes to the repository
-- [mediagit config](./config.md) - Get and set repository options
+- [Configuration Reference](../reference/config.md) - Repository configuration options

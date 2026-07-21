@@ -17,13 +17,15 @@
 
 use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
 
 use super::{
     credentials::CredentialsStore,
+    grants::GrantsStore,
     user::{Role, User},
-    AuthError, JwtAuth, TokenPair,
+    AuthError, AuthResult, JwtAuth, TokenPair,
 };
 
 /// Shared authentication service state
@@ -31,6 +33,12 @@ use super::{
 pub struct AuthService {
     pub jwt_auth: Arc<JwtAuth>,
     pub credentials_store: Arc<CredentialsStore>,
+    pub grants_store: Arc<GrantsStore>,
+    /// Whether `POST /auth/register` is open to anonymous callers. Defaults
+    /// to `true` on every constructor below (matches
+    /// `ServerConfig::allow_open_registration`'s serde default) so existing
+    /// behavior is unchanged unless a caller explicitly opts out.
+    pub allow_open_registration: bool,
 }
 
 impl AuthService {
@@ -39,6 +47,8 @@ impl AuthService {
         Self {
             jwt_auth: Arc::new(JwtAuth::new(jwt_secret)),
             credentials_store: Arc::new(CredentialsStore::new()),
+            grants_store: Arc::new(GrantsStore::new()),
+            allow_open_registration: true,
         }
     }
 
@@ -50,7 +60,21 @@ impl AuthService {
         Self {
             jwt_auth,
             credentials_store,
+            grants_store: Arc::new(GrantsStore::new()),
+            allow_open_registration: true,
         }
+    }
+
+    /// Create an authentication service whose credentials and grants are
+    /// persisted under `store_dir` (see [`CredentialsStore::load_or_new`],
+    /// [`GrantsStore::load_or_new`]).
+    pub fn new_with_store_dir(jwt_secret: &str, store_dir: &Path) -> AuthResult<Self> {
+        Ok(Self {
+            jwt_auth: Arc::new(JwtAuth::new(jwt_secret)),
+            credentials_store: Arc::new(CredentialsStore::load_or_new(store_dir)?),
+            grants_store: Arc::new(GrantsStore::load_or_new(store_dir)?),
+            allow_open_registration: true,
+        })
     }
 }
 
@@ -62,12 +86,6 @@ pub struct RegisterRequest {
     pub username: String,
     pub email: String,
     pub password: String,
-    #[serde(default = "default_role")]
-    pub role: Role,
-}
-
-fn default_role() -> Role {
-    Role::Write
 }
 
 /// User login request
@@ -120,6 +138,44 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+// Shared validation rules
+
+/// Password strength rule shared by registration, self-service password
+/// change, and admin password reset, so the minimum-length rule cannot
+/// drift between call sites.
+pub fn validate_password_strength(password: &str) -> Result<(), String> {
+    if password.is_empty() {
+        return Err("Password is required".to_string());
+    }
+    if password.len() < 8 {
+        return Err("Password must be at least 8 characters".to_string());
+    }
+    Ok(())
+}
+
+/// Registration input rules shared by `POST /auth/register` and the future
+/// server CLI / admin create-user path, so username/email/password rules
+/// cannot drift between call sites.
+pub fn validate_registration_input(
+    username: &str,
+    email: &str,
+    password: &str,
+) -> Result<(), String> {
+    let username = username.trim();
+    let email = email.trim();
+
+    if username.is_empty() || email.is_empty() || password.is_empty() {
+        return Err("Username, email, and password are required".to_string());
+    }
+    if username.len() < 3 {
+        return Err("Username must be at least 3 characters".to_string());
+    }
+    if !email.contains('@') || !email.contains('.') {
+        return Err("Invalid email format".to_string());
+    }
+    validate_password_strength(password)
+}
+
 // Handler functions
 
 /// Register new user
@@ -130,52 +186,24 @@ pub async fn register_handler(
     State(auth_service): State<Arc<AuthService>>,
     Json(req): Json<RegisterRequest>,
 ) -> Result<(StatusCode, Json<AuthResponse>), (StatusCode, Json<ErrorResponse>)> {
-    // Validate input - check for empty or whitespace-only strings
-    let username = req.username.trim();
-    let email = req.email.trim();
-    let password = &req.password; // Don't trim password (whitespace can be intentional)
-
-    if username.is_empty() || email.is_empty() || password.is_empty() {
+    if !auth_service.allow_open_registration {
         return Err((
-            StatusCode::BAD_REQUEST,
+            StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: "Username, email, and password are required".to_string(),
+                error: "Registration is closed on this server; ask an administrator to create your account".to_string(),
             }),
         ));
     }
 
-    // Validate username length and characters
-    if username.len() < 3 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Username must be at least 3 characters".to_string(),
-            }),
-        ));
-    }
-
-    // Basic email format validation
-    if !email.contains('@') || !email.contains('.') {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Invalid email format".to_string(),
-            }),
-        ));
-    }
-
-    if password.len() < 8 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Password must be at least 8 characters".to_string(),
-            }),
-        ));
-    }
+    validate_registration_input(&req.username, &req.email, &req.password)
+        .map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
 
     // Create user with unique ID
     let user_id = uuid::Uuid::new_v4().to_string();
-    let user = User::new(user_id, req.username, req.email, req.role);
+    // Self-registration always creates a Write-role account; there is no
+    // client-controlled `role` field (P0-1: prevents an unauthenticated
+    // caller from minting an Admin account via the request body).
+    let user = User::new(user_id, req.username, req.email, Role::Write);
 
     // Register user
     match auth_service
@@ -376,7 +404,6 @@ mod tests {
             username: "testuser".to_string(),
             email: "test@example.com".to_string(),
             password: "password123".to_string(),
-            role: Role::Write,
         };
 
         let result = register_handler(State(Arc::clone(&auth_service)), Json(register_req)).await;
@@ -425,7 +452,6 @@ mod tests {
             username: "testuser".to_string(),
             email: "test@example.com".to_string(),
             password: "short".to_string(), // Too short
-            role: Role::Write,
         };
 
         let result = register_handler(State(auth_service), Json(register_req)).await;
@@ -433,6 +459,57 @@ mod tests {
         assert!(result.is_err());
         let (status, _) = result.unwrap_err();
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_registration_closed_rejected() {
+        let mut auth_service = AuthService::new("test-secret");
+        auth_service.allow_open_registration = false;
+        let auth_service = Arc::new(auth_service);
+
+        let register_req = RegisterRequest {
+            username: "testuser".to_string(),
+            email: "test@example.com".to_string(),
+            password: "password123".to_string(),
+        };
+
+        let result = register_handler(State(auth_service), Json(register_req)).await;
+
+        assert!(result.is_err());
+        let (status, _) = result.unwrap_err();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_registration_open_by_default() {
+        // Default AuthService::new must keep behaving exactly as before —
+        // allow_open_registration defaults to true.
+        let auth_service = Arc::new(AuthService::new("test-secret"));
+        assert!(auth_service.allow_open_registration);
+
+        let register_req = RegisterRequest {
+            username: "testuser".to_string(),
+            email: "test@example.com".to_string(),
+            password: "password123".to_string(),
+        };
+
+        let result = register_handler(State(auth_service), Json(register_req)).await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_registration_input() {
+        assert!(validate_registration_input("ab", "a@b.com", "password123").is_err());
+        assert!(validate_registration_input("abc", "not-an-email", "password123").is_err());
+        assert!(validate_registration_input("abc", "a@b.com", "short").is_err());
+        assert!(validate_registration_input("abc", "a@b.com", "password123").is_ok());
+    }
+
+    #[test]
+    fn test_validate_password_strength() {
+        assert!(validate_password_strength("short").is_err());
+        assert!(validate_password_strength("").is_err());
+        assert!(validate_password_strength("longenough").is_ok());
     }
 
     #[tokio::test]
@@ -444,7 +521,6 @@ mod tests {
             username: "testuser".to_string(),
             email: "test@example.com".to_string(),
             password: "password123".to_string(),
-            role: Role::Write,
         };
 
         let (_, auth_response) =

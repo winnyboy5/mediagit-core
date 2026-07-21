@@ -15,7 +15,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_versioning::{
-    Commit, LcaFinder, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Signature,
+    resolve_revision, CheckoutManager, Commit, LcaFinder, MergeEngine, MergeStrategy,
+    ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Signature, Tree,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -34,10 +35,6 @@ pub struct RebaseCmd {
     #[arg(value_name = "BRANCH")]
     pub branch: Option<String>,
 
-    /// Interactive rebase (not yet implemented)
-    #[arg(short, long, hide = true)]
-    pub interactive: bool,
-
     /// Rebase merge commits (not yet implemented)
     #[arg(short = 'm', long, hide = true)]
     pub rebase_merges: bool,
@@ -55,7 +52,7 @@ pub struct RebaseCmd {
     pub abort: bool,
 
     /// Continue after resolving conflicts
-    #[arg(long)]
+    #[arg(long = "continue", alias = "continue-rebase", hide = true)]
     pub continue_rebase: bool,
 
     /// Skip current commit
@@ -91,10 +88,7 @@ impl RebaseCmd {
             anyhow::bail!("A rebase is already in progress. Use --continue, --skip, or --abort.");
         }
 
-        // Interactive and merge rebases not yet supported
-        if self.interactive {
-            anyhow::bail!("Interactive rebase not yet implemented. Use non-interactive rebase.");
-        }
+        // Merge rebases not yet supported
         if self.rebase_merges {
             anyhow::bail!("Rebase with merge commits not yet implemented.");
         }
@@ -105,7 +99,7 @@ impl RebaseCmd {
         let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
 
         // Resolve upstream branch
-        let upstream_oid = self.resolve_branch(&refdb, &self.upstream).await?;
+        let upstream_oid = resolve_revision(&self.upstream, &refdb, &odb).await?;
 
         // Get current HEAD
         let head = refdb.read("HEAD").await?;
@@ -219,6 +213,13 @@ impl RebaseCmd {
                     refdb.write(&new_ref).await?;
                 }
 
+                // Sync the working directory to the newly rebased tree
+                let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
+                checkout_mgr
+                    .checkout_commit(&new_head)
+                    .await
+                    .context("Failed to update working directory after rebase")?;
+
                 // Clear rebase state on success
                 RebaseState::clear(&repo_root)?;
 
@@ -245,11 +246,12 @@ impl RebaseCmd {
         odb: &Arc<ObjectDatabase>,
         _refdb: &RefDatabase,
         state: &mut RebaseState,
-        commits: &[Commit],
+        commits: &[(Oid, Commit)],
     ) -> Result<Oid> {
         let mut new_parent = state.new_parent;
+        let merge_engine = MergeEngine::new(odb.clone());
 
-        for original_commit in commits.iter() {
+        for (original_oid, original_commit) in commits.iter() {
             // Update state for current commit
             if !state.commits_remaining.is_empty() {
                 state.advance();
@@ -267,9 +269,47 @@ impl RebaseCmd {
                 );
             }
 
-            // Create new commit with same changes but new parent
+            // Replay this commit's actual change via a real 3-way merge instead
+            // of copying its tree verbatim (which silently drops/overwrites
+            // anything the new base has that this commit's snapshot doesn't).
+            //   base   = tree of this commit's own parent (what it changed FROM)
+            //   ours   = tree of the new parent (what we're replaying onto)
+            //   theirs = tree of this commit (what it changed TO)
+            let base_tree = match original_commit.parents.first() {
+                Some(parent_oid) => {
+                    let data = odb.read(parent_oid).await?;
+                    Commit::deserialize(&data)?.tree
+                }
+                None => Tree::new().write(odb).await?,
+            };
+
+            let new_parent_data = odb.read(&new_parent).await?;
+            let ours_tree = Commit::deserialize(&new_parent_data)?.tree;
+
+            let merge_result = merge_engine
+                .merge_trees(
+                    &base_tree,
+                    &ours_tree,
+                    &original_commit.tree,
+                    MergeStrategy::Recursive,
+                )
+                .await?;
+
+            if merge_result.has_conflicts() {
+                anyhow::bail!(
+                    "rebase stopped: conflict replaying commit {} '{}'",
+                    &original_oid.to_hex()[..7],
+                    original_commit.message.lines().next().unwrap_or("")
+                );
+            }
+
+            let merged_tree = merge_result
+                .tree_oid
+                .context("merge produced no tree during rebase")?;
+
+            // Create new commit with the merged tree and new parent
             let new_commit = Commit {
-                tree: original_commit.tree,
+                tree: merged_tree,
                 parents: vec![new_parent],
                 author: original_commit.author.clone(),
                 committer: Signature::now(
@@ -298,7 +338,7 @@ impl RebaseCmd {
         odb: &Arc<ObjectDatabase>,
         base_oid: &Oid,
         head_oid: &Oid,
-    ) -> Result<Vec<Commit>> {
+    ) -> Result<Vec<(Oid, Commit)>> {
         let mut commits = Vec::new();
         let mut visited = HashSet::new();
         let mut current = *head_oid;
@@ -313,7 +353,7 @@ impl RebaseCmd {
             let data = odb.read(&current).await?;
             let commit = Commit::deserialize(&data)?;
 
-            commits.push(commit.clone());
+            commits.push((current, commit.clone()));
 
             // Follow first parent
             if let Some(parent) = commit.parents.first() {
@@ -326,28 +366,6 @@ impl RebaseCmd {
         // Reverse to get chronological order
         commits.reverse();
         Ok(commits)
-    }
-
-    async fn resolve_branch(&self, refdb: &RefDatabase, branch: &str) -> Result<Oid> {
-        // Try as direct OID
-        if let Ok(oid) = Oid::from_hex(branch) {
-            return Ok(oid);
-        }
-
-        // Try as reference
-        let ref_result = refdb.read(branch).await;
-        match ref_result {
-            Ok(r) => r.oid.context(format!("Branch {} has no commit", branch)),
-            Err(_) => {
-                // Try with refs/heads prefix
-                let with_prefix = format!("refs/heads/{}", branch);
-                let ref_result = refdb.read(&with_prefix).await;
-                match ref_result {
-                    Ok(r) => r.oid.context(format!("Branch {} has no commit", branch)),
-                    Err(_) => anyhow::bail!("Cannot resolve branch: {}", branch),
-                }
-            }
-        }
     }
 
     async fn abort_rebase(&self, repo_root: &std::path::Path) -> Result<()> {
@@ -433,6 +451,12 @@ impl RebaseCmd {
                 refdb.write(&new_ref).await?;
             }
 
+            let checkout_mgr = CheckoutManager::new(&odb, repo_root);
+            checkout_mgr
+                .checkout_commit(&state.new_parent)
+                .await
+                .context("Failed to update working directory after rebase")?;
+
             RebaseState::clear(repo_root)?;
 
             if !self.quiet {
@@ -456,6 +480,12 @@ impl RebaseCmd {
                     let new_ref = Ref::new_direct("HEAD".to_string(), new_head);
                     refdb.write(&new_ref).await?;
                 }
+
+                let checkout_mgr = CheckoutManager::new(&odb, repo_root);
+                checkout_mgr
+                    .checkout_commit(&new_head)
+                    .await
+                    .context("Failed to update working directory after rebase")?;
 
                 RebaseState::clear(repo_root)?;
 
@@ -508,15 +538,163 @@ impl RebaseCmd {
         &self,
         odb: &Arc<ObjectDatabase>,
         state: &RebaseState,
-    ) -> Result<Vec<Commit>> {
+    ) -> Result<Vec<(Oid, Commit)>> {
         let mut commits = Vec::new();
 
         for oid in &state.commits_remaining {
             let data = odb.read(oid).await?;
             let commit = Commit::deserialize(&data)?;
-            commits.push(commit);
+            commits.push((*oid, commit));
         }
 
         Ok(commits)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::utils::test_support::{init_repo_with_commit, REPO_ENV_LOCK};
+    use clap::Parser;
+    use tempfile::TempDir;
+
+    fn parse(args: &[&str]) -> Result<RebaseCmd, clap::Error> {
+        let mut full = vec!["rebase"];
+        full.extend_from_slice(args);
+        RebaseCmd::try_parse_from(full)
+    }
+
+    #[test]
+    fn parse_basic_upstream() {
+        let cmd = parse(&["main"]).unwrap();
+        assert_eq!(cmd.upstream, "main");
+        assert!(cmd.branch.is_none());
+        assert!(!cmd.abort);
+    }
+
+    #[test]
+    fn parse_missing_upstream_is_error() {
+        assert!(parse(&[]).is_err());
+    }
+
+    #[test]
+    fn parse_upstream_and_branch() {
+        let cmd = parse(&["main", "feature"]).unwrap();
+        assert_eq!(cmd.upstream, "main");
+        assert_eq!(cmd.branch.as_deref(), Some("feature"));
+    }
+
+    #[test]
+    fn parse_all_flags() {
+        let cmd = parse(&[
+            "main",
+            "--keep-empty",
+            "--abort",
+            "--continue-rebase",
+            "--skip",
+            "-q",
+            "-v",
+        ])
+        .unwrap();
+        assert!(cmd.keep_empty);
+        assert!(cmd.abort);
+        assert!(cmd.continue_rebase);
+        assert!(cmd.skip);
+        assert!(cmd.quiet);
+        assert!(cmd.verbose);
+    }
+
+    /// Guards `MEDIAGIT_REPO` across the `.await` points in `execute()`
+    /// (see `REPO_ENV_LOCK` docs).
+    #[allow(clippy::await_holding_lock)]
+    async fn execute_in(repo_path: &std::path::Path, cmd: &RebaseCmd) -> Result<()> {
+        let _guard = REPO_ENV_LOCK.lock().unwrap();
+        std::env::set_var("MEDIAGIT_REPO", repo_path);
+        let result = cmd.execute().await;
+        std::env::remove_var("MEDIAGIT_REPO");
+        result
+    }
+
+    #[tokio::test]
+    async fn execute_no_repo_is_error() {
+        let temp = TempDir::new().unwrap();
+        let cmd = parse(&["main"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("Not a mediagit repository"));
+    }
+
+    #[tokio::test]
+    async fn execute_unknown_upstream_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["does-not-exist"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("Cannot resolve revision"));
+    }
+
+    #[tokio::test]
+    async fn execute_upstream_resolves_via_refs_remotes() {
+        // QA-004: `pull -r` passes a tracking ref like "origin/main" as the
+        // upstream, which only exists under refs/remotes. Rebase must resolve
+        // it instead of failing with "Cannot resolve revision".
+        let temp = TempDir::new().unwrap();
+        let head_oid = init_repo_with_commit(temp.path()).await;
+
+        let refdb = RefDatabase::new(temp.path().join(".mediagit"));
+        refdb
+            .write(&Ref::new_direct(
+                "refs/remotes/origin/main".to_string(),
+                head_oid,
+            ))
+            .await
+            .unwrap();
+
+        let cmd = parse(&["origin/main"]).unwrap();
+        let result = execute_in(temp.path(), &cmd).await;
+        assert!(
+            result.is_ok(),
+            "expected resolution to succeed: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn interactive_flag_is_rejected_at_parse_time() {
+        // -i/--interactive was removed from clap (unbuilt feature, pre-GA)
+        assert!(parse(&["main", "-i"]).is_err());
+        assert!(parse(&["main", "--interactive"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_rebase_merges_is_not_implemented_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["main", "--rebase-merges"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Rebase with merge commits not yet implemented"));
+    }
+
+    #[tokio::test]
+    async fn abort_without_rebase_in_progress_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["main", "--abort"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("No rebase in progress"));
+    }
+
+    #[tokio::test]
+    async fn skip_without_rebase_in_progress_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["main", "--skip"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("No rebase in progress"));
     }
 }

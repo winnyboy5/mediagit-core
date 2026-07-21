@@ -1,0 +1,227 @@
+{
+  "schema_version": 1,
+  "generated": "2026-07-18T18:45:43.330117300+00:00",
+  "corpus": "D:\\own\\saas\\mediagit-core\\test-files",
+  "totals": {
+    "total_bytes": 916517718,
+    "unique_chunk_bytes": 580723480,
+    "dedup_pct": 36.63805198799223,
+    "chunk_count": 660,
+    "avg_chunk_size": 1388663.209090909,
+    "post_compression_bytes": 485029867,
+    "add_ms": 15669.1534,
+    "delta_hit_rate": 0.8,
+    "delta_pct": 32.001355062986946
+  },
+  "per_extension": {
+    "ai": {
+      "total_bytes": 1771124,
+      "unique_chunk_bytes": 1186552,
+      "dedup_pct": 33.005707110287034,
+      "chunk_count": 3,
+      "avg_chunk_size": 590374.6666666666,
+      "post_compression_bytes": 1186554,
+      "add_ms": 1.2865,
+      "delta_hit_rate": 1.0,
+      "delta_pct": 3.5966311173128673
+    },
+    "blend": {
+      "total_bytes": 36131237,
+      "unique_chunk_bytes": 17084618,
+      "dedup_pct": 52.71510355430122,
+      "chunk_count": 32,
+      "avg_chunk_size": 1129101.15625,
+      "post_compression_bytes": 16401786,
+      "add_ms": 83.47120000000001,
+      "delta_hit_rate": 1.0,
+      "delta_pct": 29.521102026971054
+    },
+    "eps": {
+      "total_bytes": 1456618,
+      "unique_chunk_bytes": 1456618,
+      "dedup_pct": 0.0,
+      "chunk_count": 2,
+      "avg_chunk_size": 728309.0,
+      "post_compression_bytes": 500936,
+      "add_ms": 5.7811,
+      "delta_hit_rate": null,
+      "delta_pct": null
+    },
+    "fbx": {
+      "total_bytes": 27163624,
+      "unique_chunk_bytes": 15447505,
+      "dedup_pct": 43.13164914961273,
+      "chunk_count": 30,
+      "avg_chunk_size": 905454.1333333333,
+      "post_compression_bytes": 10237264,
+      "add_ms": 2459.6535000000003,
+      "delta_hit_rate": 1.0,
+      "delta_pct": 0.5760594146588451
+    },
+    "flac": {
+      "total_bytes": 117837773,
+      "unique_chunk_bytes": 42768552,
+      "dedup_pct": 63.70556663524183,
+      "chunk_count": 90,
+      "avg_chunk_size": 1309308.588888889,
+      "post_compression_bytes": 42759936,
+      "add_ms": 156.7096,
+      "delta_hit_rate": 0.0,
+      "delta_pct": 93.18798622468537
+    },
+    "glb": {
+      "total_bytes": 13789856,
+      "unique_chunk_bytes": 13789856,
+      "dedup_pct": 0.0,
+      "chunk_count": 14,
+      "avg_chunk_size": 984989.7142857143,
+      "post_compression_bytes": 6797622,
+      "add_ms": 2087.5376,
+      "delta_hit_rate": null,
+      "delta_pct": null
+    },
+    "jpg": {
+      "total_bytes": 5858177,
+      "unique_chunk_bytes": 5858177,
+      "dedup_pct": 0.0,
+      "chunk_count": 3,
+      "avg_chunk_size": 1952725.6666666667,
+      "post_compression_bytes": 5858180,
+      "add_ms": 4.986999999999999,
+      "delta_hit_rate": null,
+      "delta_pct": null
+    },
+    "mkv": {
+      "total_bytes": 8066400,
+      "unique_chunk_bytes": 8066269,
+      "dedup_pct": 0.0016240206287765346,
+      "chunk_count": 36,
+      "avg_chunk_size": 224066.66666666666,
+      "post_compression_bytes": 8066303,
+      "add_ms": 7.591100000000001,
+      "delta_hit_rate": null,
+      "delta_pct": null
+    },
+    "mov": {
+      "total_bytes": 42487623,
+      "unique_chunk_bytes": 42487393,
+      "dedup_pct": 0.000541334119819048,
+      "chunk_count": 40,
+      "avg_chunk_size": 1062190.575,
+      "post_compression_bytes": 42487426,
+      "add_ms": 42.3424,
+      "delta_hit_rate": null,
+      "delta_pct": null
+    },
+    "mp4": {
+      "total_bytes": 10906511,
+      "unique_chunk_bytes": 5782089,
+      "dedup_pct": 46.98497988953571,
+      "chunk_count": 31,
+      "avg_chunk_size": 351822.93548387097,
+      "post_compression_bytes": 5782108,
+      "add_ms": 11.1053,
+      "delta_hit_rate": null,
+      "delta_pct": null
+    },
+    "ogg": {
+      "total_bytes": 12225171,
+      "unique_chunk_bytes": 12225171,
+      "dedup_pct": 0.0,
+      "chunk_count": 43,
+      "avg_chunk_size": 284306.3023255814,
+      "post_compression_bytes": 12225214,
+      "add_ms": 11.058400000000002,
+      "delta_hit_rate": null,
+      "delta_pct": null
+    },
+    "parquet": {
+      "total_bytes": 41612597,
+      "unique_chunk_bytes": 40935267,
+      "dedup_pct": 1.627704226198623,
+      "chunk_count": 28,
+      "avg_chunk_size": 1486164.1785714286,
+      "post_compression_bytes": 40935294,
+      "add_ms": 41.3215,
+      "delta_hit_rate": 1.0,
+      "delta_pct": 52.23840319852511
+    },
+    "ply": {
+      "total_bytes": 7162463,
+      "unique_chunk_bytes": 4780778,
+      "dedup_pct": 33.252318371487576,
+      "chunk_count": 3,
+      "avg_chunk_size": 2387487.6666666665,
+      "post_compression_bytes": 1308780,
+      "add_ms": 1404.7586999999999,
+      "delta_hit_rate": 1.0,
+      "delta_pct": 0.9073845824234409
+    },
+    "png": {
+      "total_bytes": 10797725,
+      "unique_chunk_bytes": 10797725,
+      "dedup_pct": 0.0,
+      "chunk_count": 4,
+      "avg_chunk_size": 2699431.25,
+      "post_compression_bytes": 10797729,
+      "add_ms": 8.2391,
+      "delta_hit_rate": null,
+      "delta_pct": null
+    },
+    "psd": {
+      "total_bytes": 74554099,
+      "unique_chunk_bytes": 74554099,
+      "dedup_pct": 0.0,
+      "chunk_count": 51,
+      "avg_chunk_size": 1461845.0784313725,
+      "post_compression_bytes": 46877046,
+      "add_ms": 396.6608,
+      "delta_hit_rate": null,
+      "delta_pct": null
+    },
+    "safetensors": {
+      "total_bytes": 314574864,
+      "unique_chunk_bytes": 205826029,
+      "dedup_pct": 34.570096802139915,
+      "chunk_count": 107,
+      "avg_chunk_size": 2939952.0,
+      "post_compression_bytes": 190224772,
+      "add_ms": 585.0187000000001,
+      "delta_hit_rate": 0.0,
+      "delta_pct": 92.43602565779064
+    },
+    "stl": {
+      "total_bytes": 6270944,
+      "unique_chunk_bytes": 4371560,
+      "dedup_pct": 30.28864553725883,
+      "chunk_count": 7,
+      "avg_chunk_size": 895849.1428571428,
+      "post_compression_bytes": 2130791,
+      "add_ms": 574.0136,
+      "delta_hit_rate": 1.0,
+      "delta_pct": 1.1336128281002842
+    },
+    "wav": {
+      "total_bytes": 171078926,
+      "unique_chunk_bytes": 60533236,
+      "dedup_pct": 64.61677810626423,
+      "chunk_count": 132,
+      "avg_chunk_size": 1296052.4696969697,
+      "post_compression_bytes": 27680136,
+      "add_ms": 7775.7287,
+      "delta_hit_rate": 1.0,
+      "delta_pct": 45.840286164742984
+    },
+    "zip": {
+      "total_bytes": 12771986,
+      "unique_chunk_bytes": 12771986,
+      "dedup_pct": 0.0,
+      "chunk_count": 4,
+      "avg_chunk_size": 3192996.5,
+      "post_compression_bytes": 12771990,
+      "add_ms": 11.888599999999999,
+      "delta_hit_rate": null,
+      "delta_pct": null
+    }
+  }
+}

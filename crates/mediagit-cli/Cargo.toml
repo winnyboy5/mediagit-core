@@ -17,6 +17,8 @@ mediagit-storage = { path = "../mediagit-storage", features = ["all"] }
 mediagit-versioning = { path = "../mediagit-versioning" }
 mediagit-observability = { path = "../mediagit-observability" }
 mediagit-protocol = { path = "../mediagit-protocol" }
+mediagit-media = { path = "../mediagit-media" }
+mediagit-security = { path = "../mediagit-security", features = ["auth", "middleware"] }
 
 # Workspace dependencies
 tokio.workspace = true
@@ -24,6 +26,7 @@ clap.workspace = true
 clap_complete.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+postcard.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 indicatif.workspace = true
@@ -31,16 +34,20 @@ console.workspace = true
 toml.workspace = true
 chrono.workspace = true
 rayon.workspace = true
+blake3.workspace = true
 
 # Additional dependencies
 dialoguer = "0.12"
 futures = "0.3"
 glob = "0.3"
-walkdir = "2.5"
 dunce = "1.0"  # Cross-platform path canonicalization (handles Windows \\?\ prefix)
 num_cpus = "1.16"
 husky-rs = "0.3.2"
 ignore = "0.4"  # .gitignore-compatible pattern matching for .mediagitignore
+getrandom = "0.4"  # OS RNG for per-repo CDC seed generation at `mediagit init`
+url = "2.5"  # scheme/host/port parsing for full-URL download credential gating (F4)
+keyring = "4.1.5"  # OS-keychain credential storage (I10); default "v1" feature covers Windows Credential Manager natively
+reqwest.workspace = true  # `mediagit auth *` talks to server-root /auth/* endpoints directly (not repo-scoped, so ProtocolClient doesn't cover them)
 
 [lib]
 name = "mediagit_cli"
@@ -52,6 +59,9 @@ path = "src/main.rs"
 
 [dev-dependencies]
 mediagit-test-utils = { path = "../mediagit-test-utils" }
+mediagit-server = { path = "../mediagit-server" }
 assert_cmd = "2.1"
 predicates = "3.1"
 tempfile.workspace = true
+axum.workspace = true
+ssh-key = { version = "0.6.7", features = ["ed25519"] }

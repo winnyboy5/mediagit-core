@@ -7,6 +7,10 @@ All environment variables recognized by MediaGit. Environment variables take pre
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MEDIAGIT_REPO` | Override repository root path. Used internally by `-C <path>`. | — |
+| `MEDIAGIT_TOKEN` | Bearer token attached to requests against a matching configured remote. | — |
+| `MEDIAGIT_API_KEY` | API key (`X-Api-Key` header) attached to requests against a matching configured remote. Mutually exclusive with `MEDIAGIT_TOKEN` (token wins if both set). | — |
+| `MEDIAGIT_REPO_NAMESPACE` | Per-repo namespace prefix for object-store layout v2. No "off" value — always resolves to a namespace (falls back to `config.toml` `repo_namespace`, then the sanitized repo-dir basename). | — |
+| `MEDIAGIT_NO_KEYRING` | Any value disables OS keychain credential storage/lookup. | unset (keyring used) |
 
 ## Author Identity
 
@@ -48,6 +52,116 @@ Used when `storage.backend = "gcs"`.
 |----------|-------------|
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to service account JSON key file |
 | `GCS_EMULATOR_HOST` | GCS emulator URL for testing (e.g., `http://localhost:4443`) |
+
+## Performance Tuning
+
+MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurrency, chunking, cloud-pack bundling, and storage-backend behavior. The table below is a summary grouped by area; **[`env-knobs.md`](https://github.com/mediagit/mediagit/blob/main/env-knobs.md) in the repository root is the canonical, exhaustive reference** with per-knob stability status and the release each knob was introduced in.
+
+### Push / Pull / Fetch Concurrency
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MEDIAGIT_UPLOAD_CONCURRENCY` | Max concurrent chunk PUT requests. | `32` |
+| `MEDIAGIT_DOWNLOAD_CONCURRENCY` | Max concurrent chunk GET requests. | `32` |
+| `MEDIAGIT_PUSH_PIPELINE` | Cross-object push pipeline. `0` reverts to the sequential path. | `1` (ON) |
+| `MEDIAGIT_PUSH_OBJECT_CONCURRENCY` | Max concurrent object uploads when `PUSH_PIPELINE=1`. | `8` |
+| `MEDIAGIT_PUSH_CHUNK_CONCURRENCY` | Per-object chunk upload concurrency; targets ~64 total in-flight PUTs. | computed |
+| `MEDIAGIT_PUSH_DEADLINE_SECS` | Overall wall-clock deadline for a single push. | `3600` |
+| `MEDIAGIT_STRONG_VERIFY` | `1` runs a full BLAKE3 re-hash verification of pushed chunks after transfer. | `0` (OFF) |
+| `MEDIAGIT_PULL_PIPELINE` | Overlap manifest fetches and chunk downloads. | `1` (ON) |
+| `MEDIAGIT_PULL_MANIFEST_CONCURRENCY` | Max concurrent manifest fetches when `PULL_PIPELINE=1`. | `8` |
+| `MEDIAGIT_RANGE_PARALLEL` | Parallel ranged-GET fan-out for large single-chunk downloads. | `4` |
+| `MEDIAGIT_RANGE_PARALLEL_THRESHOLD` | Chunk size above which `RANGE_PARALLEL` kicks in. | `4194304` (4 MiB) |
+| `MEDIAGIT_DOWNLOAD_DIRECT_DISABLE` | `1` disables direct presigned-URL downloads, forcing the server proxy. | `0` (OFF) |
+| `MEDIAGIT_FETCH_BRANCH_CONCURRENCY` | Max branches fetched in parallel for `fetch --all`. | `4` |
+| `MEDIAGIT_FETCH_DOWNLOAD_CONCURRENCY` | Per-branch chunk download concurrency when fetching multiple branches. | computed |
+| `MEDIAGIT_STREAM_CHUNK_TO_DISK` | Stream chunk bodies directly to the ODB file instead of buffering in RAM. | `1` (ON) |
+| `MEDIAGIT_STORAGE_STREAMING` | Use streaming GET on S3/MinIO instead of a `Vec<u8>` round-trip. | `1` (ON) |
+| `MEDIAGIT_HTTP_POOL_MAX` | Max idle HTTP connections per host. Keep ≤128 on Windows. | `64` |
+| `MEDIAGIT_DECOMPRESS_BLOCKING` | Offload decompression to `spawn_blocking` for chunks ≥ threshold. | `1` (ON) |
+| `MEDIAGIT_DECOMPRESS_BLOCKING_THRESHOLD` | Byte size above which decompression is offloaded. | `262144` (256 KiB) |
+
+### Add / Chunking / Delta
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MEDIAGIT_HASH_PARALLEL` | Parallel mmap-based hashing for files ≥ the streaming threshold. `0` forces sequential. | `1` (ON) |
+| `MEDIAGIT_ADD_MAX_INFLIGHT_BYTES` | Global in-flight byte budget for parallel file processing during `add`. | `536870912` (512 MiB) |
+| `MEDIAGIT_ADD_COMPRESS_BLOCKING` | Offload add-time chunk compression to `spawn_blocking`. | `1` (ON) |
+| `MEDIAGIT_ADD_COMPRESS_BLOCKING_THRESHOLD` | Byte size above which add-time compression is offloaded. | `262144` (256 KiB) |
+| `MEDIAGIT_CDC_SEED` | Per-repo CDC chunk-boundary seed. Overrides `config.toml` `cdc_seed`. | repo config (`0` legacy) |
+| `MEDIAGIT_CODEC_DETECT` | Container-aware codec detection for compression routing. `0` forces `CodecHint::Unknown`. | `1` (ON) |
+| `MEDIAGIT_CHUNK_FBX` | Opt-in structure-aware FBX chunking walker (measured net-negative vs. generic CDC; off by design). | unset/`0` (OFF) |
+| `MEDIAGIT_CHUNK_BLEND` / `MEDIAGIT_CHUNK_STL` / `MEDIAGIT_CHUNK_PLY` | Structure-aware chunking walkers for `.blend`/STL/PLY. `0` disables each. | `1` (ON) |
+| `MEDIAGIT_AUDIO_TIER` | Audio-format chunk tier. `0` disables. | `1` (ON) |
+| `MEDIAGIT_CONTAINER_CHUNK_CAP_MB` | Ceiling (MiB) above which container-format chunking is skipped for plain `StreamCDC`. `0` disables the cap. | `100` |
+| `MEDIAGIT_PHASH` | Perceptual image hashing for delta candidacy. `0` disables hashing and image delta. | `1` (ON) |
+| `MEDIAGIT_PHASH_MAX_MB` | Max image size (MiB) perceptual-hashed for delta candidacy. | `64` |
+| `MEDIAGIT_SIMILARITY_SEED_MAX_CHUNKS` | Max chunks scanned when seeding delta-candidate similarity search. | `256` |
+| `MEDIAGIT_CHUNK_CACHE_BYTES` | In-process chunk read cache size. | `268435456` (256 MiB) |
+| `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` | Worker threads for parallel chunk writes during `add`. | `num_cpus` (clamped 2–16) |
+| `MEDIAGIT_MEDIA_META` | Show `media: ...` summary lines in `status`. `0` disables. | `1` (ON) |
+| `MEDIAGIT_CHECKOUT_PARALLELISM` | Worker threads for parallel checkout. `1` forces the sequential loop. | `num_cpus` (capped at 8) |
+
+### Cloud Packs & Transfer
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MEDIAGIT_CLOUD_PACKS` | Bundle chunks into cloud packs for push/pull instead of per-chunk transfer. | `1` (ON) |
+| `MEDIAGIT_PACK_BYTES` / `MEDIAGIT_PACK_CHUNKS` / `MEDIAGIT_PACK_MIN_CHUNKS` | Byte, chunk-count, and minimum-chunk-count caps for cloud pack building. | `64 MiB` / `1024` / `8` |
+| `MEDIAGIT_PACK_BUILDER_CONCURRENCY` | Concurrent pack-build workers. | `2` |
+| `MEDIAGIT_PACK_WORKERS` | Concurrent ODB writes while unpacking an incoming push pack on the server. | `8` |
+| `MEDIAGIT_PACK_UPLOAD_CONCURRENCY` | Concurrent pack uploads from the client pack builder. | `8` |
+| `MEDIAGIT_PACK_PROXY_BATCH` | Batch small chunk fetches through the server proxy. `0` disables. | `1` (ON) |
+| `MEDIAGIT_PACK_RANGE_COALESCE_MAX_GAP` / `MEDIAGIT_PACK_RANGE_COALESCE_MAX_BYTES` | Coalescing thresholds for ranged pack GETs. | `1 MiB` / `8 MiB` |
+| `MEDIAGIT_REPACK_CHUNKS` | Whether `gc --repack` bundles loose chunks into cloud packs. | `1` (ON) |
+| `MEDIAGIT_BATCH_GET_CONCURRENCY` | Server-side semaphore capacity for batched chunk GET requests. | `4` |
+| `MEDIAGIT_DISABLE_BATCH_GET` | `1` disables the batch-GET endpoint, forcing per-chunk fallback. | `0` (OFF) |
+| `MEDIAGIT_BFS_PARALLELISM` | Parallel BFS width for reachability walks. | `16` |
+| `MEDIAGIT_PRESIGN_BATCH` / `MEDIAGIT_PRESIGN_CONCURRENCY` | Batch size and concurrency for presigned-URL requests. | `512` / `64` |
+| `MEDIAGIT_REPAIR_EVICT_PACK_ENTRIES` | During `push --repair`, evict stale pack-index entries for repaired objects. | `1` (ON) |
+| `MEDIAGIT_BITMAP` | Roaring-bitmap reachability index for `gc`/pack negotiation. `0`/`false`/`off` disables it. | `1` (ON) |
+
+### Cloud Storage Backends
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MEDIAGIT_MPU_THRESHOLD_BYTES` | Minimum chunk size to use multipart upload. | `10485760` (10 MiB) |
+| `MEDIAGIT_MPU_PART_SIZE` | Override the MPU part size for S3/MinIO (must be within [5 MiB, 5 GiB]). | auto-computed |
+| `MEDIAGIT_STAGED_UPLOAD` | Use multipart upload for chunks ≥ the threshold. `0` forces single-PUT uploads. | `1` (ON) |
+| `MEDIAGIT_AWS_CONNECT_TIMEOUT_SECS` / `MEDIAGIT_AWS_MAX_ATTEMPTS` / `MEDIAGIT_AWS_POOL_IDLE_SECS` / `MEDIAGIT_AWS_POOL_WARM` | AWS SDK connect timeout, retry attempts, pool idle timeout, and startup pool warm count. | `10` / `5` / `90` / `16` |
+| `MEDIAGIT_MINIO_MPU_CONCURRENCY` / `MEDIAGIT_MINIO_OP_CONCURRENCY` | Concurrent MinIO MPU creations, and concurrent in-flight `with_retry` operations. | `16` / `64` |
+| `MEDIAGIT_AZURE_PUT_BLOCK_CONCURRENCY` | Concurrent block uploads per blob for Azure. | `8` |
+| `MEDIAGIT_GCS_UPLOAD_CONCURRENCY` | Upload semaphore capacity for the GCS proxy-path uploader. | `4` |
+| `MEDIAGIT_GCS_DISABLE_PRESIGN` | Any value forces GCS transfers through the server proxy, skipping presigned URLs. | unset |
+
+### Server (mediagit-server)
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MEDIAGIT_APP_NAME` / `MEDIAGIT_APP_PORT` / `MEDIAGIT_APP_HOST` / `MEDIAGIT_APP_ENVIRONMENT` / `MEDIAGIT_APP_DEBUG` | Override `[app]` config fields. | `mediagit` / `8080` / `127.0.0.1` / `development` / `false` |
+| `MEDIAGIT_LOG_LEVEL` | Override `[observability] log_level`. | `info` |
+| `MEDIAGIT_METRICS_ENABLED` / `MEDIAGIT_METRICS_PORT` | Override `[observability.metrics]` fields. | `true` / `9090` |
+| `MEDIAGIT_METRICS_ADDR` | `host:port` to bind the Prometheus metrics endpoint. | unset (metrics server not started) |
+| `MEDIAGIT_COMPRESSION_ENABLED` / `MEDIAGIT_COMPRESSION_LEVEL` | Override `[compression]` fields (Zstd fallback level). | `true` / `3` |
+| `MEDIAGIT_MAX_CONCURRENCY` / `MEDIAGIT_BUFFER_SIZE` | Override `[performance]` fields. | `num_cpus` (min 4) / `65536` |
+| `MEDIAGIT_HTTPS_ENABLED` / `MEDIAGIT_AUTH_ENABLED` | Override `[security]` fields. | `false` / `false` |
+| `MEDIAGIT_ALLOW_INSECURE_BIND` | Bypasses the startup refusal to bind a non-loopback host when auth is disabled. | `0` (OFF) |
+| `MEDIAGIT_JWT_SECRET` | JWT signing secret. Env wins over config file `jwt_secret` if both set. | none |
+| `MEDIAGIT_STARTUP_PROBE` | Server scans `repos_dir` for repo health at startup. `0` skips it. | `1` (ON) |
+| `MEDIAGIT_AUTH_PERSIST` | Persist auth state (users/grants) to disk. `0` keeps auth in-memory only. | `1` (ON) |
+| `MEDIAGIT_GRANTS_ENFORCE` | Enforce per-repo permission grants (no-op if none configured). | `1` (ON) |
+| `MEDIAGIT_LOCKS_ENFORCE` | Server rejects pushes that touch paths locked by another user. | `1` (ON) |
+| `MEDIAGIT_LOCKS_MAX_COMMITS` | Max commits walked when computing touched paths for lock enforcement. | `1000` |
+
+### GC / Housekeeping
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MEDIAGIT_GC_REFLOG_HORIZON_DAYS` | Reflog entries older than this stop being GC roots. `0` disables reflog roots. | `90` |
+| `MEDIAGIT_NO_AUTO_GC` | Any value disables auto-gc for the current invocation. | unset (auto-gc ON) |
+| `MEDIAGIT_REFLOG_MAX` | Max reflog entries retained per ref. | `1000` |
+| `MEDIAGIT_SIGN` / `MEDIAGIT_SIGN_KEY` | Sign tags with SSH/ed25519 (`tag -a`), and the key path to sign/verify with. | `0` (OFF) / `~/.ssh/id_ed25519` |
 
 ## Observability
 

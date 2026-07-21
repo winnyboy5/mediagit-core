@@ -34,3 +34,8 @@ pub use cli::{mediagit, MediagitCommand};
 pub use fixtures::TestFixtures;
 pub use platform::TestPaths;
 pub use repo::TestRepo;
+
+/// In-memory [`StorageBackend`](mediagit_storage::StorageBackend) for unit
+/// tests that need a storage backend without touching disk or network.
+/// Re-exported from `mediagit-storage` rather than reimplemented here.
+pub use mediagit_storage::mock::MockBackend as MockStorage;

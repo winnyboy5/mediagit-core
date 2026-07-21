@@ -1,0 +1,288 @@
+command_path	flag	takes_value	result
+GLOBAL	-(bare invocation)	no	OK
+GLOBAL	-v,--verbose	no	ERRTEXT-EXIT0
+GLOBAL	-q,--quiet	no	OK
+GLOBAL	--color	yes	OK
+GLOBAL	-C,--repository	yes	ERROR
+GLOBAL	-h,--help	no	OK
+GLOBAL	-V,--version	no	OK
+init	-(bare invocation)	no	OK
+init	--bare	no	OK
+init	--initial-branch	yes	OK
+init	--template	yes	OK
+clone	-(bare invocation)	COVERED-BY:phase5-remote+2b
+clone	-b,--branch	COVERED-BY:phase5-remote+2b
+add	-(bare invocation)	no	OK
+add	-A,--all	no	OK
+add	-p,--patch	no	OK
+add	--dry-run	no	OK
+add	-f,--force	no	OK
+add	--ignore-removal	no	OK
+add	-u,--update	no	OK
+add	--no-chunking	no	OK
+add	--no-delta	no	OK
+add	--no-parallel	no	OK
+add	-j,--jobs	yes	OK
+commit	-(bare invocation)	no	ERROR
+commit	-m,--message	yes	ERROR
+commit	-e,--edit	no	ERROR
+commit	-F,--file	yes	ERROR
+commit	-a,--all	no	ERROR
+commit	--include	no	ERROR
+commit	--author	yes	ERROR
+commit	--date	yes	ERROR
+commit	--allow-empty	no	ERROR
+commit	-s,--signoff	no	ERROR
+commit	--dry-run	no	ERROR
+push	-(bare invocation)	COVERED-BY:phase5-remote+2b
+push	-a,--all	COVERED-BY:phase5-remote+2b
+push	--tags	COVERED-BY:phase5-remote+2b
+push	--follow-tags	COVERED-BY:phase5-remote+2b
+push	--dry-run	COVERED-BY:phase5-remote+2b
+push	-f,--force	COVERED-BY:phase5-remote+2b
+push	--force-with-lease	COVERED-BY:phase5-remote+2b
+push	-d,--delete	COVERED-BY:phase5-remote+2b
+push	-u,--set-upstream	COVERED-BY:phase5-remote+2b
+push	--no-track	COVERED-BY:phase5-remote+2b
+pull	-(bare invocation)	COVERED-BY:phase5-remote+2b
+pull	-r,--rebase	COVERED-BY:phase5-remote+2b
+pull	--dry-run	COVERED-BY:phase5-remote+2b
+pull	--no-commit	COVERED-BY:phase5-remote+2b
+pull	--abort	COVERED-BY:phase5-remote+2b
+pull	--continue-pull	COVERED-BY:phase5-remote+2b
+fetch	-(bare invocation)	COVERED-BY:phase5-remote+2b
+fetch	--all	COVERED-BY:phase5-remote+2b
+fetch	-p,--prune	COVERED-BY:phase5-remote+2b
+download	-(bare invocation)	COVERED-BY:phase5-remote+2b
+download	--ref	COVERED-BY:phase5-remote+2b
+download	-o,--output	COVERED-BY:phase5-remote+2b
+media	-(bare invocation)	no	USAGE
+media info	-(bare invocation)	no	OK
+media info	--json	no	OK
+remote	-(bare invocation)	COVERED-BY:phase5-remote+2b
+remote add	-(bare invocation)	COVERED-BY:phase5-remote+2b
+remote add	-f,--fetch	COVERED-BY:phase5-remote+2b
+remote remove	-(bare invocation)	COVERED-BY:phase5-remote+2b
+remote list	-(bare invocation)	COVERED-BY:phase5-remote+2b
+remote list	-v,--verbose	COVERED-BY:phase5-remote+2b
+remote set-url	-(bare invocation)	COVERED-BY:phase5-remote+2b
+remote set-url	--push	COVERED-BY:phase5-remote+2b
+remote show	-(bare invocation)	COVERED-BY:phase5-remote+2b
+remote rename	-(bare invocation)	COVERED-BY:phase5-remote+2b
+branch	-(bare invocation)	no	OK
+branch list	-(bare invocation)	no	OK
+branch list	-r,--remote	no	OK
+branch list	-a,--all	no	OK
+branch list	-v,--verbose	no	OK
+branch list	--sort	yes	OK
+branch create	-(bare invocation)	no	OK
+branch create	-u,--set-upstream	yes	ERROR
+branch create	--track	no	OK
+branch create	--no-track	no	OK
+branch delete	-(bare invocation)	no	OK
+branch delete	-D,--force	no	OK
+branch delete	-d,--delete-merged	no	OK
+branch delete	-r,--remote	no	OK
+branch switch	-(bare invocation)	no	OK
+branch switch	-c,--create	no	ERROR
+branch switch	--track	no	OK
+branch switch	-f,--force	no	OK
+branch switch	--no-guess	no	OK
+branch rename	-(bare invocation)	no	OK
+branch rename	-f,--force	no	OK
+branch show	-(bare invocation)	no	OK
+branch merge	-(bare invocation)	no	ERROR
+branch merge	--no-ff	no	ERROR
+branch merge	--ff-only	no	ERROR
+branch merge	-m,--message	yes	ERROR
+branch merge	--abort	no	ERROR
+branch merge	--continue-merge	no	ERROR
+branch protect	-(bare invocation)	no	OK
+branch protect	--require-reviews	no	OK
+branch protect	--unprotect	no	OK
+tag	-(bare invocation)	no	OK
+tag list	-(bare invocation)	no	OK
+tag list	-n,--info	no	ERRTEXT-EXIT0
+tag list	--sort	yes	OK
+tag list	--reverse	no	OK
+tag create	-(bare invocation)	no	OK
+tag create	-a,--annotated	no	ERROR
+tag create	-m,--message	yes	OK
+tag create	--tagger	yes	ERROR
+tag create	--email	yes	ERROR
+tag create	-f,--force	no	OK
+tag delete	-(bare invocation)	no	OK
+tag delete	-f,--force	no	OK
+tag show	-(bare invocation)	no	OK
+tag show	--full	no	OK
+tag verify	-(bare invocation)	no	OK
+merge	-(bare invocation)	no	OK
+merge	-m,--message	yes	OK
+merge	--no-ff	no	OK
+merge	--ff-only	no	OK
+merge	--squash	no	OK
+merge	-s,--strategy	yes	ERROR
+merge	-X,--strategy-option	yes	OK
+merge	--no-commit	no	OK
+merge	--abort	no	OK
+merge	--continue-merge	no	ERROR
+rebase	-(bare invocation)	no	OK
+rebase	--keep-empty	no	OK
+rebase	--abort	no	ERROR
+rebase	--continue-rebase	no	ERROR
+rebase	--skip	no	ERROR
+cherry-pick	-(bare invocation)	no	OK
+cherry-pick	--continue-pick	no	ERROR
+cherry-pick	--abort	no	ERROR
+cherry-pick	--skip	no	ERROR
+cherry-pick	-n,--no-commit	no	OK
+cherry-pick	-e,--edit	no	OK
+cherry-pick	-x,--append-message	no	OK
+stash	-(bare invocation)	no	USAGE
+stash push	-(bare invocation)	no	OK
+stash push	-m,--message	yes	OK
+stash push	-u,--include-untracked	no	OK
+stash save	-(bare invocation)	no	OK
+stash save	-m,--message	yes	OK
+stash save	-u,--include-untracked	no	OK
+stash apply	-(bare invocation)	no	ERROR
+stash apply	--index	no	ERROR
+stash list	-(bare invocation)	no	OK
+stash list	-v,--verbose	no	OK
+stash show	-(bare invocation)	no	ERROR
+stash show	-p,--patch	no	ERROR
+stash drop	-(bare invocation)	no	ERROR
+stash pop	-(bare invocation)	no	ERROR
+stash pop	--index	no	ERROR
+stash clear	-(bare invocation)	no	ERRTEXT-EXIT0
+stash clear	-f,--force	no	OK
+bisect	-(bare invocation)	no	USAGE
+bisect start	-(bare invocation)	no	OK
+bisect start	--reset	no	OK
+bisect good	-(bare invocation)	no	ERROR
+bisect bad	-(bare invocation)	no	ERROR
+bisect skip	-(bare invocation)	no	ERROR
+bisect reset	-(bare invocation)	no	ERROR
+bisect log	-(bare invocation)	no	ERROR
+bisect replay	-(bare invocation)	no	ERROR
+log	-(bare invocation)	no	OK
+log	-n,--max-count	yes	OK
+log	--skip	yes	USAGE
+log	--oneline	no	OK
+log	--graph	no	OK
+log	--stat	no	OK
+log	-p,--patch	no	OK
+log	--author	yes	OK
+log	--grep	yes	OK
+log	--since	yes	OK
+log	--until	yes	OK
+log	--format	yes	OK
+log	--all	no	OK
+diff	-(bare invocation)	no	OK
+diff	--cached	no	OK
+diff	--word-diff	no	OK
+diff	--stat	no	OK
+diff	--summary	no	OK
+diff	-U,--unified	yes	USAGE
+show	-(bare invocation)	no	OK
+show	--stat	no	OK
+status	-(bare invocation)	no	OK
+status	--tracked	no	OK
+status	--untracked	no	OK
+status	--ignored	no	OK
+status	-s,--short	no	OK
+status	--porcelain	no	OK
+status	-b,--branch	no	OK
+status	--json	no	OK
+gc	-(bare invocation)	no	OK
+gc	--aggressive	no	OK
+gc	--no-prune	no	OK
+gc	--auto	no	OK
+gc	--dry-run	no	OK
+gc	-y,--yes	no	USAGE
+gc	--repack	no	OK
+gc	--max-pack-size	yes	OK
+fsck	-(bare invocation)	no	OK
+fsck	--full	no	OK
+fsck	--quick	no	OK
+fsck	--all	no	OK
+fsck	--lost-found	no	OK
+fsck	--no-dangling	no	OK
+fsck	--repair	no	OK
+fsck	--dry-run	no	OK
+fsck	--max-objects	yes	OK
+verify	-(bare invocation)	no	OK
+verify	--file-integrity	no	OK
+verify	--checksums	no	OK
+verify	--start	yes	OK
+verify	--end	yes	ERROR
+verify	--quick	no	OK
+verify	--detailed	no	OK
+stats	-(bare invocation)	no	OK
+stats	--storage	no	OK
+stats	--files	no	OK
+stats	--commits	no	OK
+stats	--branches	no	OK
+stats	--authors	no	OK
+stats	--compression	no	OK
+stats	--all	no	OK
+stats	--json	no	OK
+stats	--prometheus	no	OK
+reflog	-(bare invocation)	no	OK
+reflog	-n,--count	yes	OK
+reflog show	-(bare invocation)	no	OK
+reflog show	-n,--count	yes	OK
+reflog show	--all	no	OK
+reflog delete	-(bare invocation)	no	OK
+reflog expire	-(bare invocation)	no	OK
+reflog expire	--keep	yes	USAGE
+reset	-(bare invocation)	no	OK
+reset	--soft	no	OK
+reset	--hard	no	OK
+revert	-(bare invocation)	no	OK
+revert	-n,--no-commit	no	OK
+revert	-m,--message	yes	OK
+revert	--continue	no	USAGE
+revert	--abort	no	USAGE
+revert	--skip	no	USAGE
+sparse-checkout	-(bare invocation)	no	USAGE
+sparse-checkout set	-(bare invocation)	no	OK
+sparse-checkout set	--patterns	no	OK
+sparse-checkout list	-(bare invocation)	no	OK
+sparse-checkout disable	-(bare invocation)	no	OK
+version	-(bare invocation)	no	OK
+completions	-(bare invocation)	no	OK
+push	--repair	no	COVERED-BY:phase5-remote+2b
+completions zsh	-(bare invocation)	no	OK
+completions fish	-(bare invocation)	no	OK
+completions powershell	-(bare invocation)	no	OK
+fsck	--path	yes	OK
+verify	--path	yes	OK
+auth login	-(bare invocation)	COVERED-BY:07_setup+07_creds
+auth login	--server	COVERED-BY:07_setup+07_creds
+auth login	--username	COVERED-BY:07_setup
+auth login	--token	COVERED-BY:07_setup+07_creds
+auth login	--api-key	COVERED-BY:07_setup
+auth register	-(bare invocation)	COVERED-BY:07_setup+07_users
+auth register	--server	COVERED-BY:07_setup+07_users
+auth status	-(bare invocation)	COVERED-BY:07_setup+07_creds
+auth status	--server	COVERED-BY:07_setup+07_creds
+auth logout	-(bare invocation)	COVERED-BY:07_setup
+auth logout	--server	COVERED-BY:07_setup
+auth logout	--all	COVERED-BY:07_setup+07_creds
+auth passwd	-(bare invocation)	COVERED-BY:07_users
+auth passwd	--server	COVERED-BY:07_users
+auth whoami	-(bare invocation)	COVERED-BY:07_users
+auth whoami	--server	COVERED-BY:07_users
+auth key create	-(bare invocation)	COVERED-BY:07_setup+07_users
+auth key create	--name	COVERED-BY:07_setup+07_users
+auth key create	--permissions	COVERED-BY:07_users
+auth key list	-(bare invocation)	COVERED-BY:07_users
+auth key revoke	-(bare invocation)	COVERED-BY:07_users
+auth admin list-users	-(bare invocation)	COVERED-BY:07_auth+07_users
+auth admin set-role	-(bare invocation)	COVERED-BY:07_auth
+auth admin create-user	-(bare invocation)	COVERED-BY:07_users
+auth admin create-user	--role	COVERED-BY:07_users
+auth admin reset-password	-(bare invocation)	COVERED-BY:07_users
+auth admin grant	-(bare invocation)	COVERED-BY:07_auth
+auth admin revoke-grant	-(bare invocation)	COVERED-BY:07_auth

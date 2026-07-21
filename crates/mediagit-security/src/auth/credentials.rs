@@ -18,9 +18,10 @@
 use bcrypt::{hash, verify, DEFAULT_COST};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
-use super::{AuthError, AuthResult, User, UserId};
+use super::{persist, user::Role, AuthError, AuthResult, User, UserId};
 
 /// User credentials with hashed password
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,10 +72,13 @@ impl UserCredentials {
     }
 }
 
-/// In-memory user credentials store
+/// User credentials store, backed in-memory with optional JSONL persistence.
 ///
-/// This is a simple in-memory implementation. For production use,
-/// replace with a persistent database backend.
+/// When constructed via [`CredentialsStore::load_or_new`], every mutation
+/// (register, password update, delete) is persisted to `users.jsonl` under
+/// the given store directory before the call returns, so users survive a
+/// server restart. [`CredentialsStore::new`] stays purely in-memory (used by
+/// tests and any caller that doesn't want disk I/O).
 pub struct CredentialsStore {
     /// Map of user_id -> credentials
     credentials: RwLock<HashMap<UserId, UserCredentials>>,
@@ -84,16 +88,66 @@ pub struct CredentialsStore {
 
     /// Map of username -> user_id for lookup
     username_index: RwLock<HashMap<String, UserId>>,
+
+    /// Path to `users.jsonl` when persistence is enabled; `None` for a
+    /// purely in-memory store.
+    store_path: Option<PathBuf>,
 }
 
 impl CredentialsStore {
-    /// Create new credentials store
+    /// Create new credentials store (in-memory only, no persistence).
     pub fn new() -> Self {
         Self {
             credentials: RwLock::new(HashMap::new()),
             email_index: RwLock::new(HashMap::new()),
             username_index: RwLock::new(HashMap::new()),
+            store_path: None,
         }
+    }
+
+    /// Load a credentials store persisted at `store_dir/users.jsonl`, or
+    /// start fresh if the file doesn't exist yet (first boot). An
+    /// existing-but-corrupt file is a hard error — never silently start
+    /// with an empty (i.e. "no users registered") store when the file is
+    /// unreadable.
+    ///
+    /// Set `MEDIAGIT_AUTH_PERSIST=0` to force in-memory behavior (no load,
+    /// no writes) even when a directory is given.
+    pub fn load_or_new(store_dir: &Path) -> AuthResult<Self> {
+        if !persist::persist_enabled() {
+            return Ok(Self::new());
+        }
+
+        let path = store_dir.join("users.jsonl");
+        let records: Vec<UserCredentials> = persist::load_jsonl(&path)?;
+
+        let mut credentials = HashMap::new();
+        let mut email_index = HashMap::new();
+        let mut username_index = HashMap::new();
+        for creds in records {
+            email_index.insert(creds.user.email.clone(), creds.user.id.clone());
+            username_index.insert(creds.user.username.clone(), creds.user.id.clone());
+            credentials.insert(creds.user.id.clone(), creds);
+        }
+
+        Ok(Self {
+            credentials: RwLock::new(credentials),
+            email_index: RwLock::new(email_index),
+            username_index: RwLock::new(username_index),
+            store_path: Some(path),
+        })
+    }
+
+    /// Persist the current in-memory state to `users.jsonl`. A no-op when
+    /// this store was constructed with [`CredentialsStore::new`] (no store
+    /// path).
+    async fn persist(&self) -> AuthResult<()> {
+        let Some(path) = &self.store_path else {
+            return Ok(());
+        };
+        let credentials = self.credentials.read().await;
+        let records: Vec<&UserCredentials> = credentials.values().collect();
+        persist::save_jsonl(path, &records).await
     }
 
     /// Register new user with credentials
@@ -143,6 +197,8 @@ impl CredentialsStore {
             email_idx.insert(user.email.clone(), user.id.clone());
             username_idx.insert(user.username.clone(), user.id.clone());
         }
+
+        self.persist().await?;
 
         Ok(credentials)
     }
@@ -217,30 +273,84 @@ impl CredentialsStore {
 
     /// Update user password
     pub async fn update_password(&self, user_id: &str, new_password: &str) -> AuthResult<()> {
-        let mut credentials = self.credentials.write().await;
+        {
+            let mut credentials = self.credentials.write().await;
 
+            let creds = credentials
+                .get_mut(user_id)
+                .ok_or_else(|| AuthError::UserNotFound(user_id.to_string()))?;
+
+            creds.update_password(new_password)?;
+        }
+
+        self.persist().await
+    }
+
+    /// Verify a user's current password by ID, without mutating anything.
+    /// Used by the self-service password-change route, which must confirm
+    /// the caller knows their current password before calling
+    /// [`CredentialsStore::update_password`].
+    pub async fn verify_password(&self, user_id: &str, password: &str) -> AuthResult<bool> {
+        let credentials = self.credentials.read().await;
         let creds = credentials
-            .get_mut(user_id)
+            .get(user_id)
             .ok_or_else(|| AuthError::UserNotFound(user_id.to_string()))?;
+        Ok(creds.verify_password(password))
+    }
 
-        creds.update_password(new_password)
+    /// Change a user's role, persisting through the same path
+    /// [`CredentialsStore::update_password`] uses.
+    pub async fn set_role(&self, user_id: &str, role: Role) -> AuthResult<()> {
+        {
+            let mut credentials = self.credentials.write().await;
+            let creds = credentials
+                .get_mut(user_id)
+                .ok_or_else(|| AuthError::UserNotFound(user_id.to_string()))?;
+            creds.user.role = role;
+        }
+
+        self.persist().await
+    }
+
+    /// Register a new user with an explicit role (bootstrap / admin
+    /// create-user entry point). Reuses [`CredentialsStore::register_user`]
+    /// (and, through it, [`UserCredentials::new`]) so bcrypt hashing and the
+    /// duplicate-email/username checks stay in exactly one place.
+    pub async fn create_user_with_role(
+        &self,
+        user_id: UserId,
+        username: String,
+        email: String,
+        password: &str,
+        role: Role,
+    ) -> AuthResult<UserCredentials> {
+        let user = User::new(user_id, username, email, role);
+        self.register_user(user, password).await
+    }
+
+    /// Count registered users with the given role (last-admin protection).
+    pub async fn count_by_role(&self, role: Role) -> usize {
+        let credentials = self.credentials.read().await;
+        credentials.values().filter(|c| c.user.role == role).count()
     }
 
     /// Delete user
     pub async fn delete_user(&self, user_id: &str) -> AuthResult<()> {
-        let mut credentials = self.credentials.write().await;
-        let creds = credentials
-            .remove(user_id)
-            .ok_or_else(|| AuthError::UserNotFound(user_id.to_string()))?;
+        {
+            let mut credentials = self.credentials.write().await;
+            let creds = credentials
+                .remove(user_id)
+                .ok_or_else(|| AuthError::UserNotFound(user_id.to_string()))?;
 
-        // Remove from indices
-        let mut email_index = self.email_index.write().await;
-        let mut username_index = self.username_index.write().await;
+            // Remove from indices
+            let mut email_index = self.email_index.write().await;
+            let mut username_index = self.username_index.write().await;
 
-        email_index.remove(&creds.user.email);
-        username_index.remove(&creds.user.username);
+            email_index.remove(&creds.user.email);
+            username_index.remove(&creds.user.username);
+        }
 
-        Ok(())
+        self.persist().await
     }
 
     /// List all users (without passwords)
@@ -263,7 +373,9 @@ impl Default for CredentialsStore {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+// Tests hold the process-global env lock across awaits to serialize
+// env-var access (see persist::ENV_LOCK).
+#[allow(clippy::unwrap_used, clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use crate::auth::user::Role;
@@ -360,6 +472,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_set_role_persists() {
+        let _guard = persist::ENV_LOCK.read().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CredentialsStore::load_or_new(tmp.path()).unwrap();
+        let user = User::new(
+            "user1".to_string(),
+            "testuser".to_string(),
+            "test@example.com".to_string(),
+            Role::Write,
+        );
+        store.register_user(user, "password123").await.unwrap();
+
+        store.set_role("user1", Role::Admin).await.unwrap();
+        assert_eq!(store.get_user("user1").await.unwrap().role, Role::Admin);
+
+        // Fresh store from the same dir simulates a server restart: the
+        // role change must have been persisted, not just held in memory.
+        let store2 = CredentialsStore::load_or_new(tmp.path()).unwrap();
+        assert_eq!(store2.get_user("user1").await.unwrap().role, Role::Admin);
+    }
+
+    #[tokio::test]
+    async fn test_set_role_unknown_user_errors() {
+        let store = CredentialsStore::new();
+        assert!(store.set_role("nobody", Role::Admin).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_count_by_role() {
+        let store = CredentialsStore::new();
+        store
+            .register_user(
+                User::new(
+                    "a".to_string(),
+                    "a".to_string(),
+                    "a@example.com".to_string(),
+                    Role::Admin,
+                ),
+                "password123",
+            )
+            .await
+            .unwrap();
+        store
+            .register_user(
+                User::new(
+                    "b".to_string(),
+                    "b".to_string(),
+                    "b@example.com".to_string(),
+                    Role::Write,
+                ),
+                "password123",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(store.count_by_role(Role::Admin).await, 1);
+        assert_eq!(store.count_by_role(Role::Write).await, 1);
+        assert_eq!(store.count_by_role(Role::Read).await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_create_user_with_role() {
+        let store = CredentialsStore::new();
+        let creds = store
+            .create_user_with_role(
+                "user1".to_string(),
+                "testuser".to_string(),
+                "test@example.com".to_string(),
+                "password123",
+                Role::Admin,
+            )
+            .await
+            .unwrap();
+        assert_eq!(creds.user.role, Role::Admin);
+        assert_eq!(store.count_by_role(Role::Admin).await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_verify_password() {
+        let store = CredentialsStore::new();
+        let user = User::new(
+            "user1".to_string(),
+            "testuser".to_string(),
+            "test@example.com".to_string(),
+            Role::Write,
+        );
+        store.register_user(user, "password123").await.unwrap();
+
+        assert!(store.verify_password("user1", "password123").await.unwrap());
+        assert!(!store
+            .verify_password("user1", "wrongpassword")
+            .await
+            .unwrap());
+        assert!(store
+            .verify_password("nobody", "password123")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
     async fn test_delete_user() {
         let store = CredentialsStore::new();
         let user = User::new(
@@ -399,5 +611,70 @@ mod tests {
         // Should verify correctly
         assert!(creds.verify_password(password));
         assert!(!creds.verify_password("wrong_password"));
+    }
+
+    // ---- H1: persistence ----
+
+    #[tokio::test]
+    async fn persists_and_reloads_across_restart() {
+        let _guard = persist::ENV_LOCK.read().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CredentialsStore::load_or_new(tmp.path()).unwrap();
+        let user = User::new(
+            "user1".to_string(),
+            "testuser".to_string(),
+            "test@example.com".to_string(),
+            Role::Write,
+        );
+        store.register_user(user, "password123").await.unwrap();
+
+        assert!(tmp.path().join("users.jsonl").exists());
+
+        // Fresh store from the same dir simulates a server restart.
+        let store2 = CredentialsStore::load_or_new(tmp.path()).unwrap();
+        let auth_user = store2.authenticate("test@example.com", "password123").await;
+        assert!(auth_user.is_ok());
+        assert_eq!(store2.count_users().await, 1);
+    }
+
+    #[tokio::test]
+    async fn corrupt_store_file_hard_errors() {
+        let _guard = persist::ENV_LOCK.read().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            tmp.path().join("users.jsonl"),
+            b"{\"v\":1}\nnot valid json\n",
+        )
+        .await
+        .unwrap();
+
+        let result = CredentialsStore::load_or_new(tmp.path());
+        assert!(result.is_err(), "corrupt store file must hard-error");
+    }
+
+    #[tokio::test]
+    async fn missing_store_file_starts_fresh() {
+        let _guard = persist::ENV_LOCK.read().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CredentialsStore::load_or_new(tmp.path()).unwrap();
+        assert_eq!(store.count_users().await, 0);
+    }
+
+    #[tokio::test]
+    async fn persist_disabled_writes_no_files() {
+        let _guard = persist::ENV_LOCK.write().unwrap();
+        std::env::set_var("MEDIAGIT_AUTH_PERSIST", "0");
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CredentialsStore::load_or_new(tmp.path()).unwrap();
+        let user = User::new(
+            "user1".to_string(),
+            "testuser".to_string(),
+            "test@example.com".to_string(),
+            Role::Write,
+        );
+        store.register_user(user, "password123").await.unwrap();
+        std::env::remove_var("MEDIAGIT_AUTH_PERSIST");
+
+        assert!(!tmp.path().join("users.jsonl").exists());
     }
 }

@@ -17,17 +17,14 @@ Commands for working with branches.
 ## Typical Workflow
 
 ```bash
-# Create feature branch
-mediagit branch feature-new-asset
-
-# Switch to branch
-mediagit branch feature-new-asset
+# Create feature branch and switch to it
+mediagit branch switch -c feature-new-asset
 
 # Work on feature...
 mediagit add new-asset.psd
 mediagit commit -m "Add new asset"
 
 # Merge back to main
-mediagit branch main
+mediagit branch switch main
 mediagit merge feature-new-asset
 ```

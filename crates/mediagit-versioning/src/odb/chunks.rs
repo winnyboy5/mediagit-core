@@ -13,6 +13,24 @@
 
 use super::*;
 
+/// Cap on how many chunks `seed_similarity_from_manifest` will sample from a
+/// previous manifest. Without a bound, seeding is O(prior chunk count ×
+/// delta-chain depth) — every chunk of the previous version's manifest gets
+/// a full `get_chunk` reconstruction. Override via
+/// `MEDIAGIT_SIMILARITY_SEED_MAX_CHUNKS`.
+fn similarity_seed_max_chunks() -> usize {
+    match std::env::var("MEDIAGIT_SIMILARITY_SEED_MAX_CHUNKS") {
+        Ok(v) => v.parse::<usize>().unwrap_or_else(|_| {
+            warn!(
+                "MEDIAGIT_SIMILARITY_SEED_MAX_CHUNKS='{}' is not a valid usize, using default 256",
+                v
+            );
+            256
+        }),
+        Err(_) => 256,
+    }
+}
+
 impl ObjectDatabase {
     /// Try to store a chunk as delta against a similar existing chunk.
     ///
@@ -92,19 +110,29 @@ impl ObjectDatabase {
                     // TOCTOU guard FIRST: check+register before any I/O.  If the
                     // reverse pair (base_id, chunk.id) is already committed, skip all
                     // writes — no orphaned binary on disk.
-                    let should_write = {
-                        let mut pairs = self.delta_written_pairs.lock().await;
-                        if pairs.contains(&(base_id, chunk.id)) {
-                            false
-                        } else {
-                            pairs.insert((chunk.id, base_id));
-                            true
-                        }
-                    };
-
-                    if !should_write {
+                    //
+                    // The lock is held through the chain re-walk AND the meta write:
+                    // the walk at the top of this fn races with concurrent writers
+                    // (three parallel writes can form A→B→C→A with every pre-walk
+                    // passing, because no meta is on disk yet). Serializing
+                    // [walk + meta write] means whichever write closes a loop sees
+                    // the completed chain and refuses.
+                    let mut pairs = self.delta_written_pairs.lock().await;
+                    if pairs.contains(&(base_id, chunk.id)) {
                         return Ok(false);
                     }
+                    if chunk_delta_chain_contains_impl(&*self.storage, base_id, chunk.id).await {
+                        drop(pairs);
+                        debug!(
+                            chunk_id = %chunk.id,
+                            base_id = %base_id,
+                            "Refusing chunk delta at commit — concurrent writes would close a cycle"
+                        );
+                        let mut detector = self.similarity_detector.write().await;
+                        detector.add_object(chunk_meta);
+                        return Ok(false);
+                    }
+                    pairs.insert((chunk.id, base_id));
 
                     // Write .meta FIRST — it is the durability anchor for all existence
                     // probes (odb.rs:exists, check_chunk_deltas_exist). Writing meta before
@@ -119,6 +147,7 @@ impl ObjectDatabase {
                             return Err(anyhow::anyhow!("Failed to store chunk delta meta: {}", e));
                         }
                     }
+                    drop(pairs);
 
                     if let Err(e) = self.storage.put(&delta_key, &compressed_delta).await {
                         // Best-effort cleanup: remove the .meta we already committed so the
@@ -242,7 +271,7 @@ impl ObjectDatabase {
         }
 
         // Create chunker with configured strategy
-        let chunker = ContentChunker::new(self.chunk_strategy.unwrap());
+        let chunker = ContentChunker::with_seed(self.chunk_strategy.unwrap(), self.cdc_seed);
 
         // Chunk the data
         let chunks = chunker.chunk(data, filename).await.map_err(|e| {
@@ -358,7 +387,7 @@ impl ObjectDatabase {
 
         // Store manifest (use to_hex() for consistent storage paths)
         let manifest_key = format!("manifests/{}", oid.to_hex());
-        let manifest_data = crate::format::serialize(&manifest).map_err(|e| {
+        let manifest_data = manifest.to_bytes().map_err(|e| {
             anyhow::anyhow!("Failed to serialize chunk manifest for {}: {}", oid, e)
         })?;
         self.storage
@@ -464,7 +493,7 @@ impl ObjectDatabase {
         }
 
         // Chunk the data
-        let chunker = ContentChunker::new(self.chunk_strategy.unwrap());
+        let chunker = ContentChunker::with_seed(self.chunk_strategy.unwrap(), self.cdc_seed);
         let chunks = chunker
             .chunk(data, filename)
             .await
@@ -698,26 +727,42 @@ impl ObjectDatabase {
                                     };
 
                                     // TOCTOU guard FIRST: check+register before any I/O.
-                                    let should_write = {
-                                        let mut pairs = delta_pairs.lock().await;
-                                        if pairs.contains(&(base_id, chunk.id)) {
-                                            false
-                                        } else {
-                                            pairs.insert((chunk.id, base_id));
-                                            true
-                                        }
+                                    // Lock held through the chain re-walk AND the meta
+                                    // write: the pre-walk above races with concurrent
+                                    // writers (three parallel writes can form A→B→C→A
+                                    // with every pre-walk passing, since no meta is on
+                                    // disk yet). Serializing [walk + meta write] means
+                                    // whichever write closes a loop sees the completed
+                                    // chain and refuses. Only the small meta put happens
+                                    // under the lock; the delta binary put stays outside.
+                                    let mut pairs = delta_pairs.lock().await;
+                                    let should_write = if pairs.contains(&(base_id, chunk.id)) {
+                                        debug!(
+                                            chunk_id = %chunk.id,
+                                            base_id = %base_id,
+                                            "Parallel: TOCTOU delta race — reverse pair committed; skipping write"
+                                        );
+                                        false
+                                    } else if chunk_delta_chain_contains_impl(
+                                        &*storage, base_id, chunk.id,
+                                    )
+                                    .await
+                                    {
+                                        debug!(
+                                            chunk_id = %chunk.id,
+                                            base_id = %base_id,
+                                            "Parallel: refusing chunk delta at commit — concurrent writes would close a cycle"
+                                        );
+                                        false
+                                    } else {
+                                        pairs.insert((chunk.id, base_id));
+                                        true
                                     };
 
                                     if should_write {
-                                        // Tolerate concurrent writes: if put fails but chunk exists, treat as dedup
-                                        if let Err(e) =
-                                            storage.put(&delta_key, &compressed_delta).await
-                                        {
-                                            if !storage.exists(&delta_key).await.unwrap_or(false) {
-                                                return Err(anyhow::anyhow!("Store delta: {}", e));
-                                            }
-                                        }
-
+                                        // Write .meta FIRST (durability anchor — see the
+                                        // sequential path above), still under the lock so
+                                        // concurrent chain walks observe it atomically.
                                         let meta_key =
                                             format!("chunk-deltas/{}.meta", chunk.id.to_hex());
                                         let meta_data = format!("base:{}", base_id.to_hex());
@@ -731,6 +776,19 @@ impl ObjectDatabase {
                                                 ));
                                             }
                                         }
+                                        drop(pairs);
+
+                                        // Tolerate concurrent writes: if put fails but chunk exists, treat as dedup
+                                        if let Err(e) =
+                                            storage.put(&delta_key, &compressed_delta).await
+                                        {
+                                            if !storage.exists(&delta_key).await.unwrap_or(false) {
+                                                // Remove the routing sidecar so the chunk is
+                                                // not permanently misrouted to a missing binary.
+                                                let _ = storage.delete(&meta_key).await;
+                                                return Err(anyhow::anyhow!("Store delta: {}", e));
+                                            }
+                                        }
 
                                         debug!(
                                             chunk_id = %chunk.id,
@@ -740,11 +798,7 @@ impl ObjectDatabase {
                                         );
                                         stored_as_delta = true;
                                     } else {
-                                        debug!(
-                                            chunk_id = %chunk.id,
-                                            base_id = %base_id,
-                                            "Parallel: TOCTOU delta race — reverse pair committed; skipping write"
-                                        );
+                                        drop(pairs);
                                     }
                                 }
                             }
@@ -815,7 +869,8 @@ impl ObjectDatabase {
         };
 
         let manifest_key = format!("manifests/{}", oid.to_hex());
-        let manifest_data = crate::format::serialize(&manifest)
+        let manifest_data = manifest
+            .to_bytes()
             .map_err(|e| anyhow::anyhow!("Failed to serialize manifest: {}", e))?;
         self.storage
             .put(&manifest_key, &manifest_data)
@@ -1046,26 +1101,37 @@ impl ObjectDatabase {
                                     };
 
                                     // TOCTOU guard FIRST: check+register before any I/O.
-                                    let should_write = {
-                                        let mut pairs = delta_pairs.lock().await;
-                                        if pairs.contains(&(base_id, chunk.id)) {
-                                            false
-                                        } else {
-                                            pairs.insert((chunk.id, base_id));
-                                            true
-                                        }
+                                    // Lock held through the chain re-walk AND the meta
+                                    // write — same cycle-closing race as the other two
+                                    // chunk-delta write sites (see the sequential path).
+                                    let mut pairs = delta_pairs.lock().await;
+                                    let should_write = if pairs.contains(&(base_id, chunk.id)) {
+                                        debug!(
+                                            chunk_id = %chunk.id,
+                                            base_id = %base_id,
+                                            "Streaming parallel: TOCTOU delta race — reverse pair committed; skipping write"
+                                        );
+                                        false
+                                    } else if chunk_delta_chain_contains_impl(
+                                        &*storage, base_id, chunk.id,
+                                    )
+                                    .await
+                                    {
+                                        debug!(
+                                            chunk_id = %chunk.id,
+                                            base_id = %base_id,
+                                            "Streaming parallel: refusing chunk delta at commit — concurrent writes would close a cycle"
+                                        );
+                                        false
+                                    } else {
+                                        pairs.insert((chunk.id, base_id));
+                                        true
                                     };
 
                                     if should_write {
-                                        // Tolerate concurrent writes: if put fails but chunk exists, treat as dedup
-                                        if let Err(e) =
-                                            storage.put(&delta_key, &compressed_delta).await
-                                        {
-                                            if !storage.exists(&delta_key).await.unwrap_or(false) {
-                                                return Err(anyhow::anyhow!("Store delta: {}", e));
-                                            }
-                                        }
-
+                                        // Write .meta FIRST (durability anchor), still
+                                        // under the lock so concurrent chain walks
+                                        // observe it atomically.
                                         let meta_key =
                                             format!("chunk-deltas/{}.meta", chunk.id.to_hex());
                                         let meta_data = format!("base:{}", base_id.to_hex());
@@ -1079,6 +1145,19 @@ impl ObjectDatabase {
                                                 ));
                                             }
                                         }
+                                        drop(pairs);
+
+                                        // Tolerate concurrent writes: if put fails but chunk exists, treat as dedup
+                                        if let Err(e) =
+                                            storage.put(&delta_key, &compressed_delta).await
+                                        {
+                                            if !storage.exists(&delta_key).await.unwrap_or(false) {
+                                                // Remove the routing sidecar so the chunk is
+                                                // not permanently misrouted to a missing binary.
+                                                let _ = storage.delete(&meta_key).await;
+                                                return Err(anyhow::anyhow!("Store delta: {}", e));
+                                            }
+                                        }
 
                                         debug!(
                                             chunk_id = %chunk.id,
@@ -1088,11 +1167,7 @@ impl ObjectDatabase {
                                         );
                                         stored_as_delta = true;
                                     } else {
-                                        debug!(
-                                            chunk_id = %chunk.id,
-                                            base_id = %base_id,
-                                            "Streaming parallel: TOCTOU delta race — reverse pair committed; skipping write"
-                                        );
+                                        drop(pairs);
                                     }
                                 }
                             }
@@ -1194,8 +1269,9 @@ impl ObjectDatabase {
 
         let path_owned = path.to_path_buf();
         let chunk_strategy = self.chunk_strategy.unwrap_or(ChunkStrategy::MediaAware);
+        let cdc_seed = self.cdc_seed;
         let file_producer = tokio::task::spawn_blocking(move || {
-            let chunker_inner = ContentChunker::new(chunk_strategy);
+            let chunker_inner = ContentChunker::with_seed(chunk_strategy, cdc_seed);
             chunker_inner.collect_file_chunks_blocking(&path_owned, blocking_tx)
         });
 
@@ -1315,7 +1391,7 @@ impl ObjectDatabase {
             filename: Some(filename.to_string()),
         };
 
-        let manifest_data = crate::format::serialize(&manifest)?;
+        let manifest_data = manifest.to_bytes()?;
         let manifest_key = format!("manifests/{}", file_oid.to_hex());
         self.storage.put(&manifest_key, &manifest_data).await?;
 
@@ -1334,14 +1410,23 @@ impl ObjectDatabase {
 
     /// List all pack files in the database
     ///
-    /// Returns a list of pack file keys
+    /// Returns a list of pack file keys. Matches both legacy `gc --repack`
+    /// packs (`packs/<id>.pack`) and Track F cloud packs (`packs/<pack_oid>`,
+    /// no extension — the server-side pack registry's JSONL manifests live
+    /// on local disk under `.mediagit/packs/`, never in this storage prefix,
+    /// so any non-`.pack` key here is a cloud-pack object). Both share the
+    /// same on-disk envelope (`PackReader` parses either), so a plain
+    /// extension filter previously excluded cloud packs from this search,
+    /// making `read_from_packs` unable to find chunk-delta base chunks that
+    /// landed only inside a cloud pack.
     async fn list_pack_files(&self) -> anyhow::Result<Vec<String>> {
         let pack_keys = self.storage.list_objects("packs/").await?;
 
-        // Filter for .pack files only
         let pack_files: Vec<String> = pack_keys
             .into_iter()
-            .filter(|key| key.ends_with(".pack"))
+            .filter(|key| {
+                key.ends_with(".pack") || !key.rsplit('/').next().unwrap_or("").contains('.')
+            })
             .collect();
 
         debug!(count = pack_files.len(), "Found pack files");
@@ -1494,7 +1579,7 @@ impl ObjectDatabase {
         // Load chunk manifest (use to_hex() for consistent storage paths)
         let manifest_key = format!("manifests/{}", oid.to_hex());
         let manifest_data = self.storage.get(&manifest_key).await?;
-        let manifest: ChunkManifest = crate::format::deserialize(&manifest_data)
+        let manifest: ChunkManifest = ChunkManifest::from_bytes(&manifest_data)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
 
         debug!(
@@ -1651,7 +1736,7 @@ impl ObjectDatabase {
             info!(oid = %oid, "Streaming chunked object to file");
 
             let manifest_data = self.storage.get(&manifest_key).await?;
-            let manifest: ChunkManifest = crate::format::deserialize(&manifest_data)
+            let manifest: ChunkManifest = ChunkManifest::from_bytes(&manifest_data)
                 .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
 
             // Ensure parent directory exists
@@ -1659,42 +1744,59 @@ impl ObjectDatabase {
                 tokio::fs::create_dir_all(parent).await?;
             }
 
-            // Open file for streaming write
-            let mut file = tokio::fs::File::create(path).await?;
+            // Open a sibling tmp file for streaming write; only renamed into
+            // place (via `finalize_atomic_write`) once every chunk has been
+            // verified and written. A crash or error mid-stream leaves at
+            // worst a stale `.mgtmp`, never a truncated file at `path`.
+            let tmp_path = atomic_tmp_path(path)?;
+            let mut file = tokio::fs::File::create(&tmp_path).await?;
             let mut bytes_written = 0u64;
 
-            for chunk_ref in &manifest.chunks {
-                // Use get_chunk() which handles both full and delta-encoded chunks
-                let decompressed = self.get_chunk(&chunk_ref.id).await.map_err(|e| {
-                    anyhow::anyhow!("Failed to read chunk {}: {}", chunk_ref.id.to_hex(), e)
-                })?;
+            let write_result: anyhow::Result<()> = async {
+                for chunk_ref in &manifest.chunks {
+                    // Use get_chunk() which handles both full and delta-encoded chunks
+                    let decompressed = self.get_chunk(&chunk_ref.id).await.map_err(|e| {
+                        anyhow::anyhow!("Failed to read chunk {}: {}", chunk_ref.id.to_hex(), e)
+                    })?;
 
-                // Verify chunk integrity (hash + size)
-                let computed_chunk_oid = Oid::hash(&decompressed);
-                if computed_chunk_oid != chunk_ref.id {
-                    anyhow::bail!(
-                        "Chunk integrity check failed for {}: expected {}, computed {}",
-                        chunk_ref.id.to_hex(),
-                        chunk_ref.id,
-                        computed_chunk_oid
-                    );
+                    // Verify chunk integrity (hash + size)
+                    let computed_chunk_oid = Oid::hash(&decompressed);
+                    if computed_chunk_oid != chunk_ref.id {
+                        anyhow::bail!(
+                            "Chunk integrity check failed for {}: expected {}, computed {}",
+                            chunk_ref.id.to_hex(),
+                            chunk_ref.id,
+                            computed_chunk_oid
+                        );
+                    }
+
+                    if decompressed.len() != chunk_ref.size {
+                        anyhow::bail!(
+                            "Chunk size mismatch for {}: expected {}, got {}",
+                            chunk_ref.id.to_hex(),
+                            chunk_ref.size,
+                            decompressed.len()
+                        );
+                    }
+
+                    // Stream to file (chunk is dropped after write)
+                    file.write_all(&decompressed).await?;
+                    bytes_written += decompressed.len() as u64;
                 }
 
-                if decompressed.len() != chunk_ref.size {
-                    anyhow::bail!(
-                        "Chunk size mismatch for {}: expected {}, got {}",
-                        chunk_ref.id.to_hex(),
-                        chunk_ref.size,
-                        decompressed.len()
-                    );
-                }
-
-                // Stream to file (chunk is dropped after write)
-                file.write_all(&decompressed).await?;
-                bytes_written += decompressed.len() as u64;
+                file.flush().await?;
+                Ok(())
             }
+            .await;
 
-            file.flush().await?;
+            if let Err(e) = write_result {
+                drop(file);
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return Err(e);
+            }
+            drop(file);
+
+            finalize_atomic_write(&tmp_path, path).await?;
 
             info!(
                 oid = %oid,
@@ -1713,7 +1815,12 @@ impl ObjectDatabase {
                 tokio::fs::create_dir_all(parent).await?;
             }
 
-            tokio::fs::write(path, &data).await?;
+            let tmp_path = atomic_tmp_path(path)?;
+            if let Err(e) = tokio::fs::write(&tmp_path, &data).await {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return Err(e.into());
+            }
+            finalize_atomic_write(&tmp_path, path).await?;
             Ok(data.len() as u64)
         }
     }
@@ -1922,7 +2029,7 @@ impl ObjectDatabase {
         let manifest_key = format!("manifests/{}", oid.to_hex());
         if self.storage.exists(&manifest_key).await? {
             let manifest_data = self.storage.get(&manifest_key).await?;
-            let manifest: ChunkManifest = crate::format::deserialize(&manifest_data)
+            let manifest: ChunkManifest = ChunkManifest::from_bytes(&manifest_data)
                 .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
             return Ok(manifest.total_size as usize);
         }
@@ -1957,7 +2064,7 @@ impl ObjectDatabase {
 
         let manifest_data = self.storage.get(&manifest_key).await?;
         let manifest: crate::chunking::ChunkManifest =
-            crate::format::deserialize(&manifest_data)
+            crate::chunking::ChunkManifest::from_bytes(&manifest_data)
                 .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
 
         Ok(Some(manifest))
@@ -1977,8 +2084,24 @@ impl ObjectDatabase {
         &self,
         manifest: &ChunkManifest,
     ) -> anyhow::Result<usize> {
+        let total = manifest.chunks.len();
+        let max_chunks = similarity_seed_max_chunks();
+        // Spread the sample evenly across the manifest instead of just
+        // taking the first `max_chunks` — a stride keeps coverage
+        // representative of the whole file, not just its start.
+        let stride = (total / max_chunks.max(1)).max(1);
+
         let mut seeded = 0;
-        for chunk_ref in &manifest.chunks {
+        let mut skipped_deep = 0;
+        for chunk_ref in manifest.chunks.iter().step_by(stride).take(max_chunks) {
+            // Reconstructing a deep delta chain just to seed the detector
+            // costs more than the delta it might later enable — skip it.
+            // Depth 2 measured: costs ≤1.7pp savings on 5-deep wav chains,
+            // buys flat seeding time on deep epoch chains (PERF-ML-1).
+            if self.chunk_delta_depth(&chunk_ref.id).await > 2 {
+                skipped_deep += 1;
+                continue;
+            }
             if let Ok(data) = self.get_chunk(&chunk_ref.id).await {
                 let mut meta = crate::similarity::ObjectMetadata::new(
                     chunk_ref.id,
@@ -1991,14 +2114,51 @@ impl ObjectDatabase {
                 seeded += 1;
             }
         }
-        if seeded > 0 {
+        if seeded > 0 || skipped_deep > 0 {
             info!(
                 seeded_chunks = seeded,
-                total_chunks = manifest.chunks.len(),
+                skipped_deep_chunks = skipped_deep,
+                total_chunks = total,
+                sampled_chunks = total.div_ceil(stride).min(max_chunks),
                 "Seeded similarity detector from previous manifest"
             );
         }
         Ok(seeded)
+    }
+
+    /// Depth of `chunk_id`'s delta chain (0 = full chunk, no `.meta`).
+    /// Only reads the small `chunk-deltas/*.meta` sidecars — never chunk
+    /// payloads — so it's cheap to call before deciding whether a full
+    /// `get_chunk` reconstruction is worth it.
+    async fn chunk_delta_depth(&self, chunk_id: &Oid) -> usize {
+        let mut depth = 0usize;
+        let mut cur = *chunk_id;
+        let mut visited = std::collections::HashSet::new();
+        loop {
+            if depth > MAX_DELTA_DEPTH as usize || !visited.insert(cur) {
+                return depth;
+            }
+            let meta_key = format!("chunk-deltas/{}.meta", cur.to_hex());
+            match self.storage.exists(&meta_key).await {
+                Ok(true) => {}
+                _ => return depth,
+            }
+            let bytes = match self.storage.get(&meta_key).await {
+                Ok(b) => b,
+                Err(_) => return depth,
+            };
+            let s = String::from_utf8_lossy(&bytes);
+            let hex = match s.trim().strip_prefix("base:") {
+                Some(h) => h.trim(),
+                None => return depth,
+            };
+            let next = match Oid::from_hex(hex) {
+                Ok(o) => o,
+                Err(_) => return depth,
+            };
+            cur = next;
+            depth += 1;
+        }
     }
 
     /// Seed the similarity detector from a full blob object (non-chunked files).
@@ -2097,24 +2257,38 @@ impl ObjectDatabase {
             }
         };
 
-        // Read the base chunk (non-delta) once
+        // Read the base chunk (non-delta) once. Loose first; if `gc --repack`
+        // has bundled it into a pack and removed the loose copy, fall back to
+        // the same pack-routing `read_from_packs` uses for whole objects
+        // (chunk IDs are content hashes too, so its integrity check applies
+        // unchanged). `read_from_packs` returns already-decompressed data.
         let base_key = format!("chunks/{}", base_id.to_hex());
-        let compressed_base = self.storage.get(&base_key).await?;
-        let mut current = if let Some(smart_comp) = &self.smart_compressor {
-            decompress_typed_blocking(smart_comp.clone(), compressed_base)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to decompress base chunk: {}", e))?
-        } else {
-            let algo = CompressionAlgorithm::detect(&compressed_base);
-            match algo {
-                CompressionAlgorithm::None => compressed_base,
-                _ => {
-                    let fallback = compressed_base.clone();
-                    decompress_blocking(self.compressor.clone(), compressed_base)
+        let mut current = match self.storage.get(&base_key).await {
+            Ok(compressed_base) => {
+                if let Some(smart_comp) = &self.smart_compressor {
+                    decompress_typed_blocking(smart_comp.clone(), compressed_base)
                         .await
-                        .unwrap_or(fallback)
+                        .map_err(|e| anyhow::anyhow!("Failed to decompress base chunk: {}", e))?
+                } else {
+                    let algo = CompressionAlgorithm::detect(&compressed_base);
+                    match algo {
+                        CompressionAlgorithm::None => compressed_base,
+                        _ => {
+                            let fallback = compressed_base.clone();
+                            decompress_blocking(self.compressor.clone(), compressed_base)
+                                .await
+                                .unwrap_or(fallback)
+                        }
+                    }
                 }
             }
+            Err(_) => self.read_from_packs(&base_id).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to read base chunk {}: not found loose or in packs: {}",
+                    base_id,
+                    e
+                )
+            })?,
         };
 
         // Apply deltas from base->leaf (chain is leaf-first, so reverse)
@@ -2171,52 +2345,75 @@ impl ObjectDatabase {
     pub async fn get_compressed_chunk(&self, chunk_id: &Oid) -> anyhow::Result<Vec<u8>> {
         let chunk_key = format!("chunks/{}", chunk_id.to_hex());
 
-        // Fast path: raw chunk exists
+        // Fast path: raw chunk exists loose
         if let Ok(data) = self.storage.get(&chunk_key).await {
             return Ok(data);
         }
 
-        // Fallback: chunk is delta-encoded — reconstruct and re-compress
-        let delta_meta_key = format!("chunk-deltas/{}.meta", chunk_id.to_hex());
-        if self.storage.exists(&delta_meta_key).await.unwrap_or(false) {
-            tracing::debug!(
-                chunk_id = %chunk_id,
-                "Chunk stored as delta, reconstructing for transfer"
-            );
+        // Fallback: chunk is delta-encoded, or was bundled into a pack by
+        // `gc --repack` (and the loose copy removed) — reconstruct via
+        // get_chunk() (delta-chain-aware and pack-aware) and re-compress for
+        // transfer.
+        tracing::debug!(
+            chunk_id = %chunk_id,
+            "Chunk not found loose, reconstructing via delta chain or pack"
+        );
 
-            // Reconstruct full decompressed data from delta chain
-            let decompressed = self.get_chunk(chunk_id).await.map_err(|e| {
-                anyhow::anyhow!("Failed to reconstruct delta chunk {}: {}", chunk_id, e)
-            })?;
+        let decompressed = self
+            .get_chunk(chunk_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to reconstruct chunk {}: {}", chunk_id, e))?;
 
-            // Re-compress for network transfer
-            if let Some(smart_comp) = &self.smart_compressor {
-                smart_comp
-                    .compress_typed(&decompressed, CompressionObjectType::Unknown)
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "Failed to compress reconstructed chunk {}: {}",
-                            chunk_id,
-                            e
-                        )
-                    })
-            } else {
-                self.compressor.compress(&decompressed).map_err(|e| {
+        // Re-compress for network transfer
+        if let Some(smart_comp) = &self.smart_compressor {
+            smart_comp
+                .compress_typed(&decompressed, CompressionObjectType::Unknown)
+                .map_err(|e| {
                     anyhow::anyhow!("Failed to compress reconstructed chunk {}: {}", chunk_id, e)
                 })
-            }
         } else {
-            Err(anyhow::anyhow!(
-                "Failed to read compressed chunk {}: not found as raw or delta",
-                chunk_id
-            ))
+            self.compressor.compress(&decompressed).map_err(|e| {
+                anyhow::anyhow!("Failed to compress reconstructed chunk {}: {}", chunk_id, e)
+            })
         }
     }
 
     /// Store raw compressed chunk data (no compression)
     ///
-    /// Used when receiving pre-compressed chunks from remote.
+    /// Used when receiving pre-compressed chunks from remote. Decompresses
+    /// the payload and verifies it hashes to the declared `chunk_id` BEFORE
+    /// persisting anything — a corrupted or tampered chunk from an
+    /// untrusted transport must never be admitted into the store under a
+    /// hash it doesn't match (QA-006b: corruption admitted here propagates
+    /// silently through every later reader). On mismatch the chunk is not
+    /// stored at all. The send fast path (`get_compressed_chunk` above) is
+    /// unaffected — this only guards the receive/write boundary.
     pub async fn put_compressed_chunk(&self, chunk_id: &Oid, data: &[u8]) -> anyhow::Result<()> {
+        let decompressed = if let Some(smart_comp) = &self.smart_compressor {
+            decompress_typed_blocking(smart_comp.clone(), data.to_vec())
+                .await
+                .map_err(|e| anyhow::anyhow!("Chunk {} failed to decompress: {}", chunk_id, e))?
+        } else {
+            match CompressionAlgorithm::detect(data) {
+                CompressionAlgorithm::None => data.to_vec(),
+                _ => decompress_blocking(self.compressor.clone(), data.to_vec())
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("Chunk {} failed to decompress: {}", chunk_id, e)
+                    })?,
+            }
+        };
+
+        let computed = Oid::hash(&decompressed);
+        if computed != *chunk_id {
+            anyhow::bail!(
+                "Chunk integrity check failed for chunk {}: expected {}, computed {} — refusing to store",
+                chunk_id,
+                chunk_id,
+                computed
+            );
+        }
+
         let chunk_key = format!("chunks/{}", chunk_id.to_hex());
         self.storage
             .put(&chunk_key, data)
@@ -2248,7 +2445,8 @@ impl ObjectDatabase {
         manifest: &crate::chunking::ChunkManifest,
     ) -> anyhow::Result<()> {
         let manifest_key = format!("manifests/{}", oid.to_hex());
-        let manifest_data = crate::format::serialize(manifest)
+        let manifest_data = manifest
+            .to_bytes()
             .map_err(|e| anyhow::anyhow!("Failed to serialize manifest: {}", e))?;
         self.storage
             .put(&manifest_key, &manifest_data)
@@ -2256,7 +2454,8 @@ impl ObjectDatabase {
             .map_err(|e| anyhow::anyhow!("Failed to store manifest {}: {}", oid, e))
     }
 
-    /// Check if a chunk exists (including delta-encoded chunks)
+    /// Check if a chunk exists (including delta-encoded chunks and chunks
+    /// that only live inside a pack file — see `ensure_pack_membership_loaded`).
     pub async fn chunk_exists(&self, chunk_id: &Oid) -> anyhow::Result<bool> {
         let chunk_key = format!("chunks/{}", chunk_id.to_hex());
         if self.storage.exists(&chunk_key).await? {
@@ -2264,7 +2463,49 @@ impl ObjectDatabase {
         }
         // Also check for delta-encoded chunk
         let delta_key = format!("chunk-deltas/{}.meta", chunk_id.to_hex());
-        self.storage.exists(&delta_key).await
+        if self.storage.exists(&delta_key).await? {
+            return Ok(true);
+        }
+        // Packs are immutable once written and the loose copy is deleted on
+        // `repack(remove_loose=true)`, so a miss above doesn't mean "new" —
+        // it may already be packed.
+        self.ensure_pack_membership_loaded().await?;
+        let guard = self.pack_membership.read().await;
+        Ok(guard.as_ref().is_some_and(|set| set.contains(chunk_id)))
+    }
+
+    /// Lazily build the in-memory set of every OID embedded in a pack index.
+    /// Reads each pack file once (to parse its trailing index) — cheap
+    /// relative to a per-call full-pack scan, and never re-run once loaded
+    /// except to extend it (`repack()` does this directly).
+    ///
+    /// `pub(super)`: also used by `odb::core`'s `exists()` and
+    /// `resolve_abbreviated_oid()` for pack-membership union semantics.
+    pub(super) async fn ensure_pack_membership_loaded(&self) -> anyhow::Result<()> {
+        {
+            let guard = self.pack_membership.read().await;
+            if guard.is_some() {
+                return Ok(());
+            }
+        }
+        let mut guard = self.pack_membership.write().await;
+        if guard.is_some() {
+            // Another task raced us and already loaded it.
+            return Ok(());
+        }
+        use crate::pack::PackReader;
+        let mut set = std::collections::HashSet::new();
+        for pack_key in self.list_pack_files().await? {
+            if let Ok(pack_data) = self.storage.get(&pack_key).await {
+                if let Ok(pack_reader) = PackReader::new(pack_data) {
+                    for (oid, _) in pack_reader.index().iter() {
+                        set.insert(*oid);
+                    }
+                }
+            }
+        }
+        *guard = Some(set);
+        Ok(())
     }
 
     /// Check whether a chunk-delta is present locally for the given chunk id.
@@ -2371,5 +2612,150 @@ impl ObjectDatabase {
             )
         })?;
         Ok(Some((base_id, delta_bytes)))
+    }
+}
+
+/// Compute the sibling `.mgtmp` temp path used by `read_to_file` for an
+/// atomic write. Appends to the *full* file name rather than using
+/// `Path::with_extension`, which replaces the extension and would collide
+/// differently-named files sharing a stem (e.g. `a.psd` and `a.txt` would
+/// both become `a.mgtmp`). Same directory as `path`, so the eventual
+/// rename is a same-filesystem, atomic operation.
+fn atomic_tmp_path(path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    let file_name = path.file_name().ok_or_else(|| {
+        anyhow::anyhow!("read_to_file: path has no file name: {}", path.display())
+    })?;
+    let mut tmp_name = file_name.to_os_string();
+    tmp_name.push(".mgtmp");
+    Ok(path.with_file_name(tmp_name))
+}
+
+/// Rename `tmp_path` into place at `path`. Tolerates a transient
+/// Windows rename failure (e.g. destination locked by an AV scan or a
+/// concurrent reader) with one remove-destination-and-retry, mirroring the
+/// spirit of `LocalBackend`'s CAS rename retry. On any final failure,
+/// best-effort removes `tmp_path` before returning the error — a failed
+/// `read_to_file` never leaves the tmp file behind.
+async fn finalize_atomic_write(
+    tmp_path: &std::path::Path,
+    path: &std::path::Path,
+) -> anyhow::Result<()> {
+    if let Err(first_err) = tokio::fs::rename(tmp_path, path).await {
+        let _ = tokio::fs::remove_file(path).await;
+        if let Err(retry_err) = tokio::fs::rename(tmp_path, path).await {
+            let _ = tokio::fs::remove_file(tmp_path).await;
+            return Err(anyhow::anyhow!(
+                "Failed to rename {} to {}: {} (retry: {})",
+                tmp_path.display(),
+                path.display(),
+                first_err,
+                retry_err
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod read_to_file_atomicity_tests {
+    use super::*;
+    use crate::chunking::ChunkStrategy;
+    use mediagit_storage::mock::MockBackend;
+    use std::sync::Arc as StdArc;
+
+    /// F1: a chunked `read_to_file` that fails partway (missing chunk) must
+    /// leave no partial content at the final path and no stray `.mgtmp`
+    /// sibling — the write goes to a tmp file first and is only renamed
+    /// into place after every chunk is verified.
+    #[tokio::test]
+    async fn read_to_file_error_leaves_no_partial_final() {
+        let storage = StdArc::new(MockBackend::new());
+        let odb = ObjectDatabase::with_optimizations(
+            storage.clone(),
+            100,
+            Some(ChunkStrategy::Fixed { size: 256 * 1024 }),
+            false,
+            0,
+        );
+
+        // 2MB of varied content so it chunks into several pieces.
+        let data: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let oid = odb
+            .write_chunked(ObjectType::Blob, &data, "big.bin")
+            .await
+            .expect("write_chunked should succeed");
+
+        // Confirm this actually went through the chunked path.
+        let manifest_key = format!("manifests/{}", oid.to_hex());
+        assert!(
+            storage.exists(&manifest_key).await.unwrap(),
+            "test setup expected a chunked object"
+        );
+
+        // Delete one chunk so reconstruction fails partway through.
+        let manifest_data = storage.get(&manifest_key).await.unwrap();
+        let manifest: crate::chunking::ChunkManifest =
+            crate::chunking::ChunkManifest::from_bytes(&manifest_data).unwrap();
+        let victim_chunk = &manifest.chunks[manifest.chunks.len() / 2];
+        storage
+            .delete(&format!("chunks/{}", victim_chunk.id.to_hex()))
+            .await
+            .unwrap();
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let dest = tmp_dir.path().join("existing.bin");
+        std::fs::write(&dest, b"OLD CONTENT").unwrap();
+
+        let result = odb.read_to_file(&oid, &dest).await;
+        assert!(result.is_err(), "read_to_file must fail: chunk missing");
+
+        // Pre-existing content at the final path must be untouched.
+        let on_disk = std::fs::read(&dest).unwrap();
+        assert_eq!(
+            on_disk, b"OLD CONTENT",
+            "final path must retain its old content after a failed read_to_file"
+        );
+
+        // No stray .mgtmp sibling.
+        for entry in std::fs::read_dir(tmp_dir.path()).unwrap() {
+            let path = entry.unwrap().path();
+            assert!(
+                !path.to_string_lossy().ends_with(".mgtmp"),
+                "stray tmp file left behind: {}",
+                path.display()
+            );
+        }
+    }
+
+    /// F1: `read_to_file` for a non-chunked object must atomically replace
+    /// an existing destination file's content (exercises Windows
+    /// rename-replace via the tmp-file-then-rename path).
+    #[tokio::test]
+    async fn read_to_file_overwrites_existing_dest() {
+        let storage = StdArc::new(MockBackend::new());
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let data = b"brand new content".to_vec();
+        let oid = odb.write(ObjectType::Blob, &data).await.unwrap();
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let dest = tmp_dir.path().join("existing.txt");
+        std::fs::write(&dest, b"stale content that is longer than the new content").unwrap();
+
+        let bytes_written = odb.read_to_file(&oid, &dest).await.unwrap();
+        assert_eq!(bytes_written, data.len() as u64);
+
+        let on_disk = std::fs::read(&dest).unwrap();
+        assert_eq!(on_disk, data);
+
+        // No stray .mgtmp sibling after a successful write.
+        for entry in std::fs::read_dir(tmp_dir.path()).unwrap() {
+            let path = entry.unwrap().path();
+            assert!(
+                !path.to_string_lossy().ends_with(".mgtmp"),
+                "stray tmp file left behind: {}",
+                path.display()
+            );
+        }
     }
 }

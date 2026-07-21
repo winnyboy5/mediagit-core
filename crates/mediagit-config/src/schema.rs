@@ -67,6 +67,62 @@ pub struct Config {
     /// Custom user-defined settings
     #[serde(default)]
     pub custom: HashMap<String, serde_json::Value>,
+
+    /// Per-repo content-defined chunking (CDC) seed. `0` (the default for
+    /// repos without this field, e.g. pre-existing configs) reproduces the
+    /// original unseeded chunk boundaries exactly. Generated once at `mediagit
+    /// init` for new repos and propagated to clones via protocol capabilities.
+    #[serde(default)]
+    pub cdc_seed: u64,
+
+    /// Per-repo storage namespace (layout v2). All object keys are prefixed
+    /// `"<repo_namespace>/"` by `NamespacedBackend` so one storage
+    /// root/bucket can safely host multiple repos. `None` for pre-v2 repos
+    /// (never written) — the storage factory falls back to a sanitized
+    /// basename of the repo root at open time. Set once at `init`/`clone`
+    /// and never changed afterward (changing it would silently orphan every
+    /// existing key under the old namespace).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_namespace: Option<String>,
+
+    /// Physical storage layout version. `1` = pre-namespace flat layout
+    /// (implicit, absent from old configs); `2` = per-repo namespace +
+    /// true hash fanout (this cycle). Mirrored in the `LAYOUT` marker file
+    /// at the storage root so a repo opened with the wrong client version
+    /// fails fast instead of silently corrupting the physical layout.
+    #[serde(default = "default_layout_version")]
+    pub layout_version: u32,
+
+    /// Unique identifier for *this* repository, distinct from
+    /// `repo_namespace` (which defaults to a sanitized directory basename
+    /// and can collide across independently-created repos sharing a
+    /// storage root/bucket). Generated once at `init`/`clone` and recorded
+    /// in the `LAYOUT` marker so a namespace collision is a hard error
+    /// instead of silently merging two repos' key spaces. `None` for
+    /// configs written before this field existed (adopted into the marker
+    /// on first open after this fix — see `check_or_write_layout_marker`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_id: Option<String>,
+
+    /// Config schema version (distinct from `layout_version`, which tracks
+    /// the on-disk *object storage* layout and is authoritative via the
+    /// `LAYOUT` marker — this field is config.toml's own schema version,
+    /// migrated by `crate::migration::MigrationManager`). Missing on any
+    /// config.toml written before this field existed, which is exactly what
+    /// `#[serde(default)]` (-> 0) is for: an absent field means "v0".
+    #[serde(default)]
+    pub config_version: u32,
+}
+
+/// Current on-disk layout version new repos are initialized with.
+pub const CURRENT_LAYOUT_VERSION: u32 = 2;
+
+fn default_layout_version() -> u32 {
+    // Configs written before this field existed predate layout v2 entirely
+    // (v1 had no namespace, no `LAYOUT` marker) — default to 1, not
+    // `CURRENT_LAYOUT_VERSION`, so a pre-existing repo's config doesn't
+    // silently claim to be on a layout it was never written with.
+    1
 }
 
 impl Config {
@@ -108,7 +164,17 @@ impl Config {
     }
 
     /// Load config from repository root
+    ///
+    /// If the loaded config's `config_version` is behind
+    /// `migration::CONFIG_VERSION`, runs `MigrationManager` to bring it up to
+    /// date, backs up the original to `config.toml.bak`, and writes the
+    /// migrated config back before returning it. This never touches object
+    /// storage layout (`layout_version` / the `LAYOUT` marker) — only the
+    /// config.toml schema.
     pub async fn load(repo_root: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
+        use crate::migration::{
+            MigrationManager, MigrationV0ToV1, MigrationV1ToV2, CONFIG_VERSION,
+        };
         use crate::ConfigLoader;
         let config_path = repo_root.as_ref().join(".mediagit/config.toml");
 
@@ -118,7 +184,50 @@ impl Config {
         }
 
         let loader = ConfigLoader::new();
-        Ok(loader.load_file(&config_path).await?)
+        let config: Config = loader.load_file(&config_path).await?;
+
+        if config.config_version >= CONFIG_VERSION {
+            return Ok(config);
+        }
+
+        tracing::info!(
+            from_version = config.config_version,
+            to_version = CONFIG_VERSION,
+            path = %config_path.display(),
+            "Migrating config.toml to current schema version"
+        );
+
+        let backup_path = config_path.with_file_name(format!(
+            "{}.bak",
+            config_path
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("Invalid config path: {}", config_path.display()))?
+                .to_string_lossy()
+        ));
+        std::fs::copy(&config_path, &backup_path).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to back up config.toml to {} before migration: {}",
+                backup_path.display(),
+                e
+            )
+        })?;
+
+        let mut manager = MigrationManager::new();
+        manager.register(Box::new(MigrationV0ToV1));
+        manager.register(Box::new(MigrationV1ToV2));
+
+        let value = serde_json::to_value(&config)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize config for migration: {}", e))?;
+        let migrated_value = manager
+            .migrate(value, config.config_version, CONFIG_VERSION)
+            .map_err(|e| anyhow::anyhow!("Config migration failed: {}", e))?;
+        let mut migrated: Config = serde_json::from_value(migrated_value)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize migrated config: {}", e))?;
+        migrated.config_version = CONFIG_VERSION;
+
+        migrated.save(repo_root.as_ref())?;
+
+        Ok(migrated)
     }
 
     /// Save config to repository root
@@ -600,6 +709,20 @@ pub struct RemoteConfig {
     /// Default fetch flag
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_fetch: Option<bool>,
+
+    /// JWT bearer token for this remote (client auth, M2). Lowest-precedence
+    /// credential source — `MEDIAGIT_TOKEN`/`MEDIAGIT_API_KEY` env vars and
+    /// the OS keychain are checked first (see `resolve_credentials` in
+    /// `mediagit-cli/src/repo.rs`). Stored in plaintext in `config.toml`; a
+    /// world/group-readable config file triggers a warning when this is read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+
+    /// API key for this remote (client auth, M2). Same precedence and
+    /// plaintext-storage caveat as `token`; only one of `token`/`api_key`
+    /// should be set per remote (`token` wins if both are).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
 }
 
 impl RemoteConfig {
@@ -610,6 +733,8 @@ impl RemoteConfig {
             fetch: None,
             push: None,
             default_fetch: Some(true),
+            token: None,
+            api_key: None,
         }
     }
 
@@ -845,6 +970,11 @@ impl Default for Config {
             branches: HashMap::new(),
             protected_branches: HashMap::new(),
             custom: HashMap::new(),
+            cdc_seed: 0,
+            repo_namespace: None,
+            layout_version: default_layout_version(),
+            repo_id: None,
+            config_version: crate::migration::CONFIG_VERSION,
         }
     }
 }
@@ -1003,5 +1133,28 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn test_config_without_cdc_seed_defaults_to_zero() {
+        // Existing configs written before this field existed must still parse,
+        // with cdc_seed defaulting to 0 (legacy/unseeded chunking).
+        let toml_str = r#"
+[app]
+[storage]
+backend = "filesystem"
+base_path = "./data"
+[compression]
+[performance]
+[performance.cache]
+[performance.connection_pool]
+[performance.timeouts]
+[observability]
+[observability.metrics]
+[security]
+[security.rate_limiting]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.cdc_seed, 0);
     }
 }

@@ -61,9 +61,9 @@ pub struct CommitCmd {
     #[arg(short = 'a', long)]
     pub all: bool,
 
-    /// Add untracked files to index and commit
-    #[arg(long)]
-    pub include: bool,
+    /// Stage listed paths before committing
+    #[arg(long, value_name = "PATHS", num_args = 0..)]
+    pub include: Vec<String>,
 
     /// Override the commit author
     #[arg(long, value_name = "NAME <EMAIL>")]
@@ -109,24 +109,44 @@ impl CommitCmd {
             ));
         }
 
-        // Validate inputs
-        if self.message.is_none() && !self.edit && self.file.is_none() {
-            return Err(anyhow::anyhow!(
-                "please provide a commit message with -m, -F, or -e"
-            ));
-        }
-
-        let message = self.message.as_deref().unwrap_or("Initial commit");
+        // Determine the commit message with git's precedence: -m wins, then
+        // -F (read from file), then -e (or no source, if a tty) opens an
+        // editor. If none of -m/-F/-e was given and stdin isn't a tty, there
+        // is no way to obtain a message non-interactively.
+        let message: String = if let Some(m) = &self.message {
+            m.clone()
+        } else if let Some(file_path) = &self.file {
+            std::fs::read_to_string(file_path)
+                .with_context(|| format!("Failed to read commit message file: {}", file_path))?
+                .trim_end_matches(['\n', '\r'])
+                .to_string()
+        } else if self.edit || std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            edit_commit_message()?
+        } else {
+            return Err(anyhow::anyhow!("no commit message provided"));
+        };
 
         // Validate empty message (ISS-007 fix)
         if message.trim().is_empty() {
             return Err(anyhow::anyhow!(
-                "aborting commit due to empty commit message"
+                "Aborting commit due to empty commit message"
             ));
         }
 
-        // Find repository root
+        // Find repository root (needed for config loading, signoff identity resolution)
         let repo_root = find_repo_root()?;
+
+        // Stage paths if --include is used
+        if !self.include.is_empty() {
+            let staged_count =
+                super::add::stage_files_for_commit(&self.include, &repo_root).await?;
+            if !self.quiet {
+                output::info(&format!("Staged {} file(s) from --include", staged_count));
+            }
+        }
+
+        // Apply --signoff if requested (after resolving author identity below)
+        // Defer actual appending until after author_name/email are resolved
 
         if self.dry_run {
             output::info("Running in dry-run mode");
@@ -192,6 +212,12 @@ impl CommitCmd {
 
         // Then, add/update entries from index (these override parent entries with same name)
         for entry in index.entries() {
+            let path_str = entry.path.to_string_lossy();
+            // Legacy on-disk indexes from before the merge fix may still
+            // carry ::stageN debris entries; never let them reach a tree.
+            if mediagit_versioning::is_stage_debris_key(&path_str) {
+                continue;
+            }
             let file_mode = if entry.mode & 0o111 != 0 {
                 FileMode::Executable
             } else {
@@ -199,11 +225,7 @@ impl CommitCmd {
             };
 
             // Use full path, not just filename
-            tree.add_entry(TreeEntry::new(
-                entry.path.to_string_lossy().to_string(),
-                file_mode,
-                entry.oid,
-            ));
+            tree.add_entry(TreeEntry::new(path_str.to_string(), file_mode, entry.oid));
         }
 
         let tree_bytes = tree.serialize()?;
@@ -245,7 +267,29 @@ impl CommitCmd {
             (name, email)
         };
 
-        let signature = Signature::now(author_name.clone(), author_email.clone());
+        // Apply --signoff if requested (append after author identity is resolved)
+        let message = if self.signoff {
+            let signoff_line = format!("Signed-off-by: {} <{}>", author_name, author_email);
+            // Only append if not already present
+            if message.contains(&signoff_line) {
+                message
+            } else {
+                format!("{}\n\n{}", message, signoff_line)
+            }
+        } else {
+            message
+        };
+
+        // Parse --date if provided, otherwise use current time
+        let signature = if let Some(date_str) = &self.date {
+            // Parse RFC3339 date format (e.g., "2026-01-15T10:30:00Z")
+            let date = chrono::DateTime::parse_from_rfc3339(date_str)
+                .with_context(|| format!("Invalid RFC3339 date format: {}", date_str))?;
+            let utc_date = date.with_timezone(&chrono::Utc);
+            Signature::new(author_name.clone(), author_email.clone(), utc_date)
+        } else {
+            Signature::now(author_name.clone(), author_email.clone())
+        };
 
         // Create commit object
         let commit = if let Some(parent) = parent_oid {
@@ -338,7 +382,7 @@ impl CommitCmd {
         if !self.quiet {
             output::success(&format!("Created commit {}", commit_oid));
             if self.verbose {
-                output::detail("Message", message);
+                output::detail("Message", &message);
                 output::detail("Author", &format!("{} <{}>", author_name, author_email));
             }
         }
@@ -350,4 +394,58 @@ impl CommitCmd {
 
         Ok(())
     }
+}
+
+/// Open an editor (`$EDITOR`/`%EDITOR%`, else `notepad` on Windows or `vi`
+/// elsewhere) on a temp file seeded with a commented status hint, matching
+/// git's `-e` / no-message-source commit flow. Comment lines (starting with
+/// `#`) are stripped from the result; emptiness is validated by the caller.
+fn edit_commit_message() -> Result<String> {
+    let editor = std::env::var("EDITOR")
+        .or_else(|_| std::env::var("VISUAL"))
+        .unwrap_or_else(|_| {
+            if cfg!(windows) {
+                "notepad".to_string()
+            } else {
+                "vi".to_string()
+            }
+        });
+
+    let tmp_path =
+        std::env::temp_dir().join(format!("MEDIAGIT_COMMIT_EDITMSG_{}", std::process::id()));
+    std::fs::write(
+        &tmp_path,
+        "\n# Please enter the commit message for your changes. Lines starting\n\
+         # with '#' will be ignored, and an empty message aborts the commit.\n",
+    )
+    .context("Failed to create commit message temp file")?;
+
+    let status = std::process::Command::new(&editor)
+        .arg(&tmp_path)
+        .status()
+        .with_context(|| format!("Failed to launch editor: {}", editor));
+    let status = match status {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e);
+        }
+    };
+
+    if !status.success() {
+        let _ = std::fs::remove_file(&tmp_path);
+        anyhow::bail!("Editor exited with an error, aborting commit");
+    }
+
+    let content =
+        std::fs::read_to_string(&tmp_path).context("Failed to read commit message temp file")?;
+    let _ = std::fs::remove_file(&tmp_path);
+
+    let message = content
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Ok(message.trim().to_string())
 }

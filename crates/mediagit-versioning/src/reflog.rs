@@ -58,11 +58,25 @@
 
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tracing::warn;
 
 use crate::{Oid, Signature};
+
+/// Default cap on reflog entries kept per ref, mirroring the self-prune
+/// pattern `progress.rs` uses for `.mediagit/stats/` (keep the most recent
+/// N, drop the rest). Override via `MEDIAGIT_REFLOG_MAX`.
+const DEFAULT_REFLOG_MAX: usize = 1000;
+
+fn reflog_max() -> usize {
+    std::env::var("MEDIAGIT_REFLOG_MAX")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_REFLOG_MAX)
+}
 
 /// A single entry in the reflog
 #[derive(Debug, Clone)]
@@ -225,7 +239,39 @@ impl Reflog {
             .await
             .context("Failed to write reflog entry")?;
         file.flush().await.context("Failed to flush reflog entry")?;
+        drop(file);
 
+        // Best-effort cap: a trim failure must never fail the ref update
+        // that triggered this append.
+        if let Err(e) = Self::trim_if_needed(&path).await {
+            warn!(path = %path.display(), error = %e, "reflog trim failed (non-fatal)");
+        }
+
+        Ok(())
+    }
+
+    /// Cap the reflog file at `path` to the most recent `MEDIAGIT_REFLOG_MAX`
+    /// (default 1000) entries, dropping the oldest. Idempotent: re-running on
+    /// an already-capped file is a no-op (the length check short-circuits
+    /// before any write).
+    async fn trim_if_needed(path: &Path) -> Result<()> {
+        let max = reflog_max();
+        let content = match fs::read_to_string(path).await {
+            Ok(c) => c,
+            Err(_) => return Ok(()), // nothing to trim
+        };
+        let lines: Vec<&str> = content.lines().collect();
+        if lines.len() <= max {
+            return Ok(());
+        }
+        let mut trimmed = String::new();
+        for line in &lines[lines.len() - max..] {
+            trimmed.push_str(line);
+            trimmed.push('\n');
+        }
+        fs::write(path, trimmed)
+            .await
+            .context("Failed to write trimmed reflog")?;
         Ok(())
     }
 
@@ -444,6 +490,38 @@ mod tests {
         // Newest first
         assert_eq!(entries[0].message, "commit: Second");
         assert_eq!(entries[1].message, "commit: First");
+    }
+
+    #[tokio::test]
+    async fn test_reflog_trim_caps_at_max() {
+        let tmp = TempDir::new().unwrap();
+        // SAFETY: test-only env var scoping; no other test in this process
+        // reads MEDIAGIT_REFLOG_MAX concurrently within this crate's suite.
+        std::env::set_var("MEDIAGIT_REFLOG_MAX", "5");
+        let reflog = Reflog::new(tmp.path());
+
+        for i in 0..12 {
+            let entry = ReflogEntry::now(
+                Oid::hash(format!("prev{i}").as_bytes()),
+                Oid::hash(format!("next{i}").as_bytes()),
+                "User",
+                "user@test.com",
+                &format!("commit: entry {i}"),
+            );
+            reflog.append("HEAD", &entry).await.unwrap();
+        }
+
+        let entries = reflog.read("HEAD", None).await.unwrap();
+        assert_eq!(
+            entries.len(),
+            5,
+            "reflog must be capped at MEDIAGIT_REFLOG_MAX"
+        );
+        // Newest-first: the most recent entry (11) must survive, oldest dropped.
+        assert_eq!(entries[0].message, "commit: entry 11");
+        assert_eq!(entries[4].message, "commit: entry 7");
+
+        std::env::remove_var("MEDIAGIT_REFLOG_MAX");
     }
 
     #[tokio::test]

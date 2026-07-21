@@ -1,6 +1,6 @@
 # Contributing to MediaGit
 
-See [CONTRIBUTING.md](../../CONTRIBUTING.md) in repository root for complete contribution guidelines.
+See [CONTRIBUTING.md](../../../CONTRIBUTING.md) in repository root for complete contribution guidelines.
 
 ## Quick Start
 1. Fork the repository

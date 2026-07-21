@@ -172,6 +172,27 @@ impl ProtocolClient {
             message: format!("Found {} objects", stats.objects_count),
         });
 
+        // A7: bound the total wall time spent on network uploads so a mid-push
+        // backend outage fails fast with a clear error instead of hanging on
+        // retries forever. Absolute deadline (not stall-based): the default is
+        // generous enough that a real large push won't trip it; lower
+        // MEDIAGIT_PUSH_DEADLINE_SECS to fail faster on a dead backend.
+        // ponytail: absolute deadline, upgrade to a progress-reset stall
+        // deadline if multi-hour legit pushes ever false-trip it.
+        let push_deadline_secs = std::env::var("MEDIAGIT_PUSH_DEADLINE_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&s| s > 0)
+            .unwrap_or(3600);
+        let push_deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(push_deadline_secs);
+        let deadline_err = || {
+            anyhow::anyhow!(
+                "push aborted: exceeded MEDIAGIT_PUSH_DEADLINE_SECS ({push_deadline_secs}s) \
+                 uploading to remote; the storage backend may be unavailable"
+            )
+        };
+
         if !objects.is_empty() {
             // Phase 2: Generate pack with progress
             let total_objects = objects.len() as u64;
@@ -204,7 +225,9 @@ impl ProtocolClient {
                 message: "Uploading pack...".to_string(),
             });
 
-            self.upload_pack(&pack_data).await?;
+            tokio::time::timeout_at(push_deadline, self.upload_pack(&pack_data))
+                .await
+                .map_err(|_| deadline_err())??;
 
             on_progress(PushProgress {
                 phase: PushPhase::Uploading,
@@ -215,15 +238,18 @@ impl ProtocolClient {
 
             // Phase 4: Upload chunked objects (large files)
             if !chunked_oids.is_empty() {
-                self.upload_chunked_objects(odb, &chunked_oids, |bytes_done, bytes_total| {
-                    on_progress(PushProgress {
-                        phase: PushPhase::Uploading,
-                        current: bytes_done,
-                        total: bytes_total,
-                        message: String::new(),
+                let upload =
+                    self.upload_chunked_objects(odb, &chunked_oids, |bytes_done, bytes_total| {
+                        on_progress(PushProgress {
+                            phase: PushPhase::Uploading,
+                            current: bytes_done,
+                            total: bytes_total,
+                            message: String::new(),
+                        });
                     });
-                })
-                .await?;
+                tokio::time::timeout_at(push_deadline, upload)
+                    .await
+                    .map_err(|_| deadline_err())??;
             }
         } else {
             tracing::info!("No new objects to push");
@@ -231,7 +257,9 @@ impl ProtocolClient {
 
         // Update refs
         let request = RefUpdateRequest { updates, force };
-        let response = self.update_refs(request).await?;
+        let response = tokio::time::timeout_at(push_deadline, self.update_refs(request))
+            .await
+            .map_err(|_| deadline_err())??;
         Ok((response, stats))
     }
 
@@ -280,22 +308,7 @@ impl ProtocolClient {
             let mut have_queue = VecDeque::new();
             for oid in have_oids {
                 if visited.insert(oid) {
-                    // Detect actual object type by reading and inspecting the object
-                    let obj_type = if let Ok(obj_data) = odb.read(&oid).await {
-                        // Try to deserialize as each type to detect the actual type
-                        if mediagit_versioning::format::deserialize::<Commit>(&obj_data).is_ok() {
-                            ObjectType::Commit
-                        } else if mediagit_versioning::format::deserialize::<Tree>(&obj_data)
-                            .is_ok()
-                        {
-                            ObjectType::Tree
-                        } else {
-                            ObjectType::Blob
-                        }
-                    } else {
-                        // Object not found locally - assume Commit for remote objects
-                        ObjectType::Commit
-                    };
+                    let obj_type = detect_object_type(odb, &oid).await;
                     have_queue.push_back((oid, obj_type));
                 }
             }
@@ -342,8 +355,15 @@ impl ProtocolClient {
                                 }
                             }
                         }
+                        ObjectType::Tag => {
+                            if let Ok(tag) = Tag::deserialize(&obj_data) {
+                                if visited.insert(tag.target) {
+                                    have_queue.push_back((tag.target, tag.target_type));
+                                }
+                            }
+                        }
                         // Blob is filtered above; this arm satisfies exhaustiveness.
-                        _ => {}
+                        ObjectType::Blob => {}
                     }
                 }
             }
@@ -351,10 +371,14 @@ impl ProtocolClient {
             tracing::debug!("Marked {} objects as already on remote", visited.len());
         }
 
-        // Now collect only NEW objects (not in visited set)
+        // Now collect only NEW objects (not in visited set). Ref-update
+        // targets are usually commits, but can also be annotated Tag
+        // objects (e.g. `push --tags`), so the type must be detected rather
+        // than assumed.
         for oid in commit_oids {
             if visited.insert(oid) {
-                queue.push_back((oid, ObjectType::Commit));
+                let obj_type = detect_object_type(odb, &oid).await;
+                queue.push_back((oid, obj_type));
             }
         }
 
@@ -406,6 +430,19 @@ impl ProtocolClient {
                             };
                             queue.push_back((entry.oid, entry_type));
                         }
+                    }
+                }
+                ObjectType::Tag => {
+                    let obj_data = odb
+                        .read(&oid)
+                        .await
+                        .context(format!("Failed to read tag {}", oid))?;
+
+                    let tag: Tag = mediagit_versioning::format::deserialize(&obj_data)
+                        .context(format!("Failed to deserialize tag {}", oid))?;
+
+                    if visited.insert(tag.target) {
+                        queue.push_back((tag.target, tag.target_type));
                     }
                 }
                 ObjectType::Blob => {
@@ -1193,14 +1230,14 @@ impl ProtocolClient {
 
             // Optional strong verify: decompress + BLAKE3 every chunk server-side.
             // Gated by MEDIAGIT_STRONG_VERIFY=1; endpoint unavailability is non-fatal.
-            // Skipped in pack mode — chunks live at packs/<oid>, not chunks/<hex>.
+            // Runs in pack mode too — the server consults the pack index on a
+            // loose miss, so packed chunks are pack-valid to verify.
             if std::env::var("MEDIAGIT_STRONG_VERIFY").as_deref() == Ok("1")
                 && !full_chunks.is_empty()
-                && !cloud_packs
             {
                 let hexes: Vec<String> = full_chunks.iter().map(|c| c.to_hex()).collect();
                 tracing::debug!(count = hexes.len(), "Running strong chunk integrity verify");
-                match self.strong_verify_chunks(&hexes).await {
+                match self.strong_verify_chunks(&hexes, false).await {
                     Ok(invalid) if !invalid.is_empty() => {
                         anyhow::bail!(
                             "Strong verify found {} chunk(s) with corrupted content: {:?}",
@@ -1360,7 +1397,8 @@ impl ProtocolClient {
         }
 
         // Upload manifest last (ensures all chunks exist first)
-        let manifest_data = mediagit_versioning::format::serialize(&manifest)
+        let manifest_data = manifest
+            .to_bytes()
             .context("Failed to serialize manifest")?;
         self.upload_manifest(oid, &manifest_data).await?;
 
@@ -2192,7 +2230,8 @@ impl ProtocolClient {
             }
 
             // Upload manifest last (ensures all chunks exist first)
-            let manifest_data = mediagit_versioning::format::serialize(&manifest)
+            let manifest_data = manifest
+                .to_bytes()
                 .context("Failed to serialize manifest")?;
             self.upload_manifest(oid, &manifest_data).await?;
 
@@ -2203,5 +2242,134 @@ impl ProtocolClient {
             b.summary();
         }
         Ok(total_chunks_uploaded)
+    }
+
+    /// Force-heal remote chunk storage (BUG-RM-3: one corrupt chunk object
+    /// permanently bricks a remote, because push dedup and pack-index checks
+    /// both treat "server already has it" as sufficient and never re-check
+    /// content).
+    ///
+    /// Walks the FULL object closure reachable from `commit_oids` — no
+    /// "have" diffing against the remote's current refs, since a poisoned
+    /// chunk is by definition one the server already believes it has (that's
+    /// exactly what makes it invisible to ordinary push). Every chunk id
+    /// referenced by any chunked blob in the closure is strong-verified via
+    /// `POST /chunks/verify-integrity` (BLAKE3 re-hash, always run — never
+    /// gated behind `MEDIAGIT_STRONG_VERIFY`). Any chunk the server reports
+    /// invalid is re-uploaded unconditionally via `PUT /chunks/:id`, which
+    /// the server always overwrites with no existence check (see
+    /// `mediagit-server::handlers::chunks::upload_chunk`) — so this bypasses
+    /// the "already present" dedup that `/chunks/check` and the pack index
+    /// would otherwise apply.
+    pub async fn repair_remote(
+        &self,
+        odb: &ObjectDatabase,
+        commit_oids: Vec<Oid>,
+    ) -> Result<RepairReport> {
+        if commit_oids.is_empty() {
+            return Ok(RepairReport::default());
+        }
+
+        let objects = self
+            .collect_reachable_objects(odb, commit_oids, Vec::new())
+            .await?;
+
+        let mut chunk_hexes: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for (oid, obj_type) in &objects {
+            if *obj_type == ObjectType::Blob && odb.is_chunked(oid).await.unwrap_or(false) {
+                if let Some(manifest) = odb.get_chunk_manifest(oid).await? {
+                    for c in &manifest.chunks {
+                        let hex = c.id.to_hex();
+                        if seen.insert(hex.clone()) {
+                            chunk_hexes.push(hex);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut repaired = 0usize;
+        let mut unrepairable = Vec::new();
+
+        // Phase 1: whole objects (commits/trees/un-chunked blobs). The chunk
+        // walk below never sees these — CHK20's poisoned blob was one.
+        let object_hexes: Vec<String> = objects.iter().map(|(oid, _)| oid.to_hex()).collect();
+        let invalid_objects = self.strong_verify_objects(&object_hexes, true).await?;
+        if !invalid_objects.is_empty() {
+            let invalid_set: HashSet<&str> = invalid_objects.iter().map(|s| s.as_str()).collect();
+            let to_reupload: Vec<(Oid, ObjectType)> = objects
+                .iter()
+                .filter(|(oid, _)| invalid_set.contains(oid.to_hex().as_str()))
+                .cloned()
+                .collect();
+            let n = to_reupload.len();
+            let (pack_data, _) = self.generate_pack(odb, to_reupload).await?;
+            match self.upload_pack(&pack_data).await {
+                Ok(()) => repaired += n,
+                Err(_) => unrepairable.extend(invalid_objects.iter().cloned()),
+            }
+        }
+
+        if chunk_hexes.is_empty() {
+            return Ok(RepairReport {
+                verified: object_hexes.len(),
+                repaired,
+                unrepairable,
+            });
+        }
+
+        let invalid = self.strong_verify_chunks(&chunk_hexes, true).await?;
+        let verified = object_hexes.len() + chunk_hexes.len();
+
+        for hex in invalid {
+            let oid = match Oid::from_hex(&hex) {
+                Ok(o) => o,
+                Err(_) => {
+                    unrepairable.push(hex);
+                    continue;
+                }
+            };
+            let data = match odb.get_compressed_chunk(&oid).await {
+                Ok(d) => d,
+                Err(_) => {
+                    unrepairable.push(hex);
+                    continue;
+                }
+            };
+            let url = format!("{}/chunks/{}", self.base_url, hex);
+            match self.client.put(&url).body(data).send().await {
+                Ok(r) if r.status().is_success() => repaired += 1,
+                _ => unrepairable.push(hex),
+            }
+        }
+
+        Ok(RepairReport {
+            verified,
+            repaired,
+            unrepairable,
+        })
+    }
+}
+
+/// Detect an object's type by reading it and trying each deserializer in
+/// turn (Commit, Tree, Tag; else Blob) — same ordering rationale as
+/// `mediagit_versioning::reachability`'s sniff chain. Falls back to
+/// `ObjectType::Commit` if the object can't be read at all, matching this
+/// module's pre-existing behavior for stale/unknown "have" OIDs from the
+/// remote (an over-broad guess here only means the traversal below reads
+/// the object and finds it truly isn't a commit, not a correctness issue).
+async fn detect_object_type(odb: &ObjectDatabase, oid: &Oid) -> ObjectType {
+    let Ok(obj_data) = odb.read(oid).await else {
+        return ObjectType::Commit;
+    };
+    if Commit::deserialize(&obj_data).is_ok() {
+        ObjectType::Commit
+    } else if Tree::deserialize(&obj_data).is_ok() {
+        ObjectType::Tree
+    } else if Tag::deserialize(&obj_data).is_ok() {
+        ObjectType::Tag
+    } else {
+        ObjectType::Blob
     }
 }

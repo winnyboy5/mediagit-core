@@ -12,15 +12,17 @@
 // GNU Affero General Public License for more details.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 
-use mediagit_security::auth::{ApiKeyAuth, AuthLayer, AuthService, JwtAuth};
+use mediagit_security::auth::{ApiKeyAuth, AuthLayer, AuthService, GrantsStore, JwtAuth};
 use mediagit_storage::StorageBackend;
 use mediagit_versioning::ObjectDatabase;
+
+use crate::locks::LockRecord;
 
 /// Unique request ID generator
 static REQUEST_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -176,11 +178,28 @@ pub struct AppState {
     /// Populated from local JSONL on first locate hit; updated on complete_pack.
     pub pack_index: RwLock<HashMap<String, HashMap<String, PackLoc>>>,
 
+    /// Server-enforced file locks (Tracks B1-B3): repo -> path -> LockRecord.
+    /// Lazily loaded per repo from `.mediagit/locks.jsonl` on first access,
+    /// following the same double-checked pattern as `storage_backends`.
+    pub locks: RwLock<HashMap<String, HashMap<String, LockRecord>>>,
+
     /// Authentication layer (optional - can be disabled for development)
     pub auth_layer: Option<Arc<AuthLayer>>,
 
     /// Authentication service with user management (optional)
     pub auth_service: Option<Arc<AuthService>>,
+
+    /// Per-repo authorization grants (H2). Empty (and unpersisted) unless
+    /// constructed via [`AppState::new_with_full_auth`], in which case it's
+    /// loaded from `grants.jsonl` under the auth store dir — see
+    /// `mediagit_security::auth::GrantsStore`.
+    pub grants: GrantsStore,
+
+    /// M3 (#2b) test/observability counter: incremented once per `have` OID
+    /// whose reachability bitmap was used instead of a BFS walk in
+    /// `download_pack`. Not used for any correctness decision — purely lets
+    /// tests and operators observe the short-circuit firing.
+    pub bitmap_hits: AtomicU64,
 }
 
 impl AppState {
@@ -193,8 +212,11 @@ impl AppState {
             storage_backends: RwLock::new(HashMap::new()),
             odb_cache: RwLock::new(HashMap::new()),
             pack_index: RwLock::new(HashMap::new()),
+            locks: RwLock::new(HashMap::new()),
             auth_layer: None,
             auth_service: None,
+            grants: GrantsStore::new(),
+            bitmap_hits: AtomicU64::new(0),
         }
     }
 
@@ -218,30 +240,47 @@ impl AppState {
             storage_backends: RwLock::new(HashMap::new()),
             odb_cache: RwLock::new(HashMap::new()),
             pack_index: RwLock::new(HashMap::new()),
+            locks: RwLock::new(HashMap::new()),
             auth_layer: Some(auth_layer),
             auth_service: Some(auth_service),
+            grants: GrantsStore::new(),
+            bitmap_hits: AtomicU64::new(0),
         }
     }
 
-    /// Create new app state with full authentication (recommended)
-    pub fn new_with_full_auth(repos_dir: PathBuf, jwt_secret: &str) -> Self {
-        let auth_service = Arc::new(AuthService::new(jwt_secret));
-        let api_key_auth = Arc::new(ApiKeyAuth::new());
+    /// Create new app state with full authentication (recommended).
+    ///
+    /// `auth_store_dir` is where users.jsonl and api_keys.jsonl are
+    /// persisted (see `ServerConfig::resolved_auth_store_dir`) so accounts
+    /// and API keys survive a server restart. Fails hard if a store file
+    /// exists but is corrupt/unreadable — see `CredentialsStore::load_or_new`
+    /// and `ApiKeyAuth::load_or_new`.
+    pub fn new_with_full_auth(
+        repos_dir: PathBuf,
+        jwt_secret: &str,
+        auth_store_dir: &Path,
+    ) -> anyhow::Result<Self> {
+        let auth_service = Arc::new(AuthService::new_with_store_dir(jwt_secret, auth_store_dir)?);
+        let api_key_auth = Arc::new(ApiKeyAuth::load_or_new(auth_store_dir)?);
         let auth_layer = Arc::new(AuthLayer::new(
             Arc::clone(&auth_service.jwt_auth),
             api_key_auth,
         ));
+        let grants = GrantsStore::load_or_new(auth_store_dir)?;
 
-        Self {
+        Ok(Self {
             repos_dir,
             presigned_url_ttl_secs: 43200,
             want_cache: Mutex::new(WantCache::new()),
             storage_backends: RwLock::new(HashMap::new()),
             odb_cache: RwLock::new(HashMap::new()),
             pack_index: RwLock::new(HashMap::new()),
+            locks: RwLock::new(HashMap::new()),
             auth_layer: Some(auth_layer),
             auth_service: Some(auth_service),
-        }
+            grants,
+            bitmap_hits: AtomicU64::new(0),
+        })
     }
 
     /// Override the presigned URL TTL (called from `main` after reading config).
@@ -263,5 +302,73 @@ impl AppState {
     /// Get authentication service (if enabled)
     pub fn auth_service(&self) -> Option<&Arc<AuthService>> {
         self.auth_service.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mediagit_security::auth::user::Role;
+    use mediagit_security::auth::User;
+
+    #[tokio::test]
+    async fn full_auth_persists_users_across_restart() {
+        let repos = tempfile::tempdir().unwrap();
+        let auth_dir = tempfile::tempdir().unwrap();
+
+        let state = AppState::new_with_full_auth(
+            repos.path().to_path_buf(),
+            "test-secret",
+            auth_dir.path(),
+        )
+        .unwrap();
+
+        let user = User::new(
+            "user1".to_string(),
+            "alice".to_string(),
+            "alice@example.com".to_string(),
+            Role::Write,
+        );
+        state
+            .auth_service()
+            .unwrap()
+            .credentials_store
+            .register_user(user, "password123")
+            .await
+            .unwrap();
+
+        // Fresh AppState from the same auth dir simulates a server restart.
+        let state2 = AppState::new_with_full_auth(
+            repos.path().to_path_buf(),
+            "test-secret",
+            auth_dir.path(),
+        )
+        .unwrap();
+        let login = state2
+            .auth_service()
+            .unwrap()
+            .credentials_store
+            .authenticate("alice@example.com", "password123")
+            .await;
+        assert!(login.is_ok());
+    }
+
+    #[tokio::test]
+    async fn full_auth_hard_errors_on_corrupt_store() {
+        let repos = tempfile::tempdir().unwrap();
+        let auth_dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            auth_dir.path().join("users.jsonl"),
+            b"{\"v\":1}\nnot json\n",
+        )
+        .await
+        .unwrap();
+
+        let result = AppState::new_with_full_auth(
+            repos.path().to_path_buf(),
+            "test-secret",
+            auth_dir.path(),
+        );
+        assert!(result.is_err());
     }
 }

@@ -566,3 +566,37 @@ fn test_tag_list_full() {
         .success()
         .stdout(predicate::str::contains("v1.0.0"));
 }
+
+// ============================================================================
+// Tag Verify Fail-Closed Tests
+// ============================================================================
+
+#[test]
+fn test_tag_verify_annotated_tag() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+
+    add_and_commit(temp_dir.path(), "file.txt", "Content", "Initial commit");
+
+    // Create annotated tag
+    mediagit()
+        .arg("tag")
+        .arg("create")
+        .arg("v1.0.0")
+        .arg("-a")
+        .arg("-m")
+        .arg("Release version 1.0.0")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+
+    // Verify annotated tag - exercises the fail-closed verification logic
+    // (the fix in tag.rs:565-585 that checks for sidecar existence when object is missing)
+    mediagit()
+        .arg("tag")
+        .arg("verify")
+        .arg("v1.0.0")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+}
