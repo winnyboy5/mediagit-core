@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
-use super::{persist, AuthError, AuthResult, User, UserId};
+use super::{persist, user::Role, AuthError, AuthResult, User, UserId};
 
 /// User credentials with hashed password
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -286,6 +286,54 @@ impl CredentialsStore {
         self.persist().await
     }
 
+    /// Verify a user's current password by ID, without mutating anything.
+    /// Used by the self-service password-change route, which must confirm
+    /// the caller knows their current password before calling
+    /// [`CredentialsStore::update_password`].
+    pub async fn verify_password(&self, user_id: &str, password: &str) -> AuthResult<bool> {
+        let credentials = self.credentials.read().await;
+        let creds = credentials
+            .get(user_id)
+            .ok_or_else(|| AuthError::UserNotFound(user_id.to_string()))?;
+        Ok(creds.verify_password(password))
+    }
+
+    /// Change a user's role, persisting through the same path
+    /// [`CredentialsStore::update_password`] uses.
+    pub async fn set_role(&self, user_id: &str, role: Role) -> AuthResult<()> {
+        {
+            let mut credentials = self.credentials.write().await;
+            let creds = credentials
+                .get_mut(user_id)
+                .ok_or_else(|| AuthError::UserNotFound(user_id.to_string()))?;
+            creds.user.role = role;
+        }
+
+        self.persist().await
+    }
+
+    /// Register a new user with an explicit role (bootstrap / admin
+    /// create-user entry point). Reuses [`CredentialsStore::register_user`]
+    /// (and, through it, [`UserCredentials::new`]) so bcrypt hashing and the
+    /// duplicate-email/username checks stay in exactly one place.
+    pub async fn create_user_with_role(
+        &self,
+        user_id: UserId,
+        username: String,
+        email: String,
+        password: &str,
+        role: Role,
+    ) -> AuthResult<UserCredentials> {
+        let user = User::new(user_id, username, email, role);
+        self.register_user(user, password).await
+    }
+
+    /// Count registered users with the given role (last-admin protection).
+    pub async fn count_by_role(&self, role: Role) -> usize {
+        let credentials = self.credentials.read().await;
+        credentials.values().filter(|c| c.user.role == role).count()
+    }
+
     /// Delete user
     pub async fn delete_user(&self, user_id: &str) -> AuthResult<()> {
         {
@@ -421,6 +469,106 @@ mod tests {
         // New password should work
         let result = store.authenticate("test@example.com", "newpassword").await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_set_role_persists() {
+        let _guard = persist::ENV_LOCK.read().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CredentialsStore::load_or_new(tmp.path()).unwrap();
+        let user = User::new(
+            "user1".to_string(),
+            "testuser".to_string(),
+            "test@example.com".to_string(),
+            Role::Write,
+        );
+        store.register_user(user, "password123").await.unwrap();
+
+        store.set_role("user1", Role::Admin).await.unwrap();
+        assert_eq!(store.get_user("user1").await.unwrap().role, Role::Admin);
+
+        // Fresh store from the same dir simulates a server restart: the
+        // role change must have been persisted, not just held in memory.
+        let store2 = CredentialsStore::load_or_new(tmp.path()).unwrap();
+        assert_eq!(store2.get_user("user1").await.unwrap().role, Role::Admin);
+    }
+
+    #[tokio::test]
+    async fn test_set_role_unknown_user_errors() {
+        let store = CredentialsStore::new();
+        assert!(store.set_role("nobody", Role::Admin).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_count_by_role() {
+        let store = CredentialsStore::new();
+        store
+            .register_user(
+                User::new(
+                    "a".to_string(),
+                    "a".to_string(),
+                    "a@example.com".to_string(),
+                    Role::Admin,
+                ),
+                "password123",
+            )
+            .await
+            .unwrap();
+        store
+            .register_user(
+                User::new(
+                    "b".to_string(),
+                    "b".to_string(),
+                    "b@example.com".to_string(),
+                    Role::Write,
+                ),
+                "password123",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(store.count_by_role(Role::Admin).await, 1);
+        assert_eq!(store.count_by_role(Role::Write).await, 1);
+        assert_eq!(store.count_by_role(Role::Read).await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_create_user_with_role() {
+        let store = CredentialsStore::new();
+        let creds = store
+            .create_user_with_role(
+                "user1".to_string(),
+                "testuser".to_string(),
+                "test@example.com".to_string(),
+                "password123",
+                Role::Admin,
+            )
+            .await
+            .unwrap();
+        assert_eq!(creds.user.role, Role::Admin);
+        assert_eq!(store.count_by_role(Role::Admin).await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_verify_password() {
+        let store = CredentialsStore::new();
+        let user = User::new(
+            "user1".to_string(),
+            "testuser".to_string(),
+            "test@example.com".to_string(),
+            Role::Write,
+        );
+        store.register_user(user, "password123").await.unwrap();
+
+        assert!(store.verify_password("user1", "password123").await.unwrap());
+        assert!(!store
+            .verify_password("user1", "wrongpassword")
+            .await
+            .unwrap());
+        assert!(store
+            .verify_password("nobody", "password123")
+            .await
+            .is_err());
     }
 
     #[tokio::test]

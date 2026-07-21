@@ -125,6 +125,43 @@ Date:   Mon Nov 24 2025 12:00:00
     Size: 42.3 MB → 6.4 MB (84.8% savings)
 ```
 
+## Your First Remote Push
+
+To collaborate with others, push your repository to a server:
+
+```bash
+# Initialize a remote server (see deployment guide for production)
+mediagit-server init --non-interactive --data-dir ./repos
+
+# Start the server
+mediagit-server --config mediagit-server.toml
+
+# From your repo, add a remote and push
+mediagit remote add origin http://127.0.0.1:3000/my-project
+mediagit push origin main
+```
+
+```mermaid
+flowchart LR
+    A["mediagit init<br/>local repo"] --> B["mediagit add files"]
+    B --> C["mediagit commit"]
+    C --> D["mediagit remote add<br/>origin"]
+    D --> E["mediagit push<br/>origin main"]
+    E --> F["mediagit clone<br/>from remote"]
+    
+    style A fill:#e3f2fd
+    style E fill:#fff3e0
+    style F fill:#f3e5f5
+```
+
+Other users can now clone your repository:
+
+```bash
+mediagit clone http://127.0.0.1:3000/my-project ./my-project
+cd my-project
+mediagit status
+```
+
 ## Working with Branches
 
 ### Create a Feature Branch

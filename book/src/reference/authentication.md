@@ -27,6 +27,34 @@ error. Starting with `enable_auth = false` on a non-loopback host is also a
 hard error, unless `MEDIAGIT_ALLOW_INSECURE_BIND=1` is set — MediaGit
 refuses to bind an open, credential-free server to the network by default.
 
+## Setting Up Authentication
+
+The typical workflow for multi-user collaboration:
+
+```mermaid
+sequenceDiagram
+    participant Op as Operator
+    participant Init as mediagit-server init
+    participant Srv as mediagit-server
+    participant User as Client user
+    participant KC as OS keychain
+
+    Op->>Init: mediagit-server init --enable-auth
+    Init-->>Op: mediagit-server.toml + JWT secret + first admin
+    Op->>Srv: mediagit-server --config mediagit-server.toml
+    User->>Srv: mediagit auth login --server https://host
+    Srv-->>User: JWT access token
+    User->>KC: credential cached by origin
+    User->>Srv: mediagit clone / push (credential resolved from KC)
+```
+
+After initial setup:
+
+- **Operator** runs `mediagit-server init --enable-auth`, creating the server config and first admin account
+- **Server** starts with `mediagit-server --config mediagit-server.toml`
+- **Users** run `mediagit auth login --server https://host` once per origin (prompts for username + password)
+- **Credentials** are cached in the OS keychain by origin; future `clone`, `push`, `pull` commands find them automatically
+
 ## Auth Model
 
 Two credential types authenticate a request, tried in this order:
@@ -162,21 +190,15 @@ or an ephemeral server.
 For remote commands (`push`, `pull`, `fetch`, `clone`, `download`,
 `lock`), the CLI resolves credentials for a given remote in this order:
 
-1. `MEDIAGIT_TOKEN` environment variable → sent as a bearer token
-2. `MEDIAGIT_API_KEY` environment variable → sent as an API key
-3. **OS keychain** — a per-remote entry keyed by the resolved remote URL
-   (skip this tier entirely with `MEDIAGIT_NO_KEYRING`)
-4. `remotes.<name>.token` / `.api_key` in `config.toml` (token wins over
-   api_key if both are set)
-5. No credentials
+1. **Environment variables** (checked first, wins over everything):
+   - `MEDIAGIT_TOKEN` → sent as a bearer token
+   - `MEDIAGIT_API_KEY` → sent as an API key
+2. **OS keychain** — a per-remote entry keyed by the resolved remote URL
+   (skip entirely with `MEDIAGIT_NO_KEYRING`)
+3. **Config file** — `remotes.<name>.token` / `.api_key` in `config.toml` (token wins over api_key if both are set)
+4. **No credentials** → 401 if the server requires auth
 
-After a request succeeds with credentials sourced from tier 2 or 4, the
-CLI writes them through to the OS keychain (tier 3) so the next
-invocation resolves faster and skips the file/env lookup. This write-through
-only happens after a successful response — a credential is never cached
-speculatively — and is itself best-effort: a locked or unavailable
-keychain degrades silently rather than breaking an otherwise-working
-command.
+**Write-through caching**: After a successful request using environment or config credentials, the CLI writes the credential to the OS keychain so the next invocation resolves faster. This only happens after success — credentials are never cached speculatively — and is best-effort; a locked keychain doesn't block commands.
 
 ## See Also
 

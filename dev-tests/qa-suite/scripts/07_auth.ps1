@@ -3,15 +3,16 @@
 # (every other phase starts its servers auth-off):
 #   A11-auth-rest    401 without token; register/login/me roundtrip
 #   A11-auth-push    push with Bearer token succeeds; push with no creds fails
-#   A11-auth-grants  admin promotion (users.jsonl edit + restart), admin-route
-#                    gating (bob 403), per-repo grants: read-grant clone ok /
-#                    push rejected; write-grant push still ok
+#   A11-auth-grants  admin promotion (offline `mediagit-server admin promote`),
+#                    admin-route gating (bob 403), per-repo grants: read-grant
+#                    clone ok / push rejected; write-grant push still ok
 #
 # Ground truth:
 #   - POST /auth/register {username,email,password} -> 201 {user{id,role},tokens{access_token}};
-#     every registered user gets Role::Write (crates/mediagit-security/src/auth/handlers.rs:191).
-#   - The ONLY way to mint an Admin is editing users.jsonl and restarting the
-#     server (auth store loads at boot) - the documented operator flow.
+#     every registered user gets Role::Write (crates/mediagit-security/src/auth/handlers.rs).
+#   - The first Admin is minted out-of-band via `mediagit-server admin promote`
+#     (--force to mutate a live server's store); the auth store loads at boot, so
+#     a Restart is still needed to pick up the change.
 #   - check_permission (crates/mediagit-server/src/handlers/mod.rs): admin always
 #     allowed; zero grants -> flat role check; any grants -> per-repo levels
 #     Read < Write < Admin.
@@ -116,13 +117,14 @@ try {
   $pushDone = $true
 
   # ---- A11-auth-grants ----
-  # Promote qa-admin: register can only mint Role::Write, so edit users.jsonl
-  # and restart (auth store loads at boot) - the documented operator flow.
-  $usersJsonl = Join-Path $srv.DataDir "auth\users.jsonl"
-  $lines = Get-Content $usersJsonl | ForEach-Object {
-    if ($_ -match '"username":"qa-admin"') { $_ -replace '"role":"Write"', '"role":"Admin"' } else { $_ }
-  }
-  Set-Content $usersJsonl $lines -Encoding Ascii
+  # Promote qa-admin via the offline server CLI (`mediagit-server admin promote`).
+  # register can only mint Role::Write; the supported bootstrap is the offline
+  # subcommand, not a hand-edit of users.jsonl. --force is required because the
+  # server is live (the CLI refuses to mutate a running server's store otherwise);
+  # Restart reloads the auth store (it loads at boot only).
+  $promoteRun = & $QA.MGServer @("admin", "--config", $srv.ConfigPath, "--force", "promote", "qa-admin") 2>&1
+  $promoteOk = ($LASTEXITCODE -eq 0)
+  Write-QaLog $Phase "admin promote qa-admin -> exit=$LASTEXITCODE $promoteRun"
   Restart-QaServer $srv $Phase
 
   $adminBody = @{ identifier = "qa-admin@qa.local"; password = "pw-qa-admin-123456" } | ConvertTo-Json
@@ -167,8 +169,8 @@ try {
   $alicePush2 = Invoke-MG $seed @("push", "origin") $Phase -TimeoutSec 1200
   $alicePush2Ok = ($alicePush2.Exit -eq 0)
 
-  Rec "A11-auth-grants" ($adminIsAdmin -and $adminListOk -and $bobAdminRejected -and $bobCloneOk -and $bobPushRejected -and $alicePush2Ok) `
-    ("admin-role=$adminIsAdmin admin-list=$adminListOk bob-admin-403=$bobAdminRejected (code=$bobAdminCode) " +
+  Rec "A11-auth-grants" ($promoteOk -and $adminIsAdmin -and $adminListOk -and $bobAdminRejected -and $bobCloneOk -and $bobPushRejected -and $alicePush2Ok) `
+    ("promote-cli=$promoteOk admin-role=$adminIsAdmin admin-list=$adminListOk bob-admin-403=$bobAdminRejected (code=$bobAdminCode) " +
      "read-clone=$bobCloneOk read-push-rejected=$bobPushRejected (exit=$($bobPush.Exit)) write-push=$alicePush2Ok")
 } catch {
   $skip = "$_" -match "^SKIP:"

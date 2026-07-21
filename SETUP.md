@@ -9,6 +9,15 @@ collaboration). Current release: **0.3.0-rc.1**.
 
 ## Which track am I?
 
+```mermaid
+flowchart TD
+    A["Start"] --> B{"Installing/running<br/>mediagit-server for a team,<br/>or building from source?"}
+    B -->|"Installing / running server"| C["Track A — Operators"]
+    B -->|"Building MediaGit itself,<br/>running the test suite"| D["Track B — Developers"]
+    A --> E{"Just using MediaGit solo?"}
+    E -->|"Yes"| F["No server needed —<br/>init/add/commit/log work locally"]
+```
+
 - **Track A — Operators**: you want to install MediaGit and/or run
   `mediagit-server` to host repositories for a team. Start there.
 - **Track B — Developers**: you're building MediaGit itself from source,
@@ -164,38 +173,157 @@ backend configuration is per-repo, not per-server (see §6).
 
 ### 4. Auth bootstrap
 
-Enable auth with `enable_auth = true` plus a JWT secret, supplied either in
-the TOML (`jwt_secret`) or via the `MEDIAGIT_JWT_SECRET` environment
-variable — the env var wins if both are set (a warning is logged). Starting
-with `enable_auth = true` and no secret anywhere is a hard error at boot.
+The `init` wizard sets up auth end-to-end in one step — config, JWT secret,
+and the first admin user:
 
-**Security guard:** if `enable_auth = false` and `host` is not a loopback
-address (`127.0.0.1`/`localhost`), the server **refuses to start** — an
-open, credential-free server bound to a real interface is treated as
-unsafe by default. Override with `MEDIAGIT_ALLOW_INSECURE_BIND=1` if you
-really want that (e.g. behind a separate auth proxy).
+```bash
+mediagit-server init --enable-auth
+# wizard prompts for host/port/data-dir and the first admin's
+# username/email/password; writes mediagit-server.toml with a random
+# JWT secret, registration defaults CLOSED, rate limiting enabled
+```
 
-Register the first user, then log in to get a JWT:
+Non-interactive (e.g. scripted/CI provisioning):
+
+```bash
+mediagit-server init --non-interactive --enable-auth \
+  --admin-username alice --admin-email alice@example.com --admin-password a-strong-password
+```
+
+Then start the server and log in from the client:
+
+```bash
+mediagit-server --config mediagit-server.toml
+mediagit auth login --server https://host   # prompts for username + masked password
+```
+
+When run inside a repository, `auth login` also records the authenticated
+identity as that repo's commit author (config `[author]` name/email), so your
+commits are attributed to your account without a separate `mediagit config`
+step. A `--author` flag or `MEDIAGIT_AUTHOR_*` env var still takes precedence.
+
+```mermaid
+sequenceDiagram
+    participant Op as Operator
+    participant Init as mediagit-server init
+    participant Srv as mediagit-server
+    participant User as Client user
+    participant KC as OS keychain
+
+    Op->>Init: mediagit-server init --enable-auth
+    Init-->>Op: mediagit-server.toml + JWT secret + first admin
+    Op->>Srv: mediagit-server --config mediagit-server.toml
+    User->>Srv: mediagit auth login --server https://host
+    Srv-->>User: JWT access token
+    User->>KC: credential cached by origin
+    User->>Srv: mediagit clone / push (credential resolved from KC)
+```
+
+Admin bootstrap works even without a running server:
+
+```bash
+mediagit-server admin create alice alice@example.com --password a-strong-password
+# first-admin bootstrap, offline — writes directly to users.jsonl (role Admin)
+```
+
+`--force` is required if the server is currently live (it full-rewrites
+`users.jsonl` on the next mutation, so restart the server afterward).
+
+Auth state (`users.jsonl`, `api_keys.jsonl`, `grants.jsonl`) persists as
+JSONL files under `auth_store_dir` (default: a sibling `auth/` directory
+next to `repos_dir`). Set `MEDIAGIT_AUTH_PERSIST=0` to force pure in-memory
+behavior (no load, no writes) — useful for ephemeral test servers.
+
+Per-repo grants and the admin endpoints
+(`GET/DELETE /auth/users`, `POST/DELETE /auth/users/{id}/grants`,
+`GET/DELETE /auth/keys`) are documented in
+[`book/src/reference/authentication.md`](book/src/reference/authentication.md).
+
+#### Advanced / scripting: REST directly
+
+The client flow above wraps these endpoints; call them directly only for
+scripting or when no `mediagit` client is available:
 
 ```bash
 curl -X POST http://host:3000/auth/register \
   -H "Content-Type: application/json" \
-  -d '{"username": "alice", "email": "alice@example.com", "password": "a-strong-password"}'
+  -d '{"username": "bob", "email": "bob@example.com", "password": "a-strong-password"}'
 
 curl -X POST http://host:3000/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"identifier": "alice@example.com", "password": "a-strong-password"}'
-# → returns a JWT access token
+  -d '{"identifier": "bob@example.com", "password": "a-strong-password"}'
+# → returns a JWT access token ("identifier" accepts username or email)
 ```
 
-`identifier` on login accepts username or email.
+Self-registration (`POST /auth/register`) always creates a **Write**-role
+account — there is no client-controlled `role` field. Promote a
+self-registered user to Admin with `mediagit auth admin set-role bob admin`
+(requires an existing Admin), or use `mediagit-server admin create-user`
+offline (see below).
 
-Auth state (`users.jsonl`, `api_keys.jsonl`, `grants.jsonl`) persists as
-JSONL files under `auth_store_dir` (default: a sibling `auth/` directory
-next to `repos_dir`). Per-repo grants and the admin endpoints
-(`GET/DELETE /auth/users`, `POST/DELETE /auth/users/{id}/grants`,
-`GET/DELETE /auth/keys`) are documented in
+#### Managing users and keys
+
+Once an admin is logged in, day-to-day user/key management goes through the
+client:
+
+```bash
+mediagit auth admin create-user bob bob@example.com --role write --password P
+mediagit auth admin set-role bob admin
+mediagit auth admin list-users
+mediagit auth key create --name ci     # prints the plaintext key once
+mediagit auth key list
+mediagit auth key revoke <id>
+```
+
+Offline equivalents (no running server, direct `users.jsonl` edits) are
+available via `mediagit-server admin`:
+`create-user <user> <email> --role read|write|admin --password P`,
+`list`, `promote <user>`, `demote <user>`, `reset-password <user> --password P`.
+
+#### Roles and per-repo grants
+
+Every user has one of three roles:
+
+| Role | Permissions | Notes |
+|------|-------------|-------|
+| `Read` | `repo:read` | Read-only access to repos |
+| `Write` | `repo:read`, `repo:write` | Can push (self-registration default) |
+| `Admin` | All above + `repo:admin`, `user:manage` | Bypasses per-repo grants; can manage users/keys |
+
+For finer-grained access control, an Admin can assign **per-repo grants**
+to scope a user's access to specific repositories:
+
+```bash
+mediagit auth admin grant alice design-assets write
+mediagit auth admin revoke-grant alice design-assets
+```
+
+(equivalent REST: `POST`/`DELETE /auth/users/<alice-id>/grants` with a
+`{"repo": "...", "level": "..."}` body and an admin bearer token.)
+
+**Important:** the moment any grant is created, per-repo enforcement
+activates for *all* repo-scoped permission checks — including repos with
+no grant for that user (which then deny access even if their flat role
+would allow it). A deployment with zero grants behaves exactly like the
+pre-grants flat role check. Set `MEDIAGIT_GRANTS_ENFORCE=0` to opt out of
+per-repo enforcement even after grants exist.
+
+Full reference:
 [`book/src/reference/authentication.md`](book/src/reference/authentication.md).
+
+#### Running without authentication
+
+Omit `enable_auth` or set `enable_auth = false`. On loopback (`127.0.0.1` /
+`localhost`) this works out of the box — all endpoints are open and no
+credentials are needed on the client side. Auth endpoints (`/auth/register`,
+`/auth/login`, etc.) are not mounted at all when auth is disabled.
+
+To run auth-disabled on a non-loopback address (e.g. behind a reverse proxy
+with its own auth layer):
+
+```bash
+MEDIAGIT_ALLOW_INSECURE_BIND=1 mediagit-server
+```
 
 ### 5. TLS
 
@@ -294,9 +422,17 @@ Supported URL schemes: `http://`, `https://`, `file://`, `ssh://`.
 
 Credentials are resolved in this order:
 1. Environment: `MEDIAGIT_TOKEN` (JWT) or `MEDIAGIT_API_KEY`
-2. OS keychain
-3. `remotes.<name>.token` or `remotes.<name>.api_key` in the repo's
+2. `remotes.<name>.token` or `remotes.<name>.api_key` in the repo's
    `.mediagit/config.toml` (`token` wins if both are set)
+3. OS keychain, keyed by server origin (skip this tier with `MEDIAGIT_NO_KEYRING`)
+
+An **explicit config token outranks the keychain cache** — editing
+`remotes.<name>.token` takes effect immediately. After a successful request,
+the working credential is cached to the OS keychain (keyed by origin) so later
+commands across every repo on that server resolve without re-prompting; this
+write-through only happens on a successful server response, never
+speculatively. If a keychain-sourced credential is rejected with `401`, that
+entry is invalidated and the next tier is tried — no stale token can wedge you.
 
 There is no top-level `auth_token` config key — if you see that referenced
 anywhere, it's a stale doc artifact, not a real field.
@@ -385,6 +521,6 @@ driven, credentials via `dev-tests/qa-suite/scripts/campaign_env.ps1`).
 ## Further reading
 
 - [`CONFIGURATION.md`](CONFIGURATION.md) — complete client + server configuration reference
-- [`docs/env-knobs.md`](docs/env-knobs.md) — performance/behavior tuning environment variables
+- [`env-knobs.md`](env-knobs.md) — performance/behavior tuning environment variables
 - [`book/`](book/) — user guide (CLI command reference, workflows)
 - [`DEVELOPMENT_GUIDE.md`](DEVELOPMENT_GUIDE.md) — building, testing, and contributing to MediaGit itself

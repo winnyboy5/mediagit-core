@@ -55,7 +55,7 @@ Used when `storage.backend = "gcs"`.
 
 ## Performance Tuning
 
-MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurrency, chunking, cloud-pack bundling, and storage-backend behavior. The table below is a summary grouped by area; **[`docs/env-knobs.md`](https://github.com/mediagit/mediagit/blob/main/docs/env-knobs.md) in the repository root is the canonical, exhaustive reference** with per-knob stability status and the release each knob was introduced in.
+MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurrency, chunking, cloud-pack bundling, and storage-backend behavior. The table below is a summary grouped by area; **[`env-knobs.md`](https://github.com/mediagit/mediagit/blob/main/env-knobs.md) in the repository root is the canonical, exhaustive reference** with per-knob stability status and the release each knob was introduced in.
 
 ### Push / Pull / Fetch Concurrency
 

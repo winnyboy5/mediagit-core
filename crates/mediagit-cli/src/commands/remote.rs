@@ -39,6 +39,13 @@ pub enum RemoteSubcommand {
         /// Fetch immediately after adding
         #[arg(short, long)]
         fetch: bool,
+
+        /// Bearer token to store as `remotes.<name>.token` in config.toml.
+        /// Kept out of the OS keychain deliberately -- an explicit config
+        /// token is meant to be an auditable, editable override (I11); use
+        /// `mediagit auth login` for the keychain-backed default instead.
+        #[arg(long)]
+        token: Option<String>,
     },
 
     /// Remove a remote repository
@@ -92,7 +99,12 @@ pub enum RemoteSubcommand {
 impl RemoteCmd {
     pub async fn execute(&self) -> Result<()> {
         match &self.command {
-            RemoteSubcommand::Add { name, url, fetch } => self.add_remote(name, url, *fetch).await,
+            RemoteSubcommand::Add {
+                name,
+                url,
+                fetch,
+                token,
+            } => self.add_remote(name, url, *fetch, token.clone()).await,
             RemoteSubcommand::Remove { name } => self.remove_remote(name).await,
             RemoteSubcommand::List { verbose } => self.list_remotes(*verbose).await,
             RemoteSubcommand::Rename { old_name, new_name } => {
@@ -103,7 +115,13 @@ impl RemoteCmd {
         }
     }
 
-    async fn add_remote(&self, name: &str, url: &str, fetch: bool) -> Result<()> {
+    async fn add_remote(
+        &self,
+        name: &str,
+        url: &str,
+        fetch: bool,
+        token: Option<String>,
+    ) -> Result<()> {
         let repo_root = find_repo_root()?;
 
         // Validate remote name
@@ -126,6 +144,9 @@ impl RemoteCmd {
         let mut remote_config = mediagit_config::RemoteConfig::new(url);
         remote_config.fetch = Some(url.to_string());
         remote_config.push = Some(url.to_string());
+        if let Some(token) = token.filter(|t| !t.trim().is_empty()) {
+            remote_config.token = Some(token);
+        }
 
         config.remotes.insert(name.to_string(), remote_config);
 
@@ -282,7 +303,10 @@ impl RemoteCmd {
 
         // Try to fetch remote refs to show HEAD and branches
         let remote_url = remote.url.clone();
-        match self.fetch_remote_info(&remote_url).await {
+        match self
+            .fetch_remote_info(&repo_root, &config, name, &remote_url)
+            .await
+        {
             Ok((head_branch, branches)) => {
                 // Show HEAD branch
                 if let Some(head) = head_branch {
@@ -331,9 +355,21 @@ impl RemoteCmd {
         Ok(())
     }
 
-    /// Fetch remote info (HEAD branch and list of branches)
-    async fn fetch_remote_info(&self, remote_url: &str) -> Result<(Option<String>, Vec<String>)> {
-        let client = mediagit_protocol::ProtocolClient::new(remote_url.to_string());
+    /// Fetch remote info (HEAD branch and list of branches). Attaches
+    /// credentials the same way every other remote command does
+    /// (`crate::repo::resolve_credentials`) — previously built with no
+    /// credentials at all, so this failed against any auth-enforcing server
+    /// even when a valid token existed for `name`.
+    async fn fetch_remote_info(
+        &self,
+        repo_root: &std::path::Path,
+        config: &Config,
+        name: &str,
+        remote_url: &str,
+    ) -> Result<(Option<String>, Vec<String>)> {
+        let credentials = crate::repo::resolve_credentials(repo_root, config, name);
+        let client = mediagit_protocol::ProtocolClient::new(remote_url.to_string())
+            .with_credentials(credentials);
         let refs = client.get_refs().await?;
 
         // Find HEAD

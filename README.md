@@ -46,6 +46,19 @@
 
 MediaGit is a Git-like version control system optimized for large media files. Built in Rust for maximum performance, security, and reliability.
 
+```mermaid
+flowchart LR
+    CLI["mediagit (client)"] -->|"push / pull / clone / fetch"| SRV["mediagit-server (Axum)"]
+    SRV --> LOCAL["Local filesystem"]
+    SRV --> S3["AWS S3"]
+    SRV --> AZURE["Azure Blob"]
+    SRV --> GCS["Google Cloud Storage"]
+    SRV --> MINIO["MinIO"]
+    CLI -.->|"presigned PUT/GET<br/>(bypasses server)"| S3
+    CLI -.->|"presigned PUT/GET"| AZURE
+    CLI -.->|"presigned PUT/GET"| MINIO
+```
+
 ### Why MediaGit?
 
 Traditional Git struggles with large binary files. MediaGit solves this with:
@@ -96,7 +109,7 @@ Uploads and downloads bypass the server entirely when the backend supports signi
 - AES-256-GCM encryption at rest
 - JWT + API key authentication, persisted to disk (`users.jsonl`/`api_keys.jsonl`/`grants.jsonl`, atomic writes; `MEDIAGIT_AUTH_PERSIST`)
 - Per-repo authorization grants (Read < Write < Admin; `MEDIAGIT_GRANTS_ENFORCE`) plus admin endpoints for user/key management
-- OS-keychain credential storage for CLI remote credentials (Windows Credential Manager; env → keychain → config.toml)
+- OS-keychain credential storage for CLI remote credentials (Windows Credential Manager; env → config.toml → keychain)
 - TLS 1.3 with certificate management
 - Rate limiting and DoS protection
 
@@ -178,37 +191,53 @@ cargo build --release
 
 Each archive includes `mediagit` (CLI) and `mediagit-server` binaries, plus a `.sha256` checksum file.
 
-### Basic Usage
+### Choose your setup path
 
-```bash
-# Initialize repository
-mediagit init
-
-# Add files
-mediagit add *.psd
-mediagit add large-video.mp4
-
-# Commit
-mediagit commit -m "Initial commit"
-
-# Check status
-mediagit status
-
-# View log
-mediagit log
+```mermaid
+flowchart TD
+    A["Start"] --> B{"Multi-user, CI,<br/>or public network?"}
+    B -->|"No — solo / local"| C["mediagit-server init<br/>--non-interactive"]
+    C --> D["init / add / commit / push"]
+    B -->|"Yes — team / CI"| E["mediagit-server init<br/>--enable-auth"]
+    E --> F["mediagit auth login"]
+    F --> G["clone / push"]
+    E --> H["mediagit auth key create<br/>--name ci (for CI)"]
 ```
 
-### Server Setup
+### Auth-off (local, default)
+
+No login needed — `enable_auth` defaults to off. Content must be pushed
+before the first clone (cloning an empty repo isn't supported):
 
 ```bash
-# Run server (default: http://localhost:3000)
-mediagit-server
+mediagit-server init --non-interactive --data-dir ./repos   # auth off, loopback
+mediagit-server --config mediagit-server.toml               # serve
 
-# Or with custom config
-mediagit-server --config server.toml
+mediagit init myrepo && cd myrepo
+echo hi > f.txt && mediagit add f.txt && mediagit commit -m first
+mediagit remote add origin http://127.0.0.1:3000/myrepo && mediagit push origin
 ```
 
-**See [DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md) for complete setup instructions.**
+### Auth-on (multi-user)
+
+```bash
+mediagit-server init --enable-auth      # wizard: config + JWT secret + first admin
+mediagit-server --config mediagit-server.toml
+
+# user, anywhere:
+mediagit auth login --server https://host        # stores credential by origin
+mediagit clone https://host/myrepo               # credential found by origin
+cd myrepo && mediagit push
+
+# CI:
+mediagit auth key create --name ci               # prints key once
+MEDIAGIT_API_KEY=... mediagit push
+
+# admin:
+mediagit auth admin set-role bob admin
+```
+
+**See [SETUP.md](SETUP.md) for the full operator guide, or [DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md) for building from source.**
 
 ---
 
@@ -352,40 +381,23 @@ mediagit-core/
 
 ## Industry Use Cases
 
-MediaGit is designed for **enterprise-scale media workflows**:
-
-### VFX Studio: 50TB Shot Library
-| Feature | Capability |
-|---------|------------|
-| **Deduplication** | CDC + Delta = typically 25–50% savings |
-| **Fast Clone** | Differential checkout (<1s for unchanged) |
-| **Branching** | Instant branch creation |
-| **Cost** | $0 (AGPL) vs $50k/year Perforce |
-
-### Game Dev: 10TB Texture Library
-| Feature | Capability |
-|---------|------------|
-| **Cross-platform dedup** | Same source art deduped |
-| **Smart compression** | Skip GPU formats, compress PSD |
-| **Platform checkout** | Pull only needed assets |
-
-### Virtual Production: 20TB HDRI Library
-| Feature | Capability |
-|---------|------------|
-| **Multi-backend** | Local NAS + S3 cloud sync |
-| **Differential** | Pull only changed environments |
-| **Offline** | Full DVCS, work without internet |
-
-### ML/Datasets: 100TB Training Data
-| Feature | Capability |
-|---------|------------|
-| **Chunking** | CDC finds duplicates across versions |
-| **Differential** | Pull only new chunks (incremental) |
-| **Storage** | S3 + Glacier lifecycle support |
+MediaGit is built for enterprise-scale media workflows — VFX shot libraries, game dev texture pipelines, virtual production HDRI sync, and ML/dataset versioning. See **[USE_CASES.md](USE_CASES.md)** for concrete command sequences and measured payoffs per industry.
 
 ---
 
 ## Performance
+
+### Cross-Cloud Throughput (condensed)
+
+| Backend | Push MB/s | Clone MB/s |
+|---------|----------:|-----------:|
+| MinIO (local) | 146.8 | 65.3 |
+| AWS S3 | 11.8 | 7.3 |
+| Azure Blob | 13.4 | 10.7 |
+| GCS | 14.4 | 10.5 |
+
+MinIO is the loopback software ceiling; AWS/Azure/GCS are real cloud over WAN
+(bandwidth-bound). Full table, chart, and methodology: [BENCHMARKS.md](BENCHMARKS.md).
 
 ### Validated Staging Throughput (release build)
 
@@ -474,6 +486,16 @@ Compression strategy is selected automatically per file type. Pre-compressed for
 ### Storage Reduction: Two Complementary Mechanisms
 
 MediaGit achieves storage savings through two distinct layers that work together on every chunk:
+
+```mermaid
+flowchart TD
+    A["New chunk"] --> B{"BLAKE3 CAS hit?"}
+    B -->|"Yes"| C["Free dedup — 0 bytes stored"]
+    B -->|"No"| D["SimilarityDetector"]
+    D --> E{"Similar chunk found?<br/>(type-aware threshold)"}
+    E -->|"Yes"| F["Delta encode<br/>(base + zstd-dict diff)"]
+    E -->|"No"| G["Compress + store full"]
+```
 
 #### Layer 1 — Exact Deduplication (CAS)
 
@@ -827,7 +849,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 *Object-store layout v2, client auth, and reachability tooling, GA hardening: server-enforced locking, durable auth, format freeze*
 
 - [x] Object-store layout v2: per-repo namespace, true two-level hash fanout, `LAYOUT` marker
-- [x] Client authentication: env → keychain → config → none precedence (`MEDIAGIT_TOKEN`, `MEDIAGIT_API_KEY`)
+- [x] Client authentication: env → config → keychain → none precedence (`MEDIAGIT_TOKEN`, `MEDIAGIT_API_KEY`)
 - [x] `download` command — single-file fetch from a remote without a full clone
 - [x] Parallel checkout across multiple worker threads
 - [x] Roaring-bitmap reachability index for faster `gc`/`fsck` (`MEDIAGIT_BITMAP`)

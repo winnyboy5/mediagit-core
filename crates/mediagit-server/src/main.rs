@@ -21,11 +21,18 @@ use mediagit_server::{
     create_router, create_router_with_rate_limit, AppState, RateLimitConfig, ServerConfig,
 };
 
+mod setup;
+
 /// MediaGit Server - HTTP(S) server for MediaGit repositories
 #[derive(Parser, Debug)]
 #[command(name = "mediagit-server")]
 #[command(about = "MediaGit repository server", long_about = None)]
 struct Args {
+    /// Setup subcommands (init / admin). Bare `mediagit-server` (no
+    /// subcommand) still means "serve", exactly as before.
+    #[command(subcommand)]
+    command: Option<Cmd>,
+
     /// Port to listen on (overrides config file)
     #[arg(short, long)]
     port: Option<u16>,
@@ -43,6 +50,15 @@ struct Args {
     config: String,
 }
 
+#[derive(clap::Subcommand, Debug)]
+enum Cmd {
+    /// Interactive setup wizard: writes mediagit-server.toml and (optionally)
+    /// creates the first admin user.
+    Init(setup::InitArgs),
+    /// Manage users in the auth store without starting the server.
+    Admin(setup::AdminArgs),
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // google-cloud-storage v1 enables aws-lc-rs by default; this crate already
@@ -56,6 +72,17 @@ async fn main() -> Result<()> {
 
     // Parse CLI arguments
     let args = Args::parse();
+
+    // Setup subcommands (init / admin) short-circuit before any of the
+    // normal serve-path config loading below. No subcommand -> None -> falls
+    // straight through to the existing bare-invocation / --config / --port /
+    // --data-dir serve path, unchanged.
+    if let Some(cmd) = args.command {
+        return match cmd {
+            Cmd::Init(init_args) => setup::run_init(&init_args).await,
+            Cmd::Admin(admin_args) => setup::run_admin(&admin_args).await,
+        };
+    }
 
     // Setup tracing
     tracing_subscriber::registry()
@@ -362,9 +389,14 @@ async fn main() -> Result<()> {
             // Spawn HTTP server task
             let http_server = tokio::spawn(async move {
                 let listener = tokio::net::TcpListener::bind(&http_bind_addr).await?;
-                axum::serve(listener, app)
-                    .with_graceful_shutdown(shutdown_signal())
-                    .await
+                // ConnectInfo must be supplied or SmartIpKeyExtractor (rate limiting)
+                // 500s with "Unable to extract key!" on every request.
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .with_graceful_shutdown(shutdown_signal())
+                .await
             });
 
             // Spawn HTTPS server task
@@ -400,9 +432,14 @@ async fn main() -> Result<()> {
         tracing::info!("Press Ctrl+C to stop");
 
         let listener = tokio::net::TcpListener::bind(&http_bind_addr).await?;
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal())
-            .await?;
+        // ConnectInfo must be supplied or SmartIpKeyExtractor (rate limiting)
+        // 500s with "Unable to extract key!" on every request.
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     }
 
     Ok(())
@@ -412,7 +449,7 @@ async fn main() -> Result<()> {
 /// Used to gate the P0-4 insecure-bind refusal: a loopback bind with auth
 /// disabled is still local-only and safe for dev; anything else (0.0.0.0, a
 /// real interface IP, or a hostname) with auth off is an open server.
-fn is_loopback_host(host: &str) -> bool {
+pub(crate) fn is_loopback_host(host: &str) -> bool {
     if host.eq_ignore_ascii_case("localhost") {
         return true;
     }

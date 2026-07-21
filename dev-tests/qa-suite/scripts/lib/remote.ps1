@@ -101,8 +101,15 @@ function Start-QaServer {
     # 07_auth: enable_auth=true + jwt_secret in server.toml. Auth store
     # (users/api_keys/grants.jsonl) lands in <DataDir>\auth - the server's
     # default auth_store_dir is a sibling "auth" dir next to repos_dir.
-    [switch]$EnableAuth
+    [switch]$EnableAuth,
+    # Optional: bootstrap a first Admin via `mediagit-server admin create` once
+    # the server dir/config exist. Implies -EnableAuth. The admin is created
+    # BEFORE the server process starts (no --force needed, store not yet held in
+    # memory). Returned handle gains .AdminUser/.AdminPass for the caller.
+    [string]$AdminUser,
+    [string]$AdminPass
   )
+  if ($AdminUser) { $EnableAuth = $true }
 
   $bc = _QaBackendConfig $Backend
   $tplPath = Join-Path $QA.Root "config\backends\$($bc.Template)"
@@ -139,6 +146,17 @@ host = "127.0.0.1"
 repos_dir = "$reposDirFwd"$authLines
 "@ | Set-Content (Join-Path $srvDir "server.toml") -Encoding Ascii
 
+  # Bootstrap the first Admin offline before the process starts: the store is not
+  # yet held in memory, so no --force is needed and no restart is required.
+  if ($AdminUser) {
+    $srvToml = Join-Path $srvDir "server.toml"
+    $adminOut = & $QA.MGServer @(
+      "admin", "--config", $srvToml, "create", $AdminUser, "$AdminUser@qa.local", "--password", $AdminPass
+    ) 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "SKIP: admin create failed for $AdminUser : $adminOut" }
+    Write-QaLog $Phase "bootstrapped admin '$AdminUser' via mediagit-server admin create"
+  }
+
   $outLog = Join-Path $QA.Logs "server-$Backend-$Phase.out.log"
   $errLog = Join-Path $QA.Logs "server-$Backend-$Phase.err.log"
   $proc = Start-Process -FilePath $QA.MGServer `
@@ -168,6 +186,7 @@ repos_dir = "$reposDirFwd"$authLines
     BaseUrl = $url; RepoName = $repoName
     ConfigPath = (Join-Path $srvDir "server.toml")
     OutLog = $outLog; ErrLog = $errLog
+    AdminUser = $AdminUser; AdminPass = $AdminPass
   }
 }
 

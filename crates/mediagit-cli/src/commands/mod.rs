@@ -13,6 +13,7 @@
 
 // Command modules for MediaGit CLI
 pub mod add;
+pub mod auth;
 pub mod bisect;
 pub mod branch;
 pub mod cherrypick;
@@ -46,6 +47,7 @@ pub(crate) mod utils;
 pub mod verify;
 
 pub use add::AddCmd;
+pub use auth::AuthCmd;
 pub use bisect::BisectCmd;
 pub use branch::BranchCmd;
 pub use cherrypick::CherryPickCmd;

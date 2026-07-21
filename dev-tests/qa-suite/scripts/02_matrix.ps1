@@ -46,7 +46,7 @@ Invoke-MG $TPL @("branch", "create", "feat") $Phase | Out-Null
 Invoke-MG $TPL @("tag", "create", "t1") $Phase | Out-Null
 
 # ---- positional-arg / value maps (same intent as v11's run_matrix.ps1) ----
-$remoteCmds = "^(clone|push|pull|fetch|download|remote)"
+$remoteCmds = "^(clone|push|pull|fetch|download|remote|auth)"
 $posMap = @{
   "add" = @("f1.svg"); "commit" = @(); "diff" = @(); "log" = @(); "show" = @("HEAD"); "status" = @()
   "branch create" = @("nb1"); "branch delete" = @("feat"); "branch switch" = @("feat"); "branch rename" = @("feat", "feat2")

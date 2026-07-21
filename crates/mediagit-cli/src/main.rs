@@ -101,6 +101,9 @@ enum Commands {
     /// Manage server-enforced file locks
     Lock(LockCmd),
 
+    /// Manage authentication with a MediaGit server
+    Auth(AuthCmd),
+
     /// Merge branches
     Merge(MergeCmd),
 
@@ -403,6 +406,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             cmd.execute(repo_path).await
         }
         Some(Commands::Lock(cmd)) => cmd.execute().await,
+        Some(Commands::Auth(cmd)) => cmd.execute().await,
         Some(Commands::Merge(cmd)) => cmd.execute().await,
         Some(Commands::Rebase(cmd)) => cmd.execute().await,
         Some(Commands::CherryPick(cmd)) => cmd.execute().await,
@@ -477,4 +481,24 @@ fn generate_completions(shell: Shell) -> Result<()> {
     let mut cmd = Cli::command();
     generate(shell, &mut cmd, "mediagit", &mut io::stdout());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `--server` is a subcommand-local flag (declared on `LoginOpts`), not
+    /// a value-taking *global* flag, so `preprocess_args` needs no change
+    /// for it to parse correctly (see the `preprocess_args` doc comment).
+    #[test]
+    fn auth_login_with_server_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "mediagit",
+            "auth",
+            "login",
+            "--server",
+            "https://example.com:3000",
+        ]);
+        assert!(cli.is_ok(), "{:?}", cli.err());
+    }
 }

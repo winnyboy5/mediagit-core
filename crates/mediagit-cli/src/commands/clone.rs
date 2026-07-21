@@ -294,13 +294,34 @@ url = "{}"
         let clone_config = mediagit_config::Config::load(&target_dir)
             .await
             .unwrap_or_default();
-        let credentials = crate::repo::resolve_credentials(&target_dir, &clone_config, "origin");
-        let client = mediagit_protocol::ProtocolClient::new(self.url.clone())
+        let (mut credentials, cred_source) =
+            crate::repo::resolve_credentials_tiered(&target_dir, &clone_config, "origin");
+        let mut client = mediagit_protocol::ProtocolClient::new(self.url.clone())
             .with_credentials(credentials.clone());
 
         // Step 5: Get remote refs
         init_spinner.set_message("Fetching remote refs...");
-        let remote_refs = client.get_refs().await?;
+        // First authenticated call of this command — a cached keychain
+        // credential (e.g. from a prior `auth login`) may have expired; on a
+        // 401, invalidate it and retry once with the next tier (I11).
+        let remote_refs = match client.get_refs().await {
+            Ok(r) => r,
+            Err(e)
+                if crate::repo::invalidate_on_unauthorized(
+                    &clone_config,
+                    "origin",
+                    cred_source,
+                    &e,
+                ) =>
+            {
+                credentials =
+                    crate::repo::resolve_credentials(&target_dir, &clone_config, "origin");
+                client = mediagit_protocol::ProtocolClient::new(self.url.clone())
+                    .with_credentials(credentials.clone());
+                client.get_refs().await?
+            }
+            Err(e) => return Err(e),
+        };
         crate::repo::remember_credentials(&clone_config, "origin", &credentials);
         init_spinner.finish_with_message("Connected");
 
@@ -314,7 +335,26 @@ url = "{}"
         }) {
             let config_path = storage_path.join("config.toml");
             let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
-            std::fs::write(&config_path, format!("cdc_seed = {}\n{}", seed, existing))?;
+            // The freshly-written clone config already carries a top-level
+            // `cdc_seed = 0` line; replace its value in place. Prepending a
+            // second `cdc_seed` key produced invalid TOML (duplicate key) and
+            // broke every clone of a seeded repo.
+            let mut replaced = false;
+            let mut lines: Vec<String> = existing
+                .lines()
+                .map(|l| {
+                    if !replaced && l.trim_start().starts_with("cdc_seed") && l.contains('=') {
+                        replaced = true;
+                        format!("cdc_seed = {seed}")
+                    } else {
+                        l.to_string()
+                    }
+                })
+                .collect();
+            if !replaced {
+                lines.insert(0, format!("cdc_seed = {seed}"));
+            }
+            std::fs::write(&config_path, lines.join("\n") + "\n")?;
         }
 
         let remote_ref_name = format!("refs/heads/{}", branch);

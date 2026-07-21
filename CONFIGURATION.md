@@ -334,11 +334,20 @@ url = "http://backup-server.example.com/my-project"
 
 **Credential resolution precedence** (verified in `crates/mediagit-cli/src/repo.rs:152-185`, function `resolve_credentials`, used by every remote command — fetch, pull, push, clone, download, lock):
 
-1. `MEDIAGIT_TOKEN` env var (bearer), if non-empty
-2. `MEDIAGIT_API_KEY` env var (API key), if non-empty
-3. OS keychain entry for this remote — skipped entirely if `MEDIAGIT_NO_KEYRING` is set
-4. `remotes.<name>.token` / `.api_key` in `config.toml` (`token` wins over `api_key` if both are set)
-5. No credentials
+```mermaid
+flowchart LR
+    A["mediagit needs a<br/>credential for a remote"] --> B{"MEDIAGIT_TOKEN or<br/>MEDIAGIT_API_KEY set?"}
+    B -->|"Yes"| C["Use env credential"]
+    B -->|"No"| D{"remotes.name.token<br/>or api_key in config.toml?"}
+    D -->|"Yes"| E["Use config credential"]
+    D -->|"No"| F{"OS keychain entry<br/>for this origin?<br/>(skip with MEDIAGIT_NO_KEYRING)"}
+    F -->|"Yes"| G["Use keychain credential"]
+    F -->|"No"| H["No credential"]
+    C -.->|"cache after success"| KC["OS keychain<br/>(keyed by origin)"]
+    E -.->|"cache after success"| KC
+    G --> I{"401 response?"}
+    I -->|"Yes"| J["Invalidate keychain entry, retry"]
+```
 
 Note: `RemoteConfig`'s doc comment in `schema.rs` (`token`: "Highest-precedence credential source — checked before `MEDIAGIT_TOKEN`/`MEDIAGIT_API_KEY`") does not match this actual resolution order in `repo.rs` — the env vars are checked first. The precedence above reflects the real code path; the doc comment is stale.
 
@@ -450,7 +459,7 @@ Where both an environment variable and a TOML key configure the same thing, **th
 | `MEDIAGIT_SIGN_KEY` | unset | Client: path to the private key used for tag signing when `MEDIAGIT_SIGN` is enabled. Required in that case — signing errors out if unset. |
 | `RUST_LOG` | `mediagit_server=debug,tower_http=debug,mediagit_storage=warn` | Server only (`tracing_subscriber::EnvFilter`, `main.rs:61-68`). Overrides `[observability].log_level`/that whole client-side table, which is not read by either binary. The CLI does not initialize `tracing_subscriber` and does not read `RUST_LOG`. |
 
-The full ~88-knob performance/tuning catalog (chunking, compression, upload/download concurrency, pack workers, retry/backoff, timeouts, etc.) lives in [`docs/env-knobs.md`](docs/env-knobs.md) and [`book/src/reference/environment.md`](book/src/reference/environment.md) — this table covers only the operational (auth/bind/metrics/locking/signing) set, not the performance-tuning knobs.
+The full ~88-knob performance/tuning catalog (chunking, compression, upload/download concurrency, pack workers, retry/backoff, timeouts, etc.) lives in [`env-knobs.md`](env-knobs.md) and [`book/src/reference/environment.md`](book/src/reference/environment.md) — this table covers only the operational (auth/bind/metrics/locking/signing) set, not the performance-tuning knobs.
 
 ---
 
@@ -458,5 +467,5 @@ The full ~88-knob performance/tuning catalog (chunking, compression, upload/down
 
 - The exact default `layout_version` shown in the "top-level identity" table (`1` when the field is absent, `2` for new repos) is derived from `default_layout_version()` and `CURRENT_LAYOUT_VERSION` in `schema.rs`; I did not additionally trace every migration path that might touch it.
 - `MEDIAGIT_API_KEY`'s row notes that `mediagit-config`'s env-override path also reads it; I did not exhaustively check whether any other, non-CLI consumer of `mediagit-config::ConfigLoader::apply_env_overrides` exists outside this repository (e.g. a downstream tool) — within this repo, no caller exists outside its own tests/README.
-- I did not open `docs/env-knobs.md` or `book/src/reference/environment.md` to verify their contents match current code (only confirmed both files exist) — Part 3 defers the full knob catalog to them by reference, not by transcription, so any drift there is out of scope for this document.
+- I did not open `env-knobs.md` or `book/src/reference/environment.md` to verify their contents match current code (only confirmed both files exist) — Part 3 defers the full knob catalog to them by reference, not by transcription, so any drift there is out of scope for this document.
 - `max_concurrency` under `[performance]`: I confirmed no read-site outside `mediagit-config` itself; I did not exhaustively grep for indirect consumption through a cloned/threaded `PerformanceConfig` value, so "not observed to be read" is a search result, not a proof of dead code.

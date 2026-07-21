@@ -172,12 +172,17 @@ impl PushCmd {
         // Initialize protocol client. Honour [performance] upload_concurrency
         // from the repo config so users can tune parallel chunk fan-out
         // without setting MEDIAGIT_UPLOAD_CONCURRENCY in the env.
-        let credentials = crate::repo::resolve_credentials(&repo_root, &config, remote);
-        let mut client = mediagit_protocol::ProtocolClient::new(remote_url)
-            .with_credentials(credentials.clone());
-        if let Some(n) = config.performance.upload_concurrency {
-            client = client.with_concurrent_uploads(n);
-        }
+        let (mut credentials, cred_source) =
+            crate::repo::resolve_credentials_tiered(&repo_root, &config, remote);
+        let build_client = |creds: mediagit_protocol::Credentials| {
+            let mut c =
+                mediagit_protocol::ProtocolClient::new(remote_url.clone()).with_credentials(creds);
+            if let Some(n) = config.performance.upload_concurrency {
+                c = c.with_concurrent_uploads(n);
+            }
+            c
+        };
+        let mut client = build_client(credentials.clone());
 
         // Initialize ODB with smart compression for consistent read/write
         let odb = Arc::new(mediagit_versioning::ObjectDatabase::with_smart_compression(
@@ -199,8 +204,27 @@ impl PushCmd {
                 );
             }
 
-            // Get remote refs to find current OIDs for safety
-            let remote_refs = client.get_refs().await?;
+            // Get remote refs to find current OIDs for safety. First
+            // authenticated call of this command — a cached keychain
+            // credential may have expired; on a 401, invalidate it and
+            // retry once with the next tier (I11).
+            let remote_refs = match client.get_refs().await {
+                Ok(r) => r,
+                Err(e)
+                    if crate::repo::invalidate_on_unauthorized(
+                        &config,
+                        remote,
+                        cred_source,
+                        &e,
+                    ) =>
+                {
+                    credentials = crate::repo::resolve_credentials(&repo_root, &config, remote);
+                    client = build_client(credentials.clone());
+                    client.get_refs().await?
+                }
+                Err(e) => return Err(e),
+            };
+            crate::repo::remember_credentials(&config, remote, &credentials);
 
             let mut updates = Vec::new();
             for ref_name in &self.refspec {
@@ -361,8 +385,19 @@ impl PushCmd {
             resolved
         };
 
-        // Get remote refs to check current state (404 = repo not created yet, treated as empty)
-        let remote_refs = client.get_refs_or_empty().await?;
+        // Get remote refs to check current state (404 = repo not created yet,
+        // treated as empty). First authenticated call of this command — a
+        // cached keychain credential may have expired; on a 401, invalidate
+        // it and retry once with the next tier (I11).
+        let remote_refs = match client.get_refs_or_empty().await {
+            Ok(r) => r,
+            Err(e) if crate::repo::invalidate_on_unauthorized(&config, remote, cred_source, &e) => {
+                credentials = crate::repo::resolve_credentials(&repo_root, &config, remote);
+                client = build_client(credentials.clone());
+                client.get_refs_or_empty().await?
+            }
+            Err(e) => return Err(e),
+        };
         crate::repo::remember_credentials(&config, remote, &credentials);
 
         // Append tag refs when --tags or --follow-tags is specified

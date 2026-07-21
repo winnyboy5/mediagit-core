@@ -258,3 +258,31 @@ completions fish	-(bare invocation)	no	OK
 completions powershell	-(bare invocation)	no	OK
 fsck	--path	yes	OK
 verify	--path	yes	OK
+auth login	-(bare invocation)	COVERED-BY:07_setup+07_creds
+auth login	--server	COVERED-BY:07_setup+07_creds
+auth login	--username	COVERED-BY:07_setup
+auth login	--token	COVERED-BY:07_setup+07_creds
+auth login	--api-key	COVERED-BY:07_setup
+auth register	-(bare invocation)	COVERED-BY:07_setup+07_users
+auth register	--server	COVERED-BY:07_setup+07_users
+auth status	-(bare invocation)	COVERED-BY:07_setup+07_creds
+auth status	--server	COVERED-BY:07_setup+07_creds
+auth logout	-(bare invocation)	COVERED-BY:07_setup
+auth logout	--server	COVERED-BY:07_setup
+auth logout	--all	COVERED-BY:07_setup+07_creds
+auth passwd	-(bare invocation)	COVERED-BY:07_users
+auth passwd	--server	COVERED-BY:07_users
+auth whoami	-(bare invocation)	COVERED-BY:07_users
+auth whoami	--server	COVERED-BY:07_users
+auth key create	-(bare invocation)	COVERED-BY:07_setup+07_users
+auth key create	--name	COVERED-BY:07_setup+07_users
+auth key create	--permissions	COVERED-BY:07_users
+auth key list	-(bare invocation)	COVERED-BY:07_users
+auth key revoke	-(bare invocation)	COVERED-BY:07_users
+auth admin list-users	-(bare invocation)	COVERED-BY:07_auth+07_users
+auth admin set-role	-(bare invocation)	COVERED-BY:07_auth
+auth admin create-user	-(bare invocation)	COVERED-BY:07_users
+auth admin create-user	--role	COVERED-BY:07_users
+auth admin reset-password	-(bare invocation)	COVERED-BY:07_users
+auth admin grant	-(bare invocation)	COVERED-BY:07_auth
+auth admin revoke-grant	-(bare invocation)	COVERED-BY:07_auth

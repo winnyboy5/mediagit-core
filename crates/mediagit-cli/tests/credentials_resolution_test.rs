@@ -11,22 +11,28 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
 
-//! Client-auth credential resolution tests (M2 Step 1 + I10 OS-keychain tier).
+//! Client-auth credential resolution tests (M2 Step 1 + I10 OS-keychain tier
+//! + I11 reorder/origin-key/401-invalidate).
 //!
-//! Precedence: env `MEDIAGIT_TOKEN`/`MEDIAGIT_API_KEY` -> OS keychain
-//! (skippable via `MEDIAGIT_NO_KEYRING`) -> per-remote config
-//! (`remotes.<name>.token`/`.api_key`) -> none.
+//! Precedence (I11): env `MEDIAGIT_TOKEN`/`MEDIAGIT_API_KEY` -> explicit
+//! per-remote config (`remotes.<name>.token`/`.api_key`) -> OS keychain
+//! (skippable via `MEDIAGIT_NO_KEYRING`) -> none. The config tier now
+//! outranks the keychain: an explicitly configured token is the operator's
+//! stated intent and must beat an opaque write-cache. The keychain is keyed
+//! by *origin* (scheme+host+port), not the full remote URL, so one login
+//! covers every repo on the same server.
 //!
 //! `credential_precedence_env_keychain_config_none` always sets
 //! `MEDIAGIT_NO_KEYRING=1` so it never touches the real OS credential store
 //! -- running `cargo test` shouldn't write real Windows Credential
 //! Manager/macOS Keychain/Secret Service entries on a dev machine or CI
 //! runner. The keychain tier itself is covered by
-//! `keychain_tier_write_through_and_read_back`, which is opt-in
-//! (`MEDIAGIT_TEST_REAL_KEYRING=1`) and deletes the one entry it creates.
+//! `keychain_tier_write_through_and_read_back` and
+//! `keychain_legacy_full_url_entry_migrates_to_origin_key`, both opt-in
+//! (`MEDIAGIT_TEST_REAL_KEYRING=1`) and each deletes the entries it creates.
 //!
 //! `MEDIAGIT_TOKEN`/`MEDIAGIT_API_KEY`/`MEDIAGIT_NO_KEYRING` are not touched
-//! by any other test in this workspace (verified via grep). Both tests below
+//! by any other test in this workspace (verified via grep). All tests below
 //! share `ENV_LOCK` so they never race on these process-global vars even
 //! though `cargo test` runs `#[test]` functions in this binary on parallel
 //! threads.
@@ -132,6 +138,11 @@ fn credential_precedence_env_keychain_config_none() {
 /// credential store this machine has (Windows Credential Manager here) --
 /// not something a routine `cargo test` run should do unprompted. Deletes
 /// its one entry when done, pass or fail.
+///
+/// I11: the keychain is keyed by *origin* (scheme+host+port), not the full
+/// remote URL -- the account below is deliberately a different repo path
+/// (`mediagit-i10-keyring-test-repo-b`) than what a *different* remote on
+/// the same host would use, to prove the entry is found by origin alone.
 #[test]
 fn keychain_tier_write_through_and_read_back() {
     if std::env::var_os("MEDIAGIT_TEST_REAL_KEYRING").is_none() {
@@ -148,16 +159,21 @@ fn keychain_tier_write_through_and_read_back() {
     std::env::remove_var("MEDIAGIT_API_KEY");
     std::env::remove_var("MEDIAGIT_NO_KEYRING");
 
-    let account = "http://localhost:9999/mediagit-i10-keyring-test-repo";
-    let mut remote = RemoteConfig::new(account);
+    let origin_account = "http://localhost:9999";
+    let remote_url = "http://localhost:9999/mediagit-i10-keyring-test-repo-b";
+    let mut remote = RemoteConfig::new(remote_url);
     remote.token = None; // nothing in config.toml -- only the keychain has it
     let config = config_with_remote(remote);
 
-    // Belt-and-suspenders: delete any leftover entry from a previous failed
-    // run before asserting on a fresh write.
+    // Belt-and-suspenders: delete any leftover entries from a previous
+    // failed run before asserting on a fresh write. Cleans up both the
+    // origin key this test writes to and the legacy full-URL key, in case
+    // a prior version of this test (or a stale local keychain) left one.
     let cleanup = || {
-        if let Ok(entry) = keyring::Entry::new("mediagit", account) {
-            let _ = entry.delete_credential();
+        for account in [origin_account, remote_url] {
+            if let Ok(entry) = keyring::Entry::new("mediagit", account) {
+                let _ = entry.delete_credential();
+            }
         }
     };
     cleanup();
@@ -167,9 +183,185 @@ fn keychain_tier_write_through_and_read_back() {
         "origin",
         &Credentials::Bearer("keychain-token".to_string()),
     );
+
+    // The entry must land under the origin key, not the full remote URL.
+    let stored_under_origin =
+        keyring::Entry::new("mediagit", origin_account).and_then(|e| e.get_password());
+    assert!(
+        stored_under_origin.is_ok(),
+        "remember_credentials must write under the origin key, not the full remote URL"
+    );
+
     let result = resolve_credentials(repo_root, &config, "origin");
 
     cleanup();
 
     assert_eq!(result, Credentials::Bearer("keychain-token".to_string()));
+}
+
+/// I11: an explicit `config.toml` token must beat a stale keychain entry --
+/// this is the precise bug the reorder fixes (previously the keychain, a
+/// cache, was checked *before* config, the source of truth). Opt-in, same
+/// reason as the tests above.
+#[test]
+fn config_token_beats_stale_keychain_entry() {
+    if std::env::var_os("MEDIAGIT_TEST_REAL_KEYRING").is_none() {
+        eprintln!(
+            "skipping config_token_beats_stale_keychain_entry: set MEDIAGIT_TEST_REAL_KEYRING=1 to run against the real OS keychain"
+        );
+        return;
+    }
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp_dir = TempDir::new().unwrap();
+    let repo_root = temp_dir.path();
+
+    std::env::remove_var("MEDIAGIT_TOKEN");
+    std::env::remove_var("MEDIAGIT_API_KEY");
+    std::env::remove_var("MEDIAGIT_NO_KEYRING");
+
+    let origin_account = "http://localhost:9997";
+    let remote_url = "http://localhost:9997/mediagit-i11-config-vs-keychain";
+    let mut remote = RemoteConfig::new(remote_url);
+    remote.token = Some("config-token".to_string());
+    let config = config_with_remote(remote);
+
+    let cleanup = || {
+        if let Ok(entry) = keyring::Entry::new("mediagit", origin_account) {
+            let _ = entry.delete_credential();
+        }
+    };
+    cleanup();
+
+    // Stale keychain entry -- as if a previous login for this server is
+    // still cached, and doesn't match the token now configured explicitly.
+    keyring::Entry::new("mediagit", origin_account)
+        .unwrap()
+        .set_password("bearer:stale-keychain-token")
+        .unwrap();
+
+    let result = resolve_credentials(repo_root, &config, "origin");
+
+    cleanup();
+
+    assert_eq!(result, Credentials::Bearer("config-token".to_string()));
+}
+
+/// I11: a 401 on a keychain-sourced credential must invalidate the entry so
+/// the next resolution falls through to the next tier (here, `None`, since
+/// no config/env value exists). Opt-in, same reason as the tests above.
+#[test]
+fn unauthorized_invalidates_keychain_and_falls_through() {
+    if std::env::var_os("MEDIAGIT_TEST_REAL_KEYRING").is_none() {
+        eprintln!(
+            "skipping unauthorized_invalidates_keychain_and_falls_through: set MEDIAGIT_TEST_REAL_KEYRING=1 to run against the real OS keychain"
+        );
+        return;
+    }
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp_dir = TempDir::new().unwrap();
+    let repo_root = temp_dir.path();
+
+    std::env::remove_var("MEDIAGIT_TOKEN");
+    std::env::remove_var("MEDIAGIT_API_KEY");
+    std::env::remove_var("MEDIAGIT_NO_KEYRING");
+
+    let origin_account = "http://localhost:9996";
+    let remote_url = "http://localhost:9996/mediagit-i11-invalidate-repo";
+    let mut remote = RemoteConfig::new(remote_url);
+    remote.token = None;
+    let config = config_with_remote(remote);
+
+    let cleanup = || {
+        if let Ok(entry) = keyring::Entry::new("mediagit", origin_account) {
+            let _ = entry.delete_credential();
+        }
+    };
+    cleanup();
+
+    remember_credentials(
+        &config,
+        "origin",
+        &Credentials::Bearer("expiring-token".to_string()),
+    );
+
+    let (creds, source) =
+        mediagit_cli::repo::resolve_credentials_tiered(repo_root, &config, "origin");
+    assert_eq!(creds, Credentials::Bearer("expiring-token".to_string()));
+    assert_eq!(source, mediagit_cli::repo::CredentialSource::Keychain);
+
+    let err = anyhow::anyhow!("GET /info/refs failed with status: 401 Unauthorized");
+    let invalidated =
+        mediagit_cli::repo::invalidate_on_unauthorized(&config, "origin", source, &err);
+    assert!(
+        invalidated,
+        "a 401 on a keychain credential must invalidate it"
+    );
+
+    let (creds_after, source_after) =
+        mediagit_cli::repo::resolve_credentials_tiered(repo_root, &config, "origin");
+    assert_eq!(creds_after, Credentials::None);
+    assert_eq!(source_after, mediagit_cli::repo::CredentialSource::None);
+
+    cleanup();
+}
+
+/// I11 migration: a pre-I11 keychain entry keyed by the full remote URL
+/// must still be found on read, and gets rewritten under the new origin key
+/// so migration happens exactly once. Opt-in for the same reason as
+/// `keychain_tier_write_through_and_read_back`.
+#[test]
+fn keychain_legacy_full_url_entry_migrates_to_origin_key() {
+    if std::env::var_os("MEDIAGIT_TEST_REAL_KEYRING").is_none() {
+        eprintln!(
+            "skipping keychain_legacy_full_url_entry_migrates_to_origin_key: set MEDIAGIT_TEST_REAL_KEYRING=1 to run against the real OS keychain"
+        );
+        return;
+    }
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp_dir = TempDir::new().unwrap();
+    let repo_root = temp_dir.path();
+
+    std::env::remove_var("MEDIAGIT_TOKEN");
+    std::env::remove_var("MEDIAGIT_API_KEY");
+    std::env::remove_var("MEDIAGIT_NO_KEYRING");
+
+    let origin_account = "http://localhost:9998";
+    let legacy_account = "http://localhost:9998/mediagit-i10-keyring-legacy-repo";
+    let mut remote = RemoteConfig::new(legacy_account);
+    remote.token = None;
+    let config = config_with_remote(remote);
+
+    let cleanup = || {
+        for account in [origin_account, legacy_account] {
+            if let Ok(entry) = keyring::Entry::new("mediagit", account) {
+                let _ = entry.delete_credential();
+            }
+        }
+    };
+    cleanup();
+
+    // Simulate a pre-I11 entry: written directly under the full-URL key,
+    // bypassing `remember_credentials` (which would write origin-keyed).
+    keyring::Entry::new("mediagit", legacy_account)
+        .unwrap()
+        .set_password("bearer:legacy-token")
+        .unwrap();
+
+    let result = resolve_credentials(repo_root, &config, "origin");
+    assert_eq!(result, Credentials::Bearer("legacy-token".to_string()));
+
+    // The read must have migrated the entry to the origin key...
+    let migrated = keyring::Entry::new("mediagit", origin_account).and_then(|e| e.get_password());
+    assert_eq!(migrated.ok().as_deref(), Some("bearer:legacy-token"));
+
+    // ...and removed the legacy one.
+    let legacy_gone = keyring::Entry::new("mediagit", legacy_account)
+        .and_then(|e| e.get_password())
+        .is_err();
+    assert!(
+        legacy_gone,
+        "legacy full-URL entry should be removed after migration"
+    );
+
+    cleanup();
 }

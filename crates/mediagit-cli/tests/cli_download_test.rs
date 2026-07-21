@@ -299,7 +299,20 @@ fn download_help() {
 // Env vars are passed directly to the spawned `mediagit` subprocess via
 // `Command::env`, never mutated on the test-process itself, so these tests
 // don't race with `credentials_resolution_test.rs`'s in-process env
-// mutation and need no shared lock.
+// mutation and need no shared lock. All three below now pin
+// `MEDIAGIT_NO_KEYRING=1` so they exercise only the env tier and never read
+// this dev machine's real OS credential store (they didn't before I11,
+// which happened to be safe only because env was already checked first).
+//
+// I11 note: before origin-keying, `download`'s keychain lookup used the
+// literal string "origin" as the account key in host-matched full-URL mode
+// (repo.rs's old `resolve_credentials(&repo_root, &config, "origin")`
+// call), rather than the configured remote's own URL -- a real but
+// low-stakes inconsistency. Origin-keying makes this converge for free:
+// both paths now key off the *origin* of the resolved "origin" remote's
+// URL, which is exactly what `remote_origin_maps_explicit_default_port_and_bare_url_to_one_key`
+// in `repo.rs` and the opt-in real-keychain tests in
+// `credentials_resolution_test.rs` cover directly.
 
 #[derive(Default)]
 struct CapturedHeaders {
@@ -374,6 +387,7 @@ async fn download_full_url_no_repo_strips_env_token() {
         .arg("--ref")
         .arg("main")
         .env("MEDIAGIT_TOKEN", "should-not-be-sent")
+        .env("MEDIAGIT_NO_KEYRING", "1")
         .current_dir(out_dir.path())
         .assert()
         .success();
@@ -402,6 +416,7 @@ async fn download_full_url_matching_remote_host_attaches_env_token() {
         .arg("--ref")
         .arg("main")
         .env("MEDIAGIT_TOKEN", "s3cr3t-token")
+        .env("MEDIAGIT_NO_KEYRING", "1")
         .current_dir(repo_dir.path())
         .assert()
         .success();
@@ -428,6 +443,7 @@ async fn download_full_url_different_host_strips_env_token() {
         .arg("--ref")
         .arg("main")
         .env("MEDIAGIT_TOKEN", "should-not-be-sent")
+        .env("MEDIAGIT_NO_KEYRING", "1")
         .current_dir(repo_dir.path())
         .assert()
         .success();

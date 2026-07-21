@@ -20,7 +20,10 @@ function Write-QaRow([string]$Path, [string[]]$Header, [object[]]$Values) {
 # Run mediagit against a repo. Returns @{Exit; Sec; Out} - Out is combined stdout+stderr text.
 # Full output also appended to $QA.Logs\<Phase>-cmds.log for post-hoc digging.
 # Enforces $TimeoutSec: on timeout, kills process tree and returns exit 124.
-function Invoke-MG([string]$Repo, [string[]]$MgArgs, [string]$Phase = "misc", [int]$TimeoutSec = 600) {
+# -StdIn: lines fed to the child's stdin in order (one dialoguer Input/Password
+# prompt per line), for driving interactive commands like `mediagit auth login`
+# non-interactively. Omit (default) for every existing non-interactive call.
+function Invoke-MG([string]$Repo, [string[]]$MgArgs, [string]$Phase = "misc", [int]$TimeoutSec = 600, [string[]]$StdIn = $null) {
   $sw = [Diagnostics.Stopwatch]::StartNew()
   $allArgs = if ($Repo) { @("-C", $Repo) + $MgArgs } else { $MgArgs }
   # Quote each arg (A6 tests spaces/unicode paths); escape embedded quotes.
@@ -32,9 +35,14 @@ function Invoke-MG([string]$Repo, [string[]]$MgArgs, [string]$Phase = "misc", [i
   $proc.StartInfo.UseShellExecute = $false
   $proc.StartInfo.RedirectStandardOutput = $true
   $proc.StartInfo.RedirectStandardError = $true
+  if ($StdIn) { $proc.StartInfo.RedirectStandardInput = $true }
   $proc.StartInfo.CreateNoWindow = $true
 
   $proc.Start() | Out-Null
+  if ($StdIn) {
+    foreach ($line in $StdIn) { $proc.StandardInput.WriteLine($line) }
+    $proc.StandardInput.Close()
+  }
   # Threadpool drain: ReadToEnd-after-WaitForExit deadlocks once the child fills
   # the pipe buffer; async tasks drain continuously without the PS event loop.
   $outTask = $proc.StandardOutput.ReadToEndAsync()

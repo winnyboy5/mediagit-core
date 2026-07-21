@@ -43,9 +43,11 @@ pub struct ServerConfig {
     pub tls_port: u16,
 
     /// TLS certificate file path (PEM format)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_cert_path: Option<PathBuf>,
 
     /// TLS private key file path (PEM format)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_key_path: Option<PathBuf>,
 
     /// Use self-signed certificate for development
@@ -57,7 +59,15 @@ pub struct ServerConfig {
     pub enable_auth: bool,
 
     /// JWT secret key (required when enable_auth = true)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub jwt_secret: Option<String>,
+
+    /// Whether `POST /auth/register` is open to anonymous callers. Defaults
+    /// to `true` so existing configs and drills (which self-register users)
+    /// behave exactly as before; new deployments may opt into closed
+    /// registration explicitly. Only meaningful when `enable_auth = true`.
+    #[serde(default = "default_allow_open_registration")]
+    pub allow_open_registration: bool,
 
     /// TTL (seconds) for presigned PUT URLs issued to clients for direct-to-bucket uploads.
     /// 12 hours by default; may need lowering if credentials use short-lived STS sessions.
@@ -79,12 +89,13 @@ pub struct ServerConfig {
     /// Directory where auth state (users.jsonl, api_keys.jsonl) is
     /// persisted. Defaults to a sibling `auth/` directory next to
     /// `repos_dir` when unset — see [`ServerConfig::resolved_auth_store_dir`].
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_store_dir: Option<PathBuf>,
 
     /// Allowed CORS origins (exact match, e.g. "https://app.example.com").
     /// When unset (the default), no CORS layer is added — the server keeps
     /// today's behavior of emitting no CORS headers at all.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cors_allowed_origins: Option<Vec<String>>,
 }
 
@@ -116,6 +127,10 @@ fn default_rate_limit_burst() -> u32 {
     20 // Allow bursts up to 20 requests
 }
 
+fn default_allow_open_registration() -> bool {
+    true
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -129,6 +144,7 @@ impl Default for ServerConfig {
             tls_self_signed: false,
             enable_auth: false,
             jwt_secret: None,
+            allow_open_registration: default_allow_open_registration(),
             presigned_url_ttl_seconds: default_presigned_url_ttl(),
             enable_rate_limiting: false,
             rate_limit_rps: default_rate_limit_rps(),
@@ -299,5 +315,42 @@ mod tests {
         let cfg = result.expect("default path missing must fall back to defaults");
         assert_eq!(cfg.port, 3000);
         assert!(!cfg.enable_auth);
+    }
+
+    #[test]
+    fn test_serialize_load_roundtrip() {
+        // ServerConfig has `deny_unknown_fields`, and its five Option fields
+        // previously had no `skip_serializing_if`, so a naive serialize
+        // emitted explicit `None`s that the loader would still accept as
+        // TOML nulls are simply absent keys - but the real hazard this
+        // guards is any future field losing its `skip_serializing_if`.
+        // Round-trip through the exact same `toml::to_string` +
+        // `ServerConfig::load`-equivalent path a wizard would use.
+        let cfg = ServerConfig::default();
+        let serialized = toml::to_string(&cfg).expect("serialize default config");
+        let reloaded: ServerConfig =
+            toml::from_str(&serialized).expect("wizard-written TOML must parse back");
+        assert_eq!(reloaded.port, cfg.port);
+        assert_eq!(
+            reloaded.allow_open_registration,
+            cfg.allow_open_registration
+        );
+        assert!(reloaded.jwt_secret.is_none());
+
+        // Also round-trip with the Option fields populated, so a config
+        // written after `mediagit-server init` with auth enabled parses too.
+        let cfg2 = ServerConfig {
+            enable_auth: true,
+            jwt_secret: Some("a-secret".to_string()),
+            auth_store_dir: Some(PathBuf::from("/data/auth")),
+            allow_open_registration: false,
+            ..Default::default()
+        };
+        let serialized2 = toml::to_string(&cfg2).expect("serialize populated config");
+        let reloaded2: ServerConfig =
+            toml::from_str(&serialized2).expect("populated wizard TOML must parse back");
+        assert_eq!(reloaded2.jwt_secret, cfg2.jwt_secret);
+        assert_eq!(reloaded2.auth_store_dir, cfg2.auth_store_dir);
+        assert!(!reloaded2.allow_open_registration);
     }
 }

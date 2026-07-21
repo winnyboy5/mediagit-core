@@ -94,6 +94,42 @@ fn post_json(uri: &str, token: Option<&str>, body: &str) -> Request<Body> {
     b.body(Body::from(body.to_string())).unwrap()
 }
 
+fn patch_json(uri: &str, token: Option<&str>, body: &str) -> Request<Body> {
+    let mut b = Request::builder()
+        .uri(uri)
+        .method("PATCH")
+        .header("Content-Type", "application/json");
+    if let Some(t) = token {
+        b = b.header("Authorization", format!("Bearer {}", t));
+    }
+    b.body(Body::from(body.to_string())).unwrap()
+}
+
+/// Register a real user (with a role) in the live credentials store, distinct
+/// from the loose JWT tokens `test_state_with_tokens` mints — needed for any
+/// test whose handler looks the target user up by ID (role changes,
+/// password changes, key-owner permission lookups, last-admin counting).
+async fn register_role_user(
+    state: &Arc<AppState>,
+    id: &str,
+    username: &str,
+    role: mediagit_security::auth::user::Role,
+) {
+    let user = mediagit_security::auth::User::new(
+        id.to_string(),
+        username.to_string(),
+        format!("{username}@example.com"),
+        role,
+    );
+    state
+        .auth_service()
+        .unwrap()
+        .credentials_store
+        .register_user(user, "password123")
+        .await
+        .unwrap();
+}
+
 // ---- 401 unauthenticated ----
 
 #[tokio::test]
@@ -407,4 +443,439 @@ async fn list_keys_returns_metadata_only() {
     assert_eq!(arr[0]["user_id"], "keyed-user");
     assert!(arr[0]["id"].is_string());
     assert!(arr[0].get("key_hash").is_none());
+}
+
+// ---- POST /auth/keys: self-service minting cannot escalate ----
+
+#[tokio::test]
+async fn create_key_permission_intersection_cannot_escalate() {
+    let (state, _admin, write) = test_state_with_tokens();
+    register_role_user(
+        &state,
+        "write-user",
+        "writer",
+        mediagit_security::auth::user::Role::Write,
+    )
+    .await;
+    let app = create_router(Arc::clone(&state));
+
+    let resp = app
+        .oneshot(post_json(
+            "/auth/keys",
+            Some(&write),
+            r#"{"name":"escalate","permissions":["repo:admin","user:manage"]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let perms = body["permissions"].as_array().unwrap();
+    assert!(
+        perms.is_empty(),
+        "Write user must not be able to mint a repo:admin/user:manage key, got {:?}",
+        perms
+    );
+    assert!(body["key"].is_string());
+}
+
+#[tokio::test]
+async fn create_key_defaults_to_owner_permissions_when_omitted() {
+    let (state, _admin, write) = test_state_with_tokens();
+    register_role_user(
+        &state,
+        "write-user",
+        "writer",
+        mediagit_security::auth::user::Role::Write,
+    )
+    .await;
+    let app = create_router(Arc::clone(&state));
+
+    let resp = app
+        .oneshot(post_json(
+            "/auth/keys",
+            Some(&write),
+            r#"{"name":"default"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let perms: Vec<String> = body["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        perms,
+        vec!["repo:read".to_string(), "repo:write".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn create_key_for_other_user_requires_admin() {
+    let (state, _admin, write) = test_state_with_tokens();
+    register_role_user(
+        &state,
+        "write-user",
+        "writer",
+        mediagit_security::auth::user::Role::Write,
+    )
+    .await;
+    register_role_user(
+        &state,
+        "victim2",
+        "victim2",
+        mediagit_security::auth::user::Role::Write,
+    )
+    .await;
+    let app = create_router(Arc::clone(&state));
+
+    let resp = app
+        .oneshot(post_json(
+            "/auth/keys",
+            Some(&write),
+            r#"{"name":"x","user_id":"victim2"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+// ---- DELETE /auth/keys/{id}: ownership-scoped for non-admins ----
+
+#[tokio::test]
+async fn revoke_key_own_key_allowed_for_write_role() {
+    let (state, _admin, write) = test_state_with_tokens();
+    let auth_layer = state.auth().unwrap();
+    let (_plaintext, api_key) = auth_layer
+        .api_key_auth()
+        .generate_key("write-user".to_string(), "mine".to_string(), vec![])
+        .await
+        .unwrap();
+    let app = create_router(Arc::clone(&state));
+
+    let resp = app
+        .oneshot(delete_req(
+            &format!("/auth/keys/{}", api_key.id),
+            Some(&write),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+// ---- PATCH /auth/users/{id}/role ----
+
+#[tokio::test]
+async fn set_role_403_for_write_role() {
+    let (state, _admin, write) = test_state_with_tokens();
+    register_role_user(
+        &state,
+        "target",
+        "target",
+        mediagit_security::auth::user::Role::Write,
+    )
+    .await;
+    let app = create_router(Arc::clone(&state));
+
+    let resp = app
+        .oneshot(patch_json(
+            "/auth/users/target/role",
+            Some(&write),
+            r#"{"role":"Admin"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn set_role_last_admin_demotion_refused() {
+    let (state, admin, _write) = test_state_with_tokens();
+    register_role_user(
+        &state,
+        "sole-admin",
+        "solo",
+        mediagit_security::auth::user::Role::Admin,
+    )
+    .await;
+    let app = create_router(Arc::clone(&state));
+
+    let resp = app
+        .oneshot(patch_json(
+            "/auth/users/sole-admin/role",
+            Some(&admin),
+            r#"{"role":"Write"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+    // Role must be unchanged after the refusal.
+    assert_eq!(
+        state
+            .auth_service()
+            .unwrap()
+            .credentials_store
+            .get_user("sole-admin")
+            .await
+            .unwrap()
+            .role,
+        mediagit_security::auth::user::Role::Admin
+    );
+}
+
+#[tokio::test]
+async fn set_role_demotion_allowed_when_multiple_admins() {
+    let (state, admin, _write) = test_state_with_tokens();
+    register_role_user(
+        &state,
+        "admin1",
+        "admin1",
+        mediagit_security::auth::user::Role::Admin,
+    )
+    .await;
+    register_role_user(
+        &state,
+        "admin2",
+        "admin2",
+        mediagit_security::auth::user::Role::Admin,
+    )
+    .await;
+    let app = create_router(Arc::clone(&state));
+
+    let resp = app
+        .oneshot(patch_json(
+            "/auth/users/admin1/role",
+            Some(&admin),
+            r#"{"role":"Write"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        state
+            .auth_service()
+            .unwrap()
+            .credentials_store
+            .get_user("admin1")
+            .await
+            .unwrap()
+            .role,
+        mediagit_security::auth::user::Role::Write
+    );
+}
+
+// ---- POST /auth/password (self-service) ----
+
+#[tokio::test]
+async fn change_password_rejects_wrong_current_password() {
+    let (state, _admin, write) = test_state_with_tokens();
+    register_role_user(
+        &state,
+        "write-user",
+        "writer",
+        mediagit_security::auth::user::Role::Write,
+    )
+    .await;
+    let app = create_router(Arc::clone(&state));
+
+    let resp = app
+        .oneshot(post_json(
+            "/auth/password",
+            Some(&write),
+            r#"{"current_password":"wrongpw","new_password":"newpassword123"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn change_password_succeeds_with_correct_current_password() {
+    let (state, _admin, write) = test_state_with_tokens();
+    register_role_user(
+        &state,
+        "write-user",
+        "writer",
+        mediagit_security::auth::user::Role::Write,
+    )
+    .await;
+    let app = create_router(Arc::clone(&state));
+
+    let resp = app
+        .oneshot(post_json(
+            "/auth/password",
+            Some(&write),
+            r#"{"current_password":"password123","new_password":"newpassword123"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Old password no longer authenticates; new one does.
+    let auth_service = state.auth_service().unwrap();
+    assert!(auth_service
+        .credentials_store
+        .authenticate("writer", "password123")
+        .await
+        .is_err());
+    assert!(auth_service
+        .credentials_store
+        .authenticate("writer", "newpassword123")
+        .await
+        .is_ok());
+}
+
+// ---- Write-role authorization negatives on the remaining admin-only routes ----
+
+#[tokio::test]
+async fn write_user_cannot_reset_others_password() {
+    let (state, _admin, write) = test_state_with_tokens();
+    register_role_user(
+        &state,
+        "victim3",
+        "victim3",
+        mediagit_security::auth::user::Role::Write,
+    )
+    .await;
+    let app = create_router(Arc::clone(&state));
+
+    let resp = app
+        .oneshot(patch_json(
+            "/auth/users/victim3/password",
+            Some(&write),
+            r#"{"new_password":"newpassword123"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn write_user_cannot_create_users() {
+    let (state, _admin, write) = test_state_with_tokens();
+    let app = create_router(Arc::clone(&state));
+
+    let resp = app
+        .oneshot(post_json(
+            "/auth/users",
+            Some(&write),
+            r#"{"username":"newu","email":"newu@example.com","password":"password123","role":"Write"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+// ---- Admin happy paths for the new §E routes ----
+
+#[tokio::test]
+async fn admin_create_user_succeeds() {
+    let (state, admin, _write) = test_state_with_tokens();
+    let app = create_router(Arc::clone(&state));
+
+    let resp = app
+        .oneshot(post_json(
+            "/auth/users",
+            Some(&admin),
+            r#"{"username":"created","email":"created@example.com","password":"password123","role":"Read"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["username"], "created");
+    assert_eq!(body["role"], "Read");
+}
+
+#[tokio::test]
+async fn admin_reset_password_recovers_forgotten_password() {
+    let (state, admin, _write) = test_state_with_tokens();
+    register_role_user(
+        &state,
+        "forgetful",
+        "forgetful",
+        mediagit_security::auth::user::Role::Write,
+    )
+    .await;
+    let app = create_router(Arc::clone(&state));
+
+    let resp = app
+        .oneshot(patch_json(
+            "/auth/users/forgetful/password",
+            Some(&admin),
+            r#"{"new_password":"recoveredpw123"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    assert!(state
+        .auth_service()
+        .unwrap()
+        .credentials_store
+        .authenticate("forgetful", "recoveredpw123")
+        .await
+        .is_ok());
+}
+
+// ---- GET /auth/whoami ----
+
+#[tokio::test]
+async fn whoami_returns_role_and_grants() {
+    let (state, _admin, write) = test_state_with_tokens();
+    register_role_user(
+        &state,
+        "write-user",
+        "writer",
+        mediagit_security::auth::user::Role::Write,
+    )
+    .await;
+    state
+        .grants
+        .grant(
+            "write-user",
+            "repoA",
+            mediagit_security::auth::GrantLevel::Read,
+        )
+        .await
+        .unwrap();
+    let app = create_router(Arc::clone(&state));
+
+    let resp = app
+        .oneshot(get("/auth/whoami", Some(&write)))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["username"], "writer");
+    assert_eq!(body["role"], "Write");
+    assert_eq!(body["grants"][0]["repo"], "repoA");
+    assert_eq!(body["grants"][0]["level"], "read");
+}
+
+#[tokio::test]
+async fn whoami_401_unauthenticated() {
+    let (state, _admin, _write) = test_state_with_tokens();
+    let app = create_router(state);
+    let resp = app.oneshot(get("/auth/whoami", None)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }

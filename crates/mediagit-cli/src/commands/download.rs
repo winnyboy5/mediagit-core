@@ -119,8 +119,8 @@ impl DownloadCmd {
             self.resolve_source().await?;
         validate_no_path_traversal(&file_path)?;
 
-        let credentials = if attach_credentials {
-            crate::repo::resolve_credentials(&repo_root, &config, "origin")
+        let (mut credentials, cred_source) = if attach_credentials {
+            crate::repo::resolve_credentials_tiered(&repo_root, &config, "origin")
         } else {
             // F4: full-URL mode with no repo, or with a repo whose configured
             // remotes don't match the typed host — never fall through to
@@ -140,10 +140,13 @@ impl DownloadCmd {
                     "Not attaching MEDIAGIT_TOKEN/MEDIAGIT_API_KEY: URL host doesn't match a configured remote",
                 );
             }
-            mediagit_protocol::Credentials::None
+            (
+                mediagit_protocol::Credentials::None,
+                crate::repo::CredentialSource::None,
+            )
         };
-        let client =
-            mediagit_protocol::ProtocolClient::new(base_url).with_credentials(credentials.clone());
+        let mut client = mediagit_protocol::ProtocolClient::new(base_url.clone())
+            .with_credentials(credentials.clone());
 
         let ref_name = match &self.r#ref {
             Some(r) => r.clone(),
@@ -167,6 +170,38 @@ impl DownloadCmd {
             .context("Download failed");
         let bytes = match download_result {
             Ok(bytes) => bytes,
+            // First (and only, for this command) authenticated call — a
+            // cached keychain credential may have expired; on a 401,
+            // invalidate it and retry once with the next tier (I11). The
+            // partially-written file must be truncated before retrying.
+            Err(e)
+                if attach_credentials
+                    && crate::repo::invalidate_on_unauthorized(
+                        &config,
+                        "origin",
+                        cred_source,
+                        &e,
+                    ) =>
+            {
+                credentials = crate::repo::resolve_credentials(&repo_root, &config, "origin");
+                client = mediagit_protocol::ProtocolClient::new(base_url.clone())
+                    .with_credentials(credentials.clone());
+                file = tokio::fs::File::create(&out_path).await.with_context(|| {
+                    format!("Failed to recreate output file '{}'", out_path.display())
+                })?;
+                match client
+                    .download_file_by_path(&file_path, &ref_name, &mut file)
+                    .await
+                    .context("Download failed")
+                {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        drop(file);
+                        let _ = tokio::fs::remove_file(&out_path).await;
+                        return Err(e);
+                    }
+                }
+            }
             Err(e) => {
                 // Don't leave a stray empty/partial file behind on failure.
                 drop(file);

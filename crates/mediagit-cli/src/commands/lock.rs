@@ -107,18 +107,22 @@ impl LockCmd {
 
     /// Build a `ProtocolClient` for `remote_opt` (defaults to "origin"),
     /// following the same remote-URL + credential resolution as
-    /// push/pull/fetch. Also returns the config, resolved remote name, and
-    /// the credentials used, so callers can write them through to the
-    /// keychain (`crate::repo::remember_credentials`) after their first
-    /// request succeeds.
+    /// push/pull/fetch. Also returns the config, resolved remote name, repo
+    /// root, and the credentials used (with their [`crate::repo::CredentialSource`])
+    /// so callers can write them through to the keychain
+    /// (`crate::repo::remember_credentials`) after their first request
+    /// succeeds, or invalidate-and-retry on a 401 (I11).
+    #[allow(clippy::type_complexity)]
     async fn build_client(
         &self,
         remote_opt: &Option<String>,
     ) -> Result<(
         ProtocolClient,
         mediagit_config::Config,
+        std::path::PathBuf,
         String,
         mediagit_protocol::Credentials,
+        crate::repo::CredentialSource,
     )> {
         let repo_root = find_repo_root()?;
         let config = mediagit_config::Config::load(&repo_root).await?;
@@ -126,9 +130,31 @@ impl LockCmd {
         let remote_url = config
             .resolve_remote_url(&remote)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let credentials = crate::repo::resolve_credentials(&repo_root, &config, &remote);
+        let (credentials, cred_source) =
+            crate::repo::resolve_credentials_tiered(&repo_root, &config, &remote);
         let client = ProtocolClient::new(remote_url).with_credentials(credentials.clone());
-        Ok((client, config, remote, credentials))
+        Ok((client, config, repo_root, remote, credentials, cred_source))
+    }
+
+    /// On a 401 from `err` (whose credential came from `cred_source`),
+    /// invalidate the keychain entry and rebuild a fresh client + resolved
+    /// credentials for one retry. Shared by every `lock` subcommand so the
+    /// invalidate-and-retry logic lives in one place (I11).
+    fn refresh_client_on_unauthorized(
+        &self,
+        config: &mediagit_config::Config,
+        repo_root: &std::path::Path,
+        remote: &str,
+        cred_source: crate::repo::CredentialSource,
+        err: &anyhow::Error,
+    ) -> Option<(ProtocolClient, mediagit_protocol::Credentials)> {
+        if !crate::repo::invalidate_on_unauthorized(config, remote, cred_source, err) {
+            return None;
+        }
+        let remote_url = config.resolve_remote_url(remote).ok()?;
+        let credentials = crate::repo::resolve_credentials(repo_root, config, remote);
+        let client = ProtocolClient::new(remote_url).with_credentials(credentials.clone());
+        Some((client, credentials))
     }
 
     /// Resolve the owner identity for a new lock: `--owner` >
@@ -151,10 +177,30 @@ impl LockCmd {
     }
 
     async fn create(&self, opts: &CreateOpts) -> Result<()> {
-        let (client, config, remote, credentials) = self.build_client(&opts.remote).await?;
+        let (mut client, config, repo_root, remote, mut credentials, cred_source) =
+            self.build_client(&opts.remote).await?;
         let owner = self.resolve_owner(opts.owner.clone()).await?;
 
-        let info = client.create_lock(&opts.path, Some(owner)).await?;
+        // First (and only, for this subcommand) authenticated call — a
+        // cached keychain credential may have expired; on a 401, invalidate
+        // it and retry once with the next tier (I11).
+        let info = match client.create_lock(&opts.path, Some(owner.clone())).await {
+            Ok(i) => i,
+            Err(e) => match self.refresh_client_on_unauthorized(
+                &config,
+                &repo_root,
+                &remote,
+                cred_source,
+                &e,
+            ) {
+                Some((new_client, new_creds)) => {
+                    client = new_client;
+                    credentials = new_creds;
+                    client.create_lock(&opts.path, Some(owner)).await?
+                }
+                None => return Err(e),
+            },
+        };
         crate::repo::remember_credentials(&config, &remote, &credentials);
         output::success(&format!(
             "Locked '{}' as {} (id {})",
@@ -168,13 +214,31 @@ impl LockCmd {
             anyhow::bail!("mediagit lock unlock requires a PATH or --id <LOCK_ID>");
         }
 
-        let (client, config, remote, credentials) = self.build_client(&opts.remote).await?;
+        let (mut client, config, repo_root, remote, mut credentials, cred_source) =
+            self.build_client(&opts.remote).await?;
 
         let lock_id = if let Some(id) = &opts.lock_id {
             id.clone()
         } else {
             let path = opts.path.as_ref().unwrap();
-            let locks = client.list_locks().await?;
+            // First authenticated call of this command — see `create` above.
+            let locks = match client.list_locks().await {
+                Ok(l) => l,
+                Err(e) => match self.refresh_client_on_unauthorized(
+                    &config,
+                    &repo_root,
+                    &remote,
+                    cred_source,
+                    &e,
+                ) {
+                    Some((new_client, new_creds)) => {
+                        client = new_client;
+                        credentials = new_creds;
+                        client.list_locks().await?
+                    }
+                    None => return Err(e),
+                },
+            };
             crate::repo::remember_credentials(&config, &remote, &credentials);
             locks
                 .into_iter()
@@ -183,15 +247,49 @@ impl LockCmd {
                 .with_context(|| format!("No active lock found for '{}'", path))?
         };
 
-        client.delete_lock(&lock_id, opts.force).await?;
+        match client.delete_lock(&lock_id, opts.force).await {
+            Ok(()) => {}
+            Err(e) => match self.refresh_client_on_unauthorized(
+                &config,
+                &repo_root,
+                &remote,
+                cred_source,
+                &e,
+            ) {
+                Some((new_client, new_creds)) => {
+                    client = new_client;
+                    credentials = new_creds;
+                    client.delete_lock(&lock_id, opts.force).await?
+                }
+                None => return Err(e),
+            },
+        }
         crate::repo::remember_credentials(&config, &remote, &credentials);
         output::success(&format!("Unlocked {}", lock_id));
         Ok(())
     }
 
     async fn list(&self, opts: &ListOpts) -> Result<()> {
-        let (client, config, remote, credentials) = self.build_client(&opts.remote).await?;
-        let locks = client.list_locks().await?;
+        let (mut client, config, repo_root, remote, mut credentials, cred_source) =
+            self.build_client(&opts.remote).await?;
+        // First authenticated call of this command — see `create` above.
+        let locks = match client.list_locks().await {
+            Ok(l) => l,
+            Err(e) => match self.refresh_client_on_unauthorized(
+                &config,
+                &repo_root,
+                &remote,
+                cred_source,
+                &e,
+            ) {
+                Some((new_client, new_creds)) => {
+                    client = new_client;
+                    credentials = new_creds;
+                    client.list_locks().await?
+                }
+                None => return Err(e),
+            },
+        };
         crate::repo::remember_credentials(&config, &remote, &credentials);
 
         if opts.json {

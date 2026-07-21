@@ -6,6 +6,29 @@ Using MediaGit in continuous integration and deployment pipelines.
 
 MediaGit's CI/CD integration enables automated testing, verification, and deployment of media asset repositories. The `mediagit-server` binary provides the HTTP API for remote operations, while standard CLI commands work in headless CI environments.
 
+## CI Authentication Flow
+
+```mermaid
+sequenceDiagram
+    participant Admin
+    participant Server as mediagit-server
+    participant CI as CI Runner
+    participant Repo as Remote Repo
+
+    Admin->>Server: mediagit auth key create --name ci<br/>(prints: ak_xxxxx)
+    Admin->>CI: Store key in CI secrets<br/>as MEDIAGIT_API_KEY
+    
+    CI->>CI: MEDIAGIT_API_KEY=ak_xxxxx<br/>mediagit add assets/
+    CI->>CI: mediagit commit -m "Auto update"
+    CI->>Server: mediagit push origin main<br/>(sends X-API-Key header)
+    Server-->>CI: ✓ Authenticated
+    Server->>Repo: Store objects & packs
+    Repo-->>Server: ✓ Stored
+    Server-->>CI: ✓ Push complete
+```
+
+This approach avoids passwords in CI — the API key is stored as a secret and never logged.
+
 ## GitHub Actions
 
 ### Basic CI Workflow

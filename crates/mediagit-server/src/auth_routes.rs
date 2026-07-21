@@ -18,7 +18,7 @@
 use axum::{
     extract::DefaultBodyLimit,
     middleware,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Router,
 };
 use std::sync::Arc;
@@ -68,21 +68,30 @@ pub fn create_auth_router(auth_service: Arc<AuthService>) -> Router {
 }
 
 /// Create the admin router (H3): user, grant, and API-key management
-/// endpoints, all gated on the flat `user:manage` permission (Admin role).
+/// endpoints, gated on the flat `user:manage` permission (Admin role) except
+/// where noted as self-scoped (any authenticated user).
 ///
 /// # Endpoints
 /// - GET    /auth/users              - list users (id, username, role)
+/// - POST   /auth/users              - admin creates a user with an explicit role
 /// - DELETE /auth/users/{id}         - remove a user (cascades their grants)
+/// - PATCH  /auth/users/{id}/role    - change a user's role
+/// - PATCH  /auth/users/{id}/password - admin password reset (no current password)
 /// - POST   /auth/users/{id}/grants  - upsert a per-repo grant
 /// - DELETE /auth/users/{id}/grants  - remove a per-repo grant
-/// - GET    /auth/keys               - list API keys (metadata only)
-/// - DELETE /auth/keys/{id}          - revoke an API key
+/// - GET    /auth/keys               - list all API keys (metadata only)
+/// - POST   /auth/keys               - self-scoped: mint a key (admin may target `user_id`)
+/// - GET    /auth/keys/mine          - self-scoped: list the caller's own keys
+/// - DELETE /auth/keys/{id}          - revoke an API key (caller's own, or any as admin)
+/// - POST   /auth/password           - self-scoped: change the caller's own password
+/// - GET    /auth/whoami             - self-scoped: identity, role, and per-repo grants
 ///
 /// Unlike [`create_auth_router`], this takes `Arc<AppState>` rather than
-/// `Arc<AuthService>`: grant mutations must go through `AppState::grants` —
-/// the same `GrantsStore` instance `check_permission` reads for repo-level
-/// enforcement — not `AuthService::grants_store`, a separate in-memory
-/// instance that only agrees with `AppState::grants` at boot.
+/// `Arc<AuthService>`: grant mutations (and grant reads for `/auth/whoami`)
+/// must go through `AppState::grants` — the same `GrantsStore` instance
+/// `check_permission` reads for repo-level enforcement — not
+/// `AuthService::grants_store`, a separate in-memory instance that only
+/// agrees with `AppState::grants` at boot.
 ///
 /// Only meaningful when `state.auth_service` (and therefore
 /// `state.auth_layer`) is `Some`; callers merge it conditionally right
@@ -94,14 +103,28 @@ pub fn create_admin_router(state: Arc<AppState>) -> Router {
         .expect("create_admin_router requires auth to be enabled");
 
     Router::new()
-        .route("/auth/users", get(crate::handlers::list_users))
+        .route(
+            "/auth/users",
+            get(crate::handlers::list_users).post(crate::handlers::create_user),
+        )
         .route("/auth/users/{id}", delete(crate::handlers::delete_user))
+        .route("/auth/users/{id}/role", patch(crate::handlers::set_role))
+        .route(
+            "/auth/users/{id}/password",
+            patch(crate::handlers::reset_password),
+        )
         .route(
             "/auth/users/{id}/grants",
             post(crate::handlers::upsert_grant).delete(crate::handlers::remove_grant),
         )
-        .route("/auth/keys", get(crate::handlers::list_keys))
+        .route(
+            "/auth/keys",
+            get(crate::handlers::list_keys).post(crate::handlers::create_key),
+        )
+        .route("/auth/keys/mine", get(crate::handlers::list_my_keys))
         .route("/auth/keys/{id}", delete(crate::handlers::revoke_key))
+        .route("/auth/password", post(crate::handlers::change_password))
+        .route("/auth/whoami", get(crate::handlers::whoami))
         .layer(middleware::from_fn(move |req, next| {
             auth_middleware(Arc::clone(&auth_layer), req, next)
         }))

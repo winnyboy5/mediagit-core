@@ -601,7 +601,7 @@ auth, GCS permissions), see the Troubleshooting section in **SETUP.md**.
 
 For local dev, the defaults are fine. These are the knobs worth knowing when
 profiling or debugging throughput locally; the full catalog (all env knobs,
-every config key) lives in **docs/env-knobs.md** and **CONFIGURATION.md**.
+every config key) lives in **env-knobs.md** and **CONFIGURATION.md**.
 
 ### Compression (dev iteration speed vs. ratio)
 
@@ -633,7 +633,7 @@ MEDIAGIT_BENCH=1 mediagit push origin main   # emits [bench] throughput summary
 | `MEDIAGIT_HASH_PARALLEL` | `0` | Set `1` for BLAKE3 tree-parallel hashing (~2.6× faster) |
 | `RUST_LOG` | — | Module-scoped log levels, see Debug Logging above |
 
-See **docs/env-knobs.md** for the complete list (30+ knobs covering upload/
+See **env-knobs.md** for the complete list (30+ knobs covering upload/
 download concurrency, MPU, range-parallel GET, GCS-specific tuning, etc.).
 
 ---
@@ -655,7 +655,7 @@ download concurrency, MPU, range-parallel GET, GCS-specific tuning, etc.).
 |----------|-----------|
 | How do I install/deploy this? | **SETUP.md** |
 | What does config key X do? | **CONFIGURATION.md** |
-| What does env knob X do? | `docs/env-knobs.md` |
+| What does env knob X do? | `env-knobs.md` |
 | How does push/pull/clone work internally? | `ARCHITECTURE.md` |
 | How does file locking work? | [File Locking](#file-locking) above, `crates/mediagit-server/src/locks.rs` |
 | Where does server auth state live? | [Auth State](#auth-state) above |

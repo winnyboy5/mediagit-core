@@ -49,6 +49,40 @@ See individual backend documentation:
 
 ## Choosing a Backend
 
+```mermaid
+flowchart TD
+    A["Choose a Backend"] --> B{"Self-hosted<br/>or Cloud?"}
+    B -->|Self-hosted| C{"Compliance<br/>required?"}
+    B -->|Cloud| D{"Which<br/>cloud?"}
+    
+    C -->|Yes| E["MinIO"]
+    C -->|No| F["Local"]
+    
+    D -->|AWS| G["Amazon S3"]
+    D -->|Microsoft| H["Azure Blob"]
+    D -->|Google| I["Google Cloud<br/>Storage"]
+    D -->|Other| J{"On budget?"}
+    
+    J -->|Cost-conscious| K["Backblaze B2"]
+    J -->|DigitalOcean| L["Spaces"]
+    
+    E --> M["Highest control"]
+    F --> N["Fastest, dev-only"]
+    G --> O["Global, mature"]
+    H --> P["Azure ecosystem"]
+    I --> Q["GCP ecosystem"]
+    K --> R["Most economical"]
+    L --> S["Simple, managed"]
+    
+    style F fill:#c8e6c9
+    style E fill:#c8e6c9
+    style G fill:#bbdefb
+    style H fill:#bbdefb
+    style I fill:#bbdefb
+    style K fill:#fff9c4
+    style L fill:#fff9c4
+```
+
 | Backend | Best For | Cost | Performance |
 |---------|----------|------|-------------|
 | Local | Development, small teams | Free | Fastest |

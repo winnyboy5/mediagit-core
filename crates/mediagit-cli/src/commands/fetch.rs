@@ -111,17 +111,21 @@ impl FetchCmd {
         // Initialize protocol client and ODB. Honour [performance]
         // upload_concurrency from the repo config so users can tune parallel
         // chunk fan-out without setting MEDIAGIT_UPLOAD_CONCURRENCY in the env.
-        let credentials = crate::repo::resolve_credentials(&repo_root, &config, remote);
-        let mut client = mediagit_protocol::ProtocolClient::new(remote_url)
-            .with_credentials(credentials.clone());
-        if let Some(n) = config.performance.upload_concurrency {
-            client = client.with_concurrent_uploads(n);
-        }
-        if let Some(n) = config.performance.download_concurrency {
-            client = client.with_concurrent_downloads(n);
-        }
+        let (mut credentials, cred_source) =
+            crate::repo::resolve_credentials_tiered(&repo_root, &config, remote);
+        let build_client = |creds: mediagit_protocol::Credentials| {
+            let mut c =
+                mediagit_protocol::ProtocolClient::new(remote_url.clone()).with_credentials(creds);
+            if let Some(n) = config.performance.upload_concurrency {
+                c = c.with_concurrent_uploads(n);
+            }
+            if let Some(n) = config.performance.download_concurrency {
+                c = c.with_concurrent_downloads(n);
+            }
+            c
+        };
         // Arc-wrap for the parallel --all path (pull_streaming/download_chunked_objects take &self).
-        let client = Arc::new(client);
+        let mut client = Arc::new(build_client(credentials.clone()));
         let odb = Arc::new(ObjectDatabase::with_smart_compression(
             Arc::clone(&storage),
             1000,
@@ -129,7 +133,18 @@ impl FetchCmd {
 
         // Get remote refs
         let fetch_spinner = progress.spinner("Fetching remote refs...");
-        let remote_refs = client.get_refs().await?;
+        // First authenticated call of this command — a cached keychain
+        // credential may have expired; on a 401, invalidate it and retry
+        // once with the next tier (I11).
+        let remote_refs = match client.get_refs().await {
+            Ok(r) => r,
+            Err(e) if crate::repo::invalidate_on_unauthorized(&config, remote, cred_source, &e) => {
+                credentials = crate::repo::resolve_credentials(&repo_root, &config, remote);
+                client = Arc::new(build_client(credentials.clone()));
+                client.get_refs().await?
+            }
+            Err(e) => return Err(e),
+        };
         crate::repo::remember_credentials(&config, remote, &credentials);
         fetch_spinner.finish_with_message("Remote refs fetched");
 
