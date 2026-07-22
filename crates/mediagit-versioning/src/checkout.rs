@@ -19,7 +19,7 @@
 //! capped at 8).
 
 use crate::sparse::SparseFilter;
-use crate::{is_stage_debris_key, Commit, FileMode, ObjectDatabase, Oid, Tree};
+use crate::{Commit, FileMode, ObjectDatabase, Oid, Tree, is_stage_debris_key};
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -128,19 +128,16 @@ async fn checkout_entry_differential(
     oid: &Oid,
     mode: FileMode,
 ) -> Result<bool> {
-    if matches!(mode, FileMode::Regular | FileMode::Executable) && full_path.exists() {
-        if let Ok(metadata) = fs::metadata(full_path) {
-            if let Ok(expected_size) = odb.get_object_size(oid).await {
-                if metadata.len() == expected_size as u64 {
-                    if let Ok(file_oid) = Oid::from_file(full_path) {
-                        if file_oid == *oid {
-                            debug!("Skipped unchanged file: {}", full_path.display());
-                            return Ok(false);
-                        }
-                    }
-                }
-            }
-        }
+    if matches!(mode, FileMode::Regular | FileMode::Executable)
+        && full_path.exists()
+        && let Ok(metadata) = fs::metadata(full_path)
+        && let Ok(expected_size) = odb.get_object_size(oid).await
+        && metadata.len() == expected_size as u64
+        && let Ok(file_oid) = Oid::from_file(full_path)
+        && file_oid == *oid
+    {
+        debug!("Skipped unchanged file: {}", full_path.display());
+        return Ok(false);
     }
 
     write_entry_to_disk(odb, full_path, oid, mode, true).await?;
@@ -871,6 +868,7 @@ impl CheckoutStats {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)] // edition-2024: test-only env::set_var/remove_var requires unsafe
 mod tests {
     use super::*;
     use crate::{ObjectType, Signature, TreeEntry};
@@ -1353,7 +1351,8 @@ mod tests {
         let commit_b_oid = commit_b.write(&odb).await?;
 
         // Run 1: default (parallel) parallelism.
-        std::env::remove_var("MEDIAGIT_CHECKOUT_PARALLELISM");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_CHECKOUT_PARALLELISM") };
         let repo_parallel = TempDir::new()?;
         let mgr_parallel = CheckoutManager::new(&odb, repo_parallel.path());
         mgr_parallel.checkout_commit(&commit_a_oid).await?;
@@ -1363,14 +1362,16 @@ mod tests {
 
         // Run 2: forced serial (SAFETY: test-only env var scoping; no other
         // test in this process reads MEDIAGIT_CHECKOUT_PARALLELISM concurrently).
-        std::env::set_var("MEDIAGIT_CHECKOUT_PARALLELISM", "1");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MEDIAGIT_CHECKOUT_PARALLELISM", "1") };
         let repo_serial = TempDir::new()?;
         let mgr_serial = CheckoutManager::new(&odb, repo_serial.path());
         mgr_serial.checkout_commit(&commit_a_oid).await?;
         let stats_serial = mgr_serial
             .checkout_diff(&commit_a_oid, &commit_b_oid)
             .await?;
-        std::env::remove_var("MEDIAGIT_CHECKOUT_PARALLELISM");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_CHECKOUT_PARALLELISM") };
 
         // Stats must match exactly (elapsed_ms excluded — timing, not content).
         assert_eq!(stats_parallel.files_added, stats_serial.files_added);
@@ -1757,7 +1758,8 @@ mod tests {
             Ok(out)
         }
 
-        std::env::remove_var("MEDIAGIT_CHECKOUT_PARALLELISM");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_CHECKOUT_PARALLELISM") };
         let repo_parallel = TempDir::new()?;
         crate::sparse::SparseFilter::write(
             repo_parallel.path(),
@@ -1767,7 +1769,8 @@ mod tests {
         let mgr_parallel = CheckoutManager::new(&odb, repo_parallel.path());
         mgr_parallel.checkout_commit(&commit_oid).await?;
 
-        std::env::set_var("MEDIAGIT_CHECKOUT_PARALLELISM", "1");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MEDIAGIT_CHECKOUT_PARALLELISM", "1") };
         let repo_serial = TempDir::new()?;
         crate::sparse::SparseFilter::write(
             repo_serial.path(),
@@ -1776,7 +1779,8 @@ mod tests {
         )?;
         let mgr_serial = CheckoutManager::new(&odb, repo_serial.path());
         mgr_serial.checkout_commit(&commit_oid).await?;
-        std::env::remove_var("MEDIAGIT_CHECKOUT_PARALLELISM");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_CHECKOUT_PARALLELISM") };
 
         let files_parallel = list_files(repo_parallel.path())?;
         let files_serial = list_files(repo_serial.path())?;

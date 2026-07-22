@@ -47,9 +47,9 @@
 
 use axum::http::StatusCode;
 use mediagit_protocol::{RefUpdateRequest, RefsResponse, WantRequest};
-use mediagit_server::{create_router, AppState};
+use mediagit_server::{AppState, create_router};
 use mediagit_storage::{
-    azure::AzureBackend, local::LocalBackend, minio::MinIOBackend, StorageBackend,
+    StorageBackend, azure::AzureBackend, local::LocalBackend, minio::MinIOBackend,
 };
 use mediagit_versioning::{ObjectDatabase, ObjectType, PackWriter, Ref, RefDatabase};
 use reqwest::Client;
@@ -263,7 +263,7 @@ fn generate_test_wav() -> Vec<u8> {
     data.extend_from_slice(&88200u32.to_le_bytes()); // byte rate
     data.extend_from_slice(&2u16.to_le_bytes()); // block align
     data.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
-                                                  // data chunk
+    // data chunk
     data.extend_from_slice(b"data");
     data.extend_from_slice(&0u32.to_le_bytes()); // data size
     data
@@ -281,7 +281,7 @@ fn generate_test_psd() -> Vec<u8> {
     data.extend_from_slice(&100u32.to_be_bytes()); // width
     data.extend_from_slice(&8u16.to_be_bytes()); // depth
     data.extend_from_slice(&3u16.to_be_bytes()); // color mode (RGB)
-                                                 // Color mode data section
+    // Color mode data section
     data.extend_from_slice(&0u32.to_be_bytes());
     // Image resources section
     data.extend_from_slice(&0u32.to_be_bytes());

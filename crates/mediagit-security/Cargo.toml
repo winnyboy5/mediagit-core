@@ -68,6 +68,7 @@ all = ["auth", "database", "middleware", "tls"]
 [dev-dependencies]
 tempfile.workspace = true
 criterion.workspace = true
+mediagit-test-utils = { path = "../mediagit-test-utils" }
 
 [[bench]]
 name = "encryption_benchmark"

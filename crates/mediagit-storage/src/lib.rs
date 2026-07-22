@@ -129,7 +129,7 @@ pub use error::{StorageError, StorageResult};
 pub use gcs::{GcsBackend, GcsConfig};
 pub use local::LocalBackend;
 pub use minio::MinIOBackend;
-pub use namespaced::{generate_repo_id, sanitize_namespace, NamespacedBackend};
+pub use namespaced::{NamespacedBackend, generate_repo_id, sanitize_namespace};
 pub use s3::S3Backend;
 
 /// Storage backend trait for object storage operations

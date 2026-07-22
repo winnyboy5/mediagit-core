@@ -280,10 +280,11 @@ impl FsckCmd {
             println!("{} Information:", style("ℹ").blue().bold());
             for issue in &info {
                 println!("  • {}", style(&issue.message).dim());
-                if self.all && self.verbose {
-                    if let Some(oid) = issue.oid {
-                        println!("    OID: {}", style(oid.to_string()).dim());
-                    }
+                if self.all
+                    && self.verbose
+                    && let Some(oid) = issue.oid
+                {
+                    println!("    OID: {}", style(oid.to_string()).dim());
                 }
             }
             println!();

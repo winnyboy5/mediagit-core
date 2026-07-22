@@ -47,12 +47,12 @@ pub use apikey::{ApiKey, ApiKeyAuth};
 pub use credentials::{CredentialsStore, UserCredentials};
 pub use grants::{GrantsStore, Level as GrantLevel};
 pub use handlers::{
-    login_handler, logout_handler, me_handler, refresh_handler, register_handler,
-    validate_password_strength, validate_registration_input, AuthResponse, AuthService,
-    ErrorResponse, LoginRequest, RefreshRequest, RegisterRequest, UserInfo,
+    AuthResponse, AuthService, ErrorResponse, LoginRequest, RefreshRequest, RegisterRequest,
+    UserInfo, login_handler, logout_handler, me_handler, refresh_handler, register_handler,
+    validate_password_strength, validate_registration_input,
 };
 pub use jwt::{Claims, JwtAuth, TokenPair};
-pub use middleware::{auth_middleware, AuthLayer, AuthUser};
+pub use middleware::{AuthLayer, AuthUser, auth_middleware};
 pub use user::{User, UserId};
 
 use thiserror::Error;

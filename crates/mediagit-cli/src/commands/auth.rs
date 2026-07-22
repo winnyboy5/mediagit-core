@@ -40,12 +40,12 @@
 //! surfacing a raw HTTP error.
 
 use crate::output;
-use crate::repo::{find_repo_root, CredentialSource};
+use crate::repo::{CredentialSource, find_repo_root};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use dialoguer::{Input, Password};
 use mediagit_protocol::Credentials;
-use mediagit_security::auth::{user::Role, AuthResponse, GrantLevel};
+use mediagit_security::auth::{AuthResponse, GrantLevel, user::Role};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -760,12 +760,12 @@ async fn logout(opts: &LogoutOpts) -> Result<()> {
         // remotes) rather than a true keychain-wide sweep. Upgrade path:
         // switch to a keyring backend that supports enumeration, if a truly
         // exhaustive sweep is ever needed.
-        if let Ok(repo_root) = find_repo_root() {
-            if let Ok(config) = mediagit_config::Config::load(&repo_root).await {
-                for name in config.list_remotes() {
-                    if crate::repo::forget_credentials(&config, &name) {
-                        removed += 1;
-                    }
+        if let Ok(repo_root) = find_repo_root()
+            && let Ok(config) = mediagit_config::Config::load(&repo_root).await
+        {
+            for name in config.list_remotes() {
+                if crate::repo::forget_credentials(&config, &name) {
+                    removed += 1;
                 }
             }
         }

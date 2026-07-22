@@ -23,7 +23,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use mediagit_security::auth::{ApiKeyAuth, JwtAuth};
-use mediagit_server::{create_router, AppState};
+use mediagit_server::{AppState, create_router};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tower::util::ServiceExt;
@@ -308,13 +308,15 @@ async fn delete_user_cascades_grants() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
-    assert!(state
-        .auth_service()
-        .unwrap()
-        .credentials_store
-        .get_user("victim")
-        .await
-        .is_err());
+    assert!(
+        state
+            .auth_service()
+            .unwrap()
+            .credentials_store
+            .get_user("victim")
+            .await
+            .is_err()
+    );
     assert_eq!(state.grants.get("victim", "repoA"), None);
 }
 
@@ -724,16 +726,20 @@ async fn change_password_succeeds_with_correct_current_password() {
 
     // Old password no longer authenticates; new one does.
     let auth_service = state.auth_service().unwrap();
-    assert!(auth_service
-        .credentials_store
-        .authenticate("writer", "password123")
-        .await
-        .is_err());
-    assert!(auth_service
-        .credentials_store
-        .authenticate("writer", "newpassword123")
-        .await
-        .is_ok());
+    assert!(
+        auth_service
+            .credentials_store
+            .authenticate("writer", "password123")
+            .await
+            .is_err()
+    );
+    assert!(
+        auth_service
+            .credentials_store
+            .authenticate("writer", "newpassword123")
+            .await
+            .is_ok()
+    );
 }
 
 // ---- Write-role authorization negatives on the remaining admin-only routes ----
@@ -824,13 +830,15 @@ async fn admin_reset_password_recovers_forgotten_password() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
-    assert!(state
-        .auth_service()
-        .unwrap()
-        .credentials_store
-        .authenticate("forgetful", "recoveredpw123")
-        .await
-        .is_ok());
+    assert!(
+        state
+            .auth_service()
+            .unwrap()
+            .credentials_store
+            .authenticate("forgetful", "recoveredpw123")
+            .await
+            .is_ok()
+    );
 }
 
 // ---- GET /auth/whoami ----

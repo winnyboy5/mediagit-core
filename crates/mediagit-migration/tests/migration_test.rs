@@ -17,8 +17,8 @@
 //! progress tracking, and integrity verification.
 
 use mediagit_migration::{IntegrityVerifier, MigrationState};
-use mediagit_storage::mock::MockBackend;
 use mediagit_storage::StorageBackend;
+use mediagit_storage::mock::MockBackend;
 use std::sync::Arc;
 use tempfile::tempdir;
 

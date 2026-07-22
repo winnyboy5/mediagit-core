@@ -16,7 +16,7 @@
 //! `--auto --quiet` mode, which short-circuits if reclaimable work is below
 //! the byte / count thresholds defined in `gc.rs`.
 
-use crate::commands::gc::{run_gc, GcOptions};
+use crate::commands::gc::{GcOptions, run_gc};
 use anyhow::Result;
 use std::path::Path;
 use tracing::{debug, warn};
@@ -92,23 +92,19 @@ pub async fn maybe_run(repo_root: &Path, mode: TriggerMode) -> Result<()> {
         .map(|cwd| cwd != repo_root)
         .unwrap_or(true);
 
-    if needs_chdir {
-        if let Err(e) = std::env::set_current_dir(repo_root) {
-            warn!(
-                "auto-gc: failed to set cwd to {}: {}",
-                repo_root.display(),
-                e
-            );
-            return Ok(());
-        }
+    if needs_chdir && let Err(e) = std::env::set_current_dir(repo_root) {
+        warn!(
+            "auto-gc: failed to set cwd to {}: {}",
+            repo_root.display(),
+            e
+        );
+        return Ok(());
     }
 
     let result = run_gc(&opts).await;
 
-    if needs_chdir {
-        if let Some(cwd) = original_cwd {
-            let _ = std::env::set_current_dir(&cwd);
-        }
+    if needs_chdir && let Some(cwd) = original_cwd {
+        let _ = std::env::set_current_dir(&cwd);
     }
 
     if let Err(e) = result {

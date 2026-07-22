@@ -293,14 +293,19 @@ impl PushCmd {
                         .ref_name
                         .replace("refs/heads/", &format!("refs/remotes/{}/", remote));
                     if refdb.read(&tracking_ref).await.is_ok() {
-                        if let Err(e) = refdb.delete(&tracking_ref).await {
-                            tracing::warn!(
-                                "Failed to delete local tracking ref {}: {}",
-                                tracking_ref,
-                                e
-                            );
-                        } else if self.verbose {
-                            println!("  Cleaned up local tracking ref: {}", tracking_ref);
+                        match refdb.delete(&tracking_ref).await {
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to delete local tracking ref {}: {}",
+                                    tracking_ref,
+                                    e
+                                );
+                            }
+                            _ => {
+                                if self.verbose {
+                                    println!("  Cleaned up local tracking ref: {}", tracking_ref);
+                                }
+                            }
                         }
                     }
                 } else if !self.quiet {
@@ -409,26 +414,26 @@ impl PushCmd {
                 // Collect branch tips from refs_to_push
                 let mut branch_tips: Vec<mediagit_versioning::Oid> = Vec::new();
                 for branch_ref in &refs_to_push {
-                    if let Ok(r) = refdb.read(branch_ref).await {
-                        if let Some(oid) = r.oid {
-                            branch_tips.push(oid);
-                        }
+                    if let Ok(r) = refdb.read(branch_ref).await
+                        && let Some(oid) = r.oid
+                    {
+                        branch_tips.push(oid);
                     }
                 }
                 for tag_ref in all_tags {
-                    if let Ok(r) = refdb.read(&tag_ref).await {
-                        if let Some(tag_oid) = r.oid {
-                            // Include tag if its target is an ancestor of any branch tip
-                            let mut include = false;
-                            for tip in &branch_tips {
-                                if lca.is_ancestor(&tag_oid, tip).await.unwrap_or(false) {
-                                    include = true;
-                                    break;
-                                }
+                    if let Ok(r) = refdb.read(&tag_ref).await
+                        && let Some(tag_oid) = r.oid
+                    {
+                        // Include tag if its target is an ancestor of any branch tip
+                        let mut include = false;
+                        for tip in &branch_tips {
+                            if lca.is_ancestor(&tag_oid, tip).await.unwrap_or(false) {
+                                include = true;
+                                break;
                             }
-                            if include && !refs_to_push.contains(&tag_ref) {
-                                refs_to_push.push(tag_ref);
-                            }
+                        }
+                        if include && !refs_to_push.contains(&tag_ref) {
+                            refs_to_push.push(tag_ref);
                         }
                     }
                 }
@@ -481,14 +486,14 @@ impl PushCmd {
             let local_oid_str = local_oid.to_hex();
 
             // Check if already up-to-date
-            if let Some(ref remote) = remote_oid {
-                if remote == &local_oid_str {
-                    skipped_uptodate += 1;
-                    if self.verbose {
-                        println!("  {} already up to date", ref_to_push);
-                    }
-                    continue;
+            if let Some(ref remote) = remote_oid
+                && remote == &local_oid_str
+            {
+                skipped_uptodate += 1;
+                if self.verbose {
+                    println!("  {} already up to date", ref_to_push);
                 }
+                continue;
             }
 
             updates.push(mediagit_protocol::RefUpdate {
@@ -655,63 +660,58 @@ impl PushCmd {
                         .join("refs")
                         .join("tags")
                         .join(format!("{}.meta", tag_name));
-                    if meta_path.exists() {
-                        if let Ok(meta_bytes) = std::fs::read(&meta_path) {
-                            // Store meta as a blob in the ODB
-                            match odb.write(ObjectType::Blob, &meta_bytes).await {
-                                Ok(meta_oid) => {
-                                    // Upload the blob bytes to the server before registering
-                                    // the ref — update_refs only records the pointer, it does
-                                    // not transfer object data.
-                                    if let Ok(meta_raw) = odb.read(&meta_oid).await {
-                                        if let Err(e) = client
-                                            .upload_loose_object(
-                                                meta_oid,
-                                                ObjectType::Blob,
-                                                &meta_raw,
-                                            )
-                                            .await
-                                        {
-                                            tracing::warn!(
-                                                "Failed to upload tag meta blob for {}: {}",
-                                                tag_name,
-                                                e
-                                            );
-                                        }
-                                    }
-
-                                    // Push a ref pointing to this blob OID so server stores it
-                                    let meta_ref_name = format!("refs/tag-meta/{}", tag_name);
-                                    let remote_meta_oid = remote_refs
-                                        .refs
-                                        .iter()
-                                        .find(|r| r.name == meta_ref_name)
-                                        .map(|r| r.oid.clone());
-                                    let meta_update = mediagit_protocol::RefUpdate {
-                                        name: meta_ref_name,
-                                        old_oid: remote_meta_oid,
-                                        new_oid: meta_oid.to_hex(),
-                                        delete: false,
-                                    };
-                                    let meta_req = mediagit_protocol::RefUpdateRequest {
-                                        updates: vec![meta_update],
-                                        force: true,
-                                    };
-                                    if let Err(e) = client.update_refs(meta_req).await {
-                                        tracing::warn!(
-                                            "Failed to push tag meta ref for {}: {}",
-                                            tag_name,
-                                            e
-                                        );
-                                    }
-                                }
-                                Err(e) => {
+                    if meta_path.exists()
+                        && let Ok(meta_bytes) = std::fs::read(&meta_path)
+                    {
+                        // Store meta as a blob in the ODB
+                        match odb.write(ObjectType::Blob, &meta_bytes).await {
+                            Ok(meta_oid) => {
+                                // Upload the blob bytes to the server before registering
+                                // the ref — update_refs only records the pointer, it does
+                                // not transfer object data.
+                                if let Ok(meta_raw) = odb.read(&meta_oid).await
+                                    && let Err(e) = client
+                                        .upload_loose_object(meta_oid, ObjectType::Blob, &meta_raw)
+                                        .await
+                                {
                                     tracing::warn!(
-                                        "Failed to store tag meta blob for {}: {}",
+                                        "Failed to upload tag meta blob for {}: {}",
                                         tag_name,
                                         e
                                     );
                                 }
+
+                                // Push a ref pointing to this blob OID so server stores it
+                                let meta_ref_name = format!("refs/tag-meta/{}", tag_name);
+                                let remote_meta_oid = remote_refs
+                                    .refs
+                                    .iter()
+                                    .find(|r| r.name == meta_ref_name)
+                                    .map(|r| r.oid.clone());
+                                let meta_update = mediagit_protocol::RefUpdate {
+                                    name: meta_ref_name,
+                                    old_oid: remote_meta_oid,
+                                    new_oid: meta_oid.to_hex(),
+                                    delete: false,
+                                };
+                                let meta_req = mediagit_protocol::RefUpdateRequest {
+                                    updates: vec![meta_update],
+                                    force: true,
+                                };
+                                if let Err(e) = client.update_refs(meta_req).await {
+                                    tracing::warn!(
+                                        "Failed to push tag meta ref for {}: {}",
+                                        tag_name,
+                                        e
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to store tag meta blob for {}: {}",
+                                    tag_name,
+                                    e
+                                );
                             }
                         }
                     }
@@ -804,15 +804,20 @@ impl PushCmd {
                     if let Ok(oid) = mediagit_versioning::Oid::from_hex(&update.new_oid) {
                         let tracking_ref =
                             mediagit_versioning::Ref::new_direct(tracking_ref_name.clone(), oid);
-                        if let Err(e) = refdb.write(&tracking_ref).await {
-                            if self.verbose {
-                                println!(
-                                    "  Warning: Failed to update tracking ref {}: {}",
-                                    tracking_ref_name, e
-                                );
+                        match refdb.write(&tracking_ref).await {
+                            Err(e) => {
+                                if self.verbose {
+                                    println!(
+                                        "  Warning: Failed to update tracking ref {}: {}",
+                                        tracking_ref_name, e
+                                    );
+                                }
                             }
-                        } else if self.verbose {
-                            println!("  Updated tracking ref: {}", tracking_ref_name);
+                            _ => {
+                                if self.verbose {
+                                    println!("  Updated tracking ref: {}", tracking_ref_name);
+                                }
+                            }
                         }
                     }
                 }
@@ -889,10 +894,10 @@ impl PushCmd {
         }
 
         // Save stats for later retrieval by stats command
-        if !self.dry_run {
-            if let Err(e) = stats.save(&storage_path) {
-                tracing::warn!("Failed to save operation stats: {}", e);
-            }
+        if !self.dry_run
+            && let Err(e) = stats.save(&storage_path)
+        {
+            tracing::warn!("Failed to save operation stats: {}", e);
         }
 
         Ok(())

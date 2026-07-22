@@ -101,8 +101,8 @@ pub mod zstd_compressor;
 use std::fmt::Debug;
 
 pub use adaptive::{
-    calculate_entropy, AdaptiveCompressor, CompressionStrategy as AdaptiveStrategy, EntropyClass,
-    FileProfile, PatternClass, PerformanceStats, SizeClass,
+    AdaptiveCompressor, CompressionStrategy as AdaptiveStrategy, EntropyClass, FileProfile,
+    PatternClass, PerformanceStats, SizeClass, calculate_entropy,
 };
 pub use brotli_compressor::BrotliCompressor;
 pub use error::{CompressionError, CompressionResult};

@@ -142,6 +142,7 @@ impl Oid {
     ///
     /// This is a blocking function; call it inside `tokio::task::spawn_blocking`.
     /// Gated by `MEDIAGIT_HASH_PARALLEL=1` at the call site.
+    #[allow(unsafe_code)] // audited: read-only mmap, file not modified while mapped
     pub fn from_file_mmap_parallel<P: AsRef<std::path::Path>>(path: P) -> anyhow::Result<Self> {
         let file = std::fs::File::open(path.as_ref())?;
         // Safety: file opened read-only; mapping is read-only.

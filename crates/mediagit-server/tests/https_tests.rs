@@ -19,7 +19,7 @@
 #[cfg(feature = "tls")]
 mod https_tests {
     use mediagit_security::{CertificateBuilder, TlsConfigBuilder};
-    use mediagit_server::{create_router, AppState};
+    use mediagit_server::{AppState, create_router};
     use std::sync::Arc;
     use tempfile::TempDir;
 

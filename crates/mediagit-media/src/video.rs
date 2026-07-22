@@ -41,7 +41,7 @@
 //! ```
 
 use crate::error::{MediaError, Result};
-use mp4parse::{read_mp4, MediaContext, TrackType};
+use mp4parse::{MediaContext, TrackType, read_mp4};
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 use tracing::{debug, info, instrument, warn};

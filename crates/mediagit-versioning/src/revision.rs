@@ -58,10 +58,12 @@ async fn resolve_name(name: &str, refdb: &RefDatabase, odb: &ObjectDatabase) -> 
     }
 
     // Try as abbreviated OID (4-63 hex chars)
-    if name.len() >= 4 && name.len() < 64 && name.chars().all(|c| c.is_ascii_hexdigit()) {
-        if let Ok(oid) = odb.resolve_abbreviated_oid(name).await {
-            return Ok(oid);
-        }
+    if name.len() >= 4
+        && name.len() < 64
+        && name.chars().all(|c| c.is_ascii_hexdigit())
+        && let Ok(oid) = odb.resolve_abbreviated_oid(name).await
+    {
+        return Ok(oid);
     }
 
     // Try to resolve as reference (handles symbolic refs like HEAD)
@@ -136,7 +138,9 @@ async fn walk_parents(start_oid: Oid, count: usize, odb: &ObjectDatabase) -> Res
         if commit.parents.is_empty() {
             anyhow::bail!(
                 "Cannot go back {} generation(s): commit {} has no parents (reached root at generation {})",
-                count, current_oid, i
+                count,
+                current_oid,
+                i
             );
         }
 

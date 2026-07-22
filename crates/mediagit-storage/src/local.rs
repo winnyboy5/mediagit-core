@@ -382,6 +382,7 @@ impl LocalBackend {
     ///
     /// * `Ok(Mmap)` - Memory-mapped view of the file
     /// * `Err` - If the key doesn't exist or an I/O error occurs
+    #[allow(unsafe_code)] // audited: read-only mmap, file not modified while mapped
     pub fn get_mmap(&self, key: &str) -> anyhow::Result<memmap2::Mmap> {
         if key.is_empty() {
             return Err(anyhow::anyhow!("key cannot be empty"));
@@ -831,10 +832,11 @@ impl LocalBackend {
                 // between the temp write and the atomic rename): these are
                 // never part of the logical key space and must never be
                 // exposed by list_objects, even transiently.
-                if let Some((_, suffix)) = base.rsplit_once(".tmp") {
-                    if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
-                        continue;
-                    }
+                if let Some((_, suffix)) = base.rsplit_once(".tmp")
+                    && !suffix.is_empty()
+                    && suffix.chars().all(|c| c.is_ascii_digit())
+                {
+                    continue;
                 }
 
                 let key = if n >= 3 && components[n - 3] == "packs" {

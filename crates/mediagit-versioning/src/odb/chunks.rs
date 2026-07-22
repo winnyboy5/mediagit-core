@@ -142,10 +142,10 @@ impl ObjectDatabase {
                     // but the download handler sees no meta and returns NOT_FOUND).
                     let meta_key = format!("chunk-deltas/{}.meta", chunk.id.to_hex());
                     let meta_data = format!("base:{}", base_id.to_hex());
-                    if let Err(e) = self.storage.put(&meta_key, meta_data.as_bytes()).await {
-                        if !self.storage.exists(&meta_key).await.unwrap_or(false) {
-                            return Err(anyhow::anyhow!("Failed to store chunk delta meta: {}", e));
-                        }
+                    if let Err(e) = self.storage.put(&meta_key, meta_data.as_bytes()).await
+                        && !self.storage.exists(&meta_key).await.unwrap_or(false)
+                    {
+                        return Err(anyhow::anyhow!("Failed to store chunk delta meta: {}", e));
                     }
                     drop(pairs);
 
@@ -328,27 +328,31 @@ impl ObjectDatabase {
                     let codec_hint = to_chunk_codec_hint(chunk.codec_hint, chunk.chunk_type);
                     let compressed = if let Some(smart_comp) = &self.smart_compressor {
                         // Try codec-aware compression first
-                        if let Some(result) = smart_comp.compress_by_codec(&chunk.data, codec_hint)
-                        {
-                            result.map_err(|e| {
+                        match smart_comp.compress_by_codec(&chunk.data, codec_hint) {
+                            Some(result) => result.map_err(|e| {
                                 anyhow::anyhow!(
                                     "Failed to compress chunk {} (codec): {}",
                                     chunk_key,
                                     e
                                 )
-                            })?
-                        } else {
-                            // Unknown codec → fall back to file-level strategy
-                            let chunk_comp_type = if !filename.is_empty() {
-                                CompressionObjectType::from_path(filename)
-                            } else {
-                                CompressionObjectType::Unknown
-                            };
-                            smart_comp
-                                .compress_typed_with_size(&chunk.data, chunk_comp_type)
-                                .map_err(|e| {
-                                    anyhow::anyhow!("Failed to compress chunk {}: {}", chunk_key, e)
-                                })?
+                            })?,
+                            _ => {
+                                // Unknown codec → fall back to file-level strategy
+                                let chunk_comp_type = if !filename.is_empty() {
+                                    CompressionObjectType::from_path(filename)
+                                } else {
+                                    CompressionObjectType::Unknown
+                                };
+                                smart_comp
+                                    .compress_typed_with_size(&chunk.data, chunk_comp_type)
+                                    .map_err(|e| {
+                                        anyhow::anyhow!(
+                                            "Failed to compress chunk {}: {}",
+                                            chunk_key,
+                                            e
+                                        )
+                                    })?
+                            }
                         }
                     } else {
                         self.compressor.compress(&chunk.data).map_err(|e| {
@@ -679,29 +683,36 @@ impl ObjectDatabase {
                         } else {
                             let base_key = format!("chunks/{}", base_id.to_hex());
                             // Check decompressed base chunk cache before hitting storage
-                            let base_data_arc =
-                                if let Some(cached) = base_chunk_cache.get(&base_id).await {
-                                    Some(cached)
-                                } else if let Ok(base_compressed) = storage.get(&base_key).await {
-                                    let decompressed = if let Some(ref smart) = smart_comp {
-                                        decompress_typed_blocking(smart.clone(), base_compressed)
+                            let base_data_arc = if let Some(cached) =
+                                base_chunk_cache.get(&base_id).await
+                            {
+                                Some(cached)
+                            } else {
+                                match storage.get(&base_key).await {
+                                    Ok(base_compressed) => {
+                                        let decompressed = if let Some(ref smart) = smart_comp {
+                                            decompress_typed_blocking(
+                                                smart.clone(),
+                                                base_compressed,
+                                            )
                                             .await
                                             .ok()
-                                    } else {
-                                        decompress_blocking(compressor.clone(), base_compressed)
-                                            .await
-                                            .ok()
-                                    };
-                                    if let Some(data) = decompressed {
-                                        let arc = Arc::new(data);
-                                        base_chunk_cache.insert(base_id, arc.clone()).await;
-                                        Some(arc)
-                                    } else {
-                                        None
+                                        } else {
+                                            decompress_blocking(compressor.clone(), base_compressed)
+                                                .await
+                                                .ok()
+                                        };
+                                        if let Some(data) = decompressed {
+                                            let arc = Arc::new(data);
+                                            base_chunk_cache.insert(base_id, arc.clone()).await;
+                                            Some(arc)
+                                        } else {
+                                            None
+                                        }
                                     }
-                                } else {
-                                    None
-                                };
+                                    _ => None,
+                                }
+                            };
 
                             if let Some(base_data) = base_data_arc {
                                 let delta = DeltaEncoder::encode(&base_data, &chunk.data);
@@ -768,26 +779,21 @@ impl ObjectDatabase {
                                         let meta_data = format!("base:{}", base_id.to_hex());
                                         if let Err(e) =
                                             storage.put(&meta_key, meta_data.as_bytes()).await
+                                            && !storage.exists(&meta_key).await.unwrap_or(false)
                                         {
-                                            if !storage.exists(&meta_key).await.unwrap_or(false) {
-                                                return Err(anyhow::anyhow!(
-                                                    "Store delta meta: {}",
-                                                    e
-                                                ));
-                                            }
+                                            return Err(anyhow::anyhow!("Store delta meta: {}", e));
                                         }
                                         drop(pairs);
 
                                         // Tolerate concurrent writes: if put fails but chunk exists, treat as dedup
                                         if let Err(e) =
                                             storage.put(&delta_key, &compressed_delta).await
+                                            && !storage.exists(&delta_key).await.unwrap_or(false)
                                         {
-                                            if !storage.exists(&delta_key).await.unwrap_or(false) {
-                                                // Remove the routing sidecar so the chunk is
-                                                // not permanently misrouted to a missing binary.
-                                                let _ = storage.delete(&meta_key).await;
-                                                return Err(anyhow::anyhow!("Store delta: {}", e));
-                                            }
+                                            // Remove the routing sidecar so the chunk is
+                                            // not permanently misrouted to a missing binary.
+                                            let _ = storage.delete(&meta_key).await;
+                                            return Err(anyhow::anyhow!("Store delta: {}", e));
                                         }
 
                                         debug!(
@@ -818,10 +824,10 @@ impl ObjectDatabase {
                         };
 
                         // Tolerate concurrent writes: if put fails but chunk exists, treat as dedup
-                        if let Err(e) = storage.put(&chunk_key, &compressed).await {
-                            if !storage.exists(&chunk_key).await.unwrap_or(false) {
-                                return Err(anyhow::anyhow!("Store chunk: {}", e));
-                            }
+                        if let Err(e) = storage.put(&chunk_key, &compressed).await
+                            && !storage.exists(&chunk_key).await.unwrap_or(false)
+                        {
+                            return Err(anyhow::anyhow!("Store chunk: {}", e));
                         }
 
                         debug!(
@@ -1053,29 +1059,36 @@ impl ObjectDatabase {
                         } else {
                             let base_key = format!("chunks/{}", base_id.to_hex());
                             // Check decompressed base chunk cache before hitting storage
-                            let base_data_arc =
-                                if let Some(cached) = base_chunk_cache.get(&base_id).await {
-                                    Some(cached)
-                                } else if let Ok(base_compressed) = storage.get(&base_key).await {
-                                    let decompressed = if let Some(ref smart) = smart_comp {
-                                        decompress_typed_blocking(smart.clone(), base_compressed)
+                            let base_data_arc = if let Some(cached) =
+                                base_chunk_cache.get(&base_id).await
+                            {
+                                Some(cached)
+                            } else {
+                                match storage.get(&base_key).await {
+                                    Ok(base_compressed) => {
+                                        let decompressed = if let Some(ref smart) = smart_comp {
+                                            decompress_typed_blocking(
+                                                smart.clone(),
+                                                base_compressed,
+                                            )
                                             .await
                                             .ok()
-                                    } else {
-                                        decompress_blocking(compressor.clone(), base_compressed)
-                                            .await
-                                            .ok()
-                                    };
-                                    if let Some(data) = decompressed {
-                                        let arc = Arc::new(data);
-                                        base_chunk_cache.insert(base_id, arc.clone()).await;
-                                        Some(arc)
-                                    } else {
-                                        None
+                                        } else {
+                                            decompress_blocking(compressor.clone(), base_compressed)
+                                                .await
+                                                .ok()
+                                        };
+                                        if let Some(data) = decompressed {
+                                            let arc = Arc::new(data);
+                                            base_chunk_cache.insert(base_id, arc.clone()).await;
+                                            Some(arc)
+                                        } else {
+                                            None
+                                        }
                                     }
-                                } else {
-                                    None
-                                };
+                                    _ => None,
+                                }
+                            };
 
                             if let Some(base_data) = base_data_arc {
                                 let delta = DeltaEncoder::encode(&base_data, &chunk.data);
@@ -1137,26 +1150,21 @@ impl ObjectDatabase {
                                         let meta_data = format!("base:{}", base_id.to_hex());
                                         if let Err(e) =
                                             storage.put(&meta_key, meta_data.as_bytes()).await
+                                            && !storage.exists(&meta_key).await.unwrap_or(false)
                                         {
-                                            if !storage.exists(&meta_key).await.unwrap_or(false) {
-                                                return Err(anyhow::anyhow!(
-                                                    "Store delta meta: {}",
-                                                    e
-                                                ));
-                                            }
+                                            return Err(anyhow::anyhow!("Store delta meta: {}", e));
                                         }
                                         drop(pairs);
 
                                         // Tolerate concurrent writes: if put fails but chunk exists, treat as dedup
                                         if let Err(e) =
                                             storage.put(&delta_key, &compressed_delta).await
+                                            && !storage.exists(&delta_key).await.unwrap_or(false)
                                         {
-                                            if !storage.exists(&delta_key).await.unwrap_or(false) {
-                                                // Remove the routing sidecar so the chunk is
-                                                // not permanently misrouted to a missing binary.
-                                                let _ = storage.delete(&meta_key).await;
-                                                return Err(anyhow::anyhow!("Store delta: {}", e));
-                                            }
+                                            // Remove the routing sidecar so the chunk is
+                                            // not permanently misrouted to a missing binary.
+                                            let _ = storage.delete(&meta_key).await;
+                                            return Err(anyhow::anyhow!("Store delta: {}", e));
                                         }
 
                                         debug!(
@@ -1192,16 +1200,13 @@ impl ObjectDatabase {
                             let compressor2 = compressor.clone();
                             tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
                                 if let Some(ref smart) = smart2 {
-                                    if let Some(result) =
-                                        smart.compress_by_codec(&chunk_data, codec_hint)
-                                    {
-                                        result.map_err(|e| {
+                                    match smart.compress_by_codec(&chunk_data, codec_hint) {
+                                        Some(result) => result.map_err(|e| {
                                             anyhow::anyhow!("Compress chunk (codec): {}", e)
-                                        })
-                                    } else {
-                                        smart
+                                        }),
+                                        _ => smart
                                             .compress_typed_with_size(&chunk_data, comp_type)
-                                            .map_err(|e| anyhow::anyhow!("Compress chunk: {}", e))
+                                            .map_err(|e| anyhow::anyhow!("Compress chunk: {}", e)),
                                     }
                                 } else if compression_enabled {
                                     compressor2
@@ -1215,14 +1220,16 @@ impl ObjectDatabase {
                             .map_err(|e| anyhow::anyhow!("Compression task panicked: {}", e))??
                         } else if let Some(ref smart) = smart_comp {
                             // Try codec-aware compression first
-                            if let Some(result) = smart.compress_by_codec(&chunk.data, codec_hint) {
-                                result
-                                    .map_err(|e| anyhow::anyhow!("Compress chunk (codec): {}", e))?
-                            } else {
-                                // Unknown codec → fall back to file-level strategy
-                                smart
-                                    .compress_typed_with_size(&chunk.data, comp_type)
-                                    .map_err(|e| anyhow::anyhow!("Compress chunk: {}", e))?
+                            match smart.compress_by_codec(&chunk.data, codec_hint) {
+                                Some(result) => result.map_err(|e| {
+                                    anyhow::anyhow!("Compress chunk (codec): {}", e)
+                                })?,
+                                _ => {
+                                    // Unknown codec → fall back to file-level strategy
+                                    smart
+                                        .compress_typed_with_size(&chunk.data, comp_type)
+                                        .map_err(|e| anyhow::anyhow!("Compress chunk: {}", e))?
+                                }
                             }
                         } else if compression_enabled {
                             compressor
@@ -1233,10 +1240,10 @@ impl ObjectDatabase {
                         };
 
                         // Tolerate concurrent writes
-                        if let Err(e) = storage.put(&chunk_key, &data_to_store).await {
-                            if !storage.exists(&chunk_key).await.unwrap_or(false) {
-                                return Err(anyhow::anyhow!("Store chunk: {}", e));
-                            }
+                        if let Err(e) = storage.put(&chunk_key, &data_to_store).await
+                            && !storage.exists(&chunk_key).await.unwrap_or(false)
+                        {
+                            return Err(anyhow::anyhow!("Store chunk: {}", e));
                         }
                     }
 
@@ -2496,11 +2503,11 @@ impl ObjectDatabase {
         use crate::pack::PackReader;
         let mut set = std::collections::HashSet::new();
         for pack_key in self.list_pack_files().await? {
-            if let Ok(pack_data) = self.storage.get(&pack_key).await {
-                if let Ok(pack_reader) = PackReader::new(pack_data) {
-                    for (oid, _) in pack_reader.index().iter() {
-                        set.insert(*oid);
-                    }
+            if let Ok(pack_data) = self.storage.get(&pack_key).await
+                && let Ok(pack_reader) = PackReader::new(pack_data)
+            {
+                for (oid, _) in pack_reader.index().iter() {
+                    set.insert(*oid);
                 }
             }
         }
@@ -2551,18 +2558,18 @@ impl ObjectDatabase {
         }
 
         let delta_key = format!("chunk-deltas/{}", chunk_id.to_hex());
-        if let Err(e) = self.storage.put(&delta_key, compressed_delta_bytes).await {
-            if !self.storage.exists(&delta_key).await.unwrap_or(false) {
-                return Err(anyhow::anyhow!("Failed to store chunk delta: {}", e));
-            }
+        if let Err(e) = self.storage.put(&delta_key, compressed_delta_bytes).await
+            && !self.storage.exists(&delta_key).await.unwrap_or(false)
+        {
+            return Err(anyhow::anyhow!("Failed to store chunk delta: {}", e));
         }
 
         let meta_key = format!("chunk-deltas/{}.meta", chunk_id.to_hex());
         let meta_data = format!("base:{}", base_id.to_hex());
-        if let Err(e) = self.storage.put(&meta_key, meta_data.as_bytes()).await {
-            if !self.storage.exists(&meta_key).await.unwrap_or(false) {
-                return Err(anyhow::anyhow!("Failed to store chunk delta meta: {}", e));
-            }
+        if let Err(e) = self.storage.put(&meta_key, meta_data.as_bytes()).await
+            && !self.storage.exists(&meta_key).await.unwrap_or(false)
+        {
+            return Err(anyhow::anyhow!("Failed to store chunk delta meta: {}", e));
         }
 
         Ok(())

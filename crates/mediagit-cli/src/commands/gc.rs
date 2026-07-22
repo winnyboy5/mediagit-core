@@ -352,38 +352,38 @@ impl GarbageCollector {
         debug!("Found {} tags to traverse", tags.len());
 
         for tag_name in tags {
-            if let Ok(tag_ref) = self.refdb.read(&format!("refs/tags/{}", tag_name)).await {
-                if let Some(oid) = tag_ref.oid {
-                    // `oid` is either a lightweight tag (points straight at a
-                    // commit) or an annotated tag (points at a Tag object).
-                    // Protect the ref target itself either way, then walk
-                    // THROUGH a Tag object to its target — otherwise a
-                    // commit reachable only via an annotated tag would be
-                    // collected as garbage.
-                    reachable.insert(oid);
-                    let tag_obj = match self.odb.read(&oid).await {
-                        Ok(data) => Tag::deserialize(&data).ok(),
-                        Err(_) => None,
-                    };
-                    match tag_obj {
-                        Some(tag) => match tag.target_type {
-                            ObjectType::Commit => {
-                                self.traverse_commit_chain(&tag.target, &mut reachable)
-                                    .await?;
-                            }
-                            ObjectType::Tree => {
-                                self.traverse_tree(&tag.target, &mut reachable).await?;
-                            }
-                            ObjectType::Blob | ObjectType::Tag => {
-                                // Leaf or tag-of-a-tag target: existence is
-                                // all gc protects for non-commit targets.
-                                reachable.insert(tag.target);
-                            }
-                        },
-                        None => {
-                            // Lightweight tag: oid IS the commit directly.
-                            self.traverse_commit_chain(&oid, &mut reachable).await?;
+            if let Ok(tag_ref) = self.refdb.read(&format!("refs/tags/{}", tag_name)).await
+                && let Some(oid) = tag_ref.oid
+            {
+                // `oid` is either a lightweight tag (points straight at a
+                // commit) or an annotated tag (points at a Tag object).
+                // Protect the ref target itself either way, then walk
+                // THROUGH a Tag object to its target — otherwise a
+                // commit reachable only via an annotated tag would be
+                // collected as garbage.
+                reachable.insert(oid);
+                let tag_obj = match self.odb.read(&oid).await {
+                    Ok(data) => Tag::deserialize(&data).ok(),
+                    Err(_) => None,
+                };
+                match tag_obj {
+                    Some(tag) => match tag.target_type {
+                        ObjectType::Commit => {
+                            self.traverse_commit_chain(&tag.target, &mut reachable)
+                                .await?;
                         }
+                        ObjectType::Tree => {
+                            self.traverse_tree(&tag.target, &mut reachable).await?;
+                        }
+                        ObjectType::Blob | ObjectType::Tag => {
+                            // Leaf or tag-of-a-tag target: existence is
+                            // all gc protects for non-commit targets.
+                            reachable.insert(tag.target);
+                        }
+                    },
+                    None => {
+                        // Lightweight tag: oid IS the commit directly.
+                        self.traverse_commit_chain(&oid, &mut reachable).await?;
                     }
                 }
             }
@@ -558,15 +558,15 @@ impl GarbageCollector {
             if true {
                 let path_part = &key;
                 let hex = path_part.replace('/', "");
-                if hex.len() == 64 {
-                    if let Ok(oid) = Oid::from_hex(&hex) {
-                        // Get object size
-                        let size = match self.storage.get(&key).await {
-                            Ok(data) => data.len() as u64,
-                            Err(_) => 0,
-                        };
-                        objects.push((oid, size));
-                    }
+                if hex.len() == 64
+                    && let Ok(oid) = Oid::from_hex(&hex)
+                {
+                    // Get object size
+                    let size = match self.storage.get(&key).await {
+                        Ok(data) => data.len() as u64,
+                        Err(_) => 0,
+                    };
+                    objects.push((oid, size));
                 }
             }
         }
@@ -656,12 +656,11 @@ impl GarbageCollector {
         let mut manifests = Vec::new();
 
         for key in all_keys {
-            if let Some(hex) = key.strip_prefix("manifests/") {
-                if hex.len() == 64 {
-                    if let Ok(oid) = Oid::from_hex(hex) {
-                        manifests.push((oid, key));
-                    }
-                }
+            if let Some(hex) = key.strip_prefix("manifests/")
+                && hex.len() == 64
+                && let Ok(oid) = Oid::from_hex(hex)
+            {
+                manifests.push((oid, key));
             }
         }
 
@@ -772,21 +771,21 @@ impl GarbageCollector {
 
         for key in &all_keys {
             // Match `deltas/{64-char hex}` but not `.meta` files
-            if let Some(hex) = key.strip_prefix("deltas/") {
-                if hex.len() == 64 && !hex.contains('.') {
-                    if let Ok(oid) = Oid::from_hex(hex) {
-                        let meta_key = format!("deltas/{}.meta", hex);
-                        let delta_size = match self.storage.get(key).await {
-                            Ok(data) => data.len() as u64,
-                            Err(_) => 0,
-                        };
-                        let meta_size = match self.storage.get(&meta_key).await {
-                            Ok(data) => data.len() as u64,
-                            Err(_) => 0,
-                        };
-                        deltas.push((oid, key.clone(), meta_key, delta_size + meta_size));
-                    }
-                }
+            if let Some(hex) = key.strip_prefix("deltas/")
+                && hex.len() == 64
+                && !hex.contains('.')
+                && let Ok(oid) = Oid::from_hex(hex)
+            {
+                let meta_key = format!("deltas/{}.meta", hex);
+                let delta_size = match self.storage.get(key).await {
+                    Ok(data) => data.len() as u64,
+                    Err(_) => 0,
+                };
+                let meta_size = match self.storage.get(&meta_key).await {
+                    Ok(data) => data.len() as u64,
+                    Err(_) => 0,
+                };
+                deltas.push((oid, key.clone(), meta_key, delta_size + meta_size));
             }
         }
 
@@ -804,19 +803,20 @@ impl GarbageCollector {
         let mut chunk_deltas = Vec::new();
 
         for key in &all_keys {
-            if let Some(hex) = key.strip_prefix("chunk-deltas/") {
-                if hex.len() == 64 && !hex.contains('.') {
-                    let meta_key = format!("chunk-deltas/{}.meta", hex);
-                    let delta_size = match self.storage.get(key).await {
-                        Ok(data) => data.len() as u64,
-                        Err(_) => 0,
-                    };
-                    let meta_size = match self.storage.get(&meta_key).await {
-                        Ok(data) => data.len() as u64,
-                        Err(_) => 0,
-                    };
-                    chunk_deltas.push((key.clone(), meta_key, delta_size + meta_size));
-                }
+            if let Some(hex) = key.strip_prefix("chunk-deltas/")
+                && hex.len() == 64
+                && !hex.contains('.')
+            {
+                let meta_key = format!("chunk-deltas/{}.meta", hex);
+                let delta_size = match self.storage.get(key).await {
+                    Ok(data) => data.len() as u64,
+                    Err(_) => 0,
+                };
+                let meta_size = match self.storage.get(&meta_key).await {
+                    Ok(data) => data.len() as u64,
+                    Err(_) => 0,
+                };
+                chunk_deltas.push((key.clone(), meta_key, delta_size + meta_size));
             }
         }
 
@@ -858,11 +858,11 @@ impl GarbageCollector {
         for (oid, _) in &all_manifests {
             if reachable.contains(oid) {
                 let manifest_key = format!("manifests/{}", oid.to_hex());
-                if let Ok(data) = self.storage.get(&manifest_key).await {
-                    if let Ok(manifest) = ChunkManifest::from_bytes(&data) {
-                        for chunk_ref in &manifest.chunks {
-                            reachable_chunk_ids.insert(chunk_ref.id.to_hex());
-                        }
+                if let Ok(data) = self.storage.get(&manifest_key).await
+                    && let Ok(manifest) = ChunkManifest::from_bytes(&data)
+                {
+                    for chunk_ref in &manifest.chunks {
+                        reachable_chunk_ids.insert(chunk_ref.id.to_hex());
                     }
                 }
             }
@@ -951,13 +951,16 @@ impl GarbageCollector {
                 Ok(bitmap) => match bitmap.serialize() {
                     Ok(bytes) => {
                         let key = mediagit_versioning::bitmap_key(&branch.oid);
-                        if let Err(e) = self.storage.put(&key, &bytes).await {
-                            warn!(
-                                "Failed to persist bitmap for branch '{}': {}",
-                                branch.name, e
-                            );
-                        } else {
-                            regenerated += 1;
+                        match self.storage.put(&key, &bytes).await {
+                            Err(e) => {
+                                warn!(
+                                    "Failed to persist bitmap for branch '{}': {}",
+                                    branch.name, e
+                                );
+                            }
+                            _ => {
+                                regenerated += 1;
+                            }
                         }
                     }
                     Err(e) => warn!(
@@ -985,10 +988,13 @@ impl GarbageCollector {
                 continue;
             };
             if !reachable.contains(&oid) {
-                if let Err(e) = self.storage.delete(&key).await {
-                    warn!("Failed to prune orphaned bitmap {}: {}", key, e);
-                } else {
-                    pruned += 1;
+                match self.storage.delete(&key).await {
+                    Err(e) => {
+                        warn!("Failed to prune orphaned bitmap {}: {}", key, e);
+                    }
+                    _ => {
+                        pruned += 1;
+                    }
                 }
             }
         }

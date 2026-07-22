@@ -15,7 +15,7 @@ use super::super::repo::{create_storage_backend, find_repo_root};
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
-use mediagit_versioning::{resolve_revision, Commit, ObjectDatabase, Oid, RefDatabase, Tag, Tree};
+use mediagit_versioning::{Commit, ObjectDatabase, Oid, RefDatabase, Tag, Tree, resolve_revision};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -183,12 +183,11 @@ impl LogCmd {
         if self.all {
             let branch_refs = refdb.list_branches().await.unwrap_or_default();
             for branch_ref in &branch_refs {
-                if let Ok(r) = refdb.read(branch_ref).await {
-                    if let Some(oid) = r.oid {
-                        if !stack.contains(&oid) {
-                            stack.push(oid);
-                        }
-                    }
+                if let Ok(r) = refdb.read(branch_ref).await
+                    && let Some(oid) = r.oid
+                    && !stack.contains(&oid)
+                {
+                    stack.push(oid);
                 }
             }
         }
@@ -205,30 +204,29 @@ impl LogCmd {
                 .with_context(|| format!("Failed to deserialize commit {}", oid))?;
 
             // Apply filters
-            if let Some(author_pattern) = &self.author {
-                if !commit.author.name.contains(author_pattern)
-                    && !commit.author.email.contains(author_pattern)
-                {
-                    // Add parents to stack even if this commit is filtered
-                    for parent in &commit.parents {
-                        if !visited.contains(parent) {
-                            stack.push(*parent);
-                        }
+            if let Some(author_pattern) = &self.author
+                && !commit.author.name.contains(author_pattern)
+                && !commit.author.email.contains(author_pattern)
+            {
+                // Add parents to stack even if this commit is filtered
+                for parent in &commit.parents {
+                    if !visited.contains(parent) {
+                        stack.push(*parent);
                     }
-                    continue;
                 }
+                continue;
             }
 
-            if let Some(grep_pattern) = &self.grep {
-                if !commit.message.contains(grep_pattern) {
-                    // Add parents to stack even if this commit is filtered
-                    for parent in &commit.parents {
-                        if !visited.contains(parent) {
-                            stack.push(*parent);
-                        }
+            if let Some(grep_pattern) = &self.grep
+                && !commit.message.contains(grep_pattern)
+            {
+                // Add parents to stack even if this commit is filtered
+                for parent in &commit.parents {
+                    if !visited.contains(parent) {
+                        stack.push(*parent);
                     }
-                    continue;
                 }
+                continue;
             }
 
             commits_to_show.push((oid, commit.clone()));
@@ -241,10 +239,10 @@ impl LogCmd {
             }
 
             // Check if we've reached the limit
-            if let Some(max_count) = self.max_count {
-                if commits_to_show.len() >= max_count + self.skip.unwrap_or(0) {
-                    break;
-                }
+            if let Some(max_count) = self.max_count
+                && commits_to_show.len() >= max_count + self.skip.unwrap_or(0)
+            {
+                break;
             }
         }
 
@@ -316,16 +314,16 @@ impl LogCmd {
 
                 // Get parent's tree files (empty if no parent / root commit)
                 let parent_tree_files = if let Some(parent_oid) = commit.parents.first() {
-                    if let Ok(parent_data) = odb.read(parent_oid).await {
-                        if let Ok(parent_commit) = Commit::deserialize(&parent_data) {
-                            Self::get_tree_file_list(&odb, &parent_commit.tree)
-                                .await
-                                .unwrap_or_default()
-                        } else {
-                            HashMap::new()
-                        }
-                    } else {
-                        HashMap::new()
+                    match odb.read(parent_oid).await {
+                        Ok(parent_data) => match Commit::deserialize(&parent_data) {
+                            Ok(parent_commit) => {
+                                Self::get_tree_file_list(&odb, &parent_commit.tree)
+                                    .await
+                                    .unwrap_or_default()
+                            }
+                            _ => HashMap::new(),
+                        },
+                        _ => HashMap::new(),
                     }
                 } else {
                     HashMap::new()

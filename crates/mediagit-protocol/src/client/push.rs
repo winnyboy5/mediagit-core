@@ -41,10 +41,10 @@ impl ProtocolClient {
             commit_oids.push(oid);
 
             // If remote has an existing OID, add it to "have" list
-            if let Some(old_oid) = &update.old_oid {
-                if let Ok(oid) = Oid::from_hex(old_oid) {
-                    have_oids.push(oid);
-                }
+            if let Some(old_oid) = &update.old_oid
+                && let Ok(oid) = Oid::from_hex(old_oid)
+            {
+                have_oids.push(oid);
             }
         }
 
@@ -129,10 +129,10 @@ impl ProtocolClient {
                 .context(format!("Invalid OID in update: {}", update.new_oid))?;
             commit_oids.push(oid);
 
-            if let Some(old_oid) = &update.old_oid {
-                if let Ok(oid) = Oid::from_hex(old_oid) {
-                    have_oids.push(oid);
-                }
+            if let Some(old_oid) = &update.old_oid
+                && let Ok(oid) = Oid::from_hex(old_oid)
+            {
+                have_oids.push(oid);
             }
         }
 
@@ -356,10 +356,10 @@ impl ProtocolClient {
                             }
                         }
                         ObjectType::Tag => {
-                            if let Ok(tag) = Tag::deserialize(&obj_data) {
-                                if visited.insert(tag.target) {
-                                    have_queue.push_back((tag.target, tag.target_type));
-                                }
+                            if let Ok(tag) = Tag::deserialize(&obj_data)
+                                && visited.insert(tag.target)
+                            {
+                                have_queue.push_back((tag.target, tag.target_type));
                             }
                         }
                         // Blob is filtered above; this arm satisfies exhaustiveness.
@@ -872,8 +872,8 @@ impl ProtocolClient {
                                     direct_succeeded = true;
                                 }
                             }
-                            if !direct_succeeded {
-                            if let Some(Some(purl)) = presigned.get(&hex) {
+                            if !direct_succeeded
+                            && let Some(Some(purl)) = presigned.get(&hex) {
                                 let mut current_url = purl.url.clone();
                                 let mut current_headers = purl.required_headers.clone();
                                 let mut resigned = false;
@@ -1011,15 +1011,14 @@ impl ProtocolClient {
                                                             .await
                                                             .ok()
                                                             .filter(|r| r.status().is_success());
-                                                        if let Some(r) = refreshed {
-                                                            if let Ok(map) = r
+                                                        if let Some(r) = refreshed
+                                                            && let Ok(map) = r
                                                                 .json::<std::collections::HashMap<
                                                                     String,
                                                                     Option<PresignedPutInfo>,
                                                                 >>()
                                                                 .await
-                                                            {
-                                                                if let Some(Some(np)) = map.get(&hex) {
+                                                                && let Some(Some(np)) = map.get(&hex) {
                                                                     current_url = np.url.clone();
                                                                     current_headers = np.required_headers.clone();
                                                                     resigned = true;
@@ -1030,8 +1029,6 @@ impl ProtocolClient {
                                                                     );
                                                                     continue 'direct;
                                                                 }
-                                                            }
-                                                        }
                                                         tracing::warn!(
                                                             chunk = %hex,
                                                             attempt,
@@ -1115,7 +1112,6 @@ impl ProtocolClient {
                                         }
                                     }
                                 }
-                            }
                             } // end if !direct_succeeded
 
                             if direct_succeeded {
@@ -1736,8 +1732,8 @@ impl ProtocolClient {
                                         direct_succeeded = true;
                                     }
                                 }
-                                if !direct_succeeded {
-                                if let Some(Some(purl)) = presigned.get(&hex) {
+                                if !direct_succeeded
+                                && let Some(Some(purl)) = presigned.get(&hex) {
                                     let mut current_url = purl.url.clone();
                                     let mut current_headers = purl.required_headers.clone();
                                     let mut resigned = false;
@@ -1875,15 +1871,14 @@ impl ProtocolClient {
                                                                 .await
                                                                 .ok()
                                                                 .filter(|r| r.status().is_success());
-                                                            if let Some(r) = refreshed {
-                                                                if let Ok(map) = r
+                                                            if let Some(r) = refreshed
+                                                                && let Ok(map) = r
                                                                     .json::<std::collections::HashMap<
                                                                         String,
                                                                         Option<PresignedPutInfo>,
                                                                     >>()
                                                                     .await
-                                                                {
-                                                                    if let Some(Some(np)) = map.get(&hex) {
+                                                                    && let Some(Some(np)) = map.get(&hex) {
                                                                         current_url = np.url.clone();
                                                                         current_headers = np.required_headers.clone();
                                                                         resigned = true;
@@ -1894,8 +1889,6 @@ impl ProtocolClient {
                                                                         );
                                                                         continue 'direct;
                                                                     }
-                                                                }
-                                                            }
                                                             tracing::warn!(
                                                                 chunk = %hex,
                                                                 attempt,
@@ -1979,7 +1972,6 @@ impl ProtocolClient {
                                             }
                                         }
                                     }
-                                }
                                 } // end if !direct_succeeded
 
                                 if direct_succeeded {
@@ -2277,13 +2269,14 @@ impl ProtocolClient {
         let mut chunk_hexes: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         for (oid, obj_type) in &objects {
-            if *obj_type == ObjectType::Blob && odb.is_chunked(oid).await.unwrap_or(false) {
-                if let Some(manifest) = odb.get_chunk_manifest(oid).await? {
-                    for c in &manifest.chunks {
-                        let hex = c.id.to_hex();
-                        if seen.insert(hex.clone()) {
-                            chunk_hexes.push(hex);
-                        }
+            if *obj_type == ObjectType::Blob
+                && odb.is_chunked(oid).await.unwrap_or(false)
+                && let Some(manifest) = odb.get_chunk_manifest(oid).await?
+            {
+                for c in &manifest.chunks {
+                    let hex = c.id.to_hex();
+                    if seen.insert(hex.clone()) {
+                        chunk_hexes.push(hex);
                     }
                 }
             }

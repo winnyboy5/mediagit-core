@@ -13,13 +13,13 @@
 
 use anyhow::{Context, Result};
 use mediagit_versioning::{
-    chunking::ChunkManifest, Commit, FileMode, ObjectDatabase, ObjectType, Oid, PackWriter, Tag,
-    Tree,
+    Commit, FileMode, ObjectDatabase, ObjectType, Oid, PackWriter, Tag, Tree,
+    chunking::ChunkManifest,
 };
 use std::collections::{HashSet, VecDeque};
 use std::sync::{
-    atomic::{AtomicU64, AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
 use crate::types::{
@@ -168,12 +168,12 @@ fn build_control_plane_client(creds: &Credentials) -> reqwest::Client {
     // request ceiling here causes spurious "error sending request"
     // failures on healthy slow uploads. See dev-tests/azure-manual-
     // test for the regression that motivated removing this.
-    if let Some((name, value)) = creds.header() {
-        if let Ok(header_value) = reqwest::header::HeaderValue::from_str(&value) {
-            let mut headers = reqwest::header::HeaderMap::new();
-            headers.insert(reqwest::header::HeaderName::from_static(name), header_value);
-            builder = builder.default_headers(headers);
-        }
+    if let Some((name, value)) = creds.header()
+        && let Ok(header_value) = reqwest::header::HeaderValue::from_str(&value)
+    {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::HeaderName::from_static(name), header_value);
+        builder = builder.default_headers(headers);
     }
     builder.build().unwrap_or_else(|_| reqwest::Client::new())
 }
@@ -752,7 +752,7 @@ pub(crate) async fn upload_chunk_mpu(
                         &body_full[..]
                     };
 
-                    use crate::error_class::{classify_auto, TransferOutcome};
+                    use crate::error_class::{TransferOutcome, classify_auto};
                     match classify_auto(status, &part.url, &ct, &hdr_code, body_ref) {
                         TransferOutcome::Transient | TransferOutcome::RefreshUrl => {
                             // RefreshUrl treated as Transient: per-part URLs are issued per-MPU

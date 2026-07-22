@@ -16,8 +16,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_versioning::{
-    apply_merge_to_workdir, CheckoutManager, Commit, Index, MergeEngine, ObjectDatabase, Oid, Ref,
-    RefDatabase, Tree,
+    CheckoutManager, Commit, Index, MergeEngine, ObjectDatabase, Oid, Ref, RefDatabase, Tree,
+    apply_merge_to_workdir,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -527,12 +527,10 @@ impl CherryPickCmd {
         let looks_like_hex = commit_ref.len() >= 4
             && commit_ref.len() < 64
             && commit_ref.chars().all(|c| c.is_ascii_hexdigit());
-        if looks_like_hex {
-            if let Ok(storage) = create_storage_backend(repo_root).await {
-                let odb = ObjectDatabase::with_smart_compression(storage, 1000);
-                if let Ok(oid) = odb.resolve_abbreviated_oid(commit_ref).await {
-                    return Ok(oid);
-                }
+        if looks_like_hex && let Ok(storage) = create_storage_backend(repo_root).await {
+            let odb = ObjectDatabase::with_smart_compression(storage, 1000);
+            if let Ok(oid) = odb.resolve_abbreviated_oid(commit_ref).await {
+                return Ok(oid);
             }
         }
 
@@ -552,9 +550,10 @@ struct CherryPickState {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)] // edition-2024: test-only env::set_var/remove_var requires unsafe
 mod tests {
     use super::*;
-    use crate::commands::utils::test_support::{init_repo_with_commit, REPO_ENV_LOCK};
+    use crate::commands::utils::test_support::{REPO_ENV_LOCK, init_repo_with_commit};
     use clap::Parser;
     use tempfile::TempDir;
 
@@ -604,9 +603,11 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn execute_in(repo_path: &std::path::Path, cmd: &CherryPickCmd) -> Result<()> {
         let _guard = REPO_ENV_LOCK.lock().unwrap();
-        std::env::set_var("MEDIAGIT_REPO", repo_path);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MEDIAGIT_REPO", repo_path) };
         let result = cmd.execute().await;
-        std::env::remove_var("MEDIAGIT_REPO");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_REPO") };
         result
     }
 

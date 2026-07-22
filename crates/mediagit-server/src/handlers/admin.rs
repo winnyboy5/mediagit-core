@@ -30,7 +30,7 @@
 
 use super::*;
 use mediagit_security::auth::{
-    user::Role, validate_password_strength, validate_registration_input, ApiKey, User,
+    ApiKey, User, user::Role, validate_password_strength, validate_registration_input,
 };
 use serde::{Deserialize, Serialize};
 
@@ -322,8 +322,7 @@ pub async fn list_my_keys(
 /// effect on already-issued tokens: JWT claims embed permissions with a 24h
 /// TTL and are never revoked (see `jwt.rs`), so a stolen or stale token
 /// keeps working until it naturally expires.
-const NO_REVOCATION_NOTE: &str =
-    "This does not invalidate existing sessions - JWTs are valid for up to 24h after issue and are not revoked by this change.";
+const NO_REVOCATION_NOTE: &str = "This does not invalidate existing sessions - JWTs are valid for up to 24h after issue and are not revoked by this change.";
 
 #[derive(Deserialize)]
 pub struct SetRoleRequest {

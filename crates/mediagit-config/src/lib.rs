@@ -56,7 +56,7 @@ pub mod validation;
 pub use error::{ConfigError, ConfigResult};
 pub use loader::{ConfigFormat, ConfigLoader};
 pub use migration::{
-    ConfigMigration, MigrationManager, MigrationV0ToV1, MigrationV1ToV2, CONFIG_VERSION,
+    CONFIG_VERSION, ConfigMigration, MigrationManager, MigrationV0ToV1, MigrationV1ToV2,
 };
 pub use schema::*;
 pub use validation::Validator;

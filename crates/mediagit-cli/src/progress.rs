@@ -25,20 +25,16 @@ use std::time::Duration;
 /// All bars use 40-char width, "█▓░" characters, 100ms tick, stderr output.
 mod templates {
     /// Bytes-based progress for staging (`add`) operations.
-    pub const ADD: &str =
-        "{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, eta {eta}) {msg}";
+    pub const ADD: &str = "{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, eta {eta}) {msg}";
 
     /// Item-count progress for object processing (pack, delta, chunk transfer).
-    pub const OBJECTS: &str =
-        "{spinner:.yellow} {msg} [{bar:40.yellow/blue}] {pos}/{len} chunks ({percent}%, {elapsed}) eta {eta}";
+    pub const OBJECTS: &str = "{spinner:.yellow} {msg} [{bar:40.yellow/blue}] {pos}/{len} chunks ({percent}%, {elapsed}) eta {eta}";
 
     /// Bytes-based progress for push uploads with throughput and ETA.
-    pub const PUSH: &str =
-        "{spinner:.cyan} [{bar:40.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} (elapsed {elapsed}, eta {eta})";
+    pub const PUSH: &str = "{spinner:.cyan} [{bar:40.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} (elapsed {elapsed}, eta {eta})";
 
     /// Bytes-based progress for chunk downloads — mirrors PUSH format.
-    pub const DOWNLOAD_BYTES: &str =
-        "{spinner:.cyan} [{bar:40.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} (elapsed {elapsed}, eta {eta}) {msg}";
+    pub const DOWNLOAD_BYTES: &str = "{spinner:.cyan} [{bar:40.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} (elapsed {elapsed}, eta {eta}) {msg}";
 
     /// Indeterminate spinner for operations without a known total.
     pub const SPINNER: &str = "{spinner:.cyan} {msg} [{elapsed}]";
@@ -251,10 +247,10 @@ impl OperationStats {
 
         let mut stats = Vec::new();
         for entry in entries.into_iter().take(limit) {
-            if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                if let Ok(stat) = serde_json::from_str::<OperationStats>(&content) {
-                    stats.push(stat);
-                }
+            if let Ok(content) = std::fs::read_to_string(entry.path())
+                && let Ok(stat) = serde_json::from_str::<OperationStats>(&content)
+            {
+                stats.push(stat);
             }
         }
 

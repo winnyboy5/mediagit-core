@@ -152,7 +152,11 @@ impl SetOpts {
             output::success(&format!(
                 "Sparse checkout set: {} pattern(s) ({} mode) — {} file(s) removed, {} file(s) added",
                 self.patterns.len(),
-                if matches!(mode, SparseMode::Cone) { "cone" } else { "pattern" },
+                if matches!(mode, SparseMode::Cone) {
+                    "cone"
+                } else {
+                    "pattern"
+                },
                 removed,
                 added
             ));

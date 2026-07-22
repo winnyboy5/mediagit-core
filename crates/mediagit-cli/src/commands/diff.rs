@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_versioning::{
-    resolve_revision, Commit, Index, ObjectDatabase, Oid, RefDatabase, Tag, Tree, TreeDiffer,
+    Commit, Index, ObjectDatabase, Oid, RefDatabase, Tag, Tree, TreeDiffer, resolve_revision,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -441,12 +441,12 @@ impl DiffCmd {
             }
 
             // Check .mediagitignore (same rule status uses)
-            if let Some(ref m) = matcher {
-                if let Ok(rel) = path.strip_prefix(repo_root) {
-                    let is_dir = path.is_dir();
-                    if m.is_ignored(rel, is_dir) {
-                        continue; // skip file OR prune entire directory
-                    }
+            if let Some(m) = matcher
+                && let Ok(rel) = path.strip_prefix(repo_root)
+            {
+                let is_dir = path.is_dir();
+                if m.is_ignored(rel, is_dir) {
+                    continue; // skip file OR prune entire directory
                 }
             }
 

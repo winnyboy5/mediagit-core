@@ -24,8 +24,8 @@
 //!     bitmap must never change *what* gets shipped, only how it's computed.
 
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -33,8 +33,8 @@ use tokio::net::TcpListener;
 use mediagit_protocol::ProtocolClient;
 use mediagit_storage::{LocalBackend, StorageBackend};
 use mediagit_versioning::{
-    bitmap_key, Commit, FileMode, ObjectDatabase, ObjectType, Oid, ReachabilityBitmap, Ref,
-    RefDatabase, Signature, Tree, TreeEntry,
+    Commit, FileMode, ObjectDatabase, ObjectType, Oid, ReachabilityBitmap, Ref, RefDatabase,
+    Signature, Tree, TreeEntry, bitmap_key,
 };
 
 /// `MEDIAGIT_BITMAP` is a process-global env var, but `cargo test` runs the
@@ -202,7 +202,7 @@ async fn bitmap_short_circuit_matches_bfs_disabled_run() {
     // relies on it defaulting to enabled — hold `BITMAP_ENV_LOCK` for the
     // whole mutated window so the two tests can't race each other.
     let _env_guard = BITMAP_ENV_LOCK.lock().await;
-    std::env::set_var("MEDIAGIT_BITMAP", "0");
+    mediagit_test_utils::set_var("MEDIAGIT_BITMAP", "0");
 
     let bfs_temp = TempDir::new().unwrap();
     let bfs_mediagit = bfs_temp.path().join(".mediagit");
@@ -216,7 +216,7 @@ async fn bitmap_short_circuit_matches_bfs_disabled_run() {
         .await
         .expect("BFS-only fetch");
 
-    std::env::remove_var("MEDIAGIT_BITMAP");
+    mediagit_test_utils::remove_var("MEDIAGIT_BITMAP");
 
     // The counter must not have moved (bitmap path was disabled)...
     assert_eq!(

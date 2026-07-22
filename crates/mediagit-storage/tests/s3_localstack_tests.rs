@@ -34,8 +34,9 @@
 //! - Endpoint: http://localhost:4566
 
 #[cfg(test)]
+#[allow(unsafe_code)] // edition-2024: test-only env::set_var/remove_var requires unsafe
 mod s3_localstack_tests {
-    use mediagit_storage::{s3::S3Backend, StorageBackend};
+    use mediagit_storage::{StorageBackend, s3::S3Backend};
     use std::env;
 
     /// Helper function to create a test S3 backend connected to LocalStack
@@ -43,9 +44,12 @@ mod s3_localstack_tests {
         use mediagit_storage::s3::S3Config;
 
         // Set required environment variables for LocalStack
-        env::set_var("AWS_ACCESS_KEY_ID", "test");
-        env::set_var("AWS_SECRET_ACCESS_KEY", "test");
-        env::set_var("AWS_REGION", "us-east-1");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::set_var("AWS_ACCESS_KEY_ID", "test") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::set_var("AWS_SECRET_ACCESS_KEY", "test") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::set_var("AWS_REGION", "us-east-1") };
 
         // Configure S3Backend to use LocalStack endpoint
         // Use 127.0.0.1 instead of localhost for better compatibility
@@ -292,11 +296,13 @@ mod s3_localstack_tests {
 
         let result = backend.get("nonexistent/object").await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .to_lowercase()
-            .contains("not found"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .to_lowercase()
+                .contains("not found")
+        );
     }
 
     /// Test empty key validation

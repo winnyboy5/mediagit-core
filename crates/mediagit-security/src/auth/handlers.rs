@@ -15,17 +15,17 @@
 //!
 //! Provides Axum handlers for user registration, login, logout, and token refresh.
 
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{Json, extract::State, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
 
 use super::{
+    AuthError, AuthResult, JwtAuth, TokenPair,
     credentials::CredentialsStore,
     grants::GrantsStore,
     user::{Role, User},
-    AuthError, AuthResult, JwtAuth, TokenPair,
 };
 
 /// Shared authentication service state
@@ -312,21 +312,22 @@ pub async fn refresh_handler(
     {
         Ok(access_token) => {
             // Decode to get expiration
-            if let Ok(claims) = auth_service.jwt_auth.validate_token(&access_token) {
-                let expires_in = claims.exp - chrono::Utc::now().timestamp();
+            match auth_service.jwt_auth.validate_token(&access_token) {
+                Ok(claims) => {
+                    let expires_in = claims.exp - chrono::Utc::now().timestamp();
 
-                Ok(Json(TokenPair {
-                    access_token,
-                    refresh_token: req.refresh_token,
-                    expires_in,
-                }))
-            } else {
-                Err((
+                    Ok(Json(TokenPair {
+                        access_token,
+                        refresh_token: req.refresh_token,
+                        expires_in,
+                    }))
+                }
+                _ => Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse {
                         error: "Token generation failed".to_string(),
                     }),
-                ))
+                )),
             }
         }
         Err(e) => {

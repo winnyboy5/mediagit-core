@@ -142,8 +142,8 @@
 
 use crate::StorageBackend;
 use async_trait::async_trait;
-use azure_storage::prelude::*;
 use azure_storage::CloudLocation;
+use azure_storage::prelude::*;
 use azure_storage_blobs::prelude::*;
 use futures::TryStreamExt;
 use std::fmt;

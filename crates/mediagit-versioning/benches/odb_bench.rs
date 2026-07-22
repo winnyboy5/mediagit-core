@@ -18,7 +18,7 @@
 //! - Deduplication check: <10ms
 //! - Cache hit: <5ms
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use mediagit_storage::LocalBackend;
 use mediagit_versioning::{ObjectDatabase, ObjectType};
 use std::hint::black_box;

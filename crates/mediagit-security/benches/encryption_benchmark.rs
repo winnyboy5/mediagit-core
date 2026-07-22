@@ -19,10 +19,10 @@
 //! - Stream encryption performance for large objects
 //! - Argon2id key derivation with different parameters
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use mediagit_security::{
-    encryption::{decrypt, encrypt, EncryptionKey},
-    kdf::{derive_key, Argon2Params, Salt},
+    encryption::{EncryptionKey, decrypt, encrypt},
+    kdf::{Argon2Params, Salt, derive_key},
 };
 use secrecy::SecretString;
 use std::hint::black_box;

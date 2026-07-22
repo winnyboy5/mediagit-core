@@ -1016,7 +1016,7 @@ mod tests {
     #[tokio::test]
     async fn verify_detects_invalid_packed_chunk_and_evicts() {
         let _guard = EVICT_ENV_LOCK.lock().await;
-        std::env::remove_var("MEDIAGIT_REPAIR_EVICT_PACK_ENTRIES"); // default: enabled
+        mediagit_test_utils::remove_var("MEDIAGIT_REPAIR_EVICT_PACK_ENTRIES"); // default: enabled
 
         let tmp = tempfile::tempdir().unwrap();
         let repo = "test-repo".to_string();
@@ -1065,7 +1065,7 @@ mod tests {
     #[tokio::test]
     async fn verify_reports_only_when_eviction_disabled_by_knob() {
         let _guard = EVICT_ENV_LOCK.lock().await;
-        std::env::set_var("MEDIAGIT_REPAIR_EVICT_PACK_ENTRIES", "0");
+        mediagit_test_utils::set_var("MEDIAGIT_REPAIR_EVICT_PACK_ENTRIES", "0");
 
         let tmp = tempfile::tempdir().unwrap();
         let repo = "test-repo".to_string();
@@ -1092,7 +1092,7 @@ mod tests {
         .expect("handler ok")
         .0;
 
-        std::env::remove_var("MEDIAGIT_REPAIR_EVICT_PACK_ENTRIES");
+        mediagit_test_utils::remove_var("MEDIAGIT_REPAIR_EVICT_PACK_ENTRIES");
 
         // Still reported invalid, but report-only: nothing evicted.
         assert_eq!(resp.invalid, vec![chunk_id.clone()]);

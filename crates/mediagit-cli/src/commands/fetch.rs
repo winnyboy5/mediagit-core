@@ -386,7 +386,7 @@ impl FetchCmd {
                         "  {} {} -> {}",
                         style("→").cyan(),
                         f.branch_name,
-                        &f.oid_short
+                        f.oid_short
                     );
                 }
             }
@@ -635,14 +635,13 @@ pub(crate) async fn fetch_tags(
             // floating object referenced only by refs/tag-meta/<name> — so
             // fetch it explicitly rather than assuming pull_streaming above
             // already pulled it in.
-            if !odb.exists(&blob_oid).await.unwrap_or(false) {
-                if let Err(e) = client
+            if !odb.exists(&blob_oid).await.unwrap_or(false)
+                && let Err(e) = client
                     .download_pack_streaming(odb, vec![blob_oid_hex.clone()], vec![])
                     .await
-                {
-                    tracing::warn!("Failed to download tag meta blob for {}: {}", tag_name, e);
-                    continue;
-                }
+            {
+                tracing::warn!("Failed to download tag meta blob for {}: {}", tag_name, e);
+                continue;
             }
             match odb.read(&blob_oid).await {
                 Ok(meta_bytes) => {

@@ -178,8 +178,8 @@
 //!   B2_SPACES_SECRET_KEY: "your-secret-key"
 //! ```
 
-use crate::s3::{S3Backend, S3Config};
 use crate::StorageBackend;
+use crate::s3::{S3Backend, S3Config};
 use async_trait::async_trait;
 use std::fmt;
 use std::sync::Arc;
@@ -232,7 +232,7 @@ impl Provider {
                         return Err(anyhow::anyhow!(
                             "Invalid B2 region: {}. Valid regions: us-west-002, eu-central-001, ap-northeast-001",
                             region
-                        ))
+                        ));
                     }
                 }
             }
@@ -245,7 +245,7 @@ impl Provider {
                         return Err(anyhow::anyhow!(
                             "Invalid DigitalOcean region: {}. Valid regions: nyc3, sfo3, ams3, sgp1, blr1, fra1, lon1, syd1, tor1, iad1",
                             region
-                        ))
+                        ));
                     }
                 }
             }
@@ -458,7 +458,7 @@ impl B2SpacesBackend {
                 return Err(anyhow::anyhow!(
                     "Invalid provider '{}'. Must be 'b2' or 'digitalocean'",
                     other
-                ))
+                ));
             }
         };
 
@@ -608,6 +608,7 @@ impl StorageBackend for B2SpacesBackend {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)] // edition-2024: test-only env::set_var/remove_var requires unsafe
 mod tests {
     use super::*;
 
@@ -1045,11 +1046,16 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires valid B2 credentials"]
     async fn test_from_env_b2() {
-        std::env::set_var("B2_SPACES_PROVIDER", "b2");
-        std::env::set_var("B2_SPACES_REGION", "us-west-002");
-        std::env::set_var("B2_SPACES_BUCKET", "test-bucket");
-        std::env::set_var("B2_SPACES_ACCESS_KEY", "testkey");
-        std::env::set_var("B2_SPACES_SECRET_KEY", "testsecret");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("B2_SPACES_PROVIDER", "b2") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("B2_SPACES_REGION", "us-west-002") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("B2_SPACES_BUCKET", "test-bucket") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("B2_SPACES_ACCESS_KEY", "testkey") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("B2_SPACES_SECRET_KEY", "testsecret") };
 
         let result = B2SpacesBackend::from_env().await;
         assert!(result.is_ok());
@@ -1059,21 +1065,31 @@ mod tests {
         assert_eq!(backend.endpoint(), "https://s3.us-west-002.backblazeb2.com");
 
         // Clean up
-        std::env::remove_var("B2_SPACES_PROVIDER");
-        std::env::remove_var("B2_SPACES_REGION");
-        std::env::remove_var("B2_SPACES_BUCKET");
-        std::env::remove_var("B2_SPACES_ACCESS_KEY");
-        std::env::remove_var("B2_SPACES_SECRET_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_PROVIDER") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_REGION") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_BUCKET") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_ACCESS_KEY") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_SECRET_KEY") };
     }
 
     #[tokio::test]
     #[ignore = "requires valid DigitalOcean credentials"]
     async fn test_from_env_digitalocean() {
-        std::env::set_var("B2_SPACES_PROVIDER", "digitalocean");
-        std::env::set_var("B2_SPACES_REGION", "nyc3");
-        std::env::set_var("B2_SPACES_BUCKET", "my-space");
-        std::env::set_var("B2_SPACES_ACCESS_KEY", "do-key");
-        std::env::set_var("B2_SPACES_SECRET_KEY", "do-secret");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("B2_SPACES_PROVIDER", "digitalocean") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("B2_SPACES_REGION", "nyc3") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("B2_SPACES_BUCKET", "my-space") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("B2_SPACES_ACCESS_KEY", "do-key") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("B2_SPACES_SECRET_KEY", "do-secret") };
 
         let result = B2SpacesBackend::from_env().await;
         assert!(result.is_ok());
@@ -1083,41 +1099,61 @@ mod tests {
         assert_eq!(backend.endpoint(), "https://nyc3.digitaloceanspaces.com");
 
         // Clean up
-        std::env::remove_var("B2_SPACES_PROVIDER");
-        std::env::remove_var("B2_SPACES_REGION");
-        std::env::remove_var("B2_SPACES_BUCKET");
-        std::env::remove_var("B2_SPACES_ACCESS_KEY");
-        std::env::remove_var("B2_SPACES_SECRET_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_PROVIDER") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_REGION") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_BUCKET") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_ACCESS_KEY") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_SECRET_KEY") };
     }
 
     #[tokio::test]
     #[ignore = "requires environment setup"]
     async fn test_from_env_do_alias() {
-        std::env::set_var("B2_SPACES_PROVIDER", "do");
-        std::env::set_var("B2_SPACES_REGION", "sfo3");
-        std::env::set_var("B2_SPACES_BUCKET", "space");
-        std::env::set_var("B2_SPACES_ACCESS_KEY", "key");
-        std::env::set_var("B2_SPACES_SECRET_KEY", "secret");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("B2_SPACES_PROVIDER", "do") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("B2_SPACES_REGION", "sfo3") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("B2_SPACES_BUCKET", "space") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("B2_SPACES_ACCESS_KEY", "key") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("B2_SPACES_SECRET_KEY", "secret") };
 
         let result = B2SpacesBackend::from_env().await;
         assert!(result.is_ok());
 
         // Clean up
-        std::env::remove_var("B2_SPACES_PROVIDER");
-        std::env::remove_var("B2_SPACES_REGION");
-        std::env::remove_var("B2_SPACES_BUCKET");
-        std::env::remove_var("B2_SPACES_ACCESS_KEY");
-        std::env::remove_var("B2_SPACES_SECRET_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_PROVIDER") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_REGION") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_BUCKET") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_ACCESS_KEY") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_SECRET_KEY") };
     }
 
     #[tokio::test]
     async fn test_from_env_missing_variables() {
         // Clear any existing env vars
-        std::env::remove_var("B2_SPACES_PROVIDER");
-        std::env::remove_var("B2_SPACES_REGION");
-        std::env::remove_var("B2_SPACES_BUCKET");
-        std::env::remove_var("B2_SPACES_ACCESS_KEY");
-        std::env::remove_var("B2_SPACES_SECRET_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_PROVIDER") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_REGION") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_BUCKET") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_ACCESS_KEY") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_SECRET_KEY") };
 
         let result = B2SpacesBackend::from_env().await;
         assert!(result.is_err());
@@ -1126,22 +1162,32 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires environment setup"]
     async fn test_from_env_invalid_provider() {
-        std::env::set_var("B2_SPACES_PROVIDER", "invalid");
-        std::env::set_var("B2_SPACES_REGION", "us-west-002");
-        std::env::set_var("B2_SPACES_BUCKET", "bucket");
-        std::env::set_var("B2_SPACES_ACCESS_KEY", "key");
-        std::env::set_var("B2_SPACES_SECRET_KEY", "secret");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("B2_SPACES_PROVIDER", "invalid") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("B2_SPACES_REGION", "us-west-002") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("B2_SPACES_BUCKET", "bucket") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("B2_SPACES_ACCESS_KEY", "key") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("B2_SPACES_SECRET_KEY", "secret") };
 
         let result = B2SpacesBackend::from_env().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Invalid provider"));
 
         // Clean up
-        std::env::remove_var("B2_SPACES_PROVIDER");
-        std::env::remove_var("B2_SPACES_REGION");
-        std::env::remove_var("B2_SPACES_BUCKET");
-        std::env::remove_var("B2_SPACES_ACCESS_KEY");
-        std::env::remove_var("B2_SPACES_SECRET_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_PROVIDER") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_REGION") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_BUCKET") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_ACCESS_KEY") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("B2_SPACES_SECRET_KEY") };
     }
 
     // ============================================================================

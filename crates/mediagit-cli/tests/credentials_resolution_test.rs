@@ -11,6 +11,8 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
 
+#![allow(unsafe_code)] // edition-2024: test-only env::set_var/remove_var requires unsafe
+
 //! Client-auth credential resolution tests (M2 Step 1 + I10 OS-keychain tier
 //! + I11 reorder/origin-key/401-invalidate).
 //!
@@ -60,9 +62,12 @@ fn credential_precedence_env_keychain_config_none() {
     // Ensure a clean slate regardless of the outer environment. Keychain
     // disabled throughout this test -- it only exercises the env/config
     // tiers and their ordering relative to each other.
-    std::env::remove_var("MEDIAGIT_TOKEN");
-    std::env::remove_var("MEDIAGIT_API_KEY");
-    std::env::set_var("MEDIAGIT_NO_KEYRING", "1");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("MEDIAGIT_TOKEN") };
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("MEDIAGIT_API_KEY") };
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("MEDIAGIT_NO_KEYRING", "1") };
 
     // 1. No config, no env -> None.
     let empty_config = Config::default();
@@ -72,20 +77,24 @@ fn credential_precedence_env_keychain_config_none() {
     );
 
     // 2. Env token set, no config -> Bearer from env.
-    std::env::set_var("MEDIAGIT_TOKEN", "env-token");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("MEDIAGIT_TOKEN", "env-token") };
     assert_eq!(
         resolve_credentials(repo_root, &empty_config, "origin"),
         Credentials::Bearer("env-token".to_string())
     );
 
     // 3. Env api key set (token unset), no config -> ApiKey from env.
-    std::env::remove_var("MEDIAGIT_TOKEN");
-    std::env::set_var("MEDIAGIT_API_KEY", "env-key");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("MEDIAGIT_TOKEN") };
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("MEDIAGIT_API_KEY", "env-key") };
     assert_eq!(
         resolve_credentials(repo_root, &empty_config, "origin"),
         Credentials::ApiKey("env-key".to_string())
     );
-    std::env::remove_var("MEDIAGIT_API_KEY");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("MEDIAGIT_API_KEY") };
 
     // 4. Config token set AND env token set -> env wins now (I10 reordered
     //    env/explicit ahead of the file tier so env always overrides a
@@ -93,7 +102,8 @@ fn credential_precedence_env_keychain_config_none() {
     let mut remote = RemoteConfig::new("http://localhost:3000/repo");
     remote.token = Some("config-token".to_string());
     let config_with_token = config_with_remote(remote);
-    std::env::set_var("MEDIAGIT_TOKEN", "env-token-wins");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("MEDIAGIT_TOKEN", "env-token-wins") };
     assert_eq!(
         resolve_credentials(repo_root, &config_with_token, "origin"),
         Credentials::Bearer("env-token-wins".to_string())
@@ -101,7 +111,8 @@ fn credential_precedence_env_keychain_config_none() {
 
     // 5. Config token set, no env -> config wins (file is still the last
     //    fallback tier, reached once env and keychain are both empty).
-    std::env::remove_var("MEDIAGIT_TOKEN");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("MEDIAGIT_TOKEN") };
     assert_eq!(
         resolve_credentials(repo_root, &config_with_token, "origin"),
         Credentials::Bearer("config-token".to_string())
@@ -118,7 +129,8 @@ fn credential_precedence_env_keychain_config_none() {
 
     // 7. Unknown remote name falls through to env, ignoring the "origin"
     //    entry entirely.
-    std::env::set_var("MEDIAGIT_TOKEN", "env-token-wins");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("MEDIAGIT_TOKEN", "env-token-wins") };
     assert_eq!(
         resolve_credentials(repo_root, &config_with_token, "some-other-remote"),
         Credentials::Bearer("env-token-wins".to_string())
@@ -126,9 +138,12 @@ fn credential_precedence_env_keychain_config_none() {
 
     // Cleanup so this doesn't leak into any test that runs after it in the
     // same process.
-    std::env::remove_var("MEDIAGIT_TOKEN");
-    std::env::remove_var("MEDIAGIT_API_KEY");
-    std::env::remove_var("MEDIAGIT_NO_KEYRING");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("MEDIAGIT_TOKEN") };
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("MEDIAGIT_API_KEY") };
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("MEDIAGIT_NO_KEYRING") };
 }
 
 /// Exercises the real OS keychain: `remember_credentials` write-through
@@ -155,9 +170,12 @@ fn keychain_tier_write_through_and_read_back() {
     let temp_dir = TempDir::new().unwrap();
     let repo_root = temp_dir.path();
 
-    std::env::remove_var("MEDIAGIT_TOKEN");
-    std::env::remove_var("MEDIAGIT_API_KEY");
-    std::env::remove_var("MEDIAGIT_NO_KEYRING");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("MEDIAGIT_TOKEN") };
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("MEDIAGIT_API_KEY") };
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("MEDIAGIT_NO_KEYRING") };
 
     let origin_account = "http://localhost:9999";
     let remote_url = "http://localhost:9999/mediagit-i10-keyring-test-repo-b";
@@ -215,9 +233,12 @@ fn config_token_beats_stale_keychain_entry() {
     let temp_dir = TempDir::new().unwrap();
     let repo_root = temp_dir.path();
 
-    std::env::remove_var("MEDIAGIT_TOKEN");
-    std::env::remove_var("MEDIAGIT_API_KEY");
-    std::env::remove_var("MEDIAGIT_NO_KEYRING");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("MEDIAGIT_TOKEN") };
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("MEDIAGIT_API_KEY") };
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("MEDIAGIT_NO_KEYRING") };
 
     let origin_account = "http://localhost:9997";
     let remote_url = "http://localhost:9997/mediagit-i11-config-vs-keychain";
@@ -261,9 +282,12 @@ fn unauthorized_invalidates_keychain_and_falls_through() {
     let temp_dir = TempDir::new().unwrap();
     let repo_root = temp_dir.path();
 
-    std::env::remove_var("MEDIAGIT_TOKEN");
-    std::env::remove_var("MEDIAGIT_API_KEY");
-    std::env::remove_var("MEDIAGIT_NO_KEYRING");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("MEDIAGIT_TOKEN") };
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("MEDIAGIT_API_KEY") };
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("MEDIAGIT_NO_KEYRING") };
 
     let origin_account = "http://localhost:9996";
     let remote_url = "http://localhost:9996/mediagit-i11-invalidate-repo";
@@ -321,9 +345,12 @@ fn keychain_legacy_full_url_entry_migrates_to_origin_key() {
     let temp_dir = TempDir::new().unwrap();
     let repo_root = temp_dir.path();
 
-    std::env::remove_var("MEDIAGIT_TOKEN");
-    std::env::remove_var("MEDIAGIT_API_KEY");
-    std::env::remove_var("MEDIAGIT_NO_KEYRING");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("MEDIAGIT_TOKEN") };
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("MEDIAGIT_API_KEY") };
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("MEDIAGIT_NO_KEYRING") };
 
     let origin_account = "http://localhost:9998";
     let legacy_account = "http://localhost:9998/mediagit-i10-keyring-legacy-repo";

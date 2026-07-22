@@ -34,7 +34,7 @@
 
 #[cfg(test)]
 mod azure_azurite_tests {
-    use mediagit_storage::{azure::AzureBackend, StorageBackend};
+    use mediagit_storage::{StorageBackend, azure::AzureBackend};
 
     /// Azurite default connection string
     const AZURITE_CONNECTION_STRING: &str = "DefaultEndpointsProtocol=http;\

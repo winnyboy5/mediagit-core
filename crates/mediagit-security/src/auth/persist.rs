@@ -24,7 +24,7 @@
 //! empty when a file exists but can't be read, since that would look like
 //! "no users registered" instead of "storage is broken".
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::path::Path;
 
 use super::AuthError;
@@ -69,7 +69,7 @@ pub(crate) fn load_jsonl<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>, Aut
                 "failed to read auth store file {}: {}",
                 path.display(),
                 e
-            )))
+            )));
         }
     };
 

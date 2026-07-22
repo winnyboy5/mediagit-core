@@ -94,7 +94,7 @@ mod tag_object;
 mod transaction;
 mod tree;
 
-pub use bitmap::{bitmap_enabled, bitmap_key, ReachabilityBitmap};
+pub use bitmap::{ReachabilityBitmap, bitmap_enabled, bitmap_key};
 pub use branch::{BranchInfo, BranchManager, DetachedHead};
 pub use checkout::{CheckoutManager, CheckoutStats};
 pub use chunking::{
@@ -106,9 +106,9 @@ pub use config::{ChunkingStrategyConfig, StorageConfig};
 pub use conflict::{Conflict, ConflictDetector, ConflictSide, ConflictStats, ConflictType};
 pub use delta::{Delta, DeltaDecoder, DeltaEncoder};
 pub use diff::{ModifiedEntry, ThreeWayDiff, TreeDiff, TreeDiffer};
-pub use index::{is_stage_debris_key, Index, IndexEntry};
+pub use index::{Index, IndexEntry, is_stage_debris_key};
 pub use lca::{LcaFinder, LcaResult};
-pub use merge::{apply_merge_to_workdir, FastForwardInfo, MergeEngine, MergeResult, MergeStrategy};
+pub use merge::{FastForwardInfo, MergeEngine, MergeResult, MergeStrategy, apply_merge_to_workdir};
 pub use metrics::OdbMetrics;
 pub use object::ObjectType;
 pub use odb::{ObjectDatabase, RepackStats};
@@ -118,7 +118,7 @@ pub use pack::{
 };
 pub use reachability::walk_reachable;
 pub use reflog::{Reflog, ReflogEntry};
-pub use refs::{normalize_ref_name, Ref, RefDatabase, RefType};
+pub use refs::{Ref, RefDatabase, RefType, normalize_ref_name};
 pub use revision::resolve_revision;
 pub use similarity::{ObjectMetadata, SimilarityDetector, SimilarityScore};
 pub use sparse::{SparseFilter, SparseMode};

@@ -24,7 +24,7 @@ mod repo;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::{generate, Shell};
+use clap_complete::{Shell, generate};
 use commands::*;
 use mediagit_observability::LogFormat;
 use std::io;
@@ -219,14 +219,14 @@ fn preprocess_args(args: Vec<String>) -> Vec<String> {
             let cmd_idx = pos;
             let mut result = Vec::with_capacity(args.len() + 2);
             for (i, arg) in args.into_iter().enumerate() {
-                if i > cmd_idx {
-                    if let Some(rest) = arg.strip_prefix('-') {
-                        if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
-                            result.push("-n".to_string());
-                            result.push(rest.to_string());
-                            continue;
-                        }
-                    }
+                if i > cmd_idx
+                    && let Some(rest) = arg.strip_prefix('-')
+                    && !rest.is_empty()
+                    && rest.chars().all(|c| c.is_ascii_digit())
+                {
+                    result.push("-n".to_string());
+                    result.push(rest.to_string());
+                    continue;
                 }
                 result.push(arg);
             }
@@ -341,6 +341,7 @@ fn main() {
     }
 }
 
+#[allow(unsafe_code)] // audited: single-threaded startup, see SAFETY comment at the set_var call site below
 async fn async_main(cli: Cli) -> Result<()> {
     // Suppress INFO logs for machine-readable output modes (--json, --prometheus)
     // to avoid mixing log lines with structured data even when stderr is redirected
@@ -384,7 +385,11 @@ async fn async_main(cli: Cli) -> Result<()> {
         // Set MEDIAGIT_REPO to the resolved absolute path so find_repo_root() works
         // even when called from code that doesn't inspect current_dir() directly.
         if let Ok(cwd) = std::env::current_dir() {
-            std::env::set_var("MEDIAGIT_REPO", cwd);
+            // SAFETY: runs during CLI startup on the dedicated single-threaded
+            // runtime (see the `new_current_thread` runtime built on its own
+            // std::thread earlier in main) — before any other thread exists that
+            // could read the environment concurrently. No data race is possible.
+            unsafe { std::env::set_var("MEDIAGIT_REPO", cwd) };
         }
     }
 

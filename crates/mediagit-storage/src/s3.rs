@@ -88,15 +88,15 @@
 //! Use [`StorageError`](crate::StorageError) for more structured error information.
 
 use crate::StorageBackend;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
+use aws_sdk_s3::Client;
 use aws_sdk_s3::config::retry::RetryConfig;
 use aws_sdk_s3::config::timeout::TimeoutConfig;
-use aws_sdk_s3::Client;
 use bytes::Bytes;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -1175,6 +1175,9 @@ impl S3Backend {
         let part_size = self.config.part_size as usize;
         let mut part_number = 1;
 
+        // part_number feeds the S3 PartNumber (1-indexed); kept as an explicit
+        // counter for clarity in this multipart-upload hot path.
+        #[allow(clippy::explicit_counter_loop)]
         for chunk in data.chunks(part_size) {
             let client = client.clone();
             let bucket = bucket.clone();
@@ -1218,11 +1221,11 @@ impl S3Backend {
             part_handles.push(handle);
 
             // Limit concurrent uploads
-            if part_handles.len() >= self.config.max_concurrent_parts {
-                if let Some(handle) = part_handles.pop() {
-                    let (part_num, etag) = handle.await??;
-                    parts.push((part_num, etag));
-                }
+            if part_handles.len() >= self.config.max_concurrent_parts
+                && let Some(handle) = part_handles.pop()
+            {
+                let (part_num, etag) = handle.await??;
+                parts.push((part_num, etag));
             }
 
             part_number += 1;

@@ -610,10 +610,10 @@ impl PullCmd {
         }
 
         // Save stats for later retrieval by stats command
-        if !self.dry_run {
-            if let Err(e) = stats.save(&storage_path) {
-                tracing::warn!("Failed to save operation stats: {}", e);
-            }
+        if !self.dry_run
+            && let Err(e) = stats.save(&storage_path)
+        {
+            tracing::warn!("Failed to save operation stats: {}", e);
         }
 
         // Best-effort auto-gc: reclaims stale objects from partial fetches

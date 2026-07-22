@@ -1465,13 +1465,13 @@ impl ContentChunker {
     /// routing for `.ply`, which itself CDC-falls-back for non-text data.
     /// `MEDIAGIT_CHUNK_PLY=0` takes the same fallback.
     pub(super) async fn chunk_ply(&self, data: &[u8]) -> Result<Vec<ContentChunk>> {
-        if chunk_ply_enabled() {
-            if let Some(info) = parse_ply_binary_header(data) {
-                let vertex_block_len = info.vertex_count * info.vertex_stride;
-                let vertex_block_end = info.header_end + vertex_block_len;
-                if vertex_block_end <= data.len() {
-                    return self.chunk_ply_binary(data, &info).await;
-                }
+        if chunk_ply_enabled()
+            && let Some(info) = parse_ply_binary_header(data)
+        {
+            let vertex_block_len = info.vertex_count * info.vertex_stride;
+            let vertex_block_end = info.header_end + vertex_block_len;
+            if vertex_block_end <= data.len() {
+                return self.chunk_ply_binary(data, &info).await;
             }
         }
 
@@ -1590,15 +1590,15 @@ pub(super) fn parse_ply_binary_header(data: &[u8]) -> Option<PlyHeaderInfo> {
             } else {
                 in_vertex = false;
             }
-        } else if let Some(rest) = line.strip_prefix("property ") {
-            if in_vertex {
-                let rest = rest.trim_start();
-                if rest.starts_with("list") {
-                    return None; // variable-stride vertex block not supported
-                }
-                let type_name = rest.split_whitespace().next().unwrap_or("");
-                stride += ply_type_size(type_name)?;
+        } else if let Some(rest) = line.strip_prefix("property ")
+            && in_vertex
+        {
+            let rest = rest.trim_start();
+            if rest.starts_with("list") {
+                return None; // variable-stride vertex block not supported
             }
+            let type_name = rest.split_whitespace().next().unwrap_or("");
+            stride += ply_type_size(type_name)?;
         }
     }
 
@@ -2004,16 +2004,16 @@ fn avi_video_codec_hint(fcc_handler: Option<[u8; 4]>, strf: Option<&[u8]>) -> Co
             return CodecHint::RawVideo;
         }
     }
-    if let Some(strf) = strf {
-        if strf.len() >= 20 {
-            let mut comp = [0u8; 4];
-            comp.copy_from_slice(&strf[16..20]);
-            if is_h264(&comp) {
-                return CodecHint::H264;
-            }
-            if is_raw(&comp) {
-                return CodecHint::RawVideo;
-            }
+    if let Some(strf) = strf
+        && strf.len() >= 20
+    {
+        let mut comp = [0u8; 4];
+        comp.copy_from_slice(&strf[16..20]);
+        if is_h264(&comp) {
+            return CodecHint::H264;
+        }
+        if is_raw(&comp) {
+            return CodecHint::RawVideo;
         }
     }
     CodecHint::Unknown
@@ -2199,10 +2199,10 @@ fn mkv_track_codec_ids(tracks_body: &[u8]) -> Vec<String> {
                 (codec.offset as usize + codec.header_size as usize + codec.data_size as usize)
                     .min(entry_body.len())
             };
-            if cs < ce {
-                if let Ok(s) = std::str::from_utf8(&entry_body[cs..ce]) {
-                    out.push(s.trim_end_matches('\0').to_string());
-                }
+            if cs < ce
+                && let Ok(s) = std::str::from_utf8(&entry_body[cs..ce])
+            {
+                out.push(s.trim_end_matches('\0').to_string());
             }
         }
     }

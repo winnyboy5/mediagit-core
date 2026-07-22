@@ -17,7 +17,7 @@
 //! over representative fixture files, BEFORE the planned P1 fastcdc upgrade.
 //! Re-run this after that upgrade and compare MB/s to catch regressions.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use mediagit_versioning::chunking::{ChunkStrategy, ContentChunker};
 use std::hint::black_box;
 use std::path::PathBuf;

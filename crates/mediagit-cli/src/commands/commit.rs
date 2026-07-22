@@ -373,10 +373,10 @@ impl CommitCmd {
         );
         // Best-effort: don't fail the commit if reflog write fails
         let _ = reflog.append("HEAD", &entry).await;
-        if let Ok(head_ref) = refdb.read("HEAD").await {
-            if let Some(branch) = head_ref.target {
-                let _ = reflog.append(&branch, &entry).await;
-            }
+        if let Ok(head_ref) = refdb.read("HEAD").await
+            && let Some(branch) = head_ref.target
+        {
+            let _ = reflog.append(&branch, &entry).await;
         }
 
         if !self.quiet {

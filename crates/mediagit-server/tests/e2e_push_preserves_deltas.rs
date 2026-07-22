@@ -116,7 +116,7 @@ async fn push_preserves_chunk_deltas_on_server() {
     // chunk-deltas/<delta>{,.meta} — which the clone-side /chunk-deltas/check
     // endpoint walks, so it must run with packing disabled. Packed delta
     // preservation is covered separately by the F-series cloud-pack tests.
-    std::env::set_var("MEDIAGIT_CLOUD_PACKS", "0");
+    mediagit_test_utils::set_var("MEDIAGIT_CLOUD_PACKS", "0");
 
     // ── Client ──────────────────────────────────────────────────────────
     let client_temp = TempDir::new().unwrap();

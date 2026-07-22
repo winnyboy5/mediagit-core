@@ -359,23 +359,19 @@ impl FilterDriver {
             // Try default .mediagit path
             if let Ok(cwd) = std::env::current_dir() {
                 let default_storage = cwd.join(".mediagit");
-                if default_storage.exists() {
-                    if let Some(storage_path) = default_storage.to_str() {
-                        match self.retrieve_object(storage_path, &pointer.oid) {
-                            Ok(content) => {
-                                debug!(
-                                    "Retrieved object {} ({} bytes)",
-                                    pointer.oid,
-                                    content.len()
-                                );
-                                io::stdout().write_all(&content).map_err(|e| {
-                                    GitError::FilterFailed(format!("Failed to write stdout: {}", e))
-                                })?;
-                                return Ok(());
-                            }
-                            Err(e) => {
-                                debug!("Object retrieval failed: {}", e);
-                            }
+                if default_storage.exists()
+                    && let Some(storage_path) = default_storage.to_str()
+                {
+                    match self.retrieve_object(storage_path, &pointer.oid) {
+                        Ok(content) => {
+                            debug!("Retrieved object {} ({} bytes)", pointer.oid, content.len());
+                            io::stdout().write_all(&content).map_err(|e| {
+                                GitError::FilterFailed(format!("Failed to write stdout: {}", e))
+                            })?;
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            debug!("Object retrieval failed: {}", e);
                         }
                     }
                 }
@@ -444,10 +440,9 @@ impl FilterDriver {
             && data[1] == 0xB5
             && data[2] == 0x2F
             && data[3] == 0xFD
+            && let Ok(decompressed) = zstd::decode_all(std::io::Cursor::new(data))
         {
-            if let Ok(decompressed) = zstd::decode_all(std::io::Cursor::new(data)) {
-                return Ok(decompressed);
-            }
+            return Ok(decompressed);
         }
         Err(())
     }

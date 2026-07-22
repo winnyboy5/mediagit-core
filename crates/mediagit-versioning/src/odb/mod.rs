@@ -383,6 +383,7 @@ pub struct RepackStats {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)] // edition-2024: test-only env::set_var/remove_var requires unsafe
 mod tests {
     use super::*;
     use mediagit_storage::mock::MockBackend;
@@ -598,7 +599,8 @@ mod tests {
         let _env_lock = REPACK_CHUNKS_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("MEDIAGIT_REPACK_CHUNKS");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_REPACK_CHUNKS") };
 
         let storage = Arc::new(MockBackend::new());
         let odb = ObjectDatabase::new(storage, 100);
@@ -655,7 +657,8 @@ mod tests {
         let _env_lock = REPACK_CHUNKS_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("MEDIAGIT_REPACK_CHUNKS", "0");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MEDIAGIT_REPACK_CHUNKS", "0") };
 
         let storage = Arc::new(MockBackend::new());
         let odb = ObjectDatabase::new(storage, 100);
@@ -686,7 +689,8 @@ mod tests {
         let data = odb.get_chunk(&chunk_id).await.unwrap();
         assert_eq!(data, content);
 
-        std::env::remove_var("MEDIAGIT_REPACK_CHUNKS");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_REPACK_CHUNKS") };
     }
 
     /// Storage wrapper that fails `put()` for any key containing
@@ -733,7 +737,8 @@ mod tests {
         let _env_lock = REPACK_CHUNKS_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("MEDIAGIT_REPACK_CHUNKS");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_REPACK_CHUNKS") };
 
         let inner = Arc::new(MockBackend::new());
         let failing: Arc<dyn StorageBackend> = Arc::new(FailOnKeyBackend {

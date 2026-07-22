@@ -306,11 +306,7 @@ fn container_chunk_cap_bytes() -> u64 {
 /// parsing logic directly without touching the process-wide `OnceLock`.
 fn container_chunk_cap_from_env(var: Option<&str>) -> u64 {
     let mb = var.and_then(|v| v.parse::<u64>().ok()).unwrap_or(100);
-    if mb == 0 {
-        u64::MAX
-    } else {
-        mb * 1024 * 1024
-    }
+    if mb == 0 { u64::MAX } else { mb * 1024 * 1024 }
 }
 
 /// Content-based chunker
@@ -1347,7 +1343,7 @@ mod tests {
         // Large Cluster: header + 5MB of data (triggers CDC subdivision at >4MB)
         let cluster_content_size: usize = 5 * 1024 * 1024;
         mkv.extend_from_slice(&[0x1F, 0x43, 0xB6, 0x75]); // Cluster ID
-                                                          // Encode size as 4-byte VINT: marker bit in first byte
+        // Encode size as 4-byte VINT: marker bit in first byte
         let size_val = cluster_content_size as u32;
         mkv.push(0x10 | ((size_val >> 24) & 0x0F) as u8); // 4-byte VINT marker
         mkv.push((size_val >> 16) as u8);

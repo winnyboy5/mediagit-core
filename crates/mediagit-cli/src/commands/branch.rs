@@ -642,12 +642,10 @@ impl BranchCmd {
         // BUG-CLI-B1: refuse to clobber uncommitted changes to tracked files.
         // Checked before HEAD is updated / the working tree is touched.
         if !opts.force {
-            if let Some(current_oid) = current_commit_oid {
-                if Self::has_uncommitted_changes(&repo_root, &odb, &current_oid).await? {
-                    anyhow::bail!(
-                        "working tree has uncommitted changes; commit/stash or use --force"
-                    );
-                }
+            if let Some(current_oid) = current_commit_oid
+                && Self::has_uncommitted_changes(&repo_root, &odb, &current_oid).await?
+            {
+                anyhow::bail!("working tree has uncommitted changes; commit/stash or use --force");
             }
 
             // QA-001: refuse to clobber untracked files that collide with a
@@ -975,16 +973,17 @@ impl BranchCmd {
             }
 
             // Check branch protection
-            if let Some(protection) = config.get_branch_protection(branch_name) {
-                if protection.prevent_deletion && !opts.force {
-                    if !opts.quiet {
-                        output::warning(&format!(
-                            "Branch '{}' is protected (use --force to override)",
-                            branch_name
-                        ));
-                    }
-                    continue;
+            if let Some(protection) = config.get_branch_protection(branch_name)
+                && protection.prevent_deletion
+                && !opts.force
+            {
+                if !opts.quiet {
+                    output::warning(&format!(
+                        "Branch '{}' is protected (use --force to override)",
+                        branch_name
+                    ));
                 }
+                continue;
             }
 
             // Verify branch exists

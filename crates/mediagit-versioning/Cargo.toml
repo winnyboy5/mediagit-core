@@ -70,3 +70,6 @@ harness = false
 
 [[example]]
 name = "dedup_report"
+
+[lints.rust]
+unsafe_code = "deny"

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use mediagit_server::{
-    create_router, create_router_with_rate_limit, AppState, RateLimitConfig, ServerConfig,
+    AppState, RateLimitConfig, ServerConfig, create_router, create_router_with_rate_limit,
 };
 
 mod setup;

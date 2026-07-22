@@ -34,8 +34,9 @@
 //! - Bucket: test-bucket (created by minio-init container)
 
 #[cfg(test)]
+#[allow(unsafe_code)] // edition-2024: test-only env::set_var/remove_var requires unsafe
 mod minio_docker_tests {
-    use mediagit_storage::{minio::MinIOBackend, StorageBackend};
+    use mediagit_storage::{StorageBackend, minio::MinIOBackend};
 
     /// Helper function to create a test MinIO backend
     async fn create_test_backend() -> MinIOBackend {
@@ -403,10 +404,14 @@ mod minio_docker_tests {
         use std::env;
 
         // Set environment variables
-        env::set_var("MINIO_ENDPOINT", "http://localhost:9000");
-        env::set_var("MINIO_BUCKET", "test-bucket");
-        env::set_var("MINIO_ACCESS_KEY", "minioadmin");
-        env::set_var("MINIO_SECRET_KEY", "minioadmin");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::set_var("MINIO_ENDPOINT", "http://localhost:9000") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::set_var("MINIO_BUCKET", "test-bucket") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::set_var("MINIO_ACCESS_KEY", "minioadmin") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::set_var("MINIO_SECRET_KEY", "minioadmin") };
 
         let backend = MinIOBackend::from_env()
             .await
@@ -417,9 +422,13 @@ mod minio_docker_tests {
         assert_eq!(backend.get("env/test.txt").await.unwrap(), b"env test");
 
         // Cleanup env vars
-        env::remove_var("MINIO_ENDPOINT");
-        env::remove_var("MINIO_BUCKET");
-        env::remove_var("MINIO_ACCESS_KEY");
-        env::remove_var("MINIO_SECRET_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::remove_var("MINIO_ENDPOINT") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::remove_var("MINIO_BUCKET") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::remove_var("MINIO_ACCESS_KEY") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::remove_var("MINIO_SECRET_KEY") };
     }
 }

@@ -28,7 +28,7 @@ impl ProtocolClient {
         chunk_manifest_sizes: &std::collections::HashMap<Oid, u64>,
         bytes_progress: &Arc<AtomicU64>,
     ) -> Result<(u32, u64)> {
-        use crate::pack_builder::{upload_and_register, PackBuilder};
+        use crate::pack_builder::{PackBuilder, upload_and_register};
         use futures::stream::{FuturesUnordered, StreamExt};
 
         // Each in-flight pack is read fully into RAM (~MEDIAGIT_PACK_BYTES) for upload,

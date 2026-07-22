@@ -33,8 +33,8 @@
 //! way a real push (`MEDIAGIT_CLOUD_PACKS=1`, the default) would leave a repo.
 
 use mediagit_compression::{SmartCompressor, TypeAwareCompressor};
-use mediagit_storage::mock::MockBackend;
 use mediagit_storage::StorageBackend;
+use mediagit_storage::mock::MockBackend;
 use mediagit_versioning::{
     Delta, DeltaEncoder, ObjectDatabase, ObjectType, Oid, PackKind, StreamingPackWriter,
 };

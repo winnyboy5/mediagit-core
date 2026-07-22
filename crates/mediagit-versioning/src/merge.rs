@@ -20,7 +20,7 @@ use crate::{
     Commit, Conflict, ConflictDetector, Index, IndexEntry, LcaFinder, ObjectDatabase, ObjectType,
     Oid, Tree, TreeDiffer,
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, instrument, trace};

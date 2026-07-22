@@ -16,7 +16,7 @@
 //! Performance targets:
 //! - Branch switching: <100ms
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use mediagit_storage::LocalBackend;
 use mediagit_versioning::{
     BranchManager, Commit, ObjectDatabase, ObjectType, Oid, Signature, Tree,

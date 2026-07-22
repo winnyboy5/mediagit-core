@@ -454,16 +454,15 @@ impl PsdParser {
             let ours_layer = ours.layers.iter().find(|l| l.name == base_layer.name);
             let theirs_layer = theirs.layers.iter().find(|l| l.name == base_layer.name);
 
-            if let (Some(ours), Some(theirs)) = (ours_layer, theirs_layer) {
-                if ours.parent_group != theirs.parent_group
-                    && (ours.parent_group != base_layer.parent_group
-                        || theirs.parent_group != base_layer.parent_group)
-                {
-                    conflicts.push(format!(
-                        "Layer '{}' moved to different groups: {:?} vs {:?}",
-                        base_layer.name, ours.parent_group, theirs.parent_group
-                    ));
-                }
+            if let (Some(ours), Some(theirs)) = (ours_layer, theirs_layer)
+                && ours.parent_group != theirs.parent_group
+                && (ours.parent_group != base_layer.parent_group
+                    || theirs.parent_group != base_layer.parent_group)
+            {
+                conflicts.push(format!(
+                    "Layer '{}' moved to different groups: {:?} vs {:?}",
+                    base_layer.name, ours.parent_group, theirs.parent_group
+                ));
             }
         }
 

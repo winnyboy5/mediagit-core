@@ -172,10 +172,10 @@ impl Config {
     /// storage layout (`layout_version` / the `LAYOUT` marker) — only the
     /// config.toml schema.
     pub async fn load(repo_root: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
-        use crate::migration::{
-            MigrationManager, MigrationV0ToV1, MigrationV1ToV2, CONFIG_VERSION,
-        };
         use crate::ConfigLoader;
+        use crate::migration::{
+            CONFIG_VERSION, MigrationManager, MigrationV0ToV1, MigrationV1ToV2,
+        };
         let config_path = repo_root.as_ref().join(".mediagit/config.toml");
 
         if !config_path.exists() {

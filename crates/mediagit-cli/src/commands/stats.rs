@@ -414,24 +414,24 @@ impl StatsCmd {
         // Read manifests to extract original file sizes (per-category
         // compression-ratio breakdown).
         for manifest_key in &manifest_keys {
-            if let Ok(data) = storage.get(manifest_key).await {
-                if let Ok(manifest) = mediagit_versioning::ChunkManifest::from_bytes(&data) {
-                    stats.original_bytes += manifest.total_size;
+            if let Ok(data) = storage.get(manifest_key).await
+                && let Ok(manifest) = mediagit_versioning::ChunkManifest::from_bytes(&data)
+            {
+                stats.original_bytes += manifest.total_size;
 
-                    let category = manifest
-                        .filename
-                        .as_deref()
-                        .and_then(|f| std::path::Path::new(f).extension())
-                        .and_then(|e| e.to_str())
-                        .map(|ext| categorize_extension(ext))
-                        .unwrap_or("other");
-                    let cat_entry = stats
-                        .category_stats
-                        .entry(category.to_string())
-                        .or_insert((0, 0));
-                    cat_entry.0 += manifest.total_size;
-                    cat_entry.1 += 1;
-                }
+                let category = manifest
+                    .filename
+                    .as_deref()
+                    .and_then(|f| std::path::Path::new(f).extension())
+                    .and_then(|e| e.to_str())
+                    .map(|ext| categorize_extension(ext))
+                    .unwrap_or("other");
+                let cat_entry = stats
+                    .category_stats
+                    .entry(category.to_string())
+                    .or_insert((0, 0));
+                cat_entry.0 += manifest.total_size;
+                cat_entry.1 += 1;
             }
         }
 
@@ -543,7 +543,7 @@ impl StatsCmd {
                 commit_count: count,
             })
             .collect();
-        authors.sort_by(|a, b| b.commit_count.cmp(&a.commit_count));
+        authors.sort_by_key(|b| std::cmp::Reverse(b.commit_count));
 
         Ok(authors)
     }
@@ -751,7 +751,7 @@ impl StatsCmd {
                 println!("  By file type:");
                 let mut categories: Vec<(&String, &(u64, u64))> =
                     stats.category_stats.iter().collect();
-                categories.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+                categories.sort_by_key(|b| std::cmp::Reverse(b.1.0));
                 for (cat, (orig_bytes, file_count)) in &categories {
                     println!(
                         "    {:8}: {} files, {} original",

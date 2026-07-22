@@ -702,6 +702,7 @@ async fn detect_object_type(odb: &ObjectDatabase, oid: &Oid) -> ObjectType {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)] // edition-2024: test-only env::set_var/remove_var requires unsafe
 mod tests {
     use super::*;
     use tempfile::TempDir;
@@ -1156,7 +1157,7 @@ mod tests {
     static SIGN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn write_test_signing_key(dir: &std::path::Path) -> PathBuf {
-        use ssh_key::{rand_core::OsRng, Algorithm, PrivateKey};
+        use ssh_key::{Algorithm, PrivateKey, rand_core::OsRng};
         let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
         let pem = key.to_openssh(ssh_key::LineEnding::LF).unwrap();
         let path = dir.join("id_ed25519_signing_test");
@@ -1175,8 +1176,10 @@ mod tests {
         let (_temp, repo_path) = setup_test_repo().await;
         let key_path = write_test_signing_key(_temp.path());
 
-        std::env::set_var("MEDIAGIT_SIGN", "1");
-        std::env::set_var("MEDIAGIT_SIGN_KEY", key_path.to_str().unwrap());
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MEDIAGIT_SIGN", "1") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MEDIAGIT_SIGN_KEY", key_path.to_str().unwrap()) };
 
         let create_result = TagCmd {
             subcommand: TagSubcommand::Create(CreateOpts {
@@ -1212,8 +1215,10 @@ mod tests {
         .execute(repo_path)
         .await;
 
-        std::env::remove_var("MEDIAGIT_SIGN");
-        std::env::remove_var("MEDIAGIT_SIGN_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_SIGN") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_SIGN_KEY") };
 
         assert!(create_result.is_ok(), "{:?}", create_result.err());
         assert!(tag.signature.is_some(), "MEDIAGIT_SIGN=1 must sign the tag");
@@ -1226,8 +1231,10 @@ mod tests {
         let _guard = SIGN_ENV_LOCK.lock().unwrap();
         let (_temp, repo_path) = setup_test_repo().await;
 
-        std::env::remove_var("MEDIAGIT_SIGN");
-        std::env::remove_var("MEDIAGIT_SIGN_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_SIGN") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_SIGN_KEY") };
 
         TagCmd {
             subcommand: TagSubcommand::Create(CreateOpts {
@@ -1267,8 +1274,10 @@ mod tests {
         let (_temp, repo_path) = setup_test_repo().await;
         let key_path = write_test_signing_key(_temp.path());
 
-        std::env::set_var("MEDIAGIT_SIGN", "1");
-        std::env::set_var("MEDIAGIT_SIGN_KEY", key_path.to_str().unwrap());
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MEDIAGIT_SIGN", "1") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MEDIAGIT_SIGN_KEY", key_path.to_str().unwrap()) };
 
         TagCmd {
             subcommand: TagSubcommand::Create(CreateOpts {
@@ -1311,8 +1320,10 @@ mod tests {
 
         // Verification must need no local key (the signer key is embedded
         // in the signature), so drop the env vars before verifying.
-        std::env::remove_var("MEDIAGIT_SIGN");
-        std::env::remove_var("MEDIAGIT_SIGN_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_SIGN") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_SIGN_KEY") };
         drop(key_path);
 
         let verify_result = TagCmd {
@@ -1338,8 +1349,10 @@ mod tests {
         let (_temp, repo_path) = setup_test_repo().await;
         let key_path = write_test_signing_key(_temp.path());
 
-        std::env::set_var("MEDIAGIT_SIGN", "1");
-        std::env::set_var("MEDIAGIT_SIGN_KEY", key_path.to_str().unwrap());
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MEDIAGIT_SIGN", "1") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MEDIAGIT_SIGN_KEY", key_path.to_str().unwrap()) };
 
         TagCmd {
             subcommand: TagSubcommand::Create(CreateOpts {
@@ -1359,8 +1372,10 @@ mod tests {
 
         // Simulate a different machine: signing key gone, env cleared. The
         // embedded-key (TOFU) model must still verify successfully.
-        std::env::remove_var("MEDIAGIT_SIGN");
-        std::env::remove_var("MEDIAGIT_SIGN_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_SIGN") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_SIGN_KEY") };
         std::fs::remove_file(&key_path).unwrap();
 
         let verify_result = TagCmd {

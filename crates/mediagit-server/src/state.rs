@@ -13,8 +13,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 
@@ -90,16 +90,15 @@ impl WantCache {
             .retain(|_, entry| now.duration_since(entry.created_at) < Self::ENTRY_TTL);
 
         // Evict oldest entry if still at capacity after TTL sweep
-        if self.entries.len() >= self.max_entries {
-            if let Some((oldest_key, _)) = self
+        if self.entries.len() >= self.max_entries
+            && let Some((oldest_key, _)) = self
                 .entries
                 .iter()
                 .min_by_key(|(_, entry)| entry.created_at)
                 .map(|(k, e)| (k.clone(), e.clone()))
-            {
-                self.entries.remove(&oldest_key);
-                tracing::debug!("Evicted oldest want entry: {}", oldest_key);
-            }
+        {
+            self.entries.remove(&oldest_key);
+            tracing::debug!("Evicted oldest want entry: {}", oldest_key);
         }
 
         self.entries.insert(
@@ -308,8 +307,8 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mediagit_security::auth::user::Role;
     use mediagit_security::auth::User;
+    use mediagit_security::auth::user::Role;
 
     #[tokio::test]
     async fn full_auth_persists_users_across_restart() {

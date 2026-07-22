@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
-use super::{persist, AuthResult};
+use super::{AuthResult, persist};
 
 /// Access level granted to a user on a repo. Ordered `Read < Write < Admin`
 /// so a grant at a given level satisfies any requirement at or below it.
@@ -312,11 +312,11 @@ mod tests {
     #[tokio::test]
     async fn persist_disabled_writes_no_files() {
         let _guard = persist::ENV_LOCK.write().unwrap();
-        std::env::set_var("MEDIAGIT_AUTH_PERSIST", "0");
+        mediagit_test_utils::set_var("MEDIAGIT_AUTH_PERSIST", "0");
         let tmp = tempfile::tempdir().unwrap();
         let store = GrantsStore::load_or_new(tmp.path()).unwrap();
         store.grant("user1", "repoA", Level::Write).await.unwrap();
-        std::env::remove_var("MEDIAGIT_AUTH_PERSIST");
+        mediagit_test_utils::remove_var("MEDIAGIT_AUTH_PERSIST");
 
         assert!(!tmp.path().join("grants.jsonl").exists());
     }

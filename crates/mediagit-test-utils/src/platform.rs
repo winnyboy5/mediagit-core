@@ -47,12 +47,11 @@ impl TestPaths {
         // Walk up until we find the workspace root (has [workspace] in Cargo.toml)
         loop {
             let cargo_toml = current.join("Cargo.toml");
-            if cargo_toml.exists() {
-                if let Ok(content) = std::fs::read_to_string(&cargo_toml) {
-                    if content.contains("[workspace]") {
-                        return current.to_path_buf();
-                    }
-                }
+            if cargo_toml.exists()
+                && let Ok(content) = std::fs::read_to_string(&cargo_toml)
+                && content.contains("[workspace]")
+            {
+                return current.to_path_buf();
             }
 
             if let Some(parent) = current.parent() {
@@ -109,14 +108,14 @@ impl TestPaths {
 /// Handles platform-specific path differences.
 #[macro_export]
 macro_rules! assert_paths_eq {
-    ($left:expr, $right:expr) => {
+    ($left:expr_2021, $right:expr_2021) => {
         assert_eq!(
             $crate::TestPaths::normalize($left),
             $crate::TestPaths::normalize($right),
             "Paths are not equal"
         );
     };
-    ($left:expr, $right:expr, $($arg:tt)+) => {
+    ($left:expr_2021, $right:expr_2021, $($arg:tt)+) => {
         assert_eq!(
             $crate::TestPaths::normalize($left),
             $crate::TestPaths::normalize($right),

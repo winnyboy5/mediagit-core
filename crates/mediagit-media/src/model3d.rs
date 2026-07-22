@@ -356,14 +356,14 @@ impl Model3DParser {
 
                 // Parse vertex coordinates for bounding box
                 let parts: Vec<&str> = trimmed.split_whitespace().collect();
-                if parts.len() >= 4 {
-                    if let (Ok(x), Ok(y), Ok(z)) = (
+                if parts.len() >= 4
+                    && let (Ok(x), Ok(y), Ok(z)) = (
                         parts[1].parse::<f32>(),
                         parts[2].parse::<f32>(),
                         parts[3].parse::<f32>(),
-                    ) {
-                        bounding_box.expand(x, y, z);
-                    }
+                    )
+                {
+                    bounding_box.expand(x, y, z);
                 }
             } else if trimmed.starts_with("f ") {
                 // Face
@@ -477,10 +477,10 @@ impl Model3DParser {
                 vertex_count += 1;
             } else if trimmed.starts_with("Model:") {
                 object_count += 1;
-            } else if trimmed.starts_with("Material:") {
-                if let Some(mat_name) = trimmed.split('"').nth(1) {
-                    materials.insert(mat_name.to_string());
-                }
+            } else if trimmed.starts_with("Material:")
+                && let Some(mat_name) = trimmed.split('"').nth(1)
+            {
+                materials.insert(mat_name.to_string());
             }
         }
 
@@ -827,15 +827,14 @@ impl Model3DParser {
         }
 
         // Check bounding box overlap if available
-        if let (Some(our_bbox), Some(their_bbox)) = (&ours.bounding_box, &theirs.bounding_box) {
-            if let Some(base_bbox) = &base.bounding_box {
-                let ours_changed = our_bbox.volume() != base_bbox.volume();
-                let theirs_changed = their_bbox.volume() != base_bbox.volume();
+        if let (Some(our_bbox), Some(their_bbox)) = (&ours.bounding_box, &theirs.bounding_box)
+            && let Some(base_bbox) = &base.bounding_box
+        {
+            let ours_changed = our_bbox.volume() != base_bbox.volume();
+            let theirs_changed = their_bbox.volume() != base_bbox.volume();
 
-                if ours_changed && theirs_changed && our_bbox.overlaps(their_bbox) {
-                    conflicts
-                        .push("Both branches modified overlapping spatial regions".to_string());
-                }
+            if ours_changed && theirs_changed && our_bbox.overlaps(their_bbox) {
+                conflicts.push("Both branches modified overlapping spatial regions".to_string());
             }
         }
 

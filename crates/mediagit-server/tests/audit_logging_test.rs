@@ -17,7 +17,7 @@
 //! security events are properly logged.
 
 use axum::http::StatusCode;
-use mediagit_server::{create_router_with_rate_limit, AppState, RateLimitConfig};
+use mediagit_server::{AppState, RateLimitConfig, create_router_with_rate_limit};
 use reqwest::Client;
 use std::net::SocketAddr;
 use std::sync::Arc;

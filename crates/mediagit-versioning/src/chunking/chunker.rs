@@ -214,6 +214,7 @@ impl ContentChunker {
     ///
     /// # Errors
     /// Returns an error if the file cannot be opened, read, or if the receiver has been dropped.
+    #[allow(unsafe_code)] // audited: read-only mmap, file not modified while mapped
     pub fn collect_file_chunks_blocking<P: AsRef<std::path::Path>>(
         &self,
         path: P,

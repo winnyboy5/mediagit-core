@@ -845,18 +845,24 @@ impl ObjectDatabase {
                 for oid in &packed_oids {
                     // Use oid.to_hex() for consistency - LocalBackend handles path sharding
                     let object_key = oid.to_hex();
-                    if let Err(e) = self.storage.delete(&object_key).await {
-                        warn!(oid = %oid, error = %e, "Failed to remove loose object");
-                    } else {
-                        removed += 1;
+                    match self.storage.delete(&object_key).await {
+                        Err(e) => {
+                            warn!(oid = %oid, error = %e, "Failed to remove loose object");
+                        }
+                        _ => {
+                            removed += 1;
+                        }
                     }
                 }
                 for chunk_id in &legacy_packed_chunk_oids {
                     let chunk_key = format!("chunks/{}", chunk_id.to_hex());
-                    if let Err(e) = self.storage.delete(&chunk_key).await {
-                        warn!(chunk_id = %chunk_id, error = %e, "Failed to remove loose chunk");
-                    } else {
-                        removed += 1;
+                    match self.storage.delete(&chunk_key).await {
+                        Err(e) => {
+                            warn!(chunk_id = %chunk_id, error = %e, "Failed to remove loose chunk");
+                        }
+                        _ => {
+                            removed += 1;
+                        }
                     }
                 }
                 stats.loose_objects_removed += removed;
@@ -970,17 +976,17 @@ impl ObjectDatabase {
             }
         }
 
-        if let Some(w) = writer.take() {
-            if !pending.is_empty() {
-                self.seal_chunk_cloud_pack(
-                    w,
-                    &mut pending,
-                    remove_loose,
-                    stats,
-                    &mut packed_chunk_oids,
-                )
-                .await?;
-            }
+        if let Some(w) = writer.take()
+            && !pending.is_empty()
+        {
+            self.seal_chunk_cloud_pack(
+                w,
+                &mut pending,
+                remove_loose,
+                stats,
+                &mut packed_chunk_oids,
+            )
+            .await?;
         }
 
         Ok(packed_chunk_oids)
@@ -1060,10 +1066,13 @@ impl ObjectDatabase {
         if remove_loose {
             for (chunk_id, _, _) in pending.iter() {
                 let chunk_key = format!("chunks/{}", chunk_id.to_hex());
-                if let Err(e) = self.storage.delete(&chunk_key).await {
-                    warn!(chunk_id = %chunk_id, error = %e, "Failed to remove loose chunk after cloud-pack repack");
-                } else {
-                    removed += 1;
+                match self.storage.delete(&chunk_key).await {
+                    Err(e) => {
+                        warn!(chunk_id = %chunk_id, error = %e, "Failed to remove loose chunk after cloud-pack repack");
+                    }
+                    _ => {
+                        removed += 1;
+                    }
                 }
             }
             stats.loose_objects_removed += removed;
@@ -1117,14 +1126,13 @@ impl ObjectDatabase {
             {
                 continue;
             }
-            if key.starts_with(abbrev) {
-                if let Ok(oid_bytes) = hex::decode(&key) {
-                    if oid_bytes.len() == 32 {
-                        let mut bytes = [0u8; 32];
-                        bytes.copy_from_slice(&oid_bytes);
-                        matches.push(Oid::from(bytes));
-                    }
-                }
+            if key.starts_with(abbrev)
+                && let Ok(oid_bytes) = hex::decode(&key)
+                && oid_bytes.len() == 32
+            {
+                let mut bytes = [0u8; 32];
+                bytes.copy_from_slice(&oid_bytes);
+                matches.push(Oid::from(bytes));
             }
         }
 
@@ -1172,12 +1180,12 @@ impl ObjectDatabase {
             }
 
             // Key is already the hex string - parse directly to OID
-            if let Ok(oid_bytes) = hex::decode(&key) {
-                if oid_bytes.len() == 32 {
-                    let mut bytes = [0u8; 32];
-                    bytes.copy_from_slice(&oid_bytes);
-                    oids.push(Oid::from(bytes));
-                }
+            if let Ok(oid_bytes) = hex::decode(&key)
+                && oid_bytes.len() == 32
+            {
+                let mut bytes = [0u8; 32];
+                bytes.copy_from_slice(&oid_bytes);
+                oids.push(Oid::from(bytes));
             }
         }
 
@@ -1200,10 +1208,10 @@ impl ObjectDatabase {
 
         let keys = self.storage.list_objects("chunks/").await?;
         for key in keys {
-            if let Some(hex) = key.strip_prefix("chunks/") {
-                if let Ok(oid) = Oid::from_hex(hex) {
-                    oids.push(oid);
-                }
+            if let Some(hex) = key.strip_prefix("chunks/")
+                && let Ok(oid) = Oid::from_hex(hex)
+            {
+                oids.push(oid);
             }
         }
 

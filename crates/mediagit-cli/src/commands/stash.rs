@@ -600,9 +600,10 @@ struct StashEntry {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)] // edition-2024: test-only env::set_var/remove_var requires unsafe
 mod tests {
     use super::*;
-    use crate::commands::utils::test_support::{init_repo_with_commit, REPO_ENV_LOCK};
+    use crate::commands::utils::test_support::{REPO_ENV_LOCK, init_repo_with_commit};
     use clap::Parser;
     use tempfile::TempDir;
 
@@ -691,9 +692,11 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn execute_in(repo_path: &std::path::Path, cmd: &StashCmd) -> Result<()> {
         let _guard = REPO_ENV_LOCK.lock().unwrap();
-        std::env::set_var("MEDIAGIT_REPO", repo_path);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MEDIAGIT_REPO", repo_path) };
         let result = cmd.execute().await;
-        std::env::remove_var("MEDIAGIT_REPO");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_REPO") };
         result
     }
 

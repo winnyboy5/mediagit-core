@@ -939,51 +939,65 @@ impl FsckChecker {
             // Routed through the ODB (pack-aware, decompresses) rather than raw
             // storage, so dangling detection isn't fooled by packed objects.
             if let Ok(data) = self.odb.read(oid).await {
-                if let Ok(commit) = crate::format::deserialize::<Commit>(&data) {
-                    referenced.insert(commit.tree);
-                    // Recurse into the tree itself (not just record its oid)
-                    // so the Tree arm below actually runs and walks its
-                    // entries -- otherwise every blob is still never marked
-                    // referenced (QA-007).
-                    self.collect_referenced_objects(&commit.tree, visited, referenced, report)
-                        .await?;
-                    for parent in commit.parents {
-                        self.collect_referenced_objects(&parent, visited, referenced, report)
+                match crate::format::deserialize::<Commit>(&data) {
+                    Ok(commit) => {
+                        referenced.insert(commit.tree);
+                        // Recurse into the tree itself (not just record its oid)
+                        // so the Tree arm below actually runs and walks its
+                        // entries -- otherwise every blob is still never marked
+                        // referenced (QA-007).
+                        self.collect_referenced_objects(&commit.tree, visited, referenced, report)
                             .await?;
+                        for parent in commit.parents {
+                            self.collect_referenced_objects(&parent, visited, referenced, report)
+                                .await?;
+                        }
                     }
-                } else if let Ok(tag) = crate::format::deserialize::<Tag>(&data) {
-                    referenced.insert(tag.target);
-                    if tag.target_type == ObjectType::Commit {
-                        self.collect_referenced_objects(&tag.target, visited, referenced, report)
-                            .await?;
-                    }
-                } else if let Ok(tree) = crate::format::deserialize::<Tree>(&data) {
-                    for (name, entry) in &tree.entries {
-                        // A chunked blob's pack members are its chunks, which are
-                        // referenced via the blob's manifest — expand it here or
-                        // every packed chunk shows up as a dangling-object info.
-                        // insert() returning true = first sighting of this blob.
-                        if referenced.insert(entry.oid) {
-                            if let Ok(Some(manifest)) =
-                                self.odb.get_chunk_manifest(&entry.oid).await
-                            {
-                                for chunk in &manifest.chunks {
-                                    referenced.insert(chunk.id);
+                    _ => {
+                        match crate::format::deserialize::<Tag>(&data) {
+                            Ok(tag) => {
+                                referenced.insert(tag.target);
+                                if tag.target_type == ObjectType::Commit {
+                                    self.collect_referenced_objects(
+                                        &tag.target,
+                                        visited,
+                                        referenced,
+                                        report,
+                                    )
+                                    .await?;
                                 }
                             }
-                        }
-                        if crate::is_stage_debris_key(name) {
-                            report.add_issue(
-                                FsckIssue::new(
-                                    IssueSeverity::Warning,
-                                    IssueCategory::InvalidFormat,
-                                    format!(
-                                        "tree {} entry '{}' is merge-stage debris; re-commit",
-                                        oid, name
-                                    ),
-                                )
-                                .with_oid(entry.oid),
-                            );
+                            _ => {
+                                if let Ok(tree) = crate::format::deserialize::<Tree>(&data) {
+                                    for (name, entry) in &tree.entries {
+                                        // A chunked blob's pack members are its chunks, which are
+                                        // referenced via the blob's manifest — expand it here or
+                                        // every packed chunk shows up as a dangling-object info.
+                                        // insert() returning true = first sighting of this blob.
+                                        if referenced.insert(entry.oid)
+                                            && let Ok(Some(manifest)) =
+                                                self.odb.get_chunk_manifest(&entry.oid).await
+                                        {
+                                            for chunk in &manifest.chunks {
+                                                referenced.insert(chunk.id);
+                                            }
+                                        }
+                                        if crate::is_stage_debris_key(name) {
+                                            report.add_issue(
+                                    FsckIssue::new(
+                                        IssueSeverity::Warning,
+                                        IssueCategory::InvalidFormat,
+                                        format!(
+                                            "tree {} entry '{}' is merge-stage debris; re-commit",
+                                            oid, name
+                                        ),
+                                    )
+                                    .with_oid(entry.oid),
+                                );
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1015,10 +1029,10 @@ impl FsckChecker {
         // returning bare hex OIDs with no "objects/" prefix).
         let object_keys = self.storage.list_objects("").await?;
         for key in object_keys {
-            if key.len() == 64 {
-                if let Ok(oid) = Oid::from_hex(&key) {
-                    objects.insert(oid);
-                }
+            if key.len() == 64
+                && let Ok(oid) = Oid::from_hex(&key)
+            {
+                objects.insert(oid);
             }
         }
 
@@ -1030,10 +1044,10 @@ impl FsckChecker {
         // (QA-006a).
         let manifest_keys = self.storage.list_objects("manifests/").await?;
         for key in manifest_keys {
-            if let Some(hex) = key.strip_prefix("manifests/") {
-                if let Ok(oid) = Oid::from_hex(hex) {
-                    objects.insert(oid);
-                }
+            if let Some(hex) = key.strip_prefix("manifests/")
+                && let Ok(oid) = Oid::from_hex(hex)
+            {
+                objects.insert(oid);
             }
         }
 
@@ -1101,18 +1115,18 @@ impl FsckChecker {
         let ref_keys = self.storage.list_objects("refs/").await?;
 
         for key in ref_keys {
-            if let Ok(data) = self.storage.get(&key).await {
-                if let Ok(r) = crate::format::deserialize::<Ref>(&data) {
-                    refs.push(r);
-                }
+            if let Ok(data) = self.storage.get(&key).await
+                && let Ok(r) = crate::format::deserialize::<Ref>(&data)
+            {
+                refs.push(r);
             }
         }
 
         // Also check HEAD
-        if let Ok(head_data) = self.storage.get("HEAD").await {
-            if let Ok(head_ref) = crate::format::deserialize::<Ref>(&head_data) {
-                refs.push(head_ref);
-            }
+        if let Ok(head_data) = self.storage.get("HEAD").await
+            && let Ok(head_ref) = crate::format::deserialize::<Ref>(&head_data)
+        {
+            refs.push(head_ref);
         }
 
         Ok(refs)
@@ -1193,24 +1207,24 @@ impl FsckRepair {
         for issue in report.repairable_issues() {
             match issue.category {
                 IssueCategory::ChecksumMismatch => {
-                    if let Some(oid) = issue.oid {
-                        if self.repair_corrupted_object(&oid, dry_run).await? {
-                            repaired += 1;
-                        }
+                    if let Some(oid) = issue.oid
+                        && self.repair_corrupted_object(&oid, dry_run).await?
+                    {
+                        repaired += 1;
                     }
                 }
                 IssueCategory::BrokenReference => {
-                    if let Some(ref_name) = &issue.ref_name {
-                        if self.repair_broken_reference(ref_name, dry_run).await? {
-                            repaired += 1;
-                        }
+                    if let Some(ref_name) = &issue.ref_name
+                        && self.repair_broken_reference(ref_name, dry_run).await?
+                    {
+                        repaired += 1;
                     }
                 }
                 IssueCategory::DanglingObject => {
-                    if let Some(oid) = issue.oid {
-                        if self.remove_dangling_object(&oid, dry_run).await? {
-                            repaired += 1;
-                        }
+                    if let Some(oid) = issue.oid
+                        && self.remove_dangling_object(&oid, dry_run).await?
+                    {
+                        repaired += 1;
                     }
                 }
                 _ => {

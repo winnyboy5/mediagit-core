@@ -508,10 +508,10 @@ impl RevertCmd {
         let content = fs::read_to_string(&head_path).await?;
         let content = content.trim();
 
-        if let Some(target) = content.strip_prefix("ref: ") {
-            if let Some(branch) = target.strip_prefix("refs/heads/") {
-                return Ok(Some(branch.to_string()));
-            }
+        if let Some(target) = content.strip_prefix("ref: ")
+            && let Some(branch) = target.strip_prefix("refs/heads/")
+        {
+            return Ok(Some(branch.to_string()));
         }
 
         Ok(None)
@@ -556,10 +556,12 @@ impl RevertCmd {
         }
 
         // Try abbreviated OID (prefix scan)
-        if spec.len() >= 4 && spec.len() < 64 && spec.chars().all(|c| c.is_ascii_hexdigit()) {
-            if let Ok(oid) = odb.resolve_abbreviated_oid(spec).await {
-                return Ok(oid);
-            }
+        if spec.len() >= 4
+            && spec.len() < 64
+            && spec.chars().all(|c| c.is_ascii_hexdigit())
+            && let Ok(oid) = odb.resolve_abbreviated_oid(spec).await
+        {
+            return Ok(oid);
         }
 
         anyhow::bail!("Unknown revision: {}", spec)

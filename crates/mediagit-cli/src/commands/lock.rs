@@ -163,10 +163,10 @@ impl LockCmd {
         if let Some(owner) = explicit {
             return Ok(owner);
         }
-        if let Ok(name) = std::env::var("MEDIAGIT_AUTHOR_NAME") {
-            if !name.trim().is_empty() {
-                return Ok(name);
-            }
+        if let Ok(name) = std::env::var("MEDIAGIT_AUTHOR_NAME")
+            && !name.trim().is_empty()
+        {
+            return Ok(name);
         }
         let repo_root = find_repo_root()?;
         let config = mediagit_config::Config::load(&repo_root).await?;

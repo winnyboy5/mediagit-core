@@ -277,12 +277,12 @@ impl VfxParser {
             metadata.insert("format".to_string(), "PDF-based".to_string());
 
             // Try to extract version from PDF header
-            if let Some(version_start) = data.windows(5).position(|w| w == b"%PDF-") {
-                if data.len() > version_start + 8 {
-                    let version_bytes = &data[version_start + 5..version_start + 8];
-                    if let Ok(version) = String::from_utf8(version_bytes.to_vec()) {
-                        metadata.insert("pdf_version".to_string(), version);
-                    }
+            if let Some(version_start) = data.windows(5).position(|w| w == b"%PDF-")
+                && data.len() > version_start + 8
+            {
+                let version_bytes = &data[version_start + 5..version_start + 8];
+                if let Ok(version) = String::from_utf8(version_bytes.to_vec()) {
+                    metadata.insert("pdf_version".to_string(), version);
                 }
             }
         } else if data.starts_with(b"%!PS-Adobe") {
@@ -298,26 +298,25 @@ impl VfxParser {
 
         // Extract font references
         for line in content.lines() {
-            if line.contains("/FontName") || line.contains("/BaseFont") {
-                if let Some(font_start) = line.find('/') {
-                    if let Some(font_end) = line[font_start..].find(char::is_whitespace) {
-                        let font_name = &line[font_start + 1..font_start + font_end];
-                        if !font_name.is_empty() && !fonts.contains(&font_name.to_string()) {
-                            fonts.push(font_name.to_string());
-                        }
-                    }
+            if (line.contains("/FontName") || line.contains("/BaseFont"))
+                && let Some(font_start) = line.find('/')
+                && let Some(font_end) = line[font_start..].find(char::is_whitespace)
+            {
+                let font_name = &line[font_start + 1..font_start + font_end];
+                if !font_name.is_empty() && !fonts.contains(&font_name.to_string()) {
+                    fonts.push(font_name.to_string());
                 }
             }
 
             // Look for linked images
             if line.contains("/ImageFile") || line.contains("(*.jpg)") || line.contains("(*.png)") {
                 // Extract filename if possible
-                if let Some(start) = line.find('(') {
-                    if let Some(end) = line[start..].find(')') {
-                        let asset = &line[start + 1..start + end];
-                        if !asset.is_empty() {
-                            linked_assets.push(asset.to_string());
-                        }
+                if let Some(start) = line.find('(')
+                    && let Some(end) = line[start..].find(')')
+                {
+                    let asset = &line[start + 1..start + end];
+                    if !asset.is_empty() {
+                        linked_assets.push(asset.to_string());
                     }
                 }
             }
@@ -390,11 +389,11 @@ impl VfxParser {
         let mut linked_assets = Vec::new();
 
         // Extract version from XML
-        if let Some(version_start) = content.find("Version=\"") {
-            if let Some(version_end) = content[version_start + 9..].find('"') {
-                let version = &content[version_start + 9..version_start + 9 + version_end];
-                metadata.insert("version".to_string(), version.to_string());
-            }
+        if let Some(version_start) = content.find("Version=\"")
+            && let Some(version_end) = content[version_start + 9..].find('"')
+        {
+            let version = &content[version_start + 9..version_start + 9 + version_end];
+            metadata.insert("version".to_string(), version.to_string());
         }
 
         // Count sequences (simplified)
@@ -403,14 +402,13 @@ impl VfxParser {
 
         // Extract linked media files
         for line in content.lines() {
-            if line.contains("pathurl=") || line.contains("FilePath=") {
-                if let Some(start) = line.find('"') {
-                    if let Some(end) = line[start + 1..].find('"') {
-                        let asset = &line[start + 1..start + 1 + end];
-                        if !asset.is_empty() {
-                            linked_assets.push(asset.to_string());
-                        }
-                    }
+            if (line.contains("pathurl=") || line.contains("FilePath="))
+                && let Some(start) = line.find('"')
+                && let Some(end) = line[start + 1..].find('"')
+            {
+                let asset = &line[start + 1..start + 1 + end];
+                if !asset.is_empty() {
+                    linked_assets.push(asset.to_string());
                 }
             }
         }
@@ -453,25 +451,25 @@ impl VfxParser {
         // Check for page count changes (layout files)
         if let (Some(base_pages), Some(ours_pages), Some(theirs_pages)) =
             (base.page_count, ours.page_count, theirs.page_count)
+            && ours_pages != base_pages
+            && theirs_pages != base_pages
         {
-            if ours_pages != base_pages && theirs_pages != base_pages {
-                conflicts.push(format!(
-                    "Both branches modified page count (ours: {} pages, theirs: {} pages)",
-                    ours_pages, theirs_pages
-                ));
-            }
+            conflicts.push(format!(
+                "Both branches modified page count (ours: {} pages, theirs: {} pages)",
+                ours_pages, theirs_pages
+            ));
         }
 
         // Check for layer count changes
         if let (Some(base_layers), Some(ours_layers), Some(theirs_layers)) =
             (base.layer_count, ours.layer_count, theirs.layer_count)
+            && ours_layers != base_layers
+            && theirs_layers != base_layers
         {
-            if ours_layers != base_layers && theirs_layers != base_layers {
-                conflicts.push(format!(
-                    "Both branches modified layer count (ours: {} layers, theirs: {} layers)",
-                    ours_layers, theirs_layers
-                ));
-            }
+            conflicts.push(format!(
+                "Both branches modified layer count (ours: {} layers, theirs: {} layers)",
+                ours_layers, theirs_layers
+            ));
         }
 
         // Check for duration changes (video/animation files)

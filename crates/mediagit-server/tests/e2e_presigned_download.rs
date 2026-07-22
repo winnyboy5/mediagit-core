@@ -21,8 +21,8 @@
 //! - 403 fallback: presigned GET returns 403 → client falls back to proxy
 //!   GET `/chunks/{hex}` → chunk still retrieved correctly.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 

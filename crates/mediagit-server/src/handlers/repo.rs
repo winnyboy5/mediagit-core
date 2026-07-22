@@ -595,46 +595,45 @@ pub async fn update_refs(
         // Handle ref deletion
         if update.delete {
             // HEAD protection: prevent deleting the currently active branch
-            if let Ok(head) = refdb.read("HEAD").await {
-                if head.target.as_deref() == Some(&update.name) {
-                    tracing::warn!(
-                        "Refusing to delete '{}': it is the current HEAD",
+            if let Ok(head) = refdb.read("HEAD").await
+                && head.target.as_deref() == Some(&update.name)
+            {
+                tracing::warn!(
+                    "Refusing to delete '{}': it is the current HEAD",
+                    update.name
+                );
+                results.push(RefUpdateResult {
+                    ref_name: update.name.clone(),
+                    success: false,
+                    error: Some(format!(
+                        "refusing to delete the current branch: '{}'",
                         update.name
+                    )),
+                });
+                all_success = false;
+                continue;
+            }
+
+            // Safety check: verify old_oid matches (if provided)
+            if let Some(expected_old) = &update.old_oid
+                && let Ok(current_ref) = refdb.read(&update.name).await
+                && let Some(current_oid) = &current_ref.oid
+            {
+                let current_oid_str = current_oid.to_hex();
+                if &current_oid_str != expected_old && !req.force {
+                    tracing::warn!(
+                        "Ref delete rejected for '{}': expected {}, got {}",
+                        update.name,
+                        expected_old,
+                        current_oid_str
                     );
                     results.push(RefUpdateResult {
                         ref_name: update.name.clone(),
                         success: false,
-                        error: Some(format!(
-                            "refusing to delete the current branch: '{}'",
-                            update.name
-                        )),
+                        error: Some("ref changed since last fetch".to_string()),
                     });
                     all_success = false;
                     continue;
-                }
-            }
-
-            // Safety check: verify old_oid matches (if provided)
-            if let Some(expected_old) = &update.old_oid {
-                if let Ok(current_ref) = refdb.read(&update.name).await {
-                    if let Some(current_oid) = &current_ref.oid {
-                        let current_oid_str = current_oid.to_hex();
-                        if &current_oid_str != expected_old && !req.force {
-                            tracing::warn!(
-                                "Ref delete rejected for '{}': expected {}, got {}",
-                                update.name,
-                                expected_old,
-                                current_oid_str
-                            );
-                            results.push(RefUpdateResult {
-                                ref_name: update.name.clone(),
-                                success: false,
-                                error: Some("ref changed since last fetch".to_string()),
-                            });
-                            all_success = false;
-                            continue;
-                        }
-                    }
                 }
             }
 
@@ -677,73 +676,71 @@ pub async fn update_refs(
         }
 
         // Check if old_oid matches (if provided)
-        if let Some(expected_old) = &update.old_oid {
-            if let Ok(current_ref) = refdb.read(&update.name).await {
-                if let Some(current_oid) = &current_ref.oid {
-                    let current_oid_str = current_oid.to_hex();
-                    if &current_oid_str != expected_old && !req.force {
-                        tracing::warn!(
-                            "Ref update rejected: expected {}, got {}",
-                            expected_old,
-                            current_oid_str
-                        );
-                        results.push(RefUpdateResult {
-                            ref_name: update.name.clone(),
-                            success: false,
-                            error: Some("non-fast-forward".to_string()),
-                        });
-                        all_success = false;
-                        continue;
-                    }
-                }
+        if let Some(expected_old) = &update.old_oid
+            && let Ok(current_ref) = refdb.read(&update.name).await
+            && let Some(current_oid) = &current_ref.oid
+        {
+            let current_oid_str = current_oid.to_hex();
+            if &current_oid_str != expected_old && !req.force {
+                tracing::warn!(
+                    "Ref update rejected: expected {}, got {}",
+                    expected_old,
+                    current_oid_str
+                );
+                results.push(RefUpdateResult {
+                    ref_name: update.name.clone(),
+                    success: false,
+                    error: Some("non-fast-forward".to_string()),
+                });
+                all_success = false;
+                continue;
             }
         }
 
         // Ancestry check: when force=false and the ref already exists, require
         // that the new commit is a descendant of the current tip (fast-forward only).
-        if !req.force && !update.delete {
-            if let Ok(current_ref) = refdb.read(&update.name).await {
-                if let Some(current_oid) = &current_ref.oid {
-                    let new_oid_parsed =
-                        Oid::from_hex(&update.new_oid).map_err(|_| StatusCode::BAD_REQUEST)?;
-                    let lca = LcaFinder::new(Arc::clone(&odb));
-                    match lca.is_ancestor(current_oid, &new_oid_parsed).await {
-                        Ok(true) => {} // fast-forward: current is ancestor of new — allowed
-                        Ok(false) => {
-                            tracing::warn!(
-                                "Non-fast-forward push rejected for '{}': {} is not ancestor of {}",
-                                update.name,
-                                current_oid.to_hex(),
-                                update.new_oid
-                            );
-                            results.push(RefUpdateResult {
-                                ref_name: update.name.clone(),
-                                success: false,
-                                error: Some("non-fast-forward".to_string()),
-                            });
-                            all_success = false;
-                            continue;
-                        }
-                        Err(e) => {
-                            tracing::error!("Ancestry check failed for '{}': {}", update.name, e);
-                            results.push(RefUpdateResult {
-                                ref_name: update.name.clone(),
-                                success: false,
-                                error: Some(format!("ancestry check failed: {}", e)),
-                            });
-                            all_success = false;
-                            continue;
-                        }
-                    }
+        if !req.force
+            && !update.delete
+            && let Ok(current_ref) = refdb.read(&update.name).await
+            && let Some(current_oid) = &current_ref.oid
+        {
+            let new_oid_parsed =
+                Oid::from_hex(&update.new_oid).map_err(|_| StatusCode::BAD_REQUEST)?;
+            let lca = LcaFinder::new(Arc::clone(&odb));
+            match lca.is_ancestor(current_oid, &new_oid_parsed).await {
+                Ok(true) => {} // fast-forward: current is ancestor of new — allowed
+                Ok(false) => {
+                    tracing::warn!(
+                        "Non-fast-forward push rejected for '{}': {} is not ancestor of {}",
+                        update.name,
+                        current_oid.to_hex(),
+                        update.new_oid
+                    );
+                    results.push(RefUpdateResult {
+                        ref_name: update.name.clone(),
+                        success: false,
+                        error: Some("non-fast-forward".to_string()),
+                    });
+                    all_success = false;
+                    continue;
+                }
+                Err(e) => {
+                    tracing::error!("Ancestry check failed for '{}': {}", update.name, e);
+                    results.push(RefUpdateResult {
+                        ref_name: update.name.clone(),
+                        success: false,
+                        error: Some(format!("ancestry check failed: {}", e)),
+                    });
+                    all_success = false;
+                    continue;
                 }
             }
         }
 
         // Capture the pre-write OID for reflog
-        let pre_write_oid = if let Ok(current_ref) = refdb.read(&update.name).await {
-            current_ref.oid
-        } else {
-            None
+        let pre_write_oid = match refdb.read(&update.name).await {
+            Ok(current_ref) => current_ref.oid,
+            _ => None,
         };
 
         let new_oid = Oid::from_hex(&update.new_oid).map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -820,34 +817,40 @@ pub async fn update_refs(
                             Ok(bitmap) => match bitmap.serialize() {
                                 Ok(bytes) => {
                                     let key = mediagit_versioning::bitmap_key(&new_oid);
-                                    if let Err(e) = odb_for_bitmap.put_bitmap(&key, &bytes).await {
-                                        tracing::warn!(
-                                            "Failed to persist bitmap for '{}' ({}): {}",
-                                            ref_name,
-                                            new_oid,
-                                            e
-                                        );
-                                    } else if let Some(old_oid) = old_oid {
-                                        // Retention: prune the previous tip's bitmap now that
-                                        // the new tip's bitmap is safely persisted. Two refs
-                                        // pointing at the same tip share one bitmap key;
-                                        // deleting it when one ref moves off it is safe because
-                                        // bitmaps are pure speedup — a miss falls back to the
-                                        // BFS walk, and gc/next-push regenerates as needed.
-                                        // Steady state is ~one bitmap per ref; gc's
-                                        // regenerate_and_prune_bitmaps remains the backstop for
-                                        // orphans (deleted branches, forced moves).
-                                        if old_oid != new_oid {
-                                            let old_key = mediagit_versioning::bitmap_key(&old_oid);
-                                            if let Err(e) =
-                                                odb_for_bitmap.delete_bitmap(&old_key).await
-                                            {
-                                                tracing::warn!(
-                                                    "Failed to delete previous bitmap for '{}' ({}): {}",
-                                                    ref_name,
-                                                    old_oid,
-                                                    e
-                                                );
+                                    match odb_for_bitmap.put_bitmap(&key, &bytes).await {
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "Failed to persist bitmap for '{}' ({}): {}",
+                                                ref_name,
+                                                new_oid,
+                                                e
+                                            );
+                                        }
+                                        _ => {
+                                            if let Some(old_oid) = old_oid {
+                                                // Retention: prune the previous tip's bitmap now that
+                                                // the new tip's bitmap is safely persisted. Two refs
+                                                // pointing at the same tip share one bitmap key;
+                                                // deleting it when one ref moves off it is safe because
+                                                // bitmaps are pure speedup — a miss falls back to the
+                                                // BFS walk, and gc/next-push regenerates as needed.
+                                                // Steady state is ~one bitmap per ref; gc's
+                                                // regenerate_and_prune_bitmaps remains the backstop for
+                                                // orphans (deleted branches, forced moves).
+                                                if old_oid != new_oid {
+                                                    let old_key =
+                                                        mediagit_versioning::bitmap_key(&old_oid);
+                                                    if let Err(e) =
+                                                        odb_for_bitmap.delete_bitmap(&old_key).await
+                                                    {
+                                                        tracing::warn!(
+                                                            "Failed to delete previous bitmap for '{}' ({}): {}",
+                                                            ref_name,
+                                                            old_oid,
+                                                            e
+                                                        );
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -1118,10 +1121,10 @@ pub(crate) async fn evict_pack_entries(
         if line.is_empty() {
             continue;
         }
-        if let Ok(entry) = serde_json::from_str::<PackIndexLine>(line) {
-            if evict_set.contains(entry.chunk_oid.as_str()) {
-                continue;
-            }
+        if let Ok(entry) = serde_json::from_str::<PackIndexLine>(line)
+            && evict_set.contains(entry.chunk_oid.as_str())
+        {
+            continue;
         }
         kept.push_str(line);
         kept.push('\n');

@@ -36,10 +36,10 @@ use std::sync::Arc;
 /// A repo-relative `PathBuf` with forward slashes (e.g. `dir/file.txt`)
 pub fn normalize_path(path: &Path, repo_root: &Path) -> PathBuf {
     // Try canonicalize + strip_prefix first (handles symlinks, 8.3 names, etc.)
-    if let Ok(abs) = dunce::canonicalize(path) {
-        if let Ok(rel) = abs.strip_prefix(repo_root) {
-            return PathBuf::from(rel.to_string_lossy().replace('\\', "/"));
-        }
+    if let Ok(abs) = dunce::canonicalize(path)
+        && let Ok(rel) = abs.strip_prefix(repo_root)
+    {
+        return PathBuf::from(rel.to_string_lossy().replace('\\', "/"));
     }
 
     // Fallback: manual normalization
@@ -89,10 +89,10 @@ pub fn find_repo_root() -> Result<PathBuf> {
             return Ok(path);
         }
         // Try canonicalized
-        if let Ok(canonical) = dunce::canonicalize(&path) {
-            if canonical.join(".mediagit").exists() {
-                return Ok(canonical);
-            }
+        if let Ok(canonical) = dunce::canonicalize(&path)
+            && canonical.join(".mediagit").exists()
+        {
+            return Ok(canonical);
         }
         // Walk up from the given path
         return find_repo_root_from(&path);
@@ -219,10 +219,10 @@ pub fn resolve_credentials_tiered(
             );
         }
     }
-    if !keyring_disabled() {
-        if let Some(creds) = keyring_read_with_migration(config, remote_name) {
-            return (creds, CredentialSource::Keychain);
-        }
+    if !keyring_disabled()
+        && let Some(creds) = keyring_read_with_migration(config, remote_name)
+    {
+        return (creds, CredentialSource::Keychain);
     }
     (mediagit_protocol::Credentials::None, CredentialSource::None)
 }
@@ -306,10 +306,10 @@ fn keyring_read_with_migration(
         return None;
     }
     let creds = keyring_read(&legacy_account)?;
-    if let Some(payload) = credential_payload(&creds) {
-        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, &origin_account) {
-            let _ = entry.set_password(&payload);
-        }
+    if let Some(payload) = credential_payload(&creds)
+        && let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, &origin_account)
+    {
+        let _ = entry.set_password(&payload);
     }
     if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, &legacy_account) {
         let _ = entry.delete_credential();
@@ -407,10 +407,10 @@ pub fn resolve_credentials_for_origin(
             CredentialSource::Env,
         );
     }
-    if !keyring_disabled() {
-        if let Some(creds) = keyring_read(origin) {
-            return (creds, CredentialSource::Keychain);
-        }
+    if !keyring_disabled()
+        && let Some(creds) = keyring_read(origin)
+    {
+        return (creds, CredentialSource::Keychain);
     }
     (mediagit_protocol::Credentials::None, CredentialSource::None)
 }
@@ -541,15 +541,15 @@ fn warn_if_config_world_readable(_repo_root: &Path) {
 /// whose config predates `repo_namespace` (never written on disk in that
 /// case — recomputed identically every time, since repo root doesn't move).
 fn resolve_repo_namespace(repo_root: &Path, config: &mediagit_config::Config) -> String {
-    if let Ok(ns) = std::env::var("MEDIAGIT_REPO_NAMESPACE") {
-        if !ns.trim().is_empty() {
-            return mediagit_storage::sanitize_namespace(&ns);
-        }
+    if let Ok(ns) = std::env::var("MEDIAGIT_REPO_NAMESPACE")
+        && !ns.trim().is_empty()
+    {
+        return mediagit_storage::sanitize_namespace(&ns);
     }
-    if let Some(ns) = &config.repo_namespace {
-        if !ns.trim().is_empty() {
-            return mediagit_storage::sanitize_namespace(ns);
-        }
+    if let Some(ns) = &config.repo_namespace
+        && !ns.trim().is_empty()
+    {
+        return mediagit_storage::sanitize_namespace(ns);
     }
     let basename = repo_root
         .file_name()
@@ -568,10 +568,10 @@ fn resolve_repo_namespace(repo_root: &Path, config: &mediagit_config::Config) ->
 /// collision guard useless: a marker adopted with a throwaway id would
 /// mismatch on the very next open).
 async fn resolve_repo_id(repo_root: &Path, config: &mediagit_config::Config) -> Result<String> {
-    if let Some(id) = &config.repo_id {
-        if !id.trim().is_empty() {
-            return Ok(id.clone());
-        }
+    if let Some(id) = &config.repo_id
+        && !id.trim().is_empty()
+    {
+        return Ok(id.clone());
     }
     let id = mediagit_storage::generate_repo_id();
     let mut updated = config.clone();

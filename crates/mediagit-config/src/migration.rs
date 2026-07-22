@@ -12,7 +12,7 @@
 // GNU Affero General Public License for more details.
 
 use crate::error::{ConfigError, ConfigResult};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use tracing::{debug, info};
 
@@ -219,9 +219,11 @@ mod tests {
         assert!(result.is_ok());
 
         let migrated = result.unwrap();
-        assert!(migrated["observability"]["metrics"]["enabled"]
-            .as_bool()
-            .unwrap());
+        assert!(
+            migrated["observability"]["metrics"]["enabled"]
+                .as_bool()
+                .unwrap()
+        );
     }
 
     #[test]

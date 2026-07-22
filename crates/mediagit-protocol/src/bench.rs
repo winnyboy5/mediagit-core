@@ -11,10 +11,10 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
 
+use std::sync::Arc;
 /// Lightweight throughput instrumentation for push/pull operations.
 /// Gated by `MEDIAGIT_BENCH=1`; zero overhead when disabled.
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Schema version for the `[bench]` summary line. Increment when fields change.

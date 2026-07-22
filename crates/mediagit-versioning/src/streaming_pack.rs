@@ -17,7 +17,7 @@
 //! incrementally without loading entire packs into memory.
 
 use crate::hash::Hasher;
-use crate::pack::{PackHeader, PackKind, PACK_HEADER_SIZE};
+use crate::pack::{PACK_HEADER_SIZE, PackHeader, PackKind};
 use crate::streaming_index::StreamingPackIndex;
 use crate::{ObjectType, Oid};
 use std::io;
@@ -331,11 +331,12 @@ impl<W: AsyncWrite + Unpin> StreamingPackWriter<W> {
         let chunk_index_offset: u64 = self.current_offset;
 
         // Finalize streaming index to get serialized bytes (count u32 + entries)
-        let index_bytes = if let Some(index) = self.index.take() {
-            index.finalize().await?
-        } else {
-            // Empty index still needs 4-byte count prefix
-            vec![0, 0, 0, 0]
+        let index_bytes = match self.index.take() {
+            Some(index) => index.finalize().await?,
+            _ => {
+                // Empty index still needs 4-byte count prefix
+                vec![0, 0, 0, 0]
+            }
         };
 
         // Write index bytes
@@ -426,10 +427,11 @@ impl StreamingPackWriter<tokio::fs::File> {
         let chunk_index_offset: u64 = self.current_offset;
 
         // Finalize the streaming index to get [count u32][entries 44B×N]
-        let index_bytes = if let Some(index) = self.index.take() {
-            index.finalize().await?
-        } else {
-            vec![0, 0, 0, 0]
+        let index_bytes = match self.index.take() {
+            Some(index) => index.finalize().await?,
+            _ => {
+                vec![0, 0, 0, 0]
+            }
         };
 
         // Write index bytes then chunk_index_offset pointer (no BLAKE3 yet)
@@ -501,15 +503,18 @@ impl StreamingPackWriter<tokio::fs::File> {
         }
 
         // Persist the tempfile so the caller can upload it before dropping.
-        let temp_path: PathBuf = if let Some(named_tf) = self.temp_named_file.take() {
-            let path = named_tf.path().to_path_buf();
-            // Prevent auto-delete: forget the NamedTempFile without running its destructor.
-            std::mem::forget(named_tf);
-            path
-        } else {
-            return Err(io::Error::other(
-                "Missing temp file handle in open-ended writer",
-            ));
+        let temp_path: PathBuf = match self.temp_named_file.take() {
+            Some(named_tf) => {
+                let path = named_tf.path().to_path_buf();
+                // Prevent auto-delete: forget the NamedTempFile without running its destructor.
+                std::mem::forget(named_tf);
+                path
+            }
+            _ => {
+                return Err(io::Error::other(
+                    "Missing temp file handle in open-ended writer",
+                ));
+            }
         };
 
         debug!(

@@ -17,7 +17,7 @@
 
 use axum::{
     extract::{FromRequestParts, Request},
-    http::{request::Parts, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, request::Parts},
     middleware::Next,
     response::Response,
 };
@@ -113,31 +113,29 @@ impl AuthLayer {
     /// Tries JWT first, then API key if JWT fails
     pub async fn authenticate(&self, headers: &HeaderMap) -> Result<AuthUser, AuthError> {
         // Try JWT authentication first
-        if let Some(auth_header) = headers.get("authorization") {
-            if let Ok(auth_str) = auth_header.to_str() {
-                if let Ok(token) = JwtAuth::extract_from_header(auth_str) {
-                    if let Ok(claims) = self.jwt_auth.validate_token(token) {
-                        return Ok(AuthUser {
-                            user_id: claims.sub,
-                            permissions: claims.permissions,
-                            auth_method: AuthMethod::Jwt,
-                        });
-                    }
-                }
-            }
+        if let Some(auth_header) = headers.get("authorization")
+            && let Ok(auth_str) = auth_header.to_str()
+            && let Ok(token) = JwtAuth::extract_from_header(auth_str)
+            && let Ok(claims) = self.jwt_auth.validate_token(token)
+        {
+            return Ok(AuthUser {
+                user_id: claims.sub,
+                permissions: claims.permissions,
+                auth_method: AuthMethod::Jwt,
+            });
         }
 
         // Try API key authentication
-        if let Some(api_key_header) = headers.get("x-api-key") {
-            if let Ok(api_key) = api_key_header.to_str() {
-                let key = ApiKeyAuth::extract_from_header(api_key);
-                if let Ok(api_key_info) = self.api_key_auth.validate_key(key).await {
-                    return Ok(AuthUser {
-                        user_id: api_key_info.user_id,
-                        permissions: api_key_info.permissions,
-                        auth_method: AuthMethod::ApiKey,
-                    });
-                }
+        if let Some(api_key_header) = headers.get("x-api-key")
+            && let Ok(api_key) = api_key_header.to_str()
+        {
+            let key = ApiKeyAuth::extract_from_header(api_key);
+            if let Ok(api_key_info) = self.api_key_auth.validate_key(key).await {
+                return Ok(AuthUser {
+                    user_id: api_key_info.user_id,
+                    permissions: api_key_info.permissions,
+                    auth_method: AuthMethod::ApiKey,
+                });
             }
         }
 

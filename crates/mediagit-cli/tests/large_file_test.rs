@@ -207,7 +207,7 @@ fn test_large_mov_416mb() {
 fn test_very_large_mkv_2_4gb() {
     test_large_file(
         "www.1TamilMV.LC - Mask (2025) Tamil WEB-DL - 4K SDR - 2160p - HEVC - (DD+5.1 - 192Kbps & AAC 2.0) - 2.3GB - ESub.mkv",
-        "movie.mkv"
+        "movie.mkv",
     );
 }
 

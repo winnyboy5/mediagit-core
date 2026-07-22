@@ -21,7 +21,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use mediagit_security::auth::{ApiKeyAuth, JwtAuth};
-use mediagit_server::{create_router, AppState};
+use mediagit_server::{AppState, create_router};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tower::util::ServiceExt;

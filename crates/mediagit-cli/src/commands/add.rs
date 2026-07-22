@@ -24,8 +24,8 @@ use mediagit_versioning::{
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Stage files for commit (reusable by other commands like commit --include)
 ///
@@ -52,20 +52,14 @@ pub async fn stage_files_for_commit(paths: &[String], repo_root: &std::path::Pat
     let refdb = RefDatabase::new(&storage_path);
     let head_files: Arc<std::collections::HashMap<std::path::PathBuf, Oid>> = {
         let mut files = std::collections::HashMap::new();
-        if let Ok(head_oid) = refdb.resolve("HEAD").await {
-            if let Ok(commit_data) = odb.read(&head_oid).await {
-                if let Ok(commit) = mediagit_versioning::format::deserialize::<Commit>(&commit_data)
-                {
-                    if let Ok(tree_data) = odb.read(&commit.tree).await {
-                        if let Ok(tree) =
-                            mediagit_versioning::format::deserialize::<Tree>(&tree_data)
-                        {
-                            for entry in tree.iter() {
-                                files.insert(std::path::PathBuf::from(&entry.name), entry.oid);
-                            }
-                        }
-                    }
-                }
+        if let Ok(head_oid) = refdb.resolve("HEAD").await
+            && let Ok(commit_data) = odb.read(&head_oid).await
+            && let Ok(commit) = mediagit_versioning::format::deserialize::<Commit>(&commit_data)
+            && let Ok(tree_data) = odb.read(&commit.tree).await
+            && let Ok(tree) = mediagit_versioning::format::deserialize::<Tree>(&tree_data)
+        {
+            for entry in tree.iter() {
+                files.insert(std::path::PathBuf::from(&entry.name), entry.oid);
             }
         }
         Arc::new(files)
@@ -83,33 +77,33 @@ pub async fn stage_files_for_commit(paths: &[String], repo_root: &std::path::Pat
     let mut added_count = 0u64;
     for path_str in paths {
         let path = std::path::Path::new(path_str);
-        if path.is_file() {
-            if let Ok(abs_path) = dunce::canonicalize(path) {
-                match AddCmd::process_single_file(
-                    &abs_path,
-                    &repo_root,
-                    &odb,
-                    &head_files,
-                    &index_files,
-                    true,
-                    None,
-                )
-                .await
-                {
-                    Ok((Some(file_result), _)) => {
-                        let entry = IndexEntry::new(
-                            file_result.relative_path,
-                            file_result.oid,
-                            file_result.mode,
-                            file_result.file_size,
-                            file_result.mtime,
-                        );
-                        index.add_entry(entry);
-                        added_count += 1;
-                    }
-                    Ok((None, _)) => {} // unchanged, skip
-                    Err(e) => return Err(e),
+        if path.is_file()
+            && let Ok(abs_path) = dunce::canonicalize(path)
+        {
+            match AddCmd::process_single_file(
+                &abs_path,
+                &repo_root,
+                &odb,
+                &head_files,
+                &index_files,
+                true,
+                None,
+            )
+            .await
+            {
+                Ok((Some(file_result), _)) => {
+                    let entry = IndexEntry::new(
+                        file_result.relative_path,
+                        file_result.oid,
+                        file_result.mode,
+                        file_result.file_size,
+                        file_result.mtime,
+                    );
+                    index.add_entry(entry);
+                    added_count += 1;
                 }
+                Ok((None, _)) => {} // unchanged, skip
+                Err(e) => return Err(e),
             }
         }
     }
@@ -226,7 +220,9 @@ impl AddCmd {
 
         // Validate: either --all, --update, or paths must be provided
         if !self.all && !self.update && self.paths.is_empty() {
-            anyhow::bail!("Nothing specified, nothing added.\nUse 'mediagit add <file>...' or 'mediagit add --all' to stage files.");
+            anyhow::bail!(
+                "Nothing specified, nothing added.\nUse 'mediagit add <file>...' or 'mediagit add --all' to stage files."
+            );
         }
 
         // Find repository root and canonicalize to match the canonicalized file
@@ -293,21 +289,14 @@ impl AddCmd {
         let refdb = RefDatabase::new(&storage_path);
         let head_files: Arc<HashMap<PathBuf, Oid>> = {
             let mut files = HashMap::new();
-            if let Ok(head_oid) = refdb.resolve("HEAD").await {
-                if let Ok(commit_data) = odb.read(&head_oid).await {
-                    if let Ok(commit) =
-                        mediagit_versioning::format::deserialize::<Commit>(&commit_data)
-                    {
-                        if let Ok(tree_data) = odb.read(&commit.tree).await {
-                            if let Ok(tree) =
-                                mediagit_versioning::format::deserialize::<Tree>(&tree_data)
-                            {
-                                for entry in tree.iter() {
-                                    files.insert(PathBuf::from(&entry.name), entry.oid);
-                                }
-                            }
-                        }
-                    }
+            if let Ok(head_oid) = refdb.resolve("HEAD").await
+                && let Ok(commit_data) = odb.read(&head_oid).await
+                && let Ok(commit) = mediagit_versioning::format::deserialize::<Commit>(&commit_data)
+                && let Ok(tree_data) = odb.read(&commit.tree).await
+                && let Ok(tree) = mediagit_versioning::format::deserialize::<Tree>(&tree_data)
+            {
+                for entry in tree.iter() {
+                    files.insert(PathBuf::from(&entry.name), entry.oid);
                 }
             }
             Arc::new(files)
@@ -612,11 +601,7 @@ impl AddCmd {
                         .map(|r| r.to_path_buf())
                         .unwrap_or_else(|_| PathBuf::from(p));
                     let s = rel.to_string_lossy().replace('\\', "/");
-                    if s == "." {
-                        String::new()
-                    } else {
-                        s
-                    }
+                    if s == "." { String::new() } else { s }
                 })
                 .collect()
         };
@@ -752,31 +737,34 @@ impl AddCmd {
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs());
 
-        if let Some(&(idx_size, Some(idx_mtime))) = index_files.get(&relative_path) {
-            if idx_size == file_size {
-                if let Some(current_mtime) = file_mtime {
-                    if idx_mtime == current_mtime {
-                        if let Some(ref cb) = on_bytes {
-                            cb(file_size);
-                        }
-                        return Ok((None, file_size)); // Unchanged since last staging
-                    }
-                }
+        if let Some(&(idx_size, Some(idx_mtime))) = index_files.get(&relative_path)
+            && idx_size == file_size
+            && let Some(current_mtime) = file_mtime
+            && idx_mtime == current_mtime
+        {
+            if let Some(ref cb) = on_bytes {
+                cb(file_size);
             }
+            return Ok((None, file_size)); // Unchanged since last staging
         }
 
         let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         // Seed similarity detector from previous version (manifest for chunked, blob for small)
         if let Some(head_oid) = head_files.get(&relative_path) {
-            if let Ok(Some(old_manifest)) = odb.get_chunk_manifest(head_oid).await {
-                let _ = odb.seed_similarity_from_manifest(&old_manifest).await;
-            } else if delta_enabled {
-                // Non-chunked file: seed from the previous full blob so write_with_delta
-                // can find a similar base across invocations.  We seed regardless of
-                // whether the current file will ultimately use delta, because we haven't
-                // read the file yet and the actual delta decision is made later.
-                let _ = odb.seed_similarity_from_blob(head_oid, filename).await;
+            match odb.get_chunk_manifest(head_oid).await {
+                Ok(Some(old_manifest)) => {
+                    let _ = odb.seed_similarity_from_manifest(&old_manifest).await;
+                }
+                _ => {
+                    if delta_enabled {
+                        // Non-chunked file: seed from the previous full blob so write_with_delta
+                        // can find a similar base across invocations.  We seed regardless of
+                        // whether the current file will ultimately use delta, because we haven't
+                        // read the file yet and the actual delta decision is made later.
+                        let _ = odb.seed_similarity_from_blob(head_oid, filename).await;
+                    }
+                }
             }
         }
 
@@ -804,13 +792,13 @@ impl AddCmd {
             };
 
             // Check if unchanged from HEAD
-            if let Some(head_oid) = head_files.get(&relative_path) {
-                if *head_oid == content_oid {
-                    if let Some(ref cb) = on_bytes {
-                        cb(file_size);
-                    }
-                    return Ok((None, file_size));
+            if let Some(head_oid) = head_files.get(&relative_path)
+                && *head_oid == content_oid
+            {
+                if let Some(ref cb) = on_bytes {
+                    cb(file_size);
                 }
+                return Ok((None, file_size));
             }
 
             let oid = odb
@@ -828,13 +816,13 @@ impl AddCmd {
             let content_oid = Oid::hash(&content);
 
             // Check if unchanged from HEAD
-            if let Some(head_oid) = head_files.get(&relative_path) {
-                if *head_oid == content_oid {
-                    if let Some(ref cb) = on_bytes {
-                        cb(file_size);
-                    }
-                    return Ok((None, file_size));
+            if let Some(head_oid) = head_files.get(&relative_path)
+                && *head_oid == content_oid
+            {
+                if let Some(ref cb) = on_bytes {
+                    cb(file_size);
                 }
+                return Ok((None, file_size));
             }
 
             // P4a: pHash-guided delta-base nomination for images. Advisory
@@ -989,10 +977,10 @@ impl AddCmd {
                 &mut candidates,
             )?;
             for path in candidates {
-                if let Ok(rel) = path.strip_prefix(repo_root) {
-                    if tracked_paths.contains(rel) {
-                        files.push(path);
-                    }
+                if let Ok(rel) = path.strip_prefix(repo_root)
+                    && tracked_paths.contains(rel)
+                {
+                    files.push(path);
                 }
             }
             return Ok(files);
@@ -1010,20 +998,18 @@ impl AddCmd {
                                 Ok(p) => {
                                     if p.is_file() && Self::is_outside_mediagit(&p, &mediagit_dir) {
                                         // Check .mediagitignore for explicit glob results
-                                        if let Some(ref m) = matcher {
-                                            if let Some(rel) =
+                                        if let Some(ref m) = matcher
+                                            && let Some(rel) =
                                                 Self::ignore_relative_path(&p, repo_root)
-                                            {
-                                                if m.is_ignored(&rel, false) {
-                                                    if self.verbose {
-                                                        output::detail(
-                                                            "ignored (.mediagitignore)",
-                                                            &p.display().to_string(),
-                                                        );
-                                                    }
-                                                    continue;
-                                                }
+                                            && m.is_ignored(&rel, false)
+                                        {
+                                            if self.verbose {
+                                                output::detail(
+                                                    "ignored (.mediagitignore)",
+                                                    &p.display().to_string(),
+                                                );
                                             }
+                                            continue;
                                         }
                                         if let Ok(abs_path) = dunce::canonicalize(&p) {
                                             files.push(abs_path);
@@ -1058,18 +1044,17 @@ impl AddCmd {
 
             if path.is_file() && Self::is_outside_mediagit(path, &mediagit_dir) {
                 // Check .mediagitignore for explicitly-named files
-                if let Some(ref m) = matcher {
-                    if let Some(rel) = Self::ignore_relative_path(path, repo_root) {
-                        if m.is_ignored(&rel, false) {
-                            if !self.quiet {
-                                output::warning(&format!(
-                                    "'{}' is ignored by .mediagitignore — use --force to override",
-                                    path_str
-                                ));
-                            }
-                            continue;
-                        }
+                if let Some(ref m) = matcher
+                    && let Some(rel) = Self::ignore_relative_path(path, repo_root)
+                    && m.is_ignored(&rel, false)
+                {
+                    if !self.quiet {
+                        output::warning(&format!(
+                            "'{}' is ignored by .mediagitignore — use --force to override",
+                            path_str
+                        ));
                     }
+                    continue;
                 }
                 if let Ok(abs_path) = dunce::canonicalize(path) {
                     files.push(abs_path);
@@ -1112,18 +1097,15 @@ impl AddCmd {
             }
 
             // Check .mediagitignore before descending into dirs or staging files
-            if let Some(ref m) = matcher {
-                if let Some(rel) = Self::ignore_relative_path(&path, repo_root) {
-                    let is_dir = path.is_dir();
-                    if m.is_ignored(&rel, is_dir) {
-                        if self.verbose {
-                            output::detail(
-                                "ignored (.mediagitignore)",
-                                &path.display().to_string(),
-                            );
-                        }
-                        continue; // skip file OR prune entire directory
+            if let Some(m) = matcher
+                && let Some(rel) = Self::ignore_relative_path(&path, repo_root)
+            {
+                let is_dir = path.is_dir();
+                if m.is_ignored(&rel, is_dir) {
+                    if self.verbose {
+                        output::detail("ignored (.mediagitignore)", &path.display().to_string());
                     }
+                    continue; // skip file OR prune entire directory
                 }
             }
 

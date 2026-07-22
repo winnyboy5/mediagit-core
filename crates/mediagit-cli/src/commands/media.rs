@@ -154,11 +154,11 @@ impl InfoOpts {
             if let Some(codec) = &info.audio_codec {
                 println!("audio_codec: {codec}");
             }
-            if let Some(track) = info.tracks.iter().find(|t| t.track_type == "video") {
-                if let (Some(w), Some(h)) = (track.width, track.height) {
-                    println!("width: {w}");
-                    println!("height: {h}");
-                }
+            if let Some(track) = info.tracks.iter().find(|t| t.track_type == "video")
+                && let (Some(w), Some(h)) = (track.width, track.height)
+            {
+                println!("width: {w}");
+                println!("height: {h}");
             }
             println!("tracks: {}", info.tracks.len());
             Ok(())

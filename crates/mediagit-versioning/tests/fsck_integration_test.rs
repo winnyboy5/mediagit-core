@@ -105,9 +105,11 @@ async fn test_fsck_detect_corrupted_object() {
 
     let errors = report.issues_by_severity(IssueSeverity::Error);
     assert!(!errors.is_empty());
-    assert!(errors
-        .iter()
-        .any(|e| matches!(e.category, IssueCategory::ChecksumMismatch)));
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e.category, IssueCategory::ChecksumMismatch))
+    );
 }
 
 #[tokio::test]
@@ -151,9 +153,11 @@ async fn test_fsck_detect_missing_object() {
 
     let errors = report.issues_by_severity(IssueSeverity::Error);
     assert!(!errors.is_empty());
-    assert!(errors
-        .iter()
-        .any(|e| matches!(e.category, IssueCategory::MissingObject)));
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e.category, IssueCategory::MissingObject))
+    );
 }
 
 #[tokio::test]
@@ -176,9 +180,11 @@ async fn test_fsck_detect_broken_reference() {
 
     let errors = report.issues_by_severity(IssueSeverity::Error);
     assert!(!errors.is_empty());
-    assert!(errors
-        .iter()
-        .any(|e| matches!(e.category, IssueCategory::BrokenReference)));
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e.category, IssueCategory::BrokenReference))
+    );
 }
 
 #[tokio::test]
@@ -227,9 +233,11 @@ async fn test_fsck_full_mode() {
 
     // blob2 is dangling (not referenced by any commit)
     let info_issues = report.issues_by_severity(IssueSeverity::Info);
-    assert!(info_issues
-        .iter()
-        .any(|e| { matches!(e.category, IssueCategory::DanglingObject) && e.oid == Some(blob2) }));
+    assert!(
+        info_issues.iter().any(|e| {
+            matches!(e.category, IssueCategory::DanglingObject) && e.oid == Some(blob2)
+        })
+    );
 }
 
 #[tokio::test]

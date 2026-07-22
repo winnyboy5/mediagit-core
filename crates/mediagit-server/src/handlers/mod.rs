@@ -12,10 +12,10 @@
 // GNU Affero General Public License for more details.
 
 use axum::{
+    Extension, Json,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    Extension, Json,
 };
 use bytes::Bytes;
 use futures::stream::StreamExt;
@@ -27,8 +27,8 @@ use mediagit_protocol::{
 use mediagit_security::auth::{AuthUser, GrantLevel, GrantsStore};
 use mediagit_storage::{AzureBackend, GcsBackend, LocalBackend, MinIOBackend, StorageBackend};
 use mediagit_versioning::{
-    resolve_revision, Commit, FileMode, LcaFinder, ObjectDatabase, ObjectType, Oid, Ref,
-    RefDatabase, Reflog, ReflogEntry, StreamingPackWriter, Tag, Tree, TreeEntry,
+    Commit, FileMode, LcaFinder, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Reflog,
+    ReflogEntry, StreamingPackWriter, Tag, Tree, TreeEntry, resolve_revision,
 };
 use std::path::Path as StdPath;
 use std::sync::Arc;
@@ -186,15 +186,15 @@ async fn get_or_init_odb(
 /// repos whose config predates `repo_namespace`. Mirrors the CLI's
 /// `resolve_repo_namespace` in `mediagit-cli/src/repo.rs`.
 fn resolve_repo_namespace(repo_path: &StdPath, config: &mediagit_config::Config) -> String {
-    if let Ok(ns) = std::env::var("MEDIAGIT_REPO_NAMESPACE") {
-        if !ns.trim().is_empty() {
-            return mediagit_storage::sanitize_namespace(&ns);
-        }
+    if let Ok(ns) = std::env::var("MEDIAGIT_REPO_NAMESPACE")
+        && !ns.trim().is_empty()
+    {
+        return mediagit_storage::sanitize_namespace(&ns);
     }
-    if let Some(ns) = &config.repo_namespace {
-        if !ns.trim().is_empty() {
-            return mediagit_storage::sanitize_namespace(ns);
-        }
+    if let Some(ns) = &config.repo_namespace
+        && !ns.trim().is_empty()
+    {
+        return mediagit_storage::sanitize_namespace(ns);
     }
     let basename = repo_path
         .file_name()
@@ -213,10 +213,10 @@ fn resolve_repo_id(
     repo_path: &StdPath,
     config: &mediagit_config::Config,
 ) -> Result<String, StatusCode> {
-    if let Some(id) = &config.repo_id {
-        if !id.trim().is_empty() {
-            return Ok(id.clone());
-        }
+    if let Some(id) = &config.repo_id
+        && !id.trim().is_empty()
+    {
+        return Ok(id.clone());
     }
     let id = mediagit_storage::generate_repo_id();
     let mut updated = config.clone();
@@ -555,10 +555,11 @@ async fn collect_objects_bfs(
                     }
                 }
                 ObjectType::Tag => {
-                    if let Ok(tag) = Tag::deserialize(&obj_data) {
-                        if !stop_at.contains(&tag.target) && visited.insert(tag.target) {
-                            frontier.push(tag.target);
-                        }
+                    if let Ok(tag) = Tag::deserialize(&obj_data)
+                        && !stop_at.contains(&tag.target)
+                        && visited.insert(tag.target)
+                    {
+                        frontier.push(tag.target);
                     }
                 }
                 ObjectType::Blob => { /* leaf */ }
@@ -889,18 +890,19 @@ async fn load_jsonl_index(
                 if line.is_empty() {
                     continue;
                 }
-                if let Ok(entry) = serde_json::from_str::<PackIndexLine>(line) {
-                    if !entry.chunk_oid.is_empty() && !entry.pack_oid.is_empty() {
-                        repo_entries.insert(
-                            entry.chunk_oid,
-                            PackLoc {
-                                pack_oid: entry.pack_oid,
-                                offset: entry.offset,
-                                length: entry.length,
-                                compressed_hash: entry.compressed_hash,
-                            },
-                        );
-                    }
+                if let Ok(entry) = serde_json::from_str::<PackIndexLine>(line)
+                    && !entry.chunk_oid.is_empty()
+                    && !entry.pack_oid.is_empty()
+                {
+                    repo_entries.insert(
+                        entry.chunk_oid,
+                        PackLoc {
+                            pack_oid: entry.pack_oid,
+                            offset: entry.offset,
+                            length: entry.length,
+                            compressed_hash: entry.compressed_hash,
+                        },
+                    );
                 }
             }
         }
@@ -1005,7 +1007,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn grants_enforce_opt_out_falls_back_to_flat_role() {
         let _guard = GRANTS_ENV_LOCK.write().unwrap();
-        std::env::set_var("MEDIAGIT_GRANTS_ENFORCE", "0");
+        mediagit_test_utils::set_var("MEDIAGIT_GRANTS_ENFORCE", "0");
 
         let grants = GrantsStore::new();
         grants
@@ -1019,7 +1021,7 @@ mod tests {
         // "repo:write") is used instead.
         let result = check_permission(Some(&requester), "repo:write", true, &grants, "repoA");
 
-        std::env::remove_var("MEDIAGIT_GRANTS_ENFORCE");
+        mediagit_test_utils::remove_var("MEDIAGIT_GRANTS_ENFORCE");
         assert!(result.is_ok());
     }
 

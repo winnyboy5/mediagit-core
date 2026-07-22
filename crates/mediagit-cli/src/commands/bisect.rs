@@ -279,7 +279,7 @@ impl BisectCmd {
         commit_ref: &Option<String>,
         state: &BisectState,
     ) -> Result<Oid> {
-        if let Some(ref commit_ref) = commit_ref {
+        if let Some(commit_ref) = commit_ref {
             return self.resolve_commit(refdb, repo_root, commit_ref).await;
         }
         if let Some(ref current) = state.current {
@@ -620,12 +620,10 @@ impl BisectCmd {
         let looks_like_hex = commit_ref.len() >= 4
             && commit_ref.len() < 64
             && commit_ref.chars().all(|c| c.is_ascii_hexdigit());
-        if looks_like_hex {
-            if let Ok(storage) = create_storage_backend(repo_root).await {
-                let odb = ObjectDatabase::with_smart_compression(storage, 1000);
-                if let Ok(oid) = odb.resolve_abbreviated_oid(commit_ref).await {
-                    return Ok(oid);
-                }
+        if looks_like_hex && let Ok(storage) = create_storage_backend(repo_root).await {
+            let odb = ObjectDatabase::with_smart_compression(storage, 1000);
+            if let Ok(oid) = odb.resolve_abbreviated_oid(commit_ref).await {
+                return Ok(oid);
             }
         }
 

@@ -23,9 +23,11 @@ MediaGit uses an automated release process powered by GitHub Actions. Releases a
 
 ### 1. Prepare the Release
 
-- [ ] Update version in `Cargo.toml` (workspace.package.version)
-- [ ] Update version in all crate `Cargo.toml` files
-- [ ] Update `CHANGELOG.md` with release notes
+- [ ] Bump the version everywhere: `./scripts/bump-version.sh <new-version>`
+      (updates `Cargo.toml` workspace version — all crates inherit it — plus every
+      hardcoded version string in the docs and example configs)
+- [ ] Update `CHANGELOG.md`: rename the `[Unreleased]` section to the new version
+      with today's date, and add release notes
 - [ ] Run tests: `cargo test --all-features`
 - [ ] Run benchmarks: `cargo bench`
 - [ ] Run security audit: `cargo audit`
@@ -36,15 +38,15 @@ MediaGit uses an automated release process powered by GitHub Actions. Releases a
 > **Note**: Git hooks enforce [Conventional Commits](https://www.conventionalcommits.org/) format (max 72 chars) and run `cargo test --workspace` before push. Commit messages must match: `type(scope): description`
 
 ```bash
-# Update version to 0.3.0-rc.1 (example)
-vim Cargo.toml # Update [workspace.package] version
+# Bump version everywhere (Cargo.toml + all doc/version strings + example configs)
+./scripts/bump-version.sh 0.3.0-rc.2   # example
 
-# Update CHANGELOG.md
+# Rename [Unreleased] -> the new version + add release notes
 vim CHANGELOG.md
 
 # Commit changes (conventional commit format required)
-git add Cargo.toml CHANGELOG.md
-git commit -m "chore: prepare release 0.3.0-rc.1"
+git add -A
+git commit -m "chore: prepare release 0.3.0-rc.2"
 git push origin main
 ```
 

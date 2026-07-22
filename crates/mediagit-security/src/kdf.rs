@@ -34,8 +34,8 @@
 
 use crate::encryption::{EncryptionKey, KEY_SIZE};
 use argon2::{
-    password_hash::{rand_core::OsRng, SaltString},
     Algorithm, Argon2, ParamsBuilder, Version,
+    password_hash::{SaltString, rand_core::OsRng},
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};

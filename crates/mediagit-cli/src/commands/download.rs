@@ -90,28 +90,27 @@ impl DownloadCmd {
             self.remote_path.starts_with("http://") || self.remote_path.starts_with("https://");
         if !is_url {
             validate_no_path_traversal(&self.remote_path)?;
-            if let Ok(repo_root) = crate::repo::find_repo_root() {
-                if let Some(bytes) = self.try_local_extract(&repo_root).await {
-                    let out_path = self.output_path(&self.remote_path);
-                    if let Some(parent) = out_path.parent() {
-                        if !parent.as_os_str().is_empty() {
-                            std::fs::create_dir_all(parent)
-                                .context("Failed to create output directory")?;
-                        }
-                    }
-                    std::fs::write(&out_path, &bytes).with_context(|| {
-                        format!("Failed to write output file '{}'", out_path.display())
-                    })?;
-                    if !self.quiet {
-                        output::success(&format!(
-                            "Downloaded '{}' ({} bytes) to {}",
-                            self.remote_path,
-                            bytes.len(),
-                            out_path.display()
-                        ));
-                    }
-                    return Ok(());
+            if let Ok(repo_root) = crate::repo::find_repo_root()
+                && let Some(bytes) = self.try_local_extract(&repo_root).await
+            {
+                let out_path = self.output_path(&self.remote_path);
+                if let Some(parent) = out_path.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    std::fs::create_dir_all(parent).context("Failed to create output directory")?;
                 }
+                std::fs::write(&out_path, &bytes).with_context(|| {
+                    format!("Failed to write output file '{}'", out_path.display())
+                })?;
+                if !self.quiet {
+                    output::success(&format!(
+                        "Downloaded '{}' ({} bytes) to {}",
+                        self.remote_path,
+                        bytes.len(),
+                        out_path.display()
+                    ));
+                }
+                return Ok(());
             }
         }
 
@@ -154,10 +153,10 @@ impl DownloadCmd {
         };
 
         let out_path = self.output_path(&file_path);
-        if let Some(parent) = out_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).context("Failed to create output directory")?;
-            }
+        if let Some(parent) = out_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).context("Failed to create output directory")?;
         }
 
         let mut file = tokio::fs::File::create(&out_path)

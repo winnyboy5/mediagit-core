@@ -26,9 +26,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 pub use tower_governor::{
+    GovernorLayer,
     governor::{GovernorConfig, GovernorConfigBuilder},
     key_extractor::SmartIpKeyExtractor,
-    GovernorLayer,
 };
 
 /// Rate limiting configuration
@@ -66,7 +66,7 @@ impl RateLimitConfig {
     ///
     /// To use this config, create a layer with `GovernorLayer::new(config)` or use
     /// `build_with_cleanup()` to also get a cleanup task.
-    pub fn build_config(&self) -> Arc<impl Send + Sync> {
+    pub fn build_config(&self) -> Arc<impl Send + Sync + use<>> {
         Arc::new(
             GovernorConfigBuilder::default()
                 .per_second(self.requests_per_second)
@@ -102,7 +102,12 @@ impl RateLimitConfig {
     /// });
     /// # }
     /// ```
-    pub fn build_with_cleanup(&self) -> (Arc<impl Send + Sync>, impl FnOnce() + Send + 'static) {
+    pub fn build_with_cleanup(
+        &self,
+    ) -> (
+        Arc<impl Send + Sync + use<>>,
+        impl FnOnce() + Send + 'static + use<>,
+    ) {
         let config = Arc::new(
             GovernorConfigBuilder::default()
                 .per_second(self.requests_per_second)
@@ -204,59 +209,57 @@ pub async fn request_validation_middleware(
     // Validate content length (max 2GB for large media files)
     const MAX_CONTENT_LENGTH: u64 = 2 * 1024 * 1024 * 1024; // 2GB
 
-    if let Some(content_length) = request.headers().get("content-length") {
-        if let Ok(length_str) = content_length.to_str() {
-            if let Ok(length) = length_str.parse::<u64>() {
-                if length > MAX_CONTENT_LENGTH {
-                    let client_ip = extract_client_ip(&request);
-                    let path = request.uri().path().to_string();
-                    let method = request.method().to_string();
+    if let Some(content_length) = request.headers().get("content-length")
+        && let Ok(length_str) = content_length.to_str()
+        && let Ok(length) = length_str.parse::<u64>()
+        && length > MAX_CONTENT_LENGTH
+    {
+        let client_ip = extract_client_ip(&request);
+        let path = request.uri().path().to_string();
+        let method = request.method().to_string();
 
-                    tracing::warn!(
-                        "Request exceeds maximum content length: {} > {}",
-                        length,
-                        MAX_CONTENT_LENGTH
-                    );
+        tracing::warn!(
+            "Request exceeds maximum content length: {} > {}",
+            length,
+            MAX_CONTENT_LENGTH
+        );
 
-                    audit::log_invalid_request(
-                        client_ip,
-                        path,
-                        method,
-                        &format!(
-                            "Content length {} exceeds maximum {}",
-                            length, MAX_CONTENT_LENGTH
-                        ),
-                    );
+        audit::log_invalid_request(
+            client_ip,
+            path,
+            method,
+            &format!(
+                "Content length {} exceeds maximum {}",
+                length, MAX_CONTENT_LENGTH
+            ),
+        );
 
-                    return Err(StatusCode::PAYLOAD_TOO_LARGE);
-                }
-            }
-        }
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     // Validate content type for POST/PUT requests
     let method = request.method();
-    if method == "POST" || method == "PUT" {
-        if let Some(content_type) = request.headers().get("content-type") {
-            let content_type_str = content_type.to_str().unwrap_or("");
+    if (method == "POST" || method == "PUT")
+        && let Some(content_type) = request.headers().get("content-type")
+    {
+        let content_type_str = content_type.to_str().unwrap_or("");
 
-            // Allow common types for MediaGit
-            let allowed_types = [
-                "application/octet-stream",
-                "application/json",
-                "application/x-git-upload-pack-request",
-                "application/x-git-receive-pack-request",
-                "multipart/form-data",
-            ];
+        // Allow common types for MediaGit
+        let allowed_types = [
+            "application/octet-stream",
+            "application/json",
+            "application/x-git-upload-pack-request",
+            "application/x-git-receive-pack-request",
+            "multipart/form-data",
+        ];
 
-            let is_allowed = allowed_types
-                .iter()
-                .any(|&allowed| content_type_str.starts_with(allowed));
+        let is_allowed = allowed_types
+            .iter()
+            .any(|&allowed| content_type_str.starts_with(allowed));
 
-            if !is_allowed && !content_type_str.is_empty() {
-                tracing::warn!("Unsupported content type: {}", content_type_str);
-                // Don't reject, just log warning for now
-            }
+        if !is_allowed && !content_type_str.is_empty() {
+            tracing::warn!("Unsupported content type: {}", content_type_str);
+            // Don't reject, just log warning for now
         }
     }
 
@@ -277,19 +280,14 @@ pub async fn audit_middleware(request: Request, next: Next) -> Result<Response, 
     let method = request.method().to_string();
 
     // Extract repository name from path (format: /:repo/...)
-    if let Some(repo_start) = path.strip_prefix('/') {
-        if let Some(repo_end) = repo_start.find('/') {
-            let repo = &repo_start[..repo_end];
+    if let Some(repo_start) = path.strip_prefix('/')
+        && let Some(repo_end) = repo_start.find('/')
+    {
+        let repo = &repo_start[..repo_end];
 
-            // Check for path traversal attempts
-            if let Err(reason) = validate_repo_name(repo) {
-                audit::log_path_traversal_attempt(
-                    client_ip,
-                    repo.to_string(),
-                    path.clone(),
-                    reason,
-                );
-            }
+        // Check for path traversal attempts
+        if let Err(reason) = validate_repo_name(repo) {
+            audit::log_path_traversal_attempt(client_ip, repo.to_string(), path.clone(), reason);
         }
     }
 
@@ -317,19 +315,18 @@ pub async fn path_validation_middleware(
     let method = request.method().to_string();
 
     // Extract repo name from path (format: /{repo}/...)
-    if let Some(repo) = path.strip_prefix('/').and_then(|p| p.split('/').next()) {
-        if !repo.is_empty() {
-            if let Err(reason) = validate_repo_name(repo) {
-                tracing::warn!("Path validation failed for '{}': {}", repo, reason);
-                audit::log_path_traversal_attempt(
-                    client_ip,
-                    path.to_string(),
-                    method.clone(),
-                    &format!("Rejected malicious repo name '{}': {}", repo, reason),
-                );
-                return Err(StatusCode::BAD_REQUEST);
-            }
-        }
+    if let Some(repo) = path.strip_prefix('/').and_then(|p| p.split('/').next())
+        && !repo.is_empty()
+        && let Err(reason) = validate_repo_name(repo)
+    {
+        tracing::warn!("Path validation failed for '{}': {}", repo, reason);
+        audit::log_path_traversal_attempt(
+            client_ip,
+            path.to_string(),
+            method.clone(),
+            &format!("Rejected malicious repo name '{}': {}", repo, reason),
+        );
+        return Err(StatusCode::BAD_REQUEST);
     }
 
     Ok(next.run(request).await)

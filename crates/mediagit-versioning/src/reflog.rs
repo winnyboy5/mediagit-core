@@ -436,6 +436,7 @@ impl Reflog {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)] // edition-2024: test-only env::set_var/remove_var requires unsafe
 mod tests {
     use super::*;
     use tempfile::TempDir;
@@ -497,7 +498,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         // SAFETY: test-only env var scoping; no other test in this process
         // reads MEDIAGIT_REFLOG_MAX concurrently within this crate's suite.
-        std::env::set_var("MEDIAGIT_REFLOG_MAX", "5");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MEDIAGIT_REFLOG_MAX", "5") };
         let reflog = Reflog::new(tmp.path());
 
         for i in 0..12 {
@@ -521,7 +523,8 @@ mod tests {
         assert_eq!(entries[0].message, "commit: entry 11");
         assert_eq!(entries[4].message, "commit: entry 7");
 
-        std::env::remove_var("MEDIAGIT_REFLOG_MAX");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_REFLOG_MAX") };
     }
 
     #[tokio::test]

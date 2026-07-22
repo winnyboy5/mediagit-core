@@ -8,7 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_VERSION: "1.92.0"
+  RUST_VERSION: "1.97.1"          # keep in sync with rust-toolchain.toml
   CARGO_INCREMENTAL: "0"
   CARGO_BUILD_JOBS: "2"          # Cap parallelism to avoid OOM on 7 GB GitHub runners
 
@@ -226,15 +226,15 @@ jobs:
 
   # Phase 4: MSRV verification
   msrv:
-    name: MSRV Check (Rust 1.92.0)
+    name: MSRV Check (Rust 1.97)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust 1.92.0
+      - name: Install Rust 1.97
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.92.0"
+          toolchain: "1.97"
 
       - uses: Swatinem/rust-cache@v2
         with:

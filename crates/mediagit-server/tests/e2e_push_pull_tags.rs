@@ -294,10 +294,10 @@ async fn push_and_clone_transfers_tags() {
             if ref_info.name == "refs/tags/v1-annot" {
                 saw_v1_annot = true;
             }
-        } else if let Some(tag_name) = ref_info.name.strip_prefix("refs/tag-meta/") {
-            if tag_name == "v1-annot" {
-                tag_meta_ref = Some(ref_info.oid.clone());
-            }
+        } else if let Some(tag_name) = ref_info.name.strip_prefix("refs/tag-meta/")
+            && tag_name == "v1-annot"
+        {
+            tag_meta_ref = Some(ref_info.oid.clone());
         }
     }
 

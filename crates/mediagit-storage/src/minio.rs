@@ -78,15 +78,15 @@
 //! - Enable encryption at rest for sensitive data
 
 use crate::StorageBackend;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
+use aws_sdk_s3::Client;
 use aws_sdk_s3::config::retry::RetryConfig;
 use aws_sdk_s3::config::timeout::TimeoutConfig;
-use aws_sdk_s3::Client;
 use bytes::Bytes;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use tracing::{debug, warn};
@@ -789,6 +789,9 @@ impl MinIOBackend {
         let part_size = self.config.part_size as usize;
         let mut part_number = 1;
 
+        // part_number feeds the S3 PartNumber (1-indexed); kept as an explicit
+        // counter for clarity in this multipart-upload hot path.
+        #[allow(clippy::explicit_counter_loop)]
         for chunk in data.chunks(part_size) {
             let client = client.clone();
             let bucket = bucket.clone();
@@ -858,11 +861,11 @@ impl MinIOBackend {
             part_handles.push(handle);
 
             // Limit concurrent uploads
-            if part_handles.len() >= self.config.max_concurrent_parts {
-                if let Some(handle) = part_handles.pop() {
-                    let (part_num, etag) = handle.await??;
-                    parts.push((part_num, etag));
-                }
+            if part_handles.len() >= self.config.max_concurrent_parts
+                && let Some(handle) = part_handles.pop()
+            {
+                let (part_num, etag) = handle.await??;
+                parts.push((part_num, etag));
             }
 
             part_number += 1;
@@ -1458,6 +1461,7 @@ impl StorageBackend for MinIOBackend {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)] // edition-2024: test-only env::set_var/remove_var requires unsafe
 mod tests {
     use super::*;
 
@@ -1728,10 +1732,12 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("must start with http"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must start with http")
+        );
     }
 
     #[tokio::test]
@@ -1769,10 +1775,12 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("lowercase letters"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("lowercase letters")
+        );
     }
 
     #[tokio::test]
@@ -1890,26 +1898,34 @@ mod tests {
         let secret_key = std::env::var("MINIO_SECRET_KEY").ok();
 
         // Clear env vars
-        std::env::remove_var("MINIO_ENDPOINT");
-        std::env::remove_var("MINIO_BUCKET");
-        std::env::remove_var("MINIO_ACCESS_KEY");
-        std::env::remove_var("MINIO_SECRET_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MINIO_ENDPOINT") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MINIO_BUCKET") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MINIO_ACCESS_KEY") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MINIO_SECRET_KEY") };
 
         let result = MinIOBackend::from_env().await;
         assert!(result.is_err());
 
         // Restore env vars
         if let Some(v) = endpoint {
-            std::env::set_var("MINIO_ENDPOINT", v);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MINIO_ENDPOINT", v) };
         }
         if let Some(v) = bucket {
-            std::env::set_var("MINIO_BUCKET", v);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MINIO_BUCKET", v) };
         }
         if let Some(v) = access_key {
-            std::env::set_var("MINIO_ACCESS_KEY", v);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MINIO_ACCESS_KEY", v) };
         }
         if let Some(v) = secret_key {
-            std::env::set_var("MINIO_SECRET_KEY", v);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MINIO_SECRET_KEY", v) };
         }
     }
 
@@ -1923,10 +1939,14 @@ mod tests {
         let secret_key = std::env::var("MINIO_SECRET_KEY").ok();
 
         // Set test values matching docker-compose.test.yml
-        std::env::set_var("MINIO_ENDPOINT", "http://localhost:9000");
-        std::env::set_var("MINIO_BUCKET", "mediagit-test");
-        std::env::set_var("MINIO_ACCESS_KEY", "minioadmin");
-        std::env::set_var("MINIO_SECRET_KEY", "minioadmin");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MINIO_ENDPOINT", "http://localhost:9000") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MINIO_BUCKET", "mediagit-test") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MINIO_ACCESS_KEY", "minioadmin") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MINIO_SECRET_KEY", "minioadmin") };
 
         let result = MinIOBackend::from_env().await;
         if let Err(ref e) = result {
@@ -1940,24 +1960,32 @@ mod tests {
 
         // Restore env vars
         if let Some(v) = endpoint {
-            std::env::set_var("MINIO_ENDPOINT", v);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MINIO_ENDPOINT", v) };
         } else {
-            std::env::remove_var("MINIO_ENDPOINT");
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::remove_var("MINIO_ENDPOINT") };
         }
         if let Some(v) = bucket {
-            std::env::set_var("MINIO_BUCKET", v);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MINIO_BUCKET", v) };
         } else {
-            std::env::remove_var("MINIO_BUCKET");
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::remove_var("MINIO_BUCKET") };
         }
         if let Some(v) = access_key {
-            std::env::set_var("MINIO_ACCESS_KEY", v);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MINIO_ACCESS_KEY", v) };
         } else {
-            std::env::remove_var("MINIO_ACCESS_KEY");
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::remove_var("MINIO_ACCESS_KEY") };
         }
         if let Some(v) = secret_key {
-            std::env::set_var("MINIO_SECRET_KEY", v);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MINIO_SECRET_KEY", v) };
         } else {
-            std::env::remove_var("MINIO_SECRET_KEY");
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::remove_var("MINIO_SECRET_KEY") };
         }
     }
 }

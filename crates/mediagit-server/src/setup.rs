@@ -21,7 +21,7 @@
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand, ValueEnum};
 use mediagit_security::auth::{
-    user::Role, validate_password_strength, validate_registration_input, CredentialsStore, User,
+    CredentialsStore, User, user::Role, validate_password_strength, validate_registration_input,
 };
 use mediagit_server::ServerConfig;
 use std::net::ToSocketAddrs;

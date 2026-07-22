@@ -24,10 +24,14 @@
 //!
 //! ## Auth
 //!
-//! By default both clients use Application Default Credentials (ADC).
-//! When `GOOGLE_APPLICATION_CREDENTIALS` is set it is picked up automatically.
-//! The `new(…, service_account_path)` constructor sets the env var before building
-//! so the SDK finds it. Prefer `with_default_credentials` in production.
+//! By default both clients use Application Default Credentials (ADC), which
+//! honours `GOOGLE_APPLICATION_CREDENTIALS` if it is already set in the
+//! process environment. The `new(…, service_account_path)` constructor does
+//! NOT mutate the environment (mutating `std::env` in a multi-threaded async
+//! server is a process-wide data race); instead it parses the service
+//! account JSON directly and passes `Credentials` explicitly to both client
+//! builders via `with_credentials`. Prefer `with_default_credentials` in
+//! production.
 //!
 //! ## Retry
 //!
@@ -183,22 +187,36 @@ impl GcsBackend {
 
     /// Build both clients with the current `GcsConfig` retry / threshold settings.
     ///
-    /// Caller must ensure ADC is resolvable before calling (i.e. set
-    /// `GOOGLE_APPLICATION_CREDENTIALS` if needed).
-    async fn build_clients(config: &GcsConfig) -> anyhow::Result<(Storage, StorageControl)> {
-        let storage = Storage::builder()
+    /// When `creds` is `Some`, it is passed explicitly to both builders via
+    /// `with_credentials` (used by the explicit-service-account-file
+    /// constructors). When `None`, the SDK falls back to its default
+    /// Application Default Credentials resolution.
+    async fn build_clients(
+        config: &GcsConfig,
+        creds: Option<google_cloud_auth::credentials::Credentials>,
+    ) -> anyhow::Result<(Storage, StorageControl)> {
+        let mut storage_builder = Storage::builder()
             .with_resumable_upload_threshold(config.resumable_threshold)
-            .with_retry_policy(AlwaysRetry.with_attempt_limit(config.max_retries))
-            .build()
-            .await
-            .map_err(|e| anyhow::anyhow!("GCS Storage client build failed: {}", e))?;
+            .with_retry_policy(AlwaysRetry.with_attempt_limit(config.max_retries));
 
         // StorageControl (gRPC control plane: exists/delete/list) intentionally uses
         // the SDK default retry policy rather than AlwaysRetry.  AlwaysRetry retries
         // NOT_FOUND, which exists() relies on as a fast "absent" signal.  Retrying
         // NOT_FOUND causes exponential backoff for every missing chunk, stalling
         // chunks/check when the bucket is empty or a fresh push is underway.
-        let control = StorageControl::builder()
+        let mut control_builder = StorageControl::builder();
+
+        if let Some(creds) = creds {
+            storage_builder = storage_builder.with_credentials(creds.clone());
+            control_builder = control_builder.with_credentials(creds);
+        }
+
+        let storage = storage_builder
+            .build()
+            .await
+            .map_err(|e| anyhow::anyhow!("GCS Storage client build failed: {}", e))?;
+
+        let control = control_builder
             .build()
             .await
             .map_err(|e| anyhow::anyhow!("GCS StorageControl client build failed: {}", e))?;
@@ -208,8 +226,9 @@ impl GcsBackend {
 
     /// Create a new GCS backend from a service account JSON file.
     ///
-    /// Sets `GOOGLE_APPLICATION_CREDENTIALS` to `service_account_path` then
-    /// builds both clients using ADC (which reads that env var).
+    /// Reads and parses `service_account_path` and passes the resulting
+    /// `Credentials` explicitly to both client builders. Does not mutate the
+    /// process environment.
     ///
     /// # Arguments
     ///
@@ -239,17 +258,29 @@ impl GcsBackend {
             ));
         }
 
-        // Point ADC at the explicit credentials file.
-        let path_str = path
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("service account path is not valid UTF-8"))?;
-        std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", path_str);
+        let sa_json_str = std::fs::read_to_string(path).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to read service account file '{}': {}",
+                path.display(),
+                e
+            )
+        })?;
+        let sa_json: serde_json::Value = serde_json::from_str(&sa_json_str).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to parse service account JSON '{}': {}",
+                path.display(),
+                e
+            )
+        })?;
+
+        let creds = google_cloud_auth::credentials::service_account::Builder::new(sa_json.clone())
+            .build()
+            .map_err(|e| anyhow::anyhow!("GCS credentials build failed: {}", e))?;
 
         let gcs_config = GcsConfig::new(project_id.clone(), bucket_name.clone());
-        let (storage, control) = Self::build_clients(&gcs_config).await?;
+        let (storage, control) = Self::build_clients(&gcs_config, Some(creds)).await?;
 
-        // GOOGLE_APPLICATION_CREDENTIALS is now set; ADC picks it up.
-        let signer = google_cloud_auth::credentials::Builder::default()
+        let signer = google_cloud_auth::credentials::service_account::Builder::new(sa_json)
             .build_signer()
             .map_err(|e| anyhow::anyhow!("GCS signer build failed: {}", e))?;
 
@@ -288,14 +319,28 @@ impl GcsBackend {
             ));
         }
 
-        let path_str = path
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("service account path is not valid UTF-8"))?;
-        std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", path_str);
+        let sa_json_str = std::fs::read_to_string(path).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to read service account file '{}': {}",
+                path.display(),
+                e
+            )
+        })?;
+        let sa_json: serde_json::Value = serde_json::from_str(&sa_json_str).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to parse service account JSON '{}': {}",
+                path.display(),
+                e
+            )
+        })?;
 
-        let (storage, control) = Self::build_clients(&config).await?;
+        let creds = google_cloud_auth::credentials::service_account::Builder::new(sa_json.clone())
+            .build()
+            .map_err(|e| anyhow::anyhow!("GCS credentials build failed: {}", e))?;
 
-        let signer = google_cloud_auth::credentials::Builder::default()
+        let (storage, control) = Self::build_clients(&config, Some(creds)).await?;
+
+        let signer = google_cloud_auth::credentials::service_account::Builder::new(sa_json)
             .build_signer()
             .map_err(|e| anyhow::anyhow!("GCS signer build failed: {}", e))?;
 
@@ -395,7 +440,7 @@ impl GcsBackend {
             );
         }
 
-        let (storage, control) = Self::build_clients(&gcs_config).await?;
+        let (storage, control) = Self::build_clients(&gcs_config, None).await?;
 
         let signer = match google_cloud_auth::credentials::Builder::default().build_signer() {
             Ok(s) => Some(s),
@@ -478,10 +523,10 @@ impl GcsBackend {
         if e.http_status_code() == Some(404) {
             return true;
         }
-        if let Some(status) = e.status() {
-            if status.code == google_cloud_gax::error::rpc::Code::NotFound {
-                return true;
-            }
+        if let Some(status) = e.status()
+            && status.code == google_cloud_gax::error::rpc::Code::NotFound
+        {
+            return true;
         }
         false
     }
@@ -1009,10 +1054,12 @@ mod tests {
     async fn test_gcs_backend_new_missing_file() {
         let result = GcsBackend::new("project", "bucket", "nonexistent.json").await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("service account file not found"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("service account file not found")
+        );
     }
 
     /// Name-composition regression test for the GCS-prefix bug (layout v2,

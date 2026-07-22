@@ -457,10 +457,10 @@ pub async fn check_chunk_deltas_exist(
             let storage = Arc::clone(&storage);
             async move {
                 let meta_key = format!("chunk-deltas/{}.meta", chunk_id_hex);
-                if let Ok(meta_bytes) = storage.get(&meta_key).await {
-                    if let Some(base_hex) = parse_chunk_delta_meta(&meta_bytes) {
-                        return Some((chunk_id_hex, base_hex));
-                    }
+                if let Ok(meta_bytes) = storage.get(&meta_key).await
+                    && let Some(base_hex) = parse_chunk_delta_meta(&meta_bytes)
+                {
+                    return Some((chunk_id_hex, base_hex));
                 }
                 None
             }

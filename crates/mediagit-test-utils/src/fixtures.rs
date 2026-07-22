@@ -34,11 +34,7 @@ impl TestFixtures {
         } else {
             // Try without subdirectory
             let path = TestPaths::test_file(name);
-            if path.exists() {
-                Some(path)
-            } else {
-                None
-            }
+            if path.exists() { Some(path) } else { None }
         }
     }
 
@@ -49,11 +45,7 @@ impl TestFixtures {
             Some(path)
         } else {
             let path = TestPaths::test_file(name);
-            if path.exists() {
-                Some(path)
-            } else {
-                None
-            }
+            if path.exists() { Some(path) } else { None }
         }
     }
 
@@ -64,11 +56,7 @@ impl TestFixtures {
             Some(path)
         } else {
             let path = TestPaths::test_file(name);
-            if path.exists() {
-                Some(path)
-            } else {
-                None
-            }
+            if path.exists() { Some(path) } else { None }
         }
     }
 

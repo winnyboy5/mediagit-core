@@ -258,9 +258,9 @@ debug = true
 
 #[tokio::test]
 async fn test_environment_variable_overrides() {
-    std::env::set_var("MEDIAGIT_APP_PORT", "7777");
-    std::env::set_var("MEDIAGIT_APP_ENVIRONMENT", "staging");
-    std::env::set_var("MEDIAGIT_LOG_LEVEL", "debug");
+    mediagit_test_utils::set_var("MEDIAGIT_APP_PORT", "7777");
+    mediagit_test_utils::set_var("MEDIAGIT_APP_ENVIRONMENT", "staging");
+    mediagit_test_utils::set_var("MEDIAGIT_LOG_LEVEL", "debug");
 
     let loader = ConfigLoader::new();
     let mut config = Config::default();
@@ -273,9 +273,9 @@ async fn test_environment_variable_overrides() {
     assert_eq!(config.observability.log_level, "debug");
 
     // Cleanup
-    std::env::remove_var("MEDIAGIT_APP_PORT");
-    std::env::remove_var("MEDIAGIT_APP_ENVIRONMENT");
-    std::env::remove_var("MEDIAGIT_LOG_LEVEL");
+    mediagit_test_utils::remove_var("MEDIAGIT_APP_PORT");
+    mediagit_test_utils::remove_var("MEDIAGIT_APP_ENVIRONMENT");
+    mediagit_test_utils::remove_var("MEDIAGIT_LOG_LEVEL");
 }
 
 #[test]

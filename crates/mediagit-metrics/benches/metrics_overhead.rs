@@ -15,10 +15,10 @@
 //!
 //! Measures the performance overhead of metrics collection to ensure it stays below 1%
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use mediagit_metrics::{
-    types::{CompressionAlgorithm, OperationType, StorageBackend},
     MetricsRegistry,
+    types::{CompressionAlgorithm, OperationType, StorageBackend},
 };
 use std::hint::black_box;
 use std::time::{Duration, Instant};

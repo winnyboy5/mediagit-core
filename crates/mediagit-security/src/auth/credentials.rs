@@ -15,13 +15,13 @@
 //!
 //! Provides secure password hashing using bcrypt and credential storage.
 
-use bcrypt::{hash, verify, DEFAULT_COST};
+use bcrypt::{DEFAULT_COST, hash, verify};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
-use super::{persist, user::Role, AuthError, AuthResult, User, UserId};
+use super::{AuthError, AuthResult, User, UserId, persist, user::Role};
 
 /// User credentials with hashed password
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -561,14 +561,18 @@ mod tests {
         store.register_user(user, "password123").await.unwrap();
 
         assert!(store.verify_password("user1", "password123").await.unwrap());
-        assert!(!store
-            .verify_password("user1", "wrongpassword")
-            .await
-            .unwrap());
-        assert!(store
-            .verify_password("nobody", "password123")
-            .await
-            .is_err());
+        assert!(
+            !store
+                .verify_password("user1", "wrongpassword")
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .verify_password("nobody", "password123")
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -663,7 +667,7 @@ mod tests {
     #[tokio::test]
     async fn persist_disabled_writes_no_files() {
         let _guard = persist::ENV_LOCK.write().unwrap();
-        std::env::set_var("MEDIAGIT_AUTH_PERSIST", "0");
+        mediagit_test_utils::set_var("MEDIAGIT_AUTH_PERSIST", "0");
         let tmp = tempfile::tempdir().unwrap();
         let store = CredentialsStore::load_or_new(tmp.path()).unwrap();
         let user = User::new(
@@ -673,7 +677,7 @@ mod tests {
             Role::Write,
         );
         store.register_user(user, "password123").await.unwrap();
-        std::env::remove_var("MEDIAGIT_AUTH_PERSIST");
+        mediagit_test_utils::remove_var("MEDIAGIT_AUTH_PERSIST");
 
         assert!(!tmp.path().join("users.jsonl").exists());
     }

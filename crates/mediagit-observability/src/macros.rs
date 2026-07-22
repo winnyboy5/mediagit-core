@@ -28,10 +28,10 @@
 /// ```
 #[macro_export]
 macro_rules! log_info {
-    ($msg:expr) => {
+    ($msg:expr_2021) => {
         tracing::info!($msg)
     };
-    ($msg:expr => { $($key:expr => $value:expr),* $(,)? }) => {
+    ($msg:expr_2021 => { $($key:expr_2021 => $value:expr_2021),* $(,)? }) => {
         tracing::info!($msg, $($key = $value),*)
     };
 }
@@ -39,10 +39,10 @@ macro_rules! log_info {
 /// Log a debug message with structured fields
 #[macro_export]
 macro_rules! log_debug {
-    ($msg:expr) => {
+    ($msg:expr_2021) => {
         tracing::debug!($msg)
     };
-    ($msg:expr => { $($key:expr => $value:expr),* $(,)? }) => {
+    ($msg:expr_2021 => { $($key:expr_2021 => $value:expr_2021),* $(,)? }) => {
         tracing::debug!($msg, $($key = $value),*)
     };
 }
@@ -50,10 +50,10 @@ macro_rules! log_debug {
 /// Log a warning message with structured fields
 #[macro_export]
 macro_rules! log_warn {
-    ($msg:expr) => {
+    ($msg:expr_2021) => {
         tracing::warn!($msg)
     };
-    ($msg:expr => { $($key:expr => $value:expr),* $(,)? }) => {
+    ($msg:expr_2021 => { $($key:expr_2021 => $value:expr_2021),* $(,)? }) => {
         tracing::warn!($msg, $($key = $value),*)
     };
 }
@@ -61,10 +61,10 @@ macro_rules! log_warn {
 /// Log an error message with structured fields
 #[macro_export]
 macro_rules! log_error {
-    ($msg:expr) => {
+    ($msg:expr_2021) => {
         tracing::error!($msg)
     };
-    ($msg:expr => { $($key:expr => $value:expr),* $(,)? }) => {
+    ($msg:expr_2021 => { $($key:expr_2021 => $value:expr_2021),* $(,)? }) => {
         tracing::error!($msg, $($key = $value),*)
     };
 }
@@ -80,10 +80,10 @@ macro_rules! log_error {
 /// ```
 #[macro_export]
 macro_rules! trace_span {
-    ($name:expr) => {
+    ($name:expr_2021) => {
         tracing::span!(tracing::Level::DEBUG, $name)
     };
-    ($name:expr, $($field:tt)*) => {
+    ($name:expr_2021, $($field:tt)*) => {
         tracing::span!(tracing::Level::DEBUG, $name, $($field)*)
     };
 }
@@ -101,7 +101,7 @@ macro_rules! trace_span {
 /// ```
 #[macro_export]
 macro_rules! instrument_async {
-    ($name:expr, $future:expr) => {{
+    ($name:expr_2021, $future:expr_2021) => {{
         let span = $crate::trace_span!($name);
         async move { $future.await }.instrument(span)
     }};

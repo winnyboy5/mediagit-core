@@ -23,7 +23,7 @@
 //! Passphrase-protected keys are detected and rejected with a clear error;
 //! passphrase prompting is out of scope for this cycle.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use ssh_key::{HashAlg, LineEnding, PrivateKey, PublicKey, SshSig};
 use std::path::{Path, PathBuf};
 
@@ -135,7 +135,7 @@ pub fn verify_embedded(payload: &[u8], signature: &[u8]) -> Result<Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ssh_key::{rand_core::OsRng, Algorithm};
+    use ssh_key::{Algorithm, rand_core::OsRng};
 
     fn write_test_key(dir: &Path, name: &str) -> PathBuf {
         let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).expect("generate test key");
@@ -249,19 +249,18 @@ XSN9kOZv1lKThz2w==
 
     #[test]
     fn sign_enabled_defaults_off_and_respects_knob() {
-        // SAFETY: test-only env var scoping.
-        std::env::remove_var("MEDIAGIT_SIGN");
+        mediagit_test_utils::remove_var("MEDIAGIT_SIGN");
         assert!(!sign_enabled(), "default must be OFF (opt-in)");
 
-        std::env::set_var("MEDIAGIT_SIGN", "1");
+        mediagit_test_utils::set_var("MEDIAGIT_SIGN", "1");
         assert!(sign_enabled());
 
-        std::env::set_var("MEDIAGIT_SIGN", "true");
+        mediagit_test_utils::set_var("MEDIAGIT_SIGN", "true");
         assert!(sign_enabled());
 
-        std::env::set_var("MEDIAGIT_SIGN", "0");
+        mediagit_test_utils::set_var("MEDIAGIT_SIGN", "0");
         assert!(!sign_enabled());
 
-        std::env::remove_var("MEDIAGIT_SIGN");
+        mediagit_test_utils::remove_var("MEDIAGIT_SIGN");
     }
 }

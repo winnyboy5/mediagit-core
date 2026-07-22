@@ -27,7 +27,7 @@
 //! `gc` may prune bitmaps for commits no longer reachable; it must never
 //! treat a missing/stale bitmap as a corruption signal.
 
-use crate::{walk_reachable, ObjectDatabase, Oid};
+use crate::{ObjectDatabase, Oid, walk_reachable};
 use anyhow::Result;
 use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
@@ -156,6 +156,7 @@ impl ReachabilityBitmap {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)] // edition-2024: test-only env::set_var/remove_var requires unsafe
 mod tests {
     use super::*;
     use crate::{Commit, FileMode, ObjectType, Signature, Tree, TreeEntry};
@@ -257,19 +258,24 @@ mod tests {
     fn bitmap_enabled_defaults_on_and_respects_knob() {
         // SAFETY: test-only env var scoping; no other test in this process
         // reads MEDIAGIT_BITMAP concurrently within this crate's suite.
-        std::env::remove_var("MEDIAGIT_BITMAP");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_BITMAP") };
         assert!(bitmap_enabled(), "default must be ON");
 
-        std::env::set_var("MEDIAGIT_BITMAP", "0");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MEDIAGIT_BITMAP", "0") };
         assert!(!bitmap_enabled());
 
-        std::env::set_var("MEDIAGIT_BITMAP", "false");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MEDIAGIT_BITMAP", "false") };
         assert!(!bitmap_enabled());
 
-        std::env::set_var("MEDIAGIT_BITMAP", "1");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MEDIAGIT_BITMAP", "1") };
         assert!(bitmap_enabled());
 
-        std::env::remove_var("MEDIAGIT_BITMAP");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_BITMAP") };
     }
 
     #[test]

@@ -15,7 +15,7 @@ use super::super::repo::{create_storage_backend, find_repo_root};
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
-use mediagit_versioning::{resolve_revision, Commit, ObjectDatabase, Oid, RefDatabase, Tag, Tree};
+use mediagit_versioning::{Commit, ObjectDatabase, Oid, RefDatabase, Tag, Tree, resolve_revision};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -115,16 +115,16 @@ impl ShowCmd {
                     .unwrap_or_default();
 
                 let parent_tree_files = if let Some(parent_oid) = commit.parents.first() {
-                    if let Ok(parent_data) = odb.read(parent_oid).await {
-                        if let Ok(parent_commit) = Commit::deserialize(&parent_data) {
-                            Self::get_tree_file_list(&odb, &parent_commit.tree)
-                                .await
-                                .unwrap_or_default()
-                        } else {
-                            HashMap::new()
-                        }
-                    } else {
-                        HashMap::new()
+                    match odb.read(parent_oid).await {
+                        Ok(parent_data) => match Commit::deserialize(&parent_data) {
+                            Ok(parent_commit) => {
+                                Self::get_tree_file_list(&odb, &parent_commit.tree)
+                                    .await
+                                    .unwrap_or_default()
+                            }
+                            _ => HashMap::new(),
+                        },
+                        _ => HashMap::new(),
                     }
                 } else {
                     HashMap::new()

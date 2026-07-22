@@ -735,7 +735,7 @@ impl ProtocolClient {
                         .as_deref()
                         .unwrap_or("1")
                         == "1";
-                    let mut stream = futures::stream::iter(chunks_for_fallback.into_iter())
+                    let mut stream = futures::stream::iter(chunks_for_fallback)
                         .map(|chunk_id| {
                             let client = self.client.clone();
                             let direct_client = direct_client.clone();
@@ -877,7 +877,7 @@ impl ProtocolClient {
                     let _dl_pass_b_t = std::time::Instant::now();
                     let mut _dl_pass_b_n = 0u64;
                     let mut _dl_pass_b_bytes = 0u64;
-                    let mut stream = futures::stream::iter(delta_chunks.into_iter())
+                    let mut stream = futures::stream::iter(delta_chunks)
                         .map(|chunk_id| {
                             let client = self.client.clone();
                             let base_url = self.base_url.clone();

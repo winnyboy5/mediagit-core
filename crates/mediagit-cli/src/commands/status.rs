@@ -126,14 +126,13 @@ async fn collect_commit_ancestors(odb: &ObjectDatabase, root: Oid) -> HashSet<Oi
     visited.insert(root);
     queue.push_back(root);
     while let Some(oid) = queue.pop_front() {
-        if let Ok(data) = odb.read(&oid).await {
-            if let Ok(commit) =
+        if let Ok(data) = odb.read(&oid).await
+            && let Ok(commit) =
                 mediagit_versioning::format::deserialize::<mediagit_versioning::Commit>(&data)
-            {
-                for parent in commit.parents {
-                    if visited.insert(parent) {
-                        queue.push_back(parent);
-                    }
+        {
+            for parent in commit.parents {
+                if visited.insert(parent) {
+                    queue.push_back(parent);
                 }
             }
         }
@@ -354,23 +353,17 @@ impl StatusCmd {
 
         // Get HEAD commit tree for comparison (index is cleared after commit)
         let mut head_files: HashMap<PathBuf, Oid> = HashMap::new();
-        if let Ok(head_oid) = refdb.resolve("HEAD").await {
-            if let Ok(commit_data) = odb.read(&head_oid).await {
-                if let Ok(commit) = mediagit_versioning::format::deserialize::<
-                    mediagit_versioning::Commit,
-                >(&commit_data)
-                {
-                    if let Ok(tree_data) = odb.read(&commit.tree).await {
-                        if let Ok(tree) = mediagit_versioning::format::deserialize::<
-                            mediagit_versioning::Tree,
-                        >(&tree_data)
-                        {
-                            for entry in tree.iter() {
-                                head_files.insert(PathBuf::from(&entry.name), entry.oid);
-                            }
-                        }
-                    }
-                }
+        if let Ok(head_oid) = refdb.resolve("HEAD").await
+            && let Ok(commit_data) = odb.read(&head_oid).await
+            && let Ok(commit) = mediagit_versioning::format::deserialize::<
+                mediagit_versioning::Commit,
+            >(&commit_data)
+            && let Ok(tree_data) = odb.read(&commit.tree).await
+            && let Ok(tree) =
+                mediagit_versioning::format::deserialize::<mediagit_versioning::Tree>(&tree_data)
+        {
+            for entry in tree.iter() {
+                head_files.insert(PathBuf::from(&entry.name), entry.oid);
             }
         }
 
@@ -815,19 +808,18 @@ impl StatusCmd {
             }
 
             // Check .mediagitignore
-            if let Some(ref m) = matcher {
-                if let Ok(rel) = path.strip_prefix(repo_root) {
-                    let is_dir = path.is_dir();
-                    if m.is_ignored(rel, is_dir) {
-                        if path.is_file() {
-                            // Track ignored files for --ignored output
-                            let normalized =
-                                PathBuf::from(rel.to_string_lossy().replace('\\', "/"));
-                            ignored_files.insert(normalized);
-                        }
-                        // For dirs: prune entire subtree silently (don't enumerate children)
-                        continue;
+            if let Some(m) = matcher
+                && let Ok(rel) = path.strip_prefix(repo_root)
+            {
+                let is_dir = path.is_dir();
+                if m.is_ignored(rel, is_dir) {
+                    if path.is_file() {
+                        // Track ignored files for --ignored output
+                        let normalized = PathBuf::from(rel.to_string_lossy().replace('\\', "/"));
+                        ignored_files.insert(normalized);
                     }
+                    // For dirs: prune entire subtree silently (don't enumerate children)
+                    continue;
                 }
             }
 

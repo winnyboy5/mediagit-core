@@ -19,8 +19,8 @@ resolver = "2"
 
 [workspace.package]
 version = "0.3.0-rc.1"
-edition = "2021"
-rust-version = "1.92.0"
+edition = "2024"
+rust-version = "1.97"
 license = "AGPL-3.0"
 authors = ["MediaGit Contributors"]
 repository = "https://github.com/winnyboy5/mediagit-core"
@@ -91,6 +91,10 @@ indicatif = { version = "0.18", features = ["rayon", "futures"] }
 console = "0.16"
 
 [workspace.lints.rust]
+# `forbid`: crates inheriting this table (mediagit-security, mediagit-config,
+# mediagit-compression) are unsafe-free. Edition-2024 made env::set_var/remove_var
+# unsafe; test-only env mutation for these crates routes through
+# mediagit-test-utils::{set_var,remove_var}, which contains the unsafe.
 unsafe_code = "forbid"
 unused_must_use = "deny"
 unused_imports = "deny"

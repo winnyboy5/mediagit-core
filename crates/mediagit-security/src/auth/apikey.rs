@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
-use super::{persist, AuthError, AuthResult};
+use super::{AuthError, AuthResult, persist};
 
 /// API Key structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -380,14 +380,14 @@ mod tests {
     #[tokio::test]
     async fn persist_disabled_writes_no_files() {
         let _guard = persist::ENV_LOCK.write().unwrap();
-        std::env::set_var("MEDIAGIT_AUTH_PERSIST", "0");
+        mediagit_test_utils::set_var("MEDIAGIT_AUTH_PERSIST", "0");
         let tmp = tempfile::tempdir().unwrap();
         let api_key_auth = ApiKeyAuth::load_or_new(tmp.path()).unwrap();
         api_key_auth
             .generate_key("user123".to_string(), "Test Key".to_string(), vec![])
             .await
             .unwrap();
-        std::env::remove_var("MEDIAGIT_AUTH_PERSIST");
+        mediagit_test_utils::remove_var("MEDIAGIT_AUTH_PERSIST");
 
         assert!(!tmp.path().join("api_keys.jsonl").exists());
     }

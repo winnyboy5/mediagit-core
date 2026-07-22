@@ -17,18 +17,18 @@
 //! in Prometheus text exposition format.
 
 use axum::{
+    Router,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
-    Router,
 };
 use prometheus::{Encoder, TextEncoder};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{debug, error, info};
 
-use crate::{types::MetricsConfig, MetricsRegistry};
+use crate::{MetricsRegistry, types::MetricsConfig};
 
 /// HTTP server for Prometheus metrics
 ///

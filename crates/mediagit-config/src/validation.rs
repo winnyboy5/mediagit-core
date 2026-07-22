@@ -460,16 +460,16 @@ impl Validator for SecurityConfig {
             }
 
             // Validate paths exist
-            if let Some(cert_path) = &self.tls_cert_path {
-                if !Path::new(cert_path).exists() {
-                    return Err(ConfigError::FileNotFound(cert_path.clone().into()));
-                }
+            if let Some(cert_path) = &self.tls_cert_path
+                && !Path::new(cert_path).exists()
+            {
+                return Err(ConfigError::FileNotFound(cert_path.clone().into()));
             }
 
-            if let Some(key_path) = &self.tls_key_path {
-                if !Path::new(key_path).exists() {
-                    return Err(ConfigError::FileNotFound(key_path.clone().into()));
-                }
+            if let Some(key_path) = &self.tls_key_path
+                && !Path::new(key_path).exists()
+            {
+                return Err(ConfigError::FileNotFound(key_path.clone().into()));
             }
         }
 
@@ -480,10 +480,10 @@ impl Validator for SecurityConfig {
                 ));
             }
 
-            if let Some(key_path) = &self.encryption_key_path {
-                if !Path::new(key_path).exists() {
-                    return Err(ConfigError::FileNotFound(key_path.clone().into()));
-                }
+            if let Some(key_path) = &self.encryption_key_path
+                && !Path::new(key_path).exists()
+            {
+                return Err(ConfigError::FileNotFound(key_path.clone().into()));
             }
         }
 
@@ -550,7 +550,7 @@ mod tests {
     #[test]
     fn test_invalid_octal_permissions() {
         let mut config = Config::default();
-        if let StorageConfig::FileSystem(ref mut fs) = &mut config.storage {
+        if let StorageConfig::FileSystem(fs) = &mut config.storage {
             fs.file_permissions = "644".to_string();
         }
         assert!(config.validate().is_err());

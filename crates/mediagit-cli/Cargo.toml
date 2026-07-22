@@ -65,3 +65,6 @@ predicates = "3.1"
 tempfile.workspace = true
 axum.workspace = true
 ssh-key = { version = "0.6.7", features = ["ed25519"] }
+
+[lints.rust]
+unsafe_code = "deny"

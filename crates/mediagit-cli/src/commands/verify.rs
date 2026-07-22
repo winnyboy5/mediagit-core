@@ -19,8 +19,8 @@ use clap::Parser;
 use console::style;
 use mediagit_storage::StorageBackend;
 use mediagit_versioning::{
-    resolve_revision, Commit, FsckChecker, FsckOptions, IssueSeverity, ObjectDatabase, Oid,
-    RefDatabase,
+    Commit, FsckChecker, FsckOptions, IssueSeverity, ObjectDatabase, Oid, RefDatabase,
+    resolve_revision,
 };
 use std::collections::HashSet;
 use std::path::Path;
@@ -402,10 +402,10 @@ impl VerifyCmd {
 
         while let Some(current) = queue.pop() {
             // Stop if we've reached the start commit
-            if let Some(start) = start_oid {
-                if current == start {
-                    continue;
-                }
+            if let Some(start) = start_oid
+                && current == start
+            {
+                continue;
             }
 
             if visited.contains(&current) {
@@ -415,12 +415,12 @@ impl VerifyCmd {
             commits.push(current);
 
             // Read commit to get parents
-            if let Ok(data) = odb.read(&current).await {
-                if let Ok(commit) = Commit::deserialize(&data) {
-                    for parent in commit.parents {
-                        if !visited.contains(&parent) {
-                            queue.push(parent);
-                        }
+            if let Ok(data) = odb.read(&current).await
+                && let Ok(commit) = Commit::deserialize(&data)
+            {
+                for parent in commit.parents {
+                    if !visited.contains(&parent) {
+                        queue.push(parent);
                     }
                 }
             }

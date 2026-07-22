@@ -16,7 +16,7 @@
 //! in repo A must never touch repo B's keys — this is the correctness
 //! property the whole `NamespacedBackend` wrapper exists for.
 
-use mediagit_storage::{local::LocalBackend, NamespacedBackend, StorageBackend};
+use mediagit_storage::{NamespacedBackend, StorageBackend, local::LocalBackend};
 use std::sync::Arc;
 use tempfile::TempDir;
 

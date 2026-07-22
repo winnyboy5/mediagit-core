@@ -5,6 +5,33 @@ All notable changes to MediaGit will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Toolchain and edition modernization — no wire/persisted-format changes, so the
+`docs/FORMATS.md` §11 compat promise is preserved (verified byte-for-byte by the
+frozen-fixture fsck).
+
+### Changed
+- **Rust toolchain → 1.97.1** (from 1.92.0). Pinned via a new
+  `rust-toolchain.toml`; CI `RUST_VERSION` and the MSRV gate track it. MSRV
+  (`rust-version`) raised `1.92.0` → `1.97`.
+- **Edition 2021 → 2024** across all 14 crates (`cargo fix --edition`), plus
+  `rustfmt` `style_edition = "2024"`. Migration is semantics-preserving:
+  `env::set_var`/`remove_var` (now `unsafe` under edition 2024) are almost all
+  test-only; `expr` macro fragments pinned to `expr_2021`; and `if let … else`
+  scrutinees rewritten to `match` to preserve 2021 temporary-drop order.
+- **GCS backend hardening:** `GcsBackend::new`/`with_config` no longer mutate the
+  process-global `GOOGLE_APPLICATION_CREDENTIALS` env var to load a service
+  account — credentials are now passed explicitly to the storage/control clients
+  and signer. Removes a latent `set_var` data race in the multi-threaded server.
+- **Dependencies:** `Cargo.lock` refreshed within existing semver ranges
+  (`cargo update`; no direct-dependency major bumps); `cargo audit` clean.
+- **`unsafe_code` lint `forbid` → `deny`** (workspace lint table, inherited by
+  `mediagit-security`/`-config`/`-compression`) so audited, test-only
+  `env::set_var` sites can carry a scoped `#[allow(unsafe_code)]`. One production
+  site remains — `mediagit-cli` startup sets `MEDIAGIT_REPO` on its dedicated
+  single-threaded runtime thread (no concurrent env access; audited safe).
+
 ## [v0.3.0-rc.1] - 2026-07-18
 
 Collaboration primitives, auth persistence, and a GA format freeze. Version
@@ -67,6 +94,20 @@ STANDARD suite green on all 4 backends (MinIO/AWS/Azure/GCS), zero findings.
   misparsing.
 - New docs: `docs/OPERATIONS.md` (backup/restore), `docs/DEPLOYMENT.md` (TLS
   direct + reverse proxy), `docs/BENCHMARKS.md`, `docs/PRODUCTION_ROADMAP.md`.
+- **Server setup wizard** (`mediagit-server init`): interactive/flag-driven
+  bootstrap that creates the first admin account
+  (`--admin-username`/`--admin-email`/`--admin-password`), generates a random
+  JWT secret, closes open registration, and enables rate limiting in one flow.
+  Refuses to write a config that binds a non-loopback host with auth off.
+  Offline `mediagit-server admin create-user` provisions users without a
+  running server (for closed-registration deployments).
+- **CLI auth commands** (`mediagit auth …`): `login`, `logout`, `register`,
+  `whoami`, `status`, and `key create|list|revoke`. `login` accepts
+  `--token`/`--api-key`/`--username`+password, stores the credential (env →
+  keychain → config order), and prints the resolved identity, role, and grants.
+- **`auth login` records the commit author**: a successful login writes the
+  authenticated identity into the repo's `[author]` config, so commits are
+  attributed to the logged-in user without a separate `git config`-style step.
 
 ### Changed
 - `enable_auth`/insecure-bind guard: the server now refuses to bind to a

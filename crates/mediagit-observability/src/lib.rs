@@ -46,4 +46,4 @@ pub use config::{LogConfig, LogFormat, LogOutput};
 pub use initialization::{init_tracing, init_tracing_with_config};
 
 /// Tracing re-exports for convenience
-pub use tracing::{debug, error, info, span, trace, warn, Level};
+pub use tracing::{Level, debug, error, info, span, trace, warn};

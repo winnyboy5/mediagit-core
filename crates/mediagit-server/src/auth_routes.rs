@@ -16,16 +16,16 @@
 //! Provides HTTP endpoints for user authentication and management.
 
 use axum::{
+    Router,
     extract::DefaultBodyLimit,
     middleware,
     routing::{delete, get, patch, post},
-    Router,
 };
 use std::sync::Arc;
 
 use mediagit_security::auth::{
-    auth_middleware, login_handler, logout_handler, me_handler, refresh_handler, register_handler,
-    ApiKeyAuth, AuthLayer, AuthService,
+    ApiKeyAuth, AuthLayer, AuthService, auth_middleware, login_handler, logout_handler, me_handler,
+    refresh_handler, register_handler,
 };
 
 use crate::state::AppState;

@@ -351,10 +351,10 @@ async fn touched_paths_for_push(
     let mut visited = 0usize;
 
     loop {
-        if let Some(old) = old_oid {
-            if current == old {
-                break;
-            }
+        if let Some(old) = old_oid
+            && current == old
+        {
+            break;
         }
         if visited >= max_commits {
             return Ok((touched, true));
