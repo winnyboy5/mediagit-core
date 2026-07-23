@@ -48,6 +48,9 @@ getrandom = "0.4"  # OS RNG for per-repo CDC seed generation at `mediagit init`
 url = "2.5"  # scheme/host/port parsing for full-URL download credential gating (F4)
 keyring = "4.1.5"  # OS-keychain credential storage (I10); default "v1" feature covers Windows Credential Manager natively
 reqwest.workspace = true  # `mediagit auth *` talks to server-root /auth/* endpoints directly (not repo-scoped, so ProtocolClient doesn't cover them)
+# reqwest uses `rustls-no-provider`, so the binary must install the process-level
+# provider itself (see main.rs). default-features = false keeps aws-lc-rs out.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 
 [lib]
 name = "mediagit_cli"

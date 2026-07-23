@@ -88,6 +88,7 @@ async fn test_rate_limit_allows_requests_within_limit() {
     // Allow 10 requests per second with burst of 20
     let rate_config = RateLimitConfig::new(10, 20);
     let server = TestServer::new_with_rate_limit(rate_config).await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = Client::new();
 
     // Send 10 requests within burst limit - all should succeed
@@ -114,6 +115,7 @@ async fn test_rate_limit_blocks_requests_exceeding_burst() {
     // Very restrictive: 1 request per second with burst of 2
     let rate_config = RateLimitConfig::new(1, 2);
     let server = TestServer::new_with_rate_limit(rate_config).await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = Client::new();
 
     // First 2 requests should succeed (within burst)
@@ -151,6 +153,7 @@ async fn test_rate_limit_headers_present() {
     // Standard rate limit config
     let rate_config = RateLimitConfig::new(10, 20);
     let server = TestServer::new_with_rate_limit(rate_config).await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = Client::new();
 
     let resp = client
@@ -177,6 +180,7 @@ async fn test_rate_limit_replenishment() {
     // 2 requests per second with burst of 2 (token period = 500ms)
     let rate_config = RateLimitConfig::new(2, 2);
     let server = TestServer::new_with_rate_limit(rate_config).await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = Client::new();
 
     // Use up the burst (2 requests)
@@ -222,7 +226,9 @@ async fn test_rate_limit_per_ip_isolation() {
     let server = TestServer::new_with_rate_limit(rate_config).await;
 
     // Each client connection will have a different socket address
+    mediagit_protocol::ensure_crypto_provider();
     let client1 = Client::new();
+    mediagit_protocol::ensure_crypto_provider();
     let client2 = Client::new();
 
     // Client 1: use up its quota
@@ -259,9 +265,12 @@ async fn test_rate_limit_per_ip_isolation() {
 
 #[tokio::test]
 async fn test_rate_limit_config_default_values() {
+    // Sized for bulk media transfer and keyed per-identity, not per-IP: a
+    // large push falls back to one request per chunk when packs are
+    // unavailable, and the old 100/200 budget rejected healthy pushes.
     let config = RateLimitConfig::default();
-    assert_eq!(config.requests_per_second, 100);
-    assert_eq!(config.burst_size, 200);
+    assert_eq!(config.requests_per_second, 1000);
+    assert_eq!(config.burst_size, 2000);
 }
 
 #[tokio::test]
@@ -276,6 +285,7 @@ async fn test_rate_limit_with_high_throughput() {
     // Generous rate limit: 100 req/s with burst of 200
     let rate_config = RateLimitConfig::new(100, 200);
     let server = TestServer::new_with_rate_limit(rate_config).await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = Client::new();
 
     // Send 50 requests quickly - all should succeed

@@ -175,6 +175,7 @@ mod https_tests {
         let (https_url, _temp_dir, _port) = create_test_https_server().await;
 
         // Create HTTPS client that accepts self-signed certificates
+        mediagit_protocol::ensure_crypto_provider();
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true) // Only for testing!
             .build()
@@ -202,6 +203,7 @@ mod https_tests {
         let (https_url, _temp_dir, _port) = create_test_https_server().await;
 
         // Create client that accepts self-signed certs
+        mediagit_protocol::ensure_crypto_provider();
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
             .build()
@@ -225,6 +227,7 @@ mod https_tests {
 
         let (https_url, _temp_dir, _port) = create_test_https_server().await;
 
+        mediagit_protocol::ensure_crypto_provider();
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
             .build()

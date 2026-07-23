@@ -42,6 +42,7 @@ impl ProtocolClient {
         let temp_dir = tempfile::TempDir::new().context("create pack temp dir")?;
         let mut builder = PackBuilder::new(temp_dir.path());
 
+        crate::ensure_crypto_provider();
         let direct_client = reqwest::Client::builder()
             .pool_idle_timeout(std::time::Duration::from_secs(60))
             .pool_max_idle_per_host(http_pool_max())

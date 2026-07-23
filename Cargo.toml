@@ -18,7 +18,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.3.0-rc.1"
+version = "0.3.0-rc.2"
 edition = "2024"
 rust-version = "1.97"
 license = "AGPL-3.0"
@@ -74,13 +74,28 @@ tempfile = "3"
 # Time
 chrono = { version = "0.4.44", features = ["serde"] }
 
-# AWS SDK (using ring crypto backend to avoid aws-lc-sys build issues on Windows)
+# AWS SDK (ring crypto backend, to avoid aws-lc-sys build issues on Windows).
+# Ring is selected consistently across the workspace: aws-smithy-http-client
+# uses `rustls-ring`, rustls is pulled with default-features = false (its
+# defaults include aws-lc-rs), and reqwest uses `rustls-no-provider` with each
+# binary installing ring as the process default. One vendor edge remains
+# outside our control: google-cloud-auth's `default-rustls-provider` default
+# feature links aws-lc-rs, so aws-lc-sys is still built when the `gcs` feature
+# is on.
 # rt-tokio feature provides tokio sleep implementation for async operations
-aws-config = { version = "1.8", default-features = false, features = ["behavior-version-latest", "rustls", "rt-tokio"] }
-aws-sdk-s3 = { version = "1.129", default-features = false, features = ["behavior-version-latest", "rustls", "rt-tokio"] }
+# No `rustls` feature: it pulls aws-smithy-http-client's `rustls-aws-lc`, and
+# there is no ring variant exposed. We never use the SDK's built-in HTTPS
+# client anyway — every S3 config and the credentials chain are handed
+# `http_pool::shared()`, which builds a ring-backed client explicitly.
+aws-config = { version = "1.10", default-features = false, features = ["behavior-version-latest", "rt-tokio"] }
+aws-sdk-s3 = { version = "1.139", default-features = false, features = ["behavior-version-latest", "rt-tokio"] }
 
 # HTTP Client
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "http2"] }
+# `rustls-no-provider` rather than `rustls`: 0.13's `rustls` feature hard-wires
+# aws-lc-rs as the crypto provider. no-provider defers the choice to the
+# process-level default, which every binary installs as ring (see the
+# install_default() call in each main.rs). `query` became opt-in in 0.13.
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls-no-provider", "http2", "query"] }
 bytes = "1"
 
 # HTTP Framework
@@ -138,7 +153,7 @@ lto = "thin"
 # cargo-dist configuration for automated releases
 [workspace.metadata.dist]
 # The preferred cargo-dist version to use in CI (Cargo.toml SemVer syntax)
-cargo-dist-version = "0.26.0"
+cargo-dist-version = "0.32.0"
 # CI backends to support
 ci = "github"
 # The installers to generate for each app

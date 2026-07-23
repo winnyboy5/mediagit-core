@@ -15,7 +15,7 @@ brew install mediagit-core
 
 ```bash
 # Download latest Intel binary
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.1/mediagit-0.3.0-rc.1-x86_64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.2/mediagit-0.3.0-rc.2-x86_64-macos.tar.gz \
   | sudo tar xz -C /usr/local/bin
 
 # Verify
@@ -100,7 +100,7 @@ mediagit init
 
 Expected output:
 ```
-mediagit-core 0.3.0-rc.1
+mediagit-core 0.3.0-rc.2
 ✓ All checks passed
 ✓ Initialized empty MediaGit repository in .mediagit/
 ```
@@ -160,7 +160,7 @@ brew upgrade mediagit-core
 ### Manual Update
 
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.1/mediagit-0.3.0-rc.1-x86_64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.2/mediagit-0.3.0-rc.2-x86_64-macos.tar.gz \
   | sudo tar xz -C /usr/local/bin
 ```
 

@@ -26,6 +26,11 @@ axum = { workspace = true }
 [dev-dependencies]
 criterion.workspace = true
 reqwest = { workspace = true }
+# reqwest is built with `rustls-no-provider`, so anything constructing a Client
+# must install a process-level provider first. The binaries do it in main();
+# test binaries have no main() of ours, so they install it themselves.
+# default-features = false keeps aws-lc-rs out of the tree.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 
 [[bench]]
 name = "metrics_overhead"

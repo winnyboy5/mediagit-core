@@ -387,6 +387,7 @@ impl ProtocolClient {
         // Data-plane client for presigned GET downloads.
         // HTTP/1.1: parallel TCP sockets beat h2 multiplexing for large bodies.
         // Pool size via MEDIAGIT_HTTP_POOL_MAX (see http_pool_max()).
+        crate::ensure_crypto_provider();
         let direct_client = reqwest::Client::builder()
             .pool_idle_timeout(std::time::Duration::from_secs(60))
             .pool_max_idle_per_host(http_pool_max())

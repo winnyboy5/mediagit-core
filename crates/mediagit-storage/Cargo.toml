@@ -23,7 +23,7 @@ thiserror.workspace = true
 tracing.workspace = true
 aws-config.workspace = true
 aws-sdk-s3.workspace = true
-aws-smithy-http-client = { version = "1", features = ["rustls-aws-lc"] }
+aws-smithy-http-client = { version = "1", features = ["rustls-ring"] }
 bytes = "1.7"
 memmap2 = "0.9"
 futures = "0.3"
@@ -33,12 +33,18 @@ azure_storage_blobs = { version = "0.21", optional = true }
 azure_storage = { version = "0.21", optional = true }
 azure_core = { version = "0.21", optional = true }
 time = { version = "0.3", optional = true }
-google-cloud-storage = { version = "1.11", optional = true }
-google-cloud-auth = { version = "1.8", optional = true }
+# default-features = false on both: their shared `default-rustls-provider`
+# default feature links aws-lc-rs (and thus aws-lc-sys, with its cmake/NASM
+# build on Windows). The workspace standardises on ring, installed as the
+# process-level provider in each binary's main(). Dropping the default also
+# drops `default-idtoken-backend`, which we do not use -- GCS auth here is
+# OAuth access tokens via ADC / service-account JSON, not ID tokens.
+google-cloud-storage = { version = "1.16", optional = true, default-features = false }
+google-cloud-auth = { version = "1.14", optional = true, default-features = false }
 # Direct dep for typed access to RPC error codes (Code::NotFound), needed
 # because google-cloud-storage's control plane is gRPC and HTTP-status-based
 # is_not_found checks miss those errors.
-google-cloud-gax = { version = "1.9", optional = true }
+google-cloud-gax = { version = "1.12", optional = true }
 http = { version = "1", optional = true }
 serde.workspace = true
 serde_json = { workspace = true, optional = true }

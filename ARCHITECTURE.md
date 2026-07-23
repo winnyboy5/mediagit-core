@@ -1,6 +1,6 @@
 # MediaGit Architecture
 
-**Version**: 0.3.0-rc.1
+**Version**: 0.3.0-rc.2
 
 > **Media-first version control** built on Git semantics with intelligent compression,
 > content-defined chunking, delta encoding, and media-aware merging.
@@ -1183,4 +1183,4 @@ merge = "refs/heads/main"
 
 See **[BENCHMARKS.md](BENCHMARKS.md)** for current storage-savings and cross-backend
 throughput measurements, methodology, and reproduction steps — validated against the
-v0.3.0-rc.1 release (614/614 deep-tests, July 2026 QA campaign).
+v0.3.0-rc.2 release (614/614 deep-tests, July 2026 QA campaign).

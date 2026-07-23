@@ -948,12 +948,16 @@ fn default_metrics_interval() -> u64 {
     60
 }
 
+// Sized for bulk media transfer: the limiter covers the data plane, and a
+// large push falls back to one request per chunk when packs are
+// unavailable. Keyed per-identity (not per-IP), so this is one user's
+// budget. See mediagit-server::security::RateLimitConfig.
 fn default_rps() -> u32 {
-    100
+    1000
 }
 
 fn default_burst() -> u32 {
-    200
+    2000
 }
 
 impl Default for Config {
@@ -1108,8 +1112,8 @@ impl Default for RateLimitConfig {
     fn default() -> Self {
         RateLimitConfig {
             enabled: false,
-            requests_per_second: 100,
-            burst_size: 200,
+            requests_per_second: 1000,
+            burst_size: 2000,
         }
     }
 }

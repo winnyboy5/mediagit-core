@@ -25,13 +25,13 @@
 # RUSTSEC-2024-0436: paste 1.0.15 (unmaintained)
 #   azure_core 0.21 → paste. Same root cause as RUSTSEC-2024-0384.
 #
-# RUSTSEC-2026-0098, -0099, -0104: rustls-webpki 0.101.7
-#   aws-smithy-http-client 1.x → rustls 0.21 → rustls-webpki 0.101.x
-#   The 0.101.x line has no patch; the fix requires >=0.103.12 which needs
-#   rustls 0.23+. aws-smithy-http-client vendors the old rustls 0.21 stack
-#   alongside the modern 0.23 stack. We updated 0.103.10→0.103.13 (the stack
-#   we actually use); the 0.101.7 copy is the legacy fallback that the AWS SDK
-#   bundles but our code never selects.
+# RUSTSEC-2026-0098, -0099, -0104: rustls-webpki 0.101.7 — RESOLVED 2026-07-23.
+#   The legacy rustls 0.21 stack entered via aws-config's `rustls` feature
+#   (→ aws-smithy-runtime `default-https-client` → `rustls-aws-lc`). We never
+#   used that client — every S3 config and the credentials chain is handed
+#   `http_pool::shared()` — so the feature was dropped. rustls 0.21 and
+#   rustls-webpki 0.101.7 are no longer in the tree; only 0.103.13 remains.
+#   Ignores removed.
 #
 # RUSTSEC-2026-0097: rand 0.7.3 and 0.8.5 (unsound warning)
 #   rand 0.7.3 ← http-types ← azure_core 0.21 (transitive, optional azure feature)
@@ -60,9 +60,6 @@ ignore = [
     "RUSTSEC-2023-0089",
     "RUSTSEC-2024-0384",
     "RUSTSEC-2024-0436",
-    "RUSTSEC-2026-0098",
-    "RUSTSEC-2026-0099",
-    "RUSTSEC-2026-0104",
     "RUSTSEC-2026-0097",
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",

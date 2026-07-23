@@ -142,6 +142,7 @@ impl Credentials {
 /// so both construct the client identically apart from the header.
 fn build_control_plane_client(creds: &Credentials) -> reqwest::Client {
     let pool_max = http_pool_max();
+    crate::ensure_crypto_provider();
     let mut builder = reqwest::Client::builder()
         // HTTP/2 is used for control-plane traffic (manifest, URL-mint,
         // ref negotiation). Multiplexing many small requests on one TLS
@@ -207,6 +208,62 @@ pub(crate) fn http_pool_max() -> usize {
         .and_then(|s| s.parse().ok())
         .filter(|n: &usize| *n > 0)
         .unwrap_or(64)
+}
+
+/// Maximum 429 retries for a single control-plane request.
+fn rate_limit_max_retries() -> u32 {
+    std::env::var("MEDIAGIT_RATE_LIMIT_RETRIES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5)
+}
+
+/// Send a control-plane request, waiting out HTTP 429 instead of failing.
+///
+/// A large push issues one control-plane request per chunk on the
+/// server-proxy path (`PUT /chunks/<id>`), plus two per chunk on the staged
+/// (MPU) path. That legitimately outruns a rate limiter, and without this the
+/// push simply fails — which invites the operator to re-run it by hand. That
+/// manual retry loop is what masked a real corruption bug in the 2026-07-22
+/// `psds` incident: the 429s aborted each attempt before push ever reached the
+/// chunk read that was actually broken.
+///
+/// Honours the server's `Retry-After` header (seconds) when present, since the
+/// limiter already emits it (`use_headers()`), and otherwise backs off
+/// exponentially. `make` is called afresh for each attempt because a request
+/// body is consumed by sending.
+pub(crate) async fn send_with_rate_limit_retry<F, Fut>(
+    make: F,
+) -> reqwest::Result<reqwest::Response>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = reqwest::Result<reqwest::Response>>,
+{
+    let max = rate_limit_max_retries();
+    let mut attempt = 0u32;
+    loop {
+        let resp = make().await?;
+        if resp.status() != reqwest::StatusCode::TOO_MANY_REQUESTS || attempt >= max {
+            return Ok(resp);
+        }
+        let wait = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(std::time::Duration::from_secs)
+            // No header: exponential backoff, capped so a push cannot stall
+            // indefinitely behind a misconfigured limiter.
+            .unwrap_or_else(|| std::time::Duration::from_millis(250 * (1u64 << attempt.min(6))));
+        attempt += 1;
+        tracing::warn!(
+            attempt,
+            max,
+            wait_ms = wait.as_millis() as u64,
+            "rate limited (429); backing off before retry"
+        );
+        tokio::time::sleep(wait).await;
+    }
 }
 
 pub(crate) mod browse;
@@ -1022,4 +1079,87 @@ mod tests {
 
     // Additional integration tests would require a running server
     // These should be in tests/integration/
+
+    /// Build a synthetic response without a server.
+    fn resp(status: u16, retry_after: Option<&str>) -> reqwest::Response {
+        let mut b = http::Response::builder().status(status);
+        if let Some(ra) = retry_after {
+            b = b.header(reqwest::header::RETRY_AFTER, ra);
+        }
+        reqwest::Response::from(b.body("").unwrap())
+    }
+
+    #[tokio::test]
+    async fn rate_limit_retry_waits_out_429_then_succeeds() {
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let out = send_with_rate_limit_retry(|| {
+            let c = c.clone();
+            async move {
+                let n = c.fetch_add(1, Ordering::SeqCst);
+                // "Retry-After: 0" keeps the test fast while still exercising
+                // the header path rather than the exponential fallback.
+                Ok(if n < 2 {
+                    resp(429, Some("0"))
+                } else {
+                    resp(200, None)
+                })
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(out.status(), 200);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "must retry past both 429s rather than surfacing the first one"
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limit_retry_gives_up_and_returns_the_429() {
+        // A permanently rate-limited server must not hang the push forever:
+        // the helper returns the 429 so the caller reports a real failure.
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let out = send_with_rate_limit_retry(|| {
+            let c = c.clone();
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(resp(429, Some("0")))
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(out.status(), 429);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            rate_limit_max_retries() as usize + 1,
+            "one initial attempt plus the configured retry budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limit_retry_does_not_retry_non_429() {
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let out = send_with_rate_limit_retry(|| {
+            let c = c.clone();
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(resp(500, None))
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(out.status(), 500);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "only 429 is a rate-limit signal; other statuses are the caller's to handle"
+        );
+    }
 }

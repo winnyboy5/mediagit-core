@@ -163,7 +163,10 @@ impl FsckCmd {
                 );
             }
 
-            let repair = FsckRepair::new(storage);
+            // Reuse the checker's ODB: flattening an over-deep chunk-delta
+            // chain re-stores content, so it must compress exactly the way the
+            // reader expects.
+            let repair = FsckRepair::new(storage).with_odb(checker.odb());
             let repaired = repair
                 .repair(&report, self.dry_run)
                 .await

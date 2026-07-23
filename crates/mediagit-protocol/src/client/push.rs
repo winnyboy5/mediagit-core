@@ -816,6 +816,7 @@ impl ProtocolClient {
                 // better raw throughput for large bodies than h2 multiplexing
                 // on a single TCP connection (parallel cwnd > one congestion
                 // window). Pool size via MEDIAGIT_HTTP_POOL_MAX (see http_pool_max()).
+                crate::ensure_crypto_provider();
                 let direct_client = reqwest::Client::builder()
                     .pool_idle_timeout(std::time::Duration::from_secs(60))
                     .pool_max_idle_per_host(http_pool_max())
@@ -1121,18 +1122,16 @@ impl ProtocolClient {
                             // Proxy path: used when no presigned URL was issued, or all
                             // direct attempts for this chunk were exhausted.
                             let url = format!("{}/chunks/{}", base_url, hex);
-                            let resp = client
-                                .put(&url)
-                                .body(chunk_data)
-                                .send()
-                                .await
-                                .map_err(|e| {
-                                    anyhow::anyhow!(
-                                        "Failed to upload chunk {}: {}",
-                                        chunk_id,
-                                        e
-                                    )
-                                })?;
+                            // One control-plane request per chunk: this is the
+                            // path that can outrun the server's rate limiter on
+                            // a large push, so wait out 429 rather than failing.
+                            let resp = crate::client::send_with_rate_limit_retry(|| {
+                                client.put(&url).body(chunk_data.clone()).send()
+                            })
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!("Failed to upload chunk {}: {}", chunk_id, e)
+                            })?;
                             if !resp.status().is_success() {
                                 anyhow::bail!(
                                     "PUT /chunks/{} failed with status: {}",
@@ -1193,12 +1192,15 @@ impl ProtocolClient {
                             let base_url = self.base_url.clone();
                             let odb = odb.clone();
                             async move {
-                                let chunk_data = odb.get_compressed_chunk(&chunk_id).await?;
+                                let chunk_data: bytes::Bytes =
+                                    odb.get_compressed_chunk(&chunk_id).await?.into();
                                 let chunk_size = chunk_data.len() as u64;
                                 let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
-                                let resp = client.put(&url).body(chunk_data).send().await.map_err(
-                                    |e| anyhow::anyhow!("Retry chunk {}: {}", chunk_id, e),
-                                )?;
+                                let resp = crate::client::send_with_rate_limit_retry(|| {
+                                    client.put(&url).body(chunk_data.clone()).send()
+                                })
+                                .await
+                                .map_err(|e| anyhow::anyhow!("Retry chunk {}: {}", chunk_id, e))?;
                                 if !resp.status().is_success() {
                                     anyhow::bail!(
                                         "Retry PUT /chunks/{} failed: {}",
@@ -1287,36 +1289,34 @@ impl ProtocolClient {
                 let _pass_deg_t = std::time::Instant::now();
                 let mut _pass_deg_n = 0u64;
                 let mut _pass_deg_bytes = 0u64;
-                let mut stream =
-                    futures::stream::iter(degraded_ids)
-                        .map(|chunk_id| {
-                            let client = self.client.clone();
-                            let base_url = self.base_url.clone();
-                            let odb = odb.clone();
-                            async move {
-                                let chunk_data = odb.get_compressed_chunk(&chunk_id).await?;
-                                let chunk_size = chunk_data.len() as u64;
-                                let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
-                                let resp = client.put(&url).body(chunk_data).send().await.map_err(
-                                    |e| {
-                                        anyhow::anyhow!(
-                                            "Failed to upload chunk {}: {}",
-                                            chunk_id,
-                                            e
-                                        )
-                                    },
-                                )?;
-                                if !resp.status().is_success() {
-                                    anyhow::bail!(
-                                        "PUT /chunks/{} failed with status: {}",
-                                        chunk_id,
-                                        resp.status()
-                                    );
-                                }
-                                Ok::<(Oid, u64), anyhow::Error>((chunk_id, chunk_size))
+                let mut stream = futures::stream::iter(degraded_ids)
+                    .map(|chunk_id| {
+                        let client = self.client.clone();
+                        let base_url = self.base_url.clone();
+                        let odb = odb.clone();
+                        async move {
+                            let chunk_data: bytes::Bytes =
+                                odb.get_compressed_chunk(&chunk_id).await?.into();
+                            let chunk_size = chunk_data.len() as u64;
+                            let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
+                            let resp = crate::client::send_with_rate_limit_retry(|| {
+                                client.put(&url).body(chunk_data.clone()).send()
+                            })
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!("Failed to upload chunk {}: {}", chunk_id, e)
+                            })?;
+                            if !resp.status().is_success() {
+                                anyhow::bail!(
+                                    "PUT /chunks/{} failed with status: {}",
+                                    chunk_id,
+                                    resp.status()
+                                );
                             }
-                        })
-                        .buffer_unordered(concurrent_uploads);
+                            Ok::<(Oid, u64), anyhow::Error>((chunk_id, chunk_size))
+                        }
+                    })
+                    .buffer_unordered(concurrent_uploads);
 
                 while let Some(result) = stream.next().await {
                     let (chunk_id, chunk_bytes) = result?;
@@ -1676,6 +1676,7 @@ impl ProtocolClient {
                     // better raw throughput for large bodies than h2 multiplexing
                     // on a single TCP connection (parallel cwnd > one congestion
                     // window). Pool size via MEDIAGIT_HTTP_POOL_MAX (see http_pool_max()).
+                    crate::ensure_crypto_provider();
                     let direct_client = reqwest::Client::builder()
                         .pool_idle_timeout(std::time::Duration::from_secs(60))
                         .pool_max_idle_per_host(http_pool_max())

@@ -210,8 +210,8 @@ encryption_at_rest = false
 
 [security.rate_limiting]
 enabled = false
-requests_per_second = 100
-burst_size = 200
+requests_per_second = 1000
+burst_size = 2000
 ```
 
 ## Environment Variable Overrides

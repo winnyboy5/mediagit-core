@@ -82,6 +82,10 @@ pub enum IssueCategory {
     InvalidFormat,
     /// Orphaned reference
     OrphanedRef,
+    /// Chunk-delta chain deeper than `MAX_DELTA_DEPTH`. The chunk is
+    /// unreadable (`get_chunk` refuses to reconstruct it), which makes the
+    /// repository unpushable and unclonable. Repaired by flattening.
+    DeepDeltaChain,
 }
 
 /// An issue detected during FSCK
@@ -322,6 +326,16 @@ impl FsckChecker {
     /// Create a new FSCK checker (backward compat, no refdb)
     pub fn new(storage: Arc<dyn StorageBackend>) -> Self {
         Self::new_with_refdb(storage, None)
+    }
+
+    /// The ODB this checker reads through.
+    ///
+    /// Exposed so `FsckRepair::with_odb` can reuse the *same* instance rather
+    /// than building a second one: repairs that re-store content must use an
+    /// identically-configured compressor, or they would write chunks the
+    /// checker cannot read back.
+    pub fn odb(&self) -> Arc<ObjectDatabase> {
+        Arc::clone(&self.odb)
     }
 
     /// Run comprehensive integrity check
@@ -848,10 +862,16 @@ impl FsckChecker {
                                 .with_oid(id),
                             );
                         } else if visited.len() > crate::odb::MAX_DELTA_DEPTH as usize {
+                            // Repairable: `--repair` flattens the chain by
+                            // reconstructing the chunk and re-storing it in
+                            // full. Until that landed this was a dead-end
+                            // warning on a repo that could no longer be
+                            // pushed or cloned, because `get_chunk` refuses
+                            // to reconstruct a chain this deep.
                             report.add_issue(
                                 FsckIssue::new(
                                     IssueSeverity::Warning,
-                                    IssueCategory::InvalidFormat,
+                                    IssueCategory::DeepDeltaChain,
                                     format!(
                                         "chunk-delta chain from {} is {} hops deep (max {})",
                                         id.to_hex(),
@@ -859,7 +879,8 @@ impl FsckChecker {
                                         crate::odb::MAX_DELTA_DEPTH
                                     ),
                                 )
-                                .with_oid(id),
+                                .with_oid(id)
+                                .repairable(),
                             );
                         }
                         break;
@@ -1155,12 +1176,31 @@ impl FsckChecker {
 /// Repair functionality for fixing common issues
 pub struct FsckRepair {
     storage: Arc<dyn StorageBackend>,
+    /// Needed by repairs that must *reconstruct* content rather than just
+    /// delete it (chunk-delta chain flattening). Optional so existing
+    /// storage-only callers keep working; those simply cannot perform
+    /// ODB-level repairs and say so rather than silently skipping.
+    odb: Option<Arc<ObjectDatabase>>,
 }
 
 impl FsckRepair {
     /// Create a new FSCK repair tool
+    ///
+    /// Repairs that need to reconstruct content (see
+    /// [`FsckRepair::with_odb`]) are unavailable on an instance built this
+    /// way — `repair` reports them instead of claiming success.
     pub fn new(storage: Arc<dyn StorageBackend>) -> Self {
-        Self { storage }
+        Self { storage, odb: None }
+    }
+
+    /// Attach an ODB, enabling repairs that reconstruct content.
+    ///
+    /// Required for `IssueCategory::DeepDeltaChain`: flattening an over-deep
+    /// chain means applying every delta down to the base chunk, which is ODB
+    /// work and cannot be done through the raw storage handle.
+    pub fn with_odb(mut self, odb: Arc<ObjectDatabase>) -> Self {
+        self.odb = Some(odb);
+        self
     }
 
     /// Attempt to repair issues found in an FSCK report
@@ -1227,6 +1267,13 @@ impl FsckRepair {
                         repaired += 1;
                     }
                 }
+                IssueCategory::DeepDeltaChain => {
+                    if let Some(oid) = issue.oid
+                        && self.flatten_deep_chunk_chain(&oid, dry_run).await?
+                    {
+                        repaired += 1;
+                    }
+                }
                 _ => {
                     warn!("No repair strategy for category: {:?}", issue.category);
                 }
@@ -1235,6 +1282,88 @@ impl FsckRepair {
 
         info!(repaired = repaired, "FSCK repair complete");
         Ok(repaired)
+    }
+
+    /// Flatten an over-deep chunk-delta chain by re-storing the chunk in full.
+    ///
+    /// `get_chunk` refuses to reconstruct a chain deeper than `MAX_DELTA_DEPTH`,
+    /// so a repository holding one cannot be pushed or cloned — and this is the
+    /// one code path allowed to walk past that limit, because it is what makes
+    /// such a repository readable again.
+    ///
+    /// Safety properties, in order:
+    ///
+    /// 1. **Verify before mutate.** The reconstructed bytes must hash to
+    ///    `chunk_id`; on mismatch nothing is written and the repair fails
+    ///    loudly. Flattening is the one repair that *writes content*, so a
+    ///    silent mis-reconstruction here would be indistinguishable from
+    ///    corruption.
+    /// 2. **Write the full chunk before deleting the delta.** A crash then
+    ///    leaves an unreachable delta (collected by `gc`), never a chunk with
+    ///    no payload. This ordering is also required on Windows, where an open
+    ///    handle makes a delete fail — the reverse order could remove the delta
+    ///    and then fail to write the replacement, destroying the only copy.
+    /// 3. **Only report success when it happened** — the lesson from
+    ///    `repair_corrupted_object` below, which used to count no-op deletes.
+    async fn flatten_deep_chunk_chain(
+        &self,
+        chunk_id: &Oid,
+        dry_run: bool,
+    ) -> anyhow::Result<bool> {
+        let Some(odb) = self.odb.as_ref() else {
+            warn!(
+                "Cannot flatten chunk-delta chain for {}: repair was constructed \
+                 without an ODB handle (use FsckRepair::with_odb)",
+                chunk_id
+            );
+            return Ok(false);
+        };
+
+        if dry_run {
+            info!(
+                "[DRY RUN] Would flatten over-deep chunk-delta chain at {}",
+                chunk_id
+            );
+            return Ok(true);
+        }
+
+        // Reconstruct by walking the whole chain, however deep it goes.
+        let data = match odb.reconstruct_chunk_unbounded(chunk_id).await {
+            Ok(d) => d,
+            Err(e) => {
+                warn!(
+                    "Cannot flatten chunk-delta chain for {}: reconstruction failed: {}",
+                    chunk_id, e
+                );
+                return Ok(false);
+            }
+        };
+
+        // (1) Verify before mutating anything.
+        let actual = Oid::hash(&data);
+        if actual != *chunk_id {
+            warn!(
+                "Refusing to flatten {}: reconstructed content hashes to {} \
+                 — the chain is corrupt, not merely deep",
+                chunk_id, actual
+            );
+            return Ok(false);
+        }
+
+        // (2) Write the replacement first, then drop the delta.
+        odb.write_full_chunk(chunk_id, &data).await?;
+
+        let meta_key = format!("chunk-deltas/{}.meta", chunk_id.to_hex());
+        let delta_key = format!("chunk-deltas/{}", chunk_id.to_hex());
+        let _ = self.storage.delete(&meta_key).await;
+        let _ = self.storage.delete(&delta_key).await;
+
+        info!(
+            "Flattened over-deep chunk-delta chain at {} ({} bytes re-stored in full)",
+            chunk_id,
+            data.len()
+        );
+        Ok(true)
     }
 
     /// Repair a corrupted object by removing it
@@ -1412,14 +1541,155 @@ mod tests {
         let mut report = FsckReport::new();
         checker.check_chunk_deltas(&mut report).await.unwrap();
 
+        let deep: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.category == IssueCategory::DeepDeltaChain)
+            .collect();
+        assert!(
+            !deep.is_empty(),
+            "chain deeper than MAX_DELTA_DEPTH must be reported, got: {:?}",
+            report.issues
+        );
+        assert!(
+            deep.iter().all(|i| i.repairable),
+            "an over-deep chain leaves the repo unpushable, so it must be \
+             marked repairable — otherwise `fsck --repair` silently skips it \
+             and the operator has no way forward"
+        );
+    }
+
+    /// Building a genuine over-deep chain requires real delta payloads, so
+    /// this drives the ODB directly rather than fabricating `.meta` files:
+    /// the point is to prove the *reconstruct* path recovers, which fake
+    /// sidecars would not exercise.
+    #[tokio::test]
+    async fn test_fsck_repair_flattens_over_deep_chunk_delta_chain() {
+        use crate::delta::DeltaEncoder;
+        use mediagit_compression::{
+            ObjectType as CompObjectType, SmartCompressor, TypeAwareCompressor,
+        };
+        use mediagit_storage::LocalBackend;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let storage: Arc<dyn StorageBackend> =
+            Arc::new(LocalBackend::new(tmp.path().to_path_buf()).await.unwrap());
+        let odb = Arc::new(ObjectDatabase::with_smart_compression(
+            storage.clone(),
+            10_000_000,
+        ));
+        // Same compressor the ODB builds internally, so the payloads we plant
+        // are byte-for-byte what it would have written.
+        let smart = SmartCompressor::new();
+
+        // Base full chunk, then MAX+2 successive deltas, each a small edit of
+        // the last — the shape a run of similar chunks produces.
+        let mut payloads: Vec<Vec<u8>> = Vec::new();
+        let mut cur = vec![7u8; 4096];
+        payloads.push(cur.clone());
+        for i in 0..(crate::odb::MAX_DELTA_DEPTH as usize + 2) {
+            // `| 0x80` keeps every written value clear of the 7 fill byte, so
+            // each edit is guaranteed to change the payload. (Writing a plain
+            // `i` silently no-ops at i == 7, producing two identical payloads,
+            // one OID, and a self-referencing chain.)
+            cur[i * 8] = (i as u8) | 0x80;
+            payloads.push(cur.clone());
+        }
+
+        let base_id = Oid::hash(&payloads[0]);
+        odb.write_full_chunk(&base_id, &payloads[0]).await.unwrap();
+
+        // Write the chain by hand so it exceeds what the guard now permits —
+        // this is a legacy repository, not something the writer can produce.
+        let mut prev_id = base_id;
+        let mut ids = vec![base_id];
+        for payload in &payloads[1..] {
+            let id = Oid::hash(payload);
+            let delta = DeltaEncoder::encode(&payloads[0], payload);
+            let compressed = smart
+                .compress_typed(&delta.to_bytes(), CompObjectType::Unknown)
+                .unwrap();
+            storage
+                .put(&format!("chunk-deltas/{}", id.to_hex()), &compressed)
+                .await
+                .unwrap();
+            storage
+                .put(
+                    &format!("chunk-deltas/{}.meta", id.to_hex()),
+                    format!("base:{}", prev_id.to_hex()).as_bytes(),
+                )
+                .await
+                .unwrap();
+            ids.push(id);
+            prev_id = id;
+        }
+
+        let leaf = *ids.last().unwrap();
+
+        // Precondition: the leaf is unreadable — this is the reported bug.
+        assert!(
+            odb.get_chunk(&leaf).await.is_err(),
+            "an over-deep chain must be unreadable before repair, otherwise \
+             this test is not reproducing the defect"
+        );
+
+        let checker = FsckChecker::new(storage.clone());
+        let mut report = FsckReport::new();
+        checker.check_chunk_deltas(&mut report).await.unwrap();
         assert!(
             report
-                .issues
+                .repairable_issues()
                 .iter()
-                .any(|i| i.category == IssueCategory::InvalidFormat
-                    && i.severity == IssueSeverity::Warning),
-            "chain deeper than MAX_DELTA_DEPTH must be reported as a warning, got: {:?}",
+                .any(|i| i.category == IssueCategory::DeepDeltaChain),
+            "over-deep chain must be reported as repairable, got: {:?}",
             report.issues
+        );
+
+        let repaired = FsckRepair::new(storage.clone())
+            .with_odb(Arc::clone(&odb))
+            .repair(&report, false)
+            .await
+            .unwrap();
+        assert!(repaired > 0, "repair must report at least one fix");
+
+        // The chunk reads back, and byte-identically.
+        let recovered = odb
+            .get_chunk(&leaf)
+            .await
+            .expect("chain must be readable after flattening");
+        assert_eq!(
+            recovered,
+            *payloads.last().unwrap(),
+            "flattened chunk must be byte-identical to the original content"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fsck_repair_without_odb_does_not_claim_success() {
+        // A storage-only FsckRepair cannot reconstruct anything. It must say
+        // so rather than counting an unfixed issue as repaired (the QA-007
+        // "repaired 67 issues while nothing changed" failure mode).
+        let full = Oid::hash(b"noodb-full");
+        let chain: Vec<Oid> = (0..12)
+            .map(|i| Oid::hash(format!("noodb-{i}").as_bytes()))
+            .collect();
+        let mut entries: Vec<(&Oid, &Oid)> = (0..chain.len() - 1)
+            .map(|i| (&chain[i], &chain[i + 1]))
+            .collect();
+        entries.push((&chain[chain.len() - 1], &full));
+        let checker = checker_with_metas(&entries, &[&full]).await;
+
+        let mut report = FsckReport::new();
+        checker.check_chunk_deltas(&mut report).await.unwrap();
+
+        let storage = Arc::new(MockBackend::new());
+        let repaired = FsckRepair::new(storage)
+            .repair(&report, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            repaired, 0,
+            "without an ODB the flatten repair must report 0, not a false success"
         );
     }
 

@@ -9,7 +9,7 @@
 
 ## 🎯 Status
 
-**Version**: v0.3.0-rc.1
+**Version**: v0.3.0-rc.2
 **Status**: 🚧 **RELEASE CANDIDATE**
 **Features**: 100% complete (all P0–P3 items implemented)
 **Last Validated**: July 16, 2026 — release-build QA campaign (`reports/20260716-172951`), STANDARD suite green on MinIO, AWS S3, Azure Blob, GCS, zero findings
@@ -141,19 +141,19 @@ curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/instal
 
 **Linux x86_64 — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.1/mediagit-0.3.0-rc.1-x86_64-linux.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.2/mediagit-0.3.0-rc.2-x86_64-linux.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **macOS Apple Silicon — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.1/mediagit-0.3.0-rc.1-aarch64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.2/mediagit-0.3.0-rc.2-aarch64-macos.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **Windows x86_64 (PowerShell):**
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.1/mediagit-0.3.0-rc.1-x86_64-windows.zip" -OutFile mediagit.zip
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.2/mediagit-0.3.0-rc.2-x86_64-windows.zip" -OutFile mediagit.zip
 Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 # Add to PATH:
 [Environment]::SetEnvironmentVariable("Path", "$env:Path;$env:LOCALAPPDATA\MediaGit\bin", "User")
@@ -162,8 +162,8 @@ Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 #### Docker
 
 ```bash
-docker pull ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.1
-docker run --rm ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.1 mediagit --version
+docker pull ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.2
+docker run --rm ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.2 mediagit --version
 ```
 
 #### From Source
@@ -183,11 +183,11 @@ cargo build --release
 
 | Platform | Archive |
 |----------|---------|
-| Linux x86_64 | `mediagit-0.3.0-rc.1-x86_64-linux.tar.gz` |
-| Linux ARM64 | `mediagit-0.3.0-rc.1-aarch64-linux.tar.gz` |
-| macOS Intel | `mediagit-0.3.0-rc.1-x86_64-macos.tar.gz` |
-| macOS Apple Silicon | `mediagit-0.3.0-rc.1-aarch64-macos.tar.gz` |
-| Windows x86_64 | `mediagit-0.3.0-rc.1-x86_64-windows.zip` |
+| Linux x86_64 | `mediagit-0.3.0-rc.2-x86_64-linux.tar.gz` |
+| Linux ARM64 | `mediagit-0.3.0-rc.2-aarch64-linux.tar.gz` |
+| macOS Intel | `mediagit-0.3.0-rc.2-x86_64-macos.tar.gz` |
+| macOS Apple Silicon | `mediagit-0.3.0-rc.2-aarch64-macos.tar.gz` |
+| Windows x86_64 | `mediagit-0.3.0-rc.2-x86_64-windows.zip` |
 
 Each archive includes `mediagit` (CLI) and `mediagit-server` binaries, plus a `.sha256` checksum file.
 
@@ -845,7 +845,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] `/health` route alias alongside `/healthz`
 
 
-### v0.3.0-rc.1 — July 2026
+### v0.3.0-rc.2 — July 2026
 *Object-store layout v2, client auth, and reachability tooling, GA hardening: server-enforced locking, durable auth, format freeze*
 
 - [x] Object-store layout v2: per-repo namespace, true two-level hash fanout, `LAYOUT` marker
@@ -906,7 +906,7 @@ aws iam get-user-policy --user-name mediagit-user --policy-name MediaGitS3Policy
 ```bash
 # The /releases/latest API returns 404 when only pre-releases exist.
 # Pass the version explicitly:
-VERSION=0.3.0-rc.1 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
+VERSION=0.3.0-rc.2 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 
 # Or on Windows PowerShell:
 iwr -UseBasicParsing https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.ps1 | iex
@@ -974,4 +974,4 @@ Special thanks to:
 
 **Made with 🦀 and ❤️ by the MediaGit Contributors**
 
-**Status**: Release Candidate | **Version**: v0.3.0-rc.1 | **Updated**: July 16, 2026 | **Cloud-Validated**: QA campaign `20260716-172951` ✅
+**Status**: Release Candidate | **Version**: v0.3.0-rc.2 | **Updated**: July 16, 2026 | **Cloud-Validated**: QA campaign `20260716-172951` ✅

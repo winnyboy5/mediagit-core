@@ -341,6 +341,7 @@ async fn presigned_download_fallback_to_proxy() {
         .unwrap();
 
     // Push a chunk + manifest into the server-side storage via the proxy PUT.
+    mediagit_protocol::ensure_crypto_provider();
     let http_client = reqwest::Client::new();
     let (server_url, _handle) = start_test_server(repos_tmp.path().to_path_buf()).await;
 

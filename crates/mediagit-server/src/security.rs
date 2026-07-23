@@ -25,11 +25,56 @@ use mediagit_security::audit;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use tower_governor::{GovernorError, key_extractor::KeyExtractor};
 pub use tower_governor::{
     GovernorLayer,
     governor::{GovernorConfig, GovernorConfigBuilder},
     key_extractor::SmartIpKeyExtractor,
 };
+
+/// Rate-limit key: authenticated identity when present, else client IP.
+///
+/// Keying purely by IP does not survive real deployments — an entire team
+/// behind one NAT, or a fleet of CI runners, shares a single bucket, so one
+/// colleague's large push throttles everyone else. Worse, a legitimate push
+/// issues far more requests than a human ever would, so the per-IP budget is
+/// sized for the wrong thing.
+///
+/// Keying by credential makes the budget per-user, which is what the limit is
+/// actually meant to express. Anonymous traffic still falls back to IP, so
+/// unauthenticated abuse is bounded exactly as before.
+///
+/// The credential is **hashed**, never used verbatim: the key lives in the
+/// limiter's map and appears in tracing output, and a bearer token there would
+/// be a credential leak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdentityOrIpKeyExtractor;
+
+impl KeyExtractor for IdentityOrIpKeyExtractor {
+    type Key = String;
+
+    // `name()` / `key_name()` are only part of this trait when tower_governor
+    // is built with its `tracing` feature, which we do not enable (only
+    // `axum`, `default`, `tonic`). Adding them behind `#[cfg(feature =
+    // "tracing")]` would silently refer to *our* crate's features, not
+    // tower_governor's — so they are omitted rather than guarded wrongly.
+    fn extract<T>(&self, req: &axum::http::Request<T>) -> Result<Self::Key, GovernorError> {
+        if let Some(cred) = req
+            .headers()
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| !v.trim().is_empty())
+        {
+            let digest = blake3::hash(cred.as_bytes());
+            // 16 hex chars is ample to separate identities without retaining
+            // anything that could reconstruct the credential.
+            return Ok(format!("id:{}", &digest.to_hex()[..16]));
+        }
+        SmartIpKeyExtractor
+            .extract(req)
+            .map(|ip| format!("ip:{ip}"))
+    }
+}
 
 /// Rate limiting configuration
 #[derive(Debug, Clone)]
@@ -42,9 +87,22 @@ pub struct RateLimitConfig {
 
 impl Default for RateLimitConfig {
     fn default() -> Self {
+        // Sized for bulk media transfer, not for browsing.
+        //
+        // The limiter wraps the whole router, data plane included. When the
+        // pack path is unavailable, push falls back to one request per chunk —
+        // a multi-GB push is then tens of thousands of requests in a few
+        // minutes, from one legitimate client. At the previous 100/s + 200
+        // burst that produced 429s on healthy pushes, and the retries they
+        // invite are what masked a real corruption bug (the `psds` incident).
+        //
+        // Now that the key is per-identity rather than per-IP (see
+        // `IdentityOrIpKeyExtractor`), this budget applies to one user rather
+        // than to everyone sharing a NAT, so it can be sized for what a single
+        // real client actually does.
         Self {
-            requests_per_second: 100, // 100 req/s
-            burst_size: 200,          // Allow burst of 200
+            requests_per_second: 1000,
+            burst_size: 2000,
         }
     }
 }
@@ -60,9 +118,9 @@ impl RateLimitConfig {
 
     /// Build GovernorConfig from configuration
     ///
-    /// Creates a rate limiting configuration using IP-based rate limiting (SmartIpKeyExtractor)
-    /// which checks proxy headers (x-forwarded-for, x-real-ip) before falling back
-    /// to peer IP address.
+    /// Keyed by [`IdentityOrIpKeyExtractor`]: authenticated identity when the
+    /// request carries one, otherwise client IP (checking proxy headers
+    /// x-forwarded-for / x-real-ip before falling back to the peer address).
     ///
     /// To use this config, create a layer with `GovernorLayer::new(config)` or use
     /// `build_with_cleanup()` to also get a cleanup task.
@@ -72,7 +130,7 @@ impl RateLimitConfig {
                 .per_second(self.requests_per_second)
                 .burst_size(self.burst_size)
                 .use_headers() // Include rate limit headers in responses
-                .key_extractor(SmartIpKeyExtractor)
+                .key_extractor(IdentityOrIpKeyExtractor)
                 .finish()
                 .expect("Failed to build rate limiter config"),
         )
@@ -113,7 +171,7 @@ impl RateLimitConfig {
                 .per_second(self.requests_per_second)
                 .burst_size(self.burst_size)
                 .use_headers()
-                .key_extractor(SmartIpKeyExtractor)
+                .key_extractor(IdentityOrIpKeyExtractor)
                 .finish()
                 .expect("Failed to build rate limiter config"),
         );

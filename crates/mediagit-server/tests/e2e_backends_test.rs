@@ -299,6 +299,7 @@ fn generate_test_psd() -> Vec<u8> {
 #[tokio::test]
 async fn test_local_backend_complete_flow() {
     let server = TestServer::new_local().await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = Client::new();
     let repo = "test-repo";
 
@@ -746,6 +747,7 @@ async fn test_local_backend_pack_roundtrip() {
 #[tokio::test]
 async fn test_path_validation() {
     let server = TestServer::new_local().await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = Client::new();
 
     // Test path traversal protection

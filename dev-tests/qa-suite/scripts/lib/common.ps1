@@ -94,3 +94,61 @@ function Write-QaGate([string]$Phase, [string]$Gate, [bool]$Pass, [string]$Detai
   Write-QaRow (Join-Path $QA.Logs "gates.tsv") @("phase", "gate", "pass", "detail") @($Phase, $Gate, $Pass, $Detail)
   Write-QaLog $Phase ("GATE {0} = {1} {2}" -f $Gate, $(if ($Pass) { "PASS" } else { "FAIL" }), $Detail)
 }
+
+# Resolve a repo's chunk-deltas directory, whatever its object namespace is.
+# Returns $null when the repo has no chunk-delta storage yet.
+function Get-QaChunkDeltaDir([string]$Repo) {
+  $objects = Join-Path $Repo ".mediagit\objects"
+  if (-not (Test-Path $objects)) { return $null }
+  $hit = Get-ChildItem $objects -Directory -EA SilentlyContinue | ForEach-Object {
+    $c = Join-Path $_.FullName "chunk-deltas"
+    if (Test-Path $c) { $c }
+  } | Select-Object -First 1
+  return $hit
+}
+
+# Chunk-delta chain topology of a repo, read straight off the .meta sidecars.
+#
+# fsck's own chain walk reads only these sidecars (never chunk payloads), so
+# this needs no binary and is cheap even on large repos. Returns:
+#   MaxDepth   deepest chain, in delta hops above a full chunk
+#   CycleCount chains that revisit a node (self-loop or longer cycle)
+#   ChainCount number of chunk-delta sidecars found
+#
+# Guards the class of defect where a repo becomes unreadable because a chain
+# grew past what the reader will reconstruct (MAX_DELTA_DEPTH = 10).
+function Get-QaChainStats([string]$Repo) {
+  $stats = @{ MaxDepth = 0; CycleCount = 0; ChainCount = 0 }
+  # Objects live under .mediagit\objects\<repo_namespace>\, and the namespace
+  # is the repo directory name - not a literal "repo". Discover it instead of
+  # assuming, or this silently reports zero chains on every real repository.
+  $deltaDir = Get-QaChunkDeltaDir $Repo
+  if (-not $deltaDir) { return $stats }
+
+  # base map: <chunk hex> -> <base hex>
+  $bases = @{}
+  Get-ChildItem $deltaDir -Recurse -File -Filter "*.meta" -EA SilentlyContinue | ForEach-Object {
+    $txt = (Get-Content $_.FullName -Raw -EA SilentlyContinue)
+    if ($txt -and $txt.Trim() -match '^base:([0-9a-f]+)') {
+      $bases[$_.BaseName] = $Matches[1]
+    }
+  }
+  $stats.ChainCount = $bases.Count
+  if ($bases.Count -eq 0) { return $stats }
+
+  foreach ($start in $bases.Keys) {
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+    $cur = $start
+    $depth = 0
+    while ($bases.ContainsKey($cur)) {
+      if (-not $seen.Add($cur)) { $stats.CycleCount++; break }
+      $cur = $bases[$cur]
+      $depth++
+      # Hard stop well above any legal chain so a malformed repo cannot hang
+      # the harness; a chain this long is already a failure by definition.
+      if ($depth -gt 200) { $stats.CycleCount++; break }
+    }
+    if ($depth -gt $stats.MaxDepth) { $stats.MaxDepth = $depth }
+  }
+  return $stats
+}

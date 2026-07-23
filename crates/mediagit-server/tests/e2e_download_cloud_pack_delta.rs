@@ -201,6 +201,7 @@ async fn download_file_reconstructs_chunk_delta_whose_base_is_only_in_a_cloud_pa
     // ── The actual regression: GET /files/hero.glb must stream the full,
     // byte-exact reconstructed file, not die mid-stream. ──────────────────
     let (base_url, _handle) = start_test_server(server_repos).await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = reqwest::Client::new();
     let resp = client
         .get(format!("{}/g5-repo/files/hero.glb?ref=main", base_url))

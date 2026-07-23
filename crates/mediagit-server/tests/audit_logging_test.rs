@@ -90,6 +90,7 @@ impl Drop for TestServer {
 #[tokio::test]
 async fn test_audit_path_traversal_attempt() {
     let server = TestServer::new().await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = Client::new();
 
     // Attempt path traversal - should trigger audit log
@@ -113,6 +114,7 @@ async fn test_audit_path_traversal_attempt() {
 #[tokio::test]
 async fn test_audit_absolute_path_attempt() {
     let server = TestServer::new().await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = Client::new();
 
     // Attempt absolute path - should trigger audit log
@@ -134,6 +136,7 @@ async fn test_audit_absolute_path_attempt() {
 #[tokio::test]
 async fn test_audit_invalid_characters() {
     let server = TestServer::new().await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = Client::new();
 
     // Repository name with invalid characters - should trigger audit log
@@ -179,6 +182,7 @@ async fn test_audit_rate_limit_violation() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
+    mediagit_protocol::ensure_crypto_provider();
     let client = Client::new();
     let url = format!("http://{}/test-repo/info/refs", addr);
 
@@ -201,6 +205,7 @@ async fn test_audit_rate_limit_violation() {
 #[tokio::test]
 async fn test_audit_oversized_request() {
     let server = TestServer::new().await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = Client::new();
 
     // Create a request with content-length exceeding the limit (2GB)
@@ -223,6 +228,7 @@ async fn test_audit_oversized_request() {
 #[tokio::test]
 async fn test_audit_normal_request_no_log() {
     let server = TestServer::new().await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = Client::new();
 
     // Normal request to non-existent repo - should NOT trigger security audit logs
@@ -242,6 +248,7 @@ async fn test_audit_normal_request_no_log() {
 #[tokio::test]
 async fn test_audit_multiple_violations() {
     let server = TestServer::new().await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = Client::new();
 
     // Multiple different security violations

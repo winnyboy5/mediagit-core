@@ -56,6 +56,8 @@ DOC_FILES=$(find "$ROOT" \
     -not -path '*/target/*' \
     -not -path '*/.git/*' \
     -not -path '*/CHANGELOG.md' \
+    -not -path '*/compat-fixture/*' \
+    -not -path '*/qa-suite/reports/*' \
     -not -path '*/claudedocs/*')
 
 count=0

@@ -300,6 +300,14 @@ fn preprocess_args(args: Vec<String>) -> Vec<String> {
 }
 
 fn main() {
+    // reqwest is built with `rustls-no-provider`, and google-cloud-auth still
+    // links aws-lc-rs, so rustls 0.23 sees two providers and refuses to pick
+    // one ("Could not automatically determine the process-level
+    // CryptoProvider"). Install ring before any TLS use, matching the server's
+    // main(). `_ =` swallows the "already installed" error if a test harness
+    // raced us.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Preprocess args to support git-style -N shorthand (e.g., log -5 → log -n 5)
     let args = preprocess_args(std::env::args().collect());
     // Parse CLI args on the main thread (lightweight, no async needed)

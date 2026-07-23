@@ -80,6 +80,7 @@ async fn presign_upload_urls_returns_null_for_local_backend() {
         .unwrap();
     let (base_url, _handle) = start_test_server(repos_tmp.path().to_path_buf()).await;
 
+    mediagit_protocol::ensure_crypto_provider();
     let client = reqwest::Client::new();
 
     let ids = vec!["aabbcc".to_string(), "ddeeff".to_string()];
@@ -120,6 +121,7 @@ async fn complete_chunk_uploads_reports_missing_correctly() {
         .unwrap();
     let (base_url, _handle) = start_test_server(repos_tmp.path().to_path_buf()).await;
 
+    mediagit_protocol::ensure_crypto_provider();
     let client = reqwest::Client::new();
 
     let present_data = b"I am present on the server";

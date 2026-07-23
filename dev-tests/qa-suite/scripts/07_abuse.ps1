@@ -12,6 +12,9 @@
 #   A8 disk-full (capability-gated: needs admin for a small VHD volume) -> clean fail, recover
 #   A9 server-enforced lock e2e (push rejected/force-unlock/retry) + no-auth force-required variant
 #   A10 batch-get-disabled fallback -> clone still succeeds via per-chunk path
+#   A11 chunk-delta chain depth over a run of similar versions -> stays <= MAX_DELTA_DEPTH
+#   A12 fabricated chunk-delta cycle / self-loop -> fsck detects and terminates
+#   A13 per-chunk fallback (packs disabled) -> completes without tripping rate limits
 #
 # Output: $QA.Logs\abuse_results.tsv (drill, pass, detail)
 
@@ -598,6 +601,200 @@ function Drill-A10-BatchGetFallback {
   }
 }
 
+
+# ---------------------------------------------------------------------------
+# A11: chunk-delta chain depth under a run of similar versions. Editing and
+# re-committing the same large asset repeatedly makes each new chunk a delta of
+# the previous one; with no write-side depth guard the chain grows past what
+# get_chunk will reconstruct (MAX_DELTA_DEPTH = 10) and the repo becomes
+# permanently unpushable and unclonable - the 624MB psds failure, where push
+# died with "Chunk delta chain too deep (> 10)" and fsck --repair could not fix
+# it. Gate: chains stay within the limit, content round-trips, push succeeds.
+# ---------------------------------------------------------------------------
+function Drill-A11-DeltaChainDepth {
+  $drill = "A11-delta-chain-depth"
+  $srv = $null
+  try {
+    # The depth assertion is LOCAL and deliberately runs before any server is
+    # started. This drill guards a data-loss defect, so it must never report
+    # SKIP-as-PASS because some remote dependency was unavailable - which is
+    # exactly what happened on 2026-07-23 (a namespace collision skipped the
+    # drill and it was still recorded True in gates.tsv).
+    $repo = New-SandboxRepo "a11-chain-depth" $Phase
+    $asset = Join-Path $repo "asset.psd"
+
+    # 25 mutually-similar files staged in ONE `add`, each a small CUMULATIVE
+    # edit of the previous. Both properties are load-bearing, measured
+    # 2026-07-23 against the pre-fix binary:
+    #
+    #   * ONE add - within a single invocation the similarity detector
+    #     accumulates every chunk just written, so file N+1 nominates file N's
+    #     chunk, which is itself already a delta. Across separate commits the
+    #     detector is only seeded from the previous manifest and that seeding
+    #     skips bases deeper than 2, so one-file-per-commit tops out at
+    #     depth 1 and would NOT reproduce the defect (this drill did exactly
+    #     that on its first run and passed while discriminating nothing).
+    #   * CUMULATIVE edits - independent edits off one base are each
+    #     most-similar to that base, giving depth 1 and no chain.
+    #
+    # Pre-fix this shape measured depth 12; post-fix it stays <= 10.
+    New-QaBinaryFixture $asset 6 91101
+    $cur = [IO.File]::ReadAllBytes($asset)
+    Remove-Item $asset -Force
+    $versions = 25
+    for ($v = 0; $v -lt $versions; $v++) {
+      for ($k = 0; $k -lt 4096; $k++) {
+        $idx = ($v * 65536 + $k) % $cur.Length
+        $cur[$idx] = [byte]((($v * 7 + $k) -band 0x7F) -bor 0x80)
+      }
+      [IO.File]::WriteAllBytes((Join-Path $repo "asset$v.psd"), $cur)
+    }
+    Invoke-MG $repo @("add", ".") $Phase -TimeoutSec 1800 | Out-Null
+    Invoke-MG $repo @("commit", "-m", "all versions") $Phase | Out-Null
+    $asset = Join-Path $repo ("asset" + ($versions - 1) + ".psd")
+    $finalHash = Get-QaHash $asset
+
+    $stats = Get-QaChainStats $repo
+    $depthOk = ($stats.MaxDepth -le 10)
+    $noCycles = ($stats.CycleCount -eq 0)
+    # A run this long with no deltas at all would make the depth check vacuous.
+    $exercised = ($stats.ChainCount -gt 0)
+    $fsckOk = Test-QaFsckClean $repo
+
+    $localPass = $depthOk -and $noCycles -and $exercised -and $fsckOk
+    $detail = ("maxDepth=$($stats.MaxDepth) (limit=10) cycles=$($stats.CycleCount) " +
+      "chains=$($stats.ChainCount) exercised=$exercised fsck=$fsckOk")
+
+    # Remote half: the reported symptom was push failing on an unreadable
+    # chunk, and a clone must reproduce the content byte-exactly. If no server
+    # is available this degrades to "local-only" - it never turns the local
+    # verdict into a pass.
+    try {
+      $srv = Start-QaServer -Backend "minio" -Phase "$Phase-A11"
+      Invoke-MG $repo @("remote", "add", "origin", $srv.Url) $Phase | Out-Null
+      $push = Invoke-MG $repo @("push", "-u", "origin", "main") $Phase -TimeoutSec 1800
+      $clone = Join-Path $QA.Work "a11-clone"
+      if (Test-Path $clone) { Remove-Item -Recurse -Force $clone }
+      $cl = Invoke-MG $null @("clone", $srv.Url, $clone) $Phase -TimeoutSec 1800
+      $leaf = "asset" + ($versions - 1) + ".psd"
+      $cloneHashOk = (Test-Path (Join-Path $clone $leaf)) -and
+                     ((Get-QaHash (Join-Path $clone $leaf)) -eq $finalHash)
+      $remotePass = ($push.Exit -eq 0) -and ($cl.Exit -eq 0) -and $cloneHashOk
+      Rec $drill ($localPass -and $remotePass) ($detail +
+        " push=$($push.Exit) clone=$($cl.Exit) clone-hash-ok=$cloneHashOk")
+    } catch {
+      if ("$_" -match "^SKIP:") {
+        # Local half still gates - report its real verdict, not SKIP.
+        Rec $drill $localPass ($detail + " remote=SKIPPED ($_)")
+      } else { throw }
+    }
+  } catch {
+    Rec $drill $false "unexpected error: $_"
+  } finally { Stop-QaServer $srv }
+}
+
+# ---------------------------------------------------------------------------
+# A12: fabricated cyclic chunk-delta chains (A->B->A and an A->A self-loop).
+# fsck must DETECT them, must TERMINATE (a naive walk spins forever), and must
+# never report the repo clean. Guards the 2026-07-07 cycle fix, which had no
+# campaign coverage. Sidecars alone suffice - the chain walk reads only .meta,
+# never chunk payloads.
+# ---------------------------------------------------------------------------
+function Drill-A12-DeltaChainCycle {
+  $drill = "A12-delta-chain-cycle"
+  try {
+    $repo = New-SandboxRepo "a12-chain-cycle" $Phase
+    New-QaBinaryFixture (Join-Path $repo "seed.bin") 2 91201
+    Invoke-MG $repo @("add", ".") $Phase | Out-Null
+    Invoke-MG $repo @("commit", "-m", "seed") $Phase | Out-Null
+
+    # Namespace is the repo dir name, not a literal "repo" - resolve it, or the
+    # fabricated sidecars land somewhere fsck never looks and the drill passes
+    # vacuously.
+    $deltaDir = Get-QaChunkDeltaDir $repo
+    if (-not $deltaDir) {
+      $ns = Get-ChildItem (Join-Path $repo ".mediagit\objects") -Directory | Select-Object -First 1
+      $deltaDir = Join-Path $ns.FullName "chunk-deltas"
+    }
+    New-Item -ItemType Directory -Path $deltaDir -Force | Out-Null
+
+    # Sidecars must land in the ODB's real TWO-LEVEL shard layout
+    # (chunk-deltas/<c0c1>/<c2c3>/<id>.meta). Writing them flat under
+    # chunk-deltas/ puts them somewhere fsck never enumerates: measured
+    # 2026-07-23, flat => "Repository integrity: PERFECT" while a cycle sat on
+    # disk; correctly sharded => "Integrity check failed with 2 error(s)".
+    function Write-QaFakeDeltaMeta([string]$Root, [string]$Id, [string]$Base) {
+      $shard = Join-Path (Join-Path $Root $Id.Substring(0, 2)) $Id.Substring(2, 2)
+      New-Item -ItemType Directory -Path $shard -Force | Out-Null
+      Set-Content -NoNewline -Path (Join-Path $shard "$Id.meta") -Value "base:$Base"
+    }
+
+    # Two-node cycle A->B->A, plus a degenerate self-loop C->C.
+    $a = "a" * 64
+    $b = "b" * 64
+    $c = "c" * 64
+    Write-QaFakeDeltaMeta $deltaDir $a $b
+    Write-QaFakeDeltaMeta $deltaDir $b $a
+    Write-QaFakeDeltaMeta $deltaDir $c $c
+
+    # Harness-side view must see them too (and must not hang).
+    $stats = Get-QaChainStats $repo
+    $statsSawCycle = ($stats.CycleCount -gt 0)
+
+    # fsck must terminate; a spin would blow the timeout instead of returning.
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $f = Invoke-MG $repo @("fsck") $Phase -TimeoutSec 300
+    $sw.Stop()
+    $terminated = ($sw.Elapsed.TotalSeconds -lt 300)
+    $detected = ($f.Exit -ne 0) -or ($f.Out -match "(?i)cycle|circular")
+    $notSilent = -not (Test-QaFsckClean $repo)
+
+    $pass = $statsSawCycle -and $terminated -and $detected -and $notSilent
+    Rec $drill $pass ("harness-saw-cycle=$statsSawCycle fsck-detected=$detected " +
+      "terminated=$terminated ($([math]::Round($sw.Elapsed.TotalSeconds,1))s) not-silent=$notSilent")
+  } catch {
+    if ("$_" -match "^SKIP:") { Rec $drill "SKIP" "$_" } else { Rec $drill $false "unexpected error: $_" }
+  }
+}
+
+# ---------------------------------------------------------------------------
+# A13: per-chunk fallback must not become a request storm. When the pack path
+# fails, push falls back to one request per chunk; against the default per-IP
+# rate limiter that produced the 429s which masked the real corruption.
+# Gate: with packs disabled, a large push still completes under DEFAULT limits.
+# ---------------------------------------------------------------------------
+function Drill-A13-PerChunkFallbackNoRateLimit {
+  $drill = "A13-per-chunk-fallback-no-429"
+  $srv = $null
+  $prevPack = $env:MEDIAGIT_PACK_ENABLED
+  try {
+    $env:MEDIAGIT_PACK_ENABLED = "0"
+    # Distinct phase tag: sharing the bare $Phase reuses a repo namespace an
+    # earlier drill already claimed in the bucket, and the server's collision
+    # guard then refuses to start.
+    $srv = Start-QaServer -Backend "minio" -Phase "$Phase-A13"
+    $repo = New-SandboxRepo "a13-fallback" $Phase
+    # Several files so the per-chunk path issues many individual requests.
+    for ($i = 0; $i -lt 6; $i++) {
+      New-QaBinaryFixture (Join-Path $repo "part$i.bin") 8 (91300 + $i)
+    }
+    Invoke-MG $repo @("add", ".") $Phase | Out-Null
+    Invoke-MG $repo @("commit", "-m", "fallback") $Phase | Out-Null
+    Invoke-MG $repo @("remote", "add", "origin", $srv.Url) $Phase | Out-Null
+
+    $push = Invoke-MG $repo @("push", "-u", "origin", "main") $Phase -TimeoutSec 1800
+    $rateLimited = ($push.Out -match "(?i)429|rate.?limit|too many requests")
+
+    $pass = ($push.Exit -eq 0) -and (-not $rateLimited)
+    Rec $drill $pass "push=$($push.Exit) rate-limited=$rateLimited (packs disabled, default limits)"
+  } catch {
+    if ("$_" -match "^SKIP:") { Rec $drill "SKIP" "$_" } else { Rec $drill $false "unexpected error: $_" }
+  } finally {
+    Stop-QaServer $srv
+    $env:MEDIAGIT_PACK_ENABLED = $prevPack
+  }
+}
+
 # ---------------------------------------------------------------------------
 Write-QaLog $Phase "=== 07_abuse start ==="
 
@@ -611,6 +808,9 @@ Drill-A7-BackendOutage
 Drill-A8-DiskFull
 Drill-A9-LockE2E
 Drill-A10-BatchGetFallback
+Drill-A11-DeltaChainDepth
+Drill-A12-DeltaChainCycle
+Drill-A13-PerChunkFallbackNoRateLimit
 
 Write-QaLog $Phase "=== 07_abuse done: overall=$(if ($script:AllPass) { 'PASS' } else { 'FAIL' }) ==="
 if ($script:AllPass) { exit 0 } else { exit 1 }

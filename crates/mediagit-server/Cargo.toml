@@ -49,8 +49,14 @@ tower_governor = "0.8"
 governor = "0.10"
 
 # HTTPS/TLS
-axum-server = { version = "0.8", features = ["tls-rustls"] }
-rustls = { version = "0.23", features = ["ring"] }
+# `tls-rustls-no-provider`, not `tls-rustls`: the latter enables rustls with
+# aws-lc-rs. We install ring as the process provider in main() instead.
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+# default-features = false is load-bearing: rustls 0.23's default feature set
+# includes `aws-lc-rs`, so asking for `ring` alone still drags aws-lc-sys into
+# the tree (and, on Windows, its cmake/NASM build). Enumerate the defaults we
+# actually want instead.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 
 # Internal dependencies
 mediagit-protocol = { path = "../mediagit-protocol" }

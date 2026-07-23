@@ -209,8 +209,15 @@ Chain depth: 3
 
 ### Chain Breaking
 - Maximum depth: 10 (`MAX_DELTA_DEPTH`)
-- After depth exceeded, new base created
-- `mediagit gc` optimizes chains
+- On reaching the limit, the next delta is re-targeted at the chain's **root**
+  (a full chunk) rather than the nominated base, so the chunk stays
+  delta-compressed while the chain restarts at depth 1
+- Enforced on write for every chunk-delta path, and on read: `get_chunk`
+  refuses to reconstruct a deeper chain
+- `mediagit fsck` reports an over-deep chain; `mediagit fsck --repair`
+  flattens it by re-storing the chunk in full
+- `mediagit gc` does **not** optimize chains — it only reclaims orphaned
+  delta objects
 
 ## Integrity Verification
 

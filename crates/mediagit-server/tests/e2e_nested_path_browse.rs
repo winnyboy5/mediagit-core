@@ -132,6 +132,7 @@ async fn resolves_nested_file_blob() {
     .await;
 
     let (base_url, _handle) = start_test_server(server_repos).await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = reqwest::Client::new();
 
     let resp = client
@@ -160,6 +161,7 @@ async fn lists_directory_synthesized_from_flat_prefix() {
     .await;
 
     let (base_url, _handle) = start_test_server(server_repos).await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = reqwest::Client::new();
 
     // Root listing: "a" is a synthesized directory, "root.txt" is a file.
@@ -224,6 +226,7 @@ async fn root_listing_unchanged_for_single_level_repo() {
     .await;
 
     let (base_url, _handle) = start_test_server(server_repos).await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = reqwest::Client::new();
 
     let resp = client
@@ -255,6 +258,7 @@ async fn missing_nested_path_returns_404_not_panic() {
     .await;
 
     let (base_url, _handle) = start_test_server(server_repos).await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = reqwest::Client::new();
 
     let resp = client

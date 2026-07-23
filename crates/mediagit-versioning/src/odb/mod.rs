@@ -209,46 +209,161 @@ async fn chunk_delta_chain_contains_impl(
     start: Oid,
     target: Oid,
 ) -> bool {
-    if start == target {
-        return true;
+    chunk_delta_chain_walk(storage, start, Some(target))
+        .await
+        .contains_target
+}
+
+/// Absolute hop ceiling for a single chain traversal.
+///
+/// A legal chain is at most `MAX_DELTA_DEPTH`, but legacy repositories written
+/// before the write-side depth guard existed can hold arbitrarily deep chains
+/// (that is the defect this bound exists to survive). Walking one costs two
+/// tiny reads per hop, so the walk is capped rather than unbounded; exceeding
+/// the cap is reported via `truncated` and every caller treats that as "refuse
+/// the delta", which is the safe direction. `fsck`'s repair path deliberately
+/// does *not* use this helper — it must follow a chain of any length.
+const CHAIN_WALK_CAP: usize = (MAX_DELTA_DEPTH as usize) * 4;
+
+/// Outcome of one `chunk-deltas/` chain traversal.
+pub(crate) struct ChainWalk {
+    /// The requested `target` appears on the chain — writing `target -> start`
+    /// would close a cycle.
+    pub contains_target: bool,
+    /// Delta hops from `start` down to the terminal full chunk. `0` means
+    /// `start` is itself a full chunk (no `.meta` sidecar).
+    pub depth: usize,
+    /// The terminal non-delta chunk, when the chain resolved cleanly.
+    /// `None` if the walk hit a cycle, a malformed sidecar, or the cap.
+    pub root: Option<Oid>,
+    /// The walk stopped early (cycle, malformed meta, or `CHAIN_WALK_CAP`), so
+    /// `depth` is a lower bound and `root` is unknown.
+    pub truncated: bool,
+}
+
+/// Walk a chunk-delta chain once, answering both questions the write paths ask:
+/// "would this close a cycle?" and "how deep is this base already?".
+///
+/// Fusing them matters: every chunk-delta write already walks the chain for
+/// cycle detection, so deriving depth from a *second* walk would double the
+/// small-file I/O on every chunk of every add. One traversal answers both.
+///
+/// Uses `storage.exists` before `storage.get` because the common case on
+/// fresh-add hot paths is "base is a full chunk, no meta exists" — and on
+/// LocalBackend `exists()` is a single stat() syscall whereas `get()` is
+/// open+read+close. For multi-GiB files with thousands of chunks this
+/// difference matters, so the overwhelmingly common result (`depth == 0`)
+/// costs exactly one stat().
+async fn chunk_delta_chain_walk(
+    storage: &dyn StorageBackend,
+    start: Oid,
+    target: Option<Oid>,
+) -> ChainWalk {
+    let mut walk = ChainWalk {
+        contains_target: target == Some(start),
+        depth: 0,
+        root: None,
+        truncated: false,
+    };
+    if walk.contains_target {
+        walk.truncated = true;
+        return walk;
     }
+
     let mut current = start;
     let mut visited = std::collections::HashSet::new();
-    for _ in 0..=MAX_DELTA_DEPTH {
-        if current == target {
-            return true;
-        }
+    for _ in 0..CHAIN_WALK_CAP {
         if !visited.insert(current) {
-            // Existing cycle in stored data — not our concern here. We only
-            // need to answer "does the path lead to target?" Bail out so we
-            // don't loop forever.
-            return false;
+            // Pre-existing cycle in stored data. Report it as truncated so
+            // callers refuse to extend it; `fsck` is what reports/repairs it.
+            walk.truncated = true;
+            return walk;
         }
         let meta_key = format!("chunk-deltas/{}.meta", current.to_hex());
-        // Cheap probe first: if no meta, base is terminal (full chunk).
+        // Cheap probe first: no meta => `current` is terminal (full chunk).
         match storage.exists(&meta_key).await {
             Ok(true) => {}
-            Ok(false) | Err(_) => return false,
+            Ok(false) => {
+                walk.root = Some(current);
+                return walk;
+            }
+            Err(_) => {
+                walk.truncated = true;
+                return walk;
+            }
         }
-        let bytes = match storage.get(&meta_key).await {
-            Ok(b) => b,
-            Err(_) => return false,
+        let next = match storage.get(&meta_key).await {
+            Ok(bytes) => match std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|s| {
+                    s.trim()
+                        .strip_prefix("base:")
+                        .map(str::trim)
+                        .map(String::from)
+                })
+                .and_then(|hex| Oid::from_hex(&hex).ok())
+            {
+                Some(oid) => oid,
+                None => {
+                    // Malformed sidecar: corruption, not a clean terminus.
+                    walk.truncated = true;
+                    return walk;
+                }
+            },
+            Err(_) => {
+                walk.truncated = true;
+                return walk;
+            }
         };
-        let s = match std::str::from_utf8(&bytes) {
-            Ok(s) => s,
-            Err(_) => return false,
-        };
-        let hex = match s.trim().strip_prefix("base:") {
-            Some(h) => h.trim(),
-            None => return false,
-        };
-        let next = match Oid::from_hex(hex) {
-            Ok(o) => o,
-            Err(_) => return false,
-        };
+        walk.depth += 1;
         current = next;
+        if target == Some(current) {
+            walk.contains_target = true;
+            return walk;
+        }
     }
-    false
+    walk.truncated = true;
+    walk
+}
+
+/// Decide which chunk a new delta should be written against.
+///
+/// This is the single choke point for chunk-delta base policy — all write
+/// paths route through it so a new call site cannot silently omit a guard,
+/// which is exactly how the unbounded-chain defect shipped (four independent
+/// hand-rolled guards that each remembered cycles and forgot depth).
+///
+/// Returns the base to use, or `None` when no delta should be written and the
+/// caller should store the chunk in full:
+///
+/// * `None` if `new_chunk` already appears on the nominated base's chain —
+///   writing it would close a cycle and make both chunks unreadable.
+/// * `None` if the chain cannot be resolved (corruption, pre-existing cycle,
+///   or deeper than [`CHAIN_WALK_CAP`]) — never extend a chain we can't read.
+/// * When the base already sits at `MAX_DELTA_DEPTH`, the chain **root** (a
+///   full chunk) instead of the nominated base. The delta is still written —
+///   storage savings are the product's differentiator, so hitting the cap must
+///   not silently degrade to storing everything in full — but it restarts at
+///   depth 1, so chains self-balance and never exceed the cap.
+pub(crate) async fn resolve_delta_base(
+    storage: &dyn StorageBackend,
+    nominated_base: Oid,
+    new_chunk: Oid,
+) -> Option<Oid> {
+    if nominated_base == new_chunk {
+        return None;
+    }
+    let walk = chunk_delta_chain_walk(storage, nominated_base, Some(new_chunk)).await;
+    if walk.contains_target || walk.truncated {
+        return None;
+    }
+    // `truncated == false` guarantees a terminal full chunk was reached.
+    let root = walk.root?;
+    if walk.depth < MAX_DELTA_DEPTH as usize {
+        return Some(nominated_base);
+    }
+    // At the cap: fall back to the chain root rather than abandoning the delta.
+    if root == new_chunk { None } else { Some(root) }
 }
 
 /// Object Database with content-addressable storage
@@ -449,6 +564,125 @@ mod tests {
         let unrelated = Oid::hash(b"cyc-x");
         // Terminates (visited-set bail) and reports "not found".
         assert!(!chunk_delta_chain_contains_impl(&*storage, a, unrelated).await);
+    }
+
+    /// Build a chain of `len` deltas terminating at a full chunk, and return
+    /// (leaf, root). Only `.meta` sidecars are written — enough for the walk,
+    /// which never reads payloads.
+    async fn plant_chain(storage: &Arc<MockBackend>, tag: &str, len: usize) -> (Oid, Oid) {
+        let root = Oid::hash(format!("{tag}-root").as_bytes());
+        storage
+            .put(&format!("chunks/{}", root.to_hex()), b"full")
+            .await
+            .unwrap();
+        let mut prev = root;
+        for i in 0..len {
+            let id = Oid::hash(format!("{tag}-{i}").as_bytes());
+            storage
+                .put(
+                    &format!("chunk-deltas/{}.meta", id.to_hex()),
+                    format!("base:{}", prev.to_hex()).as_bytes(),
+                )
+                .await
+                .unwrap();
+            prev = id;
+        }
+        (prev, root)
+    }
+
+    /// Below the cap the nominated base is used unchanged — the guard must not
+    /// cost savings on ordinary chains.
+    #[tokio::test]
+    async fn test_resolve_delta_base_keeps_shallow_base() {
+        let storage = Arc::new(MockBackend::new());
+        let (leaf, _root) = plant_chain(&storage, "shallow", 3).await;
+        let newcomer = Oid::hash(b"shallow-new");
+        assert_eq!(
+            resolve_delta_base(&*storage, leaf, newcomer).await,
+            Some(leaf),
+            "a chain well under MAX_DELTA_DEPTH must delta against the nominated base"
+        );
+    }
+
+    /// At the cap, re-target to the chain root instead of refusing: the chunk
+    /// stays delta-compressed (savings preserved) and depth restarts at 1.
+    #[tokio::test]
+    async fn test_resolve_delta_base_retargets_to_root_at_max_depth() {
+        let storage = Arc::new(MockBackend::new());
+        let (leaf, root) = plant_chain(&storage, "deep", MAX_DELTA_DEPTH as usize).await;
+        let newcomer = Oid::hash(b"deep-new");
+        assert_eq!(
+            resolve_delta_base(&*storage, leaf, newcomer).await,
+            Some(root),
+            "at MAX_DELTA_DEPTH the base must fall back to the chain root, not \
+             be abandoned — refusing outright would cost storage savings"
+        );
+    }
+
+    /// The bug this whole change exists to prevent: repeatedly deltaing each
+    /// new chunk onto the previous one must never exceed the depth a reader
+    /// will reconstruct.
+    #[tokio::test]
+    async fn test_resolve_delta_base_never_exceeds_max_depth() {
+        let storage = Arc::new(MockBackend::new());
+        let root = Oid::hash(b"grow-root");
+        storage
+            .put(&format!("chunks/{}", root.to_hex()), b"full")
+            .await
+            .unwrap();
+
+        let mut prev = root;
+        for i in 0..40 {
+            let id = Oid::hash(format!("grow-{i}").as_bytes());
+            let base = resolve_delta_base(&*storage, prev, id)
+                .await
+                .expect("a resolvable chain must always yield some base");
+            storage
+                .put(
+                    &format!("chunk-deltas/{}.meta", id.to_hex()),
+                    format!("base:{}", base.to_hex()).as_bytes(),
+                )
+                .await
+                .unwrap();
+            let depth = chunk_delta_chain_walk(&*storage, id, None).await.depth;
+            assert!(
+                depth <= MAX_DELTA_DEPTH as usize,
+                "chunk {i} reached depth {depth}, above the {} a reader will \
+                 reconstruct — this is the unbounded-chain defect",
+                MAX_DELTA_DEPTH
+            );
+            prev = id;
+        }
+    }
+
+    /// Never extend a chain that cannot be read: a pre-existing cycle must
+    /// yield no base at all rather than a plausible-looking one.
+    #[tokio::test]
+    async fn test_resolve_delta_base_refuses_on_existing_cycle() {
+        let storage = Arc::new(MockBackend::new());
+        let a = Oid::hash(b"rc-a");
+        let b = Oid::hash(b"rc-b");
+        for (from, to) in [(a, b), (b, a)] {
+            storage
+                .put(
+                    &format!("chunk-deltas/{}.meta", from.to_hex()),
+                    format!("base:{}", to.to_hex()).as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            resolve_delta_base(&*storage, a, Oid::hash(b"rc-new")).await,
+            None
+        );
+    }
+
+    /// Self-loops are the degenerate cycle and must be refused outright.
+    #[tokio::test]
+    async fn test_resolve_delta_base_refuses_self_loop() {
+        let storage = Arc::new(MockBackend::new());
+        let a = Oid::hash(b"self-a");
+        assert_eq!(resolve_delta_base(&*storage, a, a).await, None);
     }
 
     #[tokio::test]

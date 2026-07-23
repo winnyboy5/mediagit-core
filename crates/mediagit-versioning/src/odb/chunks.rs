@@ -68,22 +68,41 @@ impl ObjectDatabase {
         );
         drop(detector); // Release read lock
 
-        if let Some((base_id, score)) = similar {
-            // Refuse self-loops and cycles. Without this, parallel adds of
-            // similar chunks can produce A→B and B→A on disk, which makes
-            // both unreadable (see chunk delta chain reconstruction).
-            if base_id == chunk.id
-                || chunk_delta_chain_contains_impl(&*self.storage, base_id, chunk.id).await
-            {
+        if let Some((nominated_base, score)) = similar {
+            // One walk answers both questions: would this close a cycle, and
+            // how deep is the nominated base already? Deriving depth from a
+            // second traversal would double the small-file I/O per chunk.
+            //
+            // Cycles: without this, parallel adds of similar chunks can produce
+            // A→B and B→A on disk, which makes both unreadable.
+            //
+            // Depth: this path loads its base with `get_chunk`, which happily
+            // reconstructs *through* an existing chain — so without a depth
+            // guard each similar chunk adds a hop and the chain grows without
+            // bound until `get_chunk` refuses it and the data is unreadable.
+            let base_id = if nominated_base == chunk.id {
                 debug!(
                     chunk_id = %chunk.id,
-                    base_id = %base_id,
-                    "Refusing chunk delta — would create cycle, falling back to full chunk"
+                    "Refusing chunk delta — self-loop, falling back to full chunk"
                 );
                 let mut detector = self.similarity_detector.write().await;
                 detector.add_object(chunk_meta);
                 return Ok(false);
-            }
+            } else {
+                match resolve_delta_base(&*self.storage, nominated_base, chunk.id).await {
+                    Some(id) => id,
+                    None => {
+                        debug!(
+                            chunk_id = %chunk.id,
+                            base_id = %nominated_base,
+                            "Refusing chunk delta — cycle or unresolvable chain, falling back to full chunk"
+                        );
+                        let mut detector = self.similarity_detector.write().await;
+                        detector.add_object(chunk_meta);
+                        return Ok(false);
+                    }
+                }
+            };
 
             // Try to load base chunk and create delta
             if let Ok(base_data) = self.get_chunk(&base_id).await {
@@ -121,12 +140,18 @@ impl ObjectDatabase {
                     if pairs.contains(&(base_id, chunk.id)) {
                         return Ok(false);
                     }
-                    if chunk_delta_chain_contains_impl(&*self.storage, base_id, chunk.id).await {
+                    // Re-decide under the lock and require the *same* answer:
+                    // the delta bytes above were encoded against `base_id`, so a
+                    // re-target here would be invalid. Any change (a concurrent
+                    // write closed a cycle, or pushed the chain to the cap)
+                    // means this delta is no longer safe — store the full chunk.
+                    if resolve_delta_base(&*self.storage, base_id, chunk.id).await != Some(base_id)
+                    {
                         drop(pairs);
                         debug!(
                             chunk_id = %chunk.id,
                             base_id = %base_id,
-                            "Refusing chunk delta at commit — concurrent writes would close a cycle"
+                            "Refusing chunk delta at commit — concurrent writes would close a cycle or exceed max depth"
                         );
                         let mut detector = self.similarity_detector.write().await;
                         detector.add_object(chunk_meta);
@@ -666,145 +691,168 @@ impl ObjectDatabase {
                     // 2. Delta encoding using the base pre-selected by the
                     //    producer (deterministic: same chunk order every run).
                     let mut stored_as_delta = false;
-                    if let Some(base_id) = base_oid_opt {
-                        // Cycle prevention: refuse self-loop and any base whose
-                        // existing on-disk chain leads back to this chunk. Without
-                        // this guard, two parallel encoders processing similar
-                        // chunks can produce mutually-referencing deltas (A→B and
-                        // B→A) that fail to reconstruct on read.
-                        let cycle_risk = base_id == chunk.id
-                            || chunk_delta_chain_contains_impl(&*storage, base_id, chunk.id).await;
-                        if cycle_risk {
-                            debug!(
-                                chunk_id = %chunk.id,
-                                base_id = %base_id,
-                                "Parallel: refusing chunk delta to prevent cycle"
-                            );
-                        } else {
-                            let base_key = format!("chunks/{}", base_id.to_hex());
-                            // Check decompressed base chunk cache before hitting storage
-                            let base_data_arc = if let Some(cached) =
-                                base_chunk_cache.get(&base_id).await
-                            {
-                                Some(cached)
-                            } else {
-                                match storage.get(&base_key).await {
-                                    Ok(base_compressed) => {
-                                        let decompressed = if let Some(ref smart) = smart_comp {
-                                            decompress_typed_blocking(
-                                                smart.clone(),
-                                                base_compressed,
-                                            )
-                                            .await
-                                            .ok()
-                                        } else {
-                                            decompress_blocking(compressor.clone(), base_compressed)
+                    if let Some(nominated_base) = base_oid_opt {
+                        // Cycle AND depth prevention in one chain walk.
+                        //
+                        // Cycles: two parallel encoders processing similar chunks
+                        // can otherwise produce mutually-referencing deltas (A→B
+                        // and B→A) that fail to reconstruct on read.
+                        //
+                        // Depth: the producer pre-caches every chunk's raw bytes
+                        // (see the pre-cache below), so a base that was itself
+                        // stored as a delta is still a cache HIT here. Without a
+                        // depth guard each similar chunk adds a hop and the chain
+                        // grows past what `get_chunk` will reconstruct.
+                        match resolve_delta_base(&*storage, nominated_base, chunk.id).await {
+                            None => {
+                                debug!(
+                                    chunk_id = %chunk.id,
+                                    base_id = %nominated_base,
+                                    "Parallel: refusing chunk delta (cycle or unresolvable chain)"
+                                );
+                            }
+                            Some(base_id) => {
+                                let base_key = format!("chunks/{}", base_id.to_hex());
+                                // Check decompressed base chunk cache before hitting storage
+                                let base_data_arc = if let Some(cached) =
+                                    base_chunk_cache.get(&base_id).await
+                                {
+                                    Some(cached)
+                                } else {
+                                    match storage.get(&base_key).await {
+                                        Ok(base_compressed) => {
+                                            let decompressed = if let Some(ref smart) = smart_comp {
+                                                decompress_typed_blocking(
+                                                    smart.clone(),
+                                                    base_compressed,
+                                                )
                                                 .await
                                                 .ok()
-                                        };
-                                        if let Some(data) = decompressed {
-                                            let arc = Arc::new(data);
-                                            base_chunk_cache.insert(base_id, arc.clone()).await;
-                                            Some(arc)
-                                        } else {
-                                            None
+                                            } else {
+                                                decompress_blocking(
+                                                    compressor.clone(),
+                                                    base_compressed,
+                                                )
+                                                .await
+                                                .ok()
+                                            };
+                                            if let Some(data) = decompressed {
+                                                let arc = Arc::new(data);
+                                                base_chunk_cache.insert(base_id, arc.clone()).await;
+                                                Some(arc)
+                                            } else {
+                                                None
+                                            }
                                         }
+                                        _ => None,
                                     }
-                                    _ => None,
-                                }
-                            };
+                                };
 
-                            if let Some(base_data) = base_data_arc {
-                                let delta = DeltaEncoder::encode(&base_data, &chunk.data);
-                                let delta_bytes = delta.to_bytes();
-                                let delta_ratio =
-                                    delta_bytes.len() as f64 / chunk.data.len() as f64;
+                                if let Some(base_data) = base_data_arc {
+                                    let delta = DeltaEncoder::encode(&base_data, &chunk.data);
+                                    let delta_bytes = delta.to_bytes();
+                                    let delta_ratio =
+                                        delta_bytes.len() as f64 / chunk.data.len() as f64;
 
-                                let threshold =
-                                    delta_ratio_threshold(chunk.codec_hint, chunk.chunk_type);
-                                if delta_ratio < threshold {
-                                    let delta_key = format!("chunk-deltas/{}", chunk.id.to_hex());
-                                    let compressed_delta = if let Some(ref smart) = smart_comp {
-                                        smart
-                                            .compress_typed(
-                                                &delta_bytes,
-                                                CompressionObjectType::Unknown,
-                                            )
-                                            .map_err(|e| anyhow::anyhow!("Compress delta: {}", e))?
-                                    } else {
-                                        compressor
-                                            .compress(&delta_bytes)
-                                            .map_err(|e| anyhow::anyhow!("Compress delta: {}", e))?
-                                    };
+                                    let threshold =
+                                        delta_ratio_threshold(chunk.codec_hint, chunk.chunk_type);
+                                    if delta_ratio < threshold {
+                                        let delta_key =
+                                            format!("chunk-deltas/{}", chunk.id.to_hex());
+                                        let compressed_delta = if let Some(ref smart) = smart_comp {
+                                            smart
+                                                .compress_typed(
+                                                    &delta_bytes,
+                                                    CompressionObjectType::Unknown,
+                                                )
+                                                .map_err(|e| {
+                                                    anyhow::anyhow!("Compress delta: {}", e)
+                                                })?
+                                        } else {
+                                            compressor.compress(&delta_bytes).map_err(|e| {
+                                                anyhow::anyhow!("Compress delta: {}", e)
+                                            })?
+                                        };
 
-                                    // TOCTOU guard FIRST: check+register before any I/O.
-                                    // Lock held through the chain re-walk AND the meta
-                                    // write: the pre-walk above races with concurrent
-                                    // writers (three parallel writes can form A→B→C→A
-                                    // with every pre-walk passing, since no meta is on
-                                    // disk yet). Serializing [walk + meta write] means
-                                    // whichever write closes a loop sees the completed
-                                    // chain and refuses. Only the small meta put happens
-                                    // under the lock; the delta binary put stays outside.
-                                    let mut pairs = delta_pairs.lock().await;
-                                    let should_write = if pairs.contains(&(base_id, chunk.id)) {
-                                        debug!(
-                                            chunk_id = %chunk.id,
-                                            base_id = %base_id,
-                                            "Parallel: TOCTOU delta race — reverse pair committed; skipping write"
-                                        );
-                                        false
-                                    } else if chunk_delta_chain_contains_impl(
-                                        &*storage, base_id, chunk.id,
-                                    )
-                                    .await
-                                    {
-                                        debug!(
-                                            chunk_id = %chunk.id,
-                                            base_id = %base_id,
-                                            "Parallel: refusing chunk delta at commit — concurrent writes would close a cycle"
-                                        );
-                                        false
-                                    } else {
-                                        pairs.insert((chunk.id, base_id));
-                                        true
-                                    };
-
-                                    if should_write {
-                                        // Write .meta FIRST (durability anchor — see the
-                                        // sequential path above), still under the lock so
-                                        // concurrent chain walks observe it atomically.
-                                        let meta_key =
-                                            format!("chunk-deltas/{}.meta", chunk.id.to_hex());
-                                        let meta_data = format!("base:{}", base_id.to_hex());
-                                        if let Err(e) =
-                                            storage.put(&meta_key, meta_data.as_bytes()).await
-                                            && !storage.exists(&meta_key).await.unwrap_or(false)
+                                        // TOCTOU guard FIRST: check+register before any I/O.
+                                        // Lock held through the chain re-walk AND the meta
+                                        // write: the pre-walk above races with concurrent
+                                        // writers (three parallel writes can form A→B→C→A
+                                        // with every pre-walk passing, since no meta is on
+                                        // disk yet). Serializing [walk + meta write] means
+                                        // whichever write closes a loop sees the completed
+                                        // chain and refuses. Only the small meta put happens
+                                        // under the lock; the delta binary put stays outside.
+                                        let mut pairs = delta_pairs.lock().await;
+                                        let should_write = if pairs.contains(&(base_id, chunk.id)) {
+                                            debug!(
+                                                chunk_id = %chunk.id,
+                                                base_id = %base_id,
+                                                "Parallel: TOCTOU delta race — reverse pair committed; skipping write"
+                                            );
+                                            false
+                                        } else if resolve_delta_base(&*storage, base_id, chunk.id)
+                                            .await
+                                            != Some(base_id)
                                         {
-                                            return Err(anyhow::anyhow!("Store delta meta: {}", e));
-                                        }
-                                        drop(pairs);
+                                            // Re-decide under the lock and require the
+                                            // SAME answer: the delta bytes were encoded
+                                            // against `base_id`, so re-targeting here
+                                            // would be invalid. Any change means this
+                                            // delta is no longer safe to write.
+                                            debug!(
+                                                chunk_id = %chunk.id,
+                                                base_id = %base_id,
+                                                "Parallel: refusing chunk delta at commit — concurrent writes would close a cycle or exceed max depth"
+                                            );
+                                            false
+                                        } else {
+                                            pairs.insert((chunk.id, base_id));
+                                            true
+                                        };
 
-                                        // Tolerate concurrent writes: if put fails but chunk exists, treat as dedup
-                                        if let Err(e) =
-                                            storage.put(&delta_key, &compressed_delta).await
-                                            && !storage.exists(&delta_key).await.unwrap_or(false)
-                                        {
-                                            // Remove the routing sidecar so the chunk is
-                                            // not permanently misrouted to a missing binary.
-                                            let _ = storage.delete(&meta_key).await;
-                                            return Err(anyhow::anyhow!("Store delta: {}", e));
-                                        }
+                                        if should_write {
+                                            // Write .meta FIRST (durability anchor — see the
+                                            // sequential path above), still under the lock so
+                                            // concurrent chain walks observe it atomically.
+                                            let meta_key =
+                                                format!("chunk-deltas/{}.meta", chunk.id.to_hex());
+                                            let meta_data = format!("base:{}", base_id.to_hex());
+                                            if let Err(e) =
+                                                storage.put(&meta_key, meta_data.as_bytes()).await
+                                                && !storage.exists(&meta_key).await.unwrap_or(false)
+                                            {
+                                                return Err(anyhow::anyhow!(
+                                                    "Store delta meta: {}",
+                                                    e
+                                                ));
+                                            }
+                                            drop(pairs);
 
-                                        debug!(
-                                            chunk_id = %chunk.id,
-                                            base_id = %base_id,
-                                            delta_ratio,
-                                            "Parallel: stored chunk as delta"
-                                        );
-                                        stored_as_delta = true;
-                                    } else {
-                                        drop(pairs);
+                                            // Tolerate concurrent writes: if put fails but chunk exists, treat as dedup
+                                            if let Err(e) =
+                                                storage.put(&delta_key, &compressed_delta).await
+                                                && !storage
+                                                    .exists(&delta_key)
+                                                    .await
+                                                    .unwrap_or(false)
+                                            {
+                                                // Remove the routing sidecar so the chunk is
+                                                // not permanently misrouted to a missing binary.
+                                                let _ = storage.delete(&meta_key).await;
+                                                return Err(anyhow::anyhow!("Store delta: {}", e));
+                                            }
+
+                                            debug!(
+                                                chunk_id = %chunk.id,
+                                                base_id = %base_id,
+                                                delta_ratio,
+                                                "Parallel: stored chunk as delta"
+                                            );
+                                            stored_as_delta = true;
+                                        } else {
+                                            drop(pairs);
+                                        }
                                     }
                                 }
                             }
@@ -1044,138 +1092,154 @@ impl ObjectDatabase {
                     // 2. Delta encoding using the base pre-selected by the
                     //    producer (deterministic: same chunk order every run).
                     let mut stored_as_delta = false;
-                    if let Some(base_id) = base_oid_opt {
-                        // Cycle prevention (see parallel non-streaming variant
-                        // above for full rationale): refuse self-loops and any
-                        // base whose chain leads back to this chunk.
-                        let cycle_risk = base_id == chunk.id
-                            || chunk_delta_chain_contains_impl(&*storage, base_id, chunk.id).await;
-                        if cycle_risk {
-                            debug!(
-                                chunk_id = %chunk.id,
-                                base_id = %base_id,
-                                "Streaming parallel: refusing chunk delta to prevent cycle"
-                            );
-                        } else {
-                            let base_key = format!("chunks/{}", base_id.to_hex());
-                            // Check decompressed base chunk cache before hitting storage
-                            let base_data_arc = if let Some(cached) =
-                                base_chunk_cache.get(&base_id).await
-                            {
-                                Some(cached)
-                            } else {
-                                match storage.get(&base_key).await {
-                                    Ok(base_compressed) => {
-                                        let decompressed = if let Some(ref smart) = smart_comp {
-                                            decompress_typed_blocking(
-                                                smart.clone(),
-                                                base_compressed,
-                                            )
-                                            .await
-                                            .ok()
-                                        } else {
-                                            decompress_blocking(compressor.clone(), base_compressed)
+                    if let Some(nominated_base) = base_oid_opt {
+                        // Cycle AND depth prevention in one chain walk (see the
+                        // parallel non-streaming variant above for the full
+                        // rationale, including why the producer pre-cache means
+                        // a delta-stored base is still a cache hit here).
+                        match resolve_delta_base(&*storage, nominated_base, chunk.id).await {
+                            None => {
+                                debug!(
+                                    chunk_id = %chunk.id,
+                                    base_id = %nominated_base,
+                                    "Streaming parallel: refusing chunk delta (cycle or unresolvable chain)"
+                                );
+                            }
+                            Some(base_id) => {
+                                let base_key = format!("chunks/{}", base_id.to_hex());
+                                // Check decompressed base chunk cache before hitting storage
+                                let base_data_arc = if let Some(cached) =
+                                    base_chunk_cache.get(&base_id).await
+                                {
+                                    Some(cached)
+                                } else {
+                                    match storage.get(&base_key).await {
+                                        Ok(base_compressed) => {
+                                            let decompressed = if let Some(ref smart) = smart_comp {
+                                                decompress_typed_blocking(
+                                                    smart.clone(),
+                                                    base_compressed,
+                                                )
                                                 .await
                                                 .ok()
-                                        };
-                                        if let Some(data) = decompressed {
-                                            let arc = Arc::new(data);
-                                            base_chunk_cache.insert(base_id, arc.clone()).await;
-                                            Some(arc)
-                                        } else {
-                                            None
+                                            } else {
+                                                decompress_blocking(
+                                                    compressor.clone(),
+                                                    base_compressed,
+                                                )
+                                                .await
+                                                .ok()
+                                            };
+                                            if let Some(data) = decompressed {
+                                                let arc = Arc::new(data);
+                                                base_chunk_cache.insert(base_id, arc.clone()).await;
+                                                Some(arc)
+                                            } else {
+                                                None
+                                            }
                                         }
+                                        _ => None,
                                     }
-                                    _ => None,
-                                }
-                            };
+                                };
 
-                            if let Some(base_data) = base_data_arc {
-                                let delta = DeltaEncoder::encode(&base_data, &chunk.data);
-                                let delta_bytes = delta.to_bytes();
-                                let delta_ratio =
-                                    delta_bytes.len() as f64 / chunk.data.len() as f64;
+                                if let Some(base_data) = base_data_arc {
+                                    let delta = DeltaEncoder::encode(&base_data, &chunk.data);
+                                    let delta_bytes = delta.to_bytes();
+                                    let delta_ratio =
+                                        delta_bytes.len() as f64 / chunk.data.len() as f64;
 
-                                let threshold =
-                                    delta_ratio_threshold(chunk.codec_hint, chunk.chunk_type);
-                                if delta_ratio < threshold {
-                                    let delta_key = format!("chunk-deltas/{}", chunk.id.to_hex());
-                                    let compressed_delta = if let Some(ref smart) = smart_comp {
-                                        smart
-                                            .compress_typed(
-                                                &delta_bytes,
-                                                CompressionObjectType::Unknown,
-                                            )
-                                            .map_err(|e| anyhow::anyhow!("Compress delta: {}", e))?
-                                    } else {
-                                        compressor
-                                            .compress(&delta_bytes)
-                                            .map_err(|e| anyhow::anyhow!("Compress delta: {}", e))?
-                                    };
+                                    let threshold =
+                                        delta_ratio_threshold(chunk.codec_hint, chunk.chunk_type);
+                                    if delta_ratio < threshold {
+                                        let delta_key =
+                                            format!("chunk-deltas/{}", chunk.id.to_hex());
+                                        let compressed_delta = if let Some(ref smart) = smart_comp {
+                                            smart
+                                                .compress_typed(
+                                                    &delta_bytes,
+                                                    CompressionObjectType::Unknown,
+                                                )
+                                                .map_err(|e| {
+                                                    anyhow::anyhow!("Compress delta: {}", e)
+                                                })?
+                                        } else {
+                                            compressor.compress(&delta_bytes).map_err(|e| {
+                                                anyhow::anyhow!("Compress delta: {}", e)
+                                            })?
+                                        };
 
-                                    // TOCTOU guard FIRST: check+register before any I/O.
-                                    // Lock held through the chain re-walk AND the meta
-                                    // write — same cycle-closing race as the other two
-                                    // chunk-delta write sites (see the sequential path).
-                                    let mut pairs = delta_pairs.lock().await;
-                                    let should_write = if pairs.contains(&(base_id, chunk.id)) {
-                                        debug!(
-                                            chunk_id = %chunk.id,
-                                            base_id = %base_id,
-                                            "Streaming parallel: TOCTOU delta race — reverse pair committed; skipping write"
-                                        );
-                                        false
-                                    } else if chunk_delta_chain_contains_impl(
-                                        &*storage, base_id, chunk.id,
-                                    )
-                                    .await
-                                    {
-                                        debug!(
-                                            chunk_id = %chunk.id,
-                                            base_id = %base_id,
-                                            "Streaming parallel: refusing chunk delta at commit — concurrent writes would close a cycle"
-                                        );
-                                        false
-                                    } else {
-                                        pairs.insert((chunk.id, base_id));
-                                        true
-                                    };
-
-                                    if should_write {
-                                        // Write .meta FIRST (durability anchor), still
-                                        // under the lock so concurrent chain walks
-                                        // observe it atomically.
-                                        let meta_key =
-                                            format!("chunk-deltas/{}.meta", chunk.id.to_hex());
-                                        let meta_data = format!("base:{}", base_id.to_hex());
-                                        if let Err(e) =
-                                            storage.put(&meta_key, meta_data.as_bytes()).await
-                                            && !storage.exists(&meta_key).await.unwrap_or(false)
+                                        // TOCTOU guard FIRST: check+register before any I/O.
+                                        // Lock held through the chain re-walk AND the meta
+                                        // write — same cycle-closing race as the other two
+                                        // chunk-delta write sites (see the sequential path).
+                                        let mut pairs = delta_pairs.lock().await;
+                                        let should_write = if pairs.contains(&(base_id, chunk.id)) {
+                                            debug!(
+                                                chunk_id = %chunk.id,
+                                                base_id = %base_id,
+                                                "Streaming parallel: TOCTOU delta race — reverse pair committed; skipping write"
+                                            );
+                                            false
+                                        } else if resolve_delta_base(&*storage, base_id, chunk.id)
+                                            .await
+                                            != Some(base_id)
                                         {
-                                            return Err(anyhow::anyhow!("Store delta meta: {}", e));
-                                        }
-                                        drop(pairs);
+                                            // Re-decide under the lock, same answer
+                                            // required — the delta bytes are bound to
+                                            // this specific `base_id`.
+                                            debug!(
+                                                chunk_id = %chunk.id,
+                                                base_id = %base_id,
+                                                "Streaming parallel: refusing chunk delta at commit — concurrent writes would close a cycle"
+                                            );
+                                            false
+                                        } else {
+                                            pairs.insert((chunk.id, base_id));
+                                            true
+                                        };
 
-                                        // Tolerate concurrent writes: if put fails but chunk exists, treat as dedup
-                                        if let Err(e) =
-                                            storage.put(&delta_key, &compressed_delta).await
-                                            && !storage.exists(&delta_key).await.unwrap_or(false)
-                                        {
-                                            // Remove the routing sidecar so the chunk is
-                                            // not permanently misrouted to a missing binary.
-                                            let _ = storage.delete(&meta_key).await;
-                                            return Err(anyhow::anyhow!("Store delta: {}", e));
-                                        }
+                                        if should_write {
+                                            // Write .meta FIRST (durability anchor), still
+                                            // under the lock so concurrent chain walks
+                                            // observe it atomically.
+                                            let meta_key =
+                                                format!("chunk-deltas/{}.meta", chunk.id.to_hex());
+                                            let meta_data = format!("base:{}", base_id.to_hex());
+                                            if let Err(e) =
+                                                storage.put(&meta_key, meta_data.as_bytes()).await
+                                                && !storage.exists(&meta_key).await.unwrap_or(false)
+                                            {
+                                                return Err(anyhow::anyhow!(
+                                                    "Store delta meta: {}",
+                                                    e
+                                                ));
+                                            }
+                                            drop(pairs);
 
-                                        debug!(
-                                            chunk_id = %chunk.id,
-                                            base_id = %base_id,
-                                            delta_ratio,
-                                            "Streaming parallel: stored chunk as delta"
-                                        );
-                                        stored_as_delta = true;
-                                    } else {
-                                        drop(pairs);
+                                            // Tolerate concurrent writes: if put fails but chunk exists, treat as dedup
+                                            if let Err(e) =
+                                                storage.put(&delta_key, &compressed_delta).await
+                                                && !storage
+                                                    .exists(&delta_key)
+                                                    .await
+                                                    .unwrap_or(false)
+                                            {
+                                                // Remove the routing sidecar so the chunk is
+                                                // not permanently misrouted to a missing binary.
+                                                let _ = storage.delete(&meta_key).await;
+                                                return Err(anyhow::anyhow!("Store delta: {}", e));
+                                            }
+
+                                            debug!(
+                                                chunk_id = %chunk.id,
+                                                base_id = %base_id,
+                                                delta_ratio,
+                                                "Streaming parallel: stored chunk as delta"
+                                            );
+                                            stored_as_delta = true;
+                                        } else {
+                                            drop(pairs);
+                                        }
                                     }
                                 }
                             }
@@ -2221,11 +2285,36 @@ impl ObjectDatabase {
     /// Reads and decompresses a single chunk, reconstructing from delta if needed.
     /// Supports ALL file types: AI/ML models, creative projects, 3D, text, etc.
     pub async fn get_chunk(&self, chunk_id: &Oid) -> anyhow::Result<Vec<u8>> {
+        self.get_chunk_limited(chunk_id, Some(MAX_DELTA_DEPTH as usize))
+            .await
+    }
+
+    /// Reconstruct a chunk through a delta chain of **any** depth.
+    ///
+    /// Identical to [`ObjectDatabase::get_chunk`] except that the depth limit
+    /// is not applied — still cycle-safe, still iterative. This exists solely
+    /// for `fsck --repair`'s chain flattening: a repository written before the
+    /// write-side depth guard can hold chains that `get_chunk` refuses, and
+    /// refusing them is precisely why it needs repairing. Nothing on a read or
+    /// transfer path may call this — they must keep enforcing the limit.
+    pub async fn reconstruct_chunk_unbounded(&self, chunk_id: &Oid) -> anyhow::Result<Vec<u8>> {
+        self.get_chunk_limited(chunk_id, None).await
+    }
+
+    /// Shared implementation of [`Self::get_chunk`] /
+    /// [`Self::reconstruct_chunk_unbounded`].
+    ///
+    /// `max_chain` of `None` disables the depth ceiling; cycle detection is
+    /// unconditional either way.
+    async fn get_chunk_limited(
+        &self,
+        chunk_id: &Oid,
+        max_chain: Option<usize>,
+    ) -> anyhow::Result<Vec<u8>> {
         // Walk the delta chain iteratively (no async recursion) to bound stack
         // usage regardless of chain length and to detect cycles. Each iteration
         // reads a tiny meta record; the heavy work (base read + delta apply)
         // happens after the full chain is known.
-        const MAX_CHUNK_DELTA_DEPTH: usize = MAX_DELTA_DEPTH as usize;
         let mut chain: Vec<Oid> = Vec::new(); // leaf-first order
         let mut visited: std::collections::HashSet<Oid> = std::collections::HashSet::new();
         let mut cur = *chunk_id;
@@ -2236,10 +2325,12 @@ impl ObjectDatabase {
                     cur
                 );
             }
-            if chain.len() > MAX_CHUNK_DELTA_DEPTH {
+            if let Some(max) = max_chain
+                && chain.len() > max
+            {
                 anyhow::bail!(
                     "Chunk delta chain too deep (> {}): chain starting at {}",
-                    MAX_CHUNK_DELTA_DEPTH,
+                    max,
                     chunk_id
                 );
             }
@@ -2341,6 +2432,30 @@ impl ObjectDatabase {
 
         // Not a delta chunk - return what we already read as the raw chunk
         Ok(current)
+    }
+
+    /// Store `data` as a full (non-delta) chunk under `chunks/<chunk_id>`.
+    ///
+    /// Used by `fsck --repair` when flattening an over-deep delta chain. The
+    /// caller is responsible for having verified that `Oid::hash(data) ==
+    /// chunk_id` — this method does not re-hash, because its only caller has
+    /// already done so and the check is what makes the repair safe.
+    pub async fn write_full_chunk(&self, chunk_id: &Oid, data: &[u8]) -> anyhow::Result<()> {
+        let compressed = if let Some(smart_comp) = &self.smart_compressor {
+            smart_comp
+                .compress_typed(data, CompressionObjectType::Unknown)
+                .map_err(|e| anyhow::anyhow!("Failed to compress chunk {}: {}", chunk_id, e))?
+        } else {
+            self.compressor
+                .compress(data)
+                .map_err(|e| anyhow::anyhow!("Failed to compress chunk {}: {}", chunk_id, e))?
+        };
+        let chunk_key = format!("chunks/{}", chunk_id.to_hex());
+        self.storage
+            .put(&chunk_key, &compressed)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to store chunk {}: {}", chunk_id, e))?;
+        Ok(())
     }
 
     /// Get raw compressed chunk data for network transfer
@@ -2547,29 +2662,43 @@ impl ObjectDatabase {
         base_id: &Oid,
         compressed_delta_bytes: &[u8],
     ) -> anyhow::Result<()> {
+        // Unlike the add-side writers, this path takes its base entirely on
+        // trust from a remote, so it must not re-target — a delta payload is
+        // bound to the exact base it was encoded against. Refusing with an
+        // error is correct here: callers (pull.rs) already fall back to
+        // fetching the full chunk when this returns Err.
         if chunk_id == base_id
-            || chunk_delta_chain_contains_impl(&*self.storage, *base_id, *chunk_id).await
+            || resolve_delta_base(&*self.storage, *base_id, *chunk_id).await != Some(*base_id)
         {
             anyhow::bail!(
-                "would create chunk delta cycle: chunk {} base {}",
+                "refusing chunk delta: chunk {} base {} would create a cycle or exceed max chain depth {}",
                 chunk_id,
-                base_id
+                base_id,
+                MAX_DELTA_DEPTH
             );
         }
 
-        let delta_key = format!("chunk-deltas/{}", chunk_id.to_hex());
-        if let Err(e) = self.storage.put(&delta_key, compressed_delta_bytes).await
-            && !self.storage.exists(&delta_key).await.unwrap_or(false)
-        {
-            return Err(anyhow::anyhow!("Failed to store chunk delta: {}", e));
-        }
-
+        // Write .meta FIRST — it is the durability anchor for all existence
+        // probes (see the add-side writers). A crash between the two writes
+        // then leaves an unreachable binary (collected by `gc`) rather than a
+        // binary with no routing sidecar, which would make clone 404 when the
+        // probe reports the id but the download handler finds no meta.
         let meta_key = format!("chunk-deltas/{}.meta", chunk_id.to_hex());
         let meta_data = format!("base:{}", base_id.to_hex());
         if let Err(e) = self.storage.put(&meta_key, meta_data.as_bytes()).await
             && !self.storage.exists(&meta_key).await.unwrap_or(false)
         {
             return Err(anyhow::anyhow!("Failed to store chunk delta meta: {}", e));
+        }
+
+        let delta_key = format!("chunk-deltas/{}", chunk_id.to_hex());
+        if let Err(e) = self.storage.put(&delta_key, compressed_delta_bytes).await
+            && !self.storage.exists(&delta_key).await.unwrap_or(false)
+        {
+            // Remove the routing sidecar so the chunk is not permanently
+            // misrouted to a missing binary.
+            let _ = self.storage.delete(&meta_key).await;
+            return Err(anyhow::anyhow!("Failed to store chunk delta: {}", e));
         }
 
         Ok(())
@@ -2763,6 +2892,172 @@ mod read_to_file_atomicity_tests {
                 "stray tmp file left behind: {}",
                 path.display()
             );
+        }
+    }
+}
+
+/// End-to-end guard for the unbounded chunk-delta chain defect.
+///
+/// The unit tests around `resolve_delta_base` prove the policy; these drive
+/// the real `add` write paths, because the defect was not in the policy (there
+/// wasn't one) but in every writer independently forgetting depth while
+/// remembering cycles.
+#[cfg(test)]
+mod chunk_delta_depth_tests {
+    use super::*;
+    use crate::chunking::ChunkStrategy;
+    use mediagit_storage::mock::MockBackend;
+    use std::sync::Arc as StdArc;
+
+    /// Deepest `chunk-deltas/` chain currently on disk, cycle-safe.
+    async fn max_chain_depth(storage: &StdArc<MockBackend>) -> usize {
+        let metas = storage.list_objects("chunk-deltas/").await.unwrap();
+        let mut worst = 0usize;
+        for key in metas.iter().filter(|k| k.ends_with(".meta")) {
+            let hex = key
+                .trim_start_matches("chunk-deltas/")
+                .trim_end_matches(".meta");
+            let Ok(start) = Oid::from_hex(hex) else {
+                continue;
+            };
+            let walk = chunk_delta_chain_walk(&**storage, start, None).await;
+            assert!(
+                !walk.truncated,
+                "chain from {start} is unresolvable (cycle or over-cap) — \
+                 every chain an add writes must terminate at a full chunk"
+            );
+            worst = worst.max(walk.depth);
+        }
+        worst
+    }
+
+    /// A run of incrementally-edited similar payloads is exactly the shape
+    /// that produced the 624 MiB `psds` repo that could not be pushed: each
+    /// new chunk nominates the previous one, which is itself a delta.
+    ///
+    /// Before the depth guard this grew without bound until `get_chunk`
+    /// refused to reconstruct — so with the guard reverted, this test fails.
+    #[tokio::test]
+    async fn add_of_many_similar_versions_never_exceeds_max_delta_depth() {
+        let storage = StdArc::new(MockBackend::new());
+        let odb = ObjectDatabase::with_optimizations(
+            storage.clone(),
+            10_000_000,
+            Some(ChunkStrategy::Fixed { size: 256 * 1024 }),
+            true,
+            0,
+        );
+
+        // 30 versions, each a small edit of the last: >2 chunks apiece so this
+        // takes the parallel writer, the path the reported failure came from.
+        let mut content: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let mut oids = Vec::new();
+        for v in 0..30usize {
+            for k in 0..64usize {
+                content[v * 997 + k] = ((v * 7 + k) | 0x80) as u8;
+            }
+            let oid = odb
+                .write_chunked_parallel(ObjectType::Blob, &content, "asset.psd")
+                .await
+                .expect("chunked write must succeed");
+            oids.push((oid, content.clone()));
+        }
+
+        let delta_count = storage
+            .list_objects("chunk-deltas/")
+            .await
+            .unwrap()
+            .iter()
+            .filter(|k| k.ends_with(".meta"))
+            .count();
+        // Guard against a vacuous pass: if no deltas were written at all, the
+        // payloads never took the delta path and the depth assertion below
+        // would be trivially true. (The first draft of this test sat under
+        // MIN_CHUNK_SIZE and silently measured nothing.)
+        assert!(
+            delta_count > 0,
+            "no chunk deltas were written — this test is not exercising the \
+             chain-depth path and proves nothing"
+        );
+
+        let depth = max_chain_depth(&storage).await;
+        assert!(
+            depth <= MAX_DELTA_DEPTH as usize,
+            "on-disk chunk-delta chain reached depth {depth}, deeper than the \
+             {} `get_chunk` will reconstruct — the repository would be \
+             unpushable and unclonable (measured {depth} with the guard \
+             disabled, so this assertion is load-bearing)",
+            MAX_DELTA_DEPTH
+        );
+
+        // Depth alone is not enough: every version must still read back
+        // byte-identically, or we bounded the chain by losing data.
+        for (oid, expected) in &oids {
+            let got = odb
+                .read(oid)
+                .await
+                .unwrap_or_else(|e| panic!("version {oid} unreadable after add: {e}"));
+            assert_eq!(&got, expected, "version {oid} round-tripped incorrectly");
+        }
+    }
+
+    /// Same invariant on the sequential writer (`num_chunks <= 2` routes here).
+    ///
+    /// Unlike the parallel test above, this is a guard rather than a
+    /// reproduction: measured with the depth check disabled, this path still
+    /// stays shallow, because `try_store_chunk_as_delta` returns as soon as it
+    /// stores a delta and so never registers that chunk in the similarity
+    /// detector — a later chunk cannot nominate it. That is incidental, not
+    /// designed (the detector is seeded from prior manifests elsewhere, at
+    /// depth <= 2), so the assertion stays: it pins the invariant against a
+    /// future change to registration order.
+    #[tokio::test]
+    async fn sequential_add_of_similar_small_files_never_exceeds_max_delta_depth() {
+        let storage = StdArc::new(MockBackend::new());
+        let odb = ObjectDatabase::with_optimizations(
+            storage.clone(),
+            10_000_000,
+            Some(ChunkStrategy::Fixed {
+                size: 2 * 1024 * 1024,
+            }),
+            true,
+            0,
+        );
+
+        let mut content: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let mut oids = Vec::new();
+        for v in 0..30usize {
+            for k in 0..32usize {
+                content[v * 101 + k] = ((v * 5 + k) | 0x80) as u8;
+            }
+            let oid = odb
+                .write_chunked(ObjectType::Blob, &content, "small.psd")
+                .await
+                .expect("chunked write must succeed");
+            oids.push((oid, content.clone()));
+        }
+
+        let delta_count = storage
+            .list_objects("chunk-deltas/")
+            .await
+            .unwrap()
+            .iter()
+            .filter(|k| k.ends_with(".meta"))
+            .count();
+        assert!(
+            delta_count > 0,
+            "no chunk deltas were written — this test is not exercising the              chain-depth path and proves nothing"
+        );
+
+        let depth = max_chain_depth(&storage).await;
+        assert!(
+            depth <= MAX_DELTA_DEPTH as usize,
+            "sequential path reached chain depth {depth}, above {}",
+            MAX_DELTA_DEPTH
+        );
+        for (oid, expected) in &oids {
+            let got = odb.read(oid).await.expect("version must be readable");
+            assert_eq!(&got, expected);
         }
     }
 }
