@@ -388,10 +388,12 @@ prefix = "media/"
 ```toml
 [storage]
 backend = "azure"
-account_name = "myaccount"
 container = "my-container"
-account_key = "..."          # or `connection_string` instead of account_name/account_key
 prefix = "media/"
+auth = { type = "account_key", account_name = "myaccount", account_key = "..." }
+# or: auth = { type = "connection_string", value = "..." }
+# or: auth = { type = "sas", account_name = "myaccount", token = "sv=..." }
+# or: auth = { type = "emulator" }   # local Azurite
 ```
 
 **Google Cloud Storage:**

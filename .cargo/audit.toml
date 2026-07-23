@@ -17,13 +17,26 @@
 #   postcard 1.1.3 is the latest release. atomic-polyfill is a no-op on
 #   desktop targets (only relevant for embedded/no_std).
 #
-# RUSTSEC-2024-0384: instant 0.1.13 (unmaintained)
-#   azure_core 0.21 → futures-lite 1.x → fastrand 1.x → instant
-#   azure_storage_blobs 0.21 is the latest on crates.io and requires
-#   azure_core 0.21. The azure feature is optional in mediagit-storage.
+# RUSTSEC-2024-0384 (instant), RUSTSEC-2024-0436 (paste),
+# RUSTSEC-2026-0174 (http-types): RESOLVED 2026-07-23. All three entered
+#   solely through azure_core 0.21, which left the tree when the Azure backend
+#   moved to Apache OpenDAL (azure_storage_blobs 0.21 is EOL; Microsoft's GA
+#   line is Entra-ID-only and cannot do shared key -- Azure/azure-sdk-for-rust
+#   #2975). Verified absent from Cargo.lock. The duplicate reqwest 0.12 that
+#   azure_core held alive is gone too. Ignores removed.
 #
-# RUSTSEC-2024-0436: paste 1.0.15 (unmaintained)
-#   azure_core 0.21 → paste. Same root cause as RUSTSEC-2024-0384.
+# RUSTSEC-2026-0194, -0195: quick-xml (DoS - quadratic duplicate-attribute
+#   scan / unbounded namespace allocation). Fix requires >= 0.41.0.
+#   NOT resolved by the OpenDAL migration -- the parent changed, the exposure
+#   did not: was quick-xml 0.31 via azure_core 0.21, is now 0.39.4 via
+#   opendal-service-azblob 0.57, which requires "^0.39.3" and so cannot take
+#   0.41. (opendal 0.58 does move to quick-xml 0.41, but 0.58.0 is YANKED and
+#   its published feature map exposes no services-azblob at all -- unusable on
+#   both counts. Recheck at 0.59.)
+#   Exposure is unchanged from before the migration and remains bounded: XML
+#   parsing happens only on Azure Blob API responses from our own configured
+#   storage account, not on attacker-supplied input, and the azure feature is
+#   optional in mediagit-storage.
 #
 # RUSTSEC-2026-0098, -0099, -0104: rustls-webpki 0.101.7 — RESOLVED 2026-07-23.
 #   The legacy rustls 0.21 stack entered via aws-config's `rustls` feature
@@ -40,30 +53,17 @@
 #   MediaGit uses tracing (not log) and never calls rand::rng() directly.
 #   Updated rand 0.9→0.9.4 and 0.10→0.10.1 (our direct deps).
 #
-# RUSTSEC-2026-0194, -0195: quick-xml 0.31.0 (DoS via duplicate attributes / namespace alloc)
-#   azure_core 0.21 → quick-xml 0.31.0. The Azure SDK for Rust hasn't
-#   released a version that uses quick-xml >= 0.41. The azure feature is
-#   optional in mediagit-storage and XML parsing is only used for Azure
-#   Blob Storage responses — not attacker-controlled input.
-#
-# RUSTSEC-2026-0174: http-types 2.12.0 (notice — ASCII invariant violation)
-#   azure_core 0.21 → http-types 2.12.0. Same root cause as quick-xml:
-#   pinned by the Azure SDK. Low severity notice, not an exploitable vuln.
-#
 # RUSTSEC-2026-0183, -0184: git2 0.20.4 (unsound — UB in Remote::list / BlameHunk)
 #   No patched git2 release available. Our code does not call Remote::list()
 #   or create BlameHunks from buffers, so these code paths are not reachable.
 #
-# Review date: 2026-07-18
+# Review date: 2026-07-23
 ignore = [
     "RUSTSEC-2023-0071",
     "RUSTSEC-2023-0089",
-    "RUSTSEC-2024-0384",
-    "RUSTSEC-2024-0436",
     "RUSTSEC-2026-0097",
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
-    "RUSTSEC-2026-0174",
     "RUSTSEC-2026-0183",
     "RUSTSEC-2026-0184",
 ]

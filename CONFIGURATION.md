@@ -173,11 +173,18 @@ encryption_algorithm = "AES256"
 ```toml
 [storage]
 backend = "azure"
-account_name = "mystorageaccount"
 container = "media-container"
 prefix = ""
-# account_key from env, or use connection_string
+auth = { type = "account_key", account_name = "mystorageaccount", account_key = "..." }
 ```
+
+Credentials sit in a tagged `auth` block (`config_version` 3+). Variants:
+`account_key` (`account_name` + `account_key`), `connection_string` (`value`),
+`sas` (`account_name` + `token`), `emulator` (no fields, local Azurite). The
+pre-v3 flat form is migrated automatically on first open; ambiguous or empty
+flat configs fail with a message naming the replacement block. The backend
+runs on Apache OpenDAL; presign is Service SAS from the account key (see
+`KNOWN_LIMITATIONS.md` for the Azurite presign caveat).
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|

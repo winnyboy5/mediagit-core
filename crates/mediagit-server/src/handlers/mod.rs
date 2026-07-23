@@ -289,23 +289,37 @@ async fn build_storage_backend(repo_path: &StdPath) -> Result<Arc<dyn StorageBac
             // multiple repos sharing one container don't collide on identical
             // OIDs. (Pre-fix, prefix was silently ignored on put/get/exists/
             // delete and only honoured on list_objects — see C-BUG-AZURE-PREFIX.)
-            let storage = if let Some(conn_str) = &azure_config.connection_string {
-                AzureBackend::with_connection_string_and_prefix(
-                    &azure_config.container,
-                    conn_str,
-                    &azure_config.prefix,
-                )
-                .await
-                .map_err(|e| {
-                    tracing::error!(
-                        "Failed to initialize Azure backend with connection string: {}",
-                        e
-                    );
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?
-            } else if let Some(account_key) = &azure_config.account_key {
-                AzureBackend::with_account_key_and_prefix(
-                    &azure_config.account_name,
+            // Credential choice is the config enum's job now; this match is
+            // total, so a new auth variant is a compile error here rather than
+            // a runtime "requires either ..." 500.
+            use mediagit_config::AzureAuth;
+            let Some(auth) = &azure_config.auth else {
+                tracing::error!(
+                    "Azure backend config is missing its `auth` block (pre-v3 flat format?) -                      see CONFIGURATION.md for the replacement"
+                );
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            };
+            let storage = match auth {
+                AzureAuth::ConnectionString { value } => {
+                    AzureBackend::with_connection_string_and_prefix(
+                        &azure_config.container,
+                        value,
+                        &azure_config.prefix,
+                    )
+                    .await
+                    .map_err(|e| {
+                        tracing::error!(
+                            "Failed to initialize Azure backend with connection string: {}",
+                            e
+                        );
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?
+                }
+                AzureAuth::AccountKey {
+                    account_name,
+                    account_key,
+                } => AzureBackend::with_account_key_and_prefix(
+                    account_name,
                     &azure_config.container,
                     account_key,
                     &azure_config.prefix,
@@ -314,10 +328,31 @@ async fn build_storage_backend(repo_path: &StdPath) -> Result<Arc<dyn StorageBac
                 .map_err(|e| {
                     tracing::error!("Failed to initialize Azure backend with account key: {}", e);
                     StatusCode::INTERNAL_SERVER_ERROR
-                })?
-            } else {
-                tracing::error!("Azure backend requires either connection_string or account_key");
-                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                })?,
+                AzureAuth::Sas {
+                    account_name,
+                    token,
+                } => AzureBackend::with_sas_token_and_prefix(
+                    account_name,
+                    &azure_config.container,
+                    token,
+                    &azure_config.prefix,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to initialize Azure backend with SAS token: {}", e);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?,
+                AzureAuth::Emulator => AzureBackend::with_connection_string_and_prefix(
+                    &azure_config.container,
+                    mediagit_config::AZURITE_DEV_CONNECTION_STRING,
+                    &azure_config.prefix,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to initialize Azure backend for emulator: {}", e);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?,
             };
             Arc::new(storage)
         }

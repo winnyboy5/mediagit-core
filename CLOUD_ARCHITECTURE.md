@@ -92,12 +92,18 @@ flowchart LR
 
 ### Azure Blob Storage
 
+Credentials use a tagged `auth` block under `[storage]` (`config_version` 3+):
+one of `account_key` (`account_name` + `account_key`), `connection_string`
+(`value`), `sas` (`account_name` + `token`), or `emulator` (local Azurite).
+
 | Setting | Description |
 |---------|-------------|
-| `account_name` | Storage account name |
-| `account_key` | Storage account key |
 | `container` | Blob container name |
-| `use_managed_identity` | Use Azure AD auth |
+| `prefix` | Optional key prefix; lets multiple repos share one container |
+
+Built on Apache OpenDAL (the `azure_storage_blobs` 0.21 line is EOL, and its GA
+replacement is Entra-ID-only). Managed-identity / Azure AD auth is not
+supported — authenticate by shared key, SAS, or connection string.
 
 **Storage Tiers:**
 - **Hot**: Frequently accessed data (active repos)
@@ -457,10 +463,10 @@ region = "us-east-1"
 ```toml
 [storage]
 backend = "azure"
-account_name = "mediagitstorage"
 container = "repos"
-# account_key = "..."   # Or set MEDIAGIT_AZURE_ACCOUNT_KEY env var
-# connection_string = "..."  # Alternative to account_key
+auth = { type = "account_key", account_name = "mediagitstorage", account_key = "..." }
+# variants: connection_string { value }, sas { account_name, token }, emulator {}
+# account_key may also come from the AZURE_STORAGE_KEY env var
 ```
 
 ### MinIO (mediagit.toml)

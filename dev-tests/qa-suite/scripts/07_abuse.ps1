@@ -766,9 +766,13 @@ function Drill-A12-DeltaChainCycle {
 function Drill-A13-PerChunkFallbackNoRateLimit {
   $drill = "A13-per-chunk-fallback-no-429"
   $srv = $null
-  $prevPack = $env:MEDIAGIT_PACK_ENABLED
+  # MEDIAGIT_CLOUD_PACKS is the knob the PUSH path actually reads
+  # (push.rs: unwrap_or("1")). The earlier version of this drill set
+  # MEDIAGIT_PACK_ENABLED, which the push path never reads — so packs stayed
+  # on and the per-chunk fallback was never exercised (a vacuous pass).
+  $prevPack = $env:MEDIAGIT_CLOUD_PACKS
   try {
-    $env:MEDIAGIT_PACK_ENABLED = "0"
+    $env:MEDIAGIT_CLOUD_PACKS = "0"
     # Distinct phase tag: sharing the bare $Phase reuses a repo namespace an
     # earlier drill already claimed in the bucket, and the server's collision
     # guard then refuses to start.
@@ -785,13 +789,37 @@ function Drill-A13-PerChunkFallbackNoRateLimit {
     $push = Invoke-MG $repo @("push", "-u", "origin", "main") $Phase -TimeoutSec 1800
     $rateLimited = ($push.Out -match "(?i)429|rate.?limit|too many requests")
 
-    $pass = ($push.Exit -eq 0) -and (-not $rateLimited)
-    Rec $drill $pass "push=$($push.Exit) rate-limited=$rateLimited (packs disabled, default limits)"
+    # Anti-vacuous: prove the fallback was ACTUALLY taken. With packs off there
+    # must be ZERO `packs/` endpoint hits. The per-chunk path itself may still
+    # move bytes either via presigned per-chunk URLs (`chunks/upload-urls`,
+    # direct-to-bucket on MinIO) OR proxy `PUT /chunks/<hex>` — both are valid
+    # fallback shapes, so "took fallback" = no packs AND some chunk activity.
+    # NOTE the two `upload-urls` endpoints are distinct: `packs/upload-urls` is
+    # the pack path, `chunks/upload-urls` is the fallback — matching them
+    # together (an earlier bug) conflates the very thing this drill separates.
+    $packHits = 0
+    $chunkUrlMints = 0
+    $chunkProxyPuts = 0
+    if ($srv.OutLog -and (Test-Path $srv.OutLog)) {
+      $log = Get-Content $srv.OutLog -Raw -EA SilentlyContinue
+      if ($log) {
+        $packHits = ([regex]::Matches($log, 'packs/upload-urls|packs/presign|Presigned pack')).Count
+        $chunkUrlMints = ([regex]::Matches($log, 'chunks/upload-urls')).Count
+        $chunkProxyPuts = ([regex]::Matches($log, 'PUT /[^ ]*/chunks/[0-9a-f]')).Count
+      }
+    }
+    $chunkActivity = ($chunkUrlMints + $chunkProxyPuts)
+    $tookFallback = ($packHits -eq 0) -and ($chunkActivity -gt 0)
+
+    $pass = ($push.Exit -eq 0) -and (-not $rateLimited) -and $tookFallback
+    Rec $drill $pass ("push=$($push.Exit) rate-limited=$rateLimited " +
+      "pack-hits=$packHits chunk-url-mints=$chunkUrlMints chunk-proxy-puts=$chunkProxyPuts " +
+      "took-fallback=$tookFallback (packs off via MEDIAGIT_CLOUD_PACKS, default limits)")
   } catch {
     if ("$_" -match "^SKIP:") { Rec $drill "SKIP" "$_" } else { Rec $drill $false "unexpected error: $_" }
   } finally {
     Stop-QaServer $srv
-    $env:MEDIAGIT_PACK_ENABLED = $prevPack
+    $env:MEDIAGIT_CLOUD_PACKS = $prevPack
   }
 }
 

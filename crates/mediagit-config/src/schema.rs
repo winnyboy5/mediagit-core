@@ -174,7 +174,7 @@ impl Config {
     pub async fn load(repo_root: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
         use crate::ConfigLoader;
         use crate::migration::{
-            CONFIG_VERSION, MigrationManager, MigrationV0ToV1, MigrationV1ToV2,
+            CONFIG_VERSION, MigrationManager, MigrationV0ToV1, MigrationV1ToV2, MigrationV2ToV3,
         };
         let config_path = repo_root.as_ref().join(".mediagit/config.toml");
 
@@ -215,6 +215,7 @@ impl Config {
         let mut manager = MigrationManager::new();
         manager.register(Box::new(MigrationV0ToV1));
         manager.register(Box::new(MigrationV1ToV2));
+        manager.register(Box::new(MigrationV2ToV3));
 
         let value = serde_json::to_value(&config)
             .map_err(|e| anyhow::anyhow!("Failed to serialize config for migration: {}", e))?;
@@ -406,16 +407,57 @@ pub struct S3Storage {
     pub encryption_algorithm: String,
 }
 
+/// How to authenticate to Azure Blob Storage.
+///
+/// A tagged enum so exactly one credential is representable. The previous flat
+/// shape had `account_key` and `connection_string` as independent `Option`s,
+/// which made "neither" and "both" expressible and pushed the check into
+/// runtime validation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AzureAuth {
+    /// Shared account key — the classic Azure Storage credential.
+    AccountKey {
+        /// Storage account name.
+        account_name: String,
+        /// Storage account key.
+        account_key: String,
+    },
+    /// Full `DefaultEndpointsProtocol=...;AccountName=...;AccountKey=...`
+    /// string. Parsed by the storage backend, not by us.
+    ConnectionString {
+        /// The connection string verbatim.
+        value: String,
+    },
+    /// A pre-minted Shared Access Signature. First-class rather than something
+    /// smuggled through a connection string.
+    Sas {
+        /// Storage account name.
+        account_name: String,
+        /// SAS token, with or without a leading `?`.
+        token: String,
+    },
+    /// Local Azurite emulator, using the well-known development credentials.
+    ///
+    /// Explicit, where it used to be *inferred* from connection-string
+    /// contents — which is why the emulator path was historically the least
+    /// obvious code in the Azure backend.
+    Emulator,
+}
+
+/// Azurite's published development connection string.
+///
+/// These are the emulator's fixed, publicly-documented credentials — they are
+/// not a secret and are identical on every Azurite install. Defined once here
+/// so the `Emulator` auth variant resolves the same way in every consumer.
+pub const AZURITE_DEV_CONNECTION_STRING: &str = "DefaultEndpointsProtocol=http;\
+AccountName=devstoreaccount1;\
+AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;\
+BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;";
+
 /// Azure Blob Storage configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AzureStorage {
-    /// Storage account name
-    pub account_name: String,
-
-    /// Storage account key (can be overridden via env)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub account_key: Option<String>,
-
     /// Container name
     pub container: String,
 
@@ -423,9 +465,40 @@ pub struct AzureStorage {
     #[serde(default)]
     pub prefix: String,
 
-    /// Connection string (alternative to account_name/account_key)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Credential. `None` only when reading a pre-v3 config; validation turns
+    /// that into an actionable migration error rather than a bare serde
+    /// "missing field" message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<AzureAuth>,
+
+    /// Fields from the pre-v3 flat shape, kept solely so a stale config is
+    /// *recognised* and reported precisely. Never written back out.
+    #[serde(flatten, default)]
+    pub legacy: LegacyAzureFields,
+}
+
+/// Pre-`config_version` 3 Azure fields. Retained for detection and migration
+/// only — see [`AzureAuth`] for the current shape.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct LegacyAzureFields {
+    /// Old top-level `account_name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_name: Option<String>,
+    /// Old top-level `account_key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_key: Option<String>,
+    /// Old top-level `connection_string`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_string: Option<String>,
+}
+
+impl LegacyAzureFields {
+    /// Whether any pre-v3 field was present in the parsed config.
+    pub fn is_present(&self) -> bool {
+        self.account_name.is_some()
+            || self.account_key.is_some()
+            || self.connection_string.is_some()
+    }
 }
 
 /// Google Cloud Storage configuration

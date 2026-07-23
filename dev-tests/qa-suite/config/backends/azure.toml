@@ -1,8 +1,11 @@
 # QA-suite template - Azure Blob Storage. Tokens substituted by scripts\lib\remote.ps1.
 # Copied from dev-tests\dev-server\config.azure.toml with the real account_key that was
 # checked into that file replaced by a placeholder token (see remote.ps1 for env var names).
+#
+# config_version 3 shape: credentials live in a tagged `auth` block so exactly
+# one credential is representable. The pre-v3 flat form (account_name/
+# account_key at this level) is rejected with a migration error.
 [storage]
 backend = "azure"
-account_name = "{{ACCOUNT}}"
-account_key = "{{KEY}}"
 container = "{{CONTAINER}}"
+auth = { type = "account_key", account_name = "{{ACCOUNT}}", account_key = "{{KEY}}" }

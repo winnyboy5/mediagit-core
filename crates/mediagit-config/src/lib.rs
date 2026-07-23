@@ -57,6 +57,7 @@ pub use error::{ConfigError, ConfigResult};
 pub use loader::{ConfigFormat, ConfigLoader};
 pub use migration::{
     CONFIG_VERSION, ConfigMigration, MigrationManager, MigrationV0ToV1, MigrationV1ToV2,
+    MigrationV2ToV3,
 };
 pub use schema::*;
 pub use validation::Validator;

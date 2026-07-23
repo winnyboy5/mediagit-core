@@ -672,25 +672,56 @@ async fn create_inner_storage_backend(
             }
         }
         mediagit_config::StorageConfig::Azure(azure_config) => {
-            let storage = if let Some(conn_str) = &azure_config.connection_string {
-                mediagit_storage::AzureBackend::with_connection_string_and_prefix(
-                    &azure_config.container,
-                    conn_str,
-                    &azure_config.prefix,
-                )
-                .await
-                .context("Failed to initialize Azure storage backend")?
-            } else if let Some(account_key) = &azure_config.account_key {
-                mediagit_storage::AzureBackend::with_account_key_and_prefix(
-                    &azure_config.account_name,
+            // Credential choice is the config enum's job now; this match is
+            // total, so a new auth variant is a compile error here rather than
+            // a runtime "requires either ..." bail.
+            use mediagit_config::AzureAuth;
+            let Some(auth) = &azure_config.auth else {
+                anyhow::bail!(
+                    "Azure backend config is missing its `auth` block (pre-v3 flat format?);                      run any mediagit command in the repo to migrate, or see CONFIGURATION.md"
+                );
+            };
+            let storage = match auth {
+                AzureAuth::ConnectionString { value } => {
+                    mediagit_storage::AzureBackend::with_connection_string_and_prefix(
+                        &azure_config.container,
+                        value,
+                        &azure_config.prefix,
+                    )
+                    .await
+                    .context("Failed to initialize Azure storage backend")?
+                }
+                AzureAuth::AccountKey {
+                    account_name,
+                    account_key,
+                } => mediagit_storage::AzureBackend::with_account_key_and_prefix(
+                    account_name,
                     &azure_config.container,
                     account_key,
                     &azure_config.prefix,
                 )
                 .await
-                .context("Failed to initialize Azure storage backend")?
-            } else {
-                anyhow::bail!("Azure backend requires either connection_string or account_key");
+                .context("Failed to initialize Azure storage backend")?,
+                AzureAuth::Sas {
+                    account_name,
+                    token,
+                } => mediagit_storage::AzureBackend::with_sas_token_and_prefix(
+                    account_name,
+                    &azure_config.container,
+                    token,
+                    &azure_config.prefix,
+                )
+                .await
+                .context("Failed to initialize Azure storage backend")?,
+                AzureAuth::Emulator => {
+                    mediagit_storage::AzureBackend::with_connection_string_and_prefix(
+                        &azure_config.container,
+                        mediagit_config::AZURITE_DEV_CONNECTION_STRING,
+                        &azure_config.prefix,
+                    )
+                    .await
+                    .context("Failed to initialize Azure storage backend (emulator)")?
+                }
             };
             Ok(Arc::new(storage))
         }

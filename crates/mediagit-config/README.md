@@ -118,13 +118,16 @@ Credentials can be provided via environment variables:
 ```toml
 [storage]
 backend = "azure"
-account_name = "mystorageaccount"
 container = "media"
 prefix = "files/"
+auth = { type = "account_key", account_name = "mystorageaccount", account_key = "..." }
 ```
 
-Credentials via environment variables:
-- `MEDIAGIT_AZURE_ACCOUNT_KEY`
+Credentials are a tagged `auth` block (`config_version` 3+): one of
+`account_key`, `connection_string { value }`, `sas { account_name, token }`,
+or `emulator` (local Azurite). Pre-v3 flat configs are migrated automatically
+on first open. The `account_key` may also come from the `AZURE_STORAGE_KEY`
+environment variable.
 
 ### Google Cloud Storage
 

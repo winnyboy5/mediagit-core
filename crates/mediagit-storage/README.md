@@ -311,7 +311,8 @@ mediagit-storage/
 
 ### Backend SDKs
 - `aws-sdk-s3` - AWS S3 SDK
-- `azure_storage_blobs` - Azure SDK
+- `opendal` (services-azblob) - Azure Blob backend (the EOL `azure_storage_blobs` 0.21 SDK was retired 2026-07)
+- `reqsign-azure-storage` - Shared Key signing for container creation
 - `google-cloud-storage` - GCS SDK
 
 ### Optional Dependencies

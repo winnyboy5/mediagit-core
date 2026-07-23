@@ -166,11 +166,16 @@ encryption_algorithm = "AES256"
 ```toml
 [storage]
 backend = "azure"
-account_name = "mystorageaccount"
 container = "media-container"
 prefix = ""
-# account_key from env AZURE_STORAGE_KEY or use connection_string
+auth = { type = "account_key", account_name = "mystorageaccount", account_key = "..." }
 ```
+
+Credentials are a tagged `auth` block (`config_version` 3+), exactly one of:
+`account_key` (`account_name` + `account_key`), `connection_string` (`value`),
+`sas` (`account_name` + `token`), or `emulator` (no fields). A pre-v3 flat
+config is migrated on first open; if migration cannot decide (both credentials
+present, or neither) it fails with the exact `auth` block to write.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|

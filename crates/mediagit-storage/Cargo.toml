@@ -11,7 +11,7 @@ documentation.workspace = true
 description = "Unified async storage backend trait and implementations"
 
 [features]
-azure = ["dep:azure_storage", "dep:azure_storage_blobs", "dep:azure_core", "dep:time"]
+azure = ["dep:opendal", "dep:reqsign-azure-storage", "dep:reqsign-core", "dep:http", "dep:reqwest", "dep:rustls"]
 gcs = ["dep:google-cloud-storage", "dep:google-cloud-auth", "dep:google-cloud-gax", "dep:http", "dep:serde_json"]
 all = ["azure", "gcs"]
 
@@ -29,10 +29,6 @@ memmap2 = "0.9"
 futures = "0.3"
 getrandom = "0.4"  # OS RNG for per-repo repo_id generation (namespace-collision guard)
 
-azure_storage_blobs = { version = "0.21", optional = true }
-azure_storage = { version = "0.21", optional = true }
-azure_core = { version = "0.21", optional = true }
-time = { version = "0.3", optional = true }
 # default-features = false on both: their shared `default-rustls-provider`
 # default feature links aws-lc-rs (and thus aws-lc-sys, with its cmake/NASM
 # build on Windows). The workspace standardises on ring, installed as the
@@ -49,12 +45,31 @@ http = { version = "1", optional = true }
 serde.workspace = true
 serde_json = { workspace = true, optional = true }
 
+# OpenDAL replaces the EOL azure_storage_blobs 0.21 stack. Do NOT enable
+# `reqwest-rustls-tls` (OpenDAL's default): it turns on reqwest's `rustls`
+# feature, which hard-wires aws-lc-rs (`__rustls-aws-lc-rs`). This workspace
+# has zero aws-lc and standardises on ring -- `reqwest-rustls-no-provider-tls`
+# is the ring-compatible variant (see mediagit_protocol::ensure_crypto_provider).
+# Signing for the container-create REST call: OpenDAL is data-plane only.
+# Same signer OpenDAL uses internally, so we do not hand-roll Shared Key.
+# Unauthenticated/simple HTTP for the signed container-create call.
+reqwest = { workspace = true, optional = true }
+reqsign-azure-storage = { version = "3.1", optional = true }
+reqsign-core = { version = "3.1", optional = true }
+# Provider install for the reqwest rustls-no-provider policy (see azure.rs).
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12", "logging"] }
+opendal = { version = "0.57", optional = true, default-features = false, features = ["services-azblob", "reqwest-rustls-no-provider-tls", "layers-retry", "layers-timeout", "executors-tokio"] }
+
 [dev-dependencies]
 tempfile.workspace = true
 criterion = { version = "0.8", features = ["async_tokio"] }
 
 [[test]]
 name = "azure_azurite_tests"
+required-features = ["azure"]
+
+[[test]]
+name = "reqsign_diag"
 required-features = ["azure"]
 
 [[test]]
