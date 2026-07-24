@@ -171,6 +171,35 @@ if ((Test-Path $manifestFile) -and (-not $Regen)) {
 }
 
 # ---------------------------------------------------------------
+# SCALE tier: many-files corpus (gen_scale_fixtures.py) + free-disk budget check.
+# Only under MG_QA_TIER=SCALE; STANDARD/STRESS runs are unaffected. (For SCALED ml/vfx
+# fixture SIZES, re-run this phase with -Regen under SCALE - MG_QA_SCALE is read there.)
+# ---------------------------------------------------------------
+if ($QA.Tier -eq "SCALE") {
+  $manyFiles = Join-Path $QA.Fixtures "scale\manyfiles"
+  if (-not $pyOk) {
+    Row "scale-fixtures" "SKIP" "python unavailable"
+  } elseif ((Test-Path $manyFiles) -and (-not $Regen)) {
+    Row "scale-fixtures" "SKIP" "present ($manyFiles); pass -Regen to force"
+  } else {
+    $out = & $py (Join-Path $PSScriptRoot "gen_scale_fixtures.py") 2>&1 | Out-String
+    $out | Add-Content (Join-Path $QA.Logs "$Phase-gen_scale_fixtures.py.log")
+    if ($LASTEXITCODE -eq 0) { Row "run:gen_scale_fixtures.py" "OK" "filecount=$($QA.FileCount)" }
+    else { Row "run:gen_scale_fixtures.py" "FAIL" "exit $LASTEXITCODE" }
+  }
+
+  $freeGB = Get-QaFreeDiskGB $QA.Work
+  if ($freeGB -lt 0) {
+    Row "scale-disk-budget" "SKIP" "free space undeterminable"
+  } elseif ($freeGB -ge $QA.DiskBudgetGB) {
+    Row "scale-disk-budget" "OK" "free ${freeGB}GB >= budget $($QA.DiskBudgetGB)GB"
+  } else {
+    # not a hard fail: phase 10's size-heavy drills (S4/S5) SKIP themselves when disk is short.
+    Row "scale-disk-budget" "WARN" "free ${freeGB}GB < budget $($QA.DiskBudgetGB)GB - S4/S5 will SKIP"
+  }
+}
+
+# ---------------------------------------------------------------
 # Determinism gate: regenerate ONE small fixture (map_v1.svg, chain generator) into a temp
 # dir and compare its hash to the one already in $QA.Fixtures.
 # ---------------------------------------------------------------

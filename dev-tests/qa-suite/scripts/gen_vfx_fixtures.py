@@ -20,8 +20,11 @@ import OpenEXR
 
 OUT = os.path.join(os.environ.get("MG_QA_FIXTURES", os.path.join(os.path.dirname(__file__), "..", "fixtures-synthetic")), "vfx")
 W, H = 1920, 1080
-N_FRAMES = 120
-N_REGRADE = 30
+# MG_QA_SCALE multiplies the sequence length (SCALE tier, phase 10). Default 1
+# keeps the STANDARD 120/30-frame sequence exactly as before.
+SCALE = max(1, int(os.environ.get("MG_QA_SCALE", "1")))
+N_FRAMES = 120 * SCALE
+N_REGRADE = 30 * SCALE
 GRADE = np.array([1.10, 1.02, 0.92], dtype=np.float32)  # RGB multiply
 
 # Static gradient plate, computed once (float32 workspace, cast to half at write)

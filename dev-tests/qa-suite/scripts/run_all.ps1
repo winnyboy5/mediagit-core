@@ -11,7 +11,9 @@
 #   run_all.ps1 -Phases 01,03                     # run only these phase tokens
 #   run_all.ps1 -ContinueOnFail                   # keep going past a failed phase
 param(
-  [string[]]$Phases = @("00", "01", "02", "03", "04", "05", "06", "07", "08", "09"),
+  # Left unset so an explicit -Phases can be told apart from a default full run: the
+  # SCALE tier auto-adds phase 10 (before 09/report) ONLY for a default full run.
+  [string[]]$Phases,
   [switch]$ContinueOnFail
 )
 
@@ -20,6 +22,16 @@ if (-not $env:MG_QA_RUN_ID) {
 }
 
 . (Join-Path $PSScriptRoot "lib\common.ps1")
+
+if (-not $Phases -or $Phases.Count -eq 0) {
+  # Default full run. Under SCALE, phase 10 runs after 08 but before 09 so the
+  # report aggregates the scale gates.
+  $Phases = if ($QA.Tier -eq "SCALE") {
+    @("00", "01", "02", "03", "04", "05", "06", "07", "08", "10", "09")
+  } else {
+    @("00", "01", "02", "03", "04", "05", "06", "07", "08", "09")
+  }
+}
 
 $Phase = "run_all"
 Write-QaLog $Phase ("run id = {0}; phases = {1}" -f $QA.RunId, ($Phases -join ","))

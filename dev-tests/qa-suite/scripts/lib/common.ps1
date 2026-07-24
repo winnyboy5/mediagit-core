@@ -152,3 +152,58 @@ function Get-QaChainStats([string]$Repo) {
   }
   return $stats
 }
+
+# ---------------------------------------------------------------------------
+# Scale-tier helpers (phase 10). All ASCII / PS 5.1 compatible.
+# ---------------------------------------------------------------------------
+
+# Cloud analogue of Select-TierFiles: caps payload sent to (slow, billed) cloud
+# backends at $QA.CloudMaxMB while minio/local get the full scale corpus.
+function Select-CloudTierFiles([string[]]$Paths) {
+  $Paths | Where-Object { (Test-Path $_) -and ((Get-Item $_).Length / 1MB) -le $QA.CloudMaxMB }
+}
+
+# Free space (GB) on the volume backing $Path - used by 01_preflight to refuse a
+# SCALE run that cannot fit the disk budget.
+function Get-QaFreeDiskGB([string]$Path) {
+  $root = [System.IO.Path]::GetPathRoot((Resolve-Path $Path).Path)
+  try { return [math]::Round((New-Object System.IO.DriveInfo($root)).AvailableFreeSpace / 1GB, 1) }
+  catch { return -1 }
+}
+
+# Run $Action while sampling peak WorkingSet64 of the mediagit process(es) in a
+# background job (Invoke-MG blocks, so in-process sampling can't observe it).
+# Returns @{ PeakMB; Result } where Result is whatever $Action returned.
+# ponytail: 200ms polling approximates the true peak - fine for a ceiling gate,
+# not a profiler. Process names are inlined in the job: passing an array through
+# Start-Job -ArgumentList nests it and Get-Process -Name then matches nothing.
+function Measure-PeakRSS {
+  param([Parameter(Mandatory = $true)][scriptblock]$Action)
+  $peakFile = Join-Path $QA.Work ("rss-" + [guid]::NewGuid().ToString("N") + ".txt")
+  $stopFile = "$peakFile.stop"
+  "0" | Set-Content $peakFile -Encoding Ascii
+  $sampler = Start-Job -ScriptBlock {
+    param($pf, $sf)
+    $peak = 0L
+    while (-not (Test-Path $sf)) {
+      foreach ($p in (Get-Process -Name "mediagit", "mediagit-server" -ErrorAction SilentlyContinue)) {
+        if ($p.WorkingSet64 -gt $peak) { $peak = $p.WorkingSet64 }
+      }
+      $peak | Set-Content $pf -Encoding Ascii
+      Start-Sleep -Milliseconds 200
+    }
+  } -ArgumentList $peakFile, $stopFile
+
+  $result = $null
+  try { $result = & $Action }
+  finally {
+    New-Item $stopFile -ItemType File -Force | Out-Null
+    Wait-Job $sampler -Timeout 5 | Out-Null
+    Stop-Job $sampler -ErrorAction SilentlyContinue
+    Remove-Job $sampler -Force -ErrorAction SilentlyContinue
+  }
+  $peakBytes = 0L
+  if (Test-Path $peakFile) { [long]::TryParse(((Get-Content $peakFile -Raw) + "").Trim(), [ref]$peakBytes) | Out-Null }
+  Remove-Item $peakFile, $stopFile -Force -ErrorAction SilentlyContinue
+  return @{ PeakMB = [math]::Round($peakBytes / 1MB, 1); Result = $result }
+}

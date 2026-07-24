@@ -21,6 +21,9 @@ OUT = os.path.join(os.environ.get("MG_QA_FIXTURES", os.path.join(os.path.dirname
 os.makedirs(OUT, exist_ok=True)
 
 MB = 1024 * 1024
+# MG_QA_SCALE multiplies the synthetic tensor/dataset sizes (SCALE tier, phase 10).
+# Default 1 keeps the STANDARD/STRESS sizes exactly as before.
+SCALE = max(1, int(os.environ.get("MG_QA_SCALE", "1")))
 
 
 def p(name):
@@ -31,7 +34,7 @@ def p(name):
 # 1. model.safetensors v1..v5 (~150MB, dict of float32 tensors)
 # ---------------------------------------------------------------------------
 def gen_safetensors():
-    target_bytes = 150 * MB
+    target_bytes = 150 * MB * SCALE
     rng = np.random.default_rng(42)
 
     # Fixed tensor shapes mimicking a small model's named parameters.
@@ -79,7 +82,7 @@ def gen_safetensors():
 # 2. checkpoint.npz v1..v3 (~50MB) + one compressed variant of v1
 # ---------------------------------------------------------------------------
 def gen_checkpoint_npz():
-    target_bytes = 50 * MB
+    target_bytes = 50 * MB * SCALE
     rng = np.random.default_rng(7)
     shapes = {
         "opt_state.m": (3000, 1024),
@@ -118,7 +121,7 @@ def gen_parquet():
     rng = np.random.default_rng(11)
     n_features = 20
     row_bytes = 8 + n_features * 4 + 4  # id(int64) + features(float32) + label(float32)
-    base_rows = int(80 * MB / row_bytes)
+    base_rows = int(80 * MB * SCALE / row_bytes)
 
     def make_table(n_rows, start_id, label_rng):
         cols = {"id": np.arange(start_id, start_id + n_rows, dtype=np.int64)}
