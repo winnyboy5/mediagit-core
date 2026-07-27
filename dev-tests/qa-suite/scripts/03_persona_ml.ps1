@@ -326,4 +326,8 @@ foreach ($sid in $toRun) {
   }
 }
 
-if ($script:AllPass) { exit 0 } else { exit 1 }
+# Teardown: reclaim this phase's own work/ scratch so a long campaign cannot run the
+# volume out of space. work/ ONLY - logs/ and fixtures-synthetic/ are never touched.
+Invoke-QaTeardown $Phase @("ml-*")
+
+Exit-QaPhase $Phase (-not $script:AllPass)

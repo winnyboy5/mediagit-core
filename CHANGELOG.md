@@ -7,9 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Stored objects whose content began with a codec magic were unreadable** (data
+  integrity, P0): `SmartCompressor` writes incompressible data as `0x00 + raw`, but
+  `decompress_typed` stripped that prefix only when the remaining bytes did not look
+  compressed. An object starting `78 F9`/`78 DA` (valid zlib headers), `28 B5 2F FD`
+  (zstd) or `BRT\x01` (brotli) was returned one byte too long, failed its oid check, and
+  could never be read again — `add` and `commit` succeeded, then the repo refused to
+  push. Roughly 1 object in 8000. The prefix is now stripped unconditionally, since no
+  codec we emit can begin with `0x00`. **Existing repositories self-heal on upgrade**:
+  the bytes on disk were always correct, only the read framing was wrong, so no repair,
+  migration, or format change is involved.
+
+### Removed
+- **`MEDIAGIT_PACK_MIN_CHUNKS`**: removed along with the dead `PackBuilder::flush_at_boundary` it only backed (zero callers, and unguarded `=0` could panic in `seal()`). `finish()` remains the only flush path.
+- **`mediagit branch merge`**: the subcommand was never implemented — it only ever
+  errored, telling the user to run `mediagit merge`, which already performs the merge.
+  Removed rather than shipped as a documented command that cannot succeed. Deferred as
+  future work should branch-scoped merge semantics ever diverge from `mediagit merge`.
+
+## [v0.3.0-rc.2] - 2026-07-22
+
 Toolchain and edition modernization — no wire/persisted-format changes, so the
-`docs/FORMATS.md` §11 compat promise is preserved (verified byte-for-byte by the
-frozen-fixture fsck).
+`docs/FORMATS.md` §11 compat promise (in effect since v0.3.0-rc.1) is preserved
+(verified byte-for-byte by the frozen-fixture fsck).
+
+### Added
+- **Azure backend migrated to OpenDAL**: `mediagit-storage`'s Azure Blob
+  backend now runs on `opendal`'s `services-azblob`, replacing the EOL
+  `azure_storage`/`azure_storage_blobs` crates.
+- **Pack-mode `[bench]` instrumentation**: `throughput_mbs`, presign, and
+  coalesced-range counters — previously always zero on the default pack
+  path — are now populated.
+- **Range-GET hardening**: reject `200`-status responses to a nonzero-offset
+  range request that would otherwise mis-slice the body; short/truncated
+  bodies fall back to per-chunk GET instead of silently serving bad bytes.
+- **Chunk-delta directory resolution helpers** for locating a chunk's delta
+  directory consistently across callers.
+- **Phase 10 (SCALE) QA tier**: concurrency/churn/conflict/RSS/throughput
+  drills added to `dev-tests/qa-suite`.
 
 ### Changed
 - **Rust toolchain → 1.97.1** (from 1.92.0). Pinned via a new

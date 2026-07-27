@@ -25,6 +25,16 @@ $QA.FileCount    = [int](_Env "MG_QA_FILECOUNT" "10000")     # many-files corpus
 $QA.Concurrency  = [int](_Env "MG_QA_CONCURRENCY" "16")      # parallel clients for S1
 $QA.ChurnCommits = [int](_Env "MG_QA_CHURN_COMMITS" "500")   # rapid-commit count for S2
 $QA.CloudMaxMB   = [int](_Env "MG_QA_CLOUD_MAX_MB" "2048")   # cap cloud-backend payload
+# Cloud throughput floor, MB/s, applied to BOTH push and clone on billed backends
+# (10_scale.ps1:549,563). 0 = informational only.
+# 1.0 is a catastrophic-regression detector, NOT a performance target: it is deliberately
+# far below measured throughput so ordinary WAN variance can never fail a run, while an
+# order-of-magnitude regression still does. Reference measurements 2026-07-27 on a 2048 MB
+# payload: aws 2.76 push / 6.93 clone, azure 3.17 push / 8.06 clone. At 1.0 MB/s a 2 GB
+# transfer must exceed ~34 min to fail - which is what a reverted Azure ranged-read (full
+# blob per range) or a dead upload-concurrency knob would actually look like.
+# Raise this only with a faster link; never lower it to make a failing run pass.
+$QA.CloudMbsFloor = [double](_Env "MG_QA_CLOUD_MBS_FLOOR" "1.0")
 $QA.DiskBudgetGB = [double](_Env "MG_QA_DISK_BUDGET_GB" "40")# scratch footprint ceiling
 $QA.RssCeilMB    = [int](_Env "MG_QA_RSS_CEIL_MB" "4096")    # peak-RSS gate threshold (S4)
 $QA.KeepScratch  = (_Env "MG_QA_KEEP_SCRATCH" "0") -eq "1"   # skip post-phase teardown for triage
@@ -37,14 +47,21 @@ $QA.MinioEndpoint  = _Env "MG_QA_MINIO"        "http://127.0.0.1:9000"
 $QA.MinioAccessKey = _Env "MG_QA_MINIO_ACCESS" "minioadmin"
 $QA.MinioSecretKey = _Env "MG_QA_MINIO_SECRET" "minioadmin"
 $QA.Work      = _Env "MG_QA_WORKDIR" (Join-Path $QA.Root "work")
-$QA.Fixtures  = Join-Path $QA.Root "fixtures-synthetic"
+$QA.Fixtures  = _Env "MG_QA_FIXTURES" (Join-Path $QA.Root "fixtures-synthetic")
 # One run id shared across phases: run_all.ps1 exports MG_QA_RUN_ID; standalone script runs get their own.
 $QA.RunId     = _Env "MG_QA_RUN_ID" (Get-Date -Format "yyyyMMdd-HHmmss")
 $QA.Logs      = Join-Path $QA.Root ("logs\" + $QA.RunId)
 $QA.Reports   = Join-Path $QA.Root ("reports\" + $QA.RunId)
 
-foreach ($d in @($QA.Work, $QA.Fixtures, $QA.Logs, $QA.Reports)) {
-  if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+# Directory creation is a side effect, so it is a function rather than load-time work:
+# dot-sourcing config.ps1 to READ a knob (run_all's phase planning, an operator's
+# `. config.ps1; $QA.Tier`) must not litter logs\<runid>\ dirs for runs that never happen.
+# lib\common.ps1 calls this immediately after loading, which covers run_all and every
+# standalone phase invocation.
+function Initialize-QaDirs {
+  foreach ($d in @($QA.Work, $QA.Fixtures, $QA.Logs, $QA.Reports)) {
+    if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+  }
 }
 
 # Prevent editor hangs in matrix rows

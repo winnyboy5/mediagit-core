@@ -22,6 +22,9 @@ if (-not $env:MG_QA_RUN_ID) {
 }
 
 . (Join-Path $PSScriptRoot "lib\common.ps1")
+# After common.ps1 (which sets Continue) so it wins. The orchestrator decides the
+# campaign verdict; an error swallowed HERE would mis-report every phase under it.
+$ErrorActionPreference = "Stop"
 
 if (-not $Phases -or $Phases.Count -eq 0) {
   # Default full run. Under SCALE, phase 10 runs after 08 but before 09 so the
@@ -36,6 +39,35 @@ if (-not $Phases -or $Phases.Count -eq 0) {
 $Phase = "run_all"
 Write-QaLog $Phase ("run id = {0}; phases = {1}" -f $QA.RunId, ($Phases -join ","))
 
+# ---- per-script extra arguments -------------------------------------------------
+# 08_perf gates against baselines\perf.tsv when it exists. The file is NOT created
+# automatically: an operator promotes a known-good campaign's perf-bench.tsv into it
+# (copy logs\<runid>\perf-bench.tsv -> baselines\perf.tsv), so the harness can never
+# quietly re-baseline itself onto a regression it just measured.
+$perfBaseline = Join-Path $QA.Root "baselines\perf.tsv"
+
+# 01_preflight regenerates fixtures when the tier changed since the last run: fixture
+# SIZES are tier-dependent (MG_QA_SCALE), so a STANDARD-sized corpus left over from a
+# previous run would silently make a SCALE campaign test the wrong thing.
+$tierMarker = Join-Path $QA.Work ".last-tier"
+$lastTier = if (Test-Path $tierMarker) { ((Get-Content $tierMarker -Raw) + "").Trim() } else { "" }
+$tierChanged = ($lastTier -ne $QA.Tier)
+if ($tierChanged -and $lastTier) {
+  Write-QaLog $Phase "tier changed '$lastTier' -> '$($QA.Tier)': 01_preflight will run with -Regen"
+}
+
+function Get-PhaseArgs([string]$ScriptName) {
+  switch -Regex ($ScriptName) {
+    '^01_preflight' { if ($tierChanged) { return @("-Regen") } else { return @() } }
+    '^08_perf' {
+      if (Test-Path $perfBaseline) { return @("-Baseline", $perfBaseline) }
+      Write-QaLog $Phase "no perf baseline at $perfBaseline - 08_perf runs informational (WARN)"
+      return @()
+    }
+    default { return @() }
+  }
+}
+
 $summaryTsv = Join-Path $QA.Logs "run_all-summary.tsv"
 $summaryHeader = @("phase", "script", "status", "exit", "sec")
 $results = @()
@@ -47,10 +79,17 @@ foreach ($tok in $Phases) {
     Where-Object { $_.Name -ne "run_all.ps1" } | Sort-Object Name
 
   if (-not $found -or $found.Count -eq 0) {
-    Write-QaLog $Phase "phase $tok : no script found, SKIP"
-    Write-QaRow $summaryTsv $summaryHeader @($tok, "", "SKIP", "", "")
-    $results += [pscustomobject]@{ Phase = $tok; Script = ""; Status = "SKIP"; Exit = ""; Sec = "" }
-    continue
+    # A token that matches no script is a typo in the invocation, not an absent
+    # capability. Silently skipping it meant `-Phases 1,3` (instead of 01,03) ran
+    # nothing and exited 0 - a green campaign that tested nothing at all.
+    Write-QaLog $Phase "phase '$tok' : NO SCRIPT MATCHES scripts\$tok*.ps1 - bad phase token"
+    Write-QaRow $summaryTsv $summaryHeader @($tok, "", "BAD-TOKEN", "", "")
+    Write-Host ""
+    Write-Host "ERROR: unknown phase token '$tok' - no scripts\$tok*.ps1 exists."
+    Write-Host ("Available tokens: " + ((Get-ChildItem -Path $scriptsDir -Filter "*.ps1" -File |
+      Where-Object { $_.Name -match '^\d' } | ForEach-Object { ($_.Name -split '_')[0] } |
+      Sort-Object -Unique) -join ", "))
+    exit 1
   }
 
   foreach ($script in $found) {
@@ -61,19 +100,27 @@ foreach ($tok in $Phases) {
       continue
     }
 
-    Write-QaLog $Phase ("phase {0} : running {1}" -f $tok, $script.Name)
+    # @() guard: a function returning @("-Regen") unrolls the single-element array to a
+    # bare string, and the empty case returns $null - splatting either one at a native
+    # command throws. Re-wrapping makes both shapes a real array again.
+    $extra = @(Get-PhaseArgs $script.Name)
+    Write-QaLog $Phase ("phase {0} : running {1} {2}" -f $tok, $script.Name, ($extra -join " "))
     $sw = [Diagnostics.Stopwatch]::StartNew()
-    & powershell -NoProfile -File $script.FullName
+    & powershell -NoProfile -File $script.FullName @extra
     $code = $LASTEXITCODE
     $sw.Stop()
-    $status = if ($code -eq 0) { "PASS" } else { "FAIL" }
-    if ($status -eq "FAIL") { $anyFail = $true }
+    # Exit 3 is Exit-QaPhase's "nothing verified": the phase failed nothing because it
+    # checked nothing. It is a failure, and it is labelled so it is not read as a pass.
+    $status = if ($code -eq 0) { "PASS" } elseif ($code -eq 3) { "NOTHING-VERIFIED" } else { "FAIL" }
+    if ($status -ne "PASS") { $anyFail = $true }
 
     Write-QaLog $Phase ("phase {0} : {1} {2} (exit={3} sec={4:n1})" -f $tok, $script.Name, $status, $code, $sw.Elapsed.TotalSeconds)
     Write-QaRow $summaryTsv $summaryHeader @($tok, $script.Name, $status, $code, [math]::Round($sw.Elapsed.TotalSeconds, 1))
     $results += [pscustomobject]@{ Phase = $tok; Script = $script.Name; Status = $status; Exit = $code; Sec = [math]::Round($sw.Elapsed.TotalSeconds, 1) }
   }
 }
+
+Set-Content $tierMarker $QA.Tier -Encoding ASCII
 
 Write-Host ""
 Write-Host "===== qa-suite run $($QA.RunId) : phase summary ====="

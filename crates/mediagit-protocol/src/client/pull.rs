@@ -655,7 +655,8 @@ impl ProtocolClient {
                         let mut pack_fut = std::pin::pin!(self.pull_chunks_via_packs(
                             &full_chunks,
                             odb,
-                            Some(pack_progress_cb)
+                            Some(pack_progress_cb),
+                            _download_bench.as_ref()
                         ));
                         let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
                         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

@@ -16,6 +16,8 @@ Sources in test-files/ are never modified.
 """
 import os
 import shutil
+from pathlib import Path
+
 import numpy as np
 import soundfile as sf
 from PIL import Image, ImageDraw, ImageEnhance
@@ -23,7 +25,9 @@ import pygltflib
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-ROOT = "D:/own/saas/mediagit-core"
+# scripts/ -> qa-suite/ -> dev-tests/ -> repo root. Derived, not hardcoded: this
+# generator has to run from any checkout, not just the machine it was written on.
+ROOT = str(Path(__file__).resolve().parents[3])
 TF = os.environ.get("MG_QA_TESTFILES", os.path.join(ROOT, "test-files"))
 OUT = os.path.join(os.environ.get("MG_QA_FIXTURES", os.path.join(ROOT, "dev-tests", "qa-suite", "fixtures-synthetic")), "chains")
 os.makedirs(OUT, exist_ok=True)

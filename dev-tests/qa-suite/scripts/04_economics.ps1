@@ -14,7 +14,7 @@ $Phase = "04_economics"
 $env:MEDIAGIT_CDC_SEED = "20260716"
 
 $OUT = Join-Path $QA.Logs "economics.tsv"
-$HEADER = @("family", "version", "fileMB", "odbGrowthMB", "savedPct", "addSec")
+$HEADER = @("family", "version", "fileMB", "odbGrowthMB", "savedPct", "addSec", "commitSec")
 
 Write-QaLog $Phase "economics run starting, tier=$($QA.Tier)"
 
@@ -64,7 +64,7 @@ foreach ($fam in $families.Keys) {
   $files = @($families[$fam] | Where-Object { Test-Path $_ })
   $files = @(Select-TierFiles $files)
   if ($files.Count -lt 2) {
-    Write-QaRow $OUT $HEADER @($fam, "SKIP", 0, 0, 0, 0)
+    Write-QaRow $OUT $HEADER @($fam, "SKIP", 0, 0, 0, 0, 0)
     Write-QaLog $Phase "SKIP family $fam (fewer than 2 usable fixtures)"
     continue
   }
@@ -80,13 +80,17 @@ foreach ($fam in $families.Keys) {
   foreach ($f in $files) {
     $i++
     Copy-Item $f (Join-Path $rp "asset$ext") -Force
-    Invoke-MG $rp @("add", "asset$ext") $Phase | Out-Null
+    # `add` is where chunking/hashing/compression actually happen, so its wall time is
+    # the number the addSec column and the report both claim to show. This used to
+    # discard the add result and record the COMMIT time under the addSec heading -
+    # a near-zero figure that made the expensive half of the pipeline look free.
+    $a = Invoke-MG $rp @("add", "asset$ext") $Phase
     $c = Invoke-MG $rp @("commit", "-m", "v$i") $Phase
     $odb = Get-DirMB (Join-Path $rp ".mediagit")
     $fmb = [math]::Round((Get-Item $f).Length / 1MB, 2)
     $growth = [math]::Round($odb - $prev, 2)
     $saved = if ($fmb -gt 0) { [math]::Round((1 - $growth / $fmb) * 100, 1) } else { 0 }
-    Write-QaRow $OUT $HEADER @($fam, "v$i", $fmb, $growth, $saved, $c.Sec)
+    Write-QaRow $OUT $HEADER @($fam, "v$i", $fmb, $growth, $saved, $a.Sec, $c.Sec)
     $prev = $odb
     $lastSaved = $saved
   }
@@ -155,4 +159,8 @@ if ((Test-Path $compareScript) -and (Test-Path $baseline) -and (Test-Path $dedup
 }
 
 Write-QaLog $Phase "done: families=$($families.Count) gateFailures=$gateFailCount"
-if ($gateFailCount -eq 0) { exit 0 } else { exit 1 }
+# Teardown: reclaim this phase's own work/ scratch so a long campaign cannot run the
+# volume out of space. work/ ONLY - logs/ and fixtures-synthetic/ are never touched.
+Invoke-QaTeardown $Phase @("economics*")
+
+Exit-QaPhase $Phase

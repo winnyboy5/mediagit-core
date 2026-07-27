@@ -96,9 +96,10 @@ pub enum BranchSubcommand {
 
     /// Show branch information
     Show(ShowOpts),
-
-    /// Merge a branch
-    Merge(MergeOpts),
+    // `branch merge` was never implemented - it only ever returned an error telling the
+    // user to run `mediagit merge`, which already does the job. Removed rather than
+    // shipped as a subcommand that cannot succeed. Future work if branch-scoped merge
+    // semantics ever diverge from `mediagit merge`.
 }
 
 /// List branches
@@ -263,38 +264,6 @@ pub struct ShowOpts {
     pub verbose: bool,
 }
 
-/// Merge a branch
-#[derive(Parser, Debug)]
-pub struct MergeOpts {
-    /// Branch to merge
-    #[arg(value_name = "BRANCH", required = true)]
-    pub branch: String,
-
-    /// Create a merge commit
-    #[arg(long)]
-    pub no_ff: bool,
-
-    /// Perform a fast-forward only merge
-    #[arg(long)]
-    pub ff_only: bool,
-
-    /// Merge message
-    #[arg(short, long, value_name = "MESSAGE")]
-    pub message: Option<String>,
-
-    /// Quit if merge conflicts occur
-    #[arg(long)]
-    pub abort: bool,
-
-    /// Continue after resolving conflicts
-    #[arg(long)]
-    pub continue_merge: bool,
-
-    /// Quiet mode
-    #[arg(short, long)]
-    pub quiet: bool,
-}
-
 impl BranchCmd {
     pub async fn execute(&self) -> Result<()> {
         match &self.subcommand {
@@ -305,7 +274,6 @@ impl BranchCmd {
             BranchSubcommand::Protect(opts) => self.protect(opts).await,
             BranchSubcommand::Rename(opts) => self.rename(opts).await,
             BranchSubcommand::Show(opts) => self.show(opts).await,
-            BranchSubcommand::Merge(opts) => self.merge(opts).await,
         }
     }
 
@@ -1179,11 +1147,5 @@ impl BranchCmd {
         }
 
         Ok(())
-    }
-
-    async fn merge(&self, _opts: &MergeOpts) -> Result<()> {
-        // NOTE: Branch merge implementation pending (delegates to mediagit merge command)
-        // Requires: conflict check, merge execution, commit creation
-        anyhow::bail!("Branch merge not yet implemented (use 'mediagit merge' instead)")
     }
 }

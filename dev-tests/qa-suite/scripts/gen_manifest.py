@@ -11,8 +11,12 @@ chain_id/version are derived from filenames:
 import hashlib
 import os
 import re
+from pathlib import Path
 
-ROOT = os.environ.get("MG_QA_FIXTURES", "D:/own/saas/mediagit-core/dev-tests/qa-suite/fixtures-synthetic")
+# scripts/ -> qa-suite/; the default fixture tree is its sibling. Derived rather than
+# hardcoded so the generator runs from any checkout.
+_QA_SUITE = Path(__file__).resolve().parents[1]
+ROOT = os.environ.get("MG_QA_FIXTURES", str(_QA_SUITE / "fixtures-synthetic"))
 MANIFEST = os.path.join(ROOT, "manifest-synthetic.tsv")
 
 

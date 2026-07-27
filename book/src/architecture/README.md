@@ -199,7 +199,7 @@ sequenceDiagram
 
 ## Technology Stack
 
-- **Language**: Rust 1.92.0
+- **Language**: Rust 1.97.1
 - **Async Runtime**: Tokio 1.40+
 - **CLI Framework**: Clap 4.5+
 - **Compression**: zstd, brotli, delta (zstd dictionary)

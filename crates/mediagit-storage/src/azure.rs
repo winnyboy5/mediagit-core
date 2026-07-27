@@ -50,6 +50,7 @@
 use crate::StorageBackend;
 use crate::error::StorageError;
 use async_trait::async_trait;
+use futures::StreamExt;
 use opendal::Operator;
 use opendal::layers::{RetryLayer, TimeoutLayer};
 use opendal::services::Azblob;
@@ -426,7 +427,7 @@ impl AzureBackend {
             // SAS-authenticated: cannot sign a create, and a SAS holder
             // generally lacks that right anyway.
             return Err(anyhow::anyhow!(
-                "Azure container '{}' is not reachable and cannot be created with SAS                  authentication. Create it first, or configure account-key auth.",
+                "Azure container '{}' is not reachable and cannot be created with SAS authentication. Create it first, or configure account-key auth.",
                 self.container_name
             ));
         };
@@ -519,7 +520,7 @@ impl AzureBackend {
             "no response".to_string(),
         ));
         Err(anyhow::anyhow!(
-            "Azure container '{}' does not exist and could not be created ({} {}).              Create it manually and retry.",
+            "Azure container '{}' does not exist and could not be created ({} {}). Create it manually and retry.",
             self.container_name,
             status,
             body
@@ -566,6 +567,34 @@ impl AzureBackend {
             .map_err(|e| map_error(&e, &format!("chunked close {key}")))?;
         Ok(())
     }
+
+    /// Open an incremental byte stream over `full` for `range`, via OpenDAL's
+    /// `Reader::into_bytes_stream`. Shared by `get_streaming` (`..`) and
+    /// `get_streaming_range` (a bounded range) so neither materializes the
+    /// full range into memory before streaming — unlike the old
+    /// `read_with(...).await` + `stream::once` shim this replaces.
+    async fn read_stream(
+        &self,
+        full: &str,
+        range: impl std::ops::RangeBounds<u64> + Send + 'static,
+        context: String,
+    ) -> anyhow::Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+        >,
+    > {
+        let reader = self
+            .op
+            .reader(full)
+            .await
+            .map_err(|e| map_error(&e, &context))?;
+        let stream = reader
+            .into_bytes_stream(range)
+            .await
+            .map_err(|e| map_error(&e, &context))?
+            .map(move |r| r.map_err(|e| anyhow::anyhow!("{context} stream error: {e}")));
+        Ok(Box::pin(stream))
+    }
 }
 
 #[async_trait]
@@ -581,6 +610,34 @@ impl StorageBackend for AzureBackend {
         Ok(buf.to_vec())
     }
 
+    /// Efficient ranged read via OpenDAL's HTTP Range-GET, overriding the
+    /// trait default (whole-object `get` + slice).
+    async fn get_range(&self, key: &str, offset: u64, len: u64) -> anyhow::Result<Vec<u8>> {
+        Self::validate_key(key)?;
+        let full = self.full_key(key);
+        let buf = self
+            .op
+            .read_with(&full)
+            .range(offset..offset + len)
+            .await
+            .map_err(|e| map_error(&e, &format!("get_range {key}")))?;
+        Ok(buf.to_vec())
+    }
+
+    async fn get_streaming(
+        &self,
+        key: &str,
+    ) -> anyhow::Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+        >,
+    > {
+        Self::validate_key(key)?;
+        let full = self.full_key(key);
+        self.read_stream(&full, .., format!("get_streaming {key}"))
+            .await
+    }
+
     async fn get_streaming_range(
         &self,
         key: &str,
@@ -592,14 +649,8 @@ impl StorageBackend for AzureBackend {
     > {
         Self::validate_key(key)?;
         let full = self.full_key(key);
-        let buf = self
-            .op
-            .read_with(&full)
-            .range(range)
+        self.read_stream(&full, range, format!("get_streaming_range {key}"))
             .await
-            .map_err(|e| map_error(&e, &format!("get_range {key}")))?;
-        let bytes = bytes::Bytes::from(buf.to_vec());
-        Ok(Box::pin(futures::stream::once(async move { Ok(bytes) })))
     }
 
     async fn put(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {

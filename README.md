@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/winnyboy5/mediagit-core/workflows/CI/badge.svg)](https://github.com/winnyboy5/mediagit-core/actions)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
-[![Rust Version](https://img.shields.io/badge/rust-1.92+-orange.svg)](https://www.rust-lang.org)
+[![Rust Version](https://img.shields.io/badge/rust-1.97+-orange.svg)](https://www.rust-lang.org)
 [![Features](https://img.shields.io/badge/features-100%25%20complete-success.svg)](claudedocs/2026-02-27/UNIMPLEMENTED_FEATURES.md)
 
 ## 🎯 Status
@@ -169,7 +169,7 @@ docker run --rm ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.2 mediagit --version
 #### From Source
 
 ```bash
-# Requires Rust 1.92+
+# Requires Rust 1.97+
 git clone https://github.com/winnyboy5/mediagit-core.git
 cd mediagit-core
 cargo build --release
@@ -627,7 +627,7 @@ gcloud auth login
 
 ### Prerequisites
 
-- **Rust**: 1.92+ (MSRV — check with `rustc --version`)
+- **Rust**: 1.97+ (MSRV — check with `rustc --version`)
 - **OS**: Linux, macOS, or WSL2 (Windows)
 - **Tools**: cargo, git
 

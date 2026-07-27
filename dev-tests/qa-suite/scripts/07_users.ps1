@@ -30,7 +30,7 @@ function Rec([string]$Drill, $Pass, [string]$Detail) {
   Write-QaRow $TSV @("drill", "pass", "detail") @($Drill, $Pass, $Detail)
   $tag = if ("$Pass" -eq "SKIP") { "SKIP" } elseif ($Pass) { "PASS" } else { "FAIL" }
   Write-QaLog $Phase ("{0} -> {1}  {2}" -f $Drill, $tag, $Detail)
-  Write-QaGate $Phase $Drill ($Pass -eq $true -or "$Pass" -eq "SKIP") $Detail
+  Write-QaGate $Phase $Drill $Pass $Detail
   if ($tag -eq "FAIL") { $script:AllPass = $false }
 }
 
@@ -150,4 +150,8 @@ try {
 }
 
 Write-QaLog $Phase "=== 07_users done: overall=$(if ($script:AllPass) { 'PASS' } else { 'FAIL' }) ==="
-if ($script:AllPass) { exit 0 } else { exit 1 }
+# Teardown: reclaim this phase's own work/ scratch so a long campaign cannot run the
+# volume out of space. work/ ONLY - logs/ and fixtures-synthetic/ are never touched.
+Invoke-QaTeardown $Phase @("users-*")
+
+Exit-QaPhase $Phase (-not $script:AllPass)

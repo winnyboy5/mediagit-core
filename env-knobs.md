@@ -66,7 +66,6 @@ Lifecycle: **experimental** → **stable** (2 clean deep-test releases) → **de
 | `MEDIAGIT_CLOUD_PACKS` | `1` (ON) | 0.3.0-rc.2 | push/pull | stable | Use cloud-pack bundling for push/pull instead of per-chunk transfer. `0` reverts to per-chunk. |
 | `MEDIAGIT_PACK_BYTES` | `67108864` (64 MiB) | 0.3.0-rc.2 | packs | stable | Byte-size cap per cloud pack (client pack builder and server-side chunk repacking). |
 | `MEDIAGIT_PACK_CHUNKS` | `1024` | 0.3.0-rc.2 | packs | stable | Chunk-count cap per cloud pack. |
-| `MEDIAGIT_PACK_MIN_CHUNKS` | `8` | 0.3.0-rc.2 | packs | stable | Minimum chunk count for a pack to be worth building; below this, chunks push individually. |
 | `MEDIAGIT_PACK_BUILDER_CONCURRENCY` | `2` | 0.3.0-rc.2 | packs | stable | Concurrent pack-build workers in the streaming pack writer. |
 | `MEDIAGIT_PACK_WORKERS` | `8` | 0.3.0-rc.2 | packs/server | stable | Concurrent ODB writes while unpacking an incoming push pack on the server. Priority: env > repo config `[performance] pack_workers` > default. |
 | `MEDIAGIT_PACK_UPLOAD_CONCURRENCY` | `8` | 0.3.0-rc.2 | packs | stable | Concurrent pack uploads from the client pack builder. |
@@ -90,6 +89,7 @@ Lifecycle: **experimental** → **stable** (2 clean deep-test releases) → **de
 | `MEDIAGIT_RANGE_PARALLEL_THRESHOLD` | `4194304` (4 MiB) | 0.3.0-rc.2 | pull | stable | Chunk size above which `RANGE_PARALLEL` fan-out kicks in. |
 | `MEDIAGIT_DOWNLOAD_DIRECT_DISABLE` | `0` (OFF) | 0.3.0-rc.2 | pull | stable | `1` disables direct presigned-URL downloads, forcing all chunk GETs through the server proxy. |
 | `MEDIAGIT_PUSH_DEADLINE_SECS` | `3600` | 0.3.0-rc.2 | push | stable | Overall wall-clock deadline for a single push operation. |
+| `MEDIAGIT_RATE_LIMIT_RETRIES` | `5` | 0.3.0-rc.2 | push/control-plane | stable | Max HTTP 429 retries for a single control-plane request. Honours the server's `Retry-After` header when present, otherwise backs off exponentially. Relevant when a large push (one control-plane request per chunk) outruns a server-side rate limiter. |
 | `MEDIAGIT_PUSH_CHUNK_CONCURRENCY` | computed (`64 / PUSH_OBJECT_CONCURRENCY`, min 4) | 0.3.0-rc.2 | push | stable | Per-object chunk upload concurrency when `PUSH_PIPELINE=1`; targets ~64 total in-flight PUTs. |
 | `MEDIAGIT_FETCH_DOWNLOAD_CONCURRENCY` | computed (`DOWNLOAD_CONCURRENCY` split across branches, floor per branch) | 0.3.0-rc.2 | fetch | stable | Per-branch chunk download concurrency when fetching multiple branches in parallel (`fetch --all`). Overrides the computed default. |
 | `MEDIAGIT_STRONG_VERIFY` | `0` (OFF) | 0.3.0-rc.2 | push | stable | `1` runs a full BLAKE3 re-hash verification of pushed chunks after transfer. `push --repair` always runs it regardless of this knob. |

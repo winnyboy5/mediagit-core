@@ -1,8 +1,14 @@
 # 08_perf.ps1 - latency/throughput micro-phase: add/commit timing across size classes,
 # plus [bench] line parsing (format per dev-tests/deep-tests/diff_bench.ps1, read-only reference).
 param(
-  [string]$Baseline = ""   # path to a prior 09_report.ps1 summary.json; when given, >25% regressions on
-                            # throughput/wall-clock bench fields fail the gate. Omitted => informational only.
+  # Path to a promoted baseline. Two accepted shapes:
+  #   *.tsv  - a perf-bench.tsv promoted from a known-good campaign (the normal case;
+  #            run_all passes baselines\perf.tsv automatically when it exists)
+  #   *.json - a prior 09_report.ps1 summary.json (its .perf array holds the same rows)
+  # Omitted or unreadable => the gate records WARN and the phase stays green: the very
+  # first campaign has nothing to compare against, and refusing to run would mean the
+  # baseline could never be created. A regression past $REGRESSION_PCT fails the gate.
+  [string]$Baseline = ""
 )
 . (Join-Path $PSScriptRoot "lib\common.ps1")
 $Phase = "08_perf"
@@ -55,19 +61,36 @@ $HIGHER_IS_BETTER = @('throughput_mbs', 'util_pct', 'hash_mbs')
 $LOWER_IS_BETTER  = @('wall', 'active_sum', 'manifest_to_first_byte_ms')
 $GATE_FIELDS = $HIGHER_IS_BETTER + $LOWER_IS_BETTER
 
+# Regression threshold, in percent, against the baseline value for the same
+# (sizeMB, op, field). Tighter than the old 25%: a 10% throughput loss on this
+# machine class is well outside run-to-run noise and is worth a human looking.
+$REGRESSION_PCT = 10.0
+
 $baseRows = $null
+$baselineNote = ""
 if ($Baseline) {
   if (Test-Path $Baseline) {
     try {
-      $baseJson = Get-Content -Raw $Baseline | ConvertFrom-Json
-      $baseRows = @($baseJson.perf)
+      if ($Baseline -match '\.tsv$') {
+        # promoted perf-bench.tsv: sizeMB, op, field, value, baseline
+        $lines = Get-Content $Baseline
+        if ($lines -and $lines.Count -ge 2) { $baseRows = @($lines | ConvertFrom-Csv -Delimiter "`t") }
+        if (-not $baseRows) { $baselineNote = "baseline TSV '$Baseline' has no data rows" }
+      } else {
+        $baseJson = Get-Content -Raw $Baseline | ConvertFrom-Json
+        $baseRows = @($baseJson.perf)
+        if (-not $baseRows) { $baselineNote = "baseline JSON '$Baseline' has no .perf rows" }
+      }
     } catch {
-      Write-QaLog $Phase "could not parse -Baseline '$Baseline' as JSON: $_"
+      $baselineNote = "could not parse -Baseline '$Baseline': $_"
     }
   } else {
-    Write-QaLog $Phase "-Baseline '$Baseline' does not exist"
+    $baselineNote = "-Baseline '$Baseline' does not exist"
   }
+} else {
+  $baselineNote = "no -Baseline supplied (promote a green campaign's perf-bench.tsv to baselines\perf.tsv)"
 }
+if ($baselineNote) { Write-QaLog $Phase $baselineNote }
 function Find-BaselineValue([int]$SizeMB, [string]$Op, [string]$Field) {
   if (-not $baseRows) { return $null }
   $m = $baseRows | Where-Object { $_.sizeMB -eq $SizeMB -and $_.op -eq $Op -and $_.field -eq $Field } | Select-Object -First 1
@@ -109,8 +132,8 @@ foreach ($sizeMB in $sizeClassesMB) {
         $baseStr = "$baseVal" -replace '[s%]$', ''
         if ([double]::TryParse($curStr, [ref]$cur) -and [double]::TryParse($baseStr, [ref]$base) -and $base -ne 0) {
           $deltaPct = (($cur - $base) / [Math]::Abs($base)) * 100.0
-          $regressed = ($HIGHER_IS_BETTER -contains $field -and $deltaPct -lt -25) -or
-                       ($LOWER_IS_BETTER -contains $field -and $deltaPct -gt 25)
+          $regressed = ($HIGHER_IS_BETTER -contains $field -and $deltaPct -lt -$REGRESSION_PCT) -or
+                       ($LOWER_IS_BETTER -contains $field -and $deltaPct -gt $REGRESSION_PCT)
           if ($regressed) {
             $regressionCount++
             Write-QaLog $Phase "REGRESSION sizeMB=$sizeMB op=$($rec['op']) field=$field baseline=$baseVal current=$value delta=$([math]::Round($deltaPct,1))%"
@@ -121,11 +144,18 @@ foreach ($sizeMB in $sizeClassesMB) {
   }
 }
 
-if ($Baseline -and $baseRows) {
-  Write-QaGate $Phase "baseline-regression" ($regressionCount -eq 0) "count=$regressionCount baseline=$Baseline"
+if ($baseRows) {
+  Write-QaGate $Phase "baseline-regression" ($regressionCount -eq 0) `
+    "count=$regressionCount threshold=$REGRESSION_PCT% baseline=$Baseline"
 } else {
-  Write-QaGate $Phase "baseline-regression" $true "no baseline supplied or unreadable - informational only"
+  # WARN, not PASS: nothing was compared. Reported as informational so the first
+  # campaign can still go green and produce the numbers the baseline is promoted from.
+  Write-QaGate $Phase "baseline-regression" "WARN" $baselineNote
 }
 
 Write-QaLog $Phase "done: sizeClasses=$($sizeClassesMB -join ',') regressions=$regressionCount"
-if ($regressionCount -eq 0) { exit 0 } else { exit 1 }
+# The size-class sandboxes are ~1.2GB of incompressible blob (500+100+10+1 MB, each
+# stored again in its ODB) and were being left behind for the next phase to trip over.
+Invoke-QaTeardown $Phase @("perf-*")
+
+Exit-QaPhase $Phase

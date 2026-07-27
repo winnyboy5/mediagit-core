@@ -6,4 +6,8 @@
 backend = "gcs"
 bucket = "{{BUCKET}}"
 project_id = "{{PROJECT}}"
+# Non-empty on purpose: the server path used to drop the configured prefix entirely
+# (repo data landed at bucket root). Keeping a prefix here means every GCS leg proves
+# the fix end-to-end - objects MUST appear under this path, never at the root.
+prefix = "{{PREFIX}}"
 {{CREDS_LINE}}

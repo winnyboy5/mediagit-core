@@ -14,7 +14,6 @@ mediagit branch delete <branches>... [-D|--force] [-d|--delete-merged] [-r|--rem
 mediagit branch rename [<old-name>] <new-name> [-f|--force]
 mediagit branch show [<branch>] [-v|--verbose]
 mediagit branch protect <branch> [--require-reviews] [--unprotect]
-mediagit branch merge <branch> [--no-ff|--ff-only] [-m <message>] [--abort|--continue-merge]
 ```
 
 ## Description
@@ -91,13 +90,6 @@ Protect a branch against force-push and deletion (see
 `[protected_branches]` in the [Configuration Reference](../reference/config.md)).
 `--require-reviews` additionally requires pull-request reviews before merge;
 `--unprotect` removes protection.
-
-### `merge <branch>`
-
-Merge `<branch>` into the current branch. `--no-ff` forces a merge commit,
-`--ff-only` allows fast-forward only, `-m <message>` sets the merge message,
-`--abort` / `--continue-merge` control conflict resolution. See
-[mediagit merge](./merge.md).
 
 ## Examples
 

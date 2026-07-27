@@ -21,7 +21,6 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 
 const DEFAULT_PACK_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_PACK_CHUNKS: u32 = 1024;
-const DEFAULT_PACK_MIN_CHUNKS: u32 = 8;
 
 fn pack_bytes_cap() -> u64 {
     std::env::var("MEDIAGIT_PACK_BYTES")
@@ -37,21 +36,13 @@ fn pack_chunks_cap() -> u32 {
         .unwrap_or(DEFAULT_PACK_CHUNKS)
 }
 
-fn pack_min_chunks() -> u32 {
-    std::env::var("MEDIAGIT_PACK_MIN_CHUNKS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_PACK_MIN_CHUNKS)
-}
-
 /// Client-side cloud pack assembler.
 ///
 /// Accumulates chunks and flushes a `CloudPackResult` when the byte cap
 /// (`MEDIAGIT_PACK_BYTES`, default 64 MiB) or chunk cap
 /// (`MEDIAGIT_PACK_CHUNKS`, default 1024) is reached.
 ///
-/// Call `finish()` after all chunks are added to flush any remainder (even
-/// below `MEDIAGIT_PACK_MIN_CHUNKS`).
+/// Call `finish()` after all chunks are added to flush any remainder.
 pub struct PackBuilder {
     temp_dir: PathBuf,
     writer: Option<StreamingPackWriter<tokio::fs::File>>,
@@ -112,18 +103,6 @@ impl PackBuilder {
         }
     }
 
-    /// Flush at a file boundary if the chunk count meets the minimum
-    /// fragmentation threshold (`MEDIAGIT_PACK_MIN_CHUNKS`, default 8).
-    ///
-    /// Returns `Some` if the pack was sealed, `None` if too few chunks.
-    pub async fn flush_at_boundary(&mut self) -> Result<Option<CloudPackResult>> {
-        if self.current_chunks >= pack_min_chunks() {
-            Ok(Some(self.seal().await?))
-        } else {
-            Ok(None)
-        }
-    }
-
     /// Force-flush all remaining chunks regardless of count. Returns `None` if
     /// the pack is empty.
     pub async fn finish(&mut self) -> Result<Option<CloudPackResult>> {
@@ -162,15 +141,22 @@ impl PackBuilder {
 /// This is the network-side of F4: the PackBuilder handles disk assembly,
 /// `upload_and_register` handles transport and server registration.
 /// `base_url` must already include the repo segment (e.g. `http://server/my-repo`).
+///
+/// Returns `true` when the pack bytes went out over a presigned PUT straight
+/// to the bucket, `false` when they were proxied through the server. Callers
+/// use this to distinguish the two in `[bench]` output — a presign request
+/// that silently degraded to the proxy otherwise looks identical to a
+/// successful direct upload.
 pub async fn upload_and_register(
     result: CloudPackResult,
     base_url: &str,
     http_client: &reqwest::Client,
     direct_client: &reqwest::Client,
     compressed_hashes: &[(String, String)],
-) -> Result<()> {
+) -> Result<bool> {
     let pack_oid_hex = bytes_to_hex(&result.pack_oid);
     let byte_len = result.byte_len;
+    let mut presigned_direct = false;
 
     // 1. Request presigned PUT URL for packs/<pack_oid>
     let presign_url = format!("{}/packs/upload-urls", base_url);
@@ -216,6 +202,7 @@ pub async fn upload_and_register(
         if !resp.status().is_success() {
             anyhow::bail!("presigned PUT returned {}", resp.status());
         }
+        presigned_direct = true;
         tracing::debug!(pack = %pack_oid_hex, bytes = byte_len, "Pack uploaded via presigned URL");
     } else {
         // Proxy fallback: PUT to /packs/<oid> so complete_pack's head("packs/<oid>") succeeds
@@ -274,7 +261,8 @@ pub async fn upload_and_register(
         pack = %pack_oid_hex,
         bytes = byte_len,
         chunks = manifest.len(),
+        presigned_direct,
         "Pack registered with server"
     );
-    Ok(())
+    Ok(presigned_direct)
 }

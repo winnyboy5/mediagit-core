@@ -25,7 +25,9 @@ use mediagit_protocol::{
     WantResponse,
 };
 use mediagit_security::auth::{AuthUser, GrantLevel, GrantsStore};
-use mediagit_storage::{AzureBackend, GcsBackend, LocalBackend, MinIOBackend, StorageBackend};
+use mediagit_storage::{
+    AzureBackend, GcsBackend, GcsConfig, LocalBackend, MinIOBackend, StorageBackend,
+};
 use mediagit_versioning::{
     Commit, FileMode, LcaFinder, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Reflog,
     ReflogEntry, StreamingPackWriter, Tag, Tree, TreeEntry, resolve_revision,
@@ -295,7 +297,7 @@ async fn build_storage_backend(repo_path: &StdPath) -> Result<Arc<dyn StorageBac
             use mediagit_config::AzureAuth;
             let Some(auth) = &azure_config.auth else {
                 tracing::error!(
-                    "Azure backend config is missing its `auth` block (pre-v3 flat format?) -                      see CONFIGURATION.md for the replacement"
+                    "Azure backend config is missing its `auth` block (pre-v3 flat format?) - see CONFIGURATION.md for the replacement"
                 );
                 return Err(StatusCode::INTERNAL_SERVER_ERROR);
             };
@@ -358,9 +360,10 @@ async fn build_storage_backend(repo_path: &StdPath) -> Result<Arc<dyn StorageBac
         }
         mediagit_config::StorageConfig::GCS(gcs_config) => {
             tracing::info!(
-                "Using GCS storage backend: bucket={}, project={}",
+                "Using GCS storage backend: bucket={}, project={}, prefix='{}'",
                 gcs_config.bucket,
-                gcs_config.project_id
+                gcs_config.project_id,
+                gcs_config.prefix
             );
 
             // Resolve credentials_path: absolute, ~-prefixed, or relative to repo dir.
@@ -382,24 +385,28 @@ async fn build_storage_backend(repo_path: &StdPath) -> Result<Arc<dyn StorageBac
                     }
                 });
 
+            // Thread the configured `prefix` through GcsConfig, same as the CLI
+            // path (mediagit-cli/src/repo.rs) and the S3/Azure branches above —
+            // pre-fix this was silently dropped and repo data landed at bucket
+            // root (C-BUG-GCS-PREFIX).
+            let gcs_backend_config = gcs_config_with_prefix(gcs_config);
+
             let storage = match resolved_creds {
-                Some(path) => GcsBackend::new(&gcs_config.project_id, &gcs_config.bucket, &path)
+                Some(path) => GcsBackend::with_config(gcs_backend_config, &path)
                     .await
                     .map_err(|e| {
                         tracing::error!("Failed to initialize GCS backend: {}", e);
                         StatusCode::INTERNAL_SERVER_ERROR
                     })?,
-                None => {
-                    GcsBackend::with_default_credentials(&gcs_config.project_id, &gcs_config.bucket)
-                        .await
-                        .map_err(|e| {
-                            tracing::error!(
-                                "Failed to initialize GCS backend with default credentials: {}",
-                                e
-                            );
-                            StatusCode::INTERNAL_SERVER_ERROR
-                        })?
-                }
+                None => GcsBackend::with_default_credentials_and_config(gcs_backend_config)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!(
+                            "Failed to initialize GCS backend with default credentials: {}",
+                            e
+                        );
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?,
             };
 
             Arc::new(storage)
@@ -427,6 +434,19 @@ async fn build_storage_backend(repo_path: &StdPath) -> Result<Arc<dyn StorageBac
     })?;
 
     Ok(Arc::new(namespaced))
+}
+
+/// Build a `GcsConfig` with the repo's configured `prefix` applied.
+///
+/// Pulled out of `build_storage_backend`'s match arm so the prefix wiring is
+/// unit-testable without a network round-trip (constructing a `GcsBackend`
+/// requires real credentials/connectivity).
+fn gcs_config_with_prefix(gcs_config: &mediagit_config::GCSStorage) -> GcsConfig {
+    let mut config = GcsConfig::new(&gcs_config.project_id, &gcs_config.bucket);
+    if !gcs_config.prefix.is_empty() {
+        config.prefix = Some(gcs_config.prefix.clone());
+    }
+    config
 }
 
 /// MinIO / S3-compatible storage (MinIO, DigitalOcean Spaces, Cloudflare R2, etc.).
@@ -1084,5 +1104,28 @@ mod tests {
             let user_id = format!("user{}", i);
             assert_eq!(grants.get(&user_id, "repoA"), Some(GrantLevel::Write));
         }
+    }
+
+    fn gcs_storage_config(prefix: &str) -> mediagit_config::GCSStorage {
+        mediagit_config::GCSStorage {
+            bucket: "bucket".to_string(),
+            project_id: "project".to_string(),
+            credentials_path: None,
+            prefix: prefix.to_string(),
+        }
+    }
+
+    #[test]
+    fn gcs_backend_config_threads_configured_prefix() {
+        let cfg = gcs_config_with_prefix(&gcs_storage_config("myrepo"));
+        assert_eq!(cfg.prefix.as_deref(), Some("myrepo"));
+        assert_eq!(cfg.project_id, "project");
+        assert_eq!(cfg.bucket_name, "bucket");
+    }
+
+    #[test]
+    fn gcs_backend_config_empty_prefix_stays_none() {
+        let cfg = gcs_config_with_prefix(&gcs_storage_config(""));
+        assert_eq!(cfg.prefix, None);
     }
 }

@@ -62,6 +62,8 @@ pub enum AuthSubcommand {
     Login(LoginOpts),
 
     /// Register a new account on a MediaGit server
+    ///
+    /// Reads username/email/password line-by-line from stdin when piped.
     Register(ServerOpts),
 
     /// Show which credential tier is active and the server's auth mode
@@ -71,6 +73,8 @@ pub enum AuthSubcommand {
     Logout(LogoutOpts),
 
     /// Change your own password
+    ///
+    /// Reads current/new password line-by-line from stdin when piped.
     Passwd(ServerOpts),
 
     /// Show your identity, role, and granted repos
@@ -183,10 +187,14 @@ pub enum AdminSubcommand {
     SetRole(SetRoleOpts),
 
     /// Create a user with an explicit role (for closed-registration servers)
+    ///
+    /// Reads email/password line-by-line from stdin when piped.
     #[command(name = "create-user")]
     CreateUser(CreateUserOpts),
 
     /// Reset a user's password (forgot-password recovery path)
+    ///
+    /// Reads the new password line-by-line from stdin when piped.
     #[command(name = "reset-password")]
     ResetPassword(UserOpts),
 
@@ -544,6 +552,32 @@ async fn set_login_author(name: &str, email: &str) {
 // login / register
 // ---------------------------------------------------------------------
 
+/// Prompts for a value interactively, or reads one line from stdin when
+/// stdin isn't a terminal (piped input, e.g. `echo pw | mediagit auth ...`
+/// in scripts/CI) — same TTY check `commit.rs` uses for its message editor.
+/// `confirm`, if set, adds an interactive re-type check (`(prompt, mismatch
+/// error)`); it's skipped on the stdin-pipe path since re-typing a value
+/// that's already coming from a pipe isn't a meaningful check.
+fn read_value(prompt: &str, secret: bool, confirm: Option<(&str, &str)>) -> Result<String> {
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        Ok(if secret {
+            let mut pw = Password::new().with_prompt(prompt);
+            if let Some((confirm_prompt, mismatch_err)) = confirm {
+                pw = pw.with_confirmation(confirm_prompt, mismatch_err);
+            }
+            pw.interact()?
+        } else {
+            Input::new().with_prompt(prompt).interact_text()?
+        })
+    } else {
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .context("failed to read from stdin")?;
+        Ok(line.trim_end_matches(['\n', '\r']).to_string())
+    }
+}
+
 async fn login(opts: &LoginOpts) -> Result<()> {
     let target = resolve_server_target(&opts.server).await?;
     mediagit_protocol::ensure_crypto_provider();
@@ -562,14 +596,9 @@ async fn login(opts: &LoginOpts) -> Result<()> {
 
     let username = match &opts.username {
         Some(u) => u.clone(),
-        None => {
-            let u: String = Input::new()
-                .with_prompt("Username or email")
-                .interact_text()?;
-            u
-        }
+        None => read_value("Username or email", false, None)?,
     };
-    let password = Password::new().with_prompt("Password").interact()?;
+    let password = read_value("Password", true, None)?;
 
     #[derive(Serialize)]
     struct LoginBody<'a> {
@@ -628,12 +657,13 @@ async fn register(opts: &ServerOpts) -> Result<()> {
     mediagit_protocol::ensure_crypto_provider();
     let client = reqwest::Client::new();
 
-    let username: String = Input::new().with_prompt("Username").interact_text()?;
-    let email: String = Input::new().with_prompt("Email").interact_text()?;
-    let password = Password::new()
-        .with_prompt("Password")
-        .with_confirmation("Confirm password", "Passwords don't match")
-        .interact()?;
+    let username = read_value("Username", false, None)?;
+    let email = read_value("Email", false, None)?;
+    let password = read_value(
+        "Password",
+        true,
+        Some(("Confirm password", "Passwords don't match")),
+    )?;
 
     #[derive(Serialize)]
     struct RegisterBody<'a> {
@@ -792,11 +822,12 @@ async fn passwd(opts: &ServerOpts) -> Result<()> {
     mediagit_protocol::ensure_crypto_provider();
     let client = reqwest::Client::new();
 
-    let current_password = Password::new().with_prompt("Current password").interact()?;
-    let new_password = Password::new()
-        .with_prompt("New password")
-        .with_confirmation("Confirm new password", "Passwords don't match")
-        .interact()?;
+    let current_password = read_value("Current password", true, None)?;
+    let new_password = read_value(
+        "New password",
+        true,
+        Some(("Confirm new password", "Passwords don't match")),
+    )?;
 
     #[derive(Serialize)]
     struct Body<'a> {
@@ -1085,11 +1116,12 @@ async fn admin_create_user(opts: &CreateUserOpts) -> Result<()> {
     mediagit_protocol::ensure_crypto_provider();
     let client = reqwest::Client::new();
 
-    let email: String = Input::new().with_prompt("Email").interact_text()?;
-    let password = Password::new()
-        .with_prompt("Password")
-        .with_confirmation("Confirm password", "Passwords don't match")
-        .interact()?;
+    let email = read_value("Email", false, None)?;
+    let password = read_value(
+        "Password",
+        true,
+        Some(("Confirm password", "Passwords don't match")),
+    )?;
 
     #[derive(Serialize)]
     struct Body<'a> {
@@ -1145,10 +1177,11 @@ async fn admin_reset_password(opts: &UserOpts) -> Result<()> {
 
     let id = resolve_user_id(&client, target.origin(), &creds, &opts.user).await?;
 
-    let new_password = Password::new()
-        .with_prompt("New password")
-        .with_confirmation("Confirm new password", "Passwords don't match")
-        .interact()?;
+    let new_password = read_value(
+        "New password",
+        true,
+        Some(("Confirm new password", "Passwords don't match")),
+    )?;
 
     #[derive(Serialize)]
     struct Body<'a> {

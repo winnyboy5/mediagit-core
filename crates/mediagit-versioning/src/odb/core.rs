@@ -56,7 +56,7 @@ impl ObjectDatabase {
         Self {
             storage,
             cache: Cache::builder()
-                .max_capacity(DEFAULT_CACHE_MAX_BYTES)
+                .max_capacity(super::cache_max_bytes())
                 .weigher(|_key: &Oid, value: &Arc<Vec<u8>>| -> u32 {
                     value.len().try_into().unwrap_or(u32::MAX)
                 })
@@ -100,7 +100,7 @@ impl ObjectDatabase {
         Self {
             storage,
             cache: Cache::builder()
-                .max_capacity(DEFAULT_CACHE_MAX_BYTES)
+                .max_capacity(super::cache_max_bytes())
                 .weigher(|_key: &Oid, value: &Arc<Vec<u8>>| -> u32 {
                     value.len().try_into().unwrap_or(u32::MAX)
                 })
@@ -133,7 +133,7 @@ impl ObjectDatabase {
         Self {
             storage,
             cache: Cache::builder()
-                .max_capacity(DEFAULT_CACHE_MAX_BYTES)
+                .max_capacity(super::cache_max_bytes())
                 .weigher(|_key: &Oid, value: &Arc<Vec<u8>>| -> u32 {
                     value.len().try_into().unwrap_or(u32::MAX)
                 })
@@ -172,7 +172,7 @@ impl ObjectDatabase {
         Self {
             storage,
             cache: Cache::builder()
-                .max_capacity(DEFAULT_CACHE_MAX_BYTES)
+                .max_capacity(super::cache_max_bytes())
                 .weigher(|_key: &Oid, value: &Arc<Vec<u8>>| -> u32 {
                     value.len().try_into().unwrap_or(u32::MAX)
                 })
@@ -205,7 +205,7 @@ impl ObjectDatabase {
         Self {
             storage,
             cache: Cache::builder()
-                .max_capacity(DEFAULT_CACHE_MAX_BYTES)
+                .max_capacity(super::cache_max_bytes())
                 .weigher(|_key: &Oid, value: &Arc<Vec<u8>>| -> u32 {
                     value.len().try_into().unwrap_or(u32::MAX)
                 })

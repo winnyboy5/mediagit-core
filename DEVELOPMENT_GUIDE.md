@@ -100,7 +100,7 @@ MediaGit uses **two separate storage locations**:
 
 ### System Requirements
 - **OS**: Linux, macOS, Windows (native or WSL2)
-- **Rust**: 1.92.0+ (pinned in `Cargo.toml` `[workspace.package].rust-version` — check with `rustc --version`)
+- **Rust**: 1.97+ (pinned in `Cargo.toml` `[workspace.package].rust-version` — check with `rustc --version`)
 - **CPU**: 2+ cores
 - **RAM**: 8GB minimum (use `RUST_TEST_THREADS=2`), 16GB+ recommended (default parallel tests)
 - **Disk**: 10GB+ free space
@@ -113,7 +113,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
 
 # Verify installation
-rustc --version  # Must be 1.92.0 or higher
+rustc --version  # Must be 1.97 or higher
 cargo --version
 
 # Ubuntu/Debian build essentials
@@ -487,7 +487,7 @@ cargo bench --bench odb_bench
 
 ### "Rust version too old" error
 
-**Solution**: `rustup update` — MediaGit requires 1.92.0+ (see `rust-version`
+**Solution**: `rustup update` — MediaGit requires 1.97+ (see `rust-version`
 in root `Cargo.toml`).
 
 ### Tests consuming too much RAM

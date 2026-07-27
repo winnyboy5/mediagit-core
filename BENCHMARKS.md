@@ -2,6 +2,8 @@
 
 **Run date:** July 16, 2026 | **Build:** mediagit 0.2.8-beta.1 | **CDC Seed:** 20260716 (pinned for determinism)
 
+> Numbers below were measured on build `0.2.8-beta.1`. Current release is `0.3.0-rc.2`; the storage-savings pipeline is unchanged since this run, but figures have not been re-measured on the current build.
+
 MediaGit applies format-aware chunking and zstd-dict deltas to achieve cross-version deduplication across media formats. This document publishes measured storage savings and methodology, with reproducibility as the primary goal.
 
 ---

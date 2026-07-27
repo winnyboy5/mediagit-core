@@ -210,7 +210,8 @@ pub(crate) fn http_pool_max() -> usize {
         .unwrap_or(64)
 }
 
-/// Maximum 429 retries for a single control-plane request.
+/// Maximum 429 retries for a single control-plane request. Default 5,
+/// overridable via `MEDIAGIT_RATE_LIMIT_RETRIES`.
 fn rate_limit_max_retries() -> u32 {
     std::env::var("MEDIAGIT_RATE_LIMIT_RETRIES")
         .ok()

@@ -456,7 +456,7 @@ merge) is available via `mediagit lock` — see
 
 ### Prerequisites
 
-- **Rust 1.92.0+** (pinned via `rust-version` in the workspace `Cargo.toml`) — verify with `rustc --version`
+- **Rust 1.97+** (pinned via `rust-version` in the workspace `Cargo.toml`) — verify with `rustc --version`
 - Linux/macOS: `build-essential`/`xcode-select` toolchain, `pkg-config`, `libssl-dev` (per `DEVELOPMENT_GUIDE.md`)
 - Docker, if you want to test against a local MinIO backend
 

@@ -44,7 +44,10 @@ if (Test-Path $QA.MG) {
 if (Test-Path $QA.MGServer) {
   Row "mediagit-server.exe" "OK" $QA.MGServer
 } else {
+  # Hard fail: without the server binary every remote/auth/scale drill degrades to a
+  # skip, and the campaign reports green having tested no networked path at all.
   Row "mediagit-server.exe" "FAIL" "not found at $($QA.MGServer)"
+  $hardFail = $true
 }
 
 # ---------------------------------------------------------------
@@ -146,9 +149,12 @@ if ($pyOk) {
 # Fixture generation (skip if manifest already present and -Regen not passed)
 # ---------------------------------------------------------------
 $manifestFile = Join-Path $QA.Fixtures "manifest-synthetic.tsv"
-$genScripts = Join-Path $PSScriptRoot "."
+# Export the RESOLVED paths for the python generators. $QA.Fixtures/$QA.TestFiles already
+# honour MG_QA_FIXTURES/MG_QA_TESTFILES (config.ps1), so an operator pointing the campaign
+# at an alternate corpus is respected here instead of being overwritten with the default.
 $env:MG_QA_FIXTURES = $QA.Fixtures
 $env:MG_QA_TESTFILES = $QA.TestFiles
+Write-QaLog $Phase "fixtures dir = $($env:MG_QA_FIXTURES); test-files dir = $($env:MG_QA_TESTFILES)"
 
 if ((Test-Path $manifestFile) -and (-not $Regen)) {
   Row "fixture-gen" "SKIP" "manifest already present ($manifestFile); pass -Regen to force"
@@ -159,7 +165,11 @@ if ((Test-Path $manifestFile) -and (-not $Regen)) {
     if ($genReady[$gen]) {
       $out = & $py (Join-Path $PSScriptRoot $gen) 2>&1 | Out-String
       $out | Add-Content (Join-Path $QA.Logs "$Phase-$gen.log")
-      if ($LASTEXITCODE -eq 0) { Row "run:$gen" "OK" "" } else { Row "run:$gen" "FAIL" "exit $LASTEXITCODE" }
+      # A generator whose deps are present but which then FAILS is a broken corpus, not
+      # an absent capability: every downstream phase would silently test a partial fixture
+      # set. Missing deps stay a SKIP; a crash is a hard fail.
+      if ($LASTEXITCODE -eq 0) { Row "run:$gen" "OK" "" }
+      else { Row "run:$gen" "FAIL" "exit $LASTEXITCODE (see $Phase-$gen.log)"; $hardFail = $true }
     } else {
       Row "run:$gen" "SKIP" "missing deps"
     }
@@ -167,7 +177,8 @@ if ((Test-Path $manifestFile) -and (-not $Regen)) {
 
   $out = & $py (Join-Path $PSScriptRoot "gen_manifest.py") 2>&1 | Out-String
   $out | Add-Content (Join-Path $QA.Logs "$Phase-gen_manifest.py.log")
-  if ($LASTEXITCODE -eq 0) { Row "run:gen_manifest.py" "OK" "" } else { Row "run:gen_manifest.py" "FAIL" "exit $LASTEXITCODE" }
+  if ($LASTEXITCODE -eq 0) { Row "run:gen_manifest.py" "OK" "" }
+  else { Row "run:gen_manifest.py" "FAIL" "exit $LASTEXITCODE"; $hardFail = $true }
 }
 
 # ---------------------------------------------------------------
@@ -220,7 +231,14 @@ if ($fixturesPresent -and $pyOk -and $genReady["gen_chain_fixtures.py"]) {
     $h1 = Get-QaHash $orig
     $h2 = Get-QaHash $redo
     if ($h1 -eq $h2) { Row "determinism" "OK" "map_v1.svg hash matches" }
-    else { Row "determinism" "FAIL" "map_v1.svg hash mismatch: $h1 vs $h2" }
+    else {
+      # Hard gate. Byte-identical regeneration is the premise the whole campaign rests on:
+      # dedup percentages, delta chains and clone-parity comparisons are only meaningful
+      # against a corpus that is the same corpus every run. A drifting generator produces
+      # storage-economics numbers that cannot be compared to any previous or later run.
+      Row "determinism" "FAIL" "map_v1.svg hash mismatch: $h1 vs $h2"
+      $hardFail = $true
+    }
   } else {
     Row "determinism" "SKIP" "map_v1.svg missing in original or redo output"
   }
@@ -232,8 +250,11 @@ if ($fixturesPresent -and $pyOk -and $genReady["gen_chain_fixtures.py"]) {
 # Gates
 # ---------------------------------------------------------------
 $fixturesGateOk = Test-Path $manifestFile
-Write-QaGate $Phase "binaries-and-minio-ok" (-not $hardFail) ""
+Write-QaGate $Phase "preflight-hard-checks" (-not $hardFail) "binaries, selected backends, fixture generation, determinism"
 Write-QaGate $Phase "fixtures-present" $fixturesGateOk $manifestFile
 
-if ($hardFail -or -not $fixturesGateOk) { exit 1 }
-exit 0
+# The determinism check regenerates a full chain fixture set (~366MB) into work/ purely
+# to hash one svg; nothing downstream reads it.
+Invoke-QaTeardown $Phase @("determinism-check")
+
+Exit-QaPhase $Phase

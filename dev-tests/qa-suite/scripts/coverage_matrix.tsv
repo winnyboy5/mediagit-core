@@ -91,12 +91,6 @@ branch switch	--no-guess	no	OK
 branch rename	-(bare invocation)	no	OK
 branch rename	-f,--force	no	OK
 branch show	-(bare invocation)	no	OK
-branch merge	-(bare invocation)	no	ERROR
-branch merge	--no-ff	no	ERROR
-branch merge	--ff-only	no	ERROR
-branch merge	-m,--message	yes	ERROR
-branch merge	--abort	no	ERROR
-branch merge	--continue-merge	no	ERROR
 branch protect	-(bare invocation)	no	OK
 branch protect	--require-reviews	no	OK
 branch protect	--unprotect	no	OK

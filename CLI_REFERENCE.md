@@ -1,6 +1,6 @@
 # MediaGit CLI Reference
 
-Complete command reference for MediaGit v0.2.8-beta.1 — Git for Media Files.
+Complete command reference for MediaGit v0.3.0-rc.2 — Git for Media Files.
 
 Object IDs (OIDs) throughout MediaGit — commits, blobs, chunks — are **BLAKE3** hashes displayed as 64 lowercase hex characters.
 
@@ -375,7 +375,6 @@ mediagit branch <SUBCOMMAND>
 | `rename` | `branch rename <OLD> <NEW>` | Rename specific branch |
 | `rename` | `branch rename <NEW>` | Rename current branch to NEW |
 | `show` | `branch show [BRANCH]` | Show info |
-| `merge` | `branch merge <BRANCH>` | Merge branch |
 | `protect` | `branch protect <BRANCH>` | Protect branch |
 
 **Flags for `branch list`:**
@@ -424,7 +423,6 @@ mediagit branch create feature/new-asset
 mediagit branch switch develop
 mediagit branch delete -D old-branch
 mediagit branch delete -r origin/stale-branch   # Delete local remote-tracking ref
-mediagit branch merge feature/complete --no-ff
 mediagit branch rename feature/old-name feature/new-name   # Rename specific branch
 mediagit branch rename new-name                            # Rename current branch
 ```

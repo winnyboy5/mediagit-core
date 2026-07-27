@@ -35,8 +35,19 @@ function Get-QaFreePort {
 }
 
 # Resolve backend -> @{ Template=<filename in config\backends>; Tokens=<hashtable> }.
-# Throws "SKIP: ..." when required credentials/env are missing.
+#
+# Throws "SKIP: ..." ONLY for a backend the operator did not ask for or did not supply
+# credentials for - i.e. things that are absent by choice. Everything else (a missing
+# template, a server that will not start, a backend that is selected but broken) throws
+# a plain error so the caller records a FAILURE. Infrastructure dying mid-campaign is
+# not a skip: reporting it as one is how a run with nothing verified reads green.
 function _QaBackendConfig([string]$Backend) {
+  # "local" is always available (filesystem storage); every other backend has to be
+  # selected. This is the one skip that may leave an all-skip phase green, so it
+  # carries the marker Exit-QaPhase looks for.
+  if ($Backend -ne "local" -and $QA.Backends -notcontains $Backend) {
+    throw "SKIP: backend '$Backend' $QA_SKIP_NOT_SELECTED"
+  }
   switch ($Backend) {
     "minio" {
       if (-not $QA.MinioAccessKey -or -not $QA.MinioSecretKey -or -not $QA.MinioEndpoint) {
@@ -80,7 +91,11 @@ function _QaBackendConfig([string]$Backend) {
       }
       $credsLine = ""
       if ($creds) { $credsLine = 'credentials_path = "' + ($creds -replace '\\', '/') + '"' }
-      return @{ Template = "gcs.toml"; Tokens = @{ PROJECT = $proj; BUCKET = $bucket; CREDS_LINE = $credsLine } }
+      # Per-run prefix, deliberately non-empty: the server used to drop it, so a rooted
+      # layout is the regression signal. Also keeps concurrent runs from colliding.
+      $prefix = [Environment]::GetEnvironmentVariable("MG_QA_GCS_PREFIX")
+      if (-not $prefix) { $prefix = "qa/$($QA.RunId)" }
+      return @{ Template = "gcs.toml"; Tokens = @{ PROJECT = $proj; BUCKET = $bucket; PREFIX = $prefix; CREDS_LINE = $credsLine } }
     }
     "local" {
       return @{ Template = "local.toml"; Tokens = @{} }
@@ -113,7 +128,8 @@ function Start-QaServer {
 
   $bc = _QaBackendConfig $Backend
   $tplPath = Join-Path $QA.Root "config\backends\$($bc.Template)"
-  if (-not (Test-Path $tplPath)) { throw "SKIP: missing template $tplPath" }
+  # A missing template is a broken harness checkout, not an absent capability - fail loudly.
+  if (-not (Test-Path $tplPath)) { throw "missing backend template $tplPath" }
 
   # Unique dir per invocation: multiple drills in one phase reuse the same backend, and a
   # shared "server-$Backend" dir let a new drill's wipe race a lingering prior server
@@ -153,7 +169,7 @@ repos_dir = "$reposDirFwd"$authLines
     $adminOut = & $QA.MGServer @(
       "admin", "--config", $srvToml, "create", $AdminUser, "$AdminUser@qa.local", "--password", $AdminPass
     ) 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "SKIP: admin create failed for $AdminUser : $adminOut" }
+    if ($LASTEXITCODE -ne 0) { throw "admin create failed for $AdminUser : $adminOut" }
     Write-QaLog $Phase "bootstrapped admin '$AdminUser' via mediagit-server admin create"
   }
 
@@ -177,7 +193,10 @@ repos_dir = "$reposDirFwd"$authLines
   if (-not $healthy) {
     $errText = if (Test-Path $errLog) { (Get-Content $errLog -Raw -ErrorAction SilentlyContinue) } else { "" }
     if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
-    throw "SKIP: mediagit-server ($Backend) never became healthy: $errText"
+    # NOT a SKIP: the backend was selected and its credentials resolved, so a server
+    # that will not come up is a live defect (or dead infrastructure) and must fail
+    # the phase. This used to be a SKIP, which turned every MinIO outage into a green run.
+    throw "mediagit-server ($Backend) never became healthy: $errText"
   }
 
   Write-QaLog $Phase "server $Backend up: $url/$repoName (pid $($proc.Id))"

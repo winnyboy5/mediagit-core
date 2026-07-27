@@ -43,4 +43,7 @@ $r = Invoke-MG $work @("fsck") $Phase -TimeoutSec 300
 $fsckOk = ($r.Exit -eq 0) -and ($r.Out -match "PERFECT|integrity")
 Write-QaGate $Phase "compat-fixture-fsck-clean" $fsckOk ("exit=$($r.Exit)")
 
-if ($coverageOk -and $fsckOk) { exit 0 } else { exit 1 }
+# work/ scratch: the fixture copy this phase made.
+Invoke-QaTeardown $Phase @("compat-fixture-check*")
+
+Exit-QaPhase $Phase

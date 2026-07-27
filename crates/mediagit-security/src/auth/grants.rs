@@ -105,7 +105,13 @@ impl GrantsStore {
     }
 
     fn snapshot(&self) -> Vec<Grant> {
-        let grants = self.grants.read().expect("grants lock poisoned");
+        // Recover from poison rather than propagate it: grants writes are
+        // small, atomic `HashMap` mutations (insert/remove/retain), so a
+        // poisoned lock still holds either the pre- or post-mutation state,
+        // never a torn one. This is a read-mostly, security-critical path —
+        // one panicking auth request must not poison the lock and cascade
+        // into every subsequent grant check panicking too.
+        let grants = self.grants.read().unwrap_or_else(|e| e.into_inner());
         grants
             .iter()
             .map(|((user_id, repo), level)| Grant {
@@ -120,7 +126,7 @@ impl GrantsStore {
     /// grant for that pair.
     pub async fn grant(&self, user_id: &str, repo: &str, level: Level) -> AuthResult<()> {
         {
-            let mut grants = self.grants.write().expect("grants lock poisoned");
+            let mut grants = self.grants.write().unwrap_or_else(|e| e.into_inner());
             grants.insert((user_id.to_string(), repo.to_string()), level);
         }
         self.persist().await
@@ -129,7 +135,7 @@ impl GrantsStore {
     /// Revoke `user_id`'s grant on `repo`, if any.
     pub async fn revoke(&self, user_id: &str, repo: &str) -> AuthResult<()> {
         {
-            let mut grants = self.grants.write().expect("grants lock poisoned");
+            let mut grants = self.grants.write().unwrap_or_else(|e| e.into_inner());
             grants.remove(&(user_id.to_string(), repo.to_string()));
         }
         self.persist().await
@@ -141,7 +147,7 @@ impl GrantsStore {
     /// matching every other mutator — if the user held no grants.
     pub async fn remove_user(&self, user_id: &str) -> AuthResult<()> {
         {
-            let mut grants = self.grants.write().expect("grants lock poisoned");
+            let mut grants = self.grants.write().unwrap_or_else(|e| e.into_inner());
             grants.retain(|(u, _), _| u != user_id);
         }
         self.persist().await
@@ -151,7 +157,7 @@ impl GrantsStore {
     pub fn get(&self, user_id: &str, repo: &str) -> Option<Level> {
         self.grants
             .read()
-            .expect("grants lock poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .get(&(user_id.to_string(), repo.to_string()))
             .copied()
     }
@@ -160,7 +166,7 @@ impl GrantsStore {
     pub fn list_for_user(&self, user_id: &str) -> Vec<(String, Level)> {
         self.grants
             .read()
-            .expect("grants lock poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .filter(|((u, _), _)| u == user_id)
             .map(|((_, repo), level)| (repo.clone(), *level))
@@ -171,7 +177,7 @@ impl GrantsStore {
     pub fn list_for_repo(&self, repo: &str) -> Vec<(String, Level)> {
         self.grants
             .read()
-            .expect("grants lock poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .filter(|((_, r), _)| r == repo)
             .map(|((user_id, _), level)| (user_id.clone(), *level))
@@ -183,7 +189,10 @@ impl GrantsStore {
     /// enforcement is active — a zero-grants deployment behaves exactly like
     /// the pre-H2 flat permission check.
     pub fn is_empty(&self) -> bool {
-        self.grants.read().expect("grants lock poisoned").is_empty()
+        self.grants
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
     }
 }
 
@@ -205,6 +214,30 @@ mod tests {
         assert!(Level::Read < Level::Write);
         assert!(Level::Write < Level::Admin);
         assert!(Level::Read < Level::Admin);
+    }
+
+    #[test]
+    fn poisoned_lock_recovers_instead_of_panicking() {
+        let store = GrantsStore::new();
+        store
+            .grants
+            .write()
+            .unwrap()
+            .insert(("user1".to_string(), "repoA".to_string()), Level::Read);
+
+        std::thread::scope(|s| {
+            let handle = s.spawn(|| {
+                let _guard = store.grants.write().unwrap();
+                panic!("simulated panic while holding the write lock");
+            });
+            assert!(handle.join().is_err(), "spawned thread should panic");
+        });
+        assert!(store.grants.is_poisoned());
+
+        // Every read/write site must recover from the poison rather than
+        // propagate it.
+        assert_eq!(store.get("user1", "repoA"), Some(Level::Read));
+        assert!(!store.is_empty());
     }
 
     #[tokio::test]

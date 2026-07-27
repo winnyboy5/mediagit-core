@@ -32,7 +32,7 @@ function Rec([string]$Check, [string]$Op, $Pass, [string]$Detail) {
   Write-QaRow $TSV @("check", "op", "pass", "detail") @($Check, $Op, $Pass, $Detail)
   $tag = if ("$Pass" -eq "SKIP") { "SKIP" } elseif ($Pass) { "PASS" } else { "FAIL" }
   Write-QaLog $Phase ("{0} :: {1} -> {2}  {3}" -f $Check, $Op, $tag, $Detail)
-  Write-QaGate $Phase $Check ($Pass -eq $true) $Detail
+  Write-QaGate $Phase $Check $Pass $Detail
   if ($tag -eq "FAIL") { $script:AllPass = $false }
 }
 
@@ -737,4 +737,8 @@ Matrix-CherryPick
 Matrix-Rebase
 
 Write-QaLog $Phase "=== 05_branching done: overall=$(if ($script:AllPass) { 'PASS' } else { 'FAIL' }) ==="
-if ($script:AllPass) { exit 0 } else { exit 1 }
+# Teardown: reclaim this phase's own work/ scratch so a long campaign cannot run the
+# volume out of space. work/ ONLY - logs/ and fixtures-synthetic/ are never touched.
+Invoke-QaTeardown $Phase @("c[0-9][0-9]-*")
+
+Exit-QaPhase $Phase (-not $script:AllPass)

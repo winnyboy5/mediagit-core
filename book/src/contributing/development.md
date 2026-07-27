@@ -6,7 +6,7 @@ A complete guide for setting up MediaGit for development and contribution.
 
 | Tool | Version | Purpose |
 |------|---------|---------|
-| Rust | 1.92.0+ | Language toolchain (MSRV) |
+| Rust | 1.97.1+ | Language toolchain (MSRV) |
 | Docker | 20.10+ | Integration test emulators |
 | Git | 2.x | Source code management |
 
@@ -17,7 +17,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://rustup.rs | sh
 source ~/.cargo/env
 
 # Install the exact MSRV toolchain
-rustup toolchain install 1.92.0
+rustup toolchain install 1.97.1
 rustup component add rustfmt clippy
 ```
 
@@ -103,7 +103,7 @@ docker compose -f docker-compose.test.yml down -v
 ### MSRV Check
 
 ```bash
-cargo +1.92.0 check --workspace --all-features
+cargo +1.97.1 check --workspace --all-features
 ```
 
 ## Git Hooks (husky-rs)

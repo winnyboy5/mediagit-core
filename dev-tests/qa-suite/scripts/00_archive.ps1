@@ -116,4 +116,4 @@ if (-not $DryRun -and (Test-Path $V11)) {
 Write-QaGate $Phase "all-archive-actions-done" $allDone ("manifest=" + $manifestPath)
 Write-QaLog $Phase ("manifest written: {0}" -f $manifestPath)
 
-if ($allDone) { exit 0 } else { exit 1 }
+Exit-QaPhase $Phase

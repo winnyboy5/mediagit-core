@@ -67,6 +67,7 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 | `MEDIAGIT_PUSH_OBJECT_CONCURRENCY` | Max concurrent object uploads when `PUSH_PIPELINE=1`. | `8` |
 | `MEDIAGIT_PUSH_CHUNK_CONCURRENCY` | Per-object chunk upload concurrency; targets ~64 total in-flight PUTs. | computed |
 | `MEDIAGIT_PUSH_DEADLINE_SECS` | Overall wall-clock deadline for a single push. | `3600` |
+| `MEDIAGIT_RATE_LIMIT_RETRIES` | Max HTTP 429 retries for a single control-plane request. Relevant when a large push outruns a server-side rate limiter. | `5` |
 | `MEDIAGIT_STRONG_VERIFY` | `1` runs a full BLAKE3 re-hash verification of pushed chunks after transfer. | `0` (OFF) |
 | `MEDIAGIT_PULL_PIPELINE` | Overlap manifest fetches and chunk downloads. | `1` (ON) |
 | `MEDIAGIT_PULL_MANIFEST_CONCURRENCY` | Max concurrent manifest fetches when `PULL_PIPELINE=1`. | `8` |
@@ -108,7 +109,7 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MEDIAGIT_CLOUD_PACKS` | Bundle chunks into cloud packs for push/pull instead of per-chunk transfer. | `1` (ON) |
-| `MEDIAGIT_PACK_BYTES` / `MEDIAGIT_PACK_CHUNKS` / `MEDIAGIT_PACK_MIN_CHUNKS` | Byte, chunk-count, and minimum-chunk-count caps for cloud pack building. | `64 MiB` / `1024` / `8` |
+| `MEDIAGIT_PACK_BYTES` / `MEDIAGIT_PACK_CHUNKS` | Byte and chunk-count caps for cloud pack building. | `64 MiB` / `1024` |
 | `MEDIAGIT_PACK_BUILDER_CONCURRENCY` | Concurrent pack-build workers. | `2` |
 | `MEDIAGIT_PACK_WORKERS` | Concurrent ODB writes while unpacking an incoming push pack on the server. | `8` |
 | `MEDIAGIT_PACK_UPLOAD_CONCURRENCY` | Concurrent pack uploads from the client pack builder. | `8` |

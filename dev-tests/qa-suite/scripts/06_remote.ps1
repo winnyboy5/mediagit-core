@@ -26,17 +26,8 @@ function Rec([string]$Backend, [string]$Op, $SizeMB, $Sec, $Parity, [string]$Det
     @($Backend, $Op, $SizeMB, $Sec, $mbps, $Parity, $Detail)
   $tag = if ("$Parity" -eq "SKIP") { "SKIP" } elseif ($Parity) { "PASS" } else { "FAIL" }
   Write-QaLog $Phase ("{0} :: {1} -> {2}  {3}s  {4}" -f $Backend, $Op, $tag, $Sec, $Detail)
-  Write-QaGate $Phase "$Backend-$Op" ($Parity -eq $true -or "$Parity" -eq "SKIP") $Detail
+  Write-QaGate $Phase "$Backend-$Op" $Parity $Detail
   if ($tag -eq "FAIL") { $script:AllPass = $false }
-}
-
-# Sorted "hash  relpath" lines for every non-.mediagit file - used for full-tree parity.
-function Get-QaTreeHashes([string]$Root) {
-  $full = (Get-Item $Root).FullName
-  Get-ChildItem $full -Recurse -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -notmatch '\\\.mediagit\\' } |
-    ForEach-Object { "{0}  {1}" -f (Get-QaHash $_.FullName), $_.FullName.Substring($full.Length + 1) } |
-    Sort-Object
 }
 
 function New-QaBinaryFixture([string]$Path, [int]$SizeMB, [int]$Seed) {
@@ -97,8 +88,12 @@ foreach ($backend in $QA.Backends) {
     try {
       $srv = Start-QaServer -Backend $backend -Phase $Phase
     } catch {
+      # SKIP only for a backend that was never selected or has no credentials. A backend
+      # we DID ask for whose server will not start is a failure - and it is recorded as
+      # one row rather than rethrown, so the remaining backends still get exercised.
       if ("$_" -match "^SKIP:") { Rec $backend "all" "" "" "SKIP" "$_"; continue }
-      throw
+      Rec $backend "all" "" "" $false "server unavailable: $_"
+      continue
     }
 
     Invoke-MG $SRC @("remote", "remove", "origin") $Phase | Out-Null
@@ -202,4 +197,8 @@ foreach ($backend in $QA.Backends) {
 }
 
 Write-QaLog $Phase "=== 06_remote done: overall=$(if ($script:AllPass) { 'PASS' } else { 'FAIL' }) ==="
-if ($script:AllPass) { exit 0 } else { exit 1 }
+# Teardown: reclaim this phase's own work/ scratch so a long campaign cannot run the
+# volume out of space. work/ ONLY - logs/ and fixtures-synthetic/ are never touched.
+Invoke-QaTeardown $Phase @("remote-*")
+
+Exit-QaPhase $Phase (-not $script:AllPass)

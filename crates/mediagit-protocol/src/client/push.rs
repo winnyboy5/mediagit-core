@@ -590,6 +590,7 @@ impl ProtocolClient {
         concurrent_uploads: usize,
         bytes_progress: Arc<AtomicU64>,
         bytes_total_progress: Arc<AtomicU64>,
+        bench: Option<&Arc<crate::bench::BenchSession>>,
     ) -> Result<(u32, u64, u64)> {
         use futures::stream::StreamExt;
         let mut chunks_uploaded: u32 = 0;
@@ -727,6 +728,7 @@ impl ProtocolClient {
                         odb,
                         &chunk_manifest_sizes,
                         &bytes_progress,
+                        bench,
                     )
                     .await
                 {
@@ -1492,8 +1494,9 @@ impl ProtocolClient {
                     let odb = odb.clone();
                     let bp = bytes_progress.clone();
                     let btp = bytes_total_progress.clone();
+                    let bench = _upload_bench.clone();
                     async move {
-                        self.push_one_object(oid, &odb, per_obj_concurrent, bp, btp)
+                        self.push_one_object(oid, &odb, per_obj_concurrent, bp, btp, bench.as_ref())
                             .await
                     }
                 })

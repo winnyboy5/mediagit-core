@@ -40,6 +40,25 @@ const MAX_CACHEABLE_OBJECT_SIZE: usize = 10 * 1024 * 1024;
 /// Uses Moka's weigher to bound by total byte size instead of entry count.
 const DEFAULT_CACHE_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
+/// Object-cache byte budget, overridable with `MEDIAGIT_ODB_CACHE_MB`.
+///
+/// This cap is what peak client memory actually tracks: profiling a 512 MB payload and a
+/// 4 GB payload both settle near this value plus working buffers, because everything above
+/// `STREAMING_THRESHOLD` is chunk-streamed rather than held whole. Without a knob, a
+/// memory-constrained host (a 1 GB CI container) had no way to ask for less.
+///
+/// `0` disables caching entirely. Unparseable values fall back to the default rather than
+/// failing a command — a bad env var should not make the ODB unopenable.
+pub(crate) fn cache_max_bytes() -> u64 {
+    match std::env::var("MEDIAGIT_ODB_CACHE_MB") {
+        Ok(v) => match v.trim().parse::<u64>() {
+            Ok(mb) => mb.saturating_mul(1024 * 1024),
+            Err(_) => DEFAULT_CACHE_MAX_BYTES,
+        },
+        Err(_) => DEFAULT_CACHE_MAX_BYTES,
+    }
+}
+
 /// Default byte budget for `base_chunk_cache` (256 MiB). Previously this
 /// cache was bounded by *entry count* (64 entries) with no size weigher —
 /// with chunks up to 32 MiB each, 64 entries could balloon to multiple GB.

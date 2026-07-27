@@ -68,7 +68,10 @@ impl Validator for StorageConfig {
             StorageConfig::S3(s3) => s3.validate(),
             StorageConfig::Azure(azure) => azure.validate(),
             StorageConfig::GCS(gcs) => gcs.validate(),
-            StorageConfig::Multi(multi) => multi.validate(),
+            StorageConfig::Multi(_) => Err(ConfigError::invalid_value(
+                "storage.backend",
+                "storage type 'multi' is not supported",
+            )),
         }
     }
 }
@@ -638,6 +641,25 @@ mod tests {
         let mut config = Config::default();
         config.observability.log_level = "invalid".to_string();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_multi_backend_storage_rejected() {
+        let config = Config {
+            storage: StorageConfig::Multi(MultiBackendStorage {
+                primary: "s3".to_string(),
+                replicas: vec![],
+                backends: Default::default(),
+            }),
+            ..Config::default()
+        };
+        let err = config
+            .validate()
+            .expect_err("multi backend should be rejected");
+        assert!(
+            err.to_string()
+                .contains("storage type 'multi' is not supported")
+        );
     }
 }
 

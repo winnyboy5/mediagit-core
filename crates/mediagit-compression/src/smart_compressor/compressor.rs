@@ -189,16 +189,18 @@ impl TypeAwareCompressor for SmartCompressor {
         // Auto-detect compression algorithm
         use crate::CompressionAlgorithm;
 
-        // Check for Store mode magic byte (0x00 prefix added by compress_with_strategy fallback)
-        // This handles data that couldn't be compressed efficiently (already-compressed content).
+        // Store mode magic byte (0x00), written by BOTH store paths in
+        // compress_with_strategy. Stripped unconditionally: no codec we emit can start
+        // with 0x00 (zlib = 0x78, zstd = 0x28, brotli = "BRT"), so a leading 0x00 is
+        // always the Store prefix and never payload.
+        //
+        // This used to strip only when the remaining bytes looked uncompressed, which
+        // silently corrupted every stored object whose raw content happened to begin
+        // with a codec magic - e.g. 0x78 0xF9, a valid zlib header. Such an object read
+        // back one byte too long, failed its oid check, and became permanently
+        // unreadable (~1 in 8000 incompressible objects).
         if !data.is_empty() && data[0] == 0x00 {
-            // Check if this looks like Store mode (no compression magic after the prefix)
-            let remaining = &data[1..];
-            let algo = CompressionAlgorithm::detect(remaining);
-            if algo == CompressionAlgorithm::None {
-                // Strip the Store prefix and return raw data
-                return Ok(remaining.to_vec());
-            }
+            return Ok(data[1..].to_vec());
         }
 
         let algo = CompressionAlgorithm::detect(data);
@@ -1402,6 +1404,46 @@ mod tests {
                 category, expected_category,
                 "{:?} should be in {:?} category",
                 obj_type, expected_category
+            );
+        }
+    }
+
+    /// Stored (incompressible) data whose first bytes mimic a codec magic must still
+    /// round-trip. These payloads previously came back with the 0x00 Store prefix still
+    /// attached, so their oid check failed and the object was unreadable for good.
+    #[test]
+    fn store_roundtrip_survives_payloads_that_look_like_codec_magic() {
+        let sc = SmartCompressor::new();
+        // 0x78F9 and 0x78DA are valid zlib headers; the other two are the zstd frame
+        // magic and our brotli marker. All four are real prefixes seen in stored data.
+        let leaders: [&[u8]; 4] = [
+            &[0x78, 0xF9],
+            &[0x78, 0xDA],
+            &[0x28, 0xB5, 0x2F, 0xFD],
+            b"BRT\x01",
+        ];
+
+        for leader in leaders {
+            // High-entropy tail so compression expands and the Store path is taken.
+            let mut original = leader.to_vec();
+            let mut x: u32 = 0x9E37_79B9;
+            for _ in 0..4096 {
+                x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                original.push((x >> 24) as u8);
+            }
+
+            let stored = sc
+                .compress_with_strategy(&original, CompressionStrategy::Store)
+                .expect("store must not fail");
+            assert_eq!(stored[0], 0x00, "store mode must write its magic byte");
+
+            let back = sc
+                .decompress_typed(&stored)
+                .expect("decompress must not fail");
+            assert_eq!(
+                back, original,
+                "payload starting {:02X?} did not round-trip",
+                leader
             );
         }
     }
