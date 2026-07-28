@@ -116,6 +116,21 @@ impl RebaseCmd {
             }
         };
 
+        // WT-3: rebase had no pre-flight dirty check at all. Refuse before
+        // any ref or working-tree write.
+        crate::worktree_guard::AtRisk::check(
+            &repo_root,
+            &odb,
+            Some(&current_oid),
+            Some(&upstream_oid),
+        )
+        .await?
+        .ensure_clean("rebase")?;
+
+        // WT-1: bound what the checkouts below may delete.
+        let tracked =
+            crate::worktree_guard::tracked_paths(&repo_root, &odb, Some(&current_oid)).await?;
+
         if !self.quiet {
             println!(
                 "{} Rebasing onto {}...",
@@ -214,7 +229,8 @@ impl RebaseCmd {
                 }
 
                 // Sync the working directory to the newly rebased tree
-                let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
+                let checkout_mgr =
+                    CheckoutManager::new(&odb, &repo_root).with_tracked_paths(tracked);
                 checkout_mgr
                     .checkout_commit(&new_head)
                     .await
@@ -438,6 +454,13 @@ impl RebaseCmd {
         let refdb = RefDatabase::new(&storage_path);
         let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
 
+        // WT-1: bound what the checkouts below may delete to files tracked at
+        // the pre-rebase HEAD (plus anything staged during conflict
+        // resolution) — untracked work is not the rebase's to remove.
+        let tracked =
+            crate::worktree_guard::tracked_paths(repo_root, &odb, Some(&state.original_head))
+                .await?;
+
         // Collect remaining commits to apply
         let remaining_commits = self.load_remaining_commits(&odb, &state).await?;
 
@@ -451,7 +474,7 @@ impl RebaseCmd {
                 refdb.write(&new_ref).await?;
             }
 
-            let checkout_mgr = CheckoutManager::new(&odb, repo_root);
+            let checkout_mgr = CheckoutManager::new(&odb, repo_root).with_tracked_paths(tracked);
             checkout_mgr
                 .checkout_commit(&state.new_parent)
                 .await
@@ -481,7 +504,8 @@ impl RebaseCmd {
                     refdb.write(&new_ref).await?;
                 }
 
-                let checkout_mgr = CheckoutManager::new(&odb, repo_root);
+                let checkout_mgr =
+                    CheckoutManager::new(&odb, repo_root).with_tracked_paths(tracked);
                 checkout_mgr
                     .checkout_commit(&new_head)
                     .await

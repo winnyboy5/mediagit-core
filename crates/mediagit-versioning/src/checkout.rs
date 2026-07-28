@@ -149,6 +149,10 @@ pub struct CheckoutManager<'a> {
     odb: &'a ObjectDatabase,
     repo_root: PathBuf,
     sparse: SparseFilter,
+    /// WT-1: paths [`Self::clean_working_directory`] is allowed to delete,
+    /// normalized to forward slashes. `None` = the legacy "delete anything
+    /// not in the target tree" behaviour.
+    deletable: Option<HashSet<String>>,
 }
 
 impl<'a> CheckoutManager<'a> {
@@ -163,7 +167,30 @@ impl<'a> CheckoutManager<'a> {
             odb,
             repo_root,
             sparse,
+            deletable: None,
         }
+    }
+
+    /// WT-1: bound which working-tree files [`Self::checkout_commit`] may
+    /// delete to the set of *tracked* paths (HEAD tree ∪ index) at the point
+    /// the working tree was last in sync.
+    ///
+    /// Without this, `clean_working_directory` removes every file absent from
+    /// the target tree — including untracked work, which exists nowhere else
+    /// and is unrecoverable. Callers that rewrite the working tree
+    /// (`reset --hard`, `merge`, `rebase`, `cherry-pick`, `revert`) must set
+    /// it; `mediagit_cli::worktree_guard::tracked_paths` computes the set.
+    ///
+    /// Left unset, behaviour is unchanged — a checkout into a directory with
+    /// no untracked files (clone, fresh checkout) needs no bound.
+    pub fn with_tracked_paths(mut self, tracked: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.deletable = Some(
+            tracked
+                .into_iter()
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .collect(),
+        );
+        self
     }
 
     /// Drop entries excluded by the active sparse-checkout filter from a flat
@@ -284,6 +311,13 @@ impl<'a> CheckoutManager<'a> {
             let file_normalized = file.to_string_lossy().replace('\\', "/");
 
             if !normalized_target.contains(&file_normalized) {
+                if let Some(deletable) = &self.deletable
+                    && !deletable.contains(&file_normalized)
+                {
+                    // WT-1: untracked — it was never ours to delete.
+                    debug!("Preserving untracked file: {}", file.display());
+                    continue;
+                }
                 if !self.sparse.is_included(&file) {
                     // Outside the sparse cone: absence is the expected state,
                     // presence is simply untouched — never deleted by checkout.

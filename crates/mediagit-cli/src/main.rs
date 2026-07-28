@@ -21,6 +21,7 @@ mod output;
 mod phash_index;
 mod progress;
 mod repo;
+mod worktree_guard;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};

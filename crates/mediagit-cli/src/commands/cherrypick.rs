@@ -94,6 +94,14 @@ impl CherryPickCmd {
             .await
             .context("Failed to resolve HEAD")?;
 
+        // WT-3: cherry-pick had no pre-flight dirty check at all. Only the
+        // modified half is knowable up front (the target tree is the result
+        // of a merge computed per commit); untracked collisions are handled
+        // by `apply_commit`.
+        crate::worktree_guard::AtRisk::check(repo_root, &odb, Some(&current_oid), None)
+            .await?
+            .ensure_clean("cherry-pick")?;
+
         if !self.quiet {
             println!(
                 "{} Starting cherry-pick on branch at {}",
@@ -198,6 +206,13 @@ impl CherryPickCmd {
         // Get current HEAD
         let current_oid = refdb.resolve("HEAD").await?;
 
+        // WT-1: the merge result can only materialize paths from ours (all
+        // tracked) or theirs, so checking collisions against the picked commit
+        // is exact. Done before any write.
+        crate::worktree_guard::AtRisk::check(repo_root, odb, Some(&current_oid), Some(commit_oid))
+            .await?
+            .ensure_clean("cherry-pick")?;
+
         // Perform three-way merge: current HEAD vs commit being cherry-picked
         let merger = MergeEngine::new(odb.clone());
         let merge_result = merger
@@ -241,8 +256,12 @@ impl CherryPickCmd {
             .tree_oid
             .context("merge produced no tree during cherry-pick")?;
 
-        // Checkout the merged tree
-        let checkout_mgr = CheckoutManager::new(odb.as_ref(), repo_root);
+        // Checkout the merged tree. WT-1: only files tracked at the current
+        // HEAD may be deleted.
+        let tracked =
+            crate::worktree_guard::tracked_paths(repo_root, odb, Some(&current_oid)).await?;
+        let checkout_mgr =
+            CheckoutManager::new(odb.as_ref(), repo_root).with_tracked_paths(tracked);
         let commit_to_checkout = Commit {
             tree: tree_oid,
             parents: vec![current_oid],
@@ -457,8 +476,12 @@ impl CherryPickCmd {
                 refdb.write(&reset_ref).await?;
             }
 
-            // Restore working directory
-            let checkout_mgr = mediagit_versioning::CheckoutManager::new(&odb, repo_root);
+            // Restore working directory. WT-1: an abort must not take
+            // untracked files with it.
+            let tracked =
+                crate::worktree_guard::tracked_paths(repo_root, &odb, Some(&original_oid)).await?;
+            let checkout_mgr = mediagit_versioning::CheckoutManager::new(&odb, repo_root)
+                .with_tracked_paths(tracked);
             checkout_mgr.checkout_commit(&original_oid).await?;
         }
 

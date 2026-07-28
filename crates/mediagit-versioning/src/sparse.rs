@@ -87,6 +87,23 @@ impl SparseFilter {
         Self::parse(repo_root, &content)
     }
 
+    /// Build the filter `patterns` *would* produce, without writing it.
+    ///
+    /// WT-8: `sparse-checkout set` must decide whether the new patterns would
+    /// delete modified files *before* persisting them, so a refusal leaves the
+    /// on-disk configuration untouched.
+    pub fn preview(
+        repo_root: &Path,
+        mode: SparseMode,
+        patterns: &[String],
+    ) -> anyhow::Result<Self> {
+        let marker = match mode {
+            SparseMode::Cone => MODE_MARKER_CONE,
+            SparseMode::Pattern => MODE_MARKER_PATTERN,
+        };
+        Self::parse(repo_root, &format!("{marker}\n{}\n", patterns.join("\n")))
+    }
+
     fn parse(repo_root: &Path, content: &str) -> anyhow::Result<Self> {
         let mut mode = SparseMode::Cone;
         let mut patterns = Vec::new();

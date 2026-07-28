@@ -182,6 +182,24 @@ impl ResetCmd {
             ));
         }
 
+        // WT-1: `--hard` is *meant* to discard tracked modifications, so it
+        // does not consult the modified list — but it must not silently
+        // overwrite an untracked file that the target tree materializes, and
+        // (via `with_tracked_paths` below) it must not delete untracked files
+        // at all. Checked before HEAD moves so a refusal leaves nothing half
+        // done.
+        if mode == ResetMode::Hard {
+            let mut at_risk = crate::worktree_guard::AtRisk::check(
+                repo_root,
+                &odb,
+                Some(&old_oid),
+                Some(&target_oid),
+            )
+            .await?;
+            at_risk.modified.clear();
+            at_risk.ensure_clean("reset --hard")?;
+        }
+
         // Get current branch from HEAD file
         let current_branch = self.get_current_branch(storage_path).await?;
 
@@ -229,7 +247,7 @@ impl ResetCmd {
         // repopulating the index with the whole tree made `status` show
         // every file as phantom-staged afterward.
         if mode == ResetMode::Hard {
-            self.reset_working_tree(repo_root, &odb, &target_oid)
+            self.reset_working_tree(repo_root, &odb, &old_oid, &target_oid)
                 .await?;
             Index::new().save(repo_root)?;
         }
@@ -376,9 +394,12 @@ impl ResetCmd {
         &self,
         repo_root: &Path,
         odb: &ObjectDatabase,
+        old_oid: &Oid,
         commit_oid: &Oid,
     ) -> Result<()> {
-        let checkout_manager = CheckoutManager::new(odb, repo_root);
+        // WT-1: only files tracked at the pre-reset HEAD may be deleted.
+        let tracked = crate::worktree_guard::tracked_paths(repo_root, odb, Some(old_oid)).await?;
+        let checkout_manager = CheckoutManager::new(odb, repo_root).with_tracked_paths(tracked);
         checkout_manager
             .checkout_commit(commit_oid)
             .await

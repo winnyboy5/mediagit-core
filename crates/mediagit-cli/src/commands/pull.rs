@@ -535,6 +535,14 @@ impl PullCmd {
                     )
                     .await?;
                 } else {
+                    // WT-3: refuse before the merge writes anything. The merge
+                    // tree does not exist yet, so collisions cannot be checked
+                    // here — `target: None` limits this to uncommitted edits to
+                    // tracked files, which is the hazard a merge introduces.
+                    crate::worktree_guard::AtRisk::check(&repo_root, &odb, Some(&head_oid), None)
+                        .await?
+                        .ensure_clean("merge")?;
+
                     let merge_engine = mediagit_versioning::MergeEngine::new(Arc::clone(&odb));
 
                     if self.verbose {
@@ -579,8 +587,14 @@ impl PullCmd {
                             refdb.write(&head_ref).await?;
                         }
 
-                        // Checkout working directory to match merge result
-                        let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
+                        // Checkout working directory to match merge result,
+                        // bounded to tracked paths so untracked work survives
+                        // the rewrite (WT-1).
+                        let tracked =
+                            crate::worktree_guard::tracked_paths(&repo_root, &odb, Some(&head_oid))
+                                .await?;
+                        let checkout_mgr =
+                            CheckoutManager::new(&odb, &repo_root).with_tracked_paths(tracked);
                         let files_count = checkout_mgr.checkout_commit(&commit_oid).await?;
                         if self.verbose {
                             println!("  Checked out {} files", files_count);
@@ -640,6 +654,15 @@ async fn fast_forward_to(
     quiet: bool,
     verbose: bool,
 ) -> Result<()> {
+    // WT-1/WT-3: refuse *before* moving the ref. A fast-forward rewrites the
+    // working tree exactly like `merge`/`switch` do, and this is the ordinary
+    // outcome of a routine `pull` — so it was the most reachable path by which
+    // uncommitted edits were overwritten and untracked files deleted.
+    let head_oid = refdb.resolve("HEAD").await.ok();
+    crate::worktree_guard::AtRisk::check(repo_root, odb, head_oid.as_ref(), Some(oid))
+        .await?
+        .ensure_clean("pull")?;
+
     // Update the right ref — symbolic HEAD updates the target branch, detached
     // HEAD updates HEAD directly.
     if let Some(target) = &head.target {
@@ -650,8 +673,11 @@ async fn fast_forward_to(
         refdb.write(&head_ref).await?;
     }
 
-    // Checkout working directory to match new HEAD
-    let checkout_mgr = CheckoutManager::new(odb, repo_root);
+    // Checkout working directory to match new HEAD. Bounded to tracked paths so
+    // untracked work is never collateral, even though the guard above already
+    // refused on collisions (WT-1).
+    let tracked = crate::worktree_guard::tracked_paths(repo_root, odb, head_oid.as_ref()).await?;
+    let checkout_mgr = CheckoutManager::new(odb, repo_root).with_tracked_paths(tracked);
     let files_count = checkout_mgr.checkout_commit(oid).await?;
     if verbose {
         println!("  Checked out {} files", files_count);

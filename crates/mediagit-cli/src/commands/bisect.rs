@@ -308,7 +308,14 @@ impl BisectCmd {
         let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
         let refdb = RefDatabase::new(&mediagit_dir);
 
-        let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
+        // WT-1: bound deletions to tracked paths. Bisect deliberately does not
+        // *refuse* on a dirty tree the way `pull`/`merge` do — it re-checks-out
+        // on every step, so refusing would make the feature unusable — but it
+        // must never take untracked work with it.
+        let head_oid = refdb.resolve("HEAD").await.ok();
+        let tracked =
+            crate::worktree_guard::tracked_paths(&repo_root, &odb, head_oid.as_ref()).await?;
+        let checkout_mgr = CheckoutManager::new(&odb, &repo_root).with_tracked_paths(tracked);
         checkout_mgr.checkout_commit(&reset_oid).await?;
 
         // Update HEAD reference
@@ -433,6 +440,14 @@ impl BisectCmd {
         ));
         let lca = LcaFinder::new(odb.clone());
 
+        // WT-1: tracked set for this step, computed once — both checkouts below
+        // are bounded by it so untracked work survives every bisect hop.
+        let bisect_tracked = {
+            let refdb = RefDatabase::new(repo_root.join(".mediagit"));
+            let head_oid = refdb.resolve("HEAD").await.ok();
+            crate::worktree_guard::tracked_paths(repo_root, &odb, head_oid.as_ref()).await?
+        };
+
         let bad_oid = Oid::from_hex(&state.bad)?;
         let good_oids: Vec<Oid> = state
             .good
@@ -462,7 +477,9 @@ impl BisectCmd {
 
         if candidates.is_empty() {
             // Range has collapsed: bad_oid is the first bad commit.
-            let checkout_mgr = CheckoutManager::new(&odb, repo_root);
+            // WT-1: bounded — see `reset` for why bisect bounds but never refuses.
+            let checkout_mgr =
+                CheckoutManager::new(&odb, repo_root).with_tracked_paths(bisect_tracked.clone());
             checkout_mgr.checkout_commit(&bad_oid).await?;
             state.current = None;
 
@@ -492,7 +509,8 @@ impl BisectCmd {
         let next_oid = candidates[midpoint];
 
         // Checkout next commit
-        let checkout_mgr = CheckoutManager::new(&odb, repo_root);
+        // WT-1: bounded — see `reset` for why bisect bounds but never refuses.
+        let checkout_mgr = CheckoutManager::new(&odb, repo_root).with_tracked_paths(bisect_tracked);
         checkout_mgr.checkout_commit(&next_oid).await?;
 
         state.current = Some(next_oid.to_hex());

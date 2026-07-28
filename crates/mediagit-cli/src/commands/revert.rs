@@ -204,6 +204,17 @@ impl RevertCmd {
         let head_oid = refs.resolve("HEAD").await?;
         let head_commit = Commit::read(odb, &head_oid).await?;
 
+        // WT-3: revert had no pre-flight dirty check at all. The merge result
+        // can only materialize paths from ours (all tracked) or from the
+        // reverted commit's parent, so checking collisions against the parent
+        // is exact.
+        crate::worktree_guard::AtRisk::check(repo_root, odb, Some(&head_oid), Some(parent_oid))
+            .await?
+            .ensure_clean("revert")?;
+
+        // WT-1: bound what the checkouts below may delete.
+        let tracked = crate::worktree_guard::tracked_paths(repo_root, odb, Some(&head_oid)).await?;
+
         if !self.quiet {
             output::progress(&format!(
                 "Reverting {} \"{}\"",
@@ -287,7 +298,7 @@ impl RevertCmd {
 
             // Update working tree to match the reverted state.
             // Without this, the working directory stays out-of-sync with HEAD.
-            let checkout_mgr = CheckoutManager::new(odb, repo_root);
+            let checkout_mgr = CheckoutManager::new(odb, repo_root).with_tracked_paths(tracked);
             checkout_mgr
                 .checkout_commit(&new_commit_oid)
                 .await
@@ -315,7 +326,7 @@ impl RevertCmd {
                 "revert (no-commit)".to_string(),
             );
             let temp_oid = temp_commit.write(odb).await?;
-            let checkout_mgr = CheckoutManager::new(odb, repo_root);
+            let checkout_mgr = CheckoutManager::new(odb, repo_root).with_tracked_paths(tracked);
             checkout_mgr
                 .checkout_commit(&temp_oid)
                 .await
@@ -436,7 +447,11 @@ impl RevertCmd {
         // everything staged after an abort.
         let storage = create_storage_backend(repo_root).await?;
         let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 10000));
-        let checkout_mgr = CheckoutManager::new(&odb, repo_root);
+        // WT-1: an abort must not take untracked files with it.
+        let tracked =
+            crate::worktree_guard::tracked_paths(repo_root, &odb, Some(&state.original_head))
+                .await?;
+        let checkout_mgr = CheckoutManager::new(&odb, repo_root).with_tracked_paths(tracked);
         checkout_mgr
             .checkout_commit(&state.original_head)
             .await

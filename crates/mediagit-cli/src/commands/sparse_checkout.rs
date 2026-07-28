@@ -111,10 +111,10 @@ impl SetOpts {
         } else {
             SparseMode::Cone
         };
-        SparseFilter::write(&repo_root, mode, &self.patterns)?;
-        let new_filter = SparseFilter::load(&repo_root)?;
+        let new_filter = SparseFilter::preview(&repo_root, mode, &self.patterns)?;
 
         let Ok(head_oid) = refdb.resolve("HEAD").await else {
+            SparseFilter::write(&repo_root, mode, &self.patterns)?;
             if !self.quiet {
                 output::info("No commits yet; patterns saved, nothing to materialize.");
             }
@@ -126,6 +126,27 @@ impl SetOpts {
             .tracked_files_at(&head_oid)
             .await
             .context("Failed to list tracked files at HEAD")?;
+
+        // WT-8: newly-excluded files were deleted unconditionally. Refuse
+        // before the patterns are persisted, so a refusal leaves the sparse
+        // configuration exactly as it was.
+        let at_risk =
+            crate::worktree_guard::AtRisk::check(&repo_root, &odb, Some(&head_oid), None).await?;
+        let doomed: Vec<std::path::PathBuf> = at_risk
+            .modified
+            .iter()
+            .filter(|p| old_filter.is_included(p) && !new_filter.is_included(p))
+            .cloned()
+            .collect();
+        if !doomed.is_empty() {
+            return Err(crate::worktree_guard::AtRisk {
+                modified: doomed,
+                untracked_collisions: Vec::new(),
+            }
+            .bail("sparse-checkout set"));
+        }
+
+        SparseFilter::write(&repo_root, mode, &self.patterns)?;
 
         let mut removed = 0usize;
         let mut added = 0usize;

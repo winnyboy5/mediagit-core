@@ -146,6 +146,16 @@ impl MergeCmd {
             }
         };
 
+        // WT-3: merge had no pre-flight dirty check at all. Refuse before any
+        // ref or working-tree write, so a refusal leaves nothing half done.
+        crate::worktree_guard::AtRisk::check(&repo_root, &odb, Some(&our_oid), Some(&their_oid))
+            .await?
+            .ensure_clean("merge")?;
+
+        // WT-1: bound what the post-merge checkouts below may delete.
+        let tracked =
+            crate::worktree_guard::tracked_paths(&repo_root, &odb, Some(&our_oid)).await?;
+
         // Parse merge strategy
         let strategy = match self.strategy.as_deref() {
             Some("ours") => MergeStrategy::Ours,
@@ -216,7 +226,8 @@ impl MergeCmd {
                     let new_ref = Ref::new_direct("HEAD".to_string(), commit_oid);
                     refdb.write(&new_ref).await?;
                 }
-                let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
+                let checkout_mgr =
+                    CheckoutManager::new(&odb, &repo_root).with_tracked_paths(tracked);
                 checkout_mgr
                     .checkout_commit(&commit_oid)
                     .await
@@ -261,7 +272,8 @@ impl MergeCmd {
                     }
 
                     // Update working directory to match the merged commit (ISS-008 fix)
-                    let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
+                    let checkout_mgr =
+                        CheckoutManager::new(&odb, &repo_root).with_tracked_paths(tracked);
                     checkout_mgr
                         .checkout_commit(&their_oid)
                         .await
@@ -395,7 +407,7 @@ impl MergeCmd {
             }
 
             // Update working directory to match the merged commit (ISS-008 fix)
-            let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
+            let checkout_mgr = CheckoutManager::new(&odb, &repo_root).with_tracked_paths(tracked);
             checkout_mgr
                 .checkout_commit(&commit_oid)
                 .await
@@ -492,7 +504,14 @@ impl MergeCmd {
             if let Some(pre_merge_oid) = pre_merge_oid {
                 let storage = create_storage_backend(&repo_root).await?;
                 let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
-                let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
+                // WT-1: an abort restores the pre-merge state; it must not
+                // take untracked files with it. Tracked = pre-merge tree plus
+                // whatever apply_merge_to_workdir staged.
+                let tracked =
+                    crate::worktree_guard::tracked_paths(&repo_root, &odb, Some(&pre_merge_oid))
+                        .await?;
+                let checkout_mgr =
+                    CheckoutManager::new(&odb, &repo_root).with_tracked_paths(tracked);
                 checkout_mgr
                     .checkout_commit(&pre_merge_oid)
                     .await

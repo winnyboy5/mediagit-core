@@ -15,9 +15,7 @@ use super::super::repo::{create_storage_backend, find_repo_root};
 use crate::progress::{OperationStats, ProgressTracker};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use mediagit_versioning::{Oid, Ref, RefDatabase, Reflog, ReflogEntry};
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use mediagit_versioning::{LcaFinder, ObjectDatabase, Oid, Ref, RefDatabase, Reflog, ReflogEntry};
 use std::time::Instant;
 
 /// Manage branches
@@ -607,45 +605,33 @@ impl BranchCmd {
 
         let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
 
-        // BUG-CLI-B1: refuse to clobber uncommitted changes to tracked files.
-        // Checked before HEAD is updated / the working tree is touched.
+        // BUG-CLI-B1 / QA-001, now via the shared guard (WT-2: the old
+        // in-place dirty-check only iterated the top level of the HEAD tree,
+        // so a modified file in any subdirectory was silently overwritten).
         if !opts.force {
-            if let Some(current_oid) = current_commit_oid
-                && Self::has_uncommitted_changes(&repo_root, &odb, &current_oid).await?
-            {
-                anyhow::bail!("working tree has uncommitted changes; commit/stash or use --force");
-            }
-
-            // QA-001: refuse to clobber untracked files that collide with a
-            // path tracked by the target branch. The dirty-check above only
-            // covers files tracked by the *current* HEAD; an untracked file
-            // is invisible to it and would otherwise be silently overwritten.
-            let collisions = Self::untracked_collision_paths(
+            crate::worktree_guard::AtRisk::check(
                 &repo_root,
                 &odb,
                 current_commit_oid.as_ref(),
-                &target_commit_oid,
+                Some(&target_commit_oid),
             )
-            .await?;
-            if !collisions.is_empty() {
-                let list = collisions
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                anyhow::bail!(
-                    "switch would overwrite untracked file(s): {}; commit, stash, or use -f",
-                    list
-                );
-            }
+            .await?
+            .ensure_clean("branch switch")?;
         }
 
         // Update HEAD to point to the branch
         let head = Ref::new_symbolic("HEAD".to_string(), branch_ref_name.clone());
         refdb.write(&head).await?;
 
-        // Update working directory to match the target branch's commit
-        let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
+        // Update working directory to match the target branch's commit.
+        // WT-1: the `checkout_commit` fallback below (no current commit) would
+        // otherwise delete untracked files that merely happen not to be in the
+        // target tree. `checkout_diff` never cleans, so this only binds the
+        // initial-checkout path.
+        let tracked =
+            crate::worktree_guard::tracked_paths(&repo_root, &odb, current_commit_oid.as_ref())
+                .await?;
+        let checkout_mgr = CheckoutManager::new(&odb, &repo_root).with_tracked_paths(tracked);
 
         let checkout_pb = progress.spinner("Updating working directory");
 
@@ -717,150 +703,6 @@ impl BranchCmd {
         Ok(())
     }
 
-    /// BUG-CLI-B1: detect uncommitted changes to tracked files before a
-    /// branch switch would silently overwrite them. Mirrors `status`'s
-    /// modified-file detection (HEAD tree vs working-directory hash), but
-    /// treats any tracked file whose working content differs from HEAD as
-    /// uncommitted — staged or not, a switch would blow it away either way.
-    async fn has_uncommitted_changes(
-        repo_root: &std::path::Path,
-        odb: &mediagit_versioning::ObjectDatabase,
-        head_oid: &Oid,
-    ) -> Result<bool> {
-        let commit_data = odb.read(head_oid).await?;
-        let commit =
-            mediagit_versioning::format::deserialize::<mediagit_versioning::Commit>(&commit_data)?;
-        let tree_data = odb.read(&commit.tree).await?;
-        let tree =
-            mediagit_versioning::format::deserialize::<mediagit_versioning::Tree>(&tree_data)?;
-
-        for entry in tree.iter() {
-            let full_path = repo_root.join(&entry.name);
-            let working_oid = match std::fs::metadata(&full_path) {
-                Ok(metadata) if metadata.len() >= super::utils::STREAMING_THRESHOLD => {
-                    match Oid::from_file(&full_path) {
-                        Ok(oid) => oid,
-                        Err(_) => continue,
-                    }
-                }
-                Ok(_) => match std::fs::read(&full_path) {
-                    Ok(content) => Oid::hash(&content),
-                    Err(_) => continue,
-                },
-                // File missing from the working tree — not this guard's concern.
-                Err(_) => continue,
-            };
-            if working_oid != entry.oid {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    /// QA-001: paths that are untracked in the working directory but would
-    /// be materialized by checking out `target_commit_oid` — i.e. a switch
-    /// would silently overwrite them. Mirrors `status`'s untracked-file
-    /// definition (working dir scan minus current-HEAD tree minus index
-    /// minus ignored), intersected with the target tree's paths.
-    async fn untracked_collision_paths(
-        repo_root: &std::path::Path,
-        odb: &mediagit_versioning::ObjectDatabase,
-        current_commit_oid: Option<&Oid>,
-        target_commit_oid: &Oid,
-    ) -> Result<Vec<PathBuf>> {
-        use crate::ignore_rules::IgnoreMatcher;
-        use mediagit_versioning::Index;
-
-        // Paths tracked by the branch we're switching away from — never
-        // "untracked", even though the index is cleared after every switch.
-        let mut head_files: HashSet<PathBuf> = HashSet::new();
-        if let Some(oid) = current_commit_oid {
-            let commit_data = odb.read(oid).await?;
-            let commit = mediagit_versioning::format::deserialize::<mediagit_versioning::Commit>(
-                &commit_data,
-            )?;
-            Self::collect_tree_paths(odb, &commit.tree, Path::new(""), &mut head_files).await?;
-        }
-
-        let index = Index::load(repo_root)?;
-        let index_files: HashSet<PathBuf> =
-            index.entries().map(|entry| entry.path.clone()).collect();
-
-        let mut ignored_files: HashSet<PathBuf> = HashSet::new();
-        let matcher = IgnoreMatcher::new(repo_root).ok();
-        // Single status-equivalent scan of the working directory (perf budget).
-        let status_cmd = super::status::StatusCmd {
-            tracked: false,
-            untracked: false,
-            ignored: false,
-            short: false,
-            porcelain: false,
-            branch: false,
-            quiet: true,
-            verbose: false,
-            json: false,
-        };
-        let working_files =
-            status_cmd.scan_working_directory(repo_root, &matcher, &mut ignored_files)?;
-
-        let untracked: HashSet<PathBuf> = working_files
-            .into_iter()
-            .filter(|path| {
-                !head_files.contains(path)
-                    && !index_files.contains(path)
-                    && !ignored_files.contains(path)
-            })
-            .collect();
-
-        if untracked.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let target_commit_data = odb.read(target_commit_oid).await?;
-        let target_commit = mediagit_versioning::format::deserialize::<mediagit_versioning::Commit>(
-            &target_commit_data,
-        )?;
-        let mut target_files: HashSet<PathBuf> = HashSet::new();
-        Self::collect_tree_paths(odb, &target_commit.tree, Path::new(""), &mut target_files)
-            .await?;
-
-        let mut collisions: Vec<PathBuf> = untracked.intersection(&target_files).cloned().collect();
-        collisions.sort();
-        Ok(collisions)
-    }
-
-    /// Recursively collect every file path in a tree (directories expanded),
-    /// relative to the tree root. Skips stage-debris entries (legacy
-    /// merge-conflict artifacts) the same way checkout does.
-    fn collect_tree_paths<'a>(
-        odb: &'a mediagit_versioning::ObjectDatabase,
-        tree_oid: &'a Oid,
-        prefix: &'a std::path::Path,
-        paths: &'a mut HashSet<PathBuf>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>> {
-        Box::pin(async move {
-            let tree_data = odb.read(tree_oid).await?;
-            let tree =
-                mediagit_versioning::format::deserialize::<mediagit_versioning::Tree>(&tree_data)?;
-
-            for entry in tree.iter() {
-                if mediagit_versioning::is_stage_debris_key(&entry.name) {
-                    continue;
-                }
-                let entry_path = prefix.join(&entry.name);
-                match entry.mode {
-                    mediagit_versioning::FileMode::Directory => {
-                        Self::collect_tree_paths(odb, &entry.oid, &entry_path, paths).await?;
-                    }
-                    _ => {
-                        paths.insert(entry_path);
-                    }
-                }
-            }
-            Ok(())
-        })
-    }
-
     async fn delete(&self, opts: &DeleteOpts) -> Result<()> {
         use crate::output;
 
@@ -929,6 +771,21 @@ impl BranchCmd {
         let head = refdb.read("HEAD").await?;
         let current_branch = head.target;
 
+        // UX-1: `-d` promises "delete only if merged" but was never read —
+        // it deleted exactly as unconditionally as `-D`. Set up the
+        // reachability check it needs. `-D` still skips it entirely.
+        let merged_check = if opts.delete_merged && !opts.force {
+            let odb = std::sync::Arc::new(ObjectDatabase::with_smart_compression(
+                _storage.clone(),
+                1000,
+            ));
+            let head_oid = refdb.resolve("HEAD").await.ok();
+            Some((LcaFinder::new(odb), head_oid))
+        } else {
+            None
+        };
+        let mut unmerged: Vec<String> = Vec::new();
+
         for branch_name in &opts.branches {
             let branch_ref_name = format!("refs/heads/{}", branch_name);
 
@@ -954,6 +811,22 @@ impl BranchCmd {
                 continue;
             }
 
+            // UX-1: refuse to drop work that lives nowhere else.
+            if let Some((lca, head_oid)) = &merged_check
+                && let Ok(branch_oid) = refdb.resolve(&branch_ref_name).await
+                && !Self::is_merged(lca, &config, &refdb, branch_name, &branch_oid, *head_oid)
+                    .await?
+            {
+                unmerged.push(branch_name.clone());
+                if !opts.quiet {
+                    output::warning(&format!(
+                        "The branch '{}' is not fully merged (use -D to force delete)",
+                        branch_name
+                    ));
+                }
+                continue;
+            }
+
             // Verify branch exists
             match refdb.read(&branch_ref_name).await {
                 Ok(_) => {
@@ -973,12 +846,49 @@ impl BranchCmd {
             }
         }
 
-        if !opts.quiet && deleted_count == 0 {
+        if !opts.quiet && deleted_count == 0 && unmerged.is_empty() {
             output::info("No branches were deleted");
+        }
+
+        if !unmerged.is_empty() {
+            anyhow::bail!(
+                "The branch(es) {} are not fully merged; use -D to delete anyway",
+                unmerged.join(", ")
+            );
         }
 
         Ok(())
     }
+
+    /// UX-1: a branch is merged when its tip is reachable from HEAD, or from
+    /// its own upstream (work that has been pushed is not lost by deletion).
+    async fn is_merged(
+        lca: &LcaFinder,
+        config: &mediagit_config::Config,
+        refdb: &RefDatabase,
+        branch_name: &str,
+        branch_oid: &Oid,
+        head_oid: Option<Oid>,
+    ) -> Result<bool> {
+        if let Some(head_oid) = head_oid
+            && lca.is_ancestor(branch_oid, &head_oid).await?
+        {
+            return Ok(true);
+        }
+
+        if let Some((remote, merge_ref)) = config.get_branch_upstream(branch_name) {
+            let short = merge_ref.strip_prefix("refs/heads/").unwrap_or(merge_ref);
+            let upstream_ref = format!("refs/remotes/{}/{}", remote, short);
+            if let Ok(upstream_oid) = refdb.resolve(&upstream_ref).await
+                && lca.is_ancestor(branch_oid, &upstream_oid).await?
+            {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
     async fn protect(&self, opts: &ProtectOpts) -> Result<()> {
         use crate::output;
         use mediagit_config::BranchProtection;
