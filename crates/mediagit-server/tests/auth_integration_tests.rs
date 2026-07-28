@@ -463,3 +463,69 @@ async fn test_mixed_auth_methods_jwt_preferred() {
     // Should succeed (JWT is valid)
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+/// AU-4: grant enforcement must be per-repo, not global.
+///
+/// `check_permission` gated per-repo authorization on `!grants.is_empty()` —
+/// *any* grant anywhere flipped enforcement on for *every* repository. So the
+/// first grant an operator recorded to onboard one tenant silently revoked
+/// flat-role access for every other user on every other repo. The blast radius
+/// was the whole server, triggered by a routine onboarding step.
+#[tokio::test]
+async fn grant_on_one_repo_does_not_lock_users_out_of_others() {
+    let (state, _read_token, write_token) = create_test_state_with_auth().await;
+
+    // Two repos; a grant will be recorded on `granted-repo` only.
+    for name in ["granted-repo", "ungranted-repo"] {
+        std::fs::create_dir_all(state.repos_dir.join(name)).unwrap();
+    }
+
+    // Someone else is granted access to one repo. This is the routine
+    // onboarding action that used to break everyone.
+    state
+        .grants
+        .grant(
+            "some-other-user",
+            "granted-repo",
+            mediagit_security::auth::GrantLevel::Read,
+        )
+        .await
+        .unwrap();
+
+    // `test-user-write` holds a flat Write role and no grants at all.
+    // The repo with NO grants must still honour the flat role.
+    let app = create_router(Arc::clone(&state));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/ungranted-repo/info/refs")
+                .header("Authorization", format!("Bearer {}", write_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a grant recorded on an unrelated repo revoked flat-role access here"
+    );
+
+    // The repo that DOES have grants is enforced: no grant, no access.
+    let app = create_router(Arc::clone(&state));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/granted-repo/info/refs")
+                .header("Authorization", format!("Bearer {}", write_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a repo with grants recorded must enforce them"
+    );
+}

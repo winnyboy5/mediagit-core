@@ -60,9 +60,12 @@ pub use transfer::*;
 /// 2. No authenticated user -> reject.
 /// 3. Admin role (flat `user:manage` permission, unique to `Role::Admin`)
 ///    always allowed, regardless of per-repo grants.
-/// 4. Backward compat: `MEDIAGIT_GRANTS_ENFORCE=0`, or no grants have ever
-///    been recorded ([`GrantsStore::is_empty`]) -> fall back to the flat
-///    role permission check exactly as before H2.
+/// 4. `MEDIAGIT_GRANTS_ENFORCE=0`, or no grants recorded **for this repo**
+///    ([`GrantsStore::repo_has_grants`]) -> fall back to the flat role check
+///    exactly as before H2. AU-4: this was previously keyed on whether the
+///    store held *any* grant, so configuring one repo silently switched every
+///    other repo's authorization mode. Set `MEDIAGIT_GRANTS_ENFORCE=strict`
+///    to enforce on every repo including ungranted ones.
 /// 5. Otherwise, per-repo grant lookup: the user's grant level for `repo`
 ///    must be at or above the level implied by `required_permission`
 ///    (`read ⊂ write ⊂ admin`). A permission string that isn't
@@ -101,10 +104,32 @@ fn check_permission(
         }
     };
 
-    // Backward compat: a zero-grants deployment (or an explicit opt-out)
-    // behaves exactly like the pre-H2 flat permission check.
-    let grants_enforced =
-        std::env::var("MEDIAGIT_GRANTS_ENFORCE").as_deref() != Ok("0") && !grants.is_empty();
+    // AU-4: decide enforcement **per repo**, not globally.
+    //
+    // This asked `!grants.is_empty()` — whether the store held any grant at
+    // all — so the first grant an operator recorded to onboard one tenant
+    // flipped every *other* repository from flat-role to grant-based
+    // authorization at the same instant, locking out every user who had no
+    // explicit grant there. A routine onboarding step had server-wide blast
+    // radius, and nothing in the API hinted at it.
+    //
+    // Scoped to the repo under access, the backward-compat intent still holds
+    // — a repo with no grants recorded behaves exactly like the pre-H2 flat
+    // check — but configuring one repo no longer reconfigures the rest.
+    // `MEDIAGIT_GRANTS_ENFORCE`:
+    //   "0"      — off everywhere; flat roles only (unchanged).
+    //   "strict" — on for every repo, including those with no grants recorded,
+    //              so an ungranted repo denies rather than falling back. This
+    //              is the fail-closed posture the old global behaviour gave by
+    //              accident; it is now something an operator opts into
+    //              deliberately instead of triggering by recording a grant.
+    //   otherwise — per-repo (default).
+    let enforce = std::env::var("MEDIAGIT_GRANTS_ENFORCE");
+    let grants_enforced = match enforce.as_deref() {
+        Ok("0") => false,
+        Ok("strict") => true,
+        _ => grants.repo_has_grants(repo),
+    };
     if !grants_enforced {
         return flat_check();
     }
@@ -1052,9 +1077,40 @@ mod tests {
         assert!(check_permission(Some(&requester), "repo:write", true, &grants, "repoA").is_ok());
         assert!(check_permission(Some(&requester), "repo:admin", true, &grants, "repoA").is_err());
 
-        // No grant recorded for repoB -> denied even though the flat role
-        // has "repo:read", because the store is non-empty (grants active).
-        assert!(check_permission(Some(&requester), "repo:read", true, &grants, "repoB").is_err());
+        // AU-4: repoB has no grants recorded, so it is governed by the flat
+        // role — a grant on repoA no longer changes repoB's authorization
+        // mode. This assertion previously expected denial, encoding the
+        // footgun: recording one grant to onboard one tenant silently locked
+        // every other user out of every other repo.
+        assert!(check_permission(Some(&requester), "repo:read", true, &grants, "repoB").is_ok());
+    }
+
+    #[tokio::test]
+    // Deliberately holds the env lock across awaits (see GRANTS_ENV_LOCK).
+    #[allow(clippy::await_holding_lock)]
+    async fn grants_enforce_strict_denies_ungranted_repos() {
+        // AU-4: operators who want the fail-closed posture the old global
+        // behaviour gave by accident can now ask for it explicitly, rather
+        // than triggering it by recording an unrelated grant.
+        let _guard = GRANTS_ENV_LOCK.write().unwrap();
+        mediagit_test_utils::set_var("MEDIAGIT_GRANTS_ENFORCE", "strict");
+
+        let grants = GrantsStore::new();
+        grants
+            .grant("user1", "repoA", GrantLevel::Read)
+            .await
+            .unwrap();
+        let requester = user(&["repo:read"]);
+
+        let granted = check_permission(Some(&requester), "repo:read", true, &grants, "repoA");
+        let ungranted = check_permission(Some(&requester), "repo:read", true, &grants, "repoB");
+
+        mediagit_test_utils::remove_var("MEDIAGIT_GRANTS_ENFORCE");
+        assert!(granted.is_ok(), "granted repo should be allowed");
+        assert!(
+            ungranted.is_err(),
+            "strict mode must deny a repo with no grants instead of falling              back to the flat role"
+        );
     }
 
     #[tokio::test]

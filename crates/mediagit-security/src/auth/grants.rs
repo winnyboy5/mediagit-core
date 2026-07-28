@@ -57,6 +57,24 @@ struct Grant {
 pub struct GrantsStore {
     grants: RwLock<HashMap<(String, String), Level>>,
 
+    /// AU-8: serialises snapshot-and-write so concurrent mutations cannot
+    /// persist out of order.
+    ///
+    /// [`Self::snapshot`] materialises an owned `Vec` and releases the map
+    /// lock before the write — it must, because `grants` is a
+    /// `std::sync::RwLock` and holding that across an `.await` would block
+    /// the runtime thread. But that left a window: a `grant` could snapshot,
+    /// a concurrent `revoke` could then mutate, snapshot and finish its write
+    /// first, and the older `grant` snapshot would land last and **restore
+    /// the revoked grant on disk**. Memory stayed correct, so the revoke
+    /// looked successful right up until the next restart reloaded the file.
+    ///
+    /// Taking the snapshot *inside* this mutex means whichever write runs
+    /// last also snapshotted last, so the file converges on current state.
+    /// `credentials.rs` and `apikey.rs` avoid the same race differently, by
+    /// holding their (tokio) read guard across the write.
+    persist_lock: tokio::sync::Mutex<()>,
+
     /// Path to `grants.jsonl` when persistence is enabled; `None` for a
     /// purely in-memory store.
     store_path: Option<PathBuf>,
@@ -67,6 +85,7 @@ impl GrantsStore {
     pub fn new() -> Self {
         Self {
             grants: RwLock::new(HashMap::new()),
+            persist_lock: tokio::sync::Mutex::new(()),
             store_path: None,
         }
     }
@@ -90,6 +109,7 @@ impl GrantsStore {
 
         Ok(Self {
             grants: RwLock::new(grants),
+            persist_lock: tokio::sync::Mutex::new(()),
             store_path: Some(path),
         })
     }
@@ -100,6 +120,8 @@ impl GrantsStore {
         let Some(path) = &self.store_path else {
             return Ok(());
         };
+        // AU-8: snapshot and write under one lock — see `persist_lock`.
+        let _serialised = self.persist_lock.lock().await;
         let records = self.snapshot();
         persist::save_jsonl(path, &records).await
     }
@@ -184,10 +206,26 @@ impl GrantsStore {
             .collect()
     }
 
-    /// `true` if no grants have been recorded at all. Used by
-    /// `mediagit-server`'s `check_permission` to decide whether per-repo
-    /// enforcement is active — a zero-grants deployment behaves exactly like
-    /// the pre-H2 flat permission check.
+    /// AU-4: whether any grant is recorded for `repo`.
+    ///
+    /// Enforcement is decided **per repository**, not globally. Gating it on
+    /// "does the whole store have any grants" meant the first grant an
+    /// operator recorded — a routine onboarding step for one tenant —
+    /// silently switched every other repo from flat-role to grant-based
+    /// authorization, locking out every user who had no explicit grant.
+    /// Scoping the question to the repo under access keeps that blast radius
+    /// to the repo actually being configured.
+    pub fn repo_has_grants(&self, repo: &str) -> bool {
+        self.grants
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .any(|(_, r)| r == repo)
+    }
+
+    /// `true` if no grants have been recorded at all. Retained for the
+    /// startup diagnostic in `mediagit-server`; authorization decisions use
+    /// [`Self::repo_has_grants`] instead (AU-4).
     pub fn is_empty(&self) -> bool {
         self.grants
             .read()
@@ -352,5 +390,60 @@ mod tests {
         mediagit_test_utils::remove_var("MEDIAGIT_AUTH_PERSIST");
 
         assert!(!tmp.path().join("grants.jsonl").exists());
+    }
+
+    /// AU-8: a revoke must survive a concurrent grant.
+    ///
+    /// `snapshot()` releases the map lock before writing, so an older
+    /// snapshot could land last and restore a revoked grant on disk. Memory
+    /// stayed correct, which is what made it hard to notice — the revoke
+    /// looked successful until the next restart reloaded the file.
+    #[tokio::test]
+    async fn concurrent_mutations_persist_final_state() {
+        // Other tests set MEDIAGIT_AUTH_PERSIST=0 process-globally, which
+        // would silently make this store in-memory and defeat the reload
+        // assertion. Take the shared read guard so we cannot overlap them.
+        let _guard = persist::ENV_LOCK.read().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(GrantsStore::load_or_new(dir.path()).unwrap());
+
+        // Churn: many concurrent grant/revoke pairs on distinct keys, plus a
+        // single key that ends revoked.
+        store.grant("victim", "repoX", Level::Admin).await.unwrap();
+
+        let mut tasks = Vec::new();
+        for i in 0..16 {
+            let s = std::sync::Arc::clone(&store);
+            tasks.push(tokio::spawn(async move {
+                s.grant(&format!("u{i}"), "repoY", Level::Read)
+                    .await
+                    .unwrap();
+            }));
+        }
+        let s = std::sync::Arc::clone(&store);
+        tasks.push(tokio::spawn(async move {
+            s.revoke("victim", "repoX").await.unwrap();
+        }));
+        for t in tasks {
+            t.await.unwrap();
+        }
+
+        // In-memory truth.
+        assert!(store.get("victim", "repoX").is_none());
+
+        // Reload from disk — the revoke must not have been resurrected by a
+        // slower concurrent write.
+        let reloaded = GrantsStore::load_or_new(dir.path()).unwrap();
+        assert!(
+            reloaded.get("victim", "repoX").is_none(),
+            "a concurrent grant overwrote the revoke on disk; it would come              back on restart"
+        );
+        for i in 0..16 {
+            assert_eq!(
+                reloaded.get(&format!("u{i}"), "repoY"),
+                Some(Level::Read),
+                "concurrent grant u{i} was lost on disk"
+            );
+        }
     }
 }
