@@ -195,3 +195,120 @@ fn wt4_clean_rebase_still_succeeds() {
     assert!(temp.path().join("main-only.txt").exists());
     assert!(temp.path().join("feature-only.txt").exists());
 }
+
+// ============================================================================
+// WT-5 — `revert --continue` must actually revert.
+//
+// On conflict, revert staged the *unmodified HEAD tree* and bailed, writing no
+// markers. `do_continue` then built a tree from that index — HEAD's own tree —
+// and committed it as "the revert". The command reported success and changed
+// nothing.
+// ============================================================================
+
+/// Three edits to one line: reverting the middle commit must conflict against
+/// the third, because the region it wants to restore has since moved on.
+fn setup_revert_conflict(dir: &Path) -> String {
+    init_repo(dir);
+    commit_file(dir, "shared.txt", "v1\n", "first");
+    commit_file(dir, "shared.txt", "v2\n", "second");
+    let target = {
+        let out = run(dir, &["log", "--oneline"]);
+        let text = String::from_utf8_lossy(&out.stdout);
+        // HEAD is "second"; grab its short oid before we move past it.
+        text.lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    commit_file(dir, "shared.txt", "v3\n", "third");
+    target
+}
+
+#[test]
+fn wt5_revert_conflict_writes_markers_to_the_working_tree() {
+    let temp = TempDir::new().unwrap();
+    let target = setup_revert_conflict(temp.path());
+
+    let out = run(temp.path(), &["revert", &target]);
+    assert!(
+        !out.status.success(),
+        "revert should have stopped on a conflict"
+    );
+
+    let content = fs::read_to_string(temp.path().join("shared.txt")).unwrap();
+    assert!(
+        content.contains("<<<<<<<") && content.contains(">>>>>>>"),
+        "no conflict markers written; nothing for the user to resolve. Got:\n{content}"
+    );
+}
+
+/// The dangerous path: `--continue` *without* resolving anything.
+///
+/// Because no markers were written, a user has no signal that resolution is
+/// required, so running `--continue` straight away is the natural thing to do.
+/// It then committed the stale HEAD tree as "the revert" — a no-op reporting
+/// success, which is worse than an error because the user believes the commit
+/// was reverted.
+#[test]
+fn wt5_revert_continue_without_resolving_must_not_commit_a_no_op() {
+    let temp = TempDir::new().unwrap();
+    let target = setup_revert_conflict(temp.path());
+
+    let out = run(temp.path(), &["revert", &target]);
+    assert!(!out.status.success(), "expected a conflict stop");
+
+    let before = fs::read_to_string(temp.path().join("shared.txt")).unwrap();
+    let log_before = String::from_utf8_lossy(&run(temp.path(), &["log", "--oneline"]).stdout)
+        .lines()
+        .count();
+
+    let cont = run(temp.path(), &["revert", "--continue"]);
+
+    if cont.status.success() {
+        // If it claims success, it must have actually changed something.
+        let after = fs::read_to_string(temp.path().join("shared.txt")).unwrap();
+        let log_after = String::from_utf8_lossy(&run(temp.path(), &["log", "--oneline"]).stdout)
+            .lines()
+            .count();
+        assert!(
+            after != before && log_after > log_before,
+            "revert --continue reported success but committed a no-op \
+             (content unchanged and/or no new commit)"
+        );
+    }
+    // Refusing is the correct outcome — nothing to assert beyond not lying.
+}
+
+/// Resolving then continuing must commit the resolution.
+#[test]
+fn wt5_revert_continue_commits_the_resolution() {
+    let temp = TempDir::new().unwrap();
+    let target = setup_revert_conflict(temp.path());
+
+    let out = run(temp.path(), &["revert", &target]);
+    assert!(!out.status.success(), "expected a conflict stop");
+
+    // Resolve to something distinguishable from HEAD ("v3").
+    fs::write(temp.path().join("shared.txt"), "resolved-revert\n").unwrap();
+    mediagit()
+        .args(["add", "shared.txt"])
+        .current_dir(temp.path())
+        .assert()
+        .success();
+
+    let cont = run(temp.path(), &["revert", "--continue"]);
+    assert!(
+        cont.status.success(),
+        "revert --continue failed: {}",
+        String::from_utf8_lossy(&cont.stderr)
+    );
+
+    let content = fs::read_to_string(temp.path().join("shared.txt")).unwrap();
+    assert_eq!(
+        content, "resolved-revert\n",
+        "revert --continue discarded the resolution and committed HEAD's tree instead"
+    );
+}

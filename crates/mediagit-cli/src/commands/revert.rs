@@ -242,9 +242,49 @@ impl RevertCmd {
             .await?;
 
         if merge_result.has_conflicts() {
-            // Conflicts - save the HEAD tree to index for resolution
-            let head_tree = Tree::read(odb, &head_commit.tree).await?;
-            self.save_tree_to_index(repo_root, &head_tree)?;
+            // WT-5: materialise the conflict instead of staging HEAD unchanged.
+            //
+            // This used to write the *unmodified HEAD tree* into the index and
+            // bail, with nothing written to the working tree. The user had no
+            // marker to resolve, so running `--continue` immediately was the
+            // natural next step — and `do_continue` then built a tree from that
+            // index (HEAD's own tree) and committed it as "the revert". The
+            // command reported success and reverted nothing.
+            let ours_tree = Tree::read(odb, &head_commit.tree).await?;
+            let theirs_tree = Tree::read(odb, &parent_commit.tree).await?;
+            let mut index = Index::load(repo_root)?;
+
+            mediagit_versioning::apply_merge_to_workdir(
+                &merge_result,
+                &ours_tree,
+                &theirs_tree,
+                odb,
+                repo_root,
+                &mut index,
+                *parent_oid,
+                head_oid,
+            )
+            .await
+            .context("Failed to write revert conflict to the working directory")?;
+
+            index.save(repo_root)?;
+
+            if !self.quiet {
+                println!(
+                    "{} Revert stopped: conflict in {} file(s):",
+                    console::style("⚠").yellow().bold(),
+                    merge_result.conflicts.len()
+                );
+                for conflict in &merge_result.conflicts {
+                    println!("  {} {}", console::style("conflict:").red(), conflict.path);
+                }
+                println!(
+                    "  Resolve the file(s), {}, then run {}",
+                    console::style("mediagit add <file>").cyan(),
+                    console::style("mediagit revert --continue").cyan()
+                );
+            }
+
             anyhow::bail!("Revert resulted in conflict - resolve and continue");
         }
 
@@ -370,6 +410,27 @@ impl RevertCmd {
 
         let state_content = fs::read_to_string(&state_file).await?;
         let state = RevertState::from_string(&state_content)?;
+
+        // WT-5: refuse while conflict markers remain in the working tree.
+        //
+        // The index has no stage/unmerged concept (WT-9), so "did the user
+        // resolve this?" cannot be asked of the index. Scanning the working
+        // tree for markers is the honest available check, and it catches the
+        // case this bug turned into a silent no-op: running `--continue`
+        // without having resolved anything.
+        //
+        // Note the state file is deliberately NOT removed until after this
+        // check — bailing must leave the revert resumable.
+        let unresolved = Self::paths_with_conflict_markers(repo_root);
+        if !unresolved.is_empty() {
+            anyhow::bail!(
+                "Cannot continue: unresolved conflict markers still present in:\n  {}\n\
+                 Resolve the file(s) and `mediagit add` them, then retry \
+                 (or `mediagit revert --abort`).",
+                unresolved.join("\n  ")
+            );
+        }
+
         fs::remove_file(&state_file).await?;
 
         let storage = create_storage_backend(repo_root).await?;
@@ -499,6 +560,28 @@ impl RevertCmd {
         }
 
         Ok(())
+    }
+
+    /// Working-tree paths still containing conflict markers.
+    ///
+    /// `REVERT_STATE` records only the original HEAD, not which files
+    /// conflicted, so this scans the index's tracked paths rather than a
+    /// recorded list. Unreadable or binary files are skipped — a false
+    /// negative here costs a no-op commit, which is the status quo, whereas a
+    /// false positive would block a legitimate continue.
+    fn paths_with_conflict_markers(repo_root: &Path) -> Vec<String> {
+        let Ok(index) = Index::load(repo_root) else {
+            return Vec::new();
+        };
+        index
+            .entries()
+            .filter(|e| {
+                std::fs::read_to_string(repo_root.join(&e.path))
+                    .map(|c| c.contains("<<<<<<<") && c.contains(">>>>>>>"))
+                    .unwrap_or(false)
+            })
+            .map(|e| e.path.display().to_string())
+            .collect()
     }
 
     fn build_tree_from_index(&self, index: &Index) -> Tree {
