@@ -163,9 +163,20 @@ pub async fn upsert_grant(
         &state.grants,
         "",
     )?;
+    // AU-5: bind the grant to the repo's durable identity, so it stops
+    // applying if this repo is later deleted and another created under the
+    // same name. Best-effort: a repo that does not exist yet (or whose config
+    // is unreadable) records an unbound, name-only grant — the pre-AU-5
+    // behaviour — rather than failing the request.
+    let repo_path = state.repos_dir.join(&req.repo);
+    let repo_id = match mediagit_config::Config::load(&repo_path).await {
+        Ok(cfg) => cfg.repo_id.clone(),
+        Err(_) => None,
+    };
+
     state
         .grants
-        .grant(&id, &req.repo, req.level)
+        .grant_bound(&id, &req.repo, repo_id.as_deref(), req.level)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::NO_CONTENT)

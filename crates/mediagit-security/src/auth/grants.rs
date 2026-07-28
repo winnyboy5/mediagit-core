@@ -45,6 +45,20 @@ struct Grant {
     user_id: String,
     repo: String,
     level: Level,
+    /// AU-5: the repo's durable `repo_id` at the time the grant was made.
+    ///
+    /// Grants were keyed on repo *name* alone, so deleting a repo and
+    /// recreating one with the same name — routine when repo names are
+    /// reused — silently handed the new repo every grant the old one had,
+    /// including Admin. Binding the grant to the identity that existed when
+    /// it was issued means a recreated repo (which gets a fresh id) matches
+    /// nothing.
+    ///
+    /// `None` marks a legacy grant recorded before this field existed. Those
+    /// still match on name, so upgrading does not revoke anyone's access; the
+    /// binding is captured the next time the grant is re-issued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repo_id: Option<String>,
 }
 
 /// Per-repo grants store, backed in-memory with optional JSONL persistence
@@ -54,8 +68,15 @@ struct Grant {
 /// lookups are pure in-memory and never held across an `.await`, so a
 /// synchronous lock lets callers (like `mediagit-server`'s `check_permission`)
 /// query grants without becoming `async` themselves.
+/// `(user_id, repo_name)` — the lookup key for a grant.
+type GrantKey = (String, String);
+
+/// `(level, repo_id)` — the granted level and the repo identity it was bound
+/// to when issued. `None` marks a legacy grant recorded before AU-5.
+type GrantValue = (Level, Option<String>);
+
 pub struct GrantsStore {
-    grants: RwLock<HashMap<(String, String), Level>>,
+    grants: RwLock<HashMap<GrantKey, GrantValue>>,
 
     /// AU-8: serialises snapshot-and-write so concurrent mutations cannot
     /// persist out of order.
@@ -104,7 +125,7 @@ impl GrantsStore {
 
         let mut grants = HashMap::new();
         for g in records {
-            grants.insert((g.user_id, g.repo), g.level);
+            grants.insert((g.user_id, g.repo), (g.level, g.repo_id));
         }
 
         Ok(Self {
@@ -136,10 +157,11 @@ impl GrantsStore {
         let grants = self.grants.read().unwrap_or_else(|e| e.into_inner());
         grants
             .iter()
-            .map(|((user_id, repo), level)| Grant {
+            .map(|((user_id, repo), (level, repo_id))| Grant {
                 user_id: user_id.clone(),
                 repo: repo.clone(),
                 level: *level,
+                repo_id: repo_id.clone(),
             })
             .collect()
     }
@@ -147,9 +169,28 @@ impl GrantsStore {
     /// Grant `user_id` `level` access on `repo`, replacing any existing
     /// grant for that pair.
     pub async fn grant(&self, user_id: &str, repo: &str, level: Level) -> AuthResult<()> {
+        self.grant_bound(user_id, repo, None, level).await
+    }
+
+    /// AU-5: grant, binding the record to the repo's durable `repo_id`.
+    ///
+    /// Pass the id whenever the caller can resolve it. A grant carrying an id
+    /// stops matching if the repo is later deleted and recreated under the
+    /// same name, because the replacement gets a fresh id. `None` records a
+    /// legacy-style name-only grant.
+    pub async fn grant_bound(
+        &self,
+        user_id: &str,
+        repo: &str,
+        repo_id: Option<&str>,
+        level: Level,
+    ) -> AuthResult<()> {
         {
             let mut grants = self.grants.write().unwrap_or_else(|e| e.into_inner());
-            grants.insert((user_id.to_string(), repo.to_string()), level);
+            grants.insert(
+                (user_id.to_string(), repo.to_string()),
+                (level, repo_id.map(str::to_string)),
+            );
         }
         self.persist().await
     }
@@ -177,11 +218,35 @@ impl GrantsStore {
 
     /// The level granted to `user_id` on `repo`, if any.
     pub fn get(&self, user_id: &str, repo: &str) -> Option<Level> {
-        self.grants
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&(user_id.to_string(), repo.to_string()))
-            .copied()
+        self.get_for_repo_id(user_id, repo, None)
+    }
+
+    /// AU-5: the level granted to `user_id` on `repo`, honouring the id the
+    /// grant was bound to.
+    ///
+    /// `current_repo_id` is the repo's id *now*. A grant matches when:
+    ///   - it carries no id (legacy, pre-AU-5) — matched on name, so an
+    ///     upgrade never revokes existing access; or
+    ///   - the caller could not resolve an id (`None`) — the request is about
+    ///     to fail its own existence check anyway, so this is not a new hole;
+    ///     or
+    ///   - the ids agree.
+    ///
+    /// A grant bound to a *different* id is ignored: that is the recreated
+    /// repo case this exists to stop.
+    pub fn get_for_repo_id(
+        &self,
+        user_id: &str,
+        repo: &str,
+        current_repo_id: Option<&str>,
+    ) -> Option<Level> {
+        let grants = self.grants.read().unwrap_or_else(|e| e.into_inner());
+        let (level, bound) = grants.get(&(user_id.to_string(), repo.to_string()))?;
+        match (bound.as_deref(), current_repo_id) {
+            (None, _) | (_, None) => Some(*level),
+            (Some(a), Some(b)) if a == b => Some(*level),
+            _ => None,
+        }
     }
 
     /// All `(repo, level)` grants held by `user_id`.
@@ -191,7 +256,7 @@ impl GrantsStore {
             .unwrap_or_else(|e| e.into_inner())
             .iter()
             .filter(|((u, _), _)| u == user_id)
-            .map(|((_, repo), level)| (repo.clone(), *level))
+            .map(|((_, repo), (level, _))| (repo.clone(), *level))
             .collect()
     }
 
@@ -202,8 +267,32 @@ impl GrantsStore {
             .unwrap_or_else(|e| e.into_inner())
             .iter()
             .filter(|((_, r), _)| r == repo)
-            .map(|((user_id, _), level)| (user_id.clone(), *level))
+            .map(|((user_id, _), (level, _))| (user_id.clone(), *level))
             .collect()
+    }
+
+    /// AU-5: drop grants for `repo` that were bound to a *different*
+    /// `current_repo_id`, returning how many were removed.
+    ///
+    /// Called when a repo's identity is resolved. A repo deleted and
+    /// recreated under the same name gets a fresh id, so every grant still
+    /// carrying the old one refers to a repository that no longer exists and
+    /// must not apply to its replacement. Legacy grants with no binding are
+    /// left alone — they predate this field and removing them would revoke
+    /// access on upgrade.
+    pub async fn prune_stale_bindings(&self, repo: &str, current_repo_id: &str) -> usize {
+        let removed = {
+            let mut grants = self.grants.write().unwrap_or_else(|e| e.into_inner());
+            let before = grants.len();
+            grants.retain(|(_, r), (_, bound)| {
+                r != repo || bound.as_deref().is_none_or(|b| b == current_repo_id)
+            });
+            before - grants.len()
+        };
+        if removed > 0 {
+            let _ = self.persist().await;
+        }
+        removed
     }
 
     /// AU-4: whether any grant is recorded for `repo`.
@@ -257,11 +346,10 @@ mod tests {
     #[test]
     fn poisoned_lock_recovers_instead_of_panicking() {
         let store = GrantsStore::new();
-        store
-            .grants
-            .write()
-            .unwrap()
-            .insert(("user1".to_string(), "repoA".to_string()), Level::Read);
+        store.grants.write().unwrap().insert(
+            ("user1".to_string(), "repoA".to_string()),
+            (Level::Read, None),
+        );
 
         std::thread::scope(|s| {
             let handle = s.spawn(|| {
@@ -445,5 +533,121 @@ mod tests {
                 "concurrent grant u{i} was lost on disk"
             );
         }
+    }
+
+    /// AU-5: a repo recreated under a reused name must not inherit the old
+    /// repo's grants.
+    ///
+    /// Grants keyed on name alone meant deleting a repo and creating another
+    /// with the same name silently handed the newcomer every grant the old
+    /// one had — up to and including Admin. Repo-name reuse is routine, so
+    /// this needed no unusual operator action to hit.
+    #[tokio::test]
+    async fn grant_does_not_survive_repo_recreation() {
+        let store = GrantsStore::new();
+        store
+            .grant_bound(
+                "alice",
+                "shared-name",
+                Some("repo-id-original"),
+                Level::Admin,
+            )
+            .await
+            .unwrap();
+
+        // Same repo, same identity: the grant applies.
+        assert_eq!(
+            store.get_for_repo_id("alice", "shared-name", Some("repo-id-original")),
+            Some(Level::Admin)
+        );
+
+        // Repo deleted and recreated: same name, fresh identity. The old
+        // grant must not carry over.
+        assert_eq!(
+            store.get_for_repo_id("alice", "shared-name", Some("repo-id-replacement")),
+            None,
+            "a recreated repo inherited the deleted repo's grant"
+        );
+    }
+
+    /// Upgrading must not revoke anyone: grants recorded before AU-5 carry no
+    /// id and keep matching on name.
+    #[tokio::test]
+    async fn legacy_unbound_grants_still_match() {
+        let store = GrantsStore::new();
+        store
+            .grant("bob", "legacy-repo", Level::Write)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.get_for_repo_id("bob", "legacy-repo", Some("any-id")),
+            Some(Level::Write),
+            "a pre-AU-5 grant should still apply after upgrade"
+        );
+    }
+
+    /// The binding must survive a reload — it is the persisted field that
+    /// does the work, not just in-memory state.
+    #[tokio::test]
+    async fn repo_id_binding_round_trips_through_disk() {
+        let _guard = persist::ENV_LOCK.read().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = GrantsStore::load_or_new(dir.path()).unwrap();
+            store
+                .grant_bound("carol", "r", Some("id-A"), Level::Read)
+                .await
+                .unwrap();
+        }
+        let reloaded = GrantsStore::load_or_new(dir.path()).unwrap();
+        assert_eq!(
+            reloaded.get_for_repo_id("carol", "r", Some("id-A")),
+            Some(Level::Read)
+        );
+        assert_eq!(
+            reloaded.get_for_repo_id("carol", "r", Some("id-B")),
+            None,
+            "binding was lost across persist/reload"
+        );
+    }
+
+    /// AU-5: pruning drops only the stale bindings.
+    ///
+    /// It must not touch grants for other repos, nor legacy unbound grants —
+    /// removing those would revoke access on upgrade, which is exactly the
+    /// outcome the `Option` binding exists to avoid.
+    #[tokio::test]
+    async fn prune_removes_only_stale_bindings() {
+        let store = GrantsStore::new();
+        store
+            .grant_bound("a", "shared", Some("old-id"), Level::Admin)
+            .await
+            .unwrap();
+        store
+            .grant_bound("b", "shared", Some("new-id"), Level::Read)
+            .await
+            .unwrap();
+        store.grant("c", "shared", Level::Write).await.unwrap(); // legacy
+        store
+            .grant_bound("d", "other", Some("old-id"), Level::Admin)
+            .await
+            .unwrap();
+
+        let pruned = store.prune_stale_bindings("shared", "new-id").await;
+        assert_eq!(pruned, 1, "only the stale binding should go");
+
+        assert_eq!(store.get("a", "shared"), None, "stale grant survived");
+        assert_eq!(store.get("b", "shared"), Some(Level::Read));
+        assert_eq!(
+            store.get("c", "shared"),
+            Some(Level::Write),
+            "a legacy unbound grant was revoked by the upgrade"
+        );
+        assert_eq!(
+            store.get("d", "other"),
+            Some(Level::Admin),
+            "pruning one repo affected another"
+        );
     }
 }

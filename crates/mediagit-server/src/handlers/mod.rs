@@ -177,6 +177,33 @@ pub async fn get_or_init_storage(
     }
     let backend = build_storage_backend(repo_path).await?;
     map.insert(key, Arc::clone(&backend));
+
+    // AU-5: this is the first time in this process that we have resolved the
+    // repo's durable identity, so it is the moment to discard grants that
+    // belonged to a *previous* repo of the same name. Deleting a repo and
+    // recreating one with the same name used to hand the newcomer every grant
+    // the old one had; a recreated repo gets a fresh id, so those bindings no
+    // longer match and are dropped here.
+    //
+    // Done on storage init rather than inside `check_permission` because the
+    // repo's identity is not known at authorization time — `check_permission`
+    // runs before the repo path is even resolved — and reading config.toml on
+    // every authorization would put file I/O on the chunk-transfer hot path.
+    if let Ok(config) = mediagit_config::Config::load(repo_path).await
+        && let Ok(repo_id) = resolve_repo_id(repo_path, &config)
+        && let Some(name) = repo_path.file_name().and_then(|n| n.to_str())
+    {
+        let pruned = state.grants.prune_stale_bindings(name, &repo_id).await;
+        if pruned > 0 {
+            tracing::warn!(
+                repo = %name,
+                repo_id = %repo_id,
+                pruned,
+                "discarded grant(s) bound to a previous repo of the same name"
+            );
+        }
+    }
+
     Ok(backend)
 }
 
