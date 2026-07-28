@@ -541,6 +541,50 @@ impl ProtocolClient {
 /// the `off - range_start` math only lands correctly when `range_start == 0`
 /// (body offset 0 == range_start). Any other status/offset combination would
 /// mis-slice — the caller must reject it and fall back to the per-chunk path.
+/// ST-3: decide whether a pack slice may be accepted.
+///
+/// A slice is accepted only when the manifest records a `compressed_hash` for
+/// it *and* the bytes match. The previous rule verified only when a hash
+/// happened to be present and accepted the slice otherwise — fail-open on an
+/// integrity check. `compressed_hash` is `#[serde(default)] Option`, so a
+/// manifest from an older binary, or one with a truncated line, silently
+/// disabled verification for that chunk while still yielding its bytes.
+///
+/// Failing closed is cheap: a refused slice falls through to the per-chunk
+/// download path, which verifies. The cost is throughput on an unverifiable
+/// manifest, never correctness.
+///
+/// Extracted so the Range-GET and batch-get paths cannot drift apart — they
+/// must apply the same rule, and previously each had its own copy of it.
+fn slice_verifies(
+    hex: &str,
+    data: &[u8],
+    comp_hashes: &std::collections::HashMap<String, String>,
+) -> bool {
+    match comp_hashes.get(hex) {
+        Some(expected) => {
+            let computed = Oid::hash(data).to_hex();
+            if &computed != expected {
+                tracing::warn!(
+                    chunk = %hex,
+                    expected = %expected,
+                    computed = %computed,
+                    "compressed-hash mismatch on pack slice; refusing"
+                );
+                return false;
+            }
+            true
+        }
+        None => {
+            tracing::warn!(
+                chunk = %hex,
+                "pack manifest carries no compressed_hash for this chunk;                  refusing the slice unverified and falling back to per-chunk"
+            );
+            false
+        }
+    }
+}
+
 fn range_status_trusted(status: u16, range_start: u64) -> bool {
     status == 206 || (status == 200 && range_start == 0)
 }
@@ -633,18 +677,8 @@ async fn fetch_pack_slices_presigned(
                 Err(_) => continue,
             };
 
-            // Per-slice compressed-hash verify when manifest includes it.
-            if let Some(expected) = comp_hashes.get(hex.as_str()) {
-                let computed = Oid::hash(data).to_hex();
-                if &computed != expected {
-                    tracing::warn!(
-                        chunk = %hex,
-                        expected = %expected,
-                        computed = %computed,
-                        "compressed-hash mismatch on pack slice; skipping"
-                    );
-                    continue;
-                }
+            if !slice_verifies(hex, data, comp_hashes) {
+                continue;
             }
 
             out.push((oid, data.to_vec()));
@@ -722,18 +756,10 @@ async fn fetch_pack_slices_batch(
             continue;
         }
         let hex = oid.to_hex();
-        if let Some(expected) = comp_hashes.get(hex.as_str()) {
-            let computed = Oid::hash(&data).to_hex();
-            if &computed != expected {
-                tracing::warn!(
-                    chunk = %hex,
-                    expected = %expected,
-                    computed = %computed,
-                    "compressed-hash mismatch on batch-get slice; skipping"
-                );
-                continue;
-            }
+        if !slice_verifies(&hex, &data, comp_hashes) {
+            continue;
         }
+
         out.push((oid, data));
     }
     Ok(out)
@@ -837,5 +863,43 @@ mod tests {
     #[test]
     fn empty_body_parses_to_no_frames() {
         assert!(parse_batch_get_frames(&[], "pack1").is_empty());
+    }
+
+    /// ST-3: an unverifiable slice must be refused, not trusted.
+    #[test]
+    fn slice_without_recorded_hash_is_refused() {
+        let data = b"chunk bytes";
+        let hex = Oid::hash(data).to_hex();
+        let empty = std::collections::HashMap::new();
+
+        assert!(
+            !slice_verifies(&hex, data, &empty),
+            "a manifest with no compressed_hash left the slice unverified and              accepted it — fail-open on an integrity check"
+        );
+    }
+
+    #[test]
+    fn slice_with_matching_hash_is_accepted() {
+        let data = b"chunk bytes";
+        let hex = Oid::hash(data).to_hex();
+        let mut m = std::collections::HashMap::new();
+        // The manifest records BLAKE3 of the compressed bytes as they are
+        // stored; here the "compressed" bytes are the payload itself.
+        m.insert(hex.clone(), Oid::hash(data).to_hex());
+
+        assert!(slice_verifies(&hex, data, &m));
+    }
+
+    #[test]
+    fn slice_with_wrong_hash_is_refused() {
+        let data = b"chunk bytes";
+        let hex = Oid::hash(data).to_hex();
+        let mut m = std::collections::HashMap::new();
+        m.insert(hex.clone(), Oid::hash(b"different").to_hex());
+
+        assert!(
+            !slice_verifies(&hex, data, &m),
+            "a slice whose bytes do not match the manifest was accepted"
+        );
     }
 }
