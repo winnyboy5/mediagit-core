@@ -18,7 +18,8 @@ use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use mediagit_server::{
-    AppState, RateLimitConfig, ServerConfig, create_router, create_router_with_rate_limit,
+    AppState, RateLimitConfig, ServerConfig, create_rate_limited_router, create_router,
+    create_router_sharing_rate_limit,
 };
 
 mod setup;
@@ -366,7 +367,7 @@ async fn main() -> Result<()> {
     }
 
     // Build router with optional rate limiting
-    let (app, _cleanup_task) = if config.enable_rate_limiting {
+    let (app, rate_limiter) = if config.enable_rate_limiting {
         tracing::info!(
             "Rate limiting ENABLED: {} req/s, burst {}",
             config.rate_limit_rps,
@@ -376,15 +377,16 @@ async fn main() -> Result<()> {
             requests_per_second: config.rate_limit_rps,
             burst_size: config.rate_limit_burst,
         };
-        let (router, cleanup) = create_router_with_rate_limit(Arc::clone(&state), rate_config);
+        let (router, cleanup, limiter) =
+            create_rate_limited_router(Arc::clone(&state), rate_config);
 
         // Spawn rate limiter cleanup task
         std::thread::spawn(cleanup);
 
-        (router, true)
+        (router, Some(limiter))
     } else {
         tracing::warn!("Rate limiting is DISABLED - not suitable for production!");
-        (create_router(Arc::clone(&state)), false)
+        (create_router(Arc::clone(&state)), None)
     };
     // I4: CORS is off unless `cors_allowed_origins` is set in config.
     let app = mediagit_server::apply_cors_layer(app, config.cors_allowed_origins.as_deref());
@@ -422,8 +424,19 @@ async fn main() -> Result<()> {
             // Build axum-server RustlsConfig from certificate
             let rustls_config = build_axum_rustls_config(&certificate)?;
 
-            // Create HTTPS app (clone of router)
-            let https_app = create_router(Arc::clone(&state));
+            // SV-1: the HTTPS listener must carry the same rate limiter as
+            // HTTP. It used to call `create_router` unconditionally, so
+            // enabling TLS silently disabled rate limiting on the port most
+            // likely to face the internet — while startup still logged
+            // "Rate limiting ENABLED". The limiter is *shared*, not rebuilt:
+            // two independent governors would give an attacker twice the
+            // budget simply for splitting traffic across the two ports.
+            let https_app = match &rate_limiter {
+                Some(limiter) => {
+                    create_router_sharing_rate_limit(Arc::clone(&state), Arc::clone(limiter))
+                }
+                None => create_router(Arc::clone(&state)),
+            };
             let https_app = mediagit_server::apply_cors_layer(
                 https_app,
                 config.cors_allowed_origins.as_deref(),

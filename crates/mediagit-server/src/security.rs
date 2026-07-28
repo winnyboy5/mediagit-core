@@ -31,6 +31,9 @@ pub use tower_governor::{
     governor::{GovernorConfig, GovernorConfigBuilder},
     key_extractor::SmartIpKeyExtractor,
 };
+// Named so a shared limiter can be passed between listeners (see
+// `SharedRateLimiter`); `.use_headers()` selects this middleware type.
+pub use governor::middleware::StateInformationMiddleware;
 
 /// Rate-limit key: authenticated identity when present, else client IP.
 ///

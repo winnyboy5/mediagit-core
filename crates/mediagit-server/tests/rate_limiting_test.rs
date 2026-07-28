@@ -316,3 +316,71 @@ async fn test_rate_limit_with_high_throughput() {
         rate_limited_count
     );
 }
+
+/// SV-1: the second listener (HTTPS in production) must enforce the *same*
+/// budget as the first, not its own.
+///
+/// `main.rs` built the HTTPS router with `create_router` regardless of
+/// configuration, so turning TLS on silently turned rate limiting off for the
+/// port most likely to be exposed — while startup still logged "Rate limiting
+/// ENABLED". Sharing rather than rebuilding the limiter also matters: two
+/// independent governors would hand an attacker twice the budget for simply
+/// splitting traffic across the two ports.
+#[tokio::test]
+async fn second_listener_shares_the_rate_limit_budget() {
+    use mediagit_server::{create_rate_limited_router, create_router_sharing_rate_limit};
+
+    let temp_dir = TempDir::new().unwrap();
+    let repos_dir = temp_dir.path().join("repos");
+    tokio::fs::create_dir_all(&repos_dir).await.unwrap();
+    let state = Arc::new(AppState::new(repos_dir));
+
+    // 1 req/s, burst 2 — the same restrictive budget the blocking test uses.
+    let (router_a, cleanup, limiter) =
+        create_rate_limited_router(Arc::clone(&state), RateLimitConfig::new(1, 2));
+    std::thread::spawn(cleanup);
+    let router_b = create_router_sharing_rate_limit(Arc::clone(&state), limiter);
+
+    let mut addrs = Vec::new();
+    for router in [router_a, router_b] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        addrs.push(listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .expect("Server failed");
+        });
+    }
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    mediagit_protocol::ensure_crypto_provider();
+    let client = Client::new();
+
+    // Spend the whole burst on listener A.
+    for _ in 0..6 {
+        let _ = client
+            .get(format!("http://{}/test-repo/info/refs", addrs[0]))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Listener B must already be out of budget. If it answers normally, it is
+    // running its own limiter (or none) — which is the SV-1 defect.
+    let resp = client
+        .get(format!("http://{}/test-repo/info/refs", addrs[1]))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "the second listener must share the first's rate-limit budget; \
+         got {} — it is enforcing a separate budget or none at all",
+        resp.status()
+    );
+}

@@ -137,7 +137,40 @@ fn small_body_routes(state: Arc<AppState>) -> Router {
 }
 
 /// Create the axum router with all endpoints
+/// The shared rate limiter, so a second listener can enforce the *same*
+/// budget rather than being handed its own.
+pub type SharedRateLimiter = Arc<
+    security::GovernorConfig<security::SmartIpKeyExtractor, security::StateInformationMiddleware>,
+>;
+
+/// Create the router without rate limiting.
 pub fn create_router(state: Arc<AppState>) -> Router {
+    build_router(state, None)
+}
+
+/// Create a router that shares an existing rate limiter.
+///
+/// SV-1: the HTTPS listener used to call `create_router`, so switching TLS on
+/// silently switched rate limiting *off* for the port actually exposed to the
+/// internet — while the log still said "Rate limiting ENABLED". Sharing the
+/// limiter rather than building a second one matters: two independent
+/// governors would hand an attacker twice the budget for splitting traffic
+/// across the two ports.
+pub fn create_router_sharing_rate_limit(
+    state: Arc<AppState>,
+    limiter: SharedRateLimiter,
+) -> Router {
+    build_router(state, Some(limiter))
+}
+
+/// Single source of truth for the route table and middleware stack.
+///
+/// Previously `create_router` and `create_router_with_rate_limit` each built
+/// their own copy of ~28 routes. Two parallel route tables drift — a route
+/// added to one and not the other exists or vanishes depending on whether
+/// rate limiting happens to be on — and that duplication is exactly what let
+/// the HTTPS branch pick the wrong builder.
+fn build_router(state: Arc<AppState>, rate_limiter: Option<SharedRateLimiter>) -> Router {
     // Create Git protocol routes
     let mut git_router = Router::new()
         .route("/{repo}/info/refs", get(handlers::get_refs))
@@ -242,6 +275,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     };
 
     // Apply security middleware to all routes
+    if let Some(limiter) = rate_limiter {
+        // Rate limiting sits inside the body limit and outside the security
+        // middleware, matching the order the rate-limited builder used.
+        router = router.layer(security::GovernorLayer::new(limiter));
+    }
     router = router
         // Body size limit (2GB for large media files)
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024))
@@ -301,10 +339,19 @@ pub fn create_router_with_rate_limit(
     state: Arc<AppState>,
     rate_limit_config: RateLimitConfig,
 ) -> (Router, impl FnOnce() + Send + 'static) {
-    use security::{GovernorConfigBuilder, GovernorLayer, SmartIpKeyExtractor};
+    let (router, cleanup, _limiter) = create_rate_limited_router(state, rate_limit_config);
+    (router, cleanup)
+}
 
-    // Build rate limiting configuration
-    let governor_config = Arc::new(
+/// As `create_router_with_rate_limit`, but also hands back the limiter so a
+/// second listener (HTTPS) can share it via `create_router_sharing_rate_limit`.
+pub fn create_rate_limited_router(
+    state: Arc<AppState>,
+    rate_limit_config: RateLimitConfig,
+) -> (Router, impl FnOnce() + Send + 'static, SharedRateLimiter) {
+    use security::{GovernorConfigBuilder, SmartIpKeyExtractor};
+
+    let governor_config: SharedRateLimiter = Arc::new(
         GovernorConfigBuilder::default()
             .per_second(rate_limit_config.requests_per_second)
             .burst_size(rate_limit_config.burst_size)
@@ -314,7 +361,7 @@ pub fn create_router_with_rate_limit(
             .expect("Failed to build rate limiter config"),
     );
 
-    // Create cleanup task
+    // Cleanup task: the limiter keeps per-key state, so prune it periodically.
     let limiter = governor_config.limiter().clone();
     let cleanup_task = move || {
         use std::time::Duration;
@@ -329,134 +376,6 @@ pub fn create_router_with_rate_limit(
         }
     };
 
-    let mut router = Router::new()
-        .route("/{repo}/info/refs", get(handlers::get_refs))
-        .route("/{repo}/objects/want", post(handlers::request_objects))
-        .route(
-            "/{repo}/objects/pack",
-            get(handlers::download_pack).post(handlers::upload_pack),
-        )
-        // Chunk transfer endpoints for large files (push and pull/clone)
-        .route("/{repo}/chunks/check", post(handlers::check_chunks_exist))
-        .route(
-            "/{repo}/chunks/upload-urls",
-            post(handlers::presign_chunk_uploads),
-        )
-        .route(
-            "/{repo}/chunks/download-urls",
-            post(handlers::presign_chunk_downloads),
-        )
-        .route(
-            "/{repo}/chunks/complete",
-            post(handlers::complete_chunk_uploads),
-        )
-        .route(
-            "/{repo}/chunks/verify-integrity",
-            post(handlers::verify_chunk_integrity),
-        )
-        .route(
-            "/{repo}/objects/verify-integrity",
-            post(handlers::verify_object_integrity),
-        )
-        .route("/{repo}/chunks/mpu/start", post(handlers::mpu_start))
-        .route("/{repo}/chunks/mpu/complete", post(handlers::mpu_complete))
-        .route("/{repo}/chunks/mpu/abort", post(handlers::mpu_abort))
-        .route(
-            "/{repo}/chunks/{chunk_id}",
-            get(handlers::download_chunk).put(handlers::upload_chunk),
-        )
-        // Chunk-delta sidecar endpoints: lets clients pull deltas during
-        // clone/fetch instead of inflated full chunks (preserves storage savings).
-        .route(
-            "/{repo}/chunk-deltas/check",
-            post(handlers::check_chunk_deltas_exist),
-        )
-        .route(
-            "/{repo}/chunk-deltas/{chunk_id}",
-            get(handlers::download_chunk_delta).put(handlers::upload_chunk_delta),
-        )
-        .route(
-            "/{repo}/manifests/{oid}",
-            get(handlers::download_manifest).put(handlers::upload_manifest),
-        )
-        // Raw file serving endpoints (read-only, repo:read permission)
-        .route(
-            "/{repo}/files/{*path}",
-            get(handlers::download_file_by_path),
-        )
-        .route("/{repo}/tree/{*path}", get(handlers::list_tree))
-        .route("/{repo}/tree", get(handlers::list_tree_root))
-        // Pack manifest endpoints (F6) — Track-F cloud pack bundling
-        .route("/{repo}/packs/complete", post(handlers::complete_pack))
-        .route(
-            "/{repo}/packs/upload-urls",
-            post(handlers::presign_pack_uploads),
-        )
-        .route("/{repo}/packs/{pack_id}", put(handlers::upload_pack_proxy))
-        .route("/{repo}/chunks/locate", post(handlers::locate_chunks))
-        .route(
-            "/{repo}/packs/presign-download-urls",
-            post(handlers::presign_pack_downloads),
-        )
-        .route(
-            "/{repo}/packs/rebuild-index",
-            post(handlers::rebuild_pack_index),
-        )
-        // D2: batch-fetch multiple chunk slices out of one pack in a single
-        // request — for backends with no presigned GET (GCS + ADC).
-        .route(
-            "/{repo}/packs/batch-get",
-            post(handlers::batch_get_pack_chunks),
-        )
-        .with_state(Arc::clone(&state))
-        // I3: refs/update + locks routes live in their own 1 MiB-capped
-        // router (see `small_body_routes`); merged in before the layer
-        // chain below so they still get rate-limit/security/auth applied.
-        .merge(small_body_routes(Arc::clone(&state)));
-
-    // Add authentication middleware if enabled — applied to the git routes
-    // only, BEFORE merging in /auth/* below (same ordering as
-    // `create_router`), so login/register stay public and the admin router
-    // keeps its own self-contained auth layer instead of double-wrapping.
-    if let Some(auth_layer) = &state.auth_layer {
-        let auth_layer = Arc::clone(auth_layer);
-        router = router.layer(middleware::from_fn(move |req, next| {
-            auth_middleware(Arc::clone(&auth_layer), req, next)
-        }));
-    }
-
-    // Merge with auth + admin routes if auth is enabled (H3 fix: this was
-    // previously missing entirely from the rate-limited router, so /auth/*
-    // — including login/register — was unreachable whenever rate limiting
-    // was on).
-    if let Some(auth_service) = &state.auth_service {
-        let auth_router = create_auth_router(Arc::clone(auth_service));
-        let admin_router = auth_routes::create_admin_router(Arc::clone(&state));
-        router = router.merge(auth_router).merge(admin_router);
-    }
-
-    // Apply middleware layers
-    router = router
-        // Body size limit (2GB for large media files)
-        .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024))
-        // Rate limiting (applied first, before other middleware)
-        .layer(GovernorLayer::new(governor_config))
-        // Security middleware
-        .layer(middleware::from_fn(security::audit_middleware))
-        .layer(middleware::from_fn(security::security_headers_middleware))
-        .layer(middleware::from_fn(security::request_validation_middleware))
-        .layer(TraceLayer::new_for_http());
-
-    // Path validation middleware must be applied as the outermost layer
-    // to intercept requests before routing
-    router = router.layer(middleware::from_fn(security::path_validation_middleware));
-
-    // Health check is merged AFTER all middleware so it bypasses auth + rate-limiting
-    router = router.merge(
-        Router::new()
-            .route("/healthz", get(health_handler))
-            .route("/health", get(health_handler)),
-    );
-
-    (router, cleanup_task)
+    let router = build_router(state, Some(Arc::clone(&governor_config)));
+    (router, cleanup_task, governor_config)
 }
