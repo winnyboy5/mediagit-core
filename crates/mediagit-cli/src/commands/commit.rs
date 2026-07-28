@@ -311,13 +311,22 @@ impl CommitCmd {
             .await
             .context("Failed to write commit object")?;
 
-        // Clear the index BEFORE updating refs for atomicity
-        // If ref update fails after this, user can re-stage and retry.
-        // This prevents the issue where ref is updated but index isn't cleared.
-        let mut index = Index::load(&repo_root)?;
-        let index_backup = index.clone();
-        index.clear();
-        index.save(&repo_root).context("Failed to clear index")?;
+        // VC-2: update the ref BEFORE clearing the index.
+        //
+        // This used to be the other way round, to avoid leaving a stale index
+        // if the ref write failed. But between clearing the index and writing
+        // the ref, the new commit/tree/blobs were reachable from *nothing* —
+        // not the index (just cleared) and not any ref (not yet written) — and
+        // gc has no grace period for freshly written objects. auto-gc fires
+        // after `add` and `commit`, so a gc landing in that window deleted the
+        // objects, and the ref write then published a commit whose tree and
+        // blobs no longer existed: an unrecoverable repo.
+        //
+        // Reordered, the failure modes swap for the better. If the ref write
+        // fails the index is untouched, so the user simply retries. If the
+        // index clear fails the commit has already succeeded and is safe; the
+        // index merely still lists entries that are now committed, which is
+        // cosmetic and self-corrects on the next add/commit.
 
         // Update HEAD reference
         let head_ref = refdb.read("HEAD").await?;
@@ -348,16 +357,24 @@ impl CommitCmd {
             _ => Err(anyhow::anyhow!("HEAD is in an invalid state")),
         };
 
-        // If ref update failed, restore the index backup
-        if let Err(e) = ref_update_result {
-            // Attempt to restore index - log but don't fail on restore error
-            if let Err(restore_err) = index_backup.save(&repo_root) {
-                tracing::error!(
-                    "Failed to restore index after ref update failure: {}",
-                    restore_err
+        // Ref write failed: the index was never touched, so the staged state
+        // is intact and the user can simply retry. No restore needed.
+        ref_update_result?;
+
+        // The commit is now durable and reachable. Clearing the index is
+        // bookkeeping — if it fails, warn but do not fail the commit, which
+        // has already succeeded.
+        {
+            let mut index = Index::load(&repo_root)?;
+            index.clear();
+            if let Err(e) = index.save(&repo_root) {
+                tracing::warn!(
+                    "Commit {} succeeded but the index could not be cleared: {}. \
+                     Staged entries will clear on the next add or commit.",
+                    commit_oid.to_hex(),
+                    e
                 );
             }
-            return Err(e);
         }
 
         // Record reflog entry for HEAD and the branch

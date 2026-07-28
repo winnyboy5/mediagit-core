@@ -726,6 +726,17 @@ impl GarbageCollector {
             .filter(|(oid, _)| !reachable.contains(oid))
             .collect();
 
+        // NOTE (VC-2): a prune grace period — refusing to delete objects
+        // written in the last few minutes — would be real defence in depth
+        // here, because rooting is inherently racy against a concurrent
+        // writer mid-`add`/`push`/rebase. It is NOT implemented, because
+        // `StorageBackend` exposes no modification time: `head` returns size
+        // only, and loose-object paths are namespaced by the backend, so gc
+        // cannot derive an object's age without duplicating storage-layer
+        // layout logic. Implementing it requires an mtime accessor on the
+        // backend trait. Until then the ordering fix in `commit` (ref written
+        // before the index is cleared) is what closes the widest window.
+
         info!("Found {} unreachable objects", unreachable.len());
         Ok(unreachable)
     }

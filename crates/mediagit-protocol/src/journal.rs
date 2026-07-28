@@ -78,7 +78,11 @@ impl UploadJournal {
             std::fs::create_dir_all(parent)?;
         }
         let data = serde_json::to_string(self)?;
-        std::fs::write(path, data)?;
+        // OP-3: this journal exists so an interrupted push can resume — so a
+        // torn write here defeats the very feature it implements. A crash or
+        // ENOSPC during `save` previously left unparseable JSON, and the
+        // resume path then had nothing to read.
+        mediagit_versioning::atomic_write::write_atomic(path, data.as_bytes())?;
         Ok(())
     }
 

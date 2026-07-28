@@ -350,6 +350,40 @@ fn main() {
     }
 }
 
+/// UX-2: tell the user what state they may be in when they interrupt.
+///
+/// The CLI previously had no signal handling at all, so Ctrl-C was a bare
+/// process kill: whatever was half-written stayed half-written, with no
+/// message and no guidance.
+///
+/// This does not *cancel* the in-flight operation — that would mean threading
+/// cancellation through every command, and a half-cancelled operation is not
+/// obviously safer than a completed one. What makes interruption survivable is
+/// that the repository's mutable files (index, refs, reflog, upload journal)
+/// are now replaced atomically, so an interrupt leaves either the old file or
+/// the new one, never a torn mix. This handler's job is to say so, name the
+/// recovery commands, and exit with the conventional 128+SIGINT code.
+///
+/// Caveat: it fires on the async runtime, so a command blocked in long
+/// synchronous work (a large hashing loop) may not surface it until that work
+/// yields. Interrupting is still safe there — it is just less talkative.
+fn spawn_interrupt_handler() {
+    tokio::spawn(async {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            eprintln!();
+            output::warning("Interrupted.");
+            eprintln!(
+                "  Repository files are written atomically, so nothing is left half-written,\n  \
+                 but an operation may be only partly applied.\n  \
+                 Check with:  mediagit status     (working tree and any operation in progress)\n  \
+                 Verify with: mediagit fsck       (object integrity)"
+            );
+            // 128 + SIGINT(2), the conventional shell exit code.
+            std::process::exit(130);
+        }
+    });
+}
+
 #[allow(unsafe_code)] // audited: single-threaded startup, see SAFETY comment at the set_var call site below
 async fn async_main(cli: Cli) -> Result<()> {
     // Suppress INFO logs for machine-readable output modes (--json, --prometheus)
@@ -401,6 +435,14 @@ async fn async_main(cli: Cli) -> Result<()> {
             unsafe { std::env::set_var("MEDIAGIT_REPO", cwd) };
         }
     }
+
+    // UX-2: arm interrupt handling once startup is done, before any command
+    // touches the repository.
+    //
+    // Placed after the `-C` block deliberately: that block's `set_var` is
+    // sound only while no other thread exists to read the environment
+    // concurrently, and this spawns one.
+    spawn_interrupt_handler();
 
     // Execute command
     match cli.command {

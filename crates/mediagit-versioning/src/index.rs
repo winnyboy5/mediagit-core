@@ -106,7 +106,12 @@ impl Index {
 
         let contents = serde_json::to_string_pretty(self).context("Failed to serialize index")?;
 
-        fs::write(&index_path, contents)
+        // VC-4: atomic replace. A plain `fs::write` truncates first, so a
+        // crash or ENOSPC mid-write left a half-written index — and
+        // `Index::load` has no recovery path, so every later command failed
+        // until the file was deleted by hand, discarding whatever was staged.
+        // This is the highest-frequency write in the tool (every add/commit).
+        crate::atomic_write::write_atomic(&index_path, contents.as_bytes())
             .with_context(|| format!("Failed to write index file: {}", index_path.display()))?;
 
         Ok(())

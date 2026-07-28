@@ -63,6 +63,7 @@
 
 pub mod hash;
 
+pub mod atomic_write;
 mod bitmap;
 mod branch;
 mod checkout;

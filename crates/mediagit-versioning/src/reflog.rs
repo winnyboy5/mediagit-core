@@ -269,8 +269,9 @@ impl Reflog {
             trimmed.push_str(line);
             trimmed.push('\n');
         }
-        fs::write(path, trimmed)
-            .await
+        // Atomic replace: a torn rewrite here silently drops reflog history,
+        // which is the recovery path for reset/rebase (see atomic_write).
+        crate::atomic_write::write_atomic(path, trimmed.as_bytes())
             .context("Failed to write trimmed reflog")?;
         Ok(())
     }
@@ -355,8 +356,8 @@ impl Reflog {
             content.push_str(&entry.to_line());
         }
 
-        fs::write(&path, content)
-            .await
+        // Atomic replace — see `trim_if_needed`.
+        crate::atomic_write::write_atomic(&path, content.as_bytes())
             .context("Failed to write expired reflog")?;
 
         Ok(expired_count)
