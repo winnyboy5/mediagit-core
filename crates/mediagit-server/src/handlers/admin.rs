@@ -21,12 +21,13 @@
 //! regardless of what `repo` is passed (see `handlers::check_permission`
 //! doc comment) — these handlers pass `""`.
 //!
-//! Grant mutations go through `state.grants` (the same `GrantsStore`
-//! instance `check_permission` reads for repo-level enforcement elsewhere),
-//! not `AuthService::grants_store` — the two are separate in-memory
-//! instances that only agree at boot (both load from the same
-//! `grants.jsonl`), so writing through the wrong one would mean a granted
-//! user doesn't actually gain access until a server restart.
+//! Grant mutations go through `state.grants`, which is now the only
+//! `GrantsStore` in the process — the same instance `check_permission` reads
+//! for repo-level enforcement. `AuthService` previously carried a second,
+//! never-read instance that agreed with this one only at boot; writing
+//! through it would have left a granted user without access until a restart.
+//! It was deleted rather than documented (AU-9), so there is no longer a
+//! wrong instance to pick.
 
 use super::*;
 use mediagit_security::auth::{

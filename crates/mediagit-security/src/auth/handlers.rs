@@ -24,7 +24,6 @@ use tracing::{info, warn};
 use super::{
     AuthError, AuthResult, JwtAuth, TokenPair,
     credentials::CredentialsStore,
-    grants::GrantsStore,
     user::{Role, User},
 };
 
@@ -33,7 +32,6 @@ use super::{
 pub struct AuthService {
     pub jwt_auth: Arc<JwtAuth>,
     pub credentials_store: Arc<CredentialsStore>,
-    pub grants_store: Arc<GrantsStore>,
     /// Whether `POST /auth/register` is open to anonymous callers. Defaults
     /// to `true` on every constructor below (matches
     /// `ServerConfig::allow_open_registration`'s serde default) so existing
@@ -47,7 +45,6 @@ impl AuthService {
         Self {
             jwt_auth: Arc::new(JwtAuth::new(jwt_secret)),
             credentials_store: Arc::new(CredentialsStore::new()),
-            grants_store: Arc::new(GrantsStore::new()),
             allow_open_registration: true,
         }
     }
@@ -60,19 +57,23 @@ impl AuthService {
         Self {
             jwt_auth,
             credentials_store,
-            grants_store: Arc::new(GrantsStore::new()),
             allow_open_registration: true,
         }
     }
 
-    /// Create an authentication service whose credentials and grants are
-    /// persisted under `store_dir` (see [`CredentialsStore::load_or_new`],
-    /// [`GrantsStore::load_or_new`]).
+    /// Create an authentication service whose credentials are persisted
+    /// under `store_dir` (see [`CredentialsStore::load_or_new`]).
+    ///
+    /// AU-9: this used to also build a `GrantsStore`, which nothing ever read
+    /// or wrote. `AppState::grants` is the single instance that
+    /// `check_permission` consults and the admin handlers mutate; a second
+    /// one here only agreed with it at boot, so any code that reached for it
+    /// would have silently no-op'd until the next restart. Removed rather
+    /// than documented, so the trap cannot be stepped in.
     pub fn new_with_store_dir(jwt_secret: &str, store_dir: &Path) -> AuthResult<Self> {
         Ok(Self {
             jwt_auth: Arc::new(JwtAuth::new(jwt_secret)),
             credentials_store: Arc::new(CredentialsStore::load_or_new(store_dir)?),
-            grants_store: Arc::new(GrantsStore::load_or_new(store_dir)?),
             allow_open_registration: true,
         })
     }
