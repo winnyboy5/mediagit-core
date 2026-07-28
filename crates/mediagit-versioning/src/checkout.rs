@@ -522,6 +522,11 @@ impl<'a> CheckoutManager<'a> {
             return Ok(0);
         }
 
+        // VC-5: refuse to check out paths that differ only by case onto a
+        // filesystem that cannot tell them apart. Every write path funnels
+        // through here, so this is the one place that has to know.
+        detect_case_collisions(&self.repo_root, entries.iter().map(|(p, _, _)| p))?;
+
         let semaphore = Arc::new(Semaphore::new(checkout_parallelism()));
         let mut tasks: JoinSet<Result<bool>> = JoinSet::new();
 
@@ -901,6 +906,90 @@ impl CheckoutStats {
     }
 }
 
+/// Is `dir` on a filesystem that treats `A.psd` and `a.psd` as one name?
+///
+/// Probed rather than inferred from the platform: Windows is case-insensitive
+/// and Linux is not, but macOS ships case-insensitive by default while
+/// supporting case-sensitive volumes, and Linux can mount either. Guessing
+/// from `cfg!(windows)` would both miss real collisions and reject legitimate
+/// repositories.
+///
+/// Falls back to `false` (permit the checkout) when the probe cannot run — a
+/// failed probe is not evidence of a collision, and refusing a valid checkout
+/// because a temp file could not be created would be its own defect.
+fn fs_is_case_insensitive(dir: &Path) -> bool {
+    use std::fs;
+    let probe = dir.join(".mediagit-case-probe-tmp");
+    if fs::write(&probe, b"").is_err() {
+        return false;
+    }
+    let upper = dir.join(".MEDIAGIT-CASE-PROBE-TMP");
+    let insensitive = upper.exists();
+    let _ = fs::remove_file(&probe);
+    insensitive
+}
+
+/// VC-5: fail loudly when two tracked paths collide case-insensitively.
+///
+/// `Tree` keys entries in a case-sensitive `BTreeMap`, so `Logo.psd` and
+/// `logo.psd` are distinct objects and a commit made on Linux can legitimately
+/// contain both. Checking that out on Windows or default macOS wrote one file
+/// over the other and reported both as written — the working tree silently
+/// lost a file that `status` then considered clean.
+///
+/// Erroring is the right outcome rather than renaming or picking a winner:
+/// either choice silently discards content the commit says is there, which is
+/// the failure this guards against.
+fn detect_case_collisions<'a, I>(repo_root: &Path, paths: I) -> Result<()>
+where
+    I: Iterator<Item = &'a PathBuf>,
+{
+    let collisions = case_only_collisions(paths);
+
+    if collisions.is_empty() || !fs_is_case_insensitive(repo_root) {
+        return Ok(());
+    }
+
+    let detail = collisions
+        .iter()
+        .map(|(a, b)| format!("  {} and {}", a.display(), b.display()))
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        );
+    anyhow::bail!(
+        "checkout would lose data: this commit contains paths that differ only 
+         by case, and this filesystem cannot hold both:
+{detail}
+
+         Writing them would silently overwrite one with the other. Rename one 
+         side in a commit made on a case-sensitive filesystem, or check this 
+         commit out on one."
+    );
+}
+
+/// Pairs of paths that differ only by case. Pure, so it is testable on a
+/// case-sensitive filesystem where the collision could never be observed.
+fn case_only_collisions<'a, I>(paths: I) -> Vec<(PathBuf, PathBuf)>
+where
+    I: Iterator<Item = &'a PathBuf>,
+{
+    let mut seen: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
+    let mut collisions = Vec::new();
+    for path in paths {
+        let key = path.to_string_lossy().to_lowercase();
+        match seen.get(&key) {
+            Some(existing) if existing != path => collisions.push((existing.clone(), path.clone())),
+            Some(_) => {}
+            None => {
+                seen.insert(key, path.clone());
+            }
+        }
+    }
+    collisions
+}
+
 #[cfg(test)]
 #[allow(unsafe_code)] // edition-2024: test-only env::set_var/remove_var requires unsafe
 mod tests {
@@ -908,6 +997,72 @@ mod tests {
     use crate::{ObjectType, Signature, TreeEntry};
     use mediagit_storage::LocalBackend;
     use std::sync::Arc;
+
+    /// VC-5: `Tree` keys entries case-sensitively, so a commit made on Linux
+    /// can legitimately hold both `Logo.psd` and `logo.psd`. Detection is pure
+    /// so it can be asserted on any platform, including the case-sensitive
+    /// filesystems where the loss could never be reproduced.
+    #[test]
+    fn case_only_collisions_are_detected() {
+        let paths = [
+            PathBuf::from("art/Logo.psd"),
+            PathBuf::from("art/logo.psd"),
+            PathBuf::from("art/scene.blend"),
+        ];
+        let found = case_only_collisions(paths.iter());
+        assert_eq!(
+            found.len(),
+            1,
+            "expected exactly one collision, got {found:?}"
+        );
+        let (a, b) = &found[0];
+        assert_ne!(a, b);
+        assert_eq!(
+            a.to_string_lossy().to_lowercase(),
+            b.to_string_lossy().to_lowercase()
+        );
+    }
+
+    /// Distinct names, and the same name repeated, must not be flagged — a
+    /// false positive here refuses a valid checkout.
+    #[test]
+    fn distinct_and_duplicate_paths_are_not_collisions() {
+        let paths = [
+            PathBuf::from("a/one.psd"),
+            PathBuf::from("a/two.psd"),
+            PathBuf::from("b/one.psd"),
+        ];
+        assert!(case_only_collisions(paths.iter()).is_empty());
+
+        let repeated = [PathBuf::from("a/one.psd"), PathBuf::from("a/one.psd")];
+        assert!(
+            case_only_collisions(repeated.iter()).is_empty(),
+            "the same path twice is not a case collision"
+        );
+    }
+
+    /// The guard must only fire where the loss can actually happen, so it is
+    /// gated on a probe of the real filesystem rather than on `cfg!(windows)`.
+    #[test]
+    fn collision_guard_matches_the_filesystem() {
+        let tmp = tempfile::tempdir().unwrap();
+        let colliding = [PathBuf::from("Logo.psd"), PathBuf::from("logo.psd")];
+        let result = detect_case_collisions(tmp.path(), colliding.iter());
+
+        if fs_is_case_insensitive(tmp.path()) {
+            let err = result.expect_err("must refuse on a case-insensitive filesystem");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("Logo.psd") && msg.contains("logo.psd"),
+                "{msg}"
+            );
+        } else {
+            assert!(
+                result.is_ok(),
+                "both files can coexist here, so the checkout must proceed"
+            );
+        }
+    }
     use tempfile::TempDir;
 
     #[tokio::test]
