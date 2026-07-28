@@ -35,6 +35,33 @@ pub struct Claims {
 
     /// User permissions
     pub permissions: Vec<String>,
+
+    /// SV-3: which kind of token this is.
+    ///
+    /// Access and refresh tokens were previously the *same* structure, so
+    /// nothing distinguished them: `refresh_access_token` accepted an access
+    /// token and minted a fresh one from it, meaning an access token renewed
+    /// itself indefinitely and a password was never needed again. The reverse
+    /// held too — a 30-day refresh token authenticated requests directly.
+    ///
+    /// `#[serde(default)]` keeps tokens issued before this field parse, as
+    /// `Access`. That is the safe default: a legacy access token keeps working
+    /// until it expires, while a legacy refresh token stops being accepted for
+    /// refresh, so the worst case is one re-login.
+    #[serde(default)]
+    pub token_type: TokenType,
+}
+
+/// Distinguishes an access token from a refresh token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TokenType {
+    /// Authenticates requests. Short-lived.
+    #[default]
+    Access,
+    /// Obtains a new access token. Long-lived, and must never authenticate a
+    /// request on its own.
+    Refresh,
 }
 
 /// Token pair (access token + refresh token)
@@ -104,6 +131,7 @@ impl JwtAuth {
             iat: now.timestamp(),
             exp: (now + self.access_token_duration).timestamp(),
             permissions,
+            token_type: TokenType::Access,
         };
 
         encode(&Header::default(), &claims, &self.encoding_key)
@@ -125,6 +153,7 @@ impl JwtAuth {
             iat: now.timestamp(),
             exp: (now + self.refresh_token_duration).timestamp(),
             permissions,
+            token_type: TokenType::Refresh,
         };
 
         let refresh_token = encode(&Header::default(), &refresh_claims, &self.encoding_key)
@@ -147,7 +176,21 @@ impl JwtAuth {
     ///
     /// # Errors
     /// Returns `AuthError::InvalidToken` if token is invalid or expired
+    /// Validates a token **for authenticating a request**, so a refresh token
+    /// is rejected here (SV-3): it is a long-lived credential whose only
+    /// purpose is obtaining access tokens.
     pub fn validate_token(&self, token: &str) -> AuthResult<Claims> {
+        let claims = self.decode_claims(token)?;
+        if claims.token_type != TokenType::Access {
+            return Err(AuthError::InvalidToken(
+                "refresh token cannot be used to authenticate a request".to_string(),
+            ));
+        }
+        Ok(claims)
+    }
+
+    /// Signature/expiry check only, without asserting the token's purpose.
+    fn decode_claims(&self, token: &str) -> AuthResult<Claims> {
         let validation = Validation::new(Algorithm::HS256);
 
         decode::<Claims>(token, &self.decoding_key, &validation)
@@ -155,9 +198,18 @@ impl JwtAuth {
             .map_err(|e| AuthError::InvalidToken(e.to_string()))
     }
 
-    /// Refresh access token using refresh token
+    /// Refresh access token using refresh token.
+    ///
+    /// Requires an actual refresh token. Accepting an access token here is
+    /// what let a session renew itself forever without re-authenticating.
     pub fn refresh_access_token(&self, refresh_token: &str) -> AuthResult<String> {
-        let claims = self.validate_token(refresh_token)?;
+        let claims = self.decode_claims(refresh_token)?;
+        if claims.token_type != TokenType::Refresh {
+            return Err(AuthError::InvalidToken(
+                "an access token cannot be exchanged for a new access token;                  present the refresh token"
+                    .to_string(),
+            ));
+        }
 
         // Generate new access token with same permissions
         self.generate_token(&claims.sub, claims.permissions)
@@ -210,9 +262,44 @@ mod tests {
             .generate_token_pair("user@example.com", permissions)
             .unwrap();
 
-        // Both tokens should be valid
+        // The access token authenticates requests.
         assert!(jwt_auth.validate_token(&token_pair.access_token).is_ok());
-        assert!(jwt_auth.validate_token(&token_pair.refresh_token).is_ok());
+
+        // SV-3: the refresh token must NOT. This previously asserted
+        // `is_ok()`, documenting the defect as intended: a 30-day credential
+        // was accepted as a request credential.
+        assert!(
+            jwt_auth.validate_token(&token_pair.refresh_token).is_err(),
+            "a refresh token must not authenticate a request"
+        );
+    }
+
+    /// SV-3: an access token must not be exchangeable for a new access token,
+    /// or a session renews itself forever and the user never re-authenticates.
+    #[test]
+    fn access_token_cannot_refresh_itself() {
+        let jwt_auth = JwtAuth::new("test-secret");
+        let pair = jwt_auth
+            .generate_token_pair("user@example.com", vec!["repo:read".to_string()])
+            .unwrap();
+
+        assert!(
+            jwt_auth.refresh_access_token(&pair.access_token).is_err(),
+            "an access token must not be accepted where a refresh token belongs"
+        );
+        assert!(
+            jwt_auth.refresh_access_token(&pair.refresh_token).is_ok(),
+            "the refresh token must still work"
+        );
+    }
+
+    /// Tokens minted before `token_type` existed have no such field. They must
+    /// keep authenticating until they expire rather than logging everyone out.
+    #[test]
+    fn legacy_claims_without_token_type_default_to_access() {
+        let json = r#"{"sub":"u","iat":0,"exp":0,"permissions":[]}"#;
+        let claims: Claims = serde_json::from_str(json).unwrap();
+        assert_eq!(claims.token_type, TokenType::Access);
     }
 
     #[test]
