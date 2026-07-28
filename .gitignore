@@ -220,6 +220,13 @@ test-archives/
 !dev-tests/compat-fixture/repo/.mediagit/
 !dev-tests/compat-fixture/repo/.mediagit/**
 
+# Dedup fixture generator. `dedup-corpus.txt` and `compare_dedup.ps1` are
+# already tracked, but the script that produces the v1/v2 pairs they reference
+# was not — so the manifest named fixtures nobody else could regenerate. The
+# pairs themselves stay ignored (573 MB of binaries); only the recipe is
+# tracked. Placed after `dev-tests/*` so the negation wins.
+!dev-tests/gen_dedup_pairs.py
+
 # Leaked-secret remediation 2026-07-18 — never re-track
 enc_key
 enc_key.pub

@@ -29,10 +29,11 @@ use super::rebase_state::RebaseState;
 #[derive(Parser, Debug)]
 pub struct RebaseCmd {
     /// Upstream branch to rebase onto
-    /// FOUND-3: optional so the mode flags can be used the way git allows —
-    /// `rebase --continue` / `--abort` / `--skip` take no upstream. It was a
-    /// required positional, which made every one of them impossible to invoke
-    /// without repeating an argument they ignore.
+    /// FOUND-3: optional because the mode flags take no upstream —
+    /// `rebase --continue` / `--abort` / `--skip` resume or discard an
+    /// operation already described by `rebase-apply/state.json`. As a required
+    /// positional it made every one of them impossible to invoke without
+    /// supplying an argument they then ignore.
     #[arg(value_name = "UPSTREAM")]
     pub upstream: Option<String>,
 
@@ -506,33 +507,28 @@ impl RebaseCmd {
 
         let mut state = RebaseState::load(repo_root)?;
 
-        // WT-4: refuse while conflict markers are still in the working tree.
+        // WT-4/WT-9: refuse while any path is still unacknowledged.
         //
-        // The index has no stage/unmerged concept (WT-9), so "did the user
-        // actually resolve this?" cannot be answered from the index. Scanning
-        // the recorded conflict files for markers is the honest available
-        // check — it catches the common case of running `--continue` without
-        // editing anything, which previously committed `<<<<<<<` markers as
-        // file content.
-        let unresolved: Vec<String> = if state.has_conflicts() {
-            state
-                .conflict_files
-                .iter()
-                .filter(|rel| {
-                    std::fs::read_to_string(repo_root.join(rel))
-                        .map(|c| c.contains("<<<<<<<") && c.contains(">>>>>>>"))
-                        .unwrap_or(false)
-                })
-                .map(|p| p.display().to_string())
-                .collect()
-        } else {
-            Vec::new()
-        };
+        // This asks the index, not the file contents. An earlier version
+        // scanned for `<<<<<<<` markers, which is a text-only signal: a
+        // conflicting PSD never gets markers, because inlining them would
+        // corrupt it — the resolver checks out one side provisionally
+        // instead. Marker-scanning therefore waved through exactly the file
+        // types this system exists to version, letting `--continue` commit a
+        // side the user never saw.
+        let unresolved = Index::load(repo_root)?.unresolved_paths();
         if !unresolved.is_empty() {
             anyhow::bail!(
-                "Cannot continue: unresolved conflict markers still present in:\n  {}\n\
-                 Resolve the file(s) and `mediagit add` them, then retry.",
-                unresolved.join("\n  ")
+                "Cannot continue: {} path(s) still unresolved:\n  {}\n\
+                 Review each, then `mediagit add <path>` to accept it \
+                 (this works for binary files too — staging is the \
+                 acknowledgement, whether or not you edited anything).",
+                unresolved.len(),
+                unresolved
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n  ")
             );
         }
 

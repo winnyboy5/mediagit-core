@@ -69,6 +69,27 @@ pub struct Index {
     /// Files marked for deletion (to be removed from tree at commit time)
     #[serde(default)]
     deleted_entries: HashSet<PathBuf>,
+    /// WT-9: paths left unresolved by a conflicting merge/rebase/revert.
+    ///
+    /// The index previously had no way to say "this path is conflicted", so
+    /// `--continue` could not tell a reviewed resolution from an untouched
+    /// one. The only available signal was scanning the file for `<<<<<<<`
+    /// markers — which is a *text* signal, and MediaGit is a VCS for media
+    /// and binary files. A conflicting PSD never gets markers (inlining them
+    /// would corrupt it); the resolver checks out one side provisionally
+    /// instead. Marker-scanning therefore reported "resolved" for exactly the
+    /// file types this system exists to version.
+    ///
+    /// This records the conflict directly. `add`-ing a path clears it, so the
+    /// user's acknowledgement is an affirmative act that works identically
+    /// whether they edited a text file or accepted the side chosen for a
+    /// binary one.
+    ///
+    /// Deliberately not a git-style stage 1/2/3 triple: for a 74 MB PSD there
+    /// is no meaningful "both sides in the index at once", so the useful state
+    /// is simply *conflicted and awaiting acknowledgement*.
+    #[serde(default)]
+    unresolved: HashSet<PathBuf>,
     /// Version of the index format
     version: u32,
 }
@@ -79,6 +100,7 @@ impl Index {
         Self {
             entries: BTreeMap::new(),
             deleted_entries: HashSet::new(),
+            unresolved: HashSet::new(),
             version: 1,
         }
     }
@@ -117,9 +139,37 @@ impl Index {
         Ok(())
     }
 
-    /// Add or update an entry in the index
+    /// Add or update an entry in the index.
+    ///
+    /// WT-9: staging a path also clears any unresolved-conflict marker on it.
+    /// `mediagit add <path>` is the user's affirmative "I have dealt with
+    /// this", and it works the same whether they edited a text file or
+    /// accepted the side the resolver checked out for a binary one.
     pub fn add_entry(&mut self, entry: IndexEntry) {
+        self.unresolved.remove(&entry.path);
         self.entries.insert(entry.path.clone(), entry);
+    }
+
+    /// WT-9: mark `path` as conflicted and awaiting acknowledgement.
+    pub fn mark_unresolved(&mut self, path: PathBuf) {
+        self.unresolved.insert(path);
+    }
+
+    /// Paths still awaiting conflict acknowledgement, sorted for stable output.
+    pub fn unresolved_paths(&self) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = self.unresolved.iter().cloned().collect();
+        v.sort();
+        v
+    }
+
+    /// Whether any path is still conflicted.
+    pub fn has_unresolved(&self) -> bool {
+        !self.unresolved.is_empty()
+    }
+
+    /// Drop all unresolved markers (used when an operation is aborted).
+    pub fn clear_unresolved(&mut self) {
+        self.unresolved.clear();
     }
 
     /// Remove an entry from the index
@@ -156,6 +206,9 @@ impl Index {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.deleted_entries.clear();
+        // A commit resolves whatever the operation was; conflict markers must
+        // not survive into the next one.
+        self.unresolved.clear();
     }
 
     /// Get all staged file paths

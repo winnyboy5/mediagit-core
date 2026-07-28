@@ -42,7 +42,13 @@ pub struct RebaseState {
     pub current_index: usize,
     /// Total number of commits to rebase
     pub total_commits: usize,
-    /// Files with conflicts that need resolution
+    /// Files that conflicted while replaying `current_commit`.
+    ///
+    /// Diagnostic only — the authoritative "is this path still unresolved?"
+    /// answer lives in the index (`Index::unresolved_paths`), which is the
+    /// single record `--continue` consults. Keeping a second copy here that
+    /// could disagree with the index is precisely the split-source-of-truth
+    /// trap this program has hit before, so nothing branches on this field.
     pub conflict_files: Vec<PathBuf>,
     /// The new parent for the next commit to apply
     pub new_parent: Oid,
@@ -158,11 +164,6 @@ impl RebaseState {
         self.conflict_files = files;
     }
 
-    /// Check if there are unresolved conflicts.
-    pub fn has_conflicts(&self) -> bool {
-        !self.conflict_files.is_empty()
-    }
-
     /// Update the new parent after successfully applying a commit.
     pub fn set_new_parent(&mut self, parent: Oid) {
         self.new_parent = parent;
@@ -246,12 +247,16 @@ mod tests {
 
         let mut state = RebaseState::new(original_head, None, upstream, commits);
 
-        assert!(!state.has_conflicts());
+        assert!(state.conflict_files.is_empty());
 
         state.set_conflicts(vec![PathBuf::from("src/main.rs"), PathBuf::from("lib.rs")]);
 
-        assert!(state.has_conflicts());
+        // Recorded for diagnostics. Note there is deliberately no
+        // `has_conflicts()` predicate any more: whether a path is still
+        // unresolved is answered by the index, not by this field, so a helper
+        // here would invite callers to branch on the wrong source.
         assert_eq!(state.conflict_files.len(), 2);
+        assert_eq!(state.conflict_files[0], PathBuf::from("src/main.rs"));
     }
 
     #[test]

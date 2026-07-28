@@ -312,3 +312,109 @@ fn wt5_revert_continue_commits_the_resolution() {
         "revert --continue discarded the resolution and committed HEAD's tree instead"
     );
 }
+
+// ============================================================================
+// WT-9 — the conflict signal must work for BINARY files.
+//
+// MediaGit versions media and binary assets. A conflicting PSD never receives
+// `<<<<<<<` markers: inlining them would corrupt the file, so the resolver
+// checks out one side provisionally instead. Any guard that inspects file
+// *content* therefore sees a clean tree and concludes the conflict was
+// resolved — waving through exactly the file types this system exists for,
+// and committing a side the user never reviewed.
+//
+// The index now records unresolved paths directly, so the signal is
+// content-independent.
+// ============================================================================
+
+/// Bytes with an embedded NUL, which is how the resolver detects "binary".
+fn binary_blob(seed: u8) -> Vec<u8> {
+    let mut v = vec![0x89, 0x50, 0x4E, 0x47, 0x00, 0x1A, 0x0A];
+    v.extend((0..4096u32).map(|i| (i as u8) ^ seed));
+    v
+}
+
+fn commit_binary(dir: &Path, rel: &str, bytes: &[u8], msg: &str) {
+    fs::write(dir.join(rel), bytes).unwrap();
+    mediagit()
+        .args(["add", rel])
+        .current_dir(dir)
+        .assert()
+        .success();
+    mediagit()
+        .args(["commit", "-m", msg])
+        .current_dir(dir)
+        .assert()
+        .success();
+}
+
+#[test]
+fn wt9_binary_conflict_blocks_continue_despite_having_no_markers() {
+    let temp = TempDir::new().unwrap();
+    init_repo(temp.path());
+    commit_binary(temp.path(), "asset.psd", &binary_blob(0x00), "base asset");
+
+    mediagit()
+        .args(["branch", "create", "feature"])
+        .current_dir(temp.path())
+        .assert()
+        .success();
+
+    commit_binary(
+        temp.path(),
+        "asset.psd",
+        &binary_blob(0x11),
+        "main edits asset",
+    );
+
+    mediagit()
+        .args(["branch", "switch", "feature"])
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    commit_binary(
+        temp.path(),
+        "asset.psd",
+        &binary_blob(0x22),
+        "feature edits asset",
+    );
+
+    let out = run(temp.path(), &["rebase", "main"]);
+    assert!(
+        !out.status.success(),
+        "rebase should have stopped on a binary conflict"
+    );
+
+    // The resolver must NOT have inlined markers into the binary.
+    let on_disk = fs::read(temp.path().join("asset.psd")).unwrap();
+    assert!(
+        !on_disk.windows(7).any(|w| w == b"<<<<<<<"),
+        "text conflict markers were inlined into a binary file"
+    );
+
+    // ...and yet --continue must still refuse, because nothing was reviewed.
+    let cont = run(temp.path(), &["rebase", "--continue"]);
+    assert!(
+        !cont.status.success(),
+        "rebase --continue accepted an unreviewed BINARY conflict — the guard \
+         is content-based and blind to media files"
+    );
+    let msg = String::from_utf8_lossy(&cont.stderr);
+    assert!(
+        msg.contains("unresolved"),
+        "expected an unresolved-path refusal, got: {msg}"
+    );
+
+    // Acknowledging by staging must unblock it, with no editing required.
+    mediagit()
+        .args(["add", "asset.psd"])
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    let cont2 = run(temp.path(), &["rebase", "--continue"]);
+    assert!(
+        cont2.status.success(),
+        "staging the binary should acknowledge the conflict: {}",
+        String::from_utf8_lossy(&cont2.stderr)
+    );
+}

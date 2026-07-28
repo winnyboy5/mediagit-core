@@ -411,23 +411,29 @@ impl RevertCmd {
         let state_content = fs::read_to_string(&state_file).await?;
         let state = RevertState::from_string(&state_content)?;
 
-        // WT-5: refuse while conflict markers remain in the working tree.
+        // WT-5/WT-9: refuse while any path is still unacknowledged.
         //
-        // The index has no stage/unmerged concept (WT-9), so "did the user
-        // resolve this?" cannot be asked of the index. Scanning the working
-        // tree for markers is the honest available check, and it catches the
-        // case this bug turned into a silent no-op: running `--continue`
-        // without having resolved anything.
+        // Asks the index rather than scanning file contents for `<<<<<<<`.
+        // Binary files never receive markers — the resolver checks out one
+        // side provisionally instead — so a content scan reported "resolved"
+        // for precisely the media files this system versions, and let
+        // `--continue` commit a side the user never reviewed.
         //
-        // Note the state file is deliberately NOT removed until after this
-        // check — bailing must leave the revert resumable.
-        let unresolved = Self::paths_with_conflict_markers(repo_root);
+        // The state file is deliberately NOT removed until after this check:
+        // bailing must leave the revert resumable.
+        let unresolved = Index::load(repo_root)?.unresolved_paths();
         if !unresolved.is_empty() {
             anyhow::bail!(
-                "Cannot continue: unresolved conflict markers still present in:\n  {}\n\
-                 Resolve the file(s) and `mediagit add` them, then retry \
-                 (or `mediagit revert --abort`).",
-                unresolved.join("\n  ")
+                "Cannot continue: {} path(s) still unresolved:\n  {}\n\
+                 Review each, then `mediagit add <path>` to accept it \
+                 (binary files included — staging is the acknowledgement), \
+                 or `mediagit revert --abort`.",
+                unresolved.len(),
+                unresolved
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n  ")
             );
         }
 
@@ -560,28 +566,6 @@ impl RevertCmd {
         }
 
         Ok(())
-    }
-
-    /// Working-tree paths still containing conflict markers.
-    ///
-    /// `REVERT_STATE` records only the original HEAD, not which files
-    /// conflicted, so this scans the index's tracked paths rather than a
-    /// recorded list. Unreadable or binary files are skipped — a false
-    /// negative here costs a no-op commit, which is the status quo, whereas a
-    /// false positive would block a legitimate continue.
-    fn paths_with_conflict_markers(repo_root: &Path) -> Vec<String> {
-        let Ok(index) = Index::load(repo_root) else {
-            return Vec::new();
-        };
-        index
-            .entries()
-            .filter(|e| {
-                std::fs::read_to_string(repo_root.join(&e.path))
-                    .map(|c| c.contains("<<<<<<<") && c.contains(">>>>>>>"))
-                    .unwrap_or(false)
-            })
-            .map(|e| e.path.display().to_string())
-            .collect()
     }
 
     fn build_tree_from_index(&self, index: &Index) -> Tree {

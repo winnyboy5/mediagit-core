@@ -77,3 +77,26 @@ safetensors_v1.safetensors
 safetensors_v2.safetensors
 fbxfair_v1.fbx
 fbxfair_v2.fbx
+
+# --- Added 2026-07-28: psd/mov/mkv had NO pair, so the report showed 0%
+#     dedup for them. That was arithmetic (nothing to reuse against), not a
+#     chunker result — every format WITH a pair showed real dedup, every
+#     format without one showed zero. Measuring with pairs gave psd 64.3%
+#     (was "0%") and exposed a real mov defect: 12.2% on a metadata-only
+#     edit, where the media payload is byte-identical.
+psd_v1.psd
+psd_v2.psd
+mkv_v1.mkv
+mkv_v2.mkv
+# Real workflow variants, not synthetic edits: same footage with a genuine
+# metadata change / remux — the cases where container-aware chunking should
+# pay off.
+mov_v1.mov
+mov_v2.mov
+mp4remux_v1.mp4
+mp4remux_v2.mp4
+# Negative control: a re-encode shares no bytes with its source and SHOULD
+# read ~0%. Without it, a genuine 0% on video is indistinguishable from the
+# missing-fixture artifact this section fixes.
+mp4reencode_v1.mp4
+mp4reencode_v2.mp4

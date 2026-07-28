@@ -142,7 +142,8 @@ impl AtRisk {
 
 /// Paths a checkout is entitled to delete: tracked at `head`, or staged.
 ///
-/// This is git's definition of "tracked" (HEAD tree ∪ index), and feeds
+/// "Tracked" here means HEAD tree ∪ index — anything the repository already
+/// knows about. Feeds
 /// [`CheckoutManager::with_tracked_paths`] so untracked work survives a
 /// working-tree rewrite (WT-1).
 pub async fn tracked_paths(

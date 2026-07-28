@@ -656,6 +656,17 @@ pub async fn apply_merge_to_workdir(
             None,
         );
         index.add_entry(index_entry);
+
+        // WT-9: flag the path as awaiting acknowledgement. Must follow
+        // `add_entry`, which clears the flag — staging is the user's
+        // acknowledgement, and we have just staged provisional content on
+        // their behalf rather than resolved anything.
+        //
+        // This is the only conflict signal that works for binary files. They
+        // never receive `<<<<<<<` markers (inlining would corrupt them), so
+        // any caller inspecting file *content* sees a clean tree and wrongly
+        // concludes the conflict was resolved.
+        index.mark_unresolved(std::path::PathBuf::from(path_str));
     }
 
     // --- Write MERGE_HEAD, MERGE_MSG, ORIG_HEAD ---
