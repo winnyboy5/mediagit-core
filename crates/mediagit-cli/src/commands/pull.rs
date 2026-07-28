@@ -329,7 +329,6 @@ impl PullCmd {
                 let chunk_pb = progress.download_bar("Downloading large files", 0);
 
                 let chunk_pb_ref = chunk_pb.clone();
-                let mut last_bytes_done = 0u64;
                 let (chunks_downloaded, chunk_bytes) = client
                     .download_chunked_objects(
                         &odb,
@@ -339,12 +338,16 @@ impl PullCmd {
                                 chunk_pb_ref.set_length(bytes_total);
                                 chunk_pb_ref.reset_eta();
                             }
-                            // Reset ETA on large jumps (end-of-object correction) so
-                            // the 5s inter-object delta-check stall doesn't produce "eta 231y".
-                            if bytes_done.saturating_sub(last_bytes_done) > 1_048_576 {
-                                chunk_pb_ref.reset_eta();
-                            }
-                            last_bytes_done = bytes_done;
+                            // RP-3: no longer resets the ETA on large jumps.
+                            // Progress is credited in pack/object-sized steps
+                            // by design, so a "large jump" is the normal unit
+                            // of progress, not an anomaly — discarding the
+                            // estimator's history on each one left the ETA
+                            // derived from a single huge delta, which is how a
+                            // WAN transfer displayed 747 MiB/s. The "eta 231y"
+                            // this guarded against is now handled where it
+                            // belongs, by rendering an implausible ETA as
+                            // `--` (see progress::format_eta).
                             chunk_pb_ref.set_position(bytes_done);
                             chunk_pb_ref.set_message(msg.to_string());
                         },

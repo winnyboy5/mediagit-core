@@ -634,12 +634,15 @@ impl PushCmd {
                                 if progress.total > pb.length().unwrap_or(0) {
                                     pb.set_length(progress.total);
                                 }
-                                // Reset ETA on large jumps (pack seals, object transitions)
-                                // so protocol overhead stalls don't produce "eta 231y".
-                                let prev = pb.position();
-                                if progress.current.saturating_sub(prev) > 1_048_576 {
-                                    pb.reset_eta();
-                                }
+                                // RP-3: pack seals *are* the unit of progress
+                                // here — a pack's bytes are credited when its
+                                // upload is confirmed, so every credit is a
+                                // large jump. Resetting the ETA on each one
+                                // meant the estimate came from a single 64 MiB
+                                // step over near-zero elapsed time, i.e. the
+                                // 747 MiB/s reading. Implausible ETAs are now
+                                // rendered `--` (see progress::format_eta)
+                                // rather than papered over here.
                                 pb.set_position(progress.current);
                             }
                         }
