@@ -226,11 +226,13 @@ impl AppState {
         api_key_auth: Arc<ApiKeyAuth>,
     ) -> Self {
         let jwt_auth = Arc::new(JwtAuth::new(jwt_secret));
-        let auth_layer = Arc::new(AuthLayer::new(
-            Arc::clone(&jwt_auth),
-            Arc::clone(&api_key_auth),
-        ));
         let auth_service = Arc::new(AuthService::new(jwt_secret));
+        // AU-2: see `new_with_full_auth` — permissions are re-derived per
+        // request from this store, not taken from the token.
+        let auth_layer = Arc::new(
+            AuthLayer::new(Arc::clone(&jwt_auth), Arc::clone(&api_key_auth))
+                .with_credentials_store(Arc::clone(&auth_service.credentials_store)),
+        );
 
         Self {
             repos_dir,
@@ -261,10 +263,12 @@ impl AppState {
     ) -> anyhow::Result<Self> {
         let auth_service = Arc::new(AuthService::new_with_store_dir(jwt_secret, auth_store_dir)?);
         let api_key_auth = Arc::new(ApiKeyAuth::load_or_new(auth_store_dir)?);
-        let auth_layer = Arc::new(AuthLayer::new(
-            Arc::clone(&auth_service.jwt_auth),
-            api_key_auth,
-        ));
+        // AU-2: give the layer the live user store so every request re-derives
+        // permissions instead of trusting the token's frozen snapshot.
+        let auth_layer = Arc::new(
+            AuthLayer::new(Arc::clone(&auth_service.jwt_auth), api_key_auth)
+                .with_credentials_store(Arc::clone(&auth_service.credentials_store)),
+        );
         let grants = GrantsStore::load_or_new(auth_store_dir)?;
 
         Ok(Self {

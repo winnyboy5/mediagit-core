@@ -87,6 +87,11 @@ impl AuthUser {
 pub struct AuthLayer {
     jwt_auth: Arc<JwtAuth>,
     api_key_auth: Arc<ApiKeyAuth>,
+    /// AU-2: live user store, consulted on every authenticated request so a
+    /// deleted or demoted account stops being honoured immediately rather
+    /// than when its token happens to expire. `None` keeps the old
+    /// claims-only behaviour for constructors that have no store (tests).
+    credentials_store: Option<Arc<super::CredentialsStore>>,
 }
 
 impl AuthLayer {
@@ -95,7 +100,15 @@ impl AuthLayer {
         Self {
             jwt_auth,
             api_key_auth,
+            credentials_store: None,
         }
+    }
+
+    /// AU-2: attach the live user store so permissions are re-derived per
+    /// request instead of trusted from the token.
+    pub fn with_credentials_store(mut self, store: Arc<super::CredentialsStore>) -> Self {
+        self.credentials_store = Some(store);
+        self
     }
 
     /// Get reference to JWT auth (for testing)
@@ -118,9 +131,12 @@ impl AuthLayer {
             && let Ok(token) = JwtAuth::extract_from_header(auth_str)
             && let Ok(claims) = self.jwt_auth.validate_token(token)
         {
+            let permissions = self
+                .live_permissions(&claims.sub, claims.permissions)
+                .await?;
             return Ok(AuthUser {
                 user_id: claims.sub,
-                permissions: claims.permissions,
+                permissions,
                 auth_method: AuthMethod::Jwt,
             });
         }
@@ -131,9 +147,12 @@ impl AuthLayer {
         {
             let key = ApiKeyAuth::extract_from_header(api_key);
             if let Ok(api_key_info) = self.api_key_auth.validate_key(key).await {
+                let permissions = self
+                    .live_permissions(&api_key_info.user_id, api_key_info.permissions)
+                    .await?;
                 return Ok(AuthUser {
                     user_id: api_key_info.user_id,
-                    permissions: api_key_info.permissions,
+                    permissions,
                     auth_method: AuthMethod::ApiKey,
                 });
             }
@@ -142,6 +161,38 @@ impl AuthLayer {
         Err(AuthError::Unauthorized(
             "No valid authentication credentials provided".to_string(),
         ))
+    }
+
+    /// AU-2: re-derive permissions from the live user store.
+    ///
+    /// Both JWT claims and API-key records carry a permission list captured
+    /// when the token or key was minted, and nothing re-checked it. A deleted
+    /// user's token kept working until it expired (up to the JWT TTL), and a
+    /// demoted user's API key kept its old permissions **forever**, since keys
+    /// have no expiry at all. Deleting or demoting an account is usually how a
+    /// compromise is contained, so trusting a stale snapshot defeated the
+    /// containment.
+    ///
+    /// The store is an in-memory `RwLock<HashMap>` — a read-lock and a hash
+    /// lookup, no disk I/O — so this is cheap enough to do on every request
+    /// and needs no cache or revocation list.
+    ///
+    /// Falls back to the presented permissions when no store is configured,
+    /// preserving behaviour for constructors that have none.
+    async fn live_permissions(
+        &self,
+        user_id: &str,
+        presented: Vec<String>,
+    ) -> Result<Vec<String>, AuthError> {
+        let Some(store) = self.credentials_store.as_ref() else {
+            return Ok(presented);
+        };
+        match store.get_user(user_id).await {
+            Ok(user) => Ok(user.permissions()),
+            Err(_) => Err(AuthError::Unauthorized(format!(
+                "account no longer exists: {user_id}"
+            ))),
+        }
     }
 }
 

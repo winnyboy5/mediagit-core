@@ -179,6 +179,36 @@ impl ApiKeyAuth {
         self.persist().await
     }
 
+    /// AU-1: revoke every API key belonging to `user_id`, returning the count.
+    ///
+    /// Deleting a user previously cleared their credentials and grants but left
+    /// their API keys intact — and `ApiKey` carries no expiry, so those keys
+    /// authenticated indefinitely. An offboarded user, or one removed *because*
+    /// their account was compromised, kept working push access forever with no
+    /// mechanism that could ever retire it.
+    ///
+    /// Idempotent: revoking for a user with no keys is a no-op that still
+    /// reports success, so callers need not special-case it.
+    pub async fn revoke_user_keys(&self, user_id: &str) -> AuthResult<usize> {
+        let removed = {
+            let mut keys = self.keys.write().await;
+            let doomed: Vec<String> = keys
+                .values()
+                .filter(|k| k.user_id == user_id)
+                .map(|k| k.id.clone())
+                .collect();
+            for id in &doomed {
+                keys.remove(id);
+            }
+            doomed.len()
+        };
+
+        if removed > 0 {
+            self.persist().await?;
+        }
+        Ok(removed)
+    }
+
     /// List all API keys for a user
     pub async fn list_user_keys(&self, user_id: &str) -> Vec<ApiKey> {
         let keys = self.keys.read().await;

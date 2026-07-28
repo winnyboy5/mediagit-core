@@ -185,10 +185,61 @@ async fn main() -> Result<()> {
             })?;
         tracing::info!("Authentication is ENABLED");
         let auth_store_dir = config.resolved_auth_store_dir();
-        Arc::new(
+        let state = Arc::new(
             AppState::new_with_full_auth(config.repos_dir.clone(), jwt_secret, &auth_store_dir)?
                 .with_presigned_ttl(config.presigned_url_ttl_seconds),
-        )
+        );
+
+        // AU-3: warn when the defaults compose into "no tenant isolation".
+        //
+        // Three separate, individually-defensible backward-compat choices
+        // combine badly: registration is open by default, self-registration
+        // assigns Role::Write, and per-repo grant enforcement only switches on
+        // once at least one grant exists (`check_permission`'s
+        // `!grants.is_empty()`). On a freshly provisioned server with no grants
+        // recorded, that means anyone who can reach POST /auth/register gets
+        // write access to every repository.
+        //
+        // Not changed silently here: closing registration or defaulting to
+        // Role::Read is a breaking change for existing deployments and for the
+        // QA drills that self-register. Warning loudly is the honest
+        // non-breaking move; the operator can then choose.
+        // AU-3: a server with auth on and no admin cannot be administered.
+        //
+        // Self-registration deliberately creates Read-role accounts and there
+        // is no client-controlled `role` field, so an admin can only come from
+        // the offline `mediagit-server admin create` bootstrap. Starting
+        // without one leaves nobody able to grant access, promote a user, or
+        // manage keys — and no in-band way to fix it.
+        if let Some(svc) = state.auth_service() {
+            let admins = svc
+                .credentials_store
+                .list_users()
+                .await
+                .into_iter()
+                .filter(|u| u.role == mediagit_security::auth::user::Role::Admin)
+                .count();
+            if admins == 0 {
+                tracing::warn!(
+                    "SECURITY: authentication is enabled but NO admin account exists. \
+                     Self-registration creates read-only accounts, so nothing can grant \
+                     access, promote users or manage API keys. Create one with: \
+                     `mediagit-server admin create --username <name> --email <email>`"
+                );
+            }
+        }
+
+        if state.grants.is_empty() && config.allow_open_registration {
+            tracing::warn!(
+                "SECURITY: no per-repo grants are recorded, so per-repo authorization is \
+                 INACTIVE and every authenticated user can read and write EVERY repository. \
+                 Registration is also open, and self-registered users receive write \
+                 permissions. Record at least one grant to activate per-repo enforcement, \
+                 and/or set `allow_open_registration = false` in the server config."
+            );
+        }
+
+        state
     } else {
         tracing::warn!("Authentication is DISABLED - not suitable for production!");
         Arc::new(

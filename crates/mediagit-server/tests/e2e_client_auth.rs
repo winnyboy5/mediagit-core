@@ -50,6 +50,29 @@ async fn start_authed_server(repos_dir: PathBuf) -> (String, String, Arc<ApiKeyA
         &jwt_secret,
         api_key_auth.clone(),
     ));
+
+    // AU-2: permissions are re-derived from the live user store per request,
+    // so tokens and API keys are only honoured while their account exists.
+    // Register the identities these tests authenticate as.
+    for (id, role) in [
+        ("test-user", mediagit_security::auth::user::Role::Read),
+        ("e2e-user", mediagit_security::auth::user::Role::Write),
+    ] {
+        let user = mediagit_security::auth::User::new(
+            id.to_string(),
+            id.to_string(),
+            format!("{id}@example.com"),
+            role,
+        );
+        state
+            .auth_service()
+            .unwrap()
+            .credentials_store
+            .register_user(user, "password123")
+            .await
+            .unwrap();
+    }
+
     let app = mediagit_server::create_router(state);
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();

@@ -30,13 +30,39 @@ use tower::util::ServiceExt;
 
 /// Admin/write JWTs plus the live `AppState` so tests can inspect store
 /// state directly (e.g. `state.grants.get(...)`) alongside HTTP calls.
-fn test_state_with_tokens() -> (Arc<AppState>, String, String) {
+/// AU-2: the accounts these tokens name must actually exist.
+///
+/// Permissions are now re-derived from the live user store on every request
+/// rather than trusted from the token, so a token naming an unregistered user
+/// is rejected as `401` — correctly, since that is indistinguishable from a
+/// token for a deleted account. These helpers previously minted tokens out of
+/// thin air, which no longer reflects how authentication works.
+async fn test_state_with_tokens() -> (Arc<AppState>, String, String) {
     let temp_dir = TempDir::new().unwrap();
     let repos_dir = temp_dir.path().to_path_buf();
     let api_key_auth = Arc::new(ApiKeyAuth::new());
     let jwt_secret = "test-secret-key-for-admin-tests";
 
     let state = Arc::new(AppState::new_with_auth(repos_dir, jwt_secret, api_key_auth));
+
+    for (id, role) in [
+        ("admin-user", mediagit_security::auth::user::Role::Admin),
+        ("write-user", mediagit_security::auth::user::Role::Write),
+    ] {
+        let user = mediagit_security::auth::User::new(
+            id.to_string(),
+            id.to_string(),
+            format!("{id}@example.com"),
+            role,
+        );
+        state
+            .auth_service()
+            .unwrap()
+            .credentials_store
+            .register_user(user, "password123")
+            .await
+            .unwrap();
+    }
 
     let jwt_auth = JwtAuth::new(jwt_secret);
     let admin_token = jwt_auth
@@ -134,7 +160,7 @@ async fn register_role_user(
 
 #[tokio::test]
 async fn list_users_401_unauthenticated() {
-    let (state, _admin, _write) = test_state_with_tokens();
+    let (state, _admin, _write) = test_state_with_tokens().await;
     let app = create_router(state);
     let resp = app.oneshot(get("/auth/users", None)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -142,7 +168,7 @@ async fn list_users_401_unauthenticated() {
 
 #[tokio::test]
 async fn delete_user_401_unauthenticated() {
-    let (state, _admin, _write) = test_state_with_tokens();
+    let (state, _admin, _write) = test_state_with_tokens().await;
     let app = create_router(state);
     let resp = app
         .oneshot(delete_req("/auth/users/someone", None, None))
@@ -153,7 +179,7 @@ async fn delete_user_401_unauthenticated() {
 
 #[tokio::test]
 async fn upsert_grant_401_unauthenticated() {
-    let (state, _admin, _write) = test_state_with_tokens();
+    let (state, _admin, _write) = test_state_with_tokens().await;
     let app = create_router(state);
     let resp = app
         .oneshot(post_json(
@@ -168,7 +194,7 @@ async fn upsert_grant_401_unauthenticated() {
 
 #[tokio::test]
 async fn list_keys_401_unauthenticated() {
-    let (state, _admin, _write) = test_state_with_tokens();
+    let (state, _admin, _write) = test_state_with_tokens().await;
     let app = create_router(state);
     let resp = app.oneshot(get("/auth/keys", None)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -176,7 +202,7 @@ async fn list_keys_401_unauthenticated() {
 
 #[tokio::test]
 async fn revoke_key_401_unauthenticated() {
-    let (state, _admin, _write) = test_state_with_tokens();
+    let (state, _admin, _write) = test_state_with_tokens().await;
     let app = create_router(state);
     let resp = app
         .oneshot(delete_req("/auth/keys/ak_someid", None, None))
@@ -189,7 +215,7 @@ async fn revoke_key_401_unauthenticated() {
 
 #[tokio::test]
 async fn list_users_403_for_write_role() {
-    let (state, _admin, write) = test_state_with_tokens();
+    let (state, _admin, write) = test_state_with_tokens().await;
     let app = create_router(state);
     let resp = app.oneshot(get("/auth/users", Some(&write))).await.unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -197,7 +223,7 @@ async fn list_users_403_for_write_role() {
 
 #[tokio::test]
 async fn delete_user_403_for_write_role() {
-    let (state, _admin, write) = test_state_with_tokens();
+    let (state, _admin, write) = test_state_with_tokens().await;
     let app = create_router(state);
     let resp = app
         .oneshot(delete_req("/auth/users/someone", Some(&write), None))
@@ -208,7 +234,7 @@ async fn delete_user_403_for_write_role() {
 
 #[tokio::test]
 async fn upsert_grant_403_for_write_role() {
-    let (state, _admin, write) = test_state_with_tokens();
+    let (state, _admin, write) = test_state_with_tokens().await;
     let app = create_router(state);
     let resp = app
         .oneshot(post_json(
@@ -223,7 +249,7 @@ async fn upsert_grant_403_for_write_role() {
 
 #[tokio::test]
 async fn list_keys_403_for_write_role() {
-    let (state, _admin, write) = test_state_with_tokens();
+    let (state, _admin, write) = test_state_with_tokens().await;
     let app = create_router(state);
     let resp = app.oneshot(get("/auth/keys", Some(&write))).await.unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -231,7 +257,7 @@ async fn list_keys_403_for_write_role() {
 
 #[tokio::test]
 async fn revoke_key_403_for_write_role() {
-    let (state, _admin, write) = test_state_with_tokens();
+    let (state, _admin, write) = test_state_with_tokens().await;
     let app = create_router(state);
     let resp = app
         .oneshot(delete_req("/auth/keys/ak_someid", Some(&write), None))
@@ -244,7 +270,7 @@ async fn revoke_key_403_for_write_role() {
 
 #[tokio::test]
 async fn grant_upsert_then_removed() {
-    let (state, admin, _write) = test_state_with_tokens();
+    let (state, admin, _write) = test_state_with_tokens().await;
     let app = create_router(Arc::clone(&state));
 
     let resp = app
@@ -276,7 +302,7 @@ async fn grant_upsert_then_removed() {
 
 #[tokio::test]
 async fn delete_user_cascades_grants() {
-    let (state, admin, _write) = test_state_with_tokens();
+    let (state, admin, _write) = test_state_with_tokens().await;
 
     let user = mediagit_security::auth::User::new(
         "victim".to_string(),
@@ -322,7 +348,7 @@ async fn delete_user_cascades_grants() {
 
 #[tokio::test]
 async fn list_users_returns_id_username_role_no_secrets() {
-    let (state, admin, _write) = test_state_with_tokens();
+    let (state, admin, _write) = test_state_with_tokens().await;
 
     let user = mediagit_security::auth::User::new(
         "u1".to_string(),
@@ -347,10 +373,15 @@ async fn list_users_returns_id_username_role_no_secrets() {
         .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let arr = body.as_array().unwrap();
-    assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["id"], "u1");
-    assert_eq!(arr[0]["username"], "alice");
-    assert_eq!(arr[0]["role"], "Read");
+    // AU-2: the shared helper now registers `admin-user` and `write-user`
+    // because their tokens must name real accounts. Assert on the user this
+    // test added rather than on the total.
+    let alice = arr
+        .iter()
+        .find(|u| u["id"] == "u1")
+        .expect("alice should be listed");
+    assert_eq!(alice["username"], "alice");
+    assert_eq!(alice["role"], "Read");
     // Never leak a password hash or any credential material.
     assert!(arr[0].get("password_hash").is_none());
     assert!(arr[0].get("email").is_none());
@@ -358,7 +389,7 @@ async fn list_users_returns_id_username_role_no_secrets() {
 
 #[tokio::test]
 async fn revoke_key_removes_auth() {
-    let (state, admin, _write) = test_state_with_tokens();
+    let (state, admin, _write) = test_state_with_tokens().await;
 
     let repo_path = state.repos_dir.join("test-repo");
     std::fs::create_dir_all(&repo_path).unwrap();
@@ -370,6 +401,24 @@ async fn revoke_key_removes_auth() {
             "keyed-user".to_string(),
             "test-key".to_string(),
             vec!["repo:read".to_string()],
+        )
+        .await
+        .unwrap();
+
+    // AU-2: an API key is only honoured while its owner exists, so the owner
+    // has to be a real account for the pre-revocation request to succeed.
+    state
+        .auth_service()
+        .unwrap()
+        .credentials_store
+        .register_user(
+            mediagit_security::auth::User::new(
+                "keyed-user".to_string(),
+                "keyed-user".to_string(),
+                "keyed@example.com".to_string(),
+                mediagit_security::auth::user::Role::Read,
+            ),
+            "password123",
         )
         .await
         .unwrap();
@@ -418,7 +467,7 @@ async fn revoke_key_removes_auth() {
 
 #[tokio::test]
 async fn list_keys_returns_metadata_only() {
-    let (state, admin, _write) = test_state_with_tokens();
+    let (state, admin, _write) = test_state_with_tokens().await;
 
     let auth_layer = state.auth().unwrap();
     auth_layer
@@ -451,7 +500,7 @@ async fn list_keys_returns_metadata_only() {
 
 #[tokio::test]
 async fn create_key_permission_intersection_cannot_escalate() {
-    let (state, _admin, write) = test_state_with_tokens();
+    let (state, _admin, write) = test_state_with_tokens().await;
     register_role_user(
         &state,
         "write-user",
@@ -486,7 +535,7 @@ async fn create_key_permission_intersection_cannot_escalate() {
 
 #[tokio::test]
 async fn create_key_defaults_to_owner_permissions_when_omitted() {
-    let (state, _admin, write) = test_state_with_tokens();
+    let (state, _admin, write) = test_state_with_tokens().await;
     register_role_user(
         &state,
         "write-user",
@@ -523,7 +572,7 @@ async fn create_key_defaults_to_owner_permissions_when_omitted() {
 
 #[tokio::test]
 async fn create_key_for_other_user_requires_admin() {
-    let (state, _admin, write) = test_state_with_tokens();
+    let (state, _admin, write) = test_state_with_tokens().await;
     register_role_user(
         &state,
         "write-user",
@@ -555,7 +604,7 @@ async fn create_key_for_other_user_requires_admin() {
 
 #[tokio::test]
 async fn revoke_key_own_key_allowed_for_write_role() {
-    let (state, _admin, write) = test_state_with_tokens();
+    let (state, _admin, write) = test_state_with_tokens().await;
     let auth_layer = state.auth().unwrap();
     let (_plaintext, api_key) = auth_layer
         .api_key_auth()
@@ -579,7 +628,7 @@ async fn revoke_key_own_key_allowed_for_write_role() {
 
 #[tokio::test]
 async fn set_role_403_for_write_role() {
-    let (state, _admin, write) = test_state_with_tokens();
+    let (state, _admin, write) = test_state_with_tokens().await;
     register_role_user(
         &state,
         "target",
@@ -602,19 +651,37 @@ async fn set_role_403_for_write_role() {
 
 #[tokio::test]
 async fn set_role_last_admin_demotion_refused() {
-    let (state, admin, _write) = test_state_with_tokens();
+    // AU-2: the shared helper registers `admin-user` as an Admin (its token
+    // must name a real account), so this test walks the count down to one
+    // rather than assuming it starts there. That exercises the invariant more
+    // thoroughly than the original: the *first* demotion must succeed, and
+    // only the one that would leave zero admins is refused.
+    let (state, admin, _write) = test_state_with_tokens().await;
     register_role_user(
         &state,
-        "sole-admin",
-        "solo",
+        "second-admin",
+        "second",
         mediagit_security::auth::user::Role::Admin,
     )
     .await;
     let app = create_router(Arc::clone(&state));
 
+    // Two admins exist — demoting one is allowed.
+    let resp = app
+        .clone()
+        .oneshot(patch_json(
+            "/auth/users/second-admin/role",
+            Some(&admin),
+            r#"{"role":"Write"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // `admin-user` is now the only admin — demoting it must be refused.
     let resp = app
         .oneshot(patch_json(
-            "/auth/users/sole-admin/role",
+            "/auth/users/admin-user/role",
             Some(&admin),
             r#"{"role":"Write"}"#,
         ))
@@ -628,7 +695,7 @@ async fn set_role_last_admin_demotion_refused() {
             .auth_service()
             .unwrap()
             .credentials_store
-            .get_user("sole-admin")
+            .get_user("admin-user")
             .await
             .unwrap()
             .role,
@@ -638,7 +705,7 @@ async fn set_role_last_admin_demotion_refused() {
 
 #[tokio::test]
 async fn set_role_demotion_allowed_when_multiple_admins() {
-    let (state, admin, _write) = test_state_with_tokens();
+    let (state, admin, _write) = test_state_with_tokens().await;
     register_role_user(
         &state,
         "admin1",
@@ -681,7 +748,7 @@ async fn set_role_demotion_allowed_when_multiple_admins() {
 
 #[tokio::test]
 async fn change_password_rejects_wrong_current_password() {
-    let (state, _admin, write) = test_state_with_tokens();
+    let (state, _admin, write) = test_state_with_tokens().await;
     register_role_user(
         &state,
         "write-user",
@@ -704,7 +771,7 @@ async fn change_password_rejects_wrong_current_password() {
 
 #[tokio::test]
 async fn change_password_succeeds_with_correct_current_password() {
-    let (state, _admin, write) = test_state_with_tokens();
+    let (state, _admin, write) = test_state_with_tokens().await;
     register_role_user(
         &state,
         "write-user",
@@ -746,7 +813,7 @@ async fn change_password_succeeds_with_correct_current_password() {
 
 #[tokio::test]
 async fn write_user_cannot_reset_others_password() {
-    let (state, _admin, write) = test_state_with_tokens();
+    let (state, _admin, write) = test_state_with_tokens().await;
     register_role_user(
         &state,
         "victim3",
@@ -769,7 +836,7 @@ async fn write_user_cannot_reset_others_password() {
 
 #[tokio::test]
 async fn write_user_cannot_create_users() {
-    let (state, _admin, write) = test_state_with_tokens();
+    let (state, _admin, write) = test_state_with_tokens().await;
     let app = create_router(Arc::clone(&state));
 
     let resp = app
@@ -787,7 +854,7 @@ async fn write_user_cannot_create_users() {
 
 #[tokio::test]
 async fn admin_create_user_succeeds() {
-    let (state, admin, _write) = test_state_with_tokens();
+    let (state, admin, _write) = test_state_with_tokens().await;
     let app = create_router(Arc::clone(&state));
 
     let resp = app
@@ -810,7 +877,7 @@ async fn admin_create_user_succeeds() {
 
 #[tokio::test]
 async fn admin_reset_password_recovers_forgotten_password() {
-    let (state, admin, _write) = test_state_with_tokens();
+    let (state, admin, _write) = test_state_with_tokens().await;
     register_role_user(
         &state,
         "forgetful",
@@ -845,7 +912,7 @@ async fn admin_reset_password_recovers_forgotten_password() {
 
 #[tokio::test]
 async fn whoami_returns_role_and_grants() {
-    let (state, _admin, write) = test_state_with_tokens();
+    let (state, _admin, write) = test_state_with_tokens().await;
     register_role_user(
         &state,
         "write-user",
@@ -882,8 +949,143 @@ async fn whoami_returns_role_and_grants() {
 
 #[tokio::test]
 async fn whoami_401_unauthenticated() {
-    let (state, _admin, _write) = test_state_with_tokens();
+    let (state, _admin, _write) = test_state_with_tokens().await;
     let app = create_router(state);
     let resp = app.oneshot(get("/auth/whoami", None)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// AU-1: deleting a user must revoke their API keys.
+///
+/// `delete_user` cleared credentials and grants but never touched the key
+/// store — and `ApiKey` carries no expiry, so those keys authenticated
+/// indefinitely. Deletion is often *how* a compromised or offboarded account
+/// is handled, which made this the gap most likely to be relied upon.
+///
+/// Note the sibling test `delete_user_cascades_grants` asserts the grant
+/// cascade and stops there. The absence of this assertion is why the gap
+/// shipped.
+#[tokio::test]
+async fn delete_user_revokes_api_keys() {
+    let (state, admin, _write) = test_state_with_tokens().await;
+
+    let user = mediagit_security::auth::User::new(
+        "keyholder".to_string(),
+        "keyholder".to_string(),
+        "keyholder@example.com".to_string(),
+        mediagit_security::auth::user::Role::Write,
+    );
+    state
+        .auth_service()
+        .unwrap()
+        .credentials_store
+        .register_user(user, "password123")
+        .await
+        .unwrap();
+
+    let keys = state.auth_layer.as_ref().unwrap().api_key_auth();
+    keys.generate_key(
+        "keyholder".to_string(),
+        "ci-token".to_string(),
+        vec!["repo:write".to_string()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        keys.list_user_keys("keyholder").await.len(),
+        1,
+        "precondition: the user should own one key"
+    );
+
+    let app = create_router(Arc::clone(&state));
+    let resp = app
+        .oneshot(delete_req("/auth/users/keyholder", Some(&admin), None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    assert!(
+        keys.list_user_keys("keyholder").await.is_empty(),
+        "deleted user still owns API keys — they never expire, so this is \
+         permanent authenticated access for an account that no longer exists"
+    );
+}
+
+/// AU-2: a deleted user's token must stop working immediately.
+///
+/// Permissions came from the token's claims and were never re-checked, so a
+/// deleted account kept its access until the JWT expired — up to 24 h. Since
+/// deletion is typically how a compromised account is contained, the
+/// containment did not actually contain anything.
+#[tokio::test]
+async fn deleted_user_token_is_rejected_immediately() {
+    let (state, admin, write) = test_state_with_tokens().await;
+
+    // The write user's token works while the account exists.
+    let app = create_router(Arc::clone(&state));
+    let resp = app
+        .oneshot(get("/auth/whoami", Some(&write)))
+        .await
+        .unwrap();
+    assert_ne!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "precondition: a live user's token should authenticate"
+    );
+
+    // Admin deletes them.
+    let app = create_router(Arc::clone(&state));
+    let resp = app
+        .oneshot(delete_req("/auth/users/write-user", Some(&admin), None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // The same, still-unexpired token must now be refused.
+    let app = create_router(Arc::clone(&state));
+    let resp = app
+        .oneshot(get("/auth/whoami", Some(&write)))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "a deleted user's unexpired token still authenticated — deletion does \
+         not revoke access until the token expires"
+    );
+}
+
+/// AU-2 corollary: demotion takes effect at once, not at token expiry.
+#[tokio::test]
+async fn demoted_user_loses_admin_rights_immediately() {
+    let (state, admin, _write) = test_state_with_tokens().await;
+    register_role_user(
+        &state,
+        "second-admin",
+        "second",
+        mediagit_security::auth::user::Role::Admin,
+    )
+    .await;
+
+    // Demote the *token holder* while two admins exist, so the last-admin
+    // guard does not intervene.
+    let app = create_router(Arc::clone(&state));
+    let resp = app
+        .oneshot(patch_json(
+            "/auth/users/admin-user/role",
+            Some(&admin),
+            r#"{"role":"Read"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Their existing admin token must no longer carry admin rights.
+    let app = create_router(Arc::clone(&state));
+    let resp = app.oneshot(get("/auth/users", Some(&admin))).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "demoted admin retained admin access via a stale token"
+    );
 }

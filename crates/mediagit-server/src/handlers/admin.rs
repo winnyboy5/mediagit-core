@@ -127,6 +127,24 @@ pub async fn delete_user(
         .remove_user(&id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // AU-1: revoke the user's API keys as part of deletion.
+    //
+    // Credentials and grants were cleared but keys were not, and `ApiKey` has
+    // no expiry — so a deleted user's keys kept authenticating indefinitely.
+    // Deletion is frequently *how* a compromised or offboarded account is
+    // handled, which made this the gap most likely to be relied upon.
+    if let Some(layer) = state.auth_layer.as_ref() {
+        let revoked = layer
+            .api_key_auth()
+            .revoke_user_keys(&id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if revoked > 0 {
+            tracing::info!(user_id = %id, revoked, "revoked API keys for deleted user");
+        }
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 

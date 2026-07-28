@@ -198,12 +198,23 @@ pub async fn register_handler(
     validate_registration_input(&req.username, &req.email, &req.password)
         .map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
 
-    // Create user with unique ID
+    // Create user with unique ID.
+    //
+    // AU-3: self-registration creates a **Read**-role account. It previously
+    // granted Write, which composed badly with two other defaults: open
+    // registration, and per-repo grant enforcement that only activates once a
+    // grant exists (`check_permission`'s `!grants.is_empty()`). On a fresh
+    // server with no grants recorded, anyone who could reach this endpoint
+    // gained write access to every repository.
+    //
+    // Read is the least privilege that keeps self-registration useful; an
+    // admin promotes the account afterwards via `PUT /auth/users/{id}/role`
+    // when write access is actually warranted.
+    //
+    // There is still no client-controlled `role` field — that would let an
+    // unauthenticated caller mint an Admin account via the request body.
     let user_id = uuid::Uuid::new_v4().to_string();
-    // Self-registration always creates a Write-role account; there is no
-    // client-controlled `role` field (P0-1: prevents an unauthenticated
-    // caller from minting an Admin account via the request body).
-    let user = User::new(user_id, req.username, req.email, Role::Write);
+    let user = User::new(user_id, req.username, req.email, Role::Read);
 
     // Register user
     match auth_service
