@@ -43,6 +43,85 @@ use std::collections::BTreeMap;
 use std::io;
 use tracing::{debug, info};
 
+/// Default byte cap per cloud pack (64 MiB).
+pub const DEFAULT_PACK_BYTES: u64 = 64 * 1024 * 1024;
+/// Default chunk-count cap per cloud pack.
+pub const DEFAULT_PACK_CHUNKS: u32 = 1024;
+
+/// Below this, per-pack overhead dominates and the repo drifts back toward
+/// one cloud object per chunk — the problem cloud packs exist to solve.
+const MIN_PACK_BYTES: u64 = 1024 * 1024;
+/// Each in-flight pack is held in RAM for upload and multiplied by
+/// `MEDIAGIT_PACK_UPLOAD_CONCURRENCY`, so a single pack above this size makes
+/// even a concurrency of 1 hostile to a typical container memory limit.
+const MAX_PACK_BYTES: u64 = 1024 * 1024 * 1024;
+
+const MIN_PACK_CHUNKS: u32 = 1;
+/// Keeps the pack's embedded chunk index (40 bytes/entry) bounded.
+const MAX_PACK_CHUNKS: u32 = 1_048_576;
+
+/// ST-4: parse an operator-supplied cap, clamping it into a workable range.
+///
+/// Split from the env lookup so the bounds are testable without mutating
+/// process environment — which `#![forbid(unsafe_code)]` would otherwise
+/// require an `unsafe` escape hatch to do under edition 2024.
+///
+/// An out-of-range or unparseable value is corrected **loudly**. Silently
+/// substituting the default would make an operator's deliberate tuning inert
+/// with no way to tell from the outside that it had been ignored.
+fn clamp_cap<T>(raw: Option<String>, name: &str, default: T, min: T, max: T) -> T
+where
+    T: std::str::FromStr + PartialOrd + std::fmt::Display + Copy,
+{
+    let Some(raw) = raw else { return default };
+    let Ok(parsed) = raw.trim().parse::<T>() else {
+        tracing::warn!(
+            env = name,
+            value = %raw,
+            using = %default,
+            "ignoring unparseable value; using the default"
+        );
+        return default;
+    };
+    if parsed < min {
+        tracing::warn!(env = name, value = %parsed, clamped_to = %min, "value below minimum");
+        return min;
+    }
+    if parsed > max {
+        tracing::warn!(env = name, value = %parsed, clamped_to = %max, "value above maximum");
+        return max;
+    }
+    parsed
+}
+
+/// Byte cap per cloud pack (`MEDIAGIT_PACK_BYTES`), clamped to a workable range.
+///
+/// The single source of truth for this knob. The push path
+/// (`mediagit-protocol`'s `PackBuilder`) and `gc --repack` both read it, and
+/// they must agree — a repacked repo's packs are supposed to be
+/// indistinguishable from ones a normal push produced.
+pub fn pack_bytes_cap() -> u64 {
+    clamp_cap(
+        std::env::var("MEDIAGIT_PACK_BYTES").ok(),
+        "MEDIAGIT_PACK_BYTES",
+        DEFAULT_PACK_BYTES,
+        MIN_PACK_BYTES,
+        MAX_PACK_BYTES,
+    )
+}
+
+/// Chunk-count cap per cloud pack (`MEDIAGIT_PACK_CHUNKS`), clamped.
+/// See [`pack_bytes_cap`] for why this is shared rather than duplicated.
+pub fn pack_chunks_cap() -> u32 {
+    clamp_cap(
+        std::env::var("MEDIAGIT_PACK_CHUNKS").ok(),
+        "MEDIAGIT_PACK_CHUNKS",
+        DEFAULT_PACK_CHUNKS,
+        MIN_PACK_CHUNKS,
+        MAX_PACK_CHUNKS,
+    )
+}
+
 /// Magic bytes for delta-encoded objects in pack files
 const DELTA_MAGIC: &[u8; 5] = b"DELTA";
 
@@ -803,6 +882,101 @@ impl PackReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ST-4: an absent knob keeps the default; a usable one is honoured.
+    #[test]
+    fn pack_caps_pass_through_usable_values() {
+        assert_eq!(
+            clamp_cap::<u64>(
+                None,
+                "T",
+                DEFAULT_PACK_BYTES,
+                MIN_PACK_BYTES,
+                MAX_PACK_BYTES
+            ),
+            DEFAULT_PACK_BYTES
+        );
+        assert_eq!(
+            clamp_cap::<u64>(
+                Some("33554432".into()),
+                "T",
+                DEFAULT_PACK_BYTES,
+                MIN_PACK_BYTES,
+                MAX_PACK_BYTES
+            ),
+            32 * 1024 * 1024,
+            "a deliberately tuned value inside the range must survive intact"
+        );
+    }
+
+    /// The failure this guards is silent, not loud: `add_chunk` tests its caps
+    /// *after* writing, so a cap of 0 seals a pack per chunk — no hang, no
+    /// error, just a repo back to one cloud object per chunk, which is the
+    /// exact problem cloud packs exist to solve.
+    #[test]
+    fn pack_caps_below_minimum_are_clamped_not_obeyed() {
+        assert_eq!(
+            clamp_cap::<u64>(
+                Some("0".into()),
+                "T",
+                DEFAULT_PACK_BYTES,
+                MIN_PACK_BYTES,
+                MAX_PACK_BYTES
+            ),
+            MIN_PACK_BYTES
+        );
+        assert_eq!(
+            clamp_cap::<u32>(
+                Some("0".into()),
+                "T",
+                DEFAULT_PACK_CHUNKS,
+                MIN_PACK_CHUNKS,
+                MAX_PACK_CHUNKS
+            ),
+            MIN_PACK_CHUNKS
+        );
+    }
+
+    /// Peak push RAM is this cap times the upload concurrency, so an
+    /// unbounded value here is an OOM a single mistyped unit away.
+    #[test]
+    fn pack_caps_above_maximum_are_clamped() {
+        assert_eq!(
+            clamp_cap::<u64>(
+                Some("64000000000".into()),
+                "T",
+                DEFAULT_PACK_BYTES,
+                MIN_PACK_BYTES,
+                MAX_PACK_BYTES
+            ),
+            MAX_PACK_BYTES
+        );
+        assert_eq!(
+            clamp_cap::<u32>(
+                Some("999999999".into()),
+                "T",
+                DEFAULT_PACK_CHUNKS,
+                MIN_PACK_CHUNKS,
+                MAX_PACK_CHUNKS
+            ),
+            MAX_PACK_CHUNKS
+        );
+    }
+
+    #[test]
+    fn unparseable_pack_cap_falls_back_to_default() {
+        assert_eq!(
+            clamp_cap::<u64>(
+                Some("64MiB".into()),
+                "T",
+                DEFAULT_PACK_BYTES,
+                MIN_PACK_BYTES,
+                MAX_PACK_BYTES
+            ),
+            DEFAULT_PACK_BYTES,
+            "a unit suffix is not supported; it must not parse as a partial number"
+        );
+    }
 
     #[test]
     fn test_pack_header_roundtrip() {

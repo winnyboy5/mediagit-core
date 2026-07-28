@@ -25,24 +25,13 @@ fn repack_chunks_cloud_enabled() -> bool {
         .unwrap_or(true)
 }
 
-/// Byte cap per cloud pack produced by chunk repacking. Shares the env var
-/// name with `PackBuilder` (mediagit-protocol, F1-F11 push path) so a
-/// repacked repo's packs look like ones produced by a normal push.
-fn repack_pack_bytes_cap() -> u64 {
-    std::env::var("MEDIAGIT_PACK_BYTES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(64 * 1024 * 1024)
-}
-
-/// Chunk-count cap per cloud pack produced by chunk repacking (see
-/// `repack_pack_bytes_cap`).
-fn repack_pack_chunks_cap() -> u32 {
-    std::env::var("MEDIAGIT_PACK_CHUNKS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1024)
-}
+// ST-4: the caps used by chunk repacking are the same ones `PackBuilder`
+// (mediagit-protocol, F1-F11 push path) uses, so a repacked repo's packs look
+// like ones produced by a normal push. Both now read the single clamped
+// definition in `crate::pack` rather than parsing the env var separately.
+use crate::pack::{
+    pack_bytes_cap as repack_pack_bytes_cap, pack_chunks_cap as repack_pack_chunks_cap,
+};
 
 impl ObjectDatabase {
     pub fn new(storage: Arc<dyn StorageBackend>, cache_capacity: u64) -> Self {

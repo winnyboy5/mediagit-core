@@ -51,10 +51,18 @@ impl ProtocolClient {
 
         // Each in-flight pack is read fully into RAM (~MEDIAGIT_PACK_BYTES) for upload,
         // so keep this modest; =1 restores sequential uploads. Default 8 ≈ 512 MiB ceiling.
+        //
+        // ST-4: bounded above as well as below. Peak RAM here is
+        // MEDIAGIT_PACK_BYTES × this value, so leaving the multiplier
+        // unbounded left the product unbounded no matter how the byte cap was
+        // clamped. 64 is already far past the point where more concurrency
+        // buys throughput on a WAN-bound link.
+        const MAX_PACK_UPLOAD_CONCURRENCY: usize = 64;
         let pack_upload_concurrency: usize = std::env::var("MEDIAGIT_PACK_UPLOAD_CONCURRENCY")
             .ok()
             .and_then(|v| v.parse().ok())
             .filter(|&n| n > 0)
+            .map(|n: usize| n.min(MAX_PACK_UPLOAD_CONCURRENCY))
             .unwrap_or(8);
 
         let temp_dir = tempfile::TempDir::new().context("create pack temp dir")?;

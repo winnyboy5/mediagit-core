@@ -115,7 +115,8 @@ pub use object::ObjectType;
 pub use odb::{ObjectDatabase, RepackStats};
 pub use oid::{Oid, StorageKey};
 pub use pack::{
-    PackHeader, PackIndex, PackKind, PackMetadata, PackObjectEntry, PackReader, PackWriter,
+    DEFAULT_PACK_BYTES, DEFAULT_PACK_CHUNKS, PackHeader, PackIndex, PackKind, PackMetadata,
+    PackObjectEntry, PackReader, PackWriter, pack_bytes_cap, pack_chunks_cap,
 };
 pub use reachability::walk_reachable;
 pub use reflog::{Reflog, ReflogEntry};

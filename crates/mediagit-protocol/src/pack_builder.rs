@@ -19,22 +19,11 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-const DEFAULT_PACK_BYTES: u64 = 64 * 1024 * 1024;
-const DEFAULT_PACK_CHUNKS: u32 = 1024;
-
-fn pack_bytes_cap() -> u64 {
-    std::env::var("MEDIAGIT_PACK_BYTES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_PACK_BYTES)
-}
-
-fn pack_chunks_cap() -> u32 {
-    std::env::var("MEDIAGIT_PACK_CHUNKS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_PACK_CHUNKS)
-}
+// ST-4: caps come from `mediagit_versioning::pack` so this path and
+// `gc --repack` cannot disagree about them, and so an out-of-range value is
+// clamped in exactly one place. They were previously parsed here and again in
+// the ODB, unclamped in both.
+use mediagit_versioning::{pack_bytes_cap, pack_chunks_cap};
 
 /// Client-side cloud pack assembler.
 ///
