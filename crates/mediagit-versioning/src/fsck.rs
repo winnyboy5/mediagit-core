@@ -861,7 +861,21 @@ impl FsckChecker {
                                 )
                                 .with_oid(id),
                             );
-                        } else if visited.len() > crate::odb::MAX_DELTA_DEPTH as usize {
+                        } else if visited.len().saturating_sub(1)
+                            > crate::odb::MAX_DELTA_DEPTH as usize
+                        {
+                            // FS-1: compare *edges*, not nodes. `visited`
+                            // holds every delta node **and** the terminal
+                            // full chunk, so its length is depth + 1. The
+                            // bare `visited.len() > MAX_DELTA_DEPTH` fired at
+                            // depth 10 — precisely the deepest chain
+                            // `resolve_delta_base` is allowed to build and
+                            // one `get_chunk` reconstructs without complaint.
+                            // Every such repo reported "11 hops deep (max
+                            // 10)" for chains that were correct, which is how
+                            // a healthy repo produced a screenful of warnings
+                            // that no repair could ever clear.
+                            //
                             // Repairable: `--repair` flattens the chain by
                             // reconstructing the chunk and re-storing it in
                             // full. Until that landed this was a dead-end
@@ -875,7 +889,7 @@ impl FsckChecker {
                                     format!(
                                         "chunk-delta chain from {} is {} hops deep (max {})",
                                         id.to_hex(),
-                                        visited.len(),
+                                        visited.len().saturating_sub(1),
                                         crate::odb::MAX_DELTA_DEPTH
                                     ),
                                 )
@@ -1556,6 +1570,56 @@ mod tests {
             "an over-deep chain leaves the repo unpushable, so it must be \
              marked repairable — otherwise `fsck --repair` silently skips it \
              and the operator has no way forward"
+        );
+        // FS-1: depth must be reported in hops (edges), not visited nodes.
+        // The longest chain here is 12 deltas terminating at a full chunk —
+        // 12 hops, though `visited` holds 13 entries. Asserted as "nothing
+        // exceeds 12" rather than "something equals 12": fsck reports a chain
+        // from *every* delta node, so the shorter suffixes mean an
+        // `any(== 12)` check passes even with the node/edge bug present.
+        assert!(
+            !deep.iter().any(|i| i.message.contains("is 13 hops deep")),
+            "depth must be reported as hops, not visited-node count, got: {:?}",
+            deep.iter().map(|i| &i.message).collect::<Vec<_>>()
+        );
+    }
+
+    /// FS-1 regression: a chain at *exactly* `MAX_DELTA_DEPTH` is legal.
+    ///
+    /// `resolve_delta_base` permits a nominated base at depth
+    /// `MAX_DELTA_DEPTH - 1`, so the deepest chain a writer can produce has
+    /// exactly `MAX_DELTA_DEPTH` delta nodes, and `get_chunk` reconstructs it
+    /// without complaint. `visited` also holds the terminal full chunk, so
+    /// the old node-count comparison flagged this healthy chain as over-deep
+    /// — every warning reading "11 hops deep (max 10)" on a repo where
+    /// nothing was actually wrong and no repair could clear it.
+    #[tokio::test]
+    async fn chain_at_exactly_max_delta_depth_is_not_reported_as_too_deep() {
+        let depth = crate::odb::MAX_DELTA_DEPTH as usize;
+        let full = Oid::hash(b"fsck-atcap-full");
+        let chain: Vec<Oid> = (0..depth)
+            .map(|i| Oid::hash(format!("fsck-atcap-{i}").as_bytes()))
+            .collect();
+        let mut entries: Vec<(&Oid, &Oid)> = (0..chain.len() - 1)
+            .map(|i| (&chain[i], &chain[i + 1]))
+            .collect();
+        entries.push((&chain[chain.len() - 1], &full));
+        let checker = checker_with_metas(&entries, &[&full]).await;
+
+        let mut report = FsckReport::new();
+        checker.check_chunk_deltas(&mut report).await.unwrap();
+
+        let deep: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.category == IssueCategory::DeepDeltaChain)
+            .collect();
+        assert!(
+            deep.is_empty(),
+            "a chain of exactly MAX_DELTA_DEPTH ({depth}) hops is what the \
+             writer is allowed to build and the reader accepts, so fsck must \
+             stay silent; got: {:?}",
+            deep.iter().map(|i| &i.message).collect::<Vec<_>>()
         );
     }
 
