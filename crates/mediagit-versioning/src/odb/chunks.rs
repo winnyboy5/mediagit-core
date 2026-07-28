@@ -2389,6 +2389,38 @@ impl ObjectDatabase {
             })?,
         };
 
+        // ST-1: verify the base chunk before building on it.
+        //
+        // Chunk IDs are content hashes, so `base_id` is exactly the expected
+        // digest — the check costs one BLAKE3 pass and needs no extra state.
+        // Nothing verified it before, and two consumers take the result on
+        // trust: `mediagit-server`'s `download_file_by_path` streams it
+        // straight to an HTTP client, and `get_compressed_chunk` re-compresses
+        // it into a pack, where it is stored under the id it was *supposed*
+        // to have. A corrupt base therefore propagated silently and could be
+        // re-published as authoritative.
+        //
+        // The loose read above can also fall back to raw bytes when
+        // decompression fails (a deliberate allowance for content whose first
+        // bytes mimic a codec magic). That fallback is only safe *because*
+        // something downstream checks the digest — which, until now, nothing
+        // did.
+        //
+        // `read_from_packs` already performs this check, so the pack path
+        // pays for it twice; a wrong-but-verified chunk is worth more than a
+        // saved hash.
+        let actual = Oid::hash(&current);
+        if actual != base_id {
+            anyhow::bail!(
+                "base chunk {} failed integrity check: computed {}. \
+                 The stored bytes are corrupt or were written by an \
+                 incompatible codec; reconstructing deltas on top of them \
+                 would produce silently wrong data.",
+                base_id.to_hex(),
+                actual.to_hex()
+            );
+        }
+
         // Apply deltas from base->leaf (chain is leaf-first, so reverse)
         for delta_oid in chain.iter().rev() {
             let delta_key = format!("chunk-deltas/{}", delta_oid.to_hex());
@@ -3059,5 +3091,84 @@ mod chunk_delta_depth_tests {
             let got = odb.read(oid).await.expect("version must be readable");
             assert_eq!(&got, expected);
         }
+    }
+
+    /// ST-1: a corrupt base chunk must stop reconstruction, not be built on.
+    ///
+    /// `get_chunk_limited` decompressed the base and applied deltas without
+    /// ever checking it against `base_id` — even though chunk ids *are*
+    /// content hashes, so the expected digest was right there. Two consumers
+    /// then trusted the result: the server streams it to HTTP clients, and
+    /// `get_compressed_chunk` re-packs it under the id it was supposed to
+    /// have, republishing corruption as authoritative.
+    #[tokio::test]
+    async fn corrupt_base_chunk_fails_instead_of_reconstructing_garbage() {
+        let storage = StdArc::new(MockBackend::new());
+        let odb = ObjectDatabase::with_optimizations(
+            storage.clone(),
+            10_000_000,
+            Some(ChunkStrategy::Fixed {
+                size: 2 * 1024 * 1024,
+            }),
+            true,
+            0,
+        );
+
+        // Two similar versions so the second is stored as a delta on the first.
+        let mut content: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        odb.write_chunked(ObjectType::Blob, &content, "v1.bin")
+            .await
+            .expect("first write");
+        for k in 0..64usize {
+            content[1000 + k] = 0xAB;
+        }
+        let v2 = odb
+            .write_chunked(ObjectType::Blob, &content, "v2.bin")
+            .await
+            .expect("second write");
+
+        // Find a delta and the base it depends on.
+        let metas = storage.list_objects("chunk-deltas/").await.unwrap();
+        let meta_key = metas
+            .iter()
+            .find(|k| k.ends_with(".meta"))
+            .expect("expected at least one chunk delta");
+        let meta = storage.get(meta_key).await.unwrap();
+        let meta_txt = String::from_utf8_lossy(&meta);
+        let base_hex = meta_txt
+            .lines()
+            .find_map(|l| l.strip_prefix("base:"))
+            .expect("meta should name its base")
+            .trim()
+            .to_string();
+
+        // Corrupt the base chunk's stored bytes in place.
+        let base_key = format!("chunks/{base_hex}");
+        let good = storage.get(&base_key).await.expect("base chunk present");
+        let mut bad = good.clone();
+        let n = bad.len();
+        bad[n / 2] ^= 0xFF;
+        storage.put(&base_key, &bad).await.unwrap();
+
+        // Read the *delta chunk itself* via `get_chunk`, which is the path
+        // `browse.rs` and `get_compressed_chunk` use.
+        //
+        // Deliberately not `read_chunked`: that verifies every chunk against
+        // its manifest id and would catch the corruption on its own, so a
+        // test through it passes with or without this guard — it proves the
+        // manifest check works, not this one. The exposure is exactly the
+        // callers that skip that verification.
+        let delta_hex = meta_key
+            .trim_start_matches("chunk-deltas/")
+            .trim_end_matches(".meta");
+        let delta_id = Oid::from_hex(delta_hex).expect("delta id");
+
+        let result = odb.get_chunk(&delta_id).await;
+        assert!(
+            result.is_err(),
+            "get_chunk reconstructed on top of a corrupt base and returned              success — those bytes are silently wrong, and              get_compressed_chunk would re-pack them under a valid id"
+        );
+
+        let _ = v2;
     }
 }
