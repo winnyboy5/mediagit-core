@@ -51,6 +51,15 @@ const MIN_SIMILARITY_THRESHOLD: f64 = 0.30;
 
 #[derive(Debug, Default, Clone, Serialize)]
 struct ExtStats {
+    /// How many files contributed to this bucket.
+    ///
+    /// Without it, `dedup_pct` reads as a property of the *format* when it is
+    /// largely a property of the *corpus*: a bucket of unpaired singles can
+    /// only ever report 0 %, and one big unpaired file drags a paired bucket
+    /// down. Both `psd` (0 %, no pair existed) and `mov` (12.2 %, 39.5 MB of
+    /// unpaired ProRes against a 12.1 % ceiling) were misread as pipeline
+    /// defects for exactly this reason.
+    file_count: u64,
     total_bytes: u64,
     unique_chunk_bytes: u64,
     dedup_pct: f64,
@@ -66,6 +75,7 @@ struct ExtStats {
 /// computed) once the whole corpus has been processed.
 #[derive(Debug, Default)]
 struct ExtAccum {
+    file_count: u64,
     total_bytes: u64,
     unique_chunk_bytes: u64,
     chunk_count: u64,
@@ -98,6 +108,7 @@ impl ExtAccum {
         };
 
         ExtStats {
+            file_count: self.file_count,
             total_bytes: self.total_bytes,
             unique_chunk_bytes: self.unique_chunk_bytes,
             dedup_pct,
@@ -111,6 +122,7 @@ impl ExtAccum {
     }
 
     fn add(&mut self, other: &ExtAccum) {
+        self.file_count += other.file_count;
         self.total_bytes += other.total_bytes;
         self.unique_chunk_bytes += other.unique_chunk_bytes;
         self.chunk_count += other.chunk_count;
@@ -282,6 +294,7 @@ async fn process_file(
         .with_context(|| format!("chunking {}", path.display()))?;
 
     let acc = per_ext.entry(ext).or_default();
+    acc.file_count += 1;
 
     for chunk in &chunks {
         acc.total_bytes += chunk.size as u64;
