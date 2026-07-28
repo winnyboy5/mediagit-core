@@ -211,42 +211,37 @@ See [Storage Backend Configuration](./guides/storage-config.md) for detailed set
 
 ## Media-Aware Features
 
-### Automatic Conflict Resolution for Images
+### Format inspection — available now
 
-When merging branches with image edits:
+`mediagit media` parses format structure without altering it:
 
 ```bash
-mediagit merge feature/photo-edits
+mediagit media info design.psd     # layer names, dimensions, colour mode
+mediagit media info sequence.mp4   # streams, codecs, duration
 ```
 
-MediaGit automatically detects:
-- ✅ Non-overlapping edits (auto-merge)
-- ✅ Metadata-only changes (auto-merge)
-- ⚠️  Overlapping pixel edits (manual resolution required)
+### Media-aware merging — not yet available
 
-### PSD Layer Merging
+Per-format merge strategies for images, PSD layers, video timelines and audio
+tracks exist and are tested in the `mediagit-media` crate, but they are **not
+wired into the `merge` command**. This section previously described layer- and
+timeline-level auto-merge as though it worked; it does not.
 
-MediaGit understands PSD layer structure:
+What `mediagit merge` does today with a conflicting binary file:
 
 ```bash
 mediagit merge feature/design-updates
 ```
 
-- ✅ Different layer edits → Auto-merge
-- ✅ New layers added → Auto-merge
-- ⚠️  Same layer modified → Conflict marker
+- The conflict is detected and recorded in the index.
+- **One side is checked out** into the working tree so the file stays valid —
+  conflict markers are never inlined into binary content, which would corrupt
+  it.
+- You resolve by choosing or producing the file you want, then `mediagit add`
+  it. Staging is the acknowledgement that clears the conflict.
 
-### Video Timeline Merging
-
-MediaGit can merge non-overlapping video edits:
-
-```bash
-mediagit merge feature/video-cuts
-```
-
-- ✅ Different timeline ranges → Auto-merge
-- ✅ Different audio tracks → Auto-merge
-- ⚠️  Overlapping timeline edits → Manual resolution
+Deduplication and delta compression still apply to every version involved, so
+keeping both variants while you decide is cheap.
 
 ## Performance Tips
 

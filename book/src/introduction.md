@@ -24,11 +24,16 @@ Support for 7 storage backends with zero vendor lock-in:
 - DigitalOcean Spaces
 
 ### Media-Aware Merging
-Intelligent conflict detection and resolution for:
-- Images (PSD, PNG, JPEG, WebP)
-- Video files (MP4, MOV, AVI)
-- Audio files (WAV, MP3, FLAC)
-- 3D models and game assets
+
+**Status: not yet available.** Per-format merge strategies for images
+(PSD, PNG, JPEG, WebP), video (MP4, MOV, AVI), audio (WAV, MP3, FLAC) and 3D
+assets are implemented and tested in the `mediagit-media` crate, but they are
+not yet wired into the `merge` command. Merging a binary file today detects
+the conflict and checks out one side for you to resolve — it does not merge
+layers, tracks or timelines.
+
+Format *inspection* is available now via `mediagit media`, which parses PSD
+layers, video/audio streams and 3D model metadata.
 
 ### Full Branching Support
 - Create, merge, and rebase branches just like Git

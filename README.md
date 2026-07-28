@@ -106,7 +106,7 @@ Instead of uploading thousands of individual chunk objects, MediaGit bundles chu
 Uploads and downloads bypass the server entirely when the backend supports signing. The server mints presigned PUT/GET URLs; the client communicates directly with cloud storage. On unsigned backends (GCS with ADC) or 404, the client automatically falls back to server-proxy transfer. Large chunks use presigned multipart upload (MPU) on S3/MinIO.
 
 🔒 **Security**
-- AES-256-GCM encryption at rest
+- Encryption at rest via the storage backend (e.g. S3 SSE, configured under `[storage]`). MediaGit's own AES-256-GCM + Argon2id module is implemented and tested but **not yet wired into the CLI**, so client-side encryption is not available in this release
 - JWT + API key authentication, persisted to disk (`users.jsonl`/`api_keys.jsonl`/`grants.jsonl`, atomic writes; `MEDIAGIT_AUTH_PERSIST`)
 - Per-repo authorization grants (Read < Write < Admin; `MEDIAGIT_GRANTS_ENFORCE`) plus admin endpoints for user/key management
 - OS-keychain credential storage for CLI remote credentials (Windows Credential Manager; env → config.toml → keychain)
@@ -722,7 +722,7 @@ cargo check
 | **macOS** | x86_64 | ✅ Supported | Intel Macs |
 | **macOS** | Apple Silicon | ✅ Supported | M1/M2/M3 |
 | **Windows** | x86_64 | ✅ Supported | Via WSL2 recommended |
-| **Windows** | ARM64 | ✅ Supported | Surface Pro X, etc. |
+| **Windows** | ARM64 | ⬜ Not shipped | No release binary is built for this target |
 
 ---
 
@@ -788,12 +788,12 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] Core CLI: `init`, `add`, `commit`, `status`, `log`, `branch`, `merge`, `push`, `pull`
 - [x] Content-addressed object database (BLAKE3, CDC chunking)
 - [x] Intelligent compression — Zstd, Brotli, per-type strategy (70+ file types)
-- [x] PSD layer-aware merge intelligence
+- [ ] PSD layer-aware merge intelligence — implemented in `mediagit-media`, not wired into `merge`; binary conflicts check out one side
 - [x] Multi-cloud storage: AWS S3, Azure Blob, GCS, MinIO, Backblaze B2, DO Spaces
-- [x] Security: AES-256-GCM encryption at rest, Argon2id key derivation
+- [x] Security: backend-provided encryption at rest (S3 SSE); AES-256-GCM + Argon2id implemented in `mediagit-security`, not yet wired into the CLI
 - [x] Observability: structured logging, Prometheus metrics
 - [x] 960 unit tests, 80%+ coverage
-- [x] Multi-platform binaries: Linux, macOS, Windows (x86_64 + ARM64)
+- [x] Multi-platform binaries: Linux (x86_64 + ARM64), macOS (Intel + Apple Silicon), Windows (x86_64)
 
 ### v0.2.0 ✅ — March 5, 2026
 *Major features — storage efficiency and security*
@@ -802,7 +802,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] Delta chain depth cap (MAX_DELTA_DEPTH=10) — prevents read-amplification
 - [x] Adaptive chunk sizes (1–8 MB) — replaces fixed 64 MB chunks
 - [x] Per-type similarity thresholds for delta compression
-- [x] AES-256-GCM client-side encryption with Argon2id KDF
+- [ ] AES-256-GCM client-side encryption with Argon2id KDF — module implemented and tested, no CLI call sites yet
 - [x] TLS 1.3 for all network operations
 - [x] JWT + API key authentication (server mode)
 - [x] Video timeline and audio track-based merging
@@ -968,7 +968,7 @@ Special thanks to:
 - **Stability**: 0 crashes, 0 data corruption across all validated test runs
 - **File Formats**: 70+ extensions (video, audio, image, 3D, DCC, ML, game engines, office)
 - **Server Endpoints**: 20 handler routes + auth
-- **Platforms**: Linux, macOS, Windows — x86_64 + ARM64
+- **Platforms**: Linux (x86_64 + ARM64), macOS (Intel + Apple Silicon), Windows (x86_64)
 
 ---
 
