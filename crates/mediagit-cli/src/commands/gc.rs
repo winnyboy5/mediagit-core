@@ -438,6 +438,59 @@ impl GarbageCollector {
             }
         }
 
+        // Remote-tracking branches (VC-1). `branch_mgr.list()` only walks
+        // `refs/heads`, so a commit fetched but not yet merged into any local
+        // branch had no root at all and was collected — silently undoing the
+        // fetch and breaking the next `merge origin/<branch>`.
+        match self.refdb.list("remotes").await {
+            Ok(remote_refs) => {
+                let mut rooted = 0usize;
+                for name in &remote_refs {
+                    // `list` yields ref names; resolve each to its commit.
+                    if let Ok(oid) = self.refdb.resolve(name).await {
+                        self.traverse_commit_chain(&oid, &mut reachable).await?;
+                        rooted += 1;
+                    }
+                }
+                if rooted > 0 {
+                    debug!("Protected {} remote-tracking ref(s) from gc", rooted);
+                }
+            }
+            Err(e) => debug!("No remote-tracking refs to protect: {}", e),
+        }
+
+        // Stashes (WT-6). Stash entries live only in `.mediagit/STASH_LIST`
+        // and are never refs, so nothing rooted them — `gc` after a
+        // `stash push` deleted the stashed tree and blobs, and the later
+        // `stash pop` failed with "object not found".
+        let stash_roots = self.stash_roots(repo_root);
+        for oid in &stash_roots {
+            self.traverse_commit_chain(oid, &mut reachable).await?;
+        }
+        if !stash_roots.is_empty() {
+            debug!(
+                "Protected {} stash entry/entries from gc",
+                stash_roots.len()
+            );
+        }
+
+        // In-progress operation state. auto-gc fires after `add` and `commit`
+        // (add.rs / commit.rs), and a rebase commits on every applied step —
+        // so a gc could land mid-rebase and collect `commits_remaining`, i.e.
+        // the user's own not-yet-replayed commits, which no ref points at
+        // once the branch has moved. Same exposure for cherry-pick, revert,
+        // merge and bisect state.
+        let op_roots = self.in_progress_roots(repo_root);
+        for oid in &op_roots {
+            self.traverse_commit_chain(oid, &mut reachable).await?;
+        }
+        if !op_roots.is_empty() {
+            debug!(
+                "Protected {} in-progress operation commit(s) from gc",
+                op_roots.len()
+            );
+        }
+
         // Protect currently-staged index entries from gc.
         // Without this, running gc between `add` and `commit` would delete
         // the staged objects, corrupting the next commit.
@@ -456,6 +509,95 @@ impl GarbageCollector {
             reachable.len()
         );
         Ok(reachable)
+    }
+
+    /// Commit OIDs referenced by stash entries (`.mediagit/STASH_LIST`).
+    ///
+    /// Parsed leniently on purpose: an unreadable or malformed stash list must
+    /// never cause gc to protect *less*, but it also must not abort gc. Any
+    /// hex-looking `commit_oid` is taken as a root.
+    fn stash_roots(&self, repo_root: &Path) -> Vec<Oid> {
+        let path = repo_root.join(".mediagit").join("STASH_LIST");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Vec::new();
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            warn!("STASH_LIST is unparseable; stashed objects cannot be protected from gc");
+            return Vec::new();
+        };
+        value
+            .as_array()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|e| e.get("commit_oid")?.as_str())
+                    .filter_map(|s| Oid::from_hex(s).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Commit OIDs held by in-progress operation state files.
+    ///
+    /// Covers rebase (`rebase-apply/state.json`), cherry-pick, revert, merge
+    /// (`MERGE_HEAD`/`ORIG_HEAD`) and bisect. These reference commits that a
+    /// user can still `--continue` or `--abort` back to, but which no ref
+    /// points at while the operation is mid-flight.
+    ///
+    /// Deliberately format-agnostic: every value that parses as a 64-char hex
+    /// OID is treated as a root. A state file whose schema changes must not
+    /// silently stop protecting the operation it describes.
+    fn in_progress_roots(&self, repo_root: &Path) -> Vec<Oid> {
+        let dir = repo_root.join(".mediagit");
+        let candidates = [
+            dir.join("rebase-apply").join("state.json"),
+            dir.join("CHERRY_PICK_STATE"),
+            dir.join("REVERT_STATE"),
+            dir.join("BISECT_STATE"),
+            dir.join("MERGE_HEAD"),
+            dir.join("ORIG_HEAD"),
+        ];
+
+        let mut oids = Vec::new();
+        for path in candidates {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            oids.extend(Self::scan_hex_oids(&text));
+        }
+        oids.sort_by_key(|o| o.to_hex());
+        oids.dedup();
+        oids
+    }
+
+    /// Every 64-char hex run in `text`, parsed as an OID. Handles JSON, the
+    /// newline-delimited REVERT_STATE format, and bare-OID files uniformly.
+    fn scan_hex_oids(text: &str) -> Vec<Oid> {
+        let bytes = text.as_bytes();
+        let mut out = Vec::new();
+        let mut start = 0usize;
+        let mut run = 0usize;
+        for (i, b) in bytes.iter().enumerate() {
+            if b.is_ascii_hexdigit() {
+                if run == 0 {
+                    start = i;
+                }
+                run += 1;
+            } else {
+                if run == 64
+                    && let Ok(oid) = Oid::from_hex(&text[start..i])
+                {
+                    out.push(oid);
+                }
+                run = 0;
+            }
+        }
+        if run == 64
+            && let Ok(oid) = Oid::from_hex(&text[start..])
+        {
+            out.push(oid);
+        }
+        out
     }
 
     /// Traverse commit → tree → blob chains
