@@ -32,6 +32,28 @@ const DELTA_MAGIC: &[u8; 5] = b"DELTA";
 /// Prevents OOM from corrupted or malicious pack data advertising huge sizes.
 const MAX_PACK_OBJECT_SIZE: usize = 2 * 1024 * 1024 * 1024;
 
+/// VC-7: reject an object the 4-byte pack size field cannot describe.
+///
+/// `write_object` stored `data.len() as u32` unchecked. An object at or above
+/// 4 GiB wrapped, so the header understated its length — and since the reader
+/// uses that field to find the *next* object, every subsequent object in the
+/// pack was misparsed. The pack stayed structurally plausible while decoding
+/// to wrong bytes, which is worse than a hard failure.
+///
+/// Takes a length rather than the slice so the bound is testable without
+/// allocating multiple gigabytes.
+fn ensure_writable_object_size(len: usize, oid: &Oid) -> io::Result<()> {
+    if len > MAX_PACK_OBJECT_SIZE {
+        return Err(io::Error::other(format!(
+            "pack object too large: {} bytes exceeds the {} byte limit (object {}). \
+             Writing it would truncate the 4-byte size field and corrupt every \
+             following object in the pack.",
+            len, MAX_PACK_OBJECT_SIZE, oid
+        )));
+    }
+    Ok(())
+}
+
 /// Streaming pack reader that processes objects incrementally
 pub struct StreamingPackReader<R: AsyncRead + Unpin> {
     reader: R,
@@ -280,6 +302,20 @@ impl<W: AsyncWrite + Unpin> StreamingPackWriter<W> {
         // Write object header. `ObjectType::to_u8`/`from_u8` are the single
         // source of truth for the wire byte value (matches `pack.rs`).
         let type_byte: u8 = obj_type.to_u8();
+
+        // VC-7: refuse oversized objects instead of silently truncating.
+        //
+        // The size field is 4 bytes, and this was an unchecked `as u32`. An
+        // object at or above 4 GiB wrapped, so the header understated its
+        // length — and because the reader uses that field to find the *next*
+        // object, every subsequent object in the pack was misparsed. The pack
+        // stayed structurally plausible while decoding to wrong bytes, which
+        // is worse than a hard failure.
+        //
+        // The reader already refuses anything over `MAX_PACK_OBJECT_SIZE`
+        // (2 GiB), so enforcing the same bound here keeps writer and reader
+        // agreeing rather than producing packs this build cannot read back.
+        ensure_writable_object_size(data.len(), &oid)?;
 
         let size = data.len() as u32;
         let mut header = Vec::with_capacity(5);
@@ -709,5 +745,41 @@ mod tests {
 
         // Cleanup
         let _ = std::fs::remove_file(&result.temp_path);
+    }
+
+    /// VC-7: nothing the writer accepts may overflow the 4-byte size field.
+    ///
+    /// Asserted on the bound itself rather than by writing a 4 GiB object,
+    /// which is not a runnable test. Together with the guard in
+    /// `write_object` this is what makes truncation unreachable: raise
+    /// `MAX_PACK_OBJECT_SIZE` past `u32::MAX` and this fails.
+    #[test]
+    fn accepted_object_sizes_always_fit_the_u32_size_field() {
+        assert!(
+            MAX_PACK_OBJECT_SIZE <= u32::MAX as usize,
+            "MAX_PACK_OBJECT_SIZE ({MAX_PACK_OBJECT_SIZE}) exceeds u32::MAX, so an              object passing the size guard would still truncate its header"
+        );
+    }
+
+    #[test]
+    fn oversized_pack_object_is_rejected_rather_than_truncated() {
+        let oid = Oid::hash(b"vc7");
+
+        ensure_writable_object_size(MAX_PACK_OBJECT_SIZE, &oid)
+            .expect("an object at exactly the limit must be writable");
+
+        let err = ensure_writable_object_size(MAX_PACK_OBJECT_SIZE + 1, &oid)
+            .expect_err("an object over the limit must be refused");
+        assert!(
+            err.to_string().contains("pack object too large"),
+            "unexpected error: {err}"
+        );
+
+        // The size that actually motivated the guard: 4 GiB wraps to 0 under
+        // `as u32`, so the header would claim an empty object and every
+        // following object in the pack would be read from the wrong offset.
+        let four_gib = 4usize * 1024 * 1024 * 1024;
+        assert_eq!(four_gib as u32, 0, "premise of the guard");
+        assert!(ensure_writable_object_size(four_gib, &oid).is_err());
     }
 }
