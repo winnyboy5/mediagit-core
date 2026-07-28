@@ -313,6 +313,37 @@ impl StatusCmd {
             None => None,
         };
 
+        // WT-10: surface an operation left mid-flight.
+        //
+        // `status` inspected HEAD, the index and the working tree, but never
+        // the operation-state files — so a user who hit a conflict, walked
+        // away and came back had no way to learn the repository was mid-
+        // rebase. The one command whose job is answering "what state am I in?"
+        // did not answer it. Printed before the branch line because "you are
+        // in the middle of X" outranks "you are on branch Y".
+        if !self.json
+            && !self.porcelain
+            && let Some(op) = in_progress_operation(&storage_path)
+        {
+            output::warning(&format!("{} in progress", op.label));
+            for hint in op.hints {
+                println!("  {}", hint);
+            }
+            let unresolved = Index::load(&repo_root)
+                .map(|i| i.unresolved_paths())
+                .unwrap_or_default();
+            if !unresolved.is_empty() {
+                println!("  Unresolved path(s):");
+                for p in &unresolved {
+                    println!("    {}", p.display());
+                }
+                println!(
+                    "  Review each, then `mediagit add <path>` to accept it \
+                     (binary files included — staging is the acknowledgement)."
+                );
+            }
+        }
+
         // Display current branch (independent of --verbose, which instead
         // enriches the summary line below). Skipped for --json (single JSON
         // document, no interleaved human text).
@@ -835,4 +866,58 @@ impl StatusCmd {
         }
         Ok(())
     }
+}
+
+/// An operation the repository is part-way through.
+struct InProgressOp {
+    label: &'static str,
+    hints: &'static [&'static str],
+}
+
+/// Detect a mid-flight operation from its state file (WT-10).
+///
+/// Checked in the order a user is most likely to be blocked by. Each state
+/// file is owned by a different command and they use four different formats,
+/// so presence — not content — is the signal; parsing them here would couple
+/// `status` to four schemas it has no other reason to know.
+fn in_progress_operation(mediagit_dir: &std::path::Path) -> Option<InProgressOp> {
+    let exists = |p: &str| mediagit_dir.join(p).exists();
+
+    if exists("rebase-apply/state.json") {
+        return Some(InProgressOp {
+            label: "Rebase",
+            hints: &[
+                "`mediagit rebase --continue` to resume",
+                "`mediagit rebase --abort` to restore the original HEAD",
+            ],
+        });
+    }
+    if exists("CHERRY_PICK_STATE") {
+        return Some(InProgressOp {
+            label: "Cherry-pick",
+            hints: &[
+                "`mediagit cherry-pick --continue` to resume",
+                "`mediagit cherry-pick --abort` to restore the original HEAD",
+            ],
+        });
+    }
+    if exists("REVERT_STATE") {
+        return Some(InProgressOp {
+            label: "Revert",
+            hints: &[
+                "`mediagit revert --continue` to resume",
+                "`mediagit revert --abort` to restore the original HEAD",
+            ],
+        });
+    }
+    if exists("MERGE_HEAD") {
+        return Some(InProgressOp {
+            label: "Merge",
+            hints: &[
+                "`mediagit merge --continue` to conclude the merge",
+                "`mediagit merge --abort` to restore the pre-merge state",
+            ],
+        });
+    }
+    None
 }

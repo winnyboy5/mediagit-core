@@ -418,3 +418,133 @@ fn wt9_binary_conflict_blocks_continue_despite_having_no_markers() {
         String::from_utf8_lossy(&cont2.stderr)
     );
 }
+
+// ============================================================================
+// WT-10 — `status` must report an operation in progress.
+//
+// `status` checked HEAD, the index and the working tree, but never looked for
+// MERGE_HEAD, rebase-apply/state.json, CHERRY_PICK_STATE or REVERT_STATE. A
+// user who hit a conflict, walked away, and came back had no way to discover
+// the repository was mid-operation — the one command whose entire job is
+// answering "what state am I in?" didn't answer it.
+// ============================================================================
+
+#[test]
+fn wt10_status_reports_rebase_in_progress_and_unresolved_paths() {
+    let temp = TempDir::new().unwrap();
+    setup_conflicting_branches(temp.path());
+
+    let out = run(temp.path(), &["rebase", "main"]);
+    assert!(!out.status.success(), "expected a conflict stop");
+
+    let status = run(temp.path(), &["status"]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let lower = text.to_lowercase();
+
+    assert!(
+        lower.contains("rebase"),
+        "status did not mention the in-progress rebase. Output:\n{text}"
+    );
+    assert!(
+        lower.contains("unresolved") || lower.contains("conflict"),
+        "status did not surface the unresolved path(s). Output:\n{text}"
+    );
+    assert!(
+        text.contains("shared.txt"),
+        "status did not name the conflicted file. Output:\n{text}"
+    );
+}
+
+/// Negative control: a clean repository must not claim an operation is in
+/// progress. A check that always fired would satisfy the test above.
+#[test]
+fn wt10_status_silent_when_no_operation_in_progress() {
+    let temp = TempDir::new().unwrap();
+    init_repo(temp.path());
+    commit_file(temp.path(), "a.txt", "v1\n", "base");
+
+    let status = run(temp.path(), &["status"]);
+    let lower = String::from_utf8_lossy(&status.stdout).to_lowercase();
+
+    assert!(
+        !lower.contains("in progress"),
+        "status claimed an operation was in progress on a clean repo:\n{lower}"
+    );
+}
+
+// ============================================================================
+// WT-7 — `stash apply` must not silently destroy divergent uncommitted work.
+//
+// `apply_tree_overlay` writes every stashed path over the working tree with no
+// comparison against what is already there. If you stashed an edit, then made
+// a *different* edit to the same file, applying the stash overwrote the second
+// edit with no warning and no way to recover it — the second edit exists
+// nowhere else.
+// ============================================================================
+
+#[test]
+fn wt7_stash_apply_refuses_to_clobber_divergent_uncommitted_work() {
+    let temp = TempDir::new().unwrap();
+    init_repo(temp.path());
+    commit_file(temp.path(), "work.txt", "committed\n", "base");
+
+    // Stash one edit.
+    fs::write(temp.path().join("work.txt"), "STASHED EDIT\n").unwrap();
+    mediagit()
+        .args(["stash", "push", "-m", "wip"])
+        .current_dir(temp.path())
+        .assert()
+        .success();
+
+    // Now make a DIFFERENT uncommitted edit to the same file.
+    fs::write(temp.path().join("work.txt"), "LATER WORK\n").unwrap();
+
+    let out = run(temp.path(), &["stash", "apply"]);
+
+    let after = fs::read_to_string(temp.path().join("work.txt")).unwrap();
+    if out.status.success() {
+        assert_ne!(
+            after, "STASHED EDIT\n",
+            "stash apply silently overwrote divergent uncommitted work — \
+             'LATER WORK' existed nowhere else and is now unrecoverable"
+        );
+    } else {
+        // Refusing is the correct outcome; the work must be untouched.
+        assert_eq!(
+            after, "LATER WORK\n",
+            "stash apply refused but still modified the file"
+        );
+    }
+}
+
+/// Negative control: applying onto a clean tree must still work.
+#[test]
+fn wt7_stash_apply_still_works_on_a_clean_tree() {
+    let temp = TempDir::new().unwrap();
+    init_repo(temp.path());
+    commit_file(temp.path(), "work.txt", "committed\n", "base");
+
+    fs::write(temp.path().join("work.txt"), "STASHED EDIT\n").unwrap();
+    mediagit()
+        .args(["stash", "push", "-m", "wip"])
+        .current_dir(temp.path())
+        .assert()
+        .success();
+
+    // Tree is back to HEAD after stashing; applying must restore the stash.
+    let out = run(temp.path(), &["stash", "apply"]);
+    assert!(
+        out.status.success(),
+        "stash apply failed on a clean tree: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(temp.path().join("work.txt")).unwrap(),
+        "STASHED EDIT\n",
+        "stash apply did not restore the stashed content"
+    );
+}

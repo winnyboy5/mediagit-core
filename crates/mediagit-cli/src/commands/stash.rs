@@ -88,6 +88,12 @@ pub struct ApplyOpts {
     #[arg(long)]
     pub index: bool,
 
+    /// WT-7: overwrite uncommitted changes that differ from the stash.
+    /// Without this, `apply` refuses rather than destroying work that exists
+    /// nowhere else.
+    #[arg(short, long)]
+    pub force: bool,
+
     /// Quiet mode
     #[arg(short, long)]
     pub quiet: bool,
@@ -131,6 +137,12 @@ pub struct PopOpts {
     /// Reinstate index changes
     #[arg(long)]
     pub index: bool,
+
+    /// WT-7: overwrite uncommitted changes that differ from the stash.
+    /// `pop` is apply-then-drop, so an unguarded clobber loses both the
+    /// working edit and the stash entry that could have restored it.
+    #[arg(short, long)]
+    pub force: bool,
 
     /// Quiet mode
     #[arg(short, long)]
@@ -342,6 +354,32 @@ impl StashCmd {
 
         let stash_oid = Oid::from_hex(&stash_entry.commit_oid)?;
 
+        // WT-7: refuse to overwrite divergent uncommitted work.
+        //
+        // The overlay below writes every stashed path unconditionally. If you
+        // stashed an edit and then made a *different* edit to the same file,
+        // that second edit was silently destroyed — and unlike the stashed
+        // version, it existed nowhere else. Stash is supposed to be the safe
+        // place to park work, so losing work to it is especially bad.
+        //
+        // A path is at risk when the working copy differs from BOTH the
+        // stashed content (so applying would change it) and from HEAD (so the
+        // difference is unsaved work rather than a clean checkout).
+        let clobbered = Self::paths_at_risk(&repo_root, &odb, &stash_oid).await?;
+        if !clobbered.is_empty() && !opts.force {
+            anyhow::bail!(
+                "Refusing to apply: {} path(s) have uncommitted changes that differ \
+                 from the stash and would be overwritten:\n  {}\n\
+                 Commit or stash them first, or re-run with --force to discard them.",
+                clobbered.len(),
+                clobbered
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n  ")
+            );
+        }
+
         // Apply stash tree on top of current working directory (overlay, not replace).
         // checkout_commit would wipe files not in the stash tree.
         let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
@@ -355,6 +393,59 @@ impl StashCmd {
         }
 
         Ok(())
+    }
+
+    /// WT-7: stashed paths whose working copy holds unsaved work that the
+    /// overlay would destroy.
+    ///
+    /// At risk means the working file differs from BOTH:
+    ///   - the stashed content (so applying would actually change it), and
+    ///   - HEAD (so the difference is unsaved work, not a clean checkout).
+    ///
+    /// Files matching the stash are already applied; files matching HEAD are
+    /// clean and safe to overwrite. Only the third case is unrecoverable —
+    /// that content exists nowhere else in the repository.
+    ///
+    /// Compares content hashes rather than scanning for text markers, so it
+    /// behaves identically for media and binary assets.
+    async fn paths_at_risk(
+        repo_root: &Path,
+        odb: &ObjectDatabase,
+        stash_oid: &Oid,
+    ) -> Result<Vec<PathBuf>> {
+        let stash_commit = Commit::read(odb, stash_oid).await?;
+        let stash_files = CheckoutManager::new(odb, repo_root)
+            .tracked_files_at(stash_oid)
+            .await?;
+
+        // HEAD content for the same paths, to tell "unsaved work" from "clean".
+        let refdb = RefDatabase::new(repo_root.join(".mediagit"));
+        let head_files = match refdb.resolve("HEAD").await {
+            Ok(head_oid) => CheckoutManager::new(odb, repo_root)
+                .tracked_files_at(&head_oid)
+                .await
+                .unwrap_or_default(),
+            Err(_) => Default::default(),
+        };
+        let _ = stash_commit;
+
+        let mut at_risk = Vec::new();
+        for (path, (stash_entry_oid, _)) in &stash_files {
+            let full = repo_root.join(path);
+            let Ok(bytes) = std::fs::read(&full) else {
+                continue; // absent: the overlay creates it, nothing to lose
+            };
+            let working = Oid::hash(&bytes);
+            if working == *stash_entry_oid {
+                continue; // already matches the stash
+            }
+            if head_files.get(path).map(|(o, _)| *o) == Some(working) {
+                continue; // clean checkout of HEAD — safe to overwrite
+            }
+            at_risk.push(path.clone());
+        }
+        at_risk.sort();
+        Ok(at_risk)
     }
 
     async fn list(&self, opts: &ListOpts) -> Result<()> {
@@ -456,6 +547,7 @@ impl StashCmd {
         let apply_opts = ApplyOpts {
             stash: opts.stash,
             index: opts.index,
+            force: opts.force,
             quiet: opts.quiet,
         };
         self.apply(&apply_opts).await?;
