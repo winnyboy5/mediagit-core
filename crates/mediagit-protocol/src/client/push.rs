@@ -85,8 +85,12 @@ impl ProtocolClient {
 
                 // Upload chunked objects (large files) if any
                 if !chunked_oids.is_empty() {
-                    self.upload_chunked_objects(odb, &chunked_oids, |_, _| {})
+                    let (_chunks, chunk_bytes) = self
+                        .upload_chunked_objects(odb, &chunked_oids, |_, _| {})
                         .await?;
+                    // RP-1: `+=`, not `=` — the metadata pack above is real
+                    // upload too, just a tiny fraction of it.
+                    stats.bytes_uploaded += chunk_bytes as usize;
                 }
             } else {
                 tracing::info!("No new objects to push - remote already has all objects");
@@ -247,9 +251,13 @@ impl ProtocolClient {
                             message: String::new(),
                         });
                     });
-                tokio::time::timeout_at(push_deadline, upload)
+                // RP-1: the `??` discarded the upload's own byte count, so
+                // `bytes_uploaded` kept only the metadata pack size assigned
+                // above and the summary under-reported by orders of magnitude.
+                let (_chunks, chunk_bytes) = tokio::time::timeout_at(push_deadline, upload)
                     .await
                     .map_err(|_| deadline_err())??;
+                stats.bytes_uploaded += chunk_bytes as usize;
             }
         } else {
             tracing::info!("No new objects to push");
@@ -1413,17 +1421,25 @@ impl ProtocolClient {
         odb: &ObjectDatabase,
         chunked_oids: &[Oid],
         mut on_progress: F,
-    ) -> Result<usize>
+    ) -> Result<(usize, u64)>
     where
         F: FnMut(u64, u64),
     {
         use futures::stream::StreamExt;
 
         if chunked_oids.is_empty() {
-            return Ok(0);
+            return Ok((0, 0));
         }
 
         let mut total_chunks_uploaded = 0;
+        // RP-1: chunk payload is the overwhelming majority of a media push, and
+        // it was never counted. `bytes_uploaded` got the metadata pack's size
+        // and nothing else, which is how a 15.53 GiB push reported "↑ 2.71 KiB".
+        // Counted in wire bytes (compressed chunk / pack bytes) to match the
+        // per-chunk and pack paths, and because a rate derived from logical
+        // bytes can exceed link capacity — the same unit error behind the
+        // "747 MiB/s" reading.
+        let mut total_bytes_uploaded: u64 = 0;
         // Concurrency for parallel chunk uploads. buffer_unordered keeps at
         // most N futures active. Default 32 measured 37% faster than 16 on a
         // 2-Mbps upstream to Azure West EU (561s -> 353s for 150 MB cold
@@ -1514,8 +1530,9 @@ impl ProtocolClient {
                         match result {
                             None => break,
                             Some(r) => {
-                                let (chunks, _bytes_up, _bytes_total_delta) = r?;
+                                let (chunks, bytes_up, _bytes_total_delta) = r?;
                                 total_chunks_uploaded += chunks as usize;
+                                total_bytes_uploaded += bytes_up;
                                 let done = bytes_progress.load(Ordering::Relaxed);
                                 let total = bytes_total_progress.load(Ordering::Relaxed);
                                 on_progress(done, total);
@@ -1537,7 +1554,7 @@ impl ProtocolClient {
             if let Some(b) = &_upload_bench {
                 b.summary();
             }
-            return Ok(total_chunks_uploaded);
+            return Ok((total_chunks_uploaded, total_bytes_uploaded));
         }
 
         for oid in chunked_oids.iter() {
@@ -2237,7 +2254,10 @@ impl ProtocolClient {
         if let Some(b) = &_upload_bench {
             b.summary();
         }
-        Ok(total_chunks_uploaded)
+        // Sequential/per-chunk path: `bytes_done` accumulates
+        // `get_compressed_chunk(..).len()`, i.e. the same wire unit the pack
+        // path reports, so the two paths stay comparable.
+        Ok((total_chunks_uploaded, bytes_done))
     }
 
     /// Force-heal remote chunk storage (BUG-RM-3: one corrupt chunk object

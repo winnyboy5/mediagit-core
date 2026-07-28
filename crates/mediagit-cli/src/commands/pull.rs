@@ -330,7 +330,7 @@ impl PullCmd {
 
                 let chunk_pb_ref = chunk_pb.clone();
                 let mut last_bytes_done = 0u64;
-                let chunks_downloaded = client
+                let (chunks_downloaded, chunk_bytes) = client
                     .download_chunked_objects(
                         &odb,
                         &chunked_oids,
@@ -354,6 +354,9 @@ impl PullCmd {
                 chunk_pb.finish_with_message(format!("Downloaded {} chunks", chunks_downloaded));
 
                 stats.objects_received += chunks_downloaded as u64;
+                // RP-2: without this the summary's "↓" never appeared, so a
+                // pull that moved gigabytes reported no transfer at all.
+                stats.bytes_downloaded += chunk_bytes;
 
                 if !self.quiet {
                     println!(

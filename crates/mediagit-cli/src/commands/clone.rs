@@ -394,7 +394,7 @@ url = "{}"
             let chunk_pb = progress.download_bar("Downloading large files", 0);
 
             let chunk_pb_ref = chunk_pb.clone();
-            let chunks_downloaded = client
+            let (chunks_downloaded, chunk_bytes) = client
                 .download_chunked_objects(
                     &odb,
                     &chunked_oids,
@@ -411,6 +411,8 @@ url = "{}"
 
             chunk_pb.finish_with_message(format!("Downloaded {} chunks", chunks_downloaded));
             stats.objects_received += chunks_downloaded as u64;
+            // RP-2: clone reported no download figure either.
+            stats.bytes_downloaded += chunk_bytes;
 
             if self.verbose {
                 println!(

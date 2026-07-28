@@ -448,9 +448,14 @@ impl FetchCmd {
                 download_pb.finish_with_message(format!("Fetched {}", branch_name));
 
                 if !chunked_oids.is_empty() {
-                    let chunks_downloaded = client
+                    let (chunks_downloaded, chunk_bytes) = client
                         .download_chunked_objects(&odb, &chunked_oids, |_, _, _| {})
                         .await?;
+                    // RP-2: fetch keeps its own OperationStats, so it must
+                    // credit the same figure pull and clone do — otherwise the
+                    // one command whose whole job is transferring data is the
+                    // one reporting none.
+                    stats.bytes_downloaded += chunk_bytes;
                     if self.verbose {
                         println!("    Downloaded {} chunks", chunks_downloaded);
                     }

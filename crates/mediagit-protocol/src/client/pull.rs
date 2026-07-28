@@ -357,14 +357,14 @@ impl ProtocolClient {
         odb: &ObjectDatabase,
         chunked_oids: &[Oid],
         mut on_progress: F,
-    ) -> Result<usize>
+    ) -> Result<(usize, u64)>
     where
         F: FnMut(u64, u64, &str),
     {
         use futures::stream::StreamExt;
 
         if chunked_oids.is_empty() {
-            return Ok(0);
+            return Ok((0, 0));
         }
 
         // Concurrency for parallel chunk downloads. Default 24 paired with
@@ -557,6 +557,11 @@ impl ProtocolClient {
         // means peak RAM = concurrent_downloads × max_chunk_size (≤64 KB on
         // Windows) rather than accumulating every result before any disk write.
         let mut total_chunks_downloaded = 0usize;
+        // RP-2: `bytes_downloaded` was declared and displayed but never
+        // assigned anywhere, so pull/clone reported no download figure at all.
+        // Counted in wire bytes (what actually crossed the network) to match
+        // the push side and to keep any derived rate under link capacity.
+        let mut total_net_bytes = 0u64;
         let mut bytes_done: u64 = 0;
 
         for (
@@ -859,6 +864,7 @@ impl ProtocolClient {
                         let (chunk_id, net_bytes) = result?;
                         _dl_pass_a_n += 1;
                         _dl_pass_a_bytes += net_bytes;
+                        total_net_bytes += net_bytes;
                         // ODB store happens inside the closure (B4 refactor).
                         total_chunks_downloaded += 1;
                         bytes_done += chunk_size_map.get(&chunk_id.to_hex()).copied().unwrap_or(0);
@@ -923,6 +929,7 @@ impl ProtocolClient {
                         let (chunk_id, base_id, delta_bytes) = result?;
                         _dl_pass_b_n += 1;
                         _dl_pass_b_bytes += delta_bytes.len() as u64;
+                        total_net_bytes += delta_bytes.len() as u64;
                         if let Err(e) = odb
                             .write_chunk_delta(&chunk_id, &base_id, &delta_bytes)
                             .await
@@ -975,6 +982,6 @@ impl ProtocolClient {
         if let Some(b) = &_download_bench {
             b.summary();
         }
-        Ok(total_chunks_downloaded)
+        Ok((total_chunks_downloaded, total_net_bytes))
     }
 }

@@ -299,7 +299,7 @@ async fn presigned_download_happy_path() {
     let file_oid = Oid::hash(b"e2e-download-test-file");
 
     let protocol = ProtocolClient::new(format!("{}/{}", server_url, repo));
-    let downloaded = protocol
+    let (downloaded, _net_bytes) = protocol
         .download_chunked_objects(&dl_odb, &[file_oid], |_, _, _| {})
         .await
         .expect("download_chunked_objects should succeed");
@@ -387,7 +387,7 @@ async fn presigned_download_fallback_to_proxy() {
     let dl_odb = open_odb(&dl_mg).await;
 
     let protocol = ProtocolClient::new(format!("{}/{}", server_url, repo));
-    let downloaded = protocol
+    let (downloaded, _net_bytes) = protocol
         .download_chunked_objects(&dl_odb, &[file_oid], |_, _, _| {})
         .await
         .expect("proxy-fallback download should succeed");
@@ -496,7 +496,7 @@ async fn presigned_download_403_falls_back_to_proxy() {
     //   2. Attempt direct GET → 403 received → fallback triggered.
     //   3. GET /chunks/{hex} via proxy → chunk bytes returned → ODB written.
     let protocol = ProtocolClient::new(format!("{}/{}", server_url, repo));
-    let downloaded = protocol
+    let (downloaded, _net_bytes) = protocol
         .download_chunked_objects(&dl_odb, &[file_oid], |_, _, _| {})
         .await
         .expect("download should succeed via proxy fallback after 403");

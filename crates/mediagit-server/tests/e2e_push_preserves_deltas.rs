@@ -144,7 +144,7 @@ async fn push_preserves_chunk_deltas_on_server() {
 
     // ── Push ────────────────────────────────────────────────────────────
     let client_odb = open_odb(&client_mediagit).await;
-    let uploaded = client
+    let (uploaded, _bytes) = client
         .upload_chunked_objects(&client_odb, &[blob_oid], |_, _| {})
         .await
         .expect("upload_chunked_objects");
@@ -208,7 +208,7 @@ async fn push_preserves_chunk_deltas_on_server() {
     // ── Idempotence: a second push must not rematerialize (server's
     // /chunks/check now treats delta-form as present, so the client
     // should skip re-uploading everything).
-    let uploaded_again = client
+    let (uploaded_again, _bytes_again) = client
         .upload_chunked_objects(&client_odb, &[blob_oid], |_, _| {})
         .await
         .expect("second upload_chunked_objects");

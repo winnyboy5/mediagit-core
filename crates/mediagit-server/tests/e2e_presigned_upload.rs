@@ -224,7 +224,7 @@ async fn full_push_with_presign_fallback_is_idempotent() {
     let client_url = format!("{}/{}", base_url, repo);
     let protocol = ProtocolClient::new(client_url);
 
-    let uploaded_first = protocol
+    let (uploaded_first, bytes_first) = protocol
         .upload_chunked_objects(&odb, &[file_oid], |_, _| {})
         .await
         .expect("first push should succeed");
@@ -233,9 +233,16 @@ async fn full_push_with_presign_fallback_is_idempotent() {
         uploaded_first, 2,
         "both chunks must be uploaded on first push"
     );
+    // RP-1: chunk bytes must be reported, not silently dropped. This is the
+    // payload of the push — when it was discarded, a multi-GiB push summarised
+    // as a few KiB.
+    assert!(
+        bytes_first > 0,
+        "uploading 2 chunks must report a non-zero byte count"
+    );
 
     // Re-push: server already has both chunks → zero uploads.
-    let uploaded_second = protocol
+    let (uploaded_second, bytes_second) = protocol
         .upload_chunked_objects(&odb, &[file_oid], |_, _| {})
         .await
         .expect("second push should succeed");
@@ -243,5 +250,10 @@ async fn full_push_with_presign_fallback_is_idempotent() {
     assert_eq!(
         uploaded_second, 0,
         "idempotent re-push must upload zero chunks"
+    );
+    assert_eq!(
+        bytes_second, 0,
+        "a re-push that uploads nothing must report zero bytes, not the \
+         size it would have sent"
     );
 }
