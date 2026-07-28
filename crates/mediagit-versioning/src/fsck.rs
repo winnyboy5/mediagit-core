@@ -438,6 +438,37 @@ impl FsckChecker {
         Ok(())
     }
 
+    /// FS-2: which chunks of a chunked object actually fail their hash.
+    ///
+    /// Returns empty for a non-chunked object (no manifest), for an unreadable
+    /// or unparseable manifest, and — deliberately — when every chunk verifies:
+    /// in that case the corruption is in the manifest or the reassembly rather
+    /// than in any one chunk, and the caller falls back to blaming the object
+    /// itself. Never guesses; an empty result means "no chunk was proven bad",
+    /// which is what keeps `repair` from deleting a healthy chunk.
+    async fn identify_corrupt_chunks(&self, oid: &Oid) -> Vec<Oid> {
+        let manifest_key = format!("manifests/{}", oid.to_hex());
+        let Ok(bytes) = self.storage.get(&manifest_key).await else {
+            return Vec::new();
+        };
+        let Ok(manifest) = crate::chunking::ChunkManifest::from_bytes(&bytes) else {
+            return Vec::new();
+        };
+
+        let mut corrupt = Vec::new();
+        for chunk_ref in &manifest.chunks {
+            // A chunk id *is* the BLAKE3 of its content, so the expected digest
+            // needs no external record. `get_chunk` reconstructs deltas, so
+            // this judges the bytes a reader would actually get, not the bytes
+            // on disk.
+            match self.odb.get_chunk(&chunk_ref.id).await {
+                Ok(data) if Oid::hash(&data) == chunk_ref.id => {}
+                _ => corrupt.push(chunk_ref.id),
+            }
+        }
+        corrupt
+    }
+
     /// Verify a single object's integrity
     async fn verify_object(&self, oid: &Oid, report: &mut FsckReport) -> anyhow::Result<()> {
         // Use ObjectDatabase's read method, which handles:
@@ -454,17 +485,52 @@ impl FsckChecker {
                 let error_msg = e.to_string();
 
                 // Classify the error based on error message
-                if error_msg.contains("integrity check failed") {
-                    // Checksum mismatch - object is corrupt
-                    report.add_issue(
-                        FsckIssue::new(
-                            IssueSeverity::Error,
-                            IssueCategory::ChecksumMismatch,
-                            format!("Checksum mismatch: {}", e),
-                        )
-                        .with_oid(*oid)
-                        .repairable(),
-                    );
+                // Match "integrity check", not "integrity check failed": the
+                // ODB phrases these both ways ("Chunk integrity check failed
+                // for ..." but "base chunk {} failed integrity check: ..."),
+                // and the stricter substring silently classified the second
+                // form as InvalidFormat — non-repairable — so chunk corruption
+                // detected via the delta-base guard could never be repaired.
+                if error_msg.contains("integrity check") {
+                    // FS-2: when the corruption is in a *chunk*, the failing
+                    // object here is the manifest that references it. Tagging
+                    // the issue with the manifest OID sent `repair` at the
+                    // wrong object — and since a chunked blob has no loose
+                    // file at its own OID (it lives at `manifests/<oid>`), the
+                    // repair found nothing, blamed "likely packed", and
+                    // reported no repair while the corrupt chunk stayed put.
+                    //
+                    // Identify the offending chunks from the manifest instead
+                    // of parsing them out of the error text: the text is not a
+                    // contract, and one read failure surfaces only the *first*
+                    // bad chunk while a damaged file may have several.
+                    let corrupt_chunks = self.identify_corrupt_chunks(oid).await;
+                    if corrupt_chunks.is_empty() {
+                        report.add_issue(
+                            FsckIssue::new(
+                                IssueSeverity::Error,
+                                IssueCategory::ChecksumMismatch,
+                                format!("Checksum mismatch: {}", e),
+                            )
+                            .with_oid(*oid)
+                            .repairable(),
+                        );
+                    } else {
+                        for chunk_id in corrupt_chunks {
+                            report.add_issue(
+                                FsckIssue::new(
+                                    IssueSeverity::Error,
+                                    IssueCategory::ChecksumMismatch,
+                                    format!(
+                                        "Chunk {} of object {} fails its integrity check",
+                                        chunk_id, oid
+                                    ),
+                                )
+                                .with_oid(chunk_id)
+                                .repairable(),
+                            );
+                        }
+                    }
                 } else if error_msg.contains("not found") || error_msg.contains("No such file") {
                     // Object file is missing
                     report.add_issue(
@@ -1392,12 +1458,52 @@ impl FsckRepair {
         // Use oid.to_hex() - LocalBackend handles "objects/" prefix and sharding
         let key = oid.to_hex();
 
+        // FS-2: a corrupt *chunk* is reported under its own OID, and chunks
+        // live at `chunks/<hex>`, not the loose object path. Handle that first
+        // — otherwise the loose probe below misses, and the operator is told
+        // the chunk is "likely packed" when it is sitting right there.
+        let chunk_key = format!("chunks/{}", oid.to_hex());
+        if self.storage.exists(&chunk_key).await.unwrap_or(false) {
+            if dry_run {
+                info!("[DRY RUN] Would remove corrupted chunk: {}", oid);
+                return Ok(true);
+            }
+            // Removing the bad bytes is what lets the next fetch/pull supply a
+            // good copy; keeping them guarantees every future read fails the
+            // same way. Any delta sidecar routing *to* this id goes with it,
+            // or the chunk would resolve back to the payload just deleted.
+            warn!("Removing corrupted chunk: {}", oid);
+            self.storage.delete(&chunk_key).await?;
+            let _ = self
+                .storage
+                .delete(&format!("chunk-deltas/{}.meta", oid.to_hex()))
+                .await;
+            let _ = self
+                .storage
+                .delete(&format!("chunk-deltas/{}", oid.to_hex()))
+                .await;
+            return Ok(true);
+        }
+
         if !self.storage.exists(&key).await.unwrap_or(false) {
-            warn!(
-                "Cannot remove corrupted object {}: not present as a loose file \
-                 (likely packed); requires a repack, not a targeted delete",
-                oid
-            );
+            // Distinguish the two reasons the loose probe misses. Reporting a
+            // chunked manifest as "likely packed" sent operators to
+            // `gc --repack`, which cannot help.
+            let manifest_key = format!("manifests/{}", oid.to_hex());
+            if self.storage.exists(&manifest_key).await.unwrap_or(false) {
+                warn!(
+                    "Cannot remove corrupted object {}: it is a chunked-blob manifest. \
+                     The damage is in its chunks — re-run fsck so they are reported \
+                     individually, or re-fetch the object.",
+                    oid
+                );
+            } else {
+                warn!(
+                    "Cannot remove corrupted object {}: not present as a loose file \
+                     (likely packed); requires a repack, not a targeted delete",
+                    oid
+                );
+            }
             return Ok(false);
         }
 
@@ -2150,13 +2256,84 @@ mod tests {
             .unwrap();
 
         assert!(
-            report.issues.iter().any(|i| i.oid == Some(blob_oid)
-                && matches!(
-                    i.category,
-                    IssueCategory::ChecksumMismatch | IssueCategory::InvalidFormat
-                )),
+            report.issues.iter().any(|i| matches!(
+                i.category,
+                IssueCategory::ChecksumMismatch | IssueCategory::InvalidFormat
+            )),
             "corrupted chunk content must be detected by fsck, got: {:?}",
             report.issues
+        );
+
+        // FS-2: the issue must name the corrupt *chunk*, not the manifest
+        // that references it. Tagged with `blob_oid`, `repair` looked for a
+        // loose file at the manifest's OID, found none, and reported the
+        // object as "likely packed" — so the corruption was detected and
+        // then never repairable.
+        let victim_id = victim.id;
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.oid == Some(victim_id) && i.repairable),
+            "fsck must report the corrupt chunk {} as a repairable issue, got: {:?}",
+            victim_id,
+            report.issues
+        );
+    }
+
+    /// FS-2: detection is only half of it — the reported issue has to be one
+    /// `repair` can actually act on, and the count it returns has to be real.
+    #[tokio::test]
+    async fn fsck_repair_removes_the_corrupt_chunk_and_counts_it() {
+        use crate::chunking::ChunkStrategy;
+
+        let storage = Arc::new(MockBackend::new());
+        let writer = ObjectDatabase::with_optimizations(
+            storage.clone(),
+            100,
+            Some(ChunkStrategy::Fixed { size: 256 * 1024 }),
+            false,
+            0,
+        );
+
+        let data: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let blob_oid = writer
+            .write_chunked(ObjectType::Blob, &data, "big.bin")
+            .await
+            .expect("write_chunked should succeed");
+
+        let manifest_bytes = storage
+            .get(&format!("manifests/{}", blob_oid.to_hex()))
+            .await
+            .unwrap();
+        let manifest = crate::chunking::ChunkManifest::from_bytes(&manifest_bytes).unwrap();
+        let victim_id = manifest.chunks[0].id;
+        let chunk_key = format!("chunks/{}", victim_id.to_hex());
+
+        let mut bytes = storage.get(&chunk_key).await.unwrap();
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0xFF;
+        storage.put(&chunk_key, &bytes).await.unwrap();
+
+        let checker = FsckChecker::new(storage.clone());
+        let mut report = FsckReport::new();
+        checker
+            .check_objects(&mut report, &FsckOptions::default())
+            .await
+            .unwrap();
+
+        let repair = FsckRepair::new(storage.clone()).with_odb(checker.odb());
+        let repaired = repair.repair(&report, false).await.unwrap();
+
+        assert!(
+            repaired > 0,
+            "a corrupt loose chunk is removable, so repair must not report 0; \
+             reporting 0 here is the '✅ repaired 0 issues' failure"
+        );
+        assert!(
+            !storage.exists(&chunk_key).await.unwrap(),
+            "the corrupt chunk must be gone so a later fetch can supply a good \
+             copy; leaving it means every future read fails identically"
         );
     }
 }

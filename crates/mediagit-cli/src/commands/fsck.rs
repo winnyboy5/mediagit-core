@@ -172,12 +172,35 @@ impl FsckCmd {
                 .await
                 .context("Repair failed")?;
 
+            // FS-2: never show a green check for work that did not happen.
+            // `repaired` counts repairs that actually succeeded, so it can be
+            // less than the number attempted — most often 0, when every issue
+            // was a packed object no targeted delete can touch. The old
+            // unconditional "✅ Successfully repaired 0 issue(s)" read as
+            // success and sent operators away believing the repo was fixed.
+            let attempted = report.repairable_issues().len();
             if !self.quiet {
                 if self.dry_run {
                     println!(
-                        "{} [DRY RUN] Would repair {} issue(s)",
+                        "{} [DRY RUN] Would repair {} of {} issue(s)",
                         style("ℹ").blue().bold(),
-                        repaired
+                        repaired,
+                        attempted
+                    );
+                } else if repaired == 0 && attempted > 0 {
+                    println!(
+                        "{} Repaired 0 of {} issue(s) — no repair succeeded. \
+                         See the warnings above for why each was skipped.",
+                        style("✖").red().bold(),
+                        attempted
+                    );
+                } else if (repaired as usize) < attempted {
+                    println!(
+                        "{} Repaired {} of {} issue(s); {} could not be repaired",
+                        style("⚠").yellow().bold(),
+                        repaired,
+                        attempted,
+                        attempted - repaired as usize
                     );
                 } else {
                     println!(
