@@ -15,8 +15,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_versioning::{
-    CheckoutManager, Commit, LcaFinder, MergeEngine, MergeStrategy, ObjectDatabase, ObjectType,
-    Oid, Ref, RefDatabase, Signature, Tree, resolve_revision,
+    CheckoutManager, Commit, Index, LcaFinder, MergeEngine, MergeStrategy, ObjectDatabase,
+    ObjectType, Oid, Ref, RefDatabase, Signature, Tree, TreeEntry, apply_merge_to_workdir,
+    resolve_revision,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -28,8 +29,12 @@ use super::rebase_state::RebaseState;
 #[derive(Parser, Debug)]
 pub struct RebaseCmd {
     /// Upstream branch to rebase onto
+    /// FOUND-3: optional so the mode flags can be used the way git allows —
+    /// `rebase --continue` / `--abort` / `--skip` take no upstream. It was a
+    /// required positional, which made every one of them impossible to invoke
+    /// without repeating an argument they ignore.
     #[arg(value_name = "UPSTREAM")]
-    pub upstream: String,
+    pub upstream: Option<String>,
 
     /// Branch to rebase (defaults to current)
     #[arg(value_name = "BRANCH")]
@@ -83,6 +88,14 @@ impl RebaseCmd {
             return self.skip_commit(&repo_root).await;
         }
 
+        let upstream = self.upstream.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "missing <UPSTREAM>
+  usage: mediagit rebase <UPSTREAM> [BRANCH]
+                   (--continue, --abort and --skip take no upstream)"
+            )
+        })?;
+
         // Check if rebase already in progress
         if RebaseState::in_progress(&repo_root) {
             anyhow::bail!("A rebase is already in progress. Use --continue, --skip, or --abort.");
@@ -99,7 +112,7 @@ impl RebaseCmd {
         let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
 
         // Resolve upstream branch
-        let upstream_oid = resolve_revision(&self.upstream, &refdb, &odb).await?;
+        let upstream_oid = resolve_revision(upstream, &refdb, &odb).await?;
 
         // Get current HEAD
         let head = refdb.read("HEAD").await?;
@@ -135,7 +148,7 @@ impl RebaseCmd {
             println!(
                 "{} Rebasing onto {}...",
                 style("🔄").cyan().bold(),
-                style(&self.upstream).yellow()
+                style(upstream).yellow()
             );
         }
 
@@ -312,6 +325,67 @@ impl RebaseCmd {
                 .await?;
 
             if merge_result.has_conflicts() {
+                // WT-4: materialise the conflict and record it before stopping.
+                //
+                // This used to bail immediately. Two things went wrong as a
+                // result. Nothing was written to the working tree, so the user
+                // had no markers to resolve — `--continue` could only guess.
+                // And `state.advance()` above had already removed this commit
+                // from `commits_remaining` *and* persisted that, so
+                // `--continue` resumed from the next commit and silently
+                // discarded this one while reporting success.
+                //
+                // `advance()` does record it in `current_commit`, so the
+                // information was there all along; it simply was not written
+                // down as a conflict, and `continue_rebase_process` only ever
+                // read `commits_remaining`.
+                let ours_tree_obj = Tree::read(odb, &ours_tree).await?;
+                let theirs_tree_obj = Tree::read(odb, &original_commit.tree).await?;
+                let mut index = Index::load(repo_root)?;
+
+                apply_merge_to_workdir(
+                    &merge_result,
+                    &ours_tree_obj,
+                    &theirs_tree_obj,
+                    odb,
+                    repo_root,
+                    &mut index,
+                    *original_oid,
+                    state.original_head,
+                )
+                .await
+                .context("Failed to write rebase conflict to the working directory")?;
+
+                index.save(repo_root)?;
+
+                let conflict_paths: Vec<std::path::PathBuf> = merge_result
+                    .conflicts
+                    .iter()
+                    .map(|c| std::path::PathBuf::from(&c.path))
+                    .collect();
+                state.set_conflicts(conflict_paths);
+                state.set_new_parent(new_parent);
+                state.save(repo_root)?;
+
+                println!(
+                    "{} Rebase stopped: conflict replaying {} '{}'",
+                    style("⚠").yellow().bold(),
+                    &original_oid.to_hex()[..7],
+                    original_commit.message.lines().next().unwrap_or("")
+                );
+                for conflict in &merge_result.conflicts {
+                    println!("  {} {}", style("conflict:").red(), conflict.path);
+                }
+                println!(
+                    "  Resolve the file(s), {}, then run {}",
+                    style("mediagit add <file>").cyan(),
+                    style("mediagit rebase --continue").cyan()
+                );
+                println!(
+                    "  Or abandon the rebase with {}",
+                    style("mediagit rebase --abort").cyan()
+                );
+
                 anyhow::bail!(
                     "rebase stopped: conflict replaying commit {} '{}'",
                     &original_oid.to_hex()[..7],
@@ -432,16 +506,33 @@ impl RebaseCmd {
 
         let mut state = RebaseState::load(repo_root)?;
 
-        // Check for unresolved conflicts
-        if state.has_conflicts() {
+        // WT-4: refuse while conflict markers are still in the working tree.
+        //
+        // The index has no stage/unmerged concept (WT-9), so "did the user
+        // actually resolve this?" cannot be answered from the index. Scanning
+        // the recorded conflict files for markers is the honest available
+        // check — it catches the common case of running `--continue` without
+        // editing anything, which previously committed `<<<<<<<` markers as
+        // file content.
+        let unresolved: Vec<String> = if state.has_conflicts() {
+            state
+                .conflict_files
+                .iter()
+                .filter(|rel| {
+                    std::fs::read_to_string(repo_root.join(rel))
+                        .map(|c| c.contains("<<<<<<<") && c.contains(">>>>>>>"))
+                        .unwrap_or(false)
+                })
+                .map(|p| p.display().to_string())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !unresolved.is_empty() {
             anyhow::bail!(
-                "Cannot continue: unresolved conflicts in:\n  {}",
-                state
-                    .conflict_files
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n  ")
+                "Cannot continue: unresolved conflict markers still present in:\n  {}\n\
+                 Resolve the file(s) and `mediagit add` them, then retry.",
+                unresolved.join("\n  ")
             );
         }
 
@@ -460,6 +551,61 @@ impl RebaseCmd {
         let tracked =
             crate::worktree_guard::tracked_paths(repo_root, &odb, Some(&state.original_head))
                 .await?;
+
+        // WT-4: finish the commit that conflicted before moving on.
+        //
+        // `state.current_commit` is the commit we stopped on. Previously this
+        // function went straight to `commits_remaining` — which `advance()`
+        // had already removed it from — so the user's resolved work was
+        // dropped and the rebase reported success. Commit the resolution
+        // under the original commit's identity and message, then continue.
+        if let Some(conflicted_oid) = state.current_commit {
+            let original = Commit::read(&odb, &conflicted_oid).await?;
+
+            let index = Index::load(repo_root)?;
+            let mut tree = Tree::new();
+            for entry in index.entries() {
+                let path_str = entry.path.to_string_lossy();
+                if mediagit_versioning::is_stage_debris_key(&path_str) {
+                    continue;
+                }
+                tree.add_entry(TreeEntry::new(
+                    path_str.to_string(),
+                    mediagit_versioning::FileMode::from_u32(entry.mode)
+                        .unwrap_or(mediagit_versioning::FileMode::Regular),
+                    entry.oid,
+                ));
+            }
+            let tree_oid = tree.write(&odb).await?;
+
+            let resolved = Commit {
+                tree: tree_oid,
+                parents: vec![state.new_parent],
+                author: original.author.clone(),
+                committer: Signature::now(
+                    original.committer.name.clone(),
+                    original.committer.email.clone(),
+                ),
+                message: original.message.clone(),
+            };
+            let resolved_oid = odb
+                .write(ObjectType::Commit, &resolved.serialize()?)
+                .await?;
+
+            state.set_new_parent(resolved_oid);
+            state.current_commit = None;
+            state.set_conflicts(Vec::new());
+            state.save(repo_root)?;
+
+            if !self.quiet {
+                println!(
+                    "  {} resolved {} '{}'",
+                    style("✓").green(),
+                    &conflicted_oid.to_hex()[..7],
+                    original.message.lines().next().unwrap_or("")
+                );
+            }
+        }
 
         // Collect remaining commits to apply
         let remaining_commits = self.load_remaining_commits(&odb, &state).await?;
@@ -592,20 +738,40 @@ mod tests {
     #[test]
     fn parse_basic_upstream() {
         let cmd = parse(&["main"]).unwrap();
-        assert_eq!(cmd.upstream, "main");
+        assert_eq!(cmd.upstream.as_deref(), Some("main"));
         assert!(cmd.branch.is_none());
         assert!(!cmd.abort);
     }
 
+    /// FOUND-3: `upstream` is no longer a required positional, so a bare
+    /// `rebase` now *parses* and is rejected at execution instead. That move
+    /// is the whole point — as a required arg it made `rebase --continue`,
+    /// `--abort` and `--skip` impossible to invoke, since clap demanded an
+    /// upstream those modes ignore.
     #[test]
-    fn parse_missing_upstream_is_error() {
-        assert!(parse(&[]).is_err());
+    fn parse_missing_upstream_is_accepted_and_deferred_to_runtime() {
+        let cmd = parse(&[]).expect("bare `rebase` must parse; the error belongs at run time");
+        assert!(
+            cmd.upstream.is_none(),
+            "no upstream given, so it must be None for execute() to reject"
+        );
+        assert!(!cmd.abort && !cmd.continue_rebase && !cmd.skip);
+    }
+
+    /// The mode flags must parse standalone — the regression FOUND-3 describes.
+    #[test]
+    fn parse_mode_flags_without_upstream() {
+        for flag in ["--continue", "--abort", "--skip"] {
+            let cmd = parse(&[flag])
+                .unwrap_or_else(|e| panic!("`rebase {flag}` must parse without an upstream: {e}"));
+            assert!(cmd.upstream.is_none());
+        }
     }
 
     #[test]
     fn parse_upstream_and_branch() {
         let cmd = parse(&["main", "feature"]).unwrap();
-        assert_eq!(cmd.upstream, "main");
+        assert_eq!(cmd.upstream.as_deref(), Some("main"));
         assert_eq!(cmd.branch.as_deref(), Some("feature"));
     }
 

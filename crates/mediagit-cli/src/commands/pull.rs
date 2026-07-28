@@ -489,7 +489,7 @@ impl PullCmd {
 
                     // Create and execute rebase command
                     let rebase_cmd = RebaseCmd {
-                        upstream: upstream_name,
+                        upstream: Some(upstream_name),
                         branch: None, // Rebase current branch
                         rebase_merges: false,
                         keep_empty: false,

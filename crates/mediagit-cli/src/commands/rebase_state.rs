@@ -154,7 +154,6 @@ impl RebaseState {
     }
 
     /// Mark files as conflicted.
-    #[allow(dead_code)]
     pub fn set_conflicts(&mut self, files: Vec<PathBuf>) {
         self.conflict_files = files;
     }
