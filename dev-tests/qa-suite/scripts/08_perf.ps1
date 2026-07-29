@@ -56,8 +56,15 @@ function Parse-BenchLines([string]$Text) {
   return $records
 }
 
-# fields eligible for baseline regression gating, and which direction is "better"
-$HIGHER_IS_BETTER = @('throughput_mbs', 'util_pct', 'hash_mbs')
+# fields eligible for baseline regression gating, and which direction is "better".
+#
+# `hash_mbs` is deliberately NOT gated: `bench.rs` computes it as
+# `total_bytes / wall_s`, so it is `wall` restated as a rate, not an independent
+# measurement. Gating both made every regression count twice -- a single 500 MB
+# slowdown reported as "wall +75.7%" AND "hash_mbs -42.8%", which are the same
+# fact (366.59 x 1.36/2.39 = 208.6). It is still written to the TSV, where a rate
+# is the easier number to reason about.
+$HIGHER_IS_BETTER = @('throughput_mbs', 'util_pct')
 $LOWER_IS_BETTER  = @('wall', 'active_sum', 'manifest_to_first_byte_ms')
 $GATE_FIELDS = $HIGHER_IS_BETTER + $LOWER_IS_BETTER
 
@@ -66,20 +73,20 @@ $GATE_FIELDS = $HIGHER_IS_BETTER + $LOWER_IS_BETTER
 # machine class is well outside run-to-run noise and is worth a human looking.
 $REGRESSION_PCT = 10.0
 
-# Minimum wall time, in seconds, a record must have taken before a percentage
-# claim about it is allowed to fail the gate.
+# Smallest input size, in MB, whose timings may fail the gate.
 #
-# The 1 MB size class runs `add` in ~20 ms. At that scale a 10% threshold is
-# measuring the Windows scheduler: a 60 ms wall (+200%) and a hash_mbs 20%
-# below baseline are the same 40 ms of jitter, and the campaign reported four
-# such "regressions" on a machine that had just finished 519 s of heavy I/O.
-# Gating on noise is worse than not gating - it trains everyone to ignore the
-# gate, so a real regression at 100 MB reads as more of the same.
+# The 1 MB class runs `add` in ~30 ms; a 10% threshold there measures the Windows
+# scheduler, and the campaign once reported four such "regressions" that were
+# 20-60 ms of jitter. Gating on noise is worse than not gating -- it trains
+# everyone to ignore the gate, so a real regression reads as more of the same.
 #
-# Every field of a record shares its wall clock (throughput and hash rate are
-# derived from it), so the floor is applied per record, not per field. Sub-floor
-# records are still written to the TSV; they just cannot fail the gate.
-$MIN_GATED_WALL_SEC = 0.5
+# Keyed on INPUT SIZE, not measured wall time. A wall-time floor is circular: it
+# uses the measurement to decide whether to trust the measurement, so the same
+# 100 MB workload was gated at 0.50s and skipped at 0.47s on two consecutive
+# runs. Input size is deterministic and decides the same way every time.
+#
+# Sub-floor records are still written to the TSV; they just cannot fail.
+$MIN_GATED_SIZE_MB = 100
 
 $baseRows = $null
 $baselineNote = ""
@@ -136,21 +143,12 @@ foreach ($sizeMB in $sizeClassesMB) {
   # @() guard: with a single bench record PS unrolls the function's return array to the bare hashtable
   $records = @(Parse-BenchLines ($addRes.Out + "`n" + $commitRes.Out))
   foreach ($rec in $records) {
-    # Too short to time reliably -> report the numbers, but do not let them
-    # fail the gate. See $MIN_GATED_WALL_SEC.
-    # Two steps deliberately. Inlining the -replace into the TryParse argument
-    # list makes PowerShell read its comma as an argument separator, so TryParse
-    # gets three arguments and throws -- the harness swallows that, every record
-    # becomes ungatable, and the gate reports PASS having checked nothing. It
-    # did exactly that on run 20260729-202252. The normalisation below uses the
-    # same two-step shape as the value parse further down; that one was right.
-    $wallStr = ("" + $rec['wall']) -replace '[s%]$', ''
-    $recWall = 0.0
-    $gatable = [double]::TryParse($wallStr, [ref]$recWall) -and
-               $recWall -ge $MIN_GATED_WALL_SEC
+    # Too small to support a percentage claim -> report, but do not gate.
+    # See $MIN_GATED_SIZE_MB.
+    $gatable = $sizeMB -ge $MIN_GATED_SIZE_MB
     $recordCount++
     if ($gatable) { $gatedCount++ } else {
-      Write-QaLog $Phase "ungated sizeMB=$sizeMB op=$($rec['op']) wall=$($rec['wall']) below $MIN_GATED_WALL_SEC s floor"
+      Write-QaLog $Phase "ungated sizeMB=$sizeMB op=$($rec['op']) wall=$($rec['wall']) (below ${MIN_GATED_SIZE_MB}MB gating floor)"
     }
     foreach ($field in $rec.Keys) {
       if ($field -eq "op") { continue }
@@ -185,10 +183,10 @@ if ($baseRows) {
   # the outside. Silence is not success.
   if ($gatedCount -eq 0) {
     Write-QaGate $Phase "baseline-regression" $false `
-      "gated 0 of $recordCount records against $Baseline - the gate measured nothing (min-wall=${MIN_GATED_WALL_SEC}s)"
+      "gated 0 of $recordCount records against $Baseline - the gate measured nothing (min-size=${MIN_GATED_SIZE_MB}MB)"
   } else {
   Write-QaGate $Phase "baseline-regression" ($regressionCount -eq 0) `
-    "count=$regressionCount gated=$gatedCount/$recordCount threshold=$REGRESSION_PCT% min-wall=${MIN_GATED_WALL_SEC}s baseline=$Baseline"
+    "count=$regressionCount gated=$gatedCount/$recordCount threshold=$REGRESSION_PCT% min-size=${MIN_GATED_SIZE_MB}MB baseline=$Baseline"
   }
 } else {
   # WARN, not PASS: nothing was compared. Reported as informational so the first
