@@ -5,6 +5,18 @@ Initialize-QaDirs
 
 $ErrorActionPreference = "Continue"
 
+# `commit` refuses an unconfigured author rather than recording
+# "Unknown <unknown@localhost>", because commit authorship cannot be changed
+# afterwards. A real user configures identity once; the harness that simulates
+# one must do the same, or every phase that commits fails at the first commit
+# and every later step cascades off a branch that was never created.
+#
+# Set here rather than per script: ten phases commit, and the four that already
+# set it locally were the only reason this was not caught sooner. A phase that
+# deliberately tests the refusal (12_safety SAFE11) clears these explicitly.
+if (-not $env:MEDIAGIT_AUTHOR_NAME)  { $env:MEDIAGIT_AUTHOR_NAME  = "QA-Suite" }
+if (-not $env:MEDIAGIT_AUTHOR_EMAIL) { $env:MEDIAGIT_AUTHOR_EMAIL = "qa-suite@mediagit.local" }
+
 function Write-QaLog([string]$Phase, [string]$Msg) {
   $line = "{0} [{1}] {2}" -f (Get-Date -Format "HH:mm:ss"), $Phase, $Msg
   $line | Add-Content (Join-Path $QA.Logs "$Phase.log")

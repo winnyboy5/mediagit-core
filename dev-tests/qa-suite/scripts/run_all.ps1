@@ -29,13 +29,13 @@ $ErrorActionPreference = "Stop"
 if (-not $Phases -or $Phases.Count -eq 0) {
   # Default full run. Under SCALE, phase 10 runs after 08 but before 09 so the
   # report aggregates the scale gates.
-  # Phase 11 (safety axis) runs before 09/report so the report aggregates it.
+  # Phase 12 (safety axis) runs before 09/report so the report aggregates it.
   # It is cheap - a handful of tiny sandboxes - and it is the axis whose absence
   # let 17 data-loss defects pass every other phase, so it runs on every tier.
   $Phases = if ($QA.Tier -eq "SCALE") {
-    @("00", "01", "02", "03", "04", "05", "06", "07", "08", "10", "11", "09")
+    @("00", "01", "02", "03", "04", "05", "06", "07", "08", "10", "12", "09")
   } else {
-    @("00", "01", "02", "03", "04", "05", "06", "07", "08", "11", "09")
+    @("00", "01", "02", "03", "04", "05", "06", "07", "08", "12", "09")
   }
 }
 

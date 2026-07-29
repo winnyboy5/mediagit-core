@@ -30,7 +30,12 @@ if (-not $env:GOOGLE_APPLICATION_CREDENTIALS) {
   # credentials_path in the TOML may be relative; consumers (server per-run dirs) have a
   # different cwd, so export an absolute path or GCS pushes 500 on "file not found".
   if ($credPath -and -not [IO.Path]::IsPathRooted($credPath)) {
-    foreach ($base in @($devServer, (Get-Location).Path)) {
+    # Repo root included because these paths are conventionally written
+    # relative to it, while the campaign is launched from scripts\ — without
+    # it GCS silently preflight-SKIPs and a "full 5-backend" campaign quietly
+    # covers four.
+    $repoRoot = Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent
+    foreach ($base in @($devServer, $repoRoot, (Get-Location).Path)) {
       $cand = Join-Path $base $credPath
       if (Test-Path $cand) { $credPath = (Resolve-Path $cand).Path; break }
     }

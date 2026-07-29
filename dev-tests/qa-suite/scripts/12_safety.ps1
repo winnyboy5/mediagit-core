@@ -1,4 +1,9 @@
-# Phase 11 - safety axis. ASCII-only, PS 5.1 compatible.
+# Phase 12 - safety axis. ASCII-only, PS 5.1 compatible.
+#
+# Numbered 12, not 11: 11_memprofile.ps1 already owns that token and is
+# deliberately outside the default run (its RSS sampling is process-wide, so a
+# concurrent campaign ruins its numbers). Sharing the token would have dragged
+# it into every campaign.
 #
 # The axis the harness did not have, and the reason 17 data-loss defects stayed
 # invisible: every other phase asks "did the command succeed?", which a command
@@ -13,14 +18,14 @@
 # comparisons and to any check built from the commit graph, so a checkout that
 # deletes them looks perfectly clean from every angle except this one.
 #
-# Usage: powershell -File 11_safety.ps1 [-Only <substring>]
+# Usage: powershell -File 12_safety.ps1 [-Only <substring>]
 param(
   [string]$Only = ""
 )
 
 . (Join-Path $PSScriptRoot "lib\common.ps1")
 
-$Phase = "11_safety"
+$Phase = "12_safety"
 $env:MEDIAGIT_AUTHOR_NAME = "QA-Suite"
 $env:MEDIAGIT_AUTHOR_EMAIL = "qa-suite@mediagit.local"
 
