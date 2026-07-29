@@ -61,7 +61,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PACK_BYTES x PACK_UPLOAD_CONCURRENCY`. Both knobs, and the concurrency
   multiplier, are now bounded and correct loudly.
 
+### Added
+- **`log --since` / `--until` now filter.** They were declared, demonstrated in
+  `log --help`, and never read, so a date-bounded log returned the entire
+  history. Accepts `YYYY-MM-DD` and RFC 3339; `--until <date>` includes that
+  whole day.
+- **`push --force-with-lease` now does something.** Previously declared and
+  never read, so asking for the safe option performed an ordinary push.
+
 ### Changed
+- **Media-aware merge strategies no longer claim auto-merges they cannot
+  perform** (data integrity). `MergeResult::AutoMerged(Vec<u8>)` means "these
+  bytes are the merged file", and a caller writes them straight to the working
+  tree. The PSD, video, audio and image strategies returned serialized
+  *metadata* there — a successful PSD "auto-merge" produced a JSON document —
+  while logging "auto-merge successful". They were never wired into `merge`, so
+  no user was affected, but wiring them (as was planned) would have replaced a
+  designer's `.psd` with JSON. They now report an informative conflict instead.
+  MediaGit can analyse whether edits overlap; it cannot yet write a merged file
+  back in these formats.
+- **Dead flags now refuse instead of silently doing nothing**: `diff
+  --word-diff`, `show --stat` (use `diff --stat`), `pull --abort` (use `merge
+  --abort`), `pull --no-commit`, `gc --aggressive`. Each is hidden from help and
+  errors when used, following the existing `rebase --rebase-merges` pattern.
+- **`commit` refuses an unconfigured author** rather than recording
+  `Unknown <unknown@localhost>`. Authorship cannot be changed afterwards, and
+  the previous `$USER` fallback was unset on Windows, so most unconfigured
+  commits on that platform were attributed to nobody.
 - **Documentation now matches the code.** The README claimed AES-256-GCM
   encryption at rest as shipped; the module exists and is tested but has no CLI or
   server call sites (the real `[storage] encryption` setting is S3 server-side
