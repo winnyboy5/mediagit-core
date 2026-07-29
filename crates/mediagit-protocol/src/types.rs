@@ -69,8 +69,22 @@ pub struct RefUpdate {
 pub struct RefUpdateRequest {
     /// List of reference updates to apply
     pub updates: Vec<RefUpdate>,
-    /// Force update even if not fast-forward
+    /// Force update even if not fast-forward.
+    ///
+    /// Waives **both** the ancestry requirement and the `old_oid`
+    /// compare-and-swap: "overwrite whatever is there".
     pub force: bool,
+
+    /// Force, but only while the remote ref is still where the client last
+    /// saw it (`old_oid`).
+    ///
+    /// A third mode, not a synonym for `force`. `force` waives the ancestry
+    /// check *and* the CAS; this waives only the ancestry check, so a
+    /// rewritten history can be pushed while a concurrent update by someone
+    /// else is still refused. `#[serde(default)]` so older clients that omit
+    /// the field keep their existing behaviour.
+    #[serde(default)]
+    pub force_with_lease: bool,
 }
 
 /// Result of a single ref update operation
@@ -178,11 +192,24 @@ mod tests {
                 delete: false,
             }],
             force: false,
+            force_with_lease: false,
         };
 
         let json = serde_json::to_string(&request).unwrap();
         let deserialized: RefUpdateRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(request.updates.len(), deserialized.updates.len());
+    }
+
+    /// `force_with_lease` is `#[serde(default)]`, so a request from a client
+    /// built before the field existed must still parse — and must default to
+    /// the old behaviour rather than silently enabling a mode that client
+    /// never asked for.
+    #[test]
+    fn ref_update_request_without_lease_field_parses_as_no_lease() {
+        let legacy = r#"{"updates":[],"force":true}"#;
+        let parsed: RefUpdateRequest = serde_json::from_str(legacy).unwrap();
+        assert!(parsed.force);
+        assert!(!parsed.force_with_lease);
     }
 
     #[test]

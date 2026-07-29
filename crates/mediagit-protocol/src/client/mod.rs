@@ -1066,6 +1066,7 @@ mod tests {
             .update_refs(crate::types::RefUpdateRequest {
                 updates: vec![],
                 force: false,
+                force_with_lease: false,
             })
             .await;
         let headers = captured.lock().await.clone().expect("request was received");

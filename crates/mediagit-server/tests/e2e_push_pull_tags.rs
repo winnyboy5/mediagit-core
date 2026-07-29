@@ -209,6 +209,7 @@ async fn push_and_clone_transfers_tags() {
             .update_refs(RefUpdateRequest {
                 updates: vec![tag_update],
                 force: false,
+                force_with_lease: false,
             })
             .await
             .expect("push tag ref");
@@ -245,6 +246,7 @@ async fn push_and_clone_transfers_tags() {
                 delete: false,
             }],
             force: true,
+            force_with_lease: false,
         })
         .await
         .expect("push tag-meta ref");
@@ -479,6 +481,7 @@ async fn push_positional_tag_name_resolves_to_tag_ref() {
         .update_refs(RefUpdateRequest {
             updates: vec![tag_update],
             force: false,
+            force_with_lease: false,
         })
         .await
         .expect("push tag ref v1.0");
@@ -494,6 +497,7 @@ async fn push_positional_tag_name_resolves_to_tag_ref() {
         .update_refs(RefUpdateRequest {
             updates: vec![annot_update],
             force: false,
+            force_with_lease: false,
         })
         .await
         .expect("push tag ref v2.0-rc");
@@ -520,6 +524,7 @@ async fn push_positional_tag_name_resolves_to_tag_ref() {
                 delete: false,
             }],
             force: true,
+            force_with_lease: false,
         })
         .await
         .expect("push tag-meta ref");

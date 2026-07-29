@@ -268,6 +268,7 @@ impl PushCmd {
             let request = mediagit_protocol::RefUpdateRequest {
                 updates: updates.clone(),
                 force: self.force,
+                force_with_lease: self.force_with_lease,
             };
 
             let response = client.update_refs(request).await?;
@@ -592,62 +593,69 @@ impl PushCmd {
             let upload_pb_cb = Arc::clone(&upload_pb);
 
             let (result, push_stats) = client
-                .push_with_progress(&odb, updates.clone(), self.force, move |progress| {
-                    match progress.phase {
-                        PushPhase::Collecting => {
-                            if let Some(ref sp) = phase_spinner {
-                                let msg = if progress.total > 0 {
-                                    format!(
-                                        "Collecting... {}/{} objects",
-                                        progress.current, progress.total
-                                    )
-                                } else {
-                                    "Collecting objects...".to_string()
-                                };
-                                sp.set_message(msg);
-                            }
-                        }
-                        PushPhase::Packing => {
-                            if let Some(ref sp) = phase_spinner {
-                                let msg = if progress.total > 0 {
-                                    format!(
-                                        "Packing... {}/{} objects",
-                                        progress.current, progress.total
-                                    )
-                                } else {
-                                    "Generating pack...".to_string()
-                                };
-                                sp.set_message(msg);
-                            }
-                        }
-                        PushPhase::Uploading => {
-                            let mut guard = upload_pb_cb.lock().unwrap_or_else(|e| e.into_inner());
-                            if guard.is_none() {
-                                // Finish spinner, create bytes progress bar
+                .push_with_progress(
+                    &odb,
+                    updates.clone(),
+                    self.force,
+                    self.force_with_lease,
+                    move |progress| {
+                        match progress.phase {
+                            PushPhase::Collecting => {
                                 if let Some(ref sp) = phase_spinner {
-                                    sp.finish_and_clear();
+                                    let msg = if progress.total > 0 {
+                                        format!(
+                                            "Collecting... {}/{} objects",
+                                            progress.current, progress.total
+                                        )
+                                    } else {
+                                        "Collecting objects...".to_string()
+                                    };
+                                    sp.set_message(msg);
                                 }
-                                *guard = Some(tracker.push_bar(progress.total));
                             }
-                            if let Some(ref pb) = *guard {
-                                // Grow total dynamically as more objects are checked
-                                if progress.total > pb.length().unwrap_or(0) {
-                                    pb.set_length(progress.total);
+                            PushPhase::Packing => {
+                                if let Some(ref sp) = phase_spinner {
+                                    let msg = if progress.total > 0 {
+                                        format!(
+                                            "Packing... {}/{} objects",
+                                            progress.current, progress.total
+                                        )
+                                    } else {
+                                        "Generating pack...".to_string()
+                                    };
+                                    sp.set_message(msg);
                                 }
-                                // RP-3: pack seals *are* the unit of progress
-                                // here — a pack's bytes are credited when its
-                                // upload is confirmed, so every credit is a
-                                // large jump. Resetting the ETA on each one
-                                // meant the estimate came from a single 64 MiB
-                                // step over near-zero elapsed time, i.e. the
-                                // 747 MiB/s reading. Implausible ETAs are now
-                                // rendered `--` (see progress::format_eta)
-                                // rather than papered over here.
-                                pb.set_position(progress.current);
+                            }
+                            PushPhase::Uploading => {
+                                let mut guard =
+                                    upload_pb_cb.lock().unwrap_or_else(|e| e.into_inner());
+                                if guard.is_none() {
+                                    // Finish spinner, create bytes progress bar
+                                    if let Some(ref sp) = phase_spinner {
+                                        sp.finish_and_clear();
+                                    }
+                                    *guard = Some(tracker.push_bar(progress.total));
+                                }
+                                if let Some(ref pb) = *guard {
+                                    // Grow total dynamically as more objects are checked
+                                    if progress.total > pb.length().unwrap_or(0) {
+                                        pb.set_length(progress.total);
+                                    }
+                                    // RP-3: pack seals *are* the unit of progress
+                                    // here — a pack's bytes are credited when its
+                                    // upload is confirmed, so every credit is a
+                                    // large jump. Resetting the ETA on each one
+                                    // meant the estimate came from a single 64 MiB
+                                    // step over near-zero elapsed time, i.e. the
+                                    // 747 MiB/s reading. Implausible ETAs are now
+                                    // rendered `--` (see progress::format_eta)
+                                    // rather than papered over here.
+                                    pb.set_position(progress.current);
+                                }
                             }
                         }
-                    }
-                })
+                    },
+                )
                 .await?;
 
             // Clean up whichever bar is still active
@@ -700,6 +708,9 @@ impl PushCmd {
                                 let meta_req = mediagit_protocol::RefUpdateRequest {
                                     updates: vec![meta_update],
                                     force: true,
+                                    // Internal sidecar ref, not user-facing;
+                                    // no lease to honour.
+                                    force_with_lease: false,
                                 };
                                 if let Err(e) = client.update_refs(meta_req).await {
                                     tracing::warn!(

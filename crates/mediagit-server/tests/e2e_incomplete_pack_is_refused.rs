@@ -195,3 +195,116 @@ async fn remove_loose_object(repo_dir: &std::path::Path, oid: &Oid) -> bool {
     }
     false
 }
+
+/// UX-3: `--force-with-lease` is a third mode, not a synonym for `--force`.
+///
+/// The flag was declared and demoed in `push --help` but never read, so it
+/// silently did an ordinary push. Implementing it as an alias for `force`
+/// would be worse than leaving it broken: `force` waives the `old_oid`
+/// compare-and-swap as well as the ancestry check, so the user asking for the
+/// *safe* option would get the dangerous one.
+///
+/// The distinction that matters: with a stale lease, force-with-lease must
+/// refuse while plain force proceeds.
+#[tokio::test]
+async fn force_with_lease_refuses_when_the_remote_moved() {
+    use mediagit_protocol::RefUpdateRequest;
+
+    let server_temp = TempDir::new().unwrap();
+    let repos_dir = server_temp.path().join("repos");
+    let server_repo = repos_dir.join("lease-repo");
+    tokio::fs::create_dir_all(server_repo.join(".mediagit/refs/heads"))
+        .await
+        .unwrap();
+    let (base_url, _srv) = start_test_server(repos_dir.clone()).await;
+
+    let local_temp = TempDir::new().unwrap();
+    let local_mediagit = local_temp.path().join(".mediagit");
+    tokio::fs::create_dir_all(local_mediagit.join("refs/heads"))
+        .await
+        .unwrap();
+    let local_odb = open_odb(&local_mediagit).await;
+    let client = ProtocolClient::new(format!("{}/lease-repo", base_url));
+
+    // Three unrelated commits so neither is an ancestor of the other — any
+    // update between them is a non-fast-forward.
+    let mut oids = Vec::new();
+    for i in 0..3 {
+        let blob = local_odb
+            .write(ObjectType::Blob, format!("content {i}").as_bytes())
+            .await
+            .unwrap();
+        let mut tree = Tree::new();
+        tree.add_entry(TreeEntry::new(format!("f{i}.bin"), FileMode::Regular, blob));
+        let tree_oid = tree.write(&local_odb).await.unwrap();
+        let who = Signature::now("Tester".to_string(), "t@test.io".to_string());
+        let commit = Commit::new(tree_oid, who.clone(), who, format!("c{i}"));
+        oids.push(commit.write(&local_odb).await.unwrap());
+    }
+
+    client
+        .push(
+            &local_odb,
+            vec![RefUpdate {
+                name: "refs/heads/main".to_string(),
+                old_oid: None,
+                new_oid: oids[0].to_hex(),
+                delete: false,
+            }],
+            false,
+        )
+        .await
+        .expect("initial push");
+
+    // Someone else moves the branch.
+    client
+        .push(
+            &local_odb,
+            vec![RefUpdate {
+                name: "refs/heads/main".to_string(),
+                old_oid: Some(oids[0].to_hex()),
+                new_oid: oids[1].to_hex(),
+                delete: false,
+            }],
+            true,
+        )
+        .await
+        .expect("concurrent update");
+
+    // Our lease still names oids[0]; the remote is at oids[1].
+    let stale = vec![RefUpdate {
+        name: "refs/heads/main".to_string(),
+        old_oid: Some(oids[0].to_hex()),
+        new_oid: oids[2].to_hex(),
+        delete: false,
+    }];
+
+    let leased = client
+        .update_refs(RefUpdateRequest {
+            updates: stale.clone(),
+            force: true,
+            force_with_lease: true,
+        })
+        .await
+        .expect("request itself should succeed");
+    assert!(
+        !leased.results[0].success,
+        "force-with-lease must refuse a stale lease — otherwise it silently \
+         destroys the concurrent update it exists to protect"
+    );
+
+    // Plain force is the dangerous mode and must still overwrite.
+    let forced = client
+        .update_refs(RefUpdateRequest {
+            updates: stale,
+            force: true,
+            force_with_lease: false,
+        })
+        .await
+        .expect("request itself should succeed");
+    assert!(
+        forced.results[0].success,
+        "plain --force must still overwrite; got: {:?}",
+        forced.results[0].error
+    );
+}

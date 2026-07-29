@@ -98,7 +98,11 @@ impl ProtocolClient {
         }
 
         // Update refs
-        let request = RefUpdateRequest { updates, force };
+        let request = RefUpdateRequest {
+            updates,
+            force,
+            force_with_lease: false,
+        };
         let response = self.update_refs(request).await?;
         Ok((response, stats))
     }
@@ -112,11 +116,16 @@ impl ProtocolClient {
     /// * `on_progress` - Callback function for progress updates
     ///
     /// Returns the ref update response and push statistics
+    /// `force_with_lease` is a third mode, not a synonym for `force`: it
+    /// waives the server's ancestry requirement while keeping the `old_oid`
+    /// compare-and-swap, so a rewritten history can be pushed but a
+    /// concurrent update by someone else is still refused.
     pub async fn push_with_progress<F>(
         &self,
         odb: &ObjectDatabase,
         updates: Vec<RefUpdate>,
         force: bool,
+        force_with_lease: bool,
         on_progress: F,
     ) -> Result<(RefUpdateResponse, PushStats)>
     where
@@ -264,7 +273,11 @@ impl ProtocolClient {
         }
 
         // Update refs
-        let request = RefUpdateRequest { updates, force };
+        let request = RefUpdateRequest {
+            updates,
+            force,
+            force_with_lease,
+        };
         let response = tokio::time::timeout_at(push_deadline, self.update_refs(request))
             .await
             .map_err(|_| deadline_err())??;

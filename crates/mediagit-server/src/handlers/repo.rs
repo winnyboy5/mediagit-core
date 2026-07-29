@@ -631,7 +631,11 @@ pub async fn update_refs(
                 && let Some(current_oid) = &current_ref.oid
             {
                 let current_oid_str = current_oid.to_hex();
-                if &current_oid_str != expected_old && !req.force {
+                // The lease survives `force_with_lease` — that mode exists to keep
+                // this check while dropping the ancestry one. Plain `force` still
+                // bypasses it. Applies to deletes too: "delete it, but only if
+                // nobody else moved it" is the same guarantee.
+                if &current_oid_str != expected_old && (!req.force || req.force_with_lease) {
                     tracing::warn!(
                         "Ref delete rejected for '{}': expected {}, got {}",
                         update.name,
@@ -692,7 +696,11 @@ pub async fn update_refs(
             && let Some(current_oid) = &current_ref.oid
         {
             let current_oid_str = current_oid.to_hex();
-            if &current_oid_str != expected_old && !req.force {
+            // The lease survives `force_with_lease` — that mode exists to keep
+            // this check while dropping the ancestry one. Plain `force` still
+            // bypasses it. Applies to deletes too: "delete it, but only if
+            // nobody else moved it" is the same guarantee.
+            if &current_oid_str != expected_old && (!req.force || req.force_with_lease) {
                 tracing::warn!(
                     "Ref update rejected: expected {}, got {}",
                     expected_old,
@@ -708,9 +716,12 @@ pub async fn update_refs(
             }
         }
 
-        // Ancestry check: when force=false and the ref already exists, require
-        // that the new commit is a descendant of the current tip (fast-forward only).
+        // Ancestry check: when neither force mode is set and the ref already
+        // exists, require that the new commit is a descendant of the current
+        // tip (fast-forward only). `force_with_lease` waives exactly this and
+        // nothing else — the CAS above still applies.
         if !req.force
+            && !req.force_with_lease
             && !update.delete
             && let Ok(current_ref) = refdb.read(&update.name).await
             && let Some(current_oid) = &current_ref.oid

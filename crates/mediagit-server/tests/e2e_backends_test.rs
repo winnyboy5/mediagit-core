@@ -395,6 +395,7 @@ async fn test_local_backend_complete_flow() {
             delete: false,
         }],
         force: false,
+        force_with_lease: false,
     };
 
     let resp = client

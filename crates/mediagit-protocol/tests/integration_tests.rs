@@ -107,6 +107,7 @@ fn test_ref_update_request() {
             delete: false,
         }],
         force: false,
+        force_with_lease: false,
     };
 
     let json = serde_json::to_string(&request).expect("Failed to serialize");
@@ -202,6 +203,7 @@ fn test_multiple_ref_updates() {
             },
         ],
         force: false,
+        force_with_lease: false,
     };
 
     let json = serde_json::to_string(&request).expect("Failed to serialize");
@@ -223,6 +225,7 @@ fn test_force_push() {
             delete: false,
         }],
         force: true,
+        force_with_lease: false,
     };
 
     let json = serde_json::to_string(&request).expect("Failed to serialize");
