@@ -49,6 +49,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   port most likely to face the internet, while startup still logged
   "Rate limiting ENABLED". Both listeners now share one limiter — sharing rather
   than rebuilding, so splitting traffic across ports cannot double the budget.
+- **`logout` did nothing server-side.** It returned 204 while the token kept
+  authenticating for the rest of its life, so a token captured beforehand still
+  worked. Tokens now carry an id and are revoked on logout — the presented
+  token only, so logging out of one machine does not sign the user out
+  everywhere.
+- **Deleting a user left their file locks held forever** by an account that no
+  longer existed: nobody else could take the lock and the only party entitled
+  to release it was gone. Deletion now releases them.
+- **Grants were accepted for users and repositories that do not exist.** A
+  mistyped id read as "access granted" in every listing while the real user
+  still had none.
+- **The bootstrap admin password is no longer a command-line flag.**
+  `--admin-password` put the credential in `ps` output and shell history; it is
+  now read from `MEDIAGIT_ADMIN_PASSWORD`.
 - **Access and refresh tokens were interchangeable**: an access token could refresh
   itself indefinitely (so a session never needed re-authentication) and a 30-day
   refresh token could authenticate requests directly. They now carry a type.
@@ -62,6 +76,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   multiplier, are now bounded and correct loudly.
 
 ### Added
+- **`mediagit config`** — `get`/`set`/`unset`/`list` for repository settings.
+  Previously `init` and `commit` help referenced a `mediagit-config(1)` that did
+  not exist, and with `commit` now requiring a configured author the only
+  remedy on offer was hand-editing TOML.
+- **Accounts can be suspended without being deleted** (`PATCH
+  /auth/users/{id}/disabled`). Deletion was the only way to stop someone signing
+  in, forcing a choice between leaving access open and destroying the record of
+  what they did. Takes effect on the account's next request.
+- **API keys record `last_used`**, so a leaked key is distinguishable from an
+  unused one and stale keys can be found. Recorded at coarse granularity
+  (`MEDIAGIT_APIKEY_LAST_USED_RESOLUTION`, default 300s) to keep a disk write
+  off the authentication hot path.
 - **`log --since` / `--until` now filter.** They were declared, demonstrated in
   `log --help`, and never read, so a date-bounded log returned the entire
   history. Accepts `YYYY-MM-DD` and RFC 3339; `--until <date>` includes that
