@@ -98,10 +98,17 @@ pub async fn get_refs(
         }
     }
 
+    // `api-v1` is the frozen wire contract (Phase 9): the response shapes in
+    // `mediagit_protocol::types`, pinned by `tests/api_contract.rs`. A client
+    // or the 1.0 UI keys off it to tell "this server speaks a protocol I
+    // understand" from "this server is newer than me". Additive changes keep
+    // this token; anything that removes, renames or retypes a field must
+    // introduce `api-v2` rather than redefine v1 under clients' feet.
+    let mut capabilities = vec!["pack-v1".to_string(), "api-v1".to_string()];
+
     // Advertise the repo's CDC seed (if any) so clones inherit matching chunk
     // boundaries. Omitted entirely when the seed is 0 (legacy repos / repos
     // without the field) to keep the capability list unchanged for them.
-    let mut capabilities = vec!["pack-v1".to_string()];
     let cdc_seed = mediagit_config::Config::load(&repo_path)
         .await
         .map(|c| c.cdc_seed)
@@ -149,6 +156,22 @@ async fn reject_streamed(body: axum::body::Body, code: StatusCode) -> StatusCode
 
 /// POST /:repo/objects/pack - Upload a pack file (streaming)
 pub async fn upload_pack(
+    path: Path<String>,
+    state: State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    body: axum::body::Body,
+) -> Result<StatusCode, StatusCode> {
+    // DC-4: record around the whole handler rather than at the success return.
+    // The body has a dozen `?` exits, and instrumenting only the happy path
+    // leaves the error counter at zero — the one number an operator alerts on.
+    let started = std::time::Instant::now();
+    let app = Arc::clone(&state.0);
+    let result = upload_pack_inner(path, state, auth_user, body).await;
+    app.record_op(MetricOp::Store, started, result.is_ok());
+    result
+}
+
+async fn upload_pack_inner(
     Path(repo): Path<String>,
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
@@ -285,6 +308,23 @@ pub async fn upload_pack(
 /// GET /:repo/objects/pack - Download a pack file (after POST to /objects/want)
 /// Requires X-Request-ID header with the request_id from POST /objects/want response.
 pub async fn download_pack(
+    path: Path<String>,
+    state: State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    headers: HeaderMap,
+) -> Result<axum::response::Response<axum::body::Body>, StatusCode> {
+    // DC-4: see `upload_pack`. Measures time to *build* the response; the pack
+    // body streams afterwards, so this is negotiation-and-walk latency, not
+    // transfer time. Conflating the two would make a slow link read as a slow
+    // server.
+    let started = std::time::Instant::now();
+    let app = Arc::clone(&state.0);
+    let result = download_pack_inner(path, state, auth_user, headers).await;
+    app.record_op(MetricOp::Retrieve, started, result.is_ok());
+    result
+}
+
+async fn download_pack_inner(
     Path(repo): Path<String>,
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,

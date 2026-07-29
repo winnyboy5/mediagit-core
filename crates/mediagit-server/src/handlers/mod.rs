@@ -20,6 +20,7 @@ use axum::{
 use bytes::Bytes;
 use futures::stream::StreamExt;
 use mediagit_compression::{Compressor, SmartCompressor};
+use mediagit_metrics::types::OperationType as MetricOp;
 use mediagit_protocol::{
     RefInfo, RefUpdateRequest, RefUpdateResponse, RefUpdateResult, RefsResponse, WantRequest,
     WantResponse,
@@ -95,11 +96,7 @@ fn check_permission(
         if user.permissions.contains(&required_permission.to_string()) {
             Ok(())
         } else {
-            tracing::warn!(
-                "User {} lacks permission: {}",
-                user.user_id,
-                required_permission
-            );
+            deny(&user.user_id, repo, required_permission);
             Err(StatusCode::FORBIDDEN)
         }
     };
@@ -144,15 +141,39 @@ fn check_permission(
     match grants.get(&user.user_id, repo) {
         Some(level) if level >= required_level => Ok(()),
         _ => {
-            tracing::warn!(
-                "User {} lacks {}-level grant on repo {}",
-                user.user_id,
-                required_permission,
-                repo
-            );
+            // The grant-based denial is the other half of DC-8: both refusal
+            // paths must emit the event, or the audit stream shows denials only
+            // on ungranted repos and goes quiet on exactly the repos an
+            // operator configured tenancy for.
+            deny(&user.user_id, repo, required_permission);
             Err(StatusCode::FORBIDDEN)
         }
     }
+}
+
+/// DC-8: record an authorization denial as an audit *event*, not just a log line.
+///
+/// `mediagit-security`'s audit hooks for scanning (`log_invalid_request`,
+/// `log_path_traversal_attempt`, `log_rate_limit_exceeded`) were wired through
+/// `audit_middleware`, but the authn/authz ones appeared only in tests — so on a
+/// multi-tenant server the single event a security team most needs, "who was
+/// refused access to which repository", existed nowhere in the audit stream.
+/// There was a `tracing::warn!` here, which is a developer breadcrumb, not a
+/// structured record anyone can query.
+///
+/// The client IP is not threaded in: `check_permission` has ~40 call sites and
+/// no request context, and plumbing `ConnectInfo` through all of them to
+/// enrich one field is a change out of proportion to it (that extractor has
+/// also already caused one 500 in this codebase). The middleware already
+/// records the IP for the same request, so the two correlate on timestamp.
+fn deny(user_id: &str, repo: &str, required_permission: &str) {
+    tracing::warn!("User {} lacks permission: {}", user_id, required_permission);
+    mediagit_security::audit::log_access_denied(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        Some(user_id.to_string()),
+        repo.to_string(),
+        required_permission,
+    );
 }
 
 /// Per-handler entry: returns the cached storage backend for this repo,

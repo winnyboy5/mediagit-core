@@ -596,6 +596,13 @@ async fn test_list_refs() {
     // Verify response structure
     assert!(!response.refs.is_empty(), "Should have at least one ref");
     assert!(response.capabilities.contains(&"pack-v1".to_string()));
+    // Phase 9: the frozen wire contract must be advertised, or a client (and
+    // the 1.0 UI) has no way to tell an understood protocol from a newer one.
+    assert!(
+        response.capabilities.contains(&"api-v1".to_string()),
+        "server must advertise its API contract version: {:?}",
+        response.capabilities
+    );
 
     // Check for expected refs
     let has_main = response.refs.iter().any(|r| r.name == "refs/heads/main");

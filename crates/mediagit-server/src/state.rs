@@ -18,6 +18,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 
+use mediagit_metrics::MetricsRegistry;
+use mediagit_metrics::types::{OperationType as MetricOp, StorageBackend as MetricBackend};
 use mediagit_security::auth::{ApiKeyAuth, AuthLayer, AuthService, GrantsStore, JwtAuth};
 use mediagit_storage::StorageBackend;
 use mediagit_versioning::ObjectDatabase;
@@ -199,9 +201,34 @@ pub struct AppState {
     /// `download_pack`. Not used for any correctness decision — purely lets
     /// tests and operators observe the short-circuit firing.
     pub bitmap_hits: AtomicU64,
+
+    /// DC-4: the registry `/metrics` serves, when that endpoint is enabled.
+    ///
+    /// `None` when `MEDIAGIT_METRICS_ADDR` is unset, which is the default —
+    /// recording is then a branch on an `Option` and costs nothing.
+    ///
+    /// This exists because the endpoint used to serve **permanent zeros**: the
+    /// registry was constructed inside `main`'s metrics block and moved
+    /// straight into the server, so no handler could reach it and nothing ever
+    /// called a `record_*` method. An operator wiring a dashboard got flatlines
+    /// that looked like a quiet system.
+    ///
+    /// One registry, created once and passed in — not constructed here. Two
+    /// instances would agree only on their zeroes (the AU-9 shape).
+    pub metrics: Option<MetricsRegistry>,
 }
 
 impl AppState {
+    /// Attach the registry `/metrics` serves so handlers can record into it.
+    ///
+    /// Takes the registry rather than making one: the same instance must back
+    /// both the recording side and the scrape endpoint, or the endpoint reports
+    /// a second registry's zeroes while the real counts go nowhere.
+    pub fn with_metrics(mut self, registry: MetricsRegistry) -> Self {
+        self.metrics = Some(registry);
+        self
+    }
+
     /// Create new app state without authentication (for development)
     pub fn new(repos_dir: PathBuf) -> Self {
         Self {
@@ -216,6 +243,7 @@ impl AppState {
             auth_service: None,
             grants: GrantsStore::new(),
             bitmap_hits: AtomicU64::new(0),
+            metrics: None,
         }
     }
 
@@ -251,6 +279,7 @@ impl AppState {
             auth_service: Some(auth_service),
             grants: GrantsStore::new(),
             bitmap_hits: AtomicU64::new(0),
+            metrics: None,
         }
     }
 
@@ -293,6 +322,7 @@ impl AppState {
             auth_service: Some(auth_service),
             grants,
             bitmap_hits: AtomicU64::new(0),
+            metrics: None,
         })
     }
 
@@ -300,6 +330,25 @@ impl AppState {
     pub fn with_presigned_ttl(mut self, secs: u64) -> Self {
         self.presigned_url_ttl_secs = secs;
         self
+    }
+
+    /// Record a completed transfer operation, if `/metrics` is enabled.
+    ///
+    /// One call site shape for every handler so the labels cannot drift: an
+    /// `operation_total` sample labelled success/error, plus the duration.
+    /// `Filesystem` is the backend label because these are the *server's* own
+    /// request-handling metrics — the object store behind them may be S3 or
+    /// Azure, and mislabelling server latency as backend latency would make the
+    /// backend look slow for time it never spent.
+    ///
+    /// A no-op when metrics are off, which is the default.
+    pub fn record_op(&self, op: MetricOp, started: Instant, success: bool) {
+        let Some(m) = self.metrics.as_ref() else {
+            return;
+        };
+        let backend = MetricBackend::Filesystem;
+        m.record_operation_complete(op, backend, success);
+        m.record_operation_duration(op, backend, started.elapsed().as_secs_f64());
     }
 
     /// Check if authentication is enabled

@@ -64,7 +64,7 @@ multi-repo server.
 ## Encryption
 - **At-rest (client-side)**: AES-256-GCM with Argon2id key derivation
 - **At-rest (cloud)**: Cloud provider encryption (SSE-S3, Azure SSE)
-- **In-transit**: TLS 1.3 for network operations
+- **In-transit**: TLS 1.3 on the server's TLS listener, enforced from `min_tls_version` (default 1.3; set 1.2 to also accept TLS 1.2). Client certificates (mTLS) are **not** wired — `TlsConfig` carries the fields but the server has no knob to set them and builds with `with_no_client_auth`.
 
 ## Best Practices
 1. Use IAM roles (avoid hardcoded keys)

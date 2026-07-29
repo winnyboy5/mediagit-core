@@ -162,6 +162,25 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&config.repos_dir)?;
     tracing::info!("Repositories directory: {:?}", config.repos_dir);
 
+    // DC-4: build the registry *before* the state, so the same instance backs
+    // both the recording side (handlers, via AppState) and the scrape endpoint.
+    // It used to be constructed inside the metrics block below and moved
+    // straight into the server, unreachable from any handler — which is why
+    // `/metrics` served permanent zeros. `None` unless the endpoint is enabled,
+    // so the default deployment pays one Option check per request.
+    let metrics_registry: Option<mediagit_metrics::MetricsRegistry> =
+        if std::env::var("MEDIAGIT_METRICS_ADDR").is_ok() {
+            match mediagit_metrics::MetricsRegistry::new() {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    tracing::error!("Failed to create metrics registry: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
     // Setup shared state with optional authentication
     let state = if config.enable_auth {
         // I2: MEDIAGIT_JWT_SECRET env var wins over the TOML `jwt_secret` key
@@ -186,10 +205,11 @@ async fn main() -> Result<()> {
             })?;
         tracing::info!("Authentication is ENABLED");
         let auth_store_dir = config.resolved_auth_store_dir();
-        let state = Arc::new(
+        let state = Arc::new(attach_metrics(
             AppState::new_with_full_auth(config.repos_dir.clone(), jwt_secret, &auth_store_dir)?
                 .with_presigned_ttl(config.presigned_url_ttl_seconds),
-        );
+            metrics_registry.clone(),
+        ));
 
         // AU-3: warn when the defaults compose into "no tenant isolation".
         //
@@ -243,10 +263,11 @@ async fn main() -> Result<()> {
         state
     } else {
         tracing::warn!("Authentication is DISABLED - not suitable for production!");
-        Arc::new(
+        Arc::new(attach_metrics(
             AppState::new(config.repos_dir.clone())
                 .with_presigned_ttl(config.presigned_url_ttl_seconds),
-        )
+            metrics_registry.clone(),
+        ))
     };
 
     // I1: startup probe — validate every repo's storage backend construction
@@ -336,8 +357,10 @@ async fn main() -> Result<()> {
             Some((bind_address, port_str)) if port_str.parse::<u16>().is_ok() => {
                 let port: u16 = port_str.parse().expect("checked above");
                 let bind_address = bind_address.to_string();
-                match mediagit_metrics::MetricsRegistry::new() {
-                    Ok(registry) => {
+                // The *same* registry the handlers record into. Constructing
+                // a second one here is what made this endpoint a liar.
+                match metrics_registry.clone() {
+                    Some(registry) => {
                         let metrics_config = mediagit_metrics::MetricsConfig {
                             port,
                             enabled: true,
@@ -352,8 +375,10 @@ async fn main() -> Result<()> {
                             }
                         });
                     }
-                    Err(e) => {
-                        tracing::error!("Failed to create metrics registry: {}", e);
+                    None => {
+                        tracing::error!(
+                            "Metrics endpoint requested but the registry failed to build;                              /metrics not started"
+                        );
                     }
                 }
             }
@@ -422,7 +447,7 @@ async fn main() -> Result<()> {
             let certificate = tls_config.load_certificate()?;
 
             // Build axum-server RustlsConfig from certificate
-            let rustls_config = build_axum_rustls_config(&certificate)?;
+            let rustls_config = build_axum_rustls_config(&certificate, tls_config.min_tls_version)?;
 
             // SV-1: the HTTPS listener must carry the same rate limiter as
             // HTTP. It used to call `create_router` unconditionally, so
@@ -553,6 +578,7 @@ async fn shutdown_signal() {
 #[cfg(feature = "tls")]
 fn build_axum_rustls_config(
     certificate: &mediagit_security::Certificate,
+    min_version: mediagit_security::TlsVersion,
 ) -> Result<axum_server::tls_rustls::RustlsConfig> {
     use axum_server::tls_rustls::RustlsConfig;
     use rustls::pki_types::pem::PemObject;
@@ -569,8 +595,27 @@ fn build_axum_rustls_config(
     let private_key: PrivateKeyDer<'static> = PrivateKeyDer::from_pem_slice(key_pem)
         .map_err(|e| anyhow::anyhow!("Failed to parse private key: {}", e))?;
 
-    // Build rustls ServerConfig with ALPN to enable HTTP/2 negotiation
-    let mut rustls_config = rustls::ServerConfig::builder()
+    // DC-9: honour `min_tls_version` instead of taking rustls's defaults.
+    //
+    // `TlsConfig::min_tls_version` defaults to 1.3 and four docs promised "TLS
+    // 1.3 for all network operations", but this function built a fresh
+    // `ServerConfig::builder()` and never consulted the setting — and rustls's
+    // default accepts **1.2 as well**. An operator reading the config believed
+    // 1.3-only while the server happily negotiated 1.2: a silent downgrade,
+    // which is worse than an honest 1.2 because nobody goes looking.
+    let versions: &[&rustls::SupportedProtocolVersion] = match min_version {
+        mediagit_security::TlsVersion::V1_3 => &[&rustls::version::TLS13],
+        mediagit_security::TlsVersion::V1_2 => &[&rustls::version::TLS12, &rustls::version::TLS13],
+    };
+    tracing::info!("TLS minimum version: {:?}", min_version);
+
+    // Build rustls ServerConfig with ALPN to enable HTTP/2 negotiation.
+    //
+    // `with_no_client_auth` is deliberate and load-bearing: mTLS
+    // (`TlsConfig::client_ca_path` / `require_client_cert`) is **not wired**,
+    // and there is no operator-facing knob for it in `mediagit-server.toml`.
+    // Reading those fields here without a way to set them would be theatre.
+    let mut rustls_config = rustls::ServerConfig::builder_with_protocol_versions(versions)
         .with_no_client_auth()
         .with_single_cert(certs, private_key)
         .map_err(|e| anyhow::anyhow!("Failed to build TLS config: {}", e))?;
@@ -578,4 +623,19 @@ fn build_axum_rustls_config(
 
     // Convert to axum-server RustlsConfig
     Ok(RustlsConfig::from_config(Arc::new(rustls_config)))
+}
+
+/// Attach the metrics registry to state when `/metrics` is enabled.
+///
+/// A free function rather than inlining `.with_metrics()` at both construction
+/// sites: `with_metrics` takes a registry, not an `Option`, so each call site
+/// would otherwise need its own `if let` around an already-long expression.
+fn attach_metrics(
+    state: mediagit_server::AppState,
+    registry: Option<mediagit_metrics::MetricsRegistry>,
+) -> mediagit_server::AppState {
+    match registry {
+        Some(r) => state.with_metrics(r),
+        None => state,
+    }
 }

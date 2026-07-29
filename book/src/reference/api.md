@@ -4,6 +4,29 @@
 
 `mediagit-server` exposes a REST API over HTTP/1.1 (or HTTP/2 when TLS is enabled).
 
+### Contract version — `api-v1`
+
+`GET /:repo/info/refs` advertises `api-v1` in its `capabilities` array. That
+token names the frozen shape of every request and response body in
+`mediagit_protocol::types`; a client reads it to distinguish "a protocol I
+understand" from "a server newer than me".
+
+The freeze is enforced, not promised: `crates/mediagit-protocol/tests/api_contract.rs`
+serializes a canonical instance of each type and compares it to a literal
+expected document, so a field renamed or retyped in a refactor fails the build.
+
+**What may change inside `api-v1`:** adding a field, and only with
+`#[serde(default)]` so senders that predate it still deserialize. Unknown fields
+are ignored by design, so a newer server may send fields an older client has
+never heard of.
+
+**What may not:** removing, renaming or retyping a field, or making a defaulted
+field required. Those need a new token (`api-v2`) advertised alongside `api-v1`
+during the overlap — never a redefinition of `api-v1` under deployed clients.
+
+Endpoint *additions* do not change the token: a client that has never heard of a
+route simply does not call it.
+
 ### Health
 
 | Method | Path | Auth | Description |
