@@ -114,6 +114,8 @@ function Find-BaselineValue([int]$SizeMB, [string]$Op, [string]$Field) {
 }
 
 $regressionCount = 0
+$gatedCount = 0
+$recordCount = 0
 
 foreach ($sizeMB in $sizeClassesMB) {
   $sb = New-SandboxRepo "perf-$sizeMB" $Phase
@@ -136,10 +138,18 @@ foreach ($sizeMB in $sizeClassesMB) {
   foreach ($rec in $records) {
     # Too short to time reliably -> report the numbers, but do not let them
     # fail the gate. See $MIN_GATED_WALL_SEC.
+    # Two steps deliberately. Inlining the -replace into the TryParse argument
+    # list makes PowerShell read its comma as an argument separator, so TryParse
+    # gets three arguments and throws -- the harness swallows that, every record
+    # becomes ungatable, and the gate reports PASS having checked nothing. It
+    # did exactly that on run 20260729-202252. The normalisation below uses the
+    # same two-step shape as the value parse further down; that one was right.
+    $wallStr = ("" + $rec['wall']) -replace '[s%]$', ''
     $recWall = 0.0
-    $gatable = [double]::TryParse(("" + $rec['wall']) -replace '[s%]$', '', [ref]$recWall) -and
+    $gatable = [double]::TryParse($wallStr, [ref]$recWall) -and
                $recWall -ge $MIN_GATED_WALL_SEC
-    if (-not $gatable) {
+    $recordCount++
+    if ($gatable) { $gatedCount++ } else {
       Write-QaLog $Phase "ungated sizeMB=$sizeMB op=$($rec['op']) wall=$($rec['wall']) below $MIN_GATED_WALL_SEC s floor"
     }
     foreach ($field in $rec.Keys) {
@@ -168,8 +178,18 @@ foreach ($sizeMB in $sizeClassesMB) {
 }
 
 if ($baseRows) {
+  # A gate that measured nothing must not report PASS. The noise floor is
+  # supposed to exclude the *small* size classes, not all of them -- if not one
+  # record cleared it, either the parse broke (as it did once) or the floor is
+  # set above every workload, and both look identical to "no regressions" from
+  # the outside. Silence is not success.
+  if ($gatedCount -eq 0) {
+    Write-QaGate $Phase "baseline-regression" $false `
+      "gated 0 of $recordCount records against $Baseline - the gate measured nothing (min-wall=${MIN_GATED_WALL_SEC}s)"
+  } else {
   Write-QaGate $Phase "baseline-regression" ($regressionCount -eq 0) `
-    "count=$regressionCount threshold=$REGRESSION_PCT% min-wall=${MIN_GATED_WALL_SEC}s baseline=$Baseline"
+    "count=$regressionCount gated=$gatedCount/$recordCount threshold=$REGRESSION_PCT% min-wall=${MIN_GATED_WALL_SEC}s baseline=$Baseline"
+  }
 } else {
   # WARN, not PASS: nothing was compared. Reported as informational so the first
   # campaign can still go green and produce the numbers the baseline is promoted from.
