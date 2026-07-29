@@ -43,7 +43,7 @@ use mediagit_versioning::{
     mediagit commit --dry-run
 
 SEE ALSO:
-    mediagit-add(1), mediagit-status(1), mediagit-log(1), mediagit-amend(1)")]
+    mediagit-add(1), mediagit-status(1), mediagit-log(1), mediagit-reset(1)")]
 pub struct CommitCmd {
     /// Commit message
     #[arg(short, long, value_name = "MESSAGE")]

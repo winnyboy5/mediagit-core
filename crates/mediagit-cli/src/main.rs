@@ -34,8 +34,9 @@ use std::io;
 #[command(name = "mediagit")]
 #[command(version, about = "Git for Media Files - Optimize Your Media Workflows")]
 #[command(
-    long_about = "MediaGit is a specialized version control system designed for media files.
-It optimizes storage for large media assets while maintaining full Git-like workflow compatibility."
+    long_about = "MediaGit is a standalone version control system for media and binary files.
+It adapts familiar version-control workflows to large assets — it is not built on Git and is
+not Git-compatible; repositories, objects and the wire protocol are its own."
 )]
 #[command(propagate_version = true)]
 #[command(author = "MediaGit Contributors")]
@@ -515,6 +516,11 @@ async fn async_main(cli: Cli) -> Result<()> {
             println!("  diff         Show changes between commits");
             println!("  show         Show object information");
             println!("  status       Show working tree status");
+            println!("  reflog       Show history of ref updates");
+            println!("  reset        Reset current HEAD to a given state");
+            println!("  revert       Revert existing commits");
+            println!("  lock         Lock files against concurrent edits");
+            println!("  auth         Manage server credentials");
             println!("  gc           Clean up repository");
             println!("  fsck         Check repository integrity");
             println!("  verify       Verify commits and signatures");
@@ -556,5 +562,50 @@ mod tests {
             "https://example.com:3000",
         ]);
         assert!(cli.is_ok(), "{:?}", cli.err());
+    }
+
+    /// UX-8: bare `mediagit` prints a hand-maintained command list, and it had
+    /// silently fallen five commands behind the actual CLI (`lock`, `auth`,
+    /// `reflog`, `reset`, `revert` were all missing, so a user reading the
+    /// default output would not know they existed).
+    ///
+    /// Adding the missing five fixes today; this test fixes the *class*, by
+    /// failing the moment a new subcommand is added without being listed.
+    /// The listing is `println!`s rather than clap's own help, so nothing
+    /// else keeps the two in step.
+    #[test]
+    fn no_args_listing_covers_every_subcommand() {
+        let source = include_str!("main.rs");
+
+        // The block of `println!("  <name>  ...")` lines in the `None` arm.
+        let listed: Vec<String> = source
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("println!(\"  "))
+            .filter_map(|rest| rest.split_whitespace().next())
+            .map(|name| name.to_string())
+            .collect();
+        assert!(
+            listed.len() > 10,
+            "failed to locate the command listing; got {listed:?}"
+        );
+
+        let cmd = Cli::command();
+        let mut missing = Vec::new();
+        for sub in cmd.get_subcommands() {
+            let name = sub.get_name();
+            // Plumbing, not workflow: `help` and `completions` are clap's,
+            // and `version` is reachable as `--version`, which clap already
+            // advertises in its own help output.
+            if matches!(name, "help" | "completions" | "version") {
+                continue;
+            }
+            if !listed.iter().any(|l| l == name) {
+                missing.push(name.to_string());
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "bare `mediagit` does not list these commands, so users cannot              discover them: {missing:?}"
+        );
     }
 }

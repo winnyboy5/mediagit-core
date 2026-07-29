@@ -42,7 +42,7 @@ use tracing::info;
     mediagit init --initial-branch develop
 
 SEE ALSO:
-    mediagit-config(1), mediagit-clone(1)")]
+    mediagit-remote(1), mediagit-clone(1)")]
 pub struct InitCmd {
     /// Path to initialize (defaults to current directory)
     #[arg(value_name = "PATH")]
