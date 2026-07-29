@@ -44,6 +44,30 @@ pub struct ApiKey {
 
     /// Creation timestamp
     pub created_at: i64,
+
+    /// AU-14: when this key was last accepted, or `None` if never.
+    ///
+    /// Without it a leaked key is indistinguishable from an unused one: an
+    /// operator auditing keys could see what exists but not what is live, so
+    /// stale keys accumulate and a compromised one leaves no trace.
+    ///
+    /// Recorded at coarse granularity on purpose — see `validate_key`.
+    #[serde(default)]
+    pub last_used: Option<i64>,
+}
+
+/// How stale `last_used` may be before a validation records a fresh value.
+///
+/// Recording every use would put a write lock and a disk write on the auth hot
+/// path, so this is deliberately coarse: it answers "is this key in use, and
+/// roughly when last" — which is the audit question — rather than serving as a
+/// request log. Bounded to one write per key per interval.
+fn last_used_resolution_secs() -> i64 {
+    std::env::var("MEDIAGIT_APIKEY_LAST_USED_RESOLUTION")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|n| *n >= 0)
+        .unwrap_or(300)
 }
 
 /// API Key authentication handler, backed in-memory with optional JSONL
@@ -134,6 +158,9 @@ impl ApiKeyAuth {
             name,
             permissions,
             created_at: chrono::Utc::now().timestamp(),
+            // Never used yet — distinguishable from "used long ago", which is
+            // the distinction an audit actually needs.
+            last_used: None,
         };
 
         // Store the key
@@ -156,16 +183,40 @@ impl ApiKeyAuth {
     pub async fn validate_key(&self, key: &str) -> AuthResult<ApiKey> {
         let key_hash = self.hash_key(key);
 
-        let keys = self.keys.read().await;
+        let mut found = {
+            let keys = self.keys.read().await;
+            match keys.values().find(|k| k.key_hash == key_hash) {
+                Some(k) => k.clone(),
+                None => return Err(AuthError::InvalidApiKey),
+            }
+        };
 
-        // Find key by hash
-        for api_key in keys.values() {
-            if api_key.key_hash == key_hash {
-                return Ok(api_key.clone());
+        // AU-14: record use, coarsely. The read lock is released above before
+        // taking the write lock, so validation stays a read for the common
+        // case and only pays for a write once per resolution interval.
+        let now = chrono::Utc::now().timestamp();
+        let due = found
+            .last_used
+            .is_none_or(|prev| now.saturating_sub(prev) >= last_used_resolution_secs());
+
+        if due {
+            {
+                let mut keys = self.keys.write().await;
+                if let Some(stored) = keys.get_mut(&found.id) {
+                    stored.last_used = Some(now);
+                }
+            }
+            found.last_used = Some(now);
+
+            // Best-effort: `last_used` is audit telemetry, and failing an
+            // otherwise valid authentication because a disk write failed
+            // would turn a monitoring feature into an outage.
+            if let Err(e) = self.persist().await {
+                tracing::warn!(key_id = %found.id, error = %e, "failed to persist API key last_used");
             }
         }
 
-        Err(AuthError::InvalidApiKey)
+        Ok(found)
     }
 
     /// Revoke API key by ID
@@ -267,6 +318,76 @@ impl Default for ApiKeyAuth {
 #[allow(clippy::unwrap_used, clippy::await_holding_lock)]
 mod tests {
     use super::*;
+
+    /// AU-14: a leaked key must be distinguishable from an unused one.
+    /// Without `last_used`, an operator auditing keys can see what exists but
+    /// not what is live, so stale keys accumulate and a compromised key leaves
+    /// no trace of having been used.
+    #[tokio::test]
+    async fn validating_a_key_records_that_it_was_used() {
+        let auth = ApiKeyAuth::new();
+        let (plaintext, created) = auth
+            .generate_key("u1".to_string(), "CI".to_string(), vec![])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            created.last_used, None,
+            "a freshly minted key has never been used, which must be              distinguishable from 'used long ago'"
+        );
+
+        let validated = auth.validate_key(&plaintext).await.unwrap();
+        assert!(validated.last_used.is_some(), "use must be recorded");
+
+        // ...and it is durable, not just returned to this caller.
+        let listed = auth.list_user_keys("u1").await;
+        assert!(
+            listed
+                .iter()
+                .any(|k| k.id == created.id && k.last_used.is_some()),
+            "the recorded use must be visible to an audit, not only to the              request that caused it"
+        );
+    }
+
+    /// Recording every single use would put a write lock and a disk write on
+    /// the auth hot path. With the default resolution, repeated validations
+    /// inside the interval must not keep rewriting the timestamp.
+    #[tokio::test]
+    async fn repeated_validation_does_not_rewrite_within_the_resolution() {
+        let auth = ApiKeyAuth::new();
+        let (plaintext, _) = auth
+            .generate_key("u2".to_string(), "CI".to_string(), vec![])
+            .await
+            .unwrap();
+
+        let first = auth.validate_key(&plaintext).await.unwrap().last_used;
+        assert!(first.is_some());
+
+        for _ in 0..5 {
+            let again = auth.validate_key(&plaintext).await.unwrap().last_used;
+            assert_eq!(
+                again, first,
+                "within the resolution interval the timestamp must be left                  alone; rewriting it would mean a lock and a disk write per                  authenticated request"
+            );
+        }
+    }
+
+    /// An invalid key must not be recorded as used, or the audit trail
+    /// reports activity for keys that never authenticated.
+    #[tokio::test]
+    async fn a_rejected_key_records_nothing() {
+        let auth = ApiKeyAuth::new();
+        let (_plaintext, created) = auth
+            .generate_key("u3".to_string(), "CI".to_string(), vec![])
+            .await
+            .unwrap();
+
+        assert!(auth.validate_key("mg_not_a_real_key").await.is_err());
+
+        let listed = auth.list_user_keys("u3").await;
+        let stored = listed.iter().find(|k| k.id == created.id).unwrap();
+        assert_eq!(stored.last_used, None);
+    }
 
     #[tokio::test]
     async fn test_generate_and_validate_key() {
