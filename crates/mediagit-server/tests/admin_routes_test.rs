@@ -38,8 +38,12 @@ use tower::util::ServiceExt;
 /// token for a deleted account. These helpers previously minted tokens out of
 /// thin air, which no longer reflects how authentication works.
 async fn test_state_with_tokens() -> (Arc<AppState>, String, String) {
-    let temp_dir = TempDir::new().unwrap();
-    let repos_dir = temp_dir.path().to_path_buf();
+    // The TempDir used to be dropped as this function returned, leaving
+    // `repos_dir` pointing at a deleted directory. That went unnoticed while
+    // nothing here touched the filesystem; AU-6's referential checks do, so
+    // the fixture now keeps a real directory and a real repository in it.
+    let repos_dir = TempDir::new().unwrap().keep();
+    std::fs::create_dir_all(repos_dir.join("repoA")).unwrap();
     let api_key_auth = Arc::new(ApiKeyAuth::new());
     let jwt_secret = "test-secret-key-for-admin-tests";
 
@@ -48,6 +52,8 @@ async fn test_state_with_tokens() -> (Arc<AppState>, String, String) {
     for (id, role) in [
         ("admin-user", mediagit_security::auth::user::Role::Admin),
         ("write-user", mediagit_security::auth::user::Role::Write),
+        // Grants now require the subject to exist (AU-6).
+        ("target-user", mediagit_security::auth::user::Role::Read),
     ] {
         let user = mediagit_security::auth::User::new(
             id.to_string(),
@@ -1087,5 +1093,104 @@ async fn demoted_user_loses_admin_rights_immediately() {
         resp.status(),
         StatusCode::FORBIDDEN,
         "demoted admin retained admin access via a stale token"
+    );
+}
+
+/// AU-6: a grant naming a user who does not exist must be refused.
+///
+/// It was accepted, which reads as "access granted" in every listing while the
+/// real user still has none — a mistyped id surfaces only when someone is
+/// unexpectedly refused, long after the admin moved on.
+#[tokio::test]
+async fn grant_for_unknown_user_is_refused() {
+    let (state, admin, _write) = test_state_with_tokens().await;
+    let app = create_router(Arc::clone(&state));
+
+    let resp = app
+        .oneshot(post_json(
+            "/auth/users/no-such-user/grants",
+            Some(&admin),
+            r#"{"repo":"repoA","level":"write"}"#,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        state.grants.get("no-such-user", "repoA"),
+        None,
+        "a refused request must not have recorded anything"
+    );
+}
+
+/// AU-6: likewise for a repository that does not exist — dead config that can
+/// silently become live if a repo is later created under that name.
+#[tokio::test]
+async fn grant_for_unknown_repo_is_refused() {
+    let (state, admin, _write) = test_state_with_tokens().await;
+    let app = create_router(Arc::clone(&state));
+
+    let resp = app
+        .oneshot(post_json(
+            "/auth/users/target-user/grants",
+            Some(&admin),
+            r#"{"repo":"no-such-repo","level":"write"}"#,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(state.grants.get("target-user", "no-such-repo"), None);
+}
+
+/// AU-17: deleting a user must release their file locks.
+///
+/// Locks record an owner id and nothing released them on deletion, so the
+/// paths stayed locked by an account that no longer existed: nobody else could
+/// take the lock, and the only party entitled to release it was gone.
+#[tokio::test]
+async fn deleting_a_user_releases_their_locks() {
+    let (state, admin, _write) = test_state_with_tokens().await;
+    let repo_path = state.repos_dir.join("repoA");
+
+    let created = mediagit_server::locks::create_lock(
+        &state,
+        "repoA",
+        &repo_path,
+        "art/hero.psd".to_string(),
+        "target-user".to_string(),
+    )
+    .await
+    .expect("lock creation should succeed");
+    assert!(matches!(
+        created,
+        mediagit_server::locks::CreateLockOutcome::Created(_)
+    ));
+
+    let app = create_router(Arc::clone(&state));
+    let resp = app
+        .oneshot(delete_req("/auth/users/target-user", Some(&admin), None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // The path must be lockable again — the practical consequence, rather
+    // than merely checking an internal map.
+    let relock = mediagit_server::locks::create_lock(
+        &state,
+        "repoA",
+        &repo_path,
+        "art/hero.psd".to_string(),
+        "someone-else".to_string(),
+    )
+    .await
+    .expect("re-lock should succeed");
+    assert!(
+        matches!(
+            relock,
+            mediagit_server::locks::CreateLockOutcome::Created(_)
+        ),
+        "the deleted user's lock must be gone, otherwise the path is held \
+         forever by an account that no longer exists"
     );
 }

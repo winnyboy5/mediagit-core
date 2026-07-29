@@ -146,6 +146,15 @@ pub async fn delete_user(
         }
     }
 
+    // AU-17: release the user's file locks. Without this, deleting a user
+    // leaves every path they had locked held forever by an account that no
+    // longer exists — nobody else can take the lock, and the only party
+    // entitled to release it is gone.
+    let released = crate::locks::release_user_locks(&state, &id).await;
+    if released > 0 {
+        tracing::info!(user_id = %id, released, "released file locks for deleted user");
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -163,12 +172,30 @@ pub async fn upsert_grant(
         &state.grants,
         "",
     )?;
+    // AU-6: refuse grants that reference something which does not exist.
+    //
+    // Both were previously accepted. A mistyped user id recorded a grant for
+    // nobody, which reads as "access granted" in every listing while the real
+    // user still has none — the failure only surfaces when they are refused,
+    // and the admin has already moved on. A mistyped repo name is dead config
+    // that can silently become live if a repo is later created with that name.
+    //
+    // Checked before any mutation so a rejected request changes nothing.
+    let auth_service = state.auth_service().ok_or(StatusCode::NOT_FOUND)?;
+    if auth_service.credentials_store.get_user(&id).await.is_err() {
+        tracing::warn!(user_id = %id, "grant refused: no such user");
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let repo_path = state.repos_dir.join(&req.repo);
+    if !repo_path.is_dir() {
+        tracing::warn!(repo = %req.repo, "grant refused: no such repository");
+        return Err(StatusCode::NOT_FOUND);
+    }
+
     // AU-5: bind the grant to the repo's durable identity, so it stops
     // applying if this repo is later deleted and another created under the
-    // same name. Best-effort: a repo that does not exist yet (or whose config
-    // is unreadable) records an unbound, name-only grant — the pre-AU-5
-    // behaviour — rather than failing the request.
-    let repo_path = state.repos_dir.join(&req.repo);
+    // same name.
     let repo_id = match mediagit_config::Config::load(&repo_path).await {
         Ok(cfg) => cfg.repo_id.clone(),
         Err(_) => None,

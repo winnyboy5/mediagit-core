@@ -254,6 +254,70 @@ pub async fn delete_lock(
     .await
 }
 
+/// AU-17: release every lock held by `user_id`, across all repositories.
+///
+/// Locks record their owner as a user id, and nothing released them when that
+/// user was deleted. The paths stayed locked by an account that no longer
+/// existed: no one else could take the lock, and the only party entitled to
+/// release it was gone. That is a data-availability failure created by an
+/// ordinary administrative action.
+///
+/// Sweeps every repository because locks are stored per repo — there is no
+/// index from user to lock, and building one to serve a rare admin operation
+/// would put maintenance on every lock write instead.
+///
+/// Returns the number of locks released. Best-effort per repository: a repo
+/// whose lock file cannot be rewritten is logged and skipped rather than
+/// aborting the sweep, so one bad repo cannot strand every other repo's locks.
+pub async fn release_user_locks(state: &AppState, user_id: &str) -> usize {
+    let mut released = 0usize;
+
+    let Ok(entries) = std::fs::read_dir(&state.repos_dir) else {
+        return 0;
+    };
+
+    for entry in entries.flatten() {
+        let repo_path = entry.path();
+        if !repo_path.is_dir() {
+            continue;
+        }
+        let Some(repo) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+
+        let owner = user_id.to_string();
+        match with_repo_locks_write(state, &repo, &repo_path, move |map| {
+            let doomed: Vec<String> = map
+                .iter()
+                .filter(|(_, r)| r.owner == owner)
+                .map(|(path, _)| path.clone())
+                .collect();
+            for path in &doomed {
+                map.remove(path);
+            }
+            doomed.len()
+        })
+        .await
+        {
+            Ok(n) => {
+                if n > 0 {
+                    tracing::info!(repo = %repo, user_id, released = n, "released locks for deleted user");
+                }
+                released += n;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    repo = %repo,
+                    user_id,
+                    "could not release locks in this repository; its locks remain held"
+                );
+            }
+        }
+    }
+
+    released
+}
+
 // ============================================================================
 // B3 — push enforcement
 // ============================================================================
