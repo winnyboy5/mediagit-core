@@ -561,7 +561,10 @@ mod tests {
             format!("{id}@example.com"),
             Role::Write,
         );
-        store.register_user(user, "password123").await.unwrap();
+        store
+            .register_user(user, "render farm quiet hum")
+            .await
+            .unwrap();
         store
     }
 
@@ -573,7 +576,7 @@ mod tests {
 
         assert!(
             store
-                .authenticate("u1@example.com", "password123")
+                .authenticate("u1@example.com", "render farm quiet hum")
                 .await
                 .is_ok(),
             "precondition: the account works before being disabled"
@@ -582,7 +585,7 @@ mod tests {
         store.set_disabled("u1", true).await.unwrap();
         assert!(
             store
-                .authenticate("u1@example.com", "password123")
+                .authenticate("u1@example.com", "render farm quiet hum")
                 .await
                 .is_err(),
             "a disabled account must not authenticate"
@@ -591,7 +594,7 @@ mod tests {
         store.set_disabled("u1", false).await.unwrap();
         assert!(
             store
-                .authenticate("u1@example.com", "password123")
+                .authenticate("u1@example.com", "render farm quiet hum")
                 .await
                 .is_ok(),
             "re-enabling must restore the account exactly; disable is not delete"
@@ -627,7 +630,7 @@ mod tests {
         store.set_disabled("u3", true).await.unwrap();
 
         let right = store
-            .authenticate("u3@example.com", "password123")
+            .authenticate("u3@example.com", "render farm quiet hum")
             .await
             .unwrap_err()
             .to_string();
@@ -655,16 +658,22 @@ mod tests {
         );
 
         // Register user
-        let result = store.register_user(user.clone(), "password123").await;
+        let result = store
+            .register_user(user.clone(), "render farm quiet hum")
+            .await;
         assert!(result.is_ok());
 
         // Authenticate with email
-        let auth_user = store.authenticate("test@example.com", "password123").await;
+        let auth_user = store
+            .authenticate("test@example.com", "render farm quiet hum")
+            .await;
         assert!(auth_user.is_ok());
         assert_eq!(auth_user.unwrap().email, "test@example.com");
 
         // Authenticate with username
-        let auth_user = store.authenticate("testuser", "password123").await;
+        let auth_user = store
+            .authenticate("testuser", "render farm quiet hum")
+            .await;
         assert!(auth_user.is_ok());
         assert_eq!(auth_user.unwrap().username, "testuser");
     }
@@ -679,7 +688,10 @@ mod tests {
             Role::Write,
         );
 
-        store.register_user(user, "password123").await.unwrap();
+        store
+            .register_user(user, "render farm quiet hum")
+            .await
+            .unwrap();
 
         // Try wrong password
         let result = store
@@ -704,7 +716,10 @@ mod tests {
             Role::Write,
         );
 
-        store.register_user(user1, "password123").await.unwrap();
+        store
+            .register_user(user1, "render farm quiet hum")
+            .await
+            .unwrap();
 
         // Try to register with same email
         let result = store.register_user(user2, "password456").await;
@@ -746,7 +761,10 @@ mod tests {
             "test@example.com".to_string(),
             Role::Write,
         );
-        store.register_user(user, "password123").await.unwrap();
+        store
+            .register_user(user, "render farm quiet hum")
+            .await
+            .unwrap();
 
         store.set_role("user1", Role::Admin).await.unwrap();
         assert_eq!(store.get_user("user1").await.unwrap().role, Role::Admin);
@@ -774,7 +792,7 @@ mod tests {
                     "a@example.com".to_string(),
                     Role::Admin,
                 ),
-                "password123",
+                "render farm quiet hum",
             )
             .await
             .unwrap();
@@ -786,7 +804,7 @@ mod tests {
                     "b@example.com".to_string(),
                     Role::Write,
                 ),
-                "password123",
+                "render farm quiet hum",
             )
             .await
             .unwrap();
@@ -804,7 +822,7 @@ mod tests {
                 "user1".to_string(),
                 "testuser".to_string(),
                 "test@example.com".to_string(),
-                "password123",
+                "render farm quiet hum",
                 Role::Admin,
             )
             .await
@@ -822,9 +840,17 @@ mod tests {
             "test@example.com".to_string(),
             Role::Write,
         );
-        store.register_user(user, "password123").await.unwrap();
+        store
+            .register_user(user, "render farm quiet hum")
+            .await
+            .unwrap();
 
-        assert!(store.verify_password("user1", "password123").await.unwrap());
+        assert!(
+            store
+                .verify_password("user1", "render farm quiet hum")
+                .await
+                .unwrap()
+        );
         assert!(
             !store
                 .verify_password("user1", "wrongpassword")
@@ -833,7 +859,7 @@ mod tests {
         );
         assert!(
             store
-                .verify_password("nobody", "password123")
+                .verify_password("nobody", "render farm quiet hum")
                 .await
                 .is_err()
         );
@@ -849,7 +875,10 @@ mod tests {
             Role::Write,
         );
 
-        store.register_user(user, "password123").await.unwrap();
+        store
+            .register_user(user, "render farm quiet hum")
+            .await
+            .unwrap();
         assert_eq!(store.count_users().await, 1);
 
         // Delete user
@@ -857,7 +886,9 @@ mod tests {
         assert_eq!(store.count_users().await, 0);
 
         // Authentication should fail
-        let result = store.authenticate("test@example.com", "password123").await;
+        let result = store
+            .authenticate("test@example.com", "render farm quiet hum")
+            .await;
         assert!(result.is_err());
     }
 
@@ -894,13 +925,18 @@ mod tests {
             "test@example.com".to_string(),
             Role::Write,
         );
-        store.register_user(user, "password123").await.unwrap();
+        store
+            .register_user(user, "render farm quiet hum")
+            .await
+            .unwrap();
 
         assert!(tmp.path().join("users.jsonl").exists());
 
         // Fresh store from the same dir simulates a server restart.
         let store2 = CredentialsStore::load_or_new(tmp.path()).unwrap();
-        let auth_user = store2.authenticate("test@example.com", "password123").await;
+        let auth_user = store2
+            .authenticate("test@example.com", "render farm quiet hum")
+            .await;
         assert!(auth_user.is_ok());
         assert_eq!(store2.count_users().await, 1);
     }
@@ -940,7 +976,10 @@ mod tests {
             "test@example.com".to_string(),
             Role::Write,
         );
-        store.register_user(user, "password123").await.unwrap();
+        store
+            .register_user(user, "render farm quiet hum")
+            .await
+            .unwrap();
         mediagit_test_utils::remove_var("MEDIAGIT_AUTH_PERSIST");
 
         assert!(!tmp.path().join("users.jsonl").exists());

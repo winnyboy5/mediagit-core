@@ -65,7 +65,7 @@ async fn test_state_with_tokens() -> (Arc<AppState>, String, String) {
             .auth_service()
             .unwrap()
             .credentials_store
-            .register_user(user, "password123")
+            .register_user(user, "render farm quiet hum")
             .await
             .unwrap();
     }
@@ -157,7 +157,7 @@ async fn register_role_user(
         .auth_service()
         .unwrap()
         .credentials_store
-        .register_user(user, "password123")
+        .register_user(user, "render farm quiet hum")
         .await
         .unwrap();
 }
@@ -320,7 +320,7 @@ async fn delete_user_cascades_grants() {
         .auth_service()
         .unwrap()
         .credentials_store
-        .register_user(user, "password123")
+        .register_user(user, "render farm quiet hum")
         .await
         .unwrap();
     state
@@ -366,7 +366,7 @@ async fn list_users_returns_id_username_role_no_secrets() {
         .auth_service()
         .unwrap()
         .credentials_store
-        .register_user(user, "password123")
+        .register_user(user, "render farm quiet hum")
         .await
         .unwrap();
 
@@ -424,7 +424,7 @@ async fn revoke_key_removes_auth() {
                 "keyed@example.com".to_string(),
                 mediagit_security::auth::user::Role::Read,
             ),
-            "password123",
+            "render farm quiet hum",
         )
         .await
         .unwrap();
@@ -768,7 +768,7 @@ async fn change_password_rejects_wrong_current_password() {
         .oneshot(post_json(
             "/auth/password",
             Some(&write),
-            r#"{"current_password":"wrongpw","new_password":"newpassword123"}"#,
+            r#"{"current_password":"wrongpw","new_password":"newrender farm quiet hum"}"#,
         ))
         .await
         .unwrap();
@@ -791,7 +791,7 @@ async fn change_password_succeeds_with_correct_current_password() {
         .oneshot(post_json(
             "/auth/password",
             Some(&write),
-            r#"{"current_password":"password123","new_password":"newpassword123"}"#,
+            r#"{"current_password":"render farm quiet hum","new_password":"newrender farm quiet hum"}"#,
         ))
         .await
         .unwrap();
@@ -802,14 +802,14 @@ async fn change_password_succeeds_with_correct_current_password() {
     assert!(
         auth_service
             .credentials_store
-            .authenticate("writer", "password123")
+            .authenticate("writer", "render farm quiet hum")
             .await
             .is_err()
     );
     assert!(
         auth_service
             .credentials_store
-            .authenticate("writer", "newpassword123")
+            .authenticate("writer", "newrender farm quiet hum")
             .await
             .is_ok()
     );
@@ -833,7 +833,7 @@ async fn write_user_cannot_reset_others_password() {
         .oneshot(patch_json(
             "/auth/users/victim3/password",
             Some(&write),
-            r#"{"new_password":"newpassword123"}"#,
+            r#"{"new_password":"newrender farm quiet hum"}"#,
         ))
         .await
         .unwrap();
@@ -849,7 +849,7 @@ async fn write_user_cannot_create_users() {
         .oneshot(post_json(
             "/auth/users",
             Some(&write),
-            r#"{"username":"newu","email":"newu@example.com","password":"password123","role":"Write"}"#,
+            r#"{"username":"newu","email":"newu@example.com","password":"render farm quiet hum","role":"Write"}"#,
         ))
         .await
         .unwrap();
@@ -867,7 +867,7 @@ async fn admin_create_user_succeeds() {
         .oneshot(post_json(
             "/auth/users",
             Some(&admin),
-            r#"{"username":"created","email":"created@example.com","password":"password123","role":"Read"}"#,
+            r#"{"username":"created","email":"created@example.com","password":"render farm quiet hum","role":"Read"}"#,
         ))
         .await
         .unwrap();
@@ -985,7 +985,7 @@ async fn delete_user_revokes_api_keys() {
         .auth_service()
         .unwrap()
         .credentials_store
-        .register_user(user, "password123")
+        .register_user(user, "render farm quiet hum")
         .await
         .unwrap();
 

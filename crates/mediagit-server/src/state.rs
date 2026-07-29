@@ -346,7 +346,7 @@ mod tests {
             .auth_service()
             .unwrap()
             .credentials_store
-            .register_user(user, "password123")
+            .register_user(user, "render farm quiet hum")
             .await
             .unwrap();
 
@@ -361,7 +361,7 @@ mod tests {
             .auth_service()
             .unwrap()
             .credentials_store
-            .authenticate("alice@example.com", "password123")
+            .authenticate("alice@example.com", "render farm quiet hum")
             .await;
         assert!(login.is_ok());
     }

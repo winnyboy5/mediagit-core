@@ -158,7 +158,7 @@ mod tests {
         let request_body = json!({
             "username": "testuser",
             "email": "test@example.com",
-            "password": "password123"
+            "password": "render farm quiet hum"
         });
 
         let response = app
@@ -185,7 +185,7 @@ mod tests {
         let register_body = json!({
             "username": "testuser",
             "email": "test@example.com",
-            "password": "password123"
+            "password": "render farm quiet hum"
         });
 
         app.clone()
@@ -203,7 +203,7 @@ mod tests {
         // Now login
         let login_body = json!({
             "identifier": "test@example.com",
-            "password": "password123"
+            "password": "render farm quiet hum"
         });
 
         let response = app

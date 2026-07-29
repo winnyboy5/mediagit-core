@@ -35,7 +35,7 @@ async fn test_complete_auth_flow() {
     let register_body = json!({
         "username": "testuser",
         "email": "test@example.com",
-        "password": "securepassword123"
+        "password": "securerender farm quiet hum"
     });
 
     let response = app
@@ -56,7 +56,7 @@ async fn test_complete_auth_flow() {
     // 2. Login with the registered user
     let login_body = json!({
         "identifier": "test@example.com",
-        "password": "securepassword123"
+        "password": "securerender farm quiet hum"
     });
 
     let response = app
@@ -194,7 +194,7 @@ async fn test_duplicate_registration() {
     let register_body = json!({
         "username": "duplicate",
         "email": "duplicate@example.com",
-        "password": "password123"
+        "password": "render farm quiet hum"
     });
 
     let response = app

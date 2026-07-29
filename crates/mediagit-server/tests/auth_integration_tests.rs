@@ -64,7 +64,7 @@ async fn create_test_state_with_auth() -> (Arc<AppState>, String, String) {
             .auth_service()
             .unwrap()
             .credentials_store
-            .register_user(user, "password123")
+            .register_user(user, "render farm quiet hum")
             .await
             .unwrap();
     }
@@ -161,7 +161,7 @@ async fn test_authenticated_request_with_api_key_succeeds() {
                 "test-user@example.com".to_string(),
                 mediagit_security::auth::user::Role::Read,
             ),
-            "password123",
+            "render farm quiet hum",
         )
         .await
         .unwrap();
@@ -439,7 +439,7 @@ async fn test_mixed_auth_methods_jwt_preferred() {
                 "test-user-2@example.com".to_string(),
                 mediagit_security::auth::user::Role::Admin,
             ),
-            "password123",
+            "render farm quiet hum",
         )
         .await
         .unwrap();

@@ -155,6 +155,66 @@ pub struct ErrorResponse {
 /// Password strength rule shared by registration, self-service password
 /// change, and admin password reset, so the minimum-length rule cannot
 /// drift between call sites.
+/// bcrypt hashes at most 72 bytes and **silently discards the rest**.
+///
+/// Two passphrases sharing a 72-byte prefix are therefore the same password,
+/// and a user adopting a long passphrase — the behaviour every modern guide
+/// encourages — is protected by only its first 72 bytes without being told.
+/// Rejecting is better than truncating: the user picks a different password
+/// instead of unknowingly getting a weaker one.
+pub const MAX_PASSWORD_BYTES: usize = 72;
+
+/// Passwords common enough that an attacker tries them first, so length alone
+/// buys nothing. Deliberately short — a real deployment wants a breach corpus
+/// (Have I Been Pwned's k-anonymity API or a local dump); this catches the
+/// handful that appear at the top of every list without pretending to be one.
+const COMMON_PASSWORDS: &[&str] = &[
+    "password",
+    "password1",
+    "password123",
+    "12345678",
+    "123456789",
+    "1234567890",
+    "qwerty",
+    "qwertyui",
+    "qwerty123",
+    "letmein",
+    "welcome",
+    "welcome1",
+    "admin123",
+    "iloveyou",
+    "sunshine",
+    "princess",
+    "football",
+    "baseball",
+    "trustno1",
+    "monkey123",
+    "dragon123",
+    "passw0rd",
+    "p@ssword",
+    "p@ssw0rd",
+    "changeme",
+    "abc12345",
+    "111111111",
+    "000000000",
+    "mediagit",
+    "mediagit123",
+];
+
+/// AU-12.
+///
+/// Deliberately **no composition rules** (an uppercase, a digit, a symbol).
+/// NIST SP 800-63B advises against them: they push people toward predictable
+/// shapes like `Password1!`, which satisfy every rule while being among the
+/// first an attacker tries, and they block genuinely strong passphrases. What
+/// is checked instead is length, the bcrypt ceiling, and whether the password
+/// is one an attacker guesses immediately.
+///
+/// Password **history/reuse prevention is also deliberately absent**. It earns
+/// its keep when rotation is forced, and forced rotation is itself advised
+/// against — without it, keeping old hashes stores more secrets to defend for
+/// very little gain. If scheduled rotation is ever introduced, history should
+/// arrive with it.
 pub fn validate_password_strength(password: &str) -> Result<(), String> {
     if password.is_empty() {
         return Err("Password is required".to_string());
@@ -162,7 +222,42 @@ pub fn validate_password_strength(password: &str) -> Result<(), String> {
     if password.len() < 8 {
         return Err("Password must be at least 8 characters".to_string());
     }
+    // Bytes, not characters: bcrypt counts bytes, so a 30-character password
+    // of multibyte glyphs can exceed the limit.
+    if password.len() > MAX_PASSWORD_BYTES {
+        return Err(format!(
+            "Password must be at most {MAX_PASSWORD_BYTES} bytes; anything longer is              silently truncated by the password hash, so the extra characters would              not protect the account"
+        ));
+    }
+
+    let lowered = password.to_lowercase();
+    if COMMON_PASSWORDS.contains(&lowered.as_str()) {
+        return Err(
+            "Password is among the most commonly used and would be guessed immediately;              choose something else"
+                .to_string(),
+        );
+    }
+
     Ok(())
+}
+
+/// Is `password` built out of the account's own identifiers?
+///
+/// `alice`/`alice2024` is guessed on the first attempt by anyone who knows the
+/// username, no matter how long it is.
+fn password_echoes_identity(password: &str, username: &str, email: &str) -> bool {
+    let pw = password.to_lowercase();
+    let mut identifiers = vec![username.trim().to_lowercase()];
+    let email = email.trim().to_lowercase();
+    if let Some((local, _)) = email.split_once('@') {
+        identifiers.push(local.to_string());
+    }
+    identifiers.push(email);
+
+    identifiers
+        .iter()
+        .filter(|id| id.len() >= 3)
+        .any(|id| pw.contains(id.as_str()))
 }
 
 /// Registration input rules shared by `POST /auth/register` and the future
@@ -185,7 +280,18 @@ pub fn validate_registration_input(
     if !email.contains('@') || !email.contains('.') {
         return Err("Invalid email format".to_string());
     }
-    validate_password_strength(password)
+    validate_password_strength(password)?;
+
+    // Checked here rather than in `validate_password_strength` because only
+    // this path knows who the account belongs to.
+    if password_echoes_identity(password, username, email) {
+        return Err(
+            "Password must not contain your username or email address; those are the              first things an attacker tries"
+                .to_string(),
+        );
+    }
+
+    Ok(())
 }
 
 // Handler functions
@@ -454,6 +560,82 @@ pub fn auth_error_to_response(error: AuthError) -> (StatusCode, Json<ErrorRespon
 mod tests {
     use super::*;
 
+    /// bcrypt hashes at most 72 bytes and discards the rest silently, so a
+    /// longer passphrase is protected by only its prefix and two passphrases
+    /// sharing that prefix are the same password. Rejecting is better than
+    /// handing someone a weaker password than they typed.
+    #[test]
+    fn password_longer_than_the_hash_limit_is_rejected() {
+        let at_limit = "a".repeat(MAX_PASSWORD_BYTES);
+        assert!(validate_password_strength(&at_limit).is_ok());
+
+        let over = "a".repeat(MAX_PASSWORD_BYTES + 1);
+        let err = validate_password_strength(&over).unwrap_err();
+        assert!(err.contains("truncated"), "{err}");
+    }
+
+    /// The limit is in bytes because bcrypt counts bytes; a password well
+    /// under 72 *characters* can still exceed it.
+    #[test]
+    fn the_limit_is_measured_in_bytes_not_characters() {
+        // 4 bytes each in UTF-8.
+        let emoji = "🔒".repeat(20); // 80 bytes, 20 chars
+        assert!(emoji.chars().count() < MAX_PASSWORD_BYTES);
+        assert!(emoji.len() > MAX_PASSWORD_BYTES);
+        assert!(
+            validate_password_strength(&emoji).is_err(),
+            "a 20-character password that occupies 80 bytes must still be refused"
+        );
+    }
+
+    /// Length alone buys nothing against a password an attacker tries first.
+    #[test]
+    fn common_passwords_are_rejected_regardless_of_case() {
+        for pw in ["password123", "PASSWORD123", "Qwerty123", "letmein"] {
+            assert!(
+                validate_password_strength(pw).is_err(),
+                "{pw:?} should be refused"
+            );
+        }
+        assert!(validate_password_strength("correct horse battery").is_ok());
+    }
+
+    /// No composition rules, deliberately (NIST SP 800-63B): a long passphrase
+    /// of only lowercase letters and spaces is strong and must be accepted,
+    /// while `Password1!` satisfies every classic rule and is not.
+    #[test]
+    fn passphrases_are_accepted_without_composition_rules() {
+        assert!(validate_password_strength("the quiet render farm hums").is_ok());
+        assert!(validate_password_strength("aaaaaaaaaaaaaaaaaaaa").is_ok());
+    }
+
+    /// A password built from the account's own identifiers is guessed on the
+    /// first attempt by anyone who knows the username.
+    #[test]
+    fn password_containing_identity_is_rejected() {
+        assert!(
+            validate_registration_input("alice", "alice@example.com", "alice-2024-summer").is_err()
+        );
+        assert!(
+            validate_registration_input("alice", "alice@example.com", "xxalice@example.comxx")
+                .is_err()
+        );
+        assert!(
+            validate_registration_input("alice", "alice@example.com", "the quiet render farm")
+                .is_ok()
+        );
+    }
+
+    /// Short identifiers must not make every password unregisterable — a
+    /// two-letter username would otherwise be a substring of almost anything.
+    #[test]
+    fn very_short_identifiers_do_not_block_registration() {
+        // Username minimum is 3 characters, so use the shortest legal one.
+        assert!(
+            validate_registration_input("abc", "abc@example.com", "zz quiet render farm").is_ok()
+        );
+    }
+
     #[tokio::test]
     async fn test_register_login_flow() {
         let auth_service = Arc::new(AuthService::new("test-secret"));
@@ -462,7 +644,7 @@ mod tests {
         let register_req = RegisterRequest {
             username: "testuser".to_string(),
             email: "test@example.com".to_string(),
-            password: "password123".to_string(),
+            password: "render farm quiet hum".to_string(),
         };
 
         let result = register_handler(State(Arc::clone(&auth_service)), Json(register_req)).await;
@@ -476,7 +658,7 @@ mod tests {
         // Login with same credentials
         let login_req = LoginRequest {
             identifier: "test@example.com".to_string(),
-            password: "password123".to_string(),
+            password: "render farm quiet hum".to_string(),
         };
 
         let result = login_handler(State(Arc::clone(&auth_service)), Json(login_req)).await;
@@ -529,7 +711,7 @@ mod tests {
         let register_req = RegisterRequest {
             username: "testuser".to_string(),
             email: "test@example.com".to_string(),
-            password: "password123".to_string(),
+            password: "render farm quiet hum".to_string(),
         };
 
         let result = register_handler(State(auth_service), Json(register_req)).await;
@@ -549,7 +731,7 @@ mod tests {
         let register_req = RegisterRequest {
             username: "testuser".to_string(),
             email: "test@example.com".to_string(),
-            password: "password123".to_string(),
+            password: "render farm quiet hum".to_string(),
         };
 
         let result = register_handler(State(auth_service), Json(register_req)).await;
@@ -558,10 +740,12 @@ mod tests {
 
     #[test]
     fn test_validate_registration_input() {
-        assert!(validate_registration_input("ab", "a@b.com", "password123").is_err());
-        assert!(validate_registration_input("abc", "not-an-email", "password123").is_err());
+        assert!(validate_registration_input("ab", "a@b.com", "render farm quiet hum").is_err());
+        assert!(
+            validate_registration_input("abc", "not-an-email", "render farm quiet hum").is_err()
+        );
         assert!(validate_registration_input("abc", "a@b.com", "short").is_err());
-        assert!(validate_registration_input("abc", "a@b.com", "password123").is_ok());
+        assert!(validate_registration_input("abc", "a@b.com", "render farm quiet hum").is_ok());
     }
 
     #[test]
@@ -579,7 +763,7 @@ mod tests {
         let register_req = RegisterRequest {
             username: "testuser".to_string(),
             email: "test@example.com".to_string(),
-            password: "password123".to_string(),
+            password: "render farm quiet hum".to_string(),
         };
 
         let (_, auth_response) =

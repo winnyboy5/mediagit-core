@@ -68,7 +68,7 @@ async fn start_authed_server(repos_dir: PathBuf) -> (String, String, Arc<ApiKeyA
             .auth_service()
             .unwrap()
             .credentials_store
-            .register_user(user, "password123")
+            .register_user(user, "render farm quiet hum")
             .await
             .unwrap();
     }
