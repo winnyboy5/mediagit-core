@@ -92,6 +92,9 @@ pub struct AuthLayer {
     /// than when its token happens to expire. `None` keeps the old
     /// claims-only behaviour for constructors that have no store (tests).
     credentials_store: Option<Arc<super::CredentialsStore>>,
+    /// AU-16: tokens revoked by an explicit logout. `None` keeps the old
+    /// behaviour for constructors that have no store.
+    revoked: Option<Arc<super::revocation::RevokedTokens>>,
 }
 
 impl AuthLayer {
@@ -101,6 +104,7 @@ impl AuthLayer {
             jwt_auth,
             api_key_auth,
             credentials_store: None,
+            revoked: None,
         }
     }
 
@@ -109,6 +113,17 @@ impl AuthLayer {
     pub fn with_credentials_store(mut self, store: Arc<super::CredentialsStore>) -> Self {
         self.credentials_store = Some(store);
         self
+    }
+
+    /// AU-16: attach the revocation list so `logout` can actually take effect.
+    pub fn with_revoked_tokens(mut self, revoked: Arc<super::revocation::RevokedTokens>) -> Self {
+        self.revoked = Some(revoked);
+        self
+    }
+
+    /// The revocation list, when one is attached.
+    pub fn revoked_tokens(&self) -> Option<&Arc<super::revocation::RevokedTokens>> {
+        self.revoked.as_ref()
     }
 
     /// Get reference to JWT auth (for testing)
@@ -131,6 +146,15 @@ impl AuthLayer {
             && let Ok(token) = JwtAuth::extract_from_header(auth_str)
             && let Ok(claims) = self.jwt_auth.validate_token(token)
         {
+            // AU-16: a token the user explicitly logged out is refused, rather
+            // than remaining valid for the rest of its life.
+            if let Some(revoked) = self.revoked.as_ref()
+                && revoked.is_revoked(&claims.jti).await
+            {
+                return Err(AuthError::InvalidToken(
+                    "token has been revoked by logout".to_string(),
+                ));
+            }
             let permissions = self
                 .live_permissions(&claims.sub, claims.permissions)
                 .await?;

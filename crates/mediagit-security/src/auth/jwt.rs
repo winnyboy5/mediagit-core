@@ -50,6 +50,19 @@ pub struct Claims {
     /// refresh, so the worst case is one re-login.
     #[serde(default)]
     pub token_type: TokenType,
+
+    /// AU-16: unique token id, so a specific token can be revoked.
+    ///
+    /// Without one, `logout` could only discard the client's copy — the token
+    /// itself stayed valid for the rest of its 24h life, so a token captured
+    /// before logout kept working and the UI's "signed out" was a claim about
+    /// the client, not the server.
+    ///
+    /// A per-token id rather than a per-user "invalid before" watermark
+    /// because logging out of one machine must not sign the user out
+    /// everywhere else.
+    #[serde(default)]
+    pub jti: String,
 }
 
 /// Distinguishes an access token from a refresh token.
@@ -132,6 +145,7 @@ impl JwtAuth {
             exp: (now + self.access_token_duration).timestamp(),
             permissions,
             token_type: TokenType::Access,
+            jti: uuid::Uuid::new_v4().to_string(),
         };
 
         encode(&Header::default(), &claims, &self.encoding_key)
@@ -154,6 +168,7 @@ impl JwtAuth {
             exp: (now + self.refresh_token_duration).timestamp(),
             permissions,
             token_type: TokenType::Refresh,
+            jti: uuid::Uuid::new_v4().to_string(),
         };
 
         let refresh_token = encode(&Header::default(), &refresh_claims, &self.encoding_key)

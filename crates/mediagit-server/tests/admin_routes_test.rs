@@ -1194,3 +1194,75 @@ async fn deleting_a_user_releases_their_locks() {
          forever by an account that no longer exists"
     );
 }
+
+/// AU-16: `logout` must end the token, not just the client's copy of it.
+///
+/// It previously returned 204 and did nothing, so a token captured before
+/// logout kept authenticating for the rest of its 24h life and "signed out"
+/// was a claim about the client rather than the server.
+#[tokio::test]
+async fn logout_revokes_the_presented_token() {
+    let (state, admin, _write) = test_state_with_tokens().await;
+    let app = create_router(Arc::clone(&state));
+
+    // The token works before logout.
+    let resp = app
+        .clone()
+        .oneshot(get("/auth/users", Some(&admin)))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(post_json("/auth/logout", Some(&admin), "{}"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // ...and must not afterwards.
+    let resp = app.oneshot(get("/auth/users", Some(&admin))).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "a logged-out token must stop working; returning 204 and leaving it \
+         valid makes logout a claim about the client, not the server"
+    );
+}
+
+/// Logging out of one machine must not sign the user out everywhere else,
+/// which is why revocation is per-token rather than a per-user watermark.
+#[tokio::test]
+async fn logout_does_not_affect_other_sessions() {
+    let (state, admin, _write) = test_state_with_tokens().await;
+
+    // A second, independent session for the same user.
+    let jwt = JwtAuth::new("test-secret-key-for-admin-tests");
+    let other = jwt
+        .generate_token(
+            "admin-user",
+            vec![
+                "repo:read".to_string(),
+                "repo:write".to_string(),
+                "repo:admin".to_string(),
+                "user:manage".to_string(),
+            ],
+        )
+        .unwrap();
+
+    let app = create_router(Arc::clone(&state));
+    let resp = app
+        .clone()
+        .oneshot(post_json("/auth/logout", Some(&admin), "{}"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app.oneshot(get("/auth/users", Some(&other))).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the other session must survive; logging out one machine cannot sign \
+         the user out of the rest"
+    );
+}

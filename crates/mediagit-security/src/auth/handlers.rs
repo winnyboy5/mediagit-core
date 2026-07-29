@@ -37,6 +37,14 @@ pub struct AuthService {
     /// `ServerConfig::allow_open_registration`'s serde default) so existing
     /// behavior is unchanged unless a caller explicitly opts out.
     pub allow_open_registration: bool,
+    /// AU-16: tokens ended by an explicit logout.
+    ///
+    /// Owned here and handed to `AuthLayer` by the server, so revoking and
+    /// checking use **one** store. Two independent instances that only agreed
+    /// at boot is exactly the AU-9 defect: `logout` would record a revocation
+    /// the authenticating side never saw, and the token would keep working
+    /// while the API reported success.
+    pub revoked_tokens: Arc<crate::auth::revocation::RevokedTokens>,
 }
 
 impl AuthService {
@@ -46,6 +54,7 @@ impl AuthService {
             jwt_auth: Arc::new(JwtAuth::new(jwt_secret)),
             credentials_store: Arc::new(CredentialsStore::new()),
             allow_open_registration: true,
+            revoked_tokens: Arc::new(crate::auth::revocation::RevokedTokens::new()),
         }
     }
 
@@ -58,6 +67,7 @@ impl AuthService {
             jwt_auth,
             credentials_store,
             allow_open_registration: true,
+            revoked_tokens: Arc::new(crate::auth::revocation::RevokedTokens::new()),
         }
     }
 
@@ -75,6 +85,7 @@ impl AuthService {
             jwt_auth: Arc::new(JwtAuth::new(jwt_secret)),
             credentials_store: Arc::new(CredentialsStore::load_or_new(store_dir)?),
             allow_open_registration: true,
+            revoked_tokens: Arc::new(crate::auth::revocation::RevokedTokens::new()),
         })
     }
 }
@@ -385,8 +396,43 @@ pub async fn me_handler(
 /// POST /auth/logout
 /// Note: With JWT, logout is primarily client-side (delete tokens).
 /// This endpoint exists for consistency and future token blacklisting.
-pub async fn logout_handler() -> StatusCode {
-    info!("User logout requested");
+/// AU-16: revoke the presented token, rather than trusting the client to
+/// forget it.
+///
+/// This used to return 204 and do nothing at all: the client discarded its
+/// copy while the token kept authenticating for the rest of its life, so a
+/// token captured before logout still worked and "signed out" described the
+/// client, not the server. Logout is the one moment a user explicitly asks for
+/// their access to stop.
+///
+/// Only the presented token is revoked — logging out of one machine must not
+/// sign the user out everywhere else.
+///
+/// Still 204 when no usable token is presented: logout is idempotent, and
+/// failing it would leave a client unable to clear its own state.
+pub async fn logout_handler(
+    State(auth_service): State<Arc<AuthService>>,
+    headers: axum::http::HeaderMap,
+) -> StatusCode {
+    let revoked = headers
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| crate::auth::JwtAuth::extract_from_header(h).ok())
+        .and_then(|token| auth_service.jwt_auth.validate_token(token).ok());
+
+    match revoked {
+        Some(claims) => {
+            auth_service
+                .revoked_tokens
+                .revoke(&claims.jti, claims.exp)
+                .await;
+            info!(user_id = %claims.sub, "User logged out; token revoked");
+        }
+        None => {
+            info!("Logout requested without a valid token; nothing to revoke");
+        }
+    }
+
     StatusCode::NO_CONTENT
 }
 

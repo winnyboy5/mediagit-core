@@ -231,7 +231,12 @@ impl AppState {
         // request from this store, not taken from the token.
         let auth_layer = Arc::new(
             AuthLayer::new(Arc::clone(&jwt_auth), Arc::clone(&api_key_auth))
-                .with_credentials_store(Arc::clone(&auth_service.credentials_store)),
+                .with_credentials_store(Arc::clone(&auth_service.credentials_store))
+                // AU-16: the *same* store the auth service revokes into.
+                // A second instance would only agree at boot — logout would
+                // record a revocation this side never sees, and the token
+                // would keep working while the API reported success (AU-9).
+                .with_revoked_tokens(Arc::clone(&auth_service.revoked_tokens)),
         );
 
         Self {
@@ -267,7 +272,12 @@ impl AppState {
         // permissions instead of trusting the token's frozen snapshot.
         let auth_layer = Arc::new(
             AuthLayer::new(Arc::clone(&auth_service.jwt_auth), api_key_auth)
-                .with_credentials_store(Arc::clone(&auth_service.credentials_store)),
+                .with_credentials_store(Arc::clone(&auth_service.credentials_store))
+                // AU-16: the *same* store the auth service revokes into.
+                // A second instance would only agree at boot — logout would
+                // record a revocation this side never sees, and the token
+                // would keep working while the API reported success (AU-9).
+                .with_revoked_tokens(Arc::clone(&auth_service.revoked_tokens)),
         );
         let grants = GrantsStore::load_or_new(auth_store_dir)?;
 

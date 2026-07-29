@@ -41,6 +41,7 @@ pub mod handlers;
 pub mod jwt;
 pub mod middleware;
 mod persist;
+pub mod revocation;
 pub mod user;
 
 pub use apikey::{ApiKey, ApiKeyAuth};
