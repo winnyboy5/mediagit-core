@@ -4,8 +4,10 @@
 # (dev-tests/dedup-baseline.json). Fails (exit 1) with a table of offenders
 # if, for ANY extension:
 #   - dedup_pct drops by more than 0.5 percentage points, or
-#   - post_compression_bytes grows by more than 0.5%, or
-#   - total add_ms grows by more than 5%.
+#   - the stored-bytes/input-bytes ratio grows by more than 0.5%.
+#
+# add_ms is reported but NOT gated: it is a wall clock on whatever machine
+# ran the report, and this file is compared across weeks.
 # The `generated` timestamp field is ignored.
 #
 # Usage: pwsh dev-tests/compare_dedup.ps1 -Baseline dev-tests/dedup-baseline.json -Current fresh.json
@@ -45,12 +47,22 @@ foreach ($prop in $base.per_extension.PSObject.Properties) {
         }
     }
 
-    if ($b.post_compression_bytes -gt 0) {
-        $growPct = 100.0 * ($c.post_compression_bytes - $b.post_compression_bytes) / $b.post_compression_bytes
+    # Compared as a RATIO of stored bytes to input bytes, not as absolute bytes.
+    #
+    # An absolute-bytes threshold cannot survive a corpus change: adding v1/v2
+    # fixture pairs for psd/mkv/mov (2026-07-28) tripled the psd input, so its
+    # stored bytes rose 5.3% and the gate called it a regression -- while its
+    # dedup went 0% -> 64.3%, i.e. the pipeline had just done its job
+    # exceptionally well. The ratio is what "did compression get worse" actually
+    # means, and it is stable when only the corpus moves.
+    if ($b.post_compression_bytes -gt 0 -and $b.total_bytes -gt 0 -and $c.total_bytes -gt 0) {
+        $baseRatio = $b.post_compression_bytes / $b.total_bytes
+        $currRatio = $c.post_compression_bytes / $c.total_bytes
+        $growPct = 100.0 * ($currRatio - $baseRatio) / $baseRatio
         if ($growPct -gt 0.5) {
             $offenders += [pscustomobject]@{
-                Extension = $ext; Metric = 'post_compression_bytes'
-                Baseline = $b.post_compression_bytes; Current = $c.post_compression_bytes
+                Extension = $ext; Metric = 'stored_bytes_ratio'
+                Baseline = [math]::Round($baseRatio, 5); Current = [math]::Round($currRatio, 5)
                 Delta = "+$([math]::Round($growPct, 3))%"
             }
         }
@@ -64,6 +76,6 @@ if ($offenders.Count -gt 0) {
 }
 
 $extCount = @($base.per_extension.PSObject.Properties).Count
-Write-Host ("PASS: {0} extensions within thresholds (dedup_pct drop <=0.5pp, post_compression growth <=0.5%)" -f $extCount)
+Write-Host ("PASS: {0} extensions within thresholds (dedup_pct drop <=0.5pp, stored/input ratio growth <=0.5%)" -f $extCount)
 Write-Host ("  totals: dedup_pct={0:N2}  post_compression_bytes={1:N0}  add_ms={2:N0} (informational)" -f $curr.totals.dedup_pct, $curr.totals.post_compression_bytes, $curr.totals.add_ms)
 exit 0
