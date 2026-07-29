@@ -8,6 +8,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Clone could silently omit objects and still report success** (data integrity,
+  P0): the want-side walk (`collect_objects_bfs`) read each object with
+  `odb.read(..).ok()` and, on `None`, logged a warning and continued — dropping
+  that object from the pack *and* abandoning its entire subtree, then answering
+  `200`. The client streams to the object count declared in the pack header, so a
+  short pack is indistinguishable from a complete one; the damage surfaced much
+  later as `Object <oid> not found: no loose object and no pack files` in a
+  repository whose clone had reported success. The server now refuses to serve an
+  incomplete closure and names the offending object, and the client surfaces that
+  message instead of a bare `500`. Leniency remains correct on the *have* side
+  (`walk_reachable`), where a client may legitimately name objects that do not
+  exist; that asymmetry is now documented at both sites. This was the root cause
+  of the intermittent `tag_object_push_clone_round_trips_*` failure.
+- **Checkout silently overwrote files whose paths differ only by case** (data
+  loss): `Tree` keys entries case-sensitively, so a commit made on Linux can hold
+  both `Logo.psd` and `logo.psd`; checking that out on Windows or default macOS
+  wrote one over the other and reported both written. Checkout now refuses, with
+  case-insensitivity probed from the filesystem rather than inferred from the
+  platform.
+- **`fsck` reported healthy delta chains as too deep**: depth was compared and
+  printed as visited *nodes* rather than hops, so a chain at exactly
+  `MAX_DELTA_DEPTH` — the deepest the writer can build — was flagged
+  "11 hops deep (max 10)". Warnings no repair could ever clear.
+- **`fsck --repair` could not repair a corrupt chunk, and claimed success anyway**:
+  corruption inside a chunked blob was reported under the *manifest's* oid, so
+  repair probed the loose path for an object that lives at `manifests/<oid>`,
+  found nothing and blamed "likely packed". Chunks are now identified from the
+  manifest and repaired directly. Separately, `Successfully repaired 0 issue(s)`
+  no longer prints a green check for work that did not happen.
+- **Transfer byte counts were wrong or absent**: `bytes_uploaded` was assigned the
+  metadata pack's size and the chunk upload's own count was discarded, so a
+  15.53 GiB push summarised as `up 2.71 KiB`; `bytes_downloaded` was never assigned
+  anywhere, so pull/clone/fetch reported no transfer at all.
+- **Progress rate and ETA were fabricated when unknown**: `eta 0s` at 0% and
+  `33 B/s` mid-transfer were an absent measurement rendered as fact, and resetting
+  the ETA on every pack seal produced readings like `747 MiB/s`. Unknown values now
+  render `--`.
+- **HTTPS listener had no rate limiting**: enabling TLS silently disabled it on the
+  port most likely to face the internet, while startup still logged
+  "Rate limiting ENABLED". Both listeners now share one limiter — sharing rather
+  than rebuilding, so splitting traffic across ports cannot double the budget.
+- **Access and refresh tokens were interchangeable**: an access token could refresh
+  itself indefinitely (so a session never needed re-authentication) and a 30-day
+  refresh token could authenticate requests directly. They now carry a type.
+- **Pack objects at or above 4 GiB silently truncated the pack**: the 4-byte size
+  field was written with an unchecked cast, so the header understated the length
+  and every following object in the pack was read from the wrong offset.
+- **Operator-supplied pack caps were unclamped**: `MEDIAGIT_PACK_BYTES=0` sealed one
+  pack per chunk — back to one cloud object per chunk, the problem cloud packs
+  exist to solve — and an over-large value is an OOM, since peak push memory is
+  `PACK_BYTES x PACK_UPLOAD_CONCURRENCY`. Both knobs, and the concurrency
+  multiplier, are now bounded and correct loudly.
+
+### Changed
+- **Documentation now matches the code.** The README claimed AES-256-GCM
+  encryption at rest as shipped; the module exists and is tested but has no CLI or
+  server call sites (the real `[storage] encryption` setting is S3 server-side
+  encryption, a different thing — the two are no longer conflated). The book
+  documented PSD layer merge and video timeline merge with worked "Auto-merge"
+  examples; `mediagit_media::MergeStrategy` has no callers, and the section now
+  describes what merge actually does with a binary conflict. Windows ARM64 was
+  listed "Supported" while no such binary is built.
+
+### Fixed (earlier in this cycle)
 - **Stored objects whose content began with a codec magic were unreadable** (data
   integrity, P0): `SmartCompressor` writes incompressible data as `0x00 + raw`, but
   `decompress_typed` stripped that prefix only when the remaining bytes did not look

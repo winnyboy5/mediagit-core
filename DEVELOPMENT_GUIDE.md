@@ -1,5 +1,5 @@
 # MediaGit-Core Development Guide
-**Version**: 0.3.0-rc.2
+**Version**: 0.3.0-rc.3
 **Last Updated**: July 18, 2026
 
 A guide for people building MediaGit itself: repo layout, local build/test loop,
@@ -187,7 +187,7 @@ cargo build --no-default-features
 
 ```bash
 ./target/debug/mediagit --version
-# Should output: mediagit 0.3.0-rc.2
+# Should output: mediagit 0.3.0-rc.3
 
 ./target/debug/mediagit-server --help
 ```
@@ -685,6 +685,6 @@ find . -name "*.tmp" -o -name "*.log" -o -name "*~"
 
 ---
 
-**Version**: 0.3.0-rc.2
+**Version**: 0.3.0-rc.3
 **Last Updated**: July 18, 2026
 **Maintained by**: MediaGit Core Team

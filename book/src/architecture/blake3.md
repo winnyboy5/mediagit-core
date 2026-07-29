@@ -68,7 +68,7 @@ Routing every call through `hash.rs` guarantees that the OID definition stays co
 
 ## Migration Note
 
-The SHA-256 → BLAKE3 switch happened during the beta cycle, before any compatibility guarantee was in effect: repositories created under the old hash are not compatible and must be re-initialized. As of `v0.3.0-rc.2` the persisted and wire formats are **frozen under the compatibility promise** (see `FORMATS.md` §11) — from this release on, a breaking format change requires a version bump and a hard-error reader, never a silent misparse.
+The SHA-256 → BLAKE3 switch happened during the beta cycle, before any compatibility guarantee was in effect: repositories created under the old hash are not compatible and must be re-initialized. As of `v0.3.0-rc.3` the persisted and wire formats are **frozen under the compatibility promise** (see `FORMATS.md` §11) — from this release on, a breaking format change requires a version bump and a hard-error reader, never a silent misparse.
 
 ## Related Documentation
 

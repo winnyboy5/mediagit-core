@@ -3395,7 +3395,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-cli"
-version = "0.3.0-rc.2"
+version = "0.3.0-rc.3"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3441,7 +3441,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-compression"
-version = "0.3.0-rc.2"
+version = "0.3.0-rc.3"
 dependencies = [
  "anyhow",
  "brotli",
@@ -3458,7 +3458,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-config"
-version = "0.3.0-rc.2"
+version = "0.3.0-rc.3"
 dependencies = [
  "anyhow",
  "mediagit-test-utils",
@@ -3475,7 +3475,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-git"
-version = "0.3.0-rc.2"
+version = "0.3.0-rc.3"
 dependencies = [
  "git2",
  "hex",
@@ -3490,7 +3490,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-media"
-version = "0.3.0-rc.2"
+version = "0.3.0-rc.3"
 dependencies = [
  "flate2",
  "image",
@@ -3510,7 +3510,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-metrics"
-version = "0.3.0-rc.2"
+version = "0.3.0-rc.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -3525,7 +3525,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-migration"
-version = "0.3.0-rc.2"
+version = "0.3.0-rc.3"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3542,7 +3542,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-observability"
-version = "0.3.0-rc.2"
+version = "0.3.0-rc.3"
 dependencies = [
  "anyhow",
  "thiserror 2.0.19",
@@ -3553,7 +3553,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-protocol"
-version = "0.3.0-rc.2"
+version = "0.3.0-rc.3"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3572,7 +3572,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-security"
-version = "0.3.0-rc.2"
+version = "0.3.0-rc.3"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3603,7 +3603,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-server"
-version = "0.3.0-rc.2"
+version = "0.3.0-rc.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3641,7 +3641,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-storage"
-version = "0.3.0-rc.2"
+version = "0.3.0-rc.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3672,7 +3672,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-test-utils"
-version = "0.3.0-rc.2"
+version = "0.3.0-rc.3"
 dependencies = [
  "assert_cmd",
  "dunce",
@@ -3683,7 +3683,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-versioning"
-version = "0.3.0-rc.2"
+version = "0.3.0-rc.3"
 dependencies = [
  "anyhow",
  "async-channel",

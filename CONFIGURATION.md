@@ -1,6 +1,6 @@
 # MediaGit Configuration Reference
 
-Complete reference for configuring the MediaGit **client** (`.mediagit/config.toml`) and the MediaGit **server** (`mediagit-server.toml`), plus the operational environment variables that sit on top of both. Version: 0.3.0-rc.2.
+Complete reference for configuring the MediaGit **client** (`.mediagit/config.toml`) and the MediaGit **server** (`mediagit-server.toml`), plus the operational environment variables that sit on top of both. Version: 0.3.0-rc.3.
 
 All facts below were verified directly against the source (`crates/mediagit-config/src/schema.rs`, `crates/mediagit-server/src/config.rs`, `crates/mediagit-server/src/main.rs`, `crates/mediagit-cli/src/repo.rs`, and related read-sites) rather than assumed. Where a setting is defined but not actually wired to any runtime behavior, that is called out explicitly rather than left implied.
 

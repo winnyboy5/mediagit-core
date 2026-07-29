@@ -1,6 +1,6 @@
 # MediaGit Use Cases
 
-**Version**: 0.3.0-rc.2
+**Version**: 0.3.0-rc.3
 
 Concrete command sequences for four industry workflows. Each is grounded in
 the QA-suite persona scripts that exercise it end-to-end
