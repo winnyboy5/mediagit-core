@@ -140,19 +140,28 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MEDIAGIT_APP_NAME` / `MEDIAGIT_APP_PORT` / `MEDIAGIT_APP_HOST` / `MEDIAGIT_APP_ENVIRONMENT` / `MEDIAGIT_APP_DEBUG` | Override `[app]` config fields. | `mediagit` / `8080` / `127.0.0.1` / `development` / `false` |
-| `MEDIAGIT_LOG_LEVEL` | Override `[observability] log_level`. | `info` |
-| `MEDIAGIT_METRICS_ENABLED` / `MEDIAGIT_METRICS_PORT` | Override `[observability.metrics]` fields. | `true` / `9090` |
 | `MEDIAGIT_METRICS_ADDR` | `host:port` to bind the Prometheus metrics endpoint. | unset (metrics server not started) |
-| `MEDIAGIT_COMPRESSION_ENABLED` / `MEDIAGIT_COMPRESSION_LEVEL` | Override `[compression]` fields (Zstd fallback level). | `true` / `3` |
-| `MEDIAGIT_MAX_CONCURRENCY` / `MEDIAGIT_BUFFER_SIZE` | Override `[performance]` fields. | `num_cpus` (min 4) / `65536` |
-| `MEDIAGIT_HTTPS_ENABLED` / `MEDIAGIT_AUTH_ENABLED` | Override `[security]` fields. | `false` / `false` |
 | `MEDIAGIT_ALLOW_INSECURE_BIND` | Bypasses the startup refusal to bind a non-loopback host when auth is disabled. | `0` (OFF) |
 | `MEDIAGIT_JWT_SECRET` | JWT signing secret. Env wins over config file `jwt_secret` if both set. | none |
 | `MEDIAGIT_STARTUP_PROBE` | Server scans `repos_dir` for repo health at startup. `0` skips it. | `1` (ON) |
 | `MEDIAGIT_AUTH_PERSIST` | Persist auth state (users/grants) to disk. `0` keeps auth in-memory only. | `1` (ON) |
 | `MEDIAGIT_GRANTS_ENFORCE` | Enforce per-repo permission grants (no-op if none configured). | `1` (ON) |
 | `MEDIAGIT_LOCKS_ENFORCE` | Server rejects pushes that touch paths locked by another user. | `1` (ON) |
+
+> **Removed from this table (DC-5).** `MEDIAGIT_APP_*`, `MEDIAGIT_LOG_LEVEL`,
+> `MEDIAGIT_METRICS_ENABLED` / `_PORT`, `MEDIAGIT_COMPRESSION_ENABLED` /
+> `_LEVEL`, `MEDIAGIT_MAX_CONCURRENCY`, `MEDIAGIT_BUFFER_SIZE` and
+> `MEDIAGIT_HTTPS_ENABLED` / `MEDIAGIT_AUTH_ENABLED` were documented here but
+> have never done anything. Two independent reasons, either sufficient:
+> `ConfigLoader::apply_env_overrides` — the only code that reads them — is
+> never called on any load path, and the `[app]`, `[observability]`,
+> `[compression]` and `[performance] max_concurrency` fields it writes are
+> read nowhere outside `mediagit-config`'s own tests. The server's real
+> settings live in `ServerConfig` (`mediagit-server.toml`), a different type
+> these variables do not touch.
+>
+> Set the corresponding key in `mediagit-server.toml` instead. Every variable
+> still listed above is read directly by the code that acts on it.
 | `MEDIAGIT_LOCKS_MAX_COMMITS` | Max commits walked when computing touched paths for lock enforcement. | `1000` |
 
 ### GC / Housekeeping

@@ -66,6 +66,21 @@ $GATE_FIELDS = $HIGHER_IS_BETTER + $LOWER_IS_BETTER
 # machine class is well outside run-to-run noise and is worth a human looking.
 $REGRESSION_PCT = 10.0
 
+# Minimum wall time, in seconds, a record must have taken before a percentage
+# claim about it is allowed to fail the gate.
+#
+# The 1 MB size class runs `add` in ~20 ms. At that scale a 10% threshold is
+# measuring the Windows scheduler: a 60 ms wall (+200%) and a hash_mbs 20%
+# below baseline are the same 40 ms of jitter, and the campaign reported four
+# such "regressions" on a machine that had just finished 519 s of heavy I/O.
+# Gating on noise is worse than not gating - it trains everyone to ignore the
+# gate, so a real regression at 100 MB reads as more of the same.
+#
+# Every field of a record shares its wall clock (throughput and hash rate are
+# derived from it), so the floor is applied per record, not per field. Sub-floor
+# records are still written to the TSV; they just cannot fail the gate.
+$MIN_GATED_WALL_SEC = 0.5
+
 $baseRows = $null
 $baselineNote = ""
 if ($Baseline) {
@@ -119,13 +134,21 @@ foreach ($sizeMB in $sizeClassesMB) {
   # @() guard: with a single bench record PS unrolls the function's return array to the bare hashtable
   $records = @(Parse-BenchLines ($addRes.Out + "`n" + $commitRes.Out))
   foreach ($rec in $records) {
+    # Too short to time reliably -> report the numbers, but do not let them
+    # fail the gate. See $MIN_GATED_WALL_SEC.
+    $recWall = 0.0
+    $gatable = [double]::TryParse(("" + $rec['wall']) -replace '[s%]$', '', [ref]$recWall) -and
+               $recWall -ge $MIN_GATED_WALL_SEC
+    if (-not $gatable) {
+      Write-QaLog $Phase "ungated sizeMB=$sizeMB op=$($rec['op']) wall=$($rec['wall']) below $MIN_GATED_WALL_SEC s floor"
+    }
     foreach ($field in $rec.Keys) {
       if ($field -eq "op") { continue }
       $value = $rec[$field]
       $baseVal = Find-BaselineValue $sizeMB $rec['op'] $field
       Write-QaRow $BENCH_OUT $BENCH_HEADER @($sizeMB, $rec['op'], $field, $value, $(if ($null -ne $baseVal) { $baseVal } else { "none" }))
 
-      if ($GATE_FIELDS -contains $field -and $null -ne $baseVal) {
+      if ($gatable -and $GATE_FIELDS -contains $field -and $null -ne $baseVal) {
         $cur = 0.0; $base = 0.0
         # strip trailing s/% units (wall=0.02s, util_pct=89%) - same normalization as diff_bench.ps1
         $curStr = "$value" -replace '[s%]$', ''
@@ -146,7 +169,7 @@ foreach ($sizeMB in $sizeClassesMB) {
 
 if ($baseRows) {
   Write-QaGate $Phase "baseline-regression" ($regressionCount -eq 0) `
-    "count=$regressionCount threshold=$REGRESSION_PCT% baseline=$Baseline"
+    "count=$regressionCount threshold=$REGRESSION_PCT% min-wall=${MIN_GATED_WALL_SEC}s baseline=$Baseline"
 } else {
   # WARN, not PASS: nothing was compared. Reported as informational so the first
   # campaign can still go green and produce the numbers the baseline is promoted from.

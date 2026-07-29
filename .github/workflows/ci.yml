@@ -82,14 +82,14 @@ jobs:
           fi
         shell: bash
 
+      # OP-5: macOS and Windows used to run `-p mediagit-cli` only. Case-only
+      # path collisions (VC-5) and symlink handling (VC-6) live in
+      # mediagit-versioning and are *only* wrong off Linux, so the one matrix
+      # dimension that could have caught them was the one not exercising them.
+      # Every platform now runs the same suite.
       - name: Run tests
         if: ${{ !matrix.cross }}
-        run: |
-          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
-            cargo test --workspace --verbose --all-features
-          else
-            cargo test -p mediagit-cli --verbose
-          fi
+        run: cargo test --workspace --verbose --all-features
         shell: bash
 
 
@@ -154,6 +154,21 @@ jobs:
 
       - name: Run cargo audit
         uses: actions-rust-lang/audit@v1
+
+  # OP-10: cargo-audit answers "is there an advisory". cargo-deny answers the
+  # three questions it cannot: license compatibility (we ship AGPL-3.0),
+  # banned/duplicate crates (a transitive rustls 0.21 once shipped alongside
+  # 0.23 with three webpki advisories), and dependency provenance.
+  # See deny.toml — advisories stay owned by .cargo/audit.toml.
+  cargo-deny:
+    name: Dependency Policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans sources
 
   # Phase 3: Integration tests (storage backends) — non-required check initially
   integration-tests:
@@ -293,3 +308,49 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
+
+  # OP-6: the QA suite has caught defects no cargo test ever did — the safety
+  # axis (phase 12) reproduces the whole 17-defect data-loss cluster against a
+  # pre-fix binary, and phase 05 exercises branching against a real server.
+  # Neither was ever run automatically.
+  #
+  # Scope is deliberately the two phases that need no cloud credentials and no
+  # MinIO: phase 12 runs the CLI against local sandboxes, phase 05 uses the
+  # filesystem backend. The cloud matrix stays a local/manual campaign — it
+  # needs five sets of real credentials and takes hours. A partial suite that
+  # runs on every PR is worth more than a complete one that runs twice a year.
+  #
+  # Windows because that is the harness's native platform and the platform
+  # whose path semantics the safety checks care about.
+  qa-suite:
+    name: QA Suite (safety + branching)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: qa-suite
+
+      # The harness runs the shipped binaries, not `cargo run`: $QA.MG defaults
+      # to target\release\mediagit.exe.
+      - name: Build release binaries
+        run: cargo build --release --workspace --bins
+
+      - name: Run QA phases 12 and 05
+        shell: pwsh
+        run: ./dev-tests/qa-suite/scripts/run_all.ps1 -Phases 12,05
+
+      - name: Upload QA logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-suite-logs
+          path: dev-tests/qa-suite/logs/
+          retention-days: 14

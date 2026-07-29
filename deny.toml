@@ -1,0 +1,81 @@
+# cargo-deny configuration (OP-10).
+#
+# `cargo audit` already runs in CI, but it only answers "does a dependency have
+# a published advisory". It says nothing about the three failure modes that
+# actually bite a project shipping under AGPL-3.0 with seven cloud SDKs:
+#
+#   licenses — a copyleft-incompatible or unlicensed crate arriving through a
+#              transitive bump, which is a legal problem discovered at release;
+#   bans     — the duplicate-version drift this repo has already been bitten by
+#              (aws-config's `rustls` feature pulled aws-lc *and* a second,
+#              vulnerable rustls 0.21 alongside the intended one);
+#   sources  — a dependency silently served from somewhere other than crates.io.
+#
+# Advisories stay authoritative in `.cargo/audit.toml`; this file defers to it
+# rather than maintaining a second ignore list that would drift out of step.
+
+[graph]
+all-features = true
+
+[licenses]
+# Every license present in the current graph, verified with `cargo metadata`:
+# no dependency ships without a license field. AGPL-3.0 is our own crates.
+allow = [
+    "AGPL-3.0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    "0BSD",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Duplicate major versions are a warning, not an error: a graph this size
+# always has some, and failing on them would mean pinning transitive deps we do
+# not control. The *specific* duplicates that caused real harm are denied
+# outright below.
+multiple-versions = "warn"
+wildcards = "deny"
+
+deny = [
+    # rustls 0.21 arrived transitively alongside the intended 0.23 and brought
+    # three webpki advisories with it. One TLS stack, one version.
+    { name = "rustls", version = "<0.23" },
+    # Two crypto providers in one binary means the one actually used is decided
+    # by feature unification, not by us. See [[project-ring-tls-consistency]].
+    { name = "aws-lc-rs" },
+    { name = "aws-lc-sys" },
+    # OpenSSL is not a dependency this project wants: it reintroduces a system
+    # library dependency the pure-Rust stack exists to avoid.
+    #
+    # This ban is ENFORCED BY DC-2. The only openssl-sys in the graph today
+    # arrives via git2's `vendored-openssl` inside `mediagit-git`, a crate with
+    # zero dependents that the program deletes; git2 is also the sole source of
+    # the two advisories `.cargo/audit.toml` currently has to ignore
+    # (RUSTSEC-2026-0183/-0184). Deleting one dead crate clears all three.
+    # Do not enable this job before that deletion lands.
+    { name = "openssl-sys" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[advisories]
+# Owned by `.cargo/audit.toml`, which carries the reasoning for each accepted
+# advisory. Duplicating that list here would guarantee the two disagree.
+yanked = "deny"
+ignore = []
