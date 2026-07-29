@@ -241,7 +241,35 @@ impl Config {
         }
 
         let toml_str = toml::to_string_pretty(self)?;
-        std::fs::write(&config_path, toml_str)?;
+
+        // Atomic: this file holds the author identity and every remote, so a
+        // torn write (crash, ENOSPC) leaves a repository that cannot resolve
+        // its own remote or commit. Same defect class as the index and pack
+        // manifests. Written to a process/thread-unique temp file in the same
+        // directory, fsynced, then renamed, so a reader sees either the old
+        // contents or the complete new ones.
+        let unique = format!(
+            "{}.{}.{:?}.tmp",
+            config_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("config.toml"),
+            std::process::id(),
+            std::thread::current().id(),
+        );
+        let tmp_path = config_path.with_file_name(unique);
+
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp_path)?;
+            f.write_all(toml_str.as_bytes())?;
+            f.sync_all()?;
+        }
+
+        if let Err(e) = std::fs::rename(&tmp_path, &config_path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e.into());
+        }
         Ok(())
     }
 

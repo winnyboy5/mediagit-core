@@ -76,6 +76,9 @@ enum Commands {
     /// Record changes to the repository
     Commit(CommitCmd),
 
+    /// Get and set repository configuration
+    Config(ConfigCmd),
+
     /// Update remote references
     Push(PushCmd),
 
@@ -451,6 +454,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         Some(Commands::Clone(cmd)) => cmd.execute().await,
         Some(Commands::Add(cmd)) => cmd.execute().await,
         Some(Commands::Commit(cmd)) => cmd.execute().await,
+        Some(Commands::Config(cmd)) => cmd.execute().await,
         Some(Commands::Push(cmd)) => cmd.execute().await,
         Some(Commands::Pull(cmd)) => cmd.execute().await,
         Some(Commands::Fetch(cmd)) => cmd.execute().await,
@@ -499,6 +503,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             println!("  clone        Clone a repository into a new directory");
             println!("  add          Stage file contents for commit");
             println!("  commit       Record changes to the repository");
+            println!("  config       Get and set repository configuration");
             println!("  push         Update remote references");
             println!("  pull         Fetch and integrate remote changes");
             println!("  fetch        Fetch remote changes without merging");

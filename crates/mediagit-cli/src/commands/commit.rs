@@ -283,11 +283,10 @@ impl CommitCmd {
 
                      Commit authorship cannot be changed afterwards, so MediaGit                      will not guess it.
 
-                     Set it in .mediagit/config.toml:
+                     Set it once:
                      
-    [author]
-    name = \"Your Name\"
-    email = \"you@example.com\"
+    mediagit config set author.name \"Your Name\"
+    mediagit config set author.email you@example.com
                      
 or for a single command:
                      
