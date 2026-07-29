@@ -25,12 +25,11 @@ Support for 7 storage backends with zero vendor lock-in:
 
 ### Media-Aware Merging
 
-**Status: not yet available.** Per-format merge strategies for images
-(PSD, PNG, JPEG, WebP), video (MP4, MOV, AVI), audio (WAV, MP3, FLAC) and 3D
-assets are implemented and tested in the `mediagit-media` crate, but they are
-not yet wired into the `merge` command. Merging a binary file today detects
-the conflict and checks out one side for you to resolve — it does not merge
-layers, tracks or timelines.
+**Status: not yet available.** MediaGit can *analyse* images (PSD, PNG, JPEG,
+WebP), video (MP4, MOV, AVI), audio (WAV, MP3, FLAC) and 3D assets to determine
+whether two sets of edits overlap. It cannot yet **write** a merged file back
+in those formats, so there is no auto-merge to wire up: merging a binary file
+detects the conflict and checks out one side for you to resolve.
 
 Format *inspection* is available now via `mediagit media`, which parses PSD
 layers, video/audio streams and 3D model metadata.

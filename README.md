@@ -788,7 +788,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] Core CLI: `init`, `add`, `commit`, `status`, `log`, `branch`, `merge`, `push`, `pull`
 - [x] Content-addressed object database (BLAKE3, CDC chunking)
 - [x] Intelligent compression — Zstd, Brotli, per-type strategy (70+ file types)
-- [ ] PSD layer-aware merge intelligence — implemented in `mediagit-media`, not wired into `merge`; binary conflicts check out one side
+- [ ] PSD layer-aware merge intelligence — layer *analysis* works; writing a merged PSD does not (the parser is read-only), so `merge` reports a conflict and checks out one side
 - [x] Multi-cloud storage: AWS S3, Azure Blob, GCS, MinIO, Backblaze B2, DO Spaces
 - [x] Security: backend-provided encryption at rest (S3 SSE); AES-256-GCM + Argon2id implemented in `mediagit-security`, not yet wired into the CLI
 - [x] Observability: structured logging, Prometheus metrics

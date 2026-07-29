@@ -222,10 +222,13 @@ mediagit media info sequence.mp4   # streams, codecs, duration
 
 ### Media-aware merging — not yet available
 
-Per-format merge strategies for images, PSD layers, video timelines and audio
-tracks exist and are tested in the `mediagit-media` crate, but they are **not
-wired into the `merge` command**. This section previously described layer- and
-timeline-level auto-merge as though it worked; it does not.
+This section previously described layer- and timeline-level auto-merge as
+though it worked. It does not, and the gap is larger than "not wired up":
+MediaGit can *analyse* PSD layers, video timelines and audio tracks and tell
+whether edits overlap, but it cannot **write** a merged file back in any of
+those formats — PSD writing is unsupported by the parser it uses, and video or
+audio would need re-encoding. An auto-merge that cannot produce a real file is
+not an auto-merge, so those strategies report an informative conflict instead.
 
 What `mediagit merge` does today with a conflicting binary file:
 
