@@ -722,7 +722,7 @@ cargo check
 | **macOS** | x86_64 | ✅ Supported | Intel Macs |
 | **macOS** | Apple Silicon | ✅ Supported | M1/M2/M3 |
 | **Windows** | x86_64 | ✅ Supported | Via WSL2 recommended |
-| **Windows** | ARM64 | ⬜ Not shipped | No release binary is built for this target |
+| **Windows** | ARM64 | ⬜ Build from source | No release binary; `cross-rs` has no Windows target. See `book/src/installation/windows-arm64.md` |
 
 ---
 

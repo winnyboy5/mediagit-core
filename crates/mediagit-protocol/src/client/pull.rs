@@ -168,6 +168,10 @@ impl ProtocolClient {
         let want_url = format!("{}/objects/want", self.base_url);
         tracing::debug!("POST {} (streaming)", want_url);
 
+        // Retained for the post-transfer check below; both move into the
+        // request.
+        let requested: Vec<String> = want.clone();
+        let declared_have: std::collections::HashSet<String> = have.iter().cloned().collect();
         let want_req = WantRequest { want, have };
 
         let response = self
@@ -269,6 +273,49 @@ impl ProtocolClient {
             if object_count % 100 == 0 {
                 tracing::debug!("Downloaded {} objects", object_count);
             }
+        }
+
+        // Verify the requested roots actually arrived.
+        //
+        // Nothing else does: the pack header declares an object count and this
+        // loop stops there, so a server that omits objects produces a stream
+        // that reads as complete.
+        //
+        // Scope is the requested roots only — O(wants), no walk. Verified by
+        // experiment, this does **not** catch a missing deep object (the
+        // partial-clone bug fixed server-side dropped a blob two levels below
+        // the want, and this check passes on it). It catches the narrower case
+        // of a root the client asked for and did not receive. Full-closure
+        // verification would need a local walk plus the separately-transferred
+        // chunked objects; `fsck` is the tool for that.
+        let mut missing = Vec::new();
+        for hex in &requested {
+            // An object this client declared as `have` is one the server is
+            // *supposed* to prune, so its absence says nothing about the
+            // server. Whether the client really had it is its own
+            // bookkeeping; treating that as a transfer failure would blame
+            // the wrong side.
+            if declared_have.contains(hex) {
+                continue;
+            }
+            let Ok(oid) = Oid::from_hex(hex) else {
+                continue;
+            };
+            // Chunked blobs travel separately, by design — absence here is
+            // expected, not a defect.
+            if chunked_oids.contains(&oid) {
+                continue;
+            }
+            if odb.read(&oid).await.is_err() {
+                missing.push(oid);
+            }
+        }
+        if !missing.is_empty() {
+            anyhow::bail!(
+                "transfer incomplete: the server did not deliver {} requested object(s),                  first missing {}. The local repository is not usable for these objects;                  re-run the operation, and run `mediagit fsck` on the server if it persists.",
+                missing.len(),
+                missing[0]
+            );
         }
 
         tracing::info!(
