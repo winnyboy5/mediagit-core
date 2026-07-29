@@ -117,8 +117,62 @@ impl InfoOpts {
             "psd" => self.show_psd(&data).await,
             "obj" | "fbx" | "blend" | "gltf" | "glb" | "stl" | "usd" | "usda" | "usdc" | "usdz"
             | "ply" => self.show_model3d(&data, &filename).await,
-            _ => unreachable!("is_supported_extension() gated this match"),
+            "ai" | "ait" | "indd" | "indt" | "aep" | "aet" | "prproj" => {
+                self.show_vfx(&data, &filename).await
+            }
+            // Not `unreachable!`: `is_supported_extension` and this match are
+            // two lists that must agree, and nothing makes them. Adding an
+            // extension to one and forgetting the other turned a missing
+            // feature into a **panic** — the worst possible outcome for a
+            // read-only info command. Say so and exit clean instead.
+            other => {
+                println!(
+                    "'.{other}' is listed as supported but has no metadata parser wired —                      this is a bug, please report it"
+                );
+                Ok(())
+            }
         }
+    }
+
+    /// DC-6: Adobe layout/motion metadata.
+    ///
+    /// Prints only the fields the parser actually populates — an `.ai` has no
+    /// timeline and an `.aep` has no page count, and printing `duration: none`
+    /// for every Illustrator file is noise that makes the real fields harder to
+    /// find.
+    async fn show_vfx(&self, data: &[u8], filename: &str) -> Result<()> {
+        let info = mediagit_media::VfxParser::new()
+            .parse(data, filename)
+            .await?;
+        if self.json {
+            return print_json(&info);
+        }
+        println!("format: {:?}", info.format);
+        if let Some(v) = &info.version {
+            println!("version: {v}");
+        }
+        if let Some(n) = info.page_count {
+            println!("pages: {n}");
+        }
+        if let Some(d) = info.duration_seconds {
+            println!("duration: {d:.2}s");
+        }
+        if let Some((w, h)) = info.dimensions {
+            println!("dimensions: {w} x {h} pt");
+        }
+        if let Some(n) = info.layer_count {
+            println!("layers: {n}");
+        }
+        if let Some(mode) = &info.color_mode {
+            println!("color mode: {mode}");
+        }
+        if !info.fonts.is_empty() {
+            println!("fonts: {}", info.fonts.join(", "));
+        }
+        if !info.linked_assets.is_empty() {
+            println!("linked assets: {}", info.linked_assets.join(", "));
+        }
+        Ok(())
     }
 
     async fn show_image(&self, data: &[u8], filename: &str) -> Result<()> {
@@ -270,6 +324,17 @@ fn is_supported_extension(ext: &str) -> bool {
             | "usdc"
             | "usdz"
             | "ply"
+            // DC-6: Adobe layout/motion formats. `VfxParser` has parsed these
+            // since the crate was written and nothing ever called it, so
+            // `mediagit media info logo.ai` answered "Unsupported media type"
+            // about a format that is in this project's own dedup corpus.
+            | "ai"
+            | "ait"
+            | "indd"
+            | "indt"
+            | "aep"
+            | "aet"
+            | "prproj"
     )
 }
 
@@ -286,6 +351,11 @@ mod tests {
         assert!(is_supported_extension("glb"));
         assert!(is_supported_extension("stl"));
         assert!(is_supported_extension("ply"));
+        // DC-6: these reached `VfxParser`, which had no caller at all.
+        assert!(is_supported_extension("ai"));
+        assert!(is_supported_extension("indd"));
+        assert!(is_supported_extension("aep"));
+        assert!(is_supported_extension("prproj"));
         assert!(!is_supported_extension("txt"));
         assert!(!is_supported_extension(""));
     }

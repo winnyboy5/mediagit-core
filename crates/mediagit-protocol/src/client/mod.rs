@@ -198,6 +198,42 @@ pub struct ProtocolClient {
     concurrent_downloads: Option<usize>,
 }
 
+/// OP-2: absolute wall-clock budget for a download (pull / fetch / clone).
+///
+/// `push` has had one since A7; the download side had none, so a backend that
+/// accepted the connection and then stopped sending left `next_object()`
+/// awaiting forever with no output and no way to tell a stall from a slow
+/// large transfer. The failure mode was a clone that never returns.
+///
+/// Absolute rather than stall-based, matching push: the default is generous
+/// enough that a real large clone will not trip it, and lowering
+/// `MEDIAGIT_PULL_DEADLINE_SECS` is how you fail fast against a dead backend.
+///
+/// ponytail: absolute deadline, upgrade to a progress-reset stall deadline if
+/// multi-hour legitimate clones ever false-trip it — same note as push.
+pub(crate) fn pull_deadline_secs() -> u64 {
+    std::env::var("MEDIAGIT_PULL_DEADLINE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(3600)
+}
+
+/// Wrap a download future in [`pull_deadline_secs`], naming the phase that ran out.
+pub(crate) async fn with_pull_deadline<T>(
+    phase: &str,
+    fut: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    let secs = pull_deadline_secs();
+    match tokio::time::timeout(std::time::Duration::from_secs(secs), fut).await {
+        Ok(res) => res,
+        Err(_) => anyhow::bail!(
+            "{phase} aborted: exceeded MEDIAGIT_PULL_DEADLINE_SECS ({secs}s); \
+             the remote or its storage backend may be unavailable"
+        ),
+    }
+}
+
 /// Single source of truth for `MEDIAGIT_HTTP_POOL_MAX`.
 /// All three reqwest clients (control, upload, download) read this one function
 /// so a user-set value applies uniformly. Default 64 is safe for all client types;

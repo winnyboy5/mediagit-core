@@ -164,6 +164,24 @@ impl ProtocolClient {
         want: Vec<String>,
         have: Vec<String>,
     ) -> Result<Vec<Oid>> {
+        // OP-2: bound the whole exchange, not just the initial requests. The
+        // hang that mattered was mid-stream — a backend that answers the GET
+        // and then stops sending leaves `next_object()` awaiting forever.
+        // Wrapping the inner body covers every await inside it, including that
+        // loop, for the cost of one indirection.
+        super::with_pull_deadline(
+            "download",
+            self.download_pack_streaming_inner(odb, want, have),
+        )
+        .await
+    }
+
+    async fn download_pack_streaming_inner(
+        &self,
+        odb: &ObjectDatabase,
+        want: Vec<String>,
+        have: Vec<String>,
+    ) -> Result<Vec<Oid>> {
         // Send want request
         let want_url = format!("{}/objects/want", self.base_url);
         tracing::debug!("POST {} (streaming)", want_url);
@@ -414,6 +432,25 @@ impl ProtocolClient {
     /// Falls back to full-chunk downloads for any chunk the server doesn't
     /// report as a delta, and for old servers that don't expose the endpoint.
     pub async fn download_chunked_objects<F>(
+        &self,
+        odb: &ObjectDatabase,
+        chunked_oids: &[Oid],
+        on_progress: F,
+    ) -> Result<(usize, u64)>
+    where
+        F: FnMut(u64, u64, &str),
+    {
+        // OP-2: chunked blobs travel *after* the pack, in a separate phase.
+        // Deadlining only the pack would leave the phase that moves the actual
+        // media bytes — the long one — able to hang forever.
+        super::with_pull_deadline(
+            "chunk download",
+            self.download_chunked_objects_inner(odb, chunked_oids, on_progress),
+        )
+        .await
+    }
+
+    async fn download_chunked_objects_inner<F>(
         &self,
         odb: &ObjectDatabase,
         chunked_oids: &[Oid],

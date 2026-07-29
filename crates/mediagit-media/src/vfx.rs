@@ -125,6 +125,40 @@ impl VfxFormat {
 #[derive(Debug)]
 pub struct VfxParser;
 
+/// Pull the font name out of a PDF/PostScript line carrying `/FontName` or
+/// `/BaseFont`.
+///
+/// The original took `line.find('/')` — the *first* slash on the line, not the
+/// one belonging to the key. Real Illustrator output puts several PDF keys on
+/// one line, so `/Intent /RelativeColorimetric ... /BaseFont /XWHYLE+Calibri`
+/// yielded `"Intent"`. Probing a real 129 MB `.ai` from the corpus produced
+/// `fonts: ["Intent", "Ascent", "I", "BaseFont/XWHYLE+Calibri/CIDSystemInfo"]`
+/// — every entry wrong. Reading the *value* after the key fixes it.
+///
+/// Subset prefixes (`XWHYLE+Calibri`) are stripped: they are per-document
+/// arbitrary tags, so keeping them makes the same font look like a different
+/// one in every file.
+fn font_from_line(line: &str) -> Option<String> {
+    let key_at = ["/FontName", "/BaseFont"]
+        .iter()
+        .filter_map(|k| line.find(k).map(|i| i + k.len()))
+        .min()?;
+
+    let rest = line[key_at..].trim_start();
+    let value = rest.strip_prefix('/')?;
+    let end = value
+        .find(|c: char| c.is_whitespace() || c == '/' || c == '<' || c == '>' || c == '[')
+        .unwrap_or(value.len());
+    let name = &value[..end];
+
+    // `ABCDEF+Calibri` -> `Calibri`
+    let name = match name.split_once('+') {
+        Some((tag, base)) if tag.len() == 6 && tag.chars().all(|c| c.is_ascii_uppercase()) => base,
+        _ => name,
+    };
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 impl VfxParser {
     /// Create a new VFX parser
     pub fn new() -> Self {
@@ -298,14 +332,10 @@ impl VfxParser {
 
         // Extract font references
         for line in content.lines() {
-            if (line.contains("/FontName") || line.contains("/BaseFont"))
-                && let Some(font_start) = line.find('/')
-                && let Some(font_end) = line[font_start..].find(char::is_whitespace)
+            if let Some(font_name) = font_from_line(line)
+                && !fonts.contains(&font_name)
             {
-                let font_name = &line[font_start + 1..font_start + font_end];
-                if !font_name.is_empty() && !fonts.contains(&font_name.to_string()) {
-                    fonts.push(font_name.to_string());
-                }
+                fonts.push(font_name);
             }
 
             // Look for linked images
@@ -608,5 +638,31 @@ mod tests {
         assert_eq!(info.format, VfxFormat::Premiere);
         assert_eq!(info.layer_count, Some(2)); // 2 sequences
         assert_eq!(info.linked_assets.len(), 2); // 2 media files
+    }
+
+    /// Real Illustrator output puts several PDF keys on one line, and the old
+    /// heuristic took the first slash — so a line naming Calibri reported
+    /// "Intent". Every string here is from an actual `.ai` in `test-files/`.
+    #[test]
+    fn font_extraction_reads_the_key_value_not_the_first_slash() {
+        assert_eq!(
+            font_from_line("/Intent /RelativeColorimetric /BaseFont /XWHYLE+Calibri"),
+            Some("Calibri".to_string()),
+            "must read the value after the key, and strip the subset prefix"
+        );
+        assert_eq!(
+            font_from_line("<< /FontName /Bodo-Amat /Ascent 750 >>"),
+            Some("Bodo-Amat".to_string())
+        );
+        // A subset tag is exactly six uppercase letters plus '+'. Anything else
+        // is part of the name and must survive.
+        assert_eq!(
+            font_from_line("/BaseFont /Not6+Real"),
+            Some("Not6+Real".to_string())
+        );
+        // Lines with no font key yield nothing — this is what stopped "/Intent"
+        // and "/Ascent" being reported as fonts.
+        assert_eq!(font_from_line("/Intent /RelativeColorimetric"), None);
+        assert_eq!(font_from_line("no slashes at all"), None);
     }
 }
