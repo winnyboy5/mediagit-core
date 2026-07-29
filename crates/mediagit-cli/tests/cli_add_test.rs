@@ -31,7 +31,13 @@ const TEST_FILES_DIR: &str = "/mnt/d/own/saas/mediagit-core/test-files";
 /// Helper to create mediagit command
 #[allow(deprecated)]
 fn mediagit() -> Command {
-    Command::cargo_bin("mediagit").unwrap()
+    let mut cmd = Command::cargo_bin("mediagit").unwrap();
+    // `commit` refuses an unconfigured identity (UX-6) rather than authoring
+    // as `Unknown <unknown@localhost>`, so tests must declare one like a real
+    // user would.
+    cmd.env("MEDIAGIT_AUTHOR_NAME", "Test User")
+        .env("MEDIAGIT_AUTHOR_EMAIL", "test@example.com");
+    cmd
 }
 
 /// Initialize a repository in the given directory

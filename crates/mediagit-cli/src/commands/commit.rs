@@ -240,31 +240,62 @@ impl CommitCmd {
             .await
             .unwrap_or_default();
 
+        // UX-6: refuse to author a commit as nobody.
+        //
+        // This used to fall back to `$USER`, then to the literal
+        // `Unknown <unknown@localhost>`. Two problems. `$USER` is unset on
+        // Windows (it is `USERNAME` there), so on this project's own primary
+        // platform essentially every unconfigured commit was authored
+        // "Unknown" — and commit authorship is immutable, so the loss is
+        // permanent and shows up only when someone reads the history later.
+        //
+        // The `$USER`-derived form is not a fix either: `alice@localhost` is a
+        // fabricated address that *looks* real, which is worse in a history
+        // than an honest refusal. Identity must be stated, not guessed.
         let (author_name, author_email) = if let Some(author_str) = &self.author {
-            // Parse "Name <email>" format from --author flag
-            if let (Some(lt), Some(gt)) = (author_str.rfind('<'), author_str.rfind('>')) {
-                let name = author_str[..lt].trim().to_string();
-                let email = author_str[lt + 1..gt].trim().to_string();
-                (name, email)
-            } else {
-                (author_str.clone(), "unknown@localhost".to_string())
+            match (author_str.rfind('<'), author_str.rfind('>')) {
+                (Some(lt), Some(gt)) if gt > lt => {
+                    let name = author_str[..lt].trim().to_string();
+                    let email = author_str[lt + 1..gt].trim().to_string();
+                    if name.is_empty() || email.is_empty() {
+                        anyhow::bail!("--author must be \"Name <email>\"; got {author_str:?}");
+                    }
+                    (name, email)
+                }
+                _ => anyhow::bail!(
+                    "--author must be \"Name <email>\"; got {author_str:?}.                      Refusing rather than recording a placeholder address."
+                ),
             }
         } else {
-            let name = std::env::var("MEDIAGIT_AUTHOR_NAME").unwrap_or_else(|_| {
-                // Priority: config.toml [author].name > $USER > fallback
-                config.author.name.clone().unwrap_or_else(|| {
-                    std::env::var("USER").unwrap_or_else(|_| "Unknown".to_string())
-                })
-            });
-            let email = std::env::var("MEDIAGIT_AUTHOR_EMAIL").unwrap_or_else(|_| {
-                config.author.email.clone().unwrap_or_else(|| {
-                    // Derive email from $USER@localhost if available
-                    std::env::var("USER")
-                        .map(|u| format!("{}@localhost", u))
-                        .unwrap_or_else(|_| "unknown@localhost".to_string())
-                })
-            });
-            (name, email)
+            let name = std::env::var("MEDIAGIT_AUTHOR_NAME")
+                .ok()
+                .or_else(|| config.author.name.clone())
+                .filter(|n| !n.trim().is_empty());
+            let email = std::env::var("MEDIAGIT_AUTHOR_EMAIL")
+                .ok()
+                .or_else(|| config.author.email.clone())
+                .filter(|e| !e.trim().is_empty());
+
+            match (name, email) {
+                (Some(n), Some(e)) => (n, e),
+                _ => anyhow::bail!(
+                    "cannot commit: author identity is not configured.
+
+                     Commit authorship cannot be changed afterwards, so MediaGit                      will not guess it.
+
+                     Set it in .mediagit/config.toml:
+                     
+    [author]
+    name = \"Your Name\"
+    email = \"you@example.com\"
+                     
+or for a single command:
+                     
+    MEDIAGIT_AUTHOR_NAME=\"Your Name\"                      MEDIAGIT_AUTHOR_EMAIL=\"you@example.com\" mediagit commit ...
+                     
+or pass --author \"Your Name <you@example.com>\"."
+                ),
+            }
         };
 
         // Apply --signoff if requested (append after author identity is resolved)
