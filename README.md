@@ -110,7 +110,7 @@ Uploads and downloads bypass the server entirely when the backend supports signi
 - JWT + API key authentication, persisted to disk (`users.jsonl`/`api_keys.jsonl`/`grants.jsonl`, atomic writes; `MEDIAGIT_AUTH_PERSIST`)
 - Per-repo authorization grants (Read < Write < Admin; `MEDIAGIT_GRANTS_ENFORCE`) plus admin endpoints for user/key management
 - OS-keychain credential storage for CLI remote credentials (Windows Credential Manager; env → config.toml → keychain)
-- TLS 1.3 with certificate management
+- TLS 1.3 with certificate management (server TLS listener; mTLS not wired)
 - Rate limiting and DoS protection
 
 📁 **Supported File Formats (70+ extensions)**
@@ -319,8 +319,13 @@ All 32 MediaGit commands, grouped by workflow:
 | `mediagit fsck` | Check repository integrity — detect corruption or missing objects |
 | `mediagit verify <commit>` | Verify commit signatures and data integrity |
 
-> **Git Interop**: Migration commands (`filter`, `install`, `track`, `untrack`) were removed in v0.2.4.
-> The `mediagit-git` crate remains in the workspace for a future migration milestone.
+> **Importing from git or git-lfs is not supported.** The migration commands
+> (`filter`, `install`, `track`, `untrack`) were removed in v0.2.4, and the two
+> crates that backed them were deleted in v0.3.0-rc.3 — neither was ever wired
+> to the CLI, and the clean filter replaced file content with a pointer without
+> storing the content anywhere. MediaGit is a standalone VCS for media, not a
+> git front-end, so an importer must rebuild history through MediaGit's own
+> object model. See ARCHITECTURE.md.
 
 ### Utility
 | Command | Description |
@@ -666,7 +671,6 @@ cargo test --workspace -- --ignored
 |-------|-----------|----------|
 | **mediagit-cli** | `tests/*.rs` | 20+ test files: init, add, commit, branch, merge, etc. |
 | **mediagit-metrics** | `tests/metrics_test.rs` | Registry, dedup, compression, cache metrics |
-| **mediagit-migration** | `tests/migration_test.rs` | State, progress, integrity verification |
 | **mediagit-security** | `tests/security_test.rs` | Encryption, KDF, audit logging |
 | **mediagit-compression** | `tests/proptest_compression.rs` | Property-based compression roundtrip |
 | **mediagit-versioning** | `tests/proptest_odb.rs` | Property-based ODB operations |
@@ -691,7 +695,6 @@ cargo test -p mediagit-cli --test performance_benchmark_test -- --ignored
 # Test individual crates
 cargo test -p mediagit-metrics
 cargo test -p mediagit-security
-cargo test -p mediagit-migration
 cargo test -p mediagit-compression
 cargo test -p mediagit-versioning
 cargo test -p mediagit-storage
@@ -803,7 +806,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] Adaptive chunk sizes (1–8 MB) — replaces fixed 64 MB chunks
 - [x] Per-type similarity thresholds for delta compression
 - [ ] AES-256-GCM client-side encryption with Argon2id KDF — module implemented and tested, no CLI call sites yet
-- [x] TLS 1.3 for all network operations
+- [x] TLS 1.3 on the server's TLS listener (`min_tls_version`, default 1.3)
 - [x] JWT + API key authentication (server mode)
 - [x] Video timeline and audio track-based merging
 - [x] Automated multi-platform release CI (Linux, macOS, Windows, Docker, crates.io)

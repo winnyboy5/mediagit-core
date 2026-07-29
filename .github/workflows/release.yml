@@ -388,7 +388,6 @@ jobs:
   #         sleep 30
   #         publish_crate mediagit-media
   #         sleep 30
-  #         publish_crate mediagit-git
   #         sleep 30
   #
   #         # Tier 1 (depends on Tier 0)
@@ -396,7 +395,6 @@ jobs:
   #         sleep 30
   #         publish_crate mediagit-metrics
   #         sleep 30
-  #         publish_crate mediagit-migration
   #         sleep 30
   #
   #         # Tier 2 (depends on Tier 1)

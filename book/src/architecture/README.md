@@ -31,8 +31,6 @@ graph TD
         CFG["mediagit-config"]
         OBS["mediagit-observability"]
         MET["mediagit-metrics"]
-        GIT["mediagit-git"]
-        MIG["mediagit-migration"]
         TEST["mediagit-test-utils"]
     end
 
@@ -143,7 +141,7 @@ sequenceDiagram
 
 ### Encryption
 - At-rest: AES-256-GCM client-side encryption + cloud provider encryption (SSE-S3, Azure SSE)
-- In-transit: TLS 1.3 for all network operations
+- In-transit: TLS 1.3 only when the server's TLS listener is enabled (`min_tls_version`, 1.3 by default). mTLS is not wired.
 - Client-side encryption: Fully implemented with Argon2id key derivation
 
 ## Scalability

@@ -53,17 +53,16 @@
 #   MediaGit uses tracing (not log) and never calls rand::rng() directly.
 #   Updated rand 0.9→0.9.4 and 0.10→0.10.1 (our direct deps).
 #
-# RUSTSEC-2026-0183, -0184: git2 0.20.4 (unsound — UB in Remote::list / BlameHunk)
-#   No patched git2 release available. Our code does not call Remote::list()
-#   or create BlameHunks from buffers, so these code paths are not reachable.
+# RUSTSEC-2026-0183, -0184: git2 -- RESOLVED 2026-07-29 by deleting the only
+#   crate that used it. git2 entered solely through `mediagit-git`, a workspace
+#   member with zero dependents that was never wired to the CLI; removing it
+#   also removed openssl-sys (git2's vendored-openssl) from the graph.
 #
-# Review date: 2026-07-23
+# Review date: 2026-07-29
 ignore = [
     "RUSTSEC-2023-0071",
     "RUSTSEC-2023-0089",
     "RUSTSEC-2026-0097",
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
-    "RUSTSEC-2026-0183",
-    "RUSTSEC-2026-0184",
 ]

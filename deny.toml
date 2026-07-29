@@ -60,12 +60,10 @@ deny = [
     # OpenSSL is not a dependency this project wants: it reintroduces a system
     # library dependency the pure-Rust stack exists to avoid.
     #
-    # This ban is ENFORCED BY DC-2. The only openssl-sys in the graph today
-    # arrives via git2's `vendored-openssl` inside `mediagit-git`, a crate with
-    # zero dependents that the program deletes; git2 is also the sole source of
-    # the two advisories `.cargo/audit.toml` currently has to ignore
-    # (RUSTSEC-2026-0183/-0184). Deleting one dead crate clears all three.
-    # Do not enable this job before that deletion lands.
+    # Enforceable as of the DC-2 deletion: openssl-sys used to enter through
+    # git2's `vendored-openssl` inside `mediagit-git`, which also carried the
+    # only two advisories `.cargo/audit.toml` had to ignore. Deleting that one
+    # dead crate cleared all three. This ban is what keeps it out.
     { name = "openssl-sys" },
 ]
 

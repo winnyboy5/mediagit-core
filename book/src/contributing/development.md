@@ -53,8 +53,6 @@ mediagit-core/
 │   ├── mediagit-security/     # AES-GCM encryption, argon2 key derivation
 │   ├── mediagit-observability/ # tracing, structured logging
 │   ├── mediagit-metrics/      # Prometheus metrics
-│   ├── mediagit-migration/    # Repository migration utilities
-│   ├── mediagit-git/          # Git interop (smudge/clean filters)
 │   └── mediagit-test-utils/   # Shared test helpers (publish = false)
 ├── book/                      # mdBook documentation source
 ├── docker/                    # Dockerfiles

@@ -106,7 +106,7 @@ pub use adaptive::{
 };
 pub use brotli_compressor::BrotliCompressor;
 pub use error::{CompressionError, CompressionResult};
-pub use metrics::{AggregatedStats, CompressionMetrics, MetricsAggregator};
+pub use metrics::CompressionMetrics;
 pub use per_type_compressor::{CompressionProfile, PerObjectTypeCompressor, PerTypeStats};
 pub use smart_compressor::{
     ChunkCodecHint, CompressionStrategy, ObjectCategory, ObjectType, SmartCompressor,

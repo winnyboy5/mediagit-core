@@ -81,11 +81,11 @@ Creates the GitHub Release with all archives, checksums, and installer scripts.
 Only runs on tag push (not `workflow_dispatch`).
 
 ### 5. publish-crates
-Publishes all 13 crates to crates.io in dependency order. Only runs for stable releases (`is-prerelease == false`).
+Publishes all 11 crates to crates.io in dependency order. Only runs for stable releases (`is-prerelease == false`).
 
 **Publish order** (respects internal dependency tiers):
-1. Tier 0: `mediagit-config`, `mediagit-security`, `mediagit-observability`, `mediagit-compression`, `mediagit-storage`, `mediagit-media`, `mediagit-git`
-2. Tier 1: `mediagit-versioning`, `mediagit-metrics`, `mediagit-migration`
+1. Tier 0: `mediagit-config`, `mediagit-security`, `mediagit-observability`, `mediagit-compression`, `mediagit-storage`, `mediagit-media`
+2. Tier 1: `mediagit-versioning`, `mediagit-metrics`
 3. Tier 2: `mediagit-protocol`
 4. Tier 3: `mediagit-server`, `mediagit-cli`
 

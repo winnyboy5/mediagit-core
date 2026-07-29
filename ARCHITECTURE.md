@@ -36,8 +36,6 @@ graph TD
         CFG["mediagit-config"]
         OBS["mediagit-observability"]
         MET["mediagit-metrics"]
-        GIT["mediagit-git"]
-        MIG["mediagit-migration"]
         TEST["mediagit-test-utils"]
     end
 
@@ -71,8 +69,6 @@ graph TD
 | **mediagit-config** | Configuration | TOML config file management |
 | **mediagit-observability** | Logging/tracing | Structured tracing with env-filter |
 | **mediagit-metrics** | Prometheus metrics | Operation stats, dedup ratios |
-| **mediagit-git** | Git interop | FUTURE MILESTONE — git/git-lfs → MediaGit migration (not wired to CLI) |
-| **mediagit-migration** | Migration tools | Git → MediaGit migration |
 | **mediagit-test-utils** | Test utilities | Shared test helpers |
 
 ### Workspace Dependency Graph
@@ -100,9 +96,6 @@ graph TD
     PROTO --> VER
     VER --> STORE
     VER --> COMP
-    GIT["mediagit-git"] --> VER
-    MIG["mediagit-migration"] --> VER
-    MIG --> STORE
     TU --> STORE
 ```
 
@@ -170,9 +163,18 @@ graph TD
 | `completions` | Generate shell completions |
 | `version` | Show version information |
 
-### Git Interop Crate
-The `mediagit-git` crate (workspace member) provides Git/git-lfs migration tooling.
-It is **not** wired into the CLI binary — migration commands are a future milestone.
+### Importing from Git or git-lfs — not available
+There is **no supported path** for importing an existing git or git-lfs
+repository into MediaGit. Two crates (`mediagit-git`, `mediagit-migration`)
+claimed to provide one and were deleted in 0.3.0-rc.3; neither had ever been
+wired to the CLI, and `mediagit-git`'s clean filter replaced file content with a
+pointer **without storing the content anywhere**, logging success. Configured as
+a real git filter, it would have destroyed every file it touched.
+
+MediaGit is a standalone VCS for media, not a git front-end, so an importer has
+to reconstruct history through MediaGit's own object model rather than reuse
+git's. That work has not been done. Recorded here so the gap is a known absence
+rather than a broken feature someone finds by trying it.
 
 ---
 

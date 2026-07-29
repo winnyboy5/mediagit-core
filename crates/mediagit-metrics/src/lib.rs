@@ -55,12 +55,10 @@
 //! }
 //! ```
 
-pub mod collector;
 pub mod registry;
 pub mod server;
 pub mod types;
 
-pub use collector::MediaGitCollector;
 pub use registry::MetricsRegistry;
 pub use server::MetricsServer;
 pub use types::{CompressionAlgorithm, MetricsConfig, StorageBackend};
