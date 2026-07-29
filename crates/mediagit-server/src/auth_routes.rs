@@ -109,6 +109,12 @@ pub fn create_admin_router(state: Arc<AppState>) -> Router {
         )
         .route("/auth/users/{id}", delete(crate::handlers::delete_user))
         .route("/auth/users/{id}/role", patch(crate::handlers::set_role))
+        // AU-11: suspend/restore without deleting, so offboarding does not
+        // have to destroy the account's history to stop its access.
+        .route(
+            "/auth/users/{id}/disabled",
+            patch(crate::handlers::set_disabled),
+        )
         .route(
             "/auth/users/{id}/password",
             patch(crate::handlers::reset_password),

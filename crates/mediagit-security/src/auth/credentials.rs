@@ -304,7 +304,21 @@ impl CredentialsStore {
         // same one an attacker could already force against any unlocked
         // account.
         let password_ok = creds.verify_password(password);
+        let is_disabled = creds.user.disabled;
         drop(credentials);
+
+        // AU-11: same ordering, same reason. Announcing "account is disabled"
+        // before checking the password would tell any anonymous caller that
+        // the account exists. Only the password holder is told why they are
+        // being refused; everyone else gets the generic error.
+        if is_disabled {
+            warn!("Login refused: account {} is disabled", user_id);
+            return Err(AuthError::Unauthorized(if password_ok {
+                "Account is disabled; contact an administrator".to_string()
+            } else {
+                "Invalid credentials".to_string()
+            }));
+        }
 
         if self.is_locked(&user_id).await {
             warn!("Login refused: account {} is locked out", user_id);
@@ -450,6 +464,27 @@ impl CredentialsStore {
         self.persist().await
     }
 
+    /// AU-11: suspend or restore an account without deleting it.
+    ///
+    /// Deletion used to be the only way to stop someone signing in, which
+    /// forces a choice between leaving access open and destroying the record
+    /// of what they did. A disabled account keeps its id, grants and history
+    /// and simply cannot authenticate; re-enabling restores it exactly.
+    ///
+    /// Takes effect on the account's next request, because the auth layer
+    /// re-reads the user on every request rather than trusting the token.
+    pub async fn set_disabled(&self, user_id: &str, disabled: bool) -> AuthResult<()> {
+        {
+            let mut credentials = self.credentials.write().await;
+            let creds = credentials
+                .get_mut(user_id)
+                .ok_or_else(|| AuthError::UserNotFound(user_id.to_string()))?;
+            creds.user.disabled = disabled;
+        }
+
+        self.persist().await
+    }
+
     /// Register a new user with an explicit role (bootstrap / admin
     /// create-user entry point). Reuses [`CredentialsStore::register_user`]
     /// (and, through it, [`UserCredentials::new`]) so bcrypt hashing and the
@@ -517,6 +552,97 @@ impl Default for CredentialsStore {
 mod tests {
     use super::*;
     use crate::auth::user::Role;
+
+    async fn store_with_user(id: &str) -> CredentialsStore {
+        let store = CredentialsStore::new();
+        let user = User::new(
+            id.to_string(),
+            format!("{id}name"),
+            format!("{id}@example.com"),
+            Role::Write,
+        );
+        store.register_user(user, "password123").await.unwrap();
+        store
+    }
+
+    /// AU-11: suspension must actually stop authentication, and must be
+    /// reversible — the whole point is to avoid deleting the account.
+    #[tokio::test]
+    async fn disabling_blocks_login_and_re_enabling_restores_it() {
+        let store = store_with_user("u1").await;
+
+        assert!(
+            store
+                .authenticate("u1@example.com", "password123")
+                .await
+                .is_ok(),
+            "precondition: the account works before being disabled"
+        );
+
+        store.set_disabled("u1", true).await.unwrap();
+        assert!(
+            store
+                .authenticate("u1@example.com", "password123")
+                .await
+                .is_err(),
+            "a disabled account must not authenticate"
+        );
+
+        store.set_disabled("u1", false).await.unwrap();
+        assert!(
+            store
+                .authenticate("u1@example.com", "password123")
+                .await
+                .is_ok(),
+            "re-enabling must restore the account exactly; disable is not delete"
+        );
+    }
+
+    /// The account and its history survive suspension — otherwise this is just
+    /// a slower delete and gives operators no reason to prefer it.
+    #[tokio::test]
+    async fn disabling_preserves_the_account_record() {
+        let store = store_with_user("u2").await;
+        let before = store.get_user("u2").await.unwrap();
+
+        store.set_disabled("u2", true).await.unwrap();
+
+        let after = store
+            .get_user("u2")
+            .await
+            .expect("account must still exist");
+        assert!(after.disabled);
+        assert_eq!(after.id, before.id);
+        assert_eq!(after.email, before.email);
+        assert_eq!(after.created_at, before.created_at);
+        assert!(!after.is_active());
+    }
+
+    /// Same enumeration-oracle reasoning as the AU-7 lockout: only the holder
+    /// of the correct password learns *why* they were refused. Announcing
+    /// "disabled" to any caller would confirm the account exists.
+    #[tokio::test]
+    async fn disabled_reason_is_revealed_only_to_the_password_holder() {
+        let store = store_with_user("u3").await;
+        store.set_disabled("u3", true).await.unwrap();
+
+        let right = store
+            .authenticate("u3@example.com", "password123")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(right.contains("disabled"), "got: {right}");
+
+        let wrong = store
+            .authenticate("u3@example.com", "not-the-password")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !wrong.contains("disabled"),
+            "a wrong password must not reveal that the account exists: {wrong}"
+        );
+    }
 
     #[tokio::test]
     async fn test_register_and_authenticate() {

@@ -188,6 +188,13 @@ impl AuthLayer {
             return Ok(presented);
         };
         match store.get_user(user_id).await {
+            // AU-11: a suspended account is refused here, on the *next*
+            // request, rather than when its token happens to expire. Checking
+            // at issue time would leave a disabled user working for up to the
+            // full JWT lifetime, which defeats the point of suspending them.
+            Ok(user) if user.disabled => Err(AuthError::Unauthorized(format!(
+                "account is disabled: {user_id}"
+            ))),
             Ok(user) => Ok(user.permissions()),
             Err(_) => Err(AuthError::Unauthorized(format!(
                 "account no longer exists: {user_id}"

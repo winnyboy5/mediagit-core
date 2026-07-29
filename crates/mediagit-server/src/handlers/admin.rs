@@ -352,11 +352,28 @@ pub async fn list_my_keys(
 /// effect on already-issued tokens: JWT claims embed permissions with a 24h
 /// TTL and are never revoked (see `jwt.rs`), so a stolen or stale token
 /// keeps working until it naturally expires.
-const NO_REVOCATION_NOTE: &str = "This does not invalidate existing sessions - JWTs are valid for up to 24h after issue and are not revoked by this change.";
+// AU-2 made the auth layer re-derive permissions from the live user store on
+// every request, so a role change now takes effect on the target's next call
+// rather than whenever their JWT expires. This note said the opposite, which
+// was true when written and became false when that landed.
+const ROLE_CHANGE_NOTE: &str = "Takes effect on the user's next request - permissions are re-read from the user store per request, not taken from the token.";
 
 #[derive(Deserialize)]
 pub struct SetRoleRequest {
     pub role: Role,
+}
+
+#[derive(Deserialize)]
+pub struct SetDisabledRequest {
+    /// `true` suspends the account, `false` restores it.
+    pub disabled: bool,
+}
+
+#[derive(Serialize)]
+pub struct SetDisabledResponse {
+    pub id: String,
+    pub disabled: bool,
+    pub note: String,
 }
 
 #[derive(Serialize)]
@@ -408,7 +425,66 @@ pub async fn set_role(
     Ok(Json(SetRoleResponse {
         id,
         role: req.role,
-        note: NO_REVOCATION_NOTE.to_string(),
+        note: ROLE_CHANGE_NOTE.to_string(),
+    }))
+}
+
+/// AU-11: suspend or restore an account without deleting it.
+///
+/// Deletion was the only lever available, which forces a choice between
+/// leaving a departed or compromised account able to sign in and destroying
+/// the record of what it did. A disabled account keeps its id, grants and
+/// history and simply cannot authenticate.
+///
+/// Refuses to disable the last remaining admin, for the same reason `set_role`
+/// refuses to demote them: it would leave the server unadministrable, which is
+/// the state `main.rs` already warns about at startup.
+pub async fn set_disabled(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    Json(req): Json<SetDisabledRequest>,
+) -> Result<Json<SetDisabledResponse>, StatusCode> {
+    check_permission(
+        auth_user.as_deref(),
+        "user:manage",
+        state.is_auth_enabled(),
+        &state.grants,
+        "",
+    )?;
+    let auth_service = state.auth_service().ok_or(StatusCode::NOT_FOUND)?;
+
+    let target = auth_service
+        .credentials_store
+        .get_user(&id)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    if req.disabled && target.role == Role::Admin {
+        let admin_count = auth_service
+            .credentials_store
+            .count_by_role(Role::Admin)
+            .await;
+        if admin_count <= 1 {
+            return Err(StatusCode::CONFLICT);
+        }
+    }
+
+    auth_service
+        .credentials_store
+        .set_disabled(&id, req.disabled)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    Ok(Json(SetDisabledResponse {
+        id,
+        disabled: req.disabled,
+        note: if req.disabled {
+            "Account suspended. Existing sessions stop working on their next              request - the user store is consulted per request, not the token."
+                .to_string()
+        } else {
+            "Account restored.".to_string()
+        },
     }))
 }
 
@@ -451,7 +527,7 @@ pub async fn change_password(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(ChangePasswordResponse {
-        note: NO_REVOCATION_NOTE.to_string(),
+        note: ROLE_CHANGE_NOTE.to_string(),
     }))
 }
 
