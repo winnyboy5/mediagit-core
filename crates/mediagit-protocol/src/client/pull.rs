@@ -114,10 +114,17 @@ impl ProtocolClient {
             .context("Failed to download pack file")?;
 
         if !response.status().is_success() {
-            anyhow::bail!(
-                "GET /objects/pack failed with status: {}",
-                response.status()
-            );
+            // Include the server's message. An incomplete-closure refusal is
+            // operator-actionable ("run fsck on the server"), and a bare
+            // status code strands the user with "500 Internal Server Error"
+            // for a condition the server can name precisely.
+            let status = response.status();
+            let detail = response.text().await.unwrap_or_default();
+            let detail = detail.trim();
+            if detail.is_empty() {
+                anyhow::bail!("GET /objects/pack failed with status: {}", status);
+            }
+            anyhow::bail!("GET /objects/pack failed ({}): {}", status, detail);
         }
 
         // Parse X-Chunked-Objects header for large files that need separate transfer
@@ -200,10 +207,17 @@ impl ProtocolClient {
             .context("Failed to download pack file")?;
 
         if !response.status().is_success() {
-            anyhow::bail!(
-                "GET /objects/pack failed with status: {}",
-                response.status()
-            );
+            // Include the server's message. An incomplete-closure refusal is
+            // operator-actionable ("run fsck on the server"), and a bare
+            // status code strands the user with "500 Internal Server Error"
+            // for a condition the server can name precisely.
+            let status = response.status();
+            let detail = response.text().await.unwrap_or_default();
+            let detail = detail.trim();
+            if detail.is_empty() {
+                anyhow::bail!("GET /objects/pack failed with status: {}", status);
+            }
+            anyhow::bail!("GET /objects/pack failed ({}): {}", status, detail);
         }
 
         // Parse X-Chunked-Objects header

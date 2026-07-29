@@ -390,12 +390,23 @@ pub async fn download_pack(
         .iter()
         .map(|s| Oid::from_hex(s).map_err(|_| StatusCode::BAD_REQUEST))
         .collect::<Result<_, _>>()?;
-    let objects_to_pack = collect_objects_bfs(&odb, want_oids, &stop_at)
-        .await
-        .map_err(|e| {
+    let objects_to_pack = match collect_objects_bfs(&odb, want_oids, &stop_at).await {
+        Ok(objects) => objects,
+        Err(e) => {
+            // Answer with a body rather than a bare 500: an incomplete closure
+            // is an operator-actionable condition, and a status code alone
+            // leaves the client reporting "500 Internal Server Error" for a
+            // repository that needs fsck. Only `client_message()` is surfaced,
+            // so backend paths and internal errors stay out of the response.
             tracing::error!("Failed to collect objects: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+            let body = e.client_message();
+            return axum::response::Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header("content-type", "text/plain; charset=utf-8")
+                .body(axum::body::Body::from(body))
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
 
     tracing::info!(
         "Collecting {} objects for pack (from {} requested, {} pruned via have)",

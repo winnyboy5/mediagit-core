@@ -82,6 +82,14 @@ where
         // Lenient read: unknown OIDs (stale haves, corrupted state) are
         // simply not expanded. They remain in `visited` so the caller sees
         // they were "reached".
+        //
+        // This leniency is correct **only** because every caller of this
+        // function walks the *have* side, where a client may legitimately
+        // name objects that do not exist. The want side must not share it:
+        // skipping an unreadable object there drops it and its whole subtree
+        // from the pack while still answering 200, which manufactured silent
+        // partial clones (see `collect_objects_bfs`, which now hard-errors).
+        // If a want-side caller is ever added here, it needs a strict mode.
         let data = match odb.read(&oid).await {
             Ok(data) => data,
             Err(_) => continue,

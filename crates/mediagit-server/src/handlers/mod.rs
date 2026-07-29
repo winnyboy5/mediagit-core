@@ -570,11 +570,47 @@ async fn build_aws_s3_storage(
 ///
 /// Uses `VecDeque`-based BFS instead of recursive `Box::pin` to avoid heap
 /// allocations per traversal step in deep histories.
+/// Why a want-side walk could not produce a complete closure.
+///
+/// Typed rather than `anyhow` so the handler can surface the actionable case
+/// to the client without risking internal detail (paths, backend errors)
+/// leaking into a response body.
+#[derive(Debug)]
+pub enum CollectError {
+    /// A reachable object could not be read. The closure is incomplete, so no
+    /// pack can honestly be produced.
+    Unreadable(Oid),
+    /// Anything else; surfaced to the client as a bare status.
+    Other(anyhow::Error),
+}
+
+impl CollectError {
+    /// Message safe to return to a client: names only the object id, which is
+    /// a content hash of data the caller is already authorized to read.
+    pub fn client_message(&self) -> String {
+        match self {
+            Self::Unreadable(oid) => format!(
+                "repository is missing objects required to serve this request: {oid}                  is unreadable or absent. The server cannot produce a complete pack;                  run `mediagit fsck` on the server repository.",
+            ),
+            Self::Other(_) => "failed to collect objects".to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for CollectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreadable(oid) => write!(f, "object {oid} unreadable during want-side walk"),
+            Self::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
 async fn collect_objects_bfs(
     odb: &ObjectDatabase,
     roots: impl IntoIterator<Item = Oid>,
     stop_at: &std::collections::HashSet<Oid>,
-) -> Result<Vec<Oid>, anyhow::Error> {
+) -> Result<Vec<Oid>, CollectError> {
     use futures::stream::StreamExt;
 
     let mut visited = std::collections::HashSet::new();
@@ -632,8 +668,19 @@ async fn collect_objects_bfs(
             let obj_data = match read {
                 Some(d) => d,
                 None => {
-                    tracing::warn!("Object {} not found", oid);
-                    continue;
+                    // The client asked for this closure. Dropping an
+                    // unreadable object here removed it from the pack *and*
+                    // abandoned its entire subtree, then answered 200 — the
+                    // client streams to the object count in the pack header,
+                    // so a short pack is indistinguishable from a complete
+                    // one. The damage surfaced much later as "Object <oid>
+                    // not found: no loose object and no pack files", in a
+                    // repository that had reported a successful clone.
+                    //
+                    // Leniency belongs on the *have* side (`walk_reachable`),
+                    // where a client may legitimately name objects that do
+                    // not exist. On the want side it manufactures corruption.
+                    return Err(CollectError::Unreadable(oid));
                 }
             };
             collected.push(oid);
