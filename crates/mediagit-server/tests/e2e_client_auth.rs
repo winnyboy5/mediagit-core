@@ -202,3 +202,69 @@ async fn authless_server_works_with_no_credentials() {
         "authless server + no credentials should work exactly as before: {refs:?}"
     );
 }
+
+/// A bare `reqwest` client, for the two tests below that assert on the HTTP
+/// status directly rather than through `ProtocolClient`.
+///
+/// The provider install is what `ProtocolClient` does on construction; without
+/// it, whether these tests pass depends on whether some other test in this
+/// binary happened to build a `ProtocolClient` first.
+fn raw_client() -> reqwest::Client {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::new()
+}
+
+/// A push refused for lack of permission must arrive as a readable 403.
+///
+/// `upload_pack` streams the body, so returning early from the handler dropped
+/// it unread; hyper then reset the connection and the client — still writing —
+/// saw "An existing connection was forcibly closed by the remote host" instead
+/// of the status. QA phase 07 reported that as an unexplained network failure
+/// on every read-role push. The body must be large enough that the client is
+/// still writing when the server decides, or the reset never happens.
+#[tokio::test]
+async fn read_role_push_is_refused_with_a_status_not_a_connection_reset() {
+    let repos_root = tempfile::TempDir::new().unwrap();
+    let (base_url, jwt_secret, _api_key_auth) =
+        start_authed_server(repos_root.path().to_path_buf()).await;
+
+    // test-user is Role::Read, so repo:write is refused.
+    let token = JwtAuth::new(&jwt_secret)
+        .generate_token("test-user", vec!["repo:read".to_string()])
+        .unwrap();
+
+    std::fs::create_dir_all(repos_root.path().join("refused-repo")).unwrap();
+
+    let response = raw_client()
+        .post(format!("{base_url}/refused-repo/objects/pack"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(vec![0u8; 4 * 1024 * 1024])
+        .send()
+        .await
+        .expect("the refusal must come back as an HTTP response, not a transport error");
+
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "a read-role account must be told it lacks push permission"
+    );
+}
+
+/// Same guard for the repo-not-found path, which returns before reading the
+/// body for the same reason.
+#[tokio::test]
+async fn push_to_missing_repo_is_refused_with_a_status_not_a_connection_reset() {
+    let repos_root = tempfile::TempDir::new().unwrap();
+    let base_url = start_authless_server(repos_root.path().to_path_buf()).await;
+
+    let response = raw_client()
+        .post(format!("{base_url}/no-such-repo/objects/pack"))
+        .header("Content-Type", "application/octet-stream")
+        .body(vec![0u8; 4 * 1024 * 1024])
+        .send()
+        .await
+        .expect("404 must come back as an HTTP response, not a transport error");
+
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+}

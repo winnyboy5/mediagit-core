@@ -116,6 +116,37 @@ pub async fn get_refs(
     }))
 }
 
+/// Bytes of a rejected request body we will read and discard before giving up.
+///
+/// Bounded because a rejected 10 GiB push is not worth the bandwidth; past this
+/// point the reset is the honest outcome.
+const REJECT_DRAIN_LIMIT: usize = 8 * 1024 * 1024;
+
+/// Return a status for a *streaming* request without the client losing it to a
+/// connection reset.
+///
+/// Returning early from a handler drops the unread body. hyper then resets the
+/// connection, and a client still writing sees ECONNRESET instead of the status
+/// we sent — so a `403` on `POST /objects/pack` reached the user as "An
+/// existing connection was forcibly closed by the remote host", an unactionable
+/// network error for what is really "you lack push permission". Reading the
+/// body first lets the client's write side finish so it can read the response.
+///
+/// Only `upload_pack` needs this: every other body-taking handler uses the
+/// `Bytes` extractor, which buffers the body *before* the handler runs.
+async fn reject_streamed(body: axum::body::Body, code: StatusCode) -> StatusCode {
+    use futures::stream::StreamExt;
+    let mut stream = body.into_data_stream();
+    let mut seen = 0usize;
+    while let Some(Ok(chunk)) = stream.next().await {
+        seen += chunk.len();
+        if seen >= REJECT_DRAIN_LIMIT {
+            break;
+        }
+    }
+    code
+}
+
 /// POST /:repo/objects/pack - Upload a pack file (streaming)
 pub async fn upload_pack(
     Path(repo): Path<String>,
@@ -126,18 +157,20 @@ pub async fn upload_pack(
     tracing::info!("POST /{}/objects/pack (streaming)", repo);
 
     // Check permission: repo:write required
-    check_permission(
+    if let Err(code) = check_permission(
         auth_user.as_deref(),
         "repo:write",
         state.is_auth_enabled(),
         &state.grants,
         &repo,
-    )?;
+    ) {
+        return Err(reject_streamed(body, code).await);
+    }
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
         tracing::warn!("Repository not found: {}", repo);
-        return Err(StatusCode::NOT_FOUND);
+        return Err(reject_streamed(body, StatusCode::NOT_FOUND).await);
     }
 
     // Initialize ODB (shared per-repo so delta_written_pairs HashSet is shared

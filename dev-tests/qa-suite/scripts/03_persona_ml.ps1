@@ -291,8 +291,13 @@ function Run-M5 {
   $gc1 = Invoke-MG $repo @("gc", "--repack", "-y") $Phase
   Add-Row $id "gc-repack" "gc --repack -y" "exit 0" $gc1.Exit $(if ($gc1.Exit -eq 0) { "PASS" } else { "FAIL" }) $gc1.Sec "odb_mb=$(Get-DirMB (Join-Path $repo '.mediagit'))"
 
-  $gc2 = Invoke-MG $repo @("gc", "--aggressive", "-y") $Phase
-  Add-Row $id "gc-aggressive" "gc --aggressive -y" "exit 0" $gc2.Exit $(if ($gc2.Exit -eq 0) { "PASS" } else { "FAIL" }) $gc2.Sec "odb_mb=$(Get-DirMB (Join-Path $repo '.mediagit'))"
+  # `--aggressive` was never implemented - its own struct comment called it
+  # "a no-op CLI flag" - and it now refuses instead of silently doing nothing
+  # (UX-5). This step's purpose is "gc still works after the ML workload",
+  # which plain gc covers; passing a flag that does nothing never tested
+  # anything the bare command did not.
+  $gc2 = Invoke-MG $repo @("gc", "-y") $Phase
+  Add-Row $id "gc-after-workload" "gc -y" "exit 0" $gc2.Exit $(if ($gc2.Exit -eq 0) { "PASS" } else { "FAIL" }) $gc2.Sec "odb_mb=$(Get-DirMB (Join-Path $repo '.mediagit'))"
 
   Test-FsckGate $id $repo @("--full")
 

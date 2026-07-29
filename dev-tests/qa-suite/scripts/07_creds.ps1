@@ -47,12 +47,12 @@ Remove-Item Env:MEDIAGIT_API_KEY -ErrorAction SilentlyContinue
 
 $srv = $null
 try {
-  $srv = Start-QaServer -Backend "local" -Phase $Phase -EnableAuth -AdminUser "qa-admin" -AdminPass "admin-pw-123456"
+  $srv = Start-QaServer -Backend "local" -Phase $Phase -EnableAuth -AdminUser "qa-admin" -AdminPass "copper-valley-signal-31"
   $base = $srv.BaseUrl
 
   # Get a VALID token for the admin (this is the good credential).
   $lr = Invoke-RestMethod -Method Post -Uri "$base/auth/login" -ContentType "application/json" `
-    -Body (@{ identifier = "qa-admin"; password = "admin-pw-123456" } | ConvertTo-Json)
+    -Body (@{ identifier = "qa-admin"; password = "copper-valley-signal-31" } | ConvertTo-Json)
   $goodTok = $lr.tokens.access_token
 
   # Seed a fresh repo whose origin remote points at the server. Use init+remote

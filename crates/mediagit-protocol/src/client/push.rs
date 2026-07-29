@@ -298,11 +298,19 @@ impl ProtocolClient {
             .await
             .context("Failed to upload pack file")?;
 
-        if !response.status().is_success() {
-            anyhow::bail!(
-                "POST /objects/pack failed with status: {}",
-                response.status()
-            );
+        let status = response.status();
+        if !status.is_success() {
+            // A rejection here is almost always authorization, and "403
+            // Forbidden" on its own does not tell the user what to do about it.
+            let hint = match status.as_u16() {
+                401 => "\n  Not authenticated. Run `mediagit auth login <server>`.",
+                403 => {
+                    "\n  Authenticated, but this account cannot push to this repository. \
+                     An admin must grant it write access."
+                }
+                _ => "",
+            };
+            anyhow::bail!("POST /objects/pack failed with status: {status}{hint}");
         }
 
         Ok(())

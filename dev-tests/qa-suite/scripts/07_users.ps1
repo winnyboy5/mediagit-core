@@ -63,22 +63,25 @@ Remove-Item Env:MEDIAGIT_TOKEN -ErrorAction SilentlyContinue
 
 $srv = $null
 try {
-  $srv = Start-QaServer -Backend "local" -Phase $Phase -EnableAuth -AdminUser "qa-admin" -AdminPass "admin-pw-123456"
+  $srv = Start-QaServer -Backend "local" -Phase $Phase -EnableAuth -AdminUser "qa-admin" -AdminPass "copper-valley-signal-31"
   $base = $srv.BaseUrl
 
   # ---- U1-self-service ----
-  $reg = Post-Json "$base/auth/register" @{ username = "carol"; email = "carol@qa.local"; password = "carol-pw-1234" }
+  $reg = Post-Json "$base/auth/register" @{ username = "carol"; email = "carol@qa.local"; password = "copper-valley-signal-32" }
   $carolTok = if ($reg.Ok) { $reg.Body.tokens.access_token } else { $null }
-  $me = if ($carolTok) { (Post-Json "$base/auth/login" @{ identifier = "carol"; password = "carol-pw-1234" }) } else { @{ Ok = $false } }
+  $me = if ($carolTok) { (Post-Json "$base/auth/login" @{ identifier = "carol"; password = "copper-valley-signal-32" }) } else { @{ Ok = $false } }
   $meRole = if ($me.Ok) { "" + $me.Body.user.role } else { "" }
   # passwd: wrong current rejected, correct current accepted.
-  $badChange = Post-Json "$base/auth/password" @{ current_password = "WRONG"; new_password = "carol-pw-9999" } $carolTok
-  $goodChange = Post-Json "$base/auth/password" @{ current_password = "carol-pw-1234"; new_password = "carol-pw-9999" } $carolTok
-  $oldLogin = Post-Json "$base/auth/login" @{ identifier = "carol"; password = "carol-pw-1234" }
-  $newLogin = Post-Json "$base/auth/login" @{ identifier = "carol"; password = "carol-pw-9999" }
+  $badChange = Post-Json "$base/auth/password" @{ current_password = "WRONG"; new_password = "copper-valley-signal-33" } $carolTok
+  $goodChange = Post-Json "$base/auth/password" @{ current_password = "copper-valley-signal-32"; new_password = "copper-valley-signal-33" } $carolTok
+  $oldLogin = Post-Json "$base/auth/login" @{ identifier = "carol"; password = "copper-valley-signal-32" }
+  $newLogin = Post-Json "$base/auth/login" @{ identifier = "carol"; password = "copper-valley-signal-33" }
   # existing token still valid right after the change (no revocation).
   $tokStillOk = (Get-Code "$base/auth/me" $carolTok) -eq 200
-  $u1 = $reg.Ok -and ($meRole -eq "Write") -and (-not $badChange.Ok) -and ($badChange.Code -eq 401 -or $badChange.Code -eq 400) `
+  # AU-3: self-registration now grants Read, not Write. Open registration that
+  # handed out push access to every repo was the single worst default in the
+  # server; an admin promotes afterwards. This asserted the old behaviour.
+  $u1 = $reg.Ok -and ($meRole -eq "Read") -and (-not $badChange.Ok) -and ($badChange.Code -eq 401 -or $badChange.Code -eq 400) `
         -and $goodChange.Ok -and (-not $oldLogin.Ok) -and $newLogin.Ok -and $tokStillOk
   Rec "U1-self-service" $u1 `
     "register=$($reg.Ok) role=$meRole wrong-current-rejected=$(-not $badChange.Ok)($($badChange.Code)) change-ok=$($goodChange.Ok) old-pw-fails=$(-not $oldLogin.Ok) new-pw-ok=$($newLogin.Ok) token-still-valid=$tokStillOk"
@@ -98,7 +101,7 @@ try {
   # ---- U3-authz-negatives ----
   # dave (another Write user) mints a key; carol must not be able to revoke it,
   # and neither may reach the admin user-list route.
-  $regD = Post-Json "$base/auth/register" @{ username = "dave"; email = "dave@qa.local"; password = "dave-pw-1234" }
+  $regD = Post-Json "$base/auth/register" @{ username = "dave"; email = "dave@qa.local"; password = "copper-valley-signal-34" }
   $daveTok = if ($regD.Ok) { $regD.Body.tokens.access_token } else { $null }
   $daveKey = Post-Json "$base/auth/keys" @{ name = "dave-key" } $daveTok
   $daveKeyId = if ($daveKey.Ok) { $daveKey.Body.id } else { $null }
@@ -116,24 +119,24 @@ try {
   # false, but Start-QaServer's server.toml leaves it default-true, so we assert
   # closed-mode behaviour by driving the admin create-user route regardless, and
   # confirm reset-password recovery.
-  $adminLogin = Post-Json "$base/auth/login" @{ identifier = "qa-admin"; password = "admin-pw-123456" }
+  $adminLogin = Post-Json "$base/auth/login" @{ identifier = "qa-admin"; password = "copper-valley-signal-31" }
   $adminTok = if ($adminLogin.Ok) { $adminLogin.Body.tokens.access_token } else { $null }
   $adminIsAdmin = $adminLogin.Ok -and (("" + $adminLogin.Body.user.role) -eq "Admin")
   # admin provisions a user (works whether or not open registration is on).
   # role uses the wire form the server's Role enum deserializes (what the CLI sends): Read|Write|Admin.
-  $prov = Post-Json "$base/auth/users" @{ username = "erin"; email = "erin@qa.local"; password = "erin-pw-1234"; role = "Write" } $adminTok
-  $erinLogin = Post-Json "$base/auth/login" @{ identifier = "erin"; password = "erin-pw-1234" }
+  $prov = Post-Json "$base/auth/users" @{ username = "erin"; email = "erin@qa.local"; password = "copper-valley-signal-35"; role = "Write" } $adminTok
+  $erinLogin = Post-Json "$base/auth/login" @{ identifier = "erin"; password = "copper-valley-signal-35" }
   # admin resets erin's password (recovery, no current password).
   # POST /auth/users returns AdminUserInfo { id, username, role } at top level.
   $erinId = if ($prov.Ok) { $prov.Body.id } else { $null }
   $reset = if ($erinId) {
     try {
-      $rb = @{ new_password = "erin-pw-5678" } | ConvertTo-Json
+      $rb = @{ new_password = "copper-valley-signal-36" } | ConvertTo-Json
       Invoke-RestMethod -Method Patch -Uri "$base/auth/users/$erinId/password" -ContentType "application/json" -Body $rb -Headers @{ Authorization = "Bearer $adminTok" } | Out-Null
       $true
     } catch { $false }
   } else { $false }
-  $erinNewLogin = Post-Json "$base/auth/login" @{ identifier = "erin"; password = "erin-pw-5678" }
+  $erinNewLogin = Post-Json "$base/auth/login" @{ identifier = "erin"; password = "copper-valley-signal-36" }
   $u4 = $adminIsAdmin -and $prov.Ok -and $erinLogin.Ok -and $reset -and $erinNewLogin.Ok
   Rec "U4-admin-provision" $u4 `
     "admin-bootstrapped=$adminIsAdmin create-user=$($prov.Ok) provisioned-login=$($erinLogin.Ok) reset-password=$reset post-reset-login=$($erinNewLogin.Ok)"

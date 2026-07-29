@@ -76,10 +76,10 @@ Remove-Item Env:MEDIAGIT_TOKEN -ErrorAction SilentlyContinue
 Remove-Item Env:MEDIAGIT_API_KEY -ErrorAction SilentlyContinue
 
 $ADMIN = "cliadmin"
-$ADMIN_PW = "cliadmin-pw-123456"
+$ADMIN_PW = "amber-tunnel-drift-21"
 $USER = "cliuser"
-$USER_PW = "cliuser-pw-123456"
-$USER_PW2 = "cliuser-pw-999999"
+$USER_PW = "amber-tunnel-drift-22"
+$USER_PW2 = "amber-tunnel-drift-23"
 
 $srv = $null
 $done = @{}
@@ -158,8 +158,8 @@ try {
   # ---- C5-cli-admin ----
   # create-user prompts: Email, Password, Confirm password
   $NEWU = "clinewbie"
-  $NEWU_PW = "clinewbie-pw-123456"
-  $NEWU_PW2 = "clinewbie-pw-999999"
+  $NEWU_PW = "amber-tunnel-drift-24"
+  $NEWU_PW2 = "amber-tunnel-drift-25"
   $cu = Invoke-Auth @("admin", "create-user", "--server", $base, $NEWU, "--role", "read") `
     @("$NEWU@qa.local", $NEWU_PW, $NEWU_PW) -Token $adminTok
   $newLogin = Test-OracleLogin $base $NEWU $NEWU_PW

@@ -86,7 +86,7 @@ try {
   $reposOn = Join-Path $setupDir "repos-on"
 
   # ---- S1-wizard-auth-on ----
-  $adminPass = "owner-pw-123456"
+  $adminPass = "copper-valley-signal-37"
   # AU-15: password passed via environment, not a flag — a command-line
   # argument is visible in `ps` output and persists in shell history.
   $env:MEDIAGIT_ADMIN_PASSWORD = $adminPass

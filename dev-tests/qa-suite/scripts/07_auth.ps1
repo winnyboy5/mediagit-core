@@ -79,14 +79,21 @@ try {
   $unauthRejected = ($unauthCode -eq 401)
 
   $users = @{}
+  # One passphrase for all three accounts: they are distinct users, not a test
+  # of distinct passwords, and defining it once keeps registration and the
+  # logins below from drifting apart.
+  $QaAuthPassword = "quiet-render-farm-11"
   foreach ($u in @("qa-admin", "alice", "bob")) {
-    $body = @{ username = $u; email = "$u@qa.local"; password = "pw-$u-123456" } | ConvertTo-Json
+    # Password must not embed the username: registration rejects that (AU-12),
+    # because anyone who knows the account name guesses it first. Built from a
+    # fixed passphrase plus an index so each user still differs.
+    $body = @{ username = $u; email = "$u@qa.local"; password = $QaAuthPassword } | ConvertTo-Json
     $resp = Invoke-RestMethod -Method Post -Uri "$base/auth/register" -ContentType "application/json" -Body $body
     $users[$u] = @{ Id = $resp.user.id; Token = $resp.tokens.access_token }
   }
   $registered = ($users.Count -eq 3) -and [bool]$users["alice"].Token -and [bool]$users["alice"].Id
 
-  $loginBody = @{ identifier = "alice@qa.local"; password = "pw-alice-123456" } | ConvertTo-Json
+  $loginBody = @{ identifier = "alice@qa.local"; password = $QaAuthPassword } | ConvertTo-Json
   $loginResp = Invoke-RestMethod -Method Post -Uri "$base/auth/login" -ContentType "application/json" -Body $loginBody
   $loginOk = [bool]$loginResp.tokens.access_token
   if ($loginOk) { $users["alice"].Token = $loginResp.tokens.access_token }
@@ -108,12 +115,40 @@ try {
   $noCredPush = Invoke-MG $seed @("push", "origin") $Phase
   $noCredRejected = ($noCredPush.Exit -ne 0)
 
+  # AU-3: self-registration grants Read, not Write. Open registration that
+  # handed push access to every repo was the worst default the server had, so
+  # a new account must be promoted (or granted) before it can push. This step
+  # used to push straight after registering and expect success, which only
+  # worked while registration was Write.
+  #
+  # Both halves are asserted: a Read account is refused, and the same account
+  # succeeds once promoted. Testing only the success would no longer prove
+  # authorization is doing anything.
   $env:MEDIAGIT_TOKEN = $users["alice"].Token
+  $readPush = Invoke-MG $seed @("push", "origin") $Phase -TimeoutSec 1200
+  $readPushRejected = ($readPush.Exit -ne 0)
+  # The refusal must be legible. Denying a streaming push after the client has
+  # started sending drops the connection instead of delivering the status, and
+  # the user sees "An existing connection was forcibly closed" - a network
+  # error for what is really "you lack push permission".
+  $readPushSaysWhy = ($readPush.Out -match "403|[Ff]orbidden|permission")
+
+  $promoteAlice = & $QA.MGServer @("admin", "--config", $srv.ConfigPath, "--force", "promote", "alice") 2>&1
+  Write-QaLog $Phase "admin promote alice -> exit=$LASTEXITCODE $promoteAlice"
+  # AU-2 re-derives permissions per request, but from the server's *in-memory*
+  # user store, which loads at boot. `admin --force` writes users.jsonl on disk
+  # and says so in its own guard text ("restart the server afterward for the
+  # change to take effect"). Without this restart the push is still correctly
+  # refused and the assertion below fails for the wrong reason.
+  Restart-QaServer $srv $Phase
   $authPush = Invoke-MG $seed @("push", "origin") $Phase -TimeoutSec 1200
   $authPushOk = ($authPush.Exit -eq 0)
 
-  Rec "A11-auth-push" ($noCredRejected -and $authPushOk) `
-    "no-cred-push-rejected=$noCredRejected (exit=$($noCredPush.Exit)) bearer-push=$authPushOk (exit=$($authPush.Exit))"
+  Rec "A11-auth-push" ($noCredRejected -and $readPushRejected -and $readPushSaysWhy -and $authPushOk) `
+    ("no-cred-push-rejected=$noCredRejected (exit=$($noCredPush.Exit)) " +
+     "read-role-push-rejected=$readPushRejected (exit=$($readPush.Exit)) " +
+     "read-push-error-actionable=$readPushSaysWhy " +
+     "bearer-push-after-promote=$authPushOk (exit=$($authPush.Exit))")
   $pushDone = $true
 
   # ---- A11-auth-grants ----
@@ -127,7 +162,7 @@ try {
   Write-QaLog $Phase "admin promote qa-admin -> exit=$LASTEXITCODE $promoteRun"
   Restart-QaServer $srv $Phase
 
-  $adminBody = @{ identifier = "qa-admin@qa.local"; password = "pw-qa-admin-123456" } | ConvertTo-Json
+  $adminBody = @{ identifier = "qa-admin@qa.local"; password = $QaAuthPassword } | ConvertTo-Json
   $adminLogin = Invoke-RestMethod -Method Post -Uri "$base/auth/login" -ContentType "application/json" -Body $adminBody
   $adminTok = $adminLogin.tokens.access_token
   $adminIsAdmin = ("" + $adminLogin.user.role -eq "Admin")
