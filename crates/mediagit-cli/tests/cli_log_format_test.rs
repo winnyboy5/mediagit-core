@@ -170,3 +170,77 @@ fn test_log_format_with_oneline() {
         .assert()
         .success();
 }
+
+/// UX-5: `--since`/`--until` were declared, shown in `log --help`, and never
+/// read, so a date-bounded log returned the entire history regardless. A
+/// window that excludes everything must therefore show nothing.
+#[test]
+fn log_since_excludes_commits_before_the_bound() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+    add_and_commit(temp_dir.path(), "file.txt", "Content", "Findable commit");
+
+    // Sanity: the commit is visible without a date filter.
+    mediagit()
+        .arg("log")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Findable commit"));
+
+    // Everything was committed today, so a window starting in 2099 is empty.
+    mediagit()
+        .arg("log")
+        .arg("--since")
+        .arg("2099-01-01")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Findable commit").not());
+
+    // ...and one ending in 1999 is too.
+    mediagit()
+        .arg("log")
+        .arg("--until")
+        .arg("1999-12-31")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Findable commit").not());
+}
+
+/// A window that does contain the commit must still show it — otherwise the
+/// filter is just a fancier way of hiding history.
+#[test]
+fn log_since_keeps_commits_inside_the_window() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+    add_and_commit(temp_dir.path(), "file.txt", "Content", "Findable commit");
+
+    mediagit()
+        .arg("log")
+        .arg("--since")
+        .arg("2000-01-01")
+        .arg("--until")
+        .arg("2099-12-31")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Findable commit"));
+}
+
+/// A malformed date must fail loudly rather than being ignored.
+#[test]
+fn log_rejects_an_unparseable_date() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+    add_and_commit(temp_dir.path(), "file.txt", "Content", "Findable commit");
+
+    mediagit()
+        .arg("log")
+        .arg("--since")
+        .arg("last tuesday")
+        .current_dir(temp_dir.path())
+        .assert()
+        .failure();
+}

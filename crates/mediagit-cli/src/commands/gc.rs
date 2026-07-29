@@ -53,8 +53,8 @@ fn gc_reflog_horizon_days() -> i64 {
 /// Clean up repository and optimize storage
 #[derive(Parser, Debug)]
 pub struct GcCmd {
-    /// Aggressive optimization (includes protected branches)
-    #[arg(long)]
+    /// Aggressive optimization (not yet implemented)
+    #[arg(long, hide = true)]
     pub aggressive: bool,
 
     /// Skip pruning unreachable objects (by default, gc prunes)
@@ -1245,6 +1245,11 @@ impl GarbageCollector {
 
 impl GcCmd {
     pub async fn execute(&self) -> Result<()> {
+        // UX-5: declared but never read; the struct comment already admitted
+        // it was "a no-op CLI flag".
+        if self.aggressive {
+            anyhow::bail!("gc --aggressive is not yet implemented.");
+        }
         run_gc(&GcOptions::from(self)).await
     }
 }

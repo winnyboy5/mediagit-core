@@ -63,8 +63,8 @@ pub struct DiffCmd {
     #[arg(long)]
     pub cached: bool,
 
-    /// Show word-level changes
-    #[arg(long)]
+    /// Show word-level changes (not yet implemented)
+    #[arg(long, hide = true)]
     pub word_diff: bool,
 
     /// Show statistics
@@ -90,6 +90,11 @@ pub struct DiffCmd {
 
 impl DiffCmd {
     pub async fn execute(&self) -> Result<()> {
+        // UX-5: declared but never read, so it silently produced an ordinary
+        // diff. Refuse rather than pretend (see `rebase --rebase-merges`).
+        if self.word_diff {
+            anyhow::bail!("--word-diff is not yet implemented.");
+        }
         if self.quiet {
             return Ok(());
         }

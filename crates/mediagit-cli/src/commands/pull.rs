@@ -67,12 +67,12 @@ pub struct PullCmd {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Quit if conflicts occur
-    #[arg(long)]
+    /// Quit if conflicts occur (not yet implemented)
+    #[arg(long, hide = true)]
     pub no_commit: bool,
 
-    /// Abort pull
-    #[arg(long)]
+    /// Abort pull (not yet implemented; use `mediagit merge --abort`)
+    #[arg(long, hide = true)]
     pub abort: bool,
 
     /// Continue after resolving conflicts
@@ -90,6 +90,16 @@ pub struct PullCmd {
 
 impl PullCmd {
     pub async fn execute(&self) -> Result<()> {
+        // UX-5: both declared, neither read — `--abort` in particular looked
+        // like a way out of a bad pull and did nothing at all.
+        if self.abort {
+            anyhow::bail!(
+                "pull --abort is not yet implemented. A pull that stopped in                  conflict left a merge in progress: use `mediagit merge --abort`."
+            );
+        }
+        if self.no_commit {
+            anyhow::bail!("pull --no-commit is not yet implemented.");
+        }
         let start_time = Instant::now();
         let mut stats = OperationStats::for_operation("pull");
         let progress = ProgressTracker::new(self.quiet);

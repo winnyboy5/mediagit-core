@@ -192,6 +192,22 @@ impl LogCmd {
             }
         }
 
+        // Parsed once, before the walk, so a malformed date fails immediately
+        // rather than after streaming part of the history.
+        let since_bound = match self.since.as_deref() {
+            Some(raw) => Some(parse_date_bound(raw, "--since")?),
+            None => None,
+        };
+        let until_bound = match self.until.as_deref() {
+            Some(raw) => Some(parse_date_bound(raw, "--until")?),
+            None => None,
+        };
+        if let (Some(a), Some(b)) = (since_bound, until_bound)
+            && a > b
+        {
+            anyhow::bail!("--since ({a}) is after --until ({b}); no commit can match");
+        }
+
         while let Some(oid) = stack.pop() {
             if visited.contains(&oid) {
                 continue;
@@ -221,6 +237,24 @@ impl LogCmd {
                 && !commit.message.contains(grep_pattern)
             {
                 // Add parents to stack even if this commit is filtered
+                for parent in &commit.parents {
+                    if !visited.contains(parent) {
+                        stack.push(*parent);
+                    }
+                }
+                continue;
+            }
+
+            // UX-5: --since/--until were declared, demonstrated in this
+            // command's own help text, and never read — so a date-bounded log
+            // silently returned the whole history. Filter on the author
+            // timestamp, which is the date `log` displays.
+            let ts = commit.author.timestamp;
+            let out_of_range =
+                since_bound.is_some_and(|b| ts < b) || until_bound.is_some_and(|b| ts > b);
+            if out_of_range {
+                // Parents still get walked: an out-of-range commit does not
+                // mean its ancestors are, and history is not sorted by date.
                 for parent in &commit.parents {
                     if !visited.contains(parent) {
                         stack.push(*parent);
@@ -498,5 +532,81 @@ impl LogCmd {
             }
             Ok(())
         })
+    }
+}
+
+/// Parse a `--since`/`--until` bound into a UTC instant.
+///
+/// Accepts what this command's help advertises (`YYYY-MM-DD`) plus a full
+/// RFC 3339 timestamp for callers that need precision. A bare date means
+/// midnight UTC, so `--since 2024-01-01 --until 2024-12-31` includes every
+/// commit made on 31 December — an exclusive upper bound there would silently
+/// drop a day, which is exactly the kind of quiet wrongness this flag was
+/// guilty of before.
+fn parse_date_bound(raw: &str, flag: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    use chrono::{NaiveDate, NaiveTime, TimeZone, Utc};
+
+    let raw = raw.trim();
+
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+
+    if let Ok(date) = NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
+        let time = if flag == "--until" {
+            // Inclusive end-of-day.
+            NaiveTime::from_hms_milli_opt(23, 59, 59, 999).unwrap_or_default()
+        } else {
+            NaiveTime::MIN
+        };
+        return Ok(Utc.from_utc_datetime(&date.and_time(time)));
+    }
+
+    anyhow::bail!(
+        "{flag}: could not parse {raw:?} as a date. Use YYYY-MM-DD          (e.g. 2024-01-31) or an RFC 3339 timestamp          (e.g. 2024-01-31T14:30:00Z)."
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Datelike, Timelike};
+
+    /// UX-5: `--since`/`--until` were declared, demonstrated in `log --help`,
+    /// and never read — a date-bounded log silently returned all of history.
+    #[test]
+    fn date_bounds_parse_the_advertised_format() {
+        let since = parse_date_bound("2024-01-31", "--since").unwrap();
+        assert_eq!((since.year(), since.month(), since.day()), (2024, 1, 31));
+        assert_eq!((since.hour(), since.minute()), (0, 0));
+
+        let rfc = parse_date_bound("2024-01-31T14:30:00Z", "--since").unwrap();
+        assert_eq!((rfc.hour(), rfc.minute()), (14, 30));
+    }
+
+    /// A bare `--until 2024-12-31` must include commits made *during* that day.
+    /// Treating it as midnight would silently drop a day's work — the same
+    /// class of quiet wrongness the flag had when it did nothing at all.
+    #[test]
+    fn until_is_inclusive_of_the_whole_day() {
+        let until = parse_date_bound("2024-12-31", "--until").unwrap();
+        assert_eq!((until.hour(), until.minute(), until.second()), (23, 59, 59));
+
+        let since = parse_date_bound("2024-12-31", "--since").unwrap();
+        assert!(
+            since < until,
+            "the same date as --since and --until must still describe a range"
+        );
+    }
+
+    #[test]
+    fn unparseable_date_is_rejected_with_guidance() {
+        let err = parse_date_bound("last tuesday", "--since").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--since"), "{msg}");
+        assert!(
+            msg.contains("YYYY-MM-DD"),
+            "must say what it accepts: {msg}"
+        );
     }
 }

@@ -30,8 +30,8 @@ pub struct ShowCmd {
     #[arg(short = 'p', long, hide = true)]
     pub patch: bool,
 
-    /// Show file change statistics
-    #[arg(long)]
+    /// Show file change statistics (not yet implemented)
+    #[arg(long, hide = true)]
     pub stat: bool,
 
     /// Show pretty format (not yet implemented)
@@ -53,6 +53,12 @@ pub struct ShowCmd {
 
 impl ShowCmd {
     pub async fn execute(&self) -> Result<()> {
+        // UX-5: declared but never read. `diff --stat` does work.
+        if self.stat {
+            anyhow::bail!(
+                "show --stat is not yet implemented. Use `mediagit diff --stat` instead."
+            );
+        }
         if self.quiet {
             return Ok(());
         }

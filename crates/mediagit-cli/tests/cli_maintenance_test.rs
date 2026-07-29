@@ -104,12 +104,15 @@ fn test_gc_aggressive() {
         );
     }
 
+    // UX-5: `--aggressive` was never read — this asserted `.success()` and
+    // passed only because the flag was a silent no-op. It is now hidden and
+    // refuses, so the honest assertion is that it says so.
     mediagit()
         .arg("gc")
         .arg("--aggressive")
         .current_dir(temp_dir.path())
         .assert()
-        .success();
+        .failure();
 }
 
 #[test]
