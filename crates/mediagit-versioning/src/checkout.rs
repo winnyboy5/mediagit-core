@@ -45,17 +45,25 @@ fn checkout_parallelism() -> usize {
 /// Write one file/symlink entry from the ODB to disk. Standalone (not `&self`)
 /// so it can run inside a spawned tokio task.
 ///
-/// `symlink_write_as_file_on_non_unix` selects between the two pre-existing
-/// non-Unix symlink behaviors in this module: `checkout_tree` historically
-/// skipped symlinks entirely on non-Unix (just logged), while
-/// `checkout_tree_optimized`/`checkout_single_file` wrote the symlink target
-/// as a regular file. Both are preserved exactly per call site.
+/// VC-6: non-Unix symlink handling is one behaviour, not two.
+///
+/// This used to take a `symlink_write_as_file_on_non_unix` flag because the
+/// module genuinely had two: `checkout_tree` skipped symlinks entirely (at
+/// `debug!`, so invisibly), while `checkout_tree_optimized` wrote the target
+/// as a regular file. The same repository therefore checked out differently
+/// depending on which path ran — and both outcomes were silent. Skipping
+/// loses the entry; writing it as a file turns a link into a text file whose
+/// contents are a path, which a later `commit` then stores as the file's real
+/// content.
+///
+/// Now: try a real symlink first (Windows supports them with Developer Mode
+/// or the privilege granted), and only fall back to the file representation
+/// with a **warning** the user can actually see.
 async fn write_entry_to_disk(
     odb: &ObjectDatabase,
     full_path: &Path,
     oid: &Oid,
     mode: FileMode,
-    _symlink_write_as_file_on_non_unix: bool,
 ) -> Result<()> {
     if let Some(parent) = full_path.parent() {
         fs::create_dir_all(parent)
@@ -97,15 +105,40 @@ async fn write_entry_to_disk(
 
             #[cfg(not(unix))]
             {
-                if _symlink_write_as_file_on_non_unix {
+                let _ = fs::remove_file(full_path);
+                // Resolve relative to the link's own directory to choose the
+                // right Windows call — the two are not interchangeable, and a
+                // directory link created as a file link is broken.
+                let resolved = full_path.parent().map(|p| p.join(&target));
+                let target_is_dir = resolved.as_deref().is_some_and(|p| p.is_dir());
+
+                #[cfg(windows)]
+                let created = {
+                    use std::os::windows::fs::{symlink_dir, symlink_file};
+                    if target_is_dir {
+                        symlink_dir(&target, full_path)
+                    } else {
+                        symlink_file(&target, full_path)
+                    }
+                };
+                #[cfg(not(windows))]
+                let created: std::io::Result<()> = Err(std::io::Error::other(
+                    "symlinks unsupported on this platform",
+                ));
+
+                if let Err(e) = created {
+                    // Loud, not `debug!`: the working tree no longer matches
+                    // the commit, and the user needs to know before they
+                    // commit the substitute back.
+                    warn!(
+                        path = %full_path.display(),
+                        target = %target,
+                        error = %e,
+                        "could not create a symlink; writing the target as a regular file                          instead. This file's contents are a path, not the linked data —                          committing it will store it that way. Enable Developer Mode on                          Windows to get real symlinks."
+                    );
                     fs::write(full_path, target.as_bytes()).with_context(|| {
                         format!("Failed to write symlink file: {}", full_path.display())
                     })?;
-                } else {
-                    debug!(
-                        "Symlinks not supported on this platform, skipping: {}",
-                        full_path.display()
-                    );
                 }
             }
         }
@@ -140,7 +173,7 @@ async fn checkout_entry_differential(
         return Ok(false);
     }
 
-    write_entry_to_disk(odb, full_path, oid, mode, true).await?;
+    write_entry_to_disk(odb, full_path, oid, mode).await?;
     Ok(true)
 }
 
@@ -222,7 +255,7 @@ impl<'a> CheckoutManager<'a> {
     /// explicitly materialize a newly-included file.
     pub async fn materialize_file(&self, rel_path: &Path, oid: &Oid, mode: FileMode) -> Result<()> {
         let full_path = self.repo_root.join(rel_path);
-        write_entry_to_disk(self.odb, &full_path, oid, mode, true).await
+        write_entry_to_disk(self.odb, &full_path, oid, mode).await
     }
 
     /// Checkout a commit, updating the working directory to match its tree
@@ -491,7 +524,7 @@ impl<'a> CheckoutManager<'a> {
         let flat = self.filter_sparse(flat);
         let entries: Vec<(PathBuf, Oid, FileMode)> =
             flat.into_iter().map(|(p, (o, m))| (p, o, m)).collect();
-        self.run_parallel_writes(entries, false, false).await
+        self.run_parallel_writes(entries, false).await
     }
 
     /// Run a batch of entry writes with bounded parallelism (JoinSet +
@@ -500,8 +533,7 @@ impl<'a> CheckoutManager<'a> {
     /// partial-silent success.
     ///
     /// `differential` enables the skip-if-unchanged check (Regular/Executable
-    /// only); `symlink_write_as_file_on_non_unix` is forwarded to
-    /// [`write_entry_to_disk`]. Returns the number of files actually written.
+    /// only). Returns the number of files actually written.
     ///
     /// # Invariant (F1+F2)
     ///
@@ -516,7 +548,6 @@ impl<'a> CheckoutManager<'a> {
         &self,
         entries: Vec<(PathBuf, Oid, FileMode)>,
         differential: bool,
-        symlink_write_as_file_on_non_unix: bool,
     ) -> Result<usize> {
         if entries.is_empty() {
             return Ok(0);
@@ -542,14 +573,7 @@ impl<'a> CheckoutManager<'a> {
                 if differential {
                     checkout_entry_differential(&odb, &full_path, &oid, mode).await
                 } else {
-                    write_entry_to_disk(
-                        &odb,
-                        &full_path,
-                        &oid,
-                        mode,
-                        symlink_write_as_file_on_non_unix,
-                    )
-                    .await?;
+                    write_entry_to_disk(&odb, &full_path, &oid, mode).await?;
                     Ok(true)
                 }
             });
@@ -635,7 +659,7 @@ impl<'a> CheckoutManager<'a> {
         let file_paths: HashSet<PathBuf> = flat.keys().cloned().collect();
         let entries: Vec<(PathBuf, Oid, FileMode)> =
             flat.into_iter().map(|(p, (o, m))| (p, o, m)).collect();
-        let files_updated = self.run_parallel_writes(entries, true, true).await?;
+        let files_updated = self.run_parallel_writes(entries, true).await?;
         Ok((file_paths, files_updated))
     }
 
@@ -731,7 +755,7 @@ impl<'a> CheckoutManager<'a> {
                 }
             }
 
-            let files_added = self.run_parallel_writes(to_restore, false, true).await?;
+            let files_added = self.run_parallel_writes(to_restore, false).await?;
 
             let mut stats = CheckoutStats {
                 files_added,
@@ -802,8 +826,8 @@ impl<'a> CheckoutManager<'a> {
         // Parallel I/O phases (bounded by MEDIAGIT_CHECKOUT_PARALLELISM).
         // First error in any phase aborts that phase's remaining tasks and
         // fails the whole checkout.
-        let files_added = self.run_parallel_writes(to_add, false, true).await?;
-        let files_modified = self.run_parallel_writes(to_modify, false, true).await?;
+        let files_added = self.run_parallel_writes(to_add, false).await?;
+        let files_modified = self.run_parallel_writes(to_modify, false).await?;
         let files_deleted = self.run_parallel_deletes(to_delete).await?;
 
         let mut stats = CheckoutStats {
@@ -997,6 +1021,55 @@ mod tests {
     use crate::{ObjectType, Signature, TreeEntry};
     use mediagit_storage::LocalBackend;
     use std::sync::Arc;
+
+    /// VC-6: a symlink entry must produce *something* at its path, and the
+    /// same something on every checkout path.
+    ///
+    /// Previously `checkout_tree` skipped symlinks on non-Unix (at `debug!`,
+    /// so invisibly) while `checkout_tree_optimized` wrote the target as a
+    /// file — the same commit checked out differently depending on which
+    /// function ran. A missing entry is the worse of the two: `status` then
+    /// reports the file deleted and a commit can drop it from the tree.
+    #[tokio::test]
+    async fn symlink_entry_is_materialised_on_every_platform() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage: Arc<dyn mediagit_storage::StorageBackend> =
+            Arc::new(LocalBackend::new(tmp.path()).await.unwrap());
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let target = "assets/logo.psd";
+        let link_oid = odb
+            .write(ObjectType::Blob, target.as_bytes())
+            .await
+            .unwrap();
+
+        let link_path = tmp.path().join("link-to-logo");
+        write_entry_to_disk(&odb, &link_path, &link_oid, FileMode::Symlink)
+            .await
+            .expect("a symlink entry must be written, not silently skipped");
+
+        // `exists()` follows links and the target does not exist, so probe the
+        // link itself.
+        let meta = std::fs::symlink_metadata(&link_path)
+            .expect("symlink entry must leave something at its path");
+
+        if meta.file_type().is_symlink() {
+            let read_back = std::fs::read_link(&link_path).unwrap();
+            assert_eq!(
+                read_back.to_string_lossy().replace('\\', "/"),
+                target,
+                "a real symlink must point at the recorded target"
+            );
+        } else {
+            // Documented fallback: the target as file content, which the user
+            // was warned about. It must at least be exactly the target.
+            let content = std::fs::read_to_string(&link_path).unwrap();
+            assert_eq!(
+                content, target,
+                "the fallback file must contain exactly the link target"
+            );
+        }
+    }
 
     /// VC-5: `Tree` keys entries case-sensitively, so a commit made on Linux
     /// can legitimately hold both `Logo.psd` and `logo.psd`. Detection is pure
