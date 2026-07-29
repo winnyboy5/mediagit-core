@@ -1068,9 +1068,23 @@ pub async fn complete_pack(
     // complete_pack calls don't interleave their appends (F9 concurrency guard).
     {
         let mut idx = state.pack_index.write().await;
-        tokio::fs::write(&manifest_path, jsonl.as_bytes())
+        // ST-2: atomic. This JSONL *is* the routing table for every chunk in
+        // the pack, so a crash or ENOSPC part-way through a plain write leaves
+        // a truncated manifest: chunks silently unroutable, or a half-written
+        // final line. The pack bytes are already verified present and
+        // size-consistent above, so this write is the last step that can
+        // desynchronise registration from the blob it describes.
+        // `spawn_blocking` because `write_atomic` fsyncs.
+        {
+            let path = manifest_path.clone();
+            let bytes = jsonl.clone().into_bytes();
+            tokio::task::spawn_blocking(move || {
+                mediagit_versioning::atomic_write::write_atomic(&path, &bytes)
+            })
             .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        }
         let repo_idx = idx.entry(repo.clone()).or_default();
         for entry in &req.manifest {
             repo_idx.insert(
@@ -1152,13 +1166,22 @@ pub(crate) async fn evict_pack_entries(
         kept.push('\n');
     }
 
-    let tmp_path = manifest_path.with_extension("jsonl.tmp");
-    tokio::fs::write(&tmp_path, kept.as_bytes())
+    // ST-2: the hand-rolled tmp+rename here used a *predictable, shared*
+    // temp name (`<pack>.jsonl.tmp`), so two concurrent prunes of the same
+    // pack raced on one file and the last rename won — the lost-update shape
+    // fixed elsewhere as VC-3. It also never fsynced, so the rename could be
+    // durable while the contents were not. `write_atomic` gives both a
+    // process/thread-unique temp name and the fsync.
+    {
+        let path = manifest_path.clone();
+        let bytes = kept.clone().into_bytes();
+        tokio::task::spawn_blocking(move || {
+            mediagit_versioning::atomic_write::write_atomic(&path, &bytes)
+        })
         .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    tokio::fs::rename(&tmp_path, &manifest_path)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
 
     if let Some(repo_idx) = idx.get_mut(repo) {
         for id in chunk_oids {
@@ -1309,6 +1332,73 @@ pub async fn rebuild_pack_index(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ST-2: a pack manifest must never be observable half-written.
+    ///
+    /// The JSONL is the routing table for every chunk in the pack, so a
+    /// truncated one makes chunks unroutable or yields a partial final line.
+    /// `write_atomic` publishes by rename, so a concurrent reader sees either
+    /// the previous contents or the complete new ones — never a prefix.
+    #[test]
+    fn pack_manifest_write_is_all_or_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ab").join("deadbeef.jsonl");
+
+        let big = "x".repeat(512 * 1024);
+        mediagit_versioning::atomic_write::write_atomic(&path, big.as_bytes()).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap().len(), big.len());
+
+        // Replacement is also all-or-nothing, and leaves no temp residue that
+        // a later prune could mistake for a manifest.
+        let small = "y".repeat(16);
+        mediagit_versioning::atomic_write::write_atomic(&path, small.as_bytes()).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), small);
+
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n != "deadbeef.jsonl")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "atomic write must not leave temp files behind, found: {leftovers:?}"
+        );
+    }
+
+    /// The prune path previously built its temp file as
+    /// `<pack>.jsonl.tmp` — one shared, predictable name. Two concurrent
+    /// prunes of the same pack therefore wrote the same temp file and the
+    /// last rename won, silently discarding the other's result: the VC-3
+    /// lost-update shape. Unique temp names are what make this safe.
+    #[test]
+    fn concurrent_writers_to_one_manifest_do_not_share_a_temp_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = std::sync::Arc::new(dir.path().join("cd").join("feedface.jsonl"));
+
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let path = std::sync::Arc::clone(&path);
+                std::thread::spawn(move || {
+                    let body = format!("{i}").repeat(4096);
+                    mediagit_versioning::atomic_write::write_atomic(&path, body.as_bytes())
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap().expect("every writer must succeed");
+        }
+
+        // Whoever landed last, the file must be exactly one writer's payload
+        // — not a blend, and not truncated.
+        let final_bytes = std::fs::read_to_string(path.as_path()).unwrap();
+        assert_eq!(final_bytes.len(), 4096, "torn or interleaved write");
+        let first = final_bytes.chars().next().unwrap();
+        assert!(
+            final_bytes.chars().all(|c| c == first),
+            "manifest contains bytes from more than one writer"
+        );
+    }
 
     fn entry(chunk_oid: &str, offset: u64, length: u32) -> ManifestEntry {
         ManifestEntry {
