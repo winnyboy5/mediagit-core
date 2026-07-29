@@ -186,8 +186,12 @@ mediagit-server init --enable-auth
 Non-interactive (e.g. scripted/CI provisioning):
 
 ```bash
+# The password comes from the environment, never a flag: a command-line
+# argument is visible in `ps` (world-readable on most systems) and is kept
+# in shell history long after the bootstrap that needed it.
+MEDIAGIT_ADMIN_PASSWORD='a-strong-password' \
 mediagit-server init --non-interactive --enable-auth \
-  --admin-username alice --admin-email alice@example.com --admin-password a-strong-password
+  --admin-username alice --admin-email alice@example.com
 ```
 
 Then start the server and log in from the client:

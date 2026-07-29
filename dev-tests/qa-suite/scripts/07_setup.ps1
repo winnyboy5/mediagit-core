@@ -87,12 +87,16 @@ try {
 
   # ---- S1-wizard-auth-on ----
   $adminPass = "owner-pw-123456"
+  # AU-15: password passed via environment, not a flag — a command-line
+  # argument is visible in `ps` output and persists in shell history.
+  $env:MEDIAGIT_ADMIN_PASSWORD = $adminPass
   $initOut = & $QA.MGServer @(
     "init", "--non-interactive", "--enable-auth",
     "--config", $cfgOn, "--data-dir", $reposOn, "--host", "127.0.0.1", "--port", "$port",
-    "--admin-username", "qa-owner", "--admin-email", "qa-owner@qa.local", "--admin-password", $adminPass
+    "--admin-username", "qa-owner", "--admin-email", "qa-owner@qa.local"
   ) 2>&1
   $initExit = $LASTEXITCODE
+  Remove-Item Env:MEDIAGIT_ADMIN_PASSWORD -ErrorAction SilentlyContinue
   $cfgText = if (Test-Path $cfgOn) { Get-Content $cfgOn -Raw } else { "" }
   $hasSecret = $cfgText -match "jwt_secret"
   $regClosed = $cfgText -match "allow_open_registration = false"

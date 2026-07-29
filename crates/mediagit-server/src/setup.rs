@@ -64,8 +64,6 @@ pub struct InitArgs {
     pub admin_username: Option<String>,
     #[arg(long)]
     pub admin_email: Option<String>,
-    #[arg(long)]
-    pub admin_password: Option<String>,
 }
 
 pub async fn run_init(args: &InitArgs) -> Result<()> {
@@ -121,17 +119,22 @@ pub async fn run_init(args: &InitArgs) -> Result<()> {
         config.enable_rate_limiting = true;
 
         if args.non_interactive {
-            match (
-                &args.admin_username,
-                &args.admin_email,
-                &args.admin_password,
-            ) {
-                (Some(u), Some(e), Some(p)) => Some((u.clone(), e.clone(), p.clone())),
+            // AU-15: the admin password comes from the environment, never a
+            // command-line flag.
+            //
+            // `--admin-password` put the credential in `ps` output — world
+            // readable on most systems — and in the operator's shell history,
+            // where it long outlives the bootstrap it was needed for. An
+            // environment variable is readable only by the same user and root,
+            // and is how container and CI runners pass secrets anyway.
+            let env_password = std::env::var("MEDIAGIT_ADMIN_PASSWORD")
+                .ok()
+                .filter(|p| !p.is_empty());
+            match (&args.admin_username, &args.admin_email, env_password) {
+                (Some(u), Some(e), Some(p)) => Some((u.clone(), e.clone(), p)),
                 _ => {
                     eprintln!(
-                        "auth enabled but --admin-username/--admin-email/--admin-password were \
-                         not all supplied; skipping admin creation. Run `mediagit-server admin \
-                         create` separately before starting the server."
+                        "auth enabled but --admin-username, --admin-email and                          MEDIAGIT_ADMIN_PASSWORD were not all supplied; skipping                          admin creation. Run `mediagit-server admin create`                          separately before starting the server. (The password is                          read from the environment, not a flag, so it does not                          appear in `ps` output or shell history.)"
                     );
                     None
                 }
