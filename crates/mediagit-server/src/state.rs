@@ -166,14 +166,12 @@ pub struct AppState {
     /// because the presigned path is the one place an untrusted client's
     /// bytes reach storage without the server ever inspecting them.
     ///
-    /// Defaults to `false`, matching `ServerConfig::verify_content_on_complete`
-    /// — see that field for the measured reason (0.226 MiB/s aggregate on a real
-    /// S3 push; ~12.6 h extrapolated for 10 GB). The two defaults are kept in
-    /// step deliberately: if this defaulted `true` while the config defaulted
-    /// `false`, every test built on `AppState::new()` would exercise a
-    /// configuration no real server runs, which is how a green suite stops
-    /// meaning anything. Tests that need verification opt in explicitly via
-    /// `with_verify_chunks_on_complete(true)`, exactly as an operator must.
+    /// Defaults to `true`, matching `ServerConfig::verify_content_on_complete`
+    /// — see that field for why it is affordable now (verification moved off
+    /// the push critical path; reads are never speculative). The two defaults
+    /// are kept in step deliberately: if they diverged, every test built on
+    /// `AppState::new()` would exercise a configuration no real server runs,
+    /// which is how a green suite stops meaning anything.
     pub verify_chunks_on_complete: bool,
 
     /// Cache of objects wanted by clients (request_id -> WantEntry)
@@ -280,7 +278,7 @@ impl AppState {
         Self {
             repos_dir,
             presigned_url_ttl_secs: 43200,
-            verify_chunks_on_complete: false,
+            verify_chunks_on_complete: true,
             want_cache: Mutex::new(WantCache::new()),
             storage_backends: RwLock::new(HashMap::new()),
             odb_cache: RwLock::new(HashMap::new()),
@@ -319,7 +317,7 @@ impl AppState {
         Self {
             repos_dir,
             presigned_url_ttl_secs: 43200,
-            verify_chunks_on_complete: false,
+            verify_chunks_on_complete: true,
             want_cache: Mutex::new(WantCache::new()),
             storage_backends: RwLock::new(HashMap::new()),
             odb_cache: RwLock::new(HashMap::new()),
@@ -365,7 +363,7 @@ impl AppState {
         Ok(Self {
             repos_dir,
             presigned_url_ttl_secs: 43200,
-            verify_chunks_on_complete: false,
+            verify_chunks_on_complete: true,
             want_cache: Mutex::new(WantCache::new()),
             storage_backends: RwLock::new(HashMap::new()),
             odb_cache: RwLock::new(HashMap::new()),

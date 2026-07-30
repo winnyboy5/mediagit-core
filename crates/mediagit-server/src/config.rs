@@ -106,35 +106,42 @@ pub struct ServerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cors_allowed_origins: Option<Vec<String>>,
 
-    /// Server-enforced content verification on `POST /:repo/chunks/complete`
-    /// (the presigned-upload completion check). When `true` (the default),
-    /// each newly-completed chunk is read back from storage, decompressed,
-    /// and its BLAKE3 hash compared against its claimed id — a mismatch is
-    /// reported in `missing` so the client re-uploads it. This is the only
-    /// server-side defense on the presigned path, since those bytes go
-    /// client→bucket directly and the server never otherwise sees them.
+    /// Server-enforced content verification of presigned uploads: chunk
+    /// completion (`POST /:repo/chunks/complete`) and pack registration
+    /// (`POST /:repo/packs/complete`). Presigned bytes go client→bucket
+    /// directly, so this is the only point the server can check them at all.
     ///
-    /// Turning this off drops back to an existence-only check (`head`), which
-    /// accepts any bytes under a claimed id — a client with a valid
-    /// `repo:write` grant could poison the store.
+    /// Turning it off drops back to existence-only checks, which accept any
+    /// bytes under a claimed id — a client holding a valid `repo:write` grant
+    /// could poison the store, and nothing would notice until someone
+    /// reconstructed the file.
     ///
-    /// **Defaults to `false` on measured evidence.** A 1 GB push to S3 with it
-    /// enabled was still unfinished after 42 minutes, having verified 569 MiB at
-    /// an aggregate **0.226 MiB/s** — 33x slower than the 7.5 MiB/s upload it
-    /// accompanies, extrapolating to roughly **12.6 hours for a 10 GB push**
-    /// against ~20 minutes without it. The cost is not the read-back itself but
-    /// contention: the client uploads packs concurrently, so N `complete_pack`
-    /// requests each pull a whole 64 MiB pack back over the same link at once.
-    /// Per-pack throughput decayed monotonically as they piled up (0.057 ->
-    /// 0.032 MiB/s) and the final pack, running alone, was **45x faster** at
-    /// 1.458 MiB/s. See CONFIGURATION.md for the full table.
+    /// **Defaults to `true`.** It did not always: `bdfd897` turned it off on
+    /// measured evidence, because verifying synchronously ran at an aggregate
+    /// **0.226 MiB/s** on real S3 — a 1 GB push was still unfinished after 42
+    /// minutes, extrapolating to ~12.6 h for 10 GB against ~20 min without.
+    /// The cost was contention, not bandwidth: N concurrent `complete_pack`
+    /// requests each dragged a whole 64 MiB pack back over one WAN link, and
+    /// per-pack throughput decayed monotonically as they piled up (0.057 →
+    /// 0.032 MiB/s) while the last pack, running alone, was 45x faster.
     ///
-    /// Enable it on a multi-tenant server where `repo:write` holders are not
-    /// all trusted — the poisoning it prevents is silent, and worth minutes or
-    /// hours there. Leave it off for a trusted team pushing large media, which
-    /// is the workload this product exists for. The proxy upload path
-    /// (`PUT /:repo/chunks/:id`) verifies unconditionally either way; that
-    /// check is free because the server already holds those bytes.
+    /// That cost is now gone. `complete_pack` registers the pack and returns;
+    /// verification runs in the background under a serialising semaphore
+    /// (`MEDIAGIT_PACK_VERIFY_CONCURRENCY`), durably tracked by a `.pending`
+    /// marker so a crash mid-verification is resumed by the startup sweep
+    /// rather than silently dropped.
+    ///
+    /// Defaulting on is safe because **reads are never speculative**: an
+    /// unverified pack is verified before any byte of it is served
+    /// (`download_chunk`, `batch_get_pack_chunks` verify the requested slice
+    /// inline) and before any presigned URL for it is minted
+    /// (`presign_pack_downloads` verifies the whole pack, since once a URL is
+    /// out the server has no revocation, only a 12 h expiry). A verified pack
+    /// mints immediately with zero added cost, so steady-state pulls are
+    /// unchanged and media keeps travelling client↔bucket directly.
+    ///
+    /// The proxy upload path (`PUT /:repo/chunks/:id`) verifies unconditionally
+    /// either way — that check is free, the server already holds those bytes.
     #[serde(default = "default_verify_content_on_complete")]
     pub verify_content_on_complete: bool,
 }
@@ -172,12 +179,19 @@ fn default_allow_open_registration() -> bool {
 }
 
 fn default_verify_content_on_complete() -> bool {
-    // false, not true — see the field doc. Measured: 0.226 MiB/s aggregate on a
-    // real S3 push (~12.6 h extrapolated for 10 GB vs ~20 min without), caused by
-    // concurrent whole-pack read-backs contending for one WAN link. A default that
-    // makes the product's core workload 38x slower is not a safe default, even for
-    // a real integrity guarantee; operators who need it turn it on deliberately.
-    false
+    // true again, now that verification is off the push critical path.
+    //
+    // It was flipped to false in bdfd897 on measured evidence: synchronous
+    // verification ran at 0.226 MiB/s aggregate on real S3 (~12.6 h extrapolated
+    // for a 10 GB push against ~20 min without), because N concurrent
+    // complete_pack requests each dragged a whole 64 MiB pack back over one WAN
+    // link. That cost is gone: complete_pack now registers and returns, and
+    // verification happens in the background under a serialising semaphore.
+    //
+    // Safe to default on because reads are never speculative -- an unverified
+    // pack is verified before any byte of it is served, and before any presigned
+    // URL for it is minted. See ServerConfig::verify_content_on_complete.
+    true
 }
 
 impl Default for ServerConfig {

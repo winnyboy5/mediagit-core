@@ -414,23 +414,23 @@ Every key in `ServerConfig` (`crates/mediagit-server/src/config.rs:24-89`), `#[s
 | `rate_limit_burst` | u32 | `20` | Burst allowance, when rate limiting is enabled. |
 | `auth_store_dir` | path \| absent | *(resolved)* | Directory for `users.jsonl`/`api_keys.jsonl`. When unset, resolves to a sibling `auth/` directory next to `repos_dir` (`resolved_auth_store_dir`, `config.rs:190-197`) — e.g. `repos_dir = "./repos"` → `./auth`. |
 | `cors_allowed_origins` | array \| absent | absent (no CORS layer at all) | Allowed CORS origins, exact match (e.g. `"https://app.example.com"`). When unset, the server adds **no** CORS layer and emits no CORS headers — this is stricter than "allow none with headers present." |
-| `verify_content_on_complete` | bool | `false` | Server-enforced BLAKE3 content verification on presigned chunk completion (`POST /:repo/chunks/complete`) **and** pack registration (`POST /:repo/packs/complete`). Off by default on measured evidence — **read the section below before enabling it.** |
+| `verify_content_on_complete` | bool | `true` | Server-enforced BLAKE3 content verification of presigned uploads — chunk completion (`POST /:repo/chunks/complete`) and pack registration (`POST /:repo/packs/complete`). Verification runs in the **background**; pushes do not wait for it. See below. |
 
-### Cost of `verify_content_on_complete` (measured 2026-07-30, real S3)
+### How verification works, and what it costs (measured 2026-07-30)
 
-Presigned uploads go client→bucket directly, so the server never sees those bytes. The
-only way it can verify them is to read them back out of the bucket — one extra full read
-of everything you just pushed.
+Presigned uploads go client→bucket directly, so the server never sees those bytes.
+The only way it can check them is to read them back — and doing that *synchronously*
+was unaffordable.
 
-A 1 GB push to AWS S3 with verification enabled was **still unfinished after 42 minutes**,
-having verified 569 MiB at an aggregate **0.226 MiB/s** — 33x slower than the ~7.5 MiB/s
-upload it accompanies. Extrapolated: **~12.6 hours for a 10 GB push**, against ~20 minutes
-with it off.
+**Measured on real S3:** a 1 GB push with synchronous verification was still
+unfinished after 42 minutes, having verified 569 MiB at an aggregate **0.226 MiB/s**
+— 33× slower than the ~7.5 MiB/s upload it accompanies, extrapolating to **~12.6
+hours for a 10 GB push** against ~20 minutes without.
 
-**The cost is contention, not bandwidth.** The client uploads packs concurrently, so N
-`complete_pack` requests each pull a whole 64 MiB pack back over the same link at once.
-Per-pack throughput decayed monotonically as requests piled up, and the final pack —
-running alone — was **45x faster**:
+The cost was **contention, not bandwidth**. The client uploads packs concurrently, so
+N `complete_pack` requests each pulled a whole 64 MiB pack back over the same link at
+once. Throughput decayed monotonically as they piled up; the final pack, running
+alone, was **45× faster**:
 
 | pack | size | elapsed | throughput |
 |---|---|---|---|
@@ -439,32 +439,41 @@ running alone — was **45x faster**:
 | 8 | 65.7 MiB | 2021.0 s | 0.032 MiB/s |
 | **9 (alone)** | 37.1 MiB | **25.4 s** | **1.458 MiB/s** |
 
-`MEDIAGIT_PACK_VERIFY_CONCURRENCY` (default **1**) serialises verification server-wide for
-exactly this reason — queueing for one shared link beats fighting over it, and measured
-~5.7x better in aggregate. Raise it only if your server's egress genuinely parallelises.
+**So verification no longer blocks the push.** `complete_pack` writes a durable
+`.pending` marker, registers the pack, and returns; a background worker verifies it
+under a serialising semaphore (`MEDIAGIT_PACK_VERIFY_CONCURRENCY`, default 1 —
+queueing for one shared link beats fighting over it). Push cost returns to upload
+speed.
 
-**Why it defaults off:** a default that makes the product's core workload ~38x slower is
-not a safe default, however real the guarantee. Large-media teams would hit it before
-they ever read this page.
+**Reads are never speculative**, which is what makes that safe:
 
-**Why you should still consider enabling it:** the failure it prevents is silent. Chunk
-ids are content addresses, and without this check any `repo:write` collaborator can store
-bytes that don't match theirs; nothing notices until someone reconstructs the file, long
-after others have pulled it. **Enable it on a multi-tenant server where not every
-`repo:write` holder is trusted** — there, minutes or hours of push time is the right
-trade. Leave it off for a trusted team.
+| Read path | Behaviour for an **unverified** pack | For a **verified** pack |
+|---|---|---|
+| `download_chunk` | verifies the requested slice inline (bytes already in hand) | serves directly |
+| `batch_get_pack_chunks` | same inline slice check | serves directly |
+| `presign_pack_downloads` | verifies the **whole** pack before minting | **mints immediately, zero added cost** |
 
-**Why it is not simply made asynchronous:** nothing is servable until it is verified —
-`complete_pack` returning *is* the sync point, and there is no re-verification anywhere on
-the read path. Deferring would mean serving unverified bytes during the window, and the
-server has no durable task machinery, so a restart mid-verification would drop the check
-permanently and leave the pack trusted forever. Doing it safely needs a persisted
-pending-verification record plus a startup sweep — a deliberate piece of work, not a flag
-flip, and the route to getting this guarantee at near-zero push cost.
+`presign_pack_downloads` verifies the whole pack because once a URL is minted the
+server is permanently out of that request path — there is no revocation, only
+expiry (`presigned_url_ttl_seconds`, default 12 h). A pack is unverified only for the
+short window between push and the background worker finishing, so in steady state
+every pull mints immediately and **media keeps travelling client↔bucket directly in
+both directions**.
+
+**Crash safety.** The `.pending` marker is written *before* the manifest and is the
+source of truth: marker present ⇒ unverified. A crash mid-verification leaves the
+marker, and the startup sweep re-queues that pack rather than silently trusting it.
+An unreadable marker is logged and the pack left unverified — it never prevents boot.
+
+**Turning it off** drops back to existence-only checks, which accept any bytes under
+a claimed id: a client holding `repo:write` could poison the store, and nothing would
+notice until someone reconstructed the file. There is no longer a performance reason
+to disable it.
 
 **Always on regardless of this setting:** the proxy upload path
 (`PUT /:repo/chunks/:id`) verifies unconditionally. That check is free — the server
 already holds those bytes in memory.
+
 
 ### No `[storage]` section here
 
