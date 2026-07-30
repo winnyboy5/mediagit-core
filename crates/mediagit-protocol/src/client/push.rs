@@ -1113,11 +1113,20 @@ impl ProtocolClient {
                                                         body = %body_str,
                                                         request_id = %request_id,
                                                         permanent_failures = fails,
+                                                        body_len = chunk_size,
                                                         "Direct upload rejected \
                                                          (config/auth error); falling back \
                                                          to proxy. See troubleshooting docs \
                                                          for bucket-policy / presigned-URL \
-                                                         setup."
+                                                         setup. If the code is \
+                                                         SignatureDoesNotMatch, compare \
+                                                         body_len against the \
+                                                         Content-Length the server signed \
+                                                         (compressed_chunk_len at presign \
+                                                         time) before suspecting \
+                                                         credentials — they diverge if the \
+                                                         chunk was repacked between \
+                                                         presign and upload."
                                                     );
                                                     if fails >= 3 {
                                                         tracing::warn!(
