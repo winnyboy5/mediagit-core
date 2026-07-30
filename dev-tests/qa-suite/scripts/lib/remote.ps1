@@ -106,9 +106,16 @@ function _QaBackendConfig([string]$Backend) {
 
 # Start-QaServer -Backend <minio|aws|azure|gcs|local> -Phase <name>
 # Returns @{ Url; Proc; DataDir; Backend } on success.
-# Throws an exception whose message starts with "SKIP:" when the backend cannot be
-# used (missing credentials, server failed to become healthy, etc) - callers should
-# wrap the call in try/catch and record a SKIP row rather than fail the whole phase.
+# Throws "SKIP: ..." ONLY when the backend is absent BY CHOICE - not selected in
+# $QA.Backends, or credentials not supplied. Those are the exceptions a caller may
+# legitimately record as a SKIP row.
+#
+# Any other failure - a server that never became healthy, a missing template, a failed
+# `init --bare` - throws a PLAIN error and has already written a FAILED gate to
+# gates.tsv before throwing. A caller that blanket-catches and records SKIP cannot
+# soften it. Do NOT extend the SKIP: prefix to infrastructure failures: "server failed
+# to become healthy" was previously documented here as a skip, and that sentence is
+# what kept callers converting a dead MinIO into a green campaign.
 function Start-QaServer {
   param(
     [Parameter(Mandatory = $true)][ValidateSet("minio", "aws", "azure", "gcs", "local")][string]$Backend,
@@ -196,6 +203,15 @@ repos_dir = "$reposDirFwd"$authLines
     # NOT a SKIP: the backend was selected and its credentials resolved, so a server
     # that will not come up is a live defect (or dead infrastructure) and must fail
     # the phase. This used to be a SKIP, which turned every MinIO outage into a green run.
+    #
+    # Throwing is not enough on its own. Every caller wraps this in
+    # `try/catch { Add-Row ... "SKIP" ... }`, and those rows go to the phase's own step
+    # table, never to gates.tsv -- so Exit-QaPhase counted skip=0 and the phase reported
+    # PASS on whatever local gates it had while push and clone silently never ran
+    # (campaign 20260730-120513: persona_designer PASS with 5 fsck gates, zero remote
+    # coverage). Recording the gate HERE makes the failure unbypassable by a lenient
+    # caller, which is the only version of this that stays fixed.
+    Write-QaGate $Phase "server-up-$Backend" $false "server never became healthy"
     throw "mediagit-server ($Backend) never became healthy: $errText"
   }
 

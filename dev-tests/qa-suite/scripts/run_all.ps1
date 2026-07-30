@@ -117,6 +117,20 @@ foreach ($tok in $Phases) {
     $status = if ($code -eq 0) { "PASS" } elseif ($code -eq 3) { "NOTHING-VERIFIED" } else { "FAIL" }
     if ($status -ne "PASS") { $anyFail = $true }
 
+    # 01_preflight is a PRECONDITION, not a phase. -ContinueOnFail exists so one bad
+    # drill cannot cost you the other nineteen; it must not mean "run the campaign on
+    # a foundation we just proved is broken". Campaign 20260730-120513 did exactly
+    # that: preflight hard-failed on an unreachable MinIO, -ContinueOnFail carried on,
+    # and 59 gates went green while every push and clone silently never ran. Gates
+    # collected after a failed preflight are not weak evidence, they are no evidence.
+    if ($status -ne "PASS" -and $script.Name -like "01_preflight*") {
+      Write-QaLog $Phase ("preflight FAILED (exit={0}) - aborting campaign even with -ContinueOnFail; fix the environment and rerun" -f $code)
+      Write-Host ""
+      Write-Host "ABORT: 01_preflight failed. Later phases would report on an environment"
+      Write-Host "       that preflight already proved broken. See logs\$($QA.RunId)\preflight.tsv"
+      exit 1
+    }
+
     Write-QaLog $Phase ("phase {0} : {1} {2} (exit={3} sec={4:n1})" -f $tok, $script.Name, $status, $code, $sw.Elapsed.TotalSeconds)
     Write-QaRow $summaryTsv $summaryHeader @($tok, $script.Name, $status, $code, [math]::Round($sw.Elapsed.TotalSeconds, 1))
     $results += [pscustomobject]@{ Phase = $tok; Script = $script.Name; Status = $status; Exit = $code; Sec = [math]::Round($sw.Elapsed.TotalSeconds, 1) }
