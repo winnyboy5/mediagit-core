@@ -1024,6 +1024,75 @@ fn first_entry_exceeding_pack_size(
         .find(|entry| entry.offset.saturating_add(entry.length as u64) > pack_size)
 }
 
+/// Packs at or under this size are read once into memory for content
+/// verification (one sequential GET, then cheap `Bytes::slice` per entry)
+/// instead of one `get_range` per manifest entry. Set to
+/// `pack::DEFAULT_PACK_BYTES` — the pack size an operator gets without
+/// touching `MEDIAGIT_PACK_BYTES` — so the common case pays for one read.
+/// Larger packs (only reachable by an operator raising the cap toward
+/// `MAX_PACK_BYTES`, 1 GiB) fall back to per-entry ranged reads: concurrent
+/// `complete_pack` calls each buffering a full oversized pack is exactly the
+/// "PACK_BYTES × concurrency" OOM shape this repo has already hit once (see
+/// ST-4 notes on push RAM).
+const WHOLE_PACK_VERIFY_THRESHOLD_BYTES: u64 = mediagit_versioning::DEFAULT_PACK_BYTES;
+
+/// Verify every manifest entry's chunk bytes hash to its claimed `chunk_oid`,
+/// reusing [`verify_chunk_content`] so this is the same BLAKE3-after-decompress
+/// rule the loose-chunk path enforces — never a second copy of it.
+///
+/// `threshold` gates whole-pack-in-memory vs per-entry `get_range` (see
+/// [`WHOLE_PACK_VERIFY_THRESHOLD_BYTES`]); it's a parameter rather than the
+/// constant directly so tests can force the `get_range` branch without
+/// allocating a huge pack.
+///
+/// Returns the first manifest entry whose bytes don't match, if any.
+async fn first_pack_entry_failing_content_verification<'a>(
+    storage: &Arc<dyn StorageBackend>,
+    compressor: &Arc<SmartCompressor>,
+    pack_key: &str,
+    pack_size: u64,
+    manifest: &'a [ManifestEntry],
+    threshold: u64,
+) -> Option<&'a ManifestEntry> {
+    // ponytail: whole-pack read only below `threshold`; falls back to
+    // per-entry get_range on read failure too (e.g. backend hiccup), not just
+    // on size, so a transient error here surfaces as a verification failure
+    // rather than silently skipping the check.
+    let whole_pack: Option<Bytes> = if pack_size <= threshold {
+        storage.get(pack_key).await.ok().map(Bytes::from)
+    } else {
+        None
+    };
+
+    for entry in manifest {
+        // Same 5-byte pack entry header `[type:1][size:4]` that
+        // `read_and_verify_chunk` skips — see its comment for the layout.
+        if entry.length < 5 {
+            return Some(entry);
+        }
+        let data_offset = entry.offset + 5;
+        let data_len = (entry.length as u64) - 5;
+        let compressed = match &whole_pack {
+            Some(bytes) => {
+                let start = data_offset as usize;
+                let end = start + data_len as usize;
+                if end > bytes.len() {
+                    return Some(entry);
+                }
+                bytes.slice(start..end)
+            }
+            None => match storage.get_range(pack_key, data_offset, data_len).await {
+                Ok(data) => Bytes::from(data),
+                Err(_) => return Some(entry),
+            },
+        };
+        if !verify_chunk_content(compressor, &entry.chunk_oid, compressed).await {
+            return Some(entry);
+        }
+    }
+    None
+}
+
 /// POST /{repo}/packs/complete — Register a finished cloud pack and its chunk manifest.
 ///
 /// Server HEADs the pack object before accepting the manifest so a crash between
@@ -1103,6 +1172,48 @@ pub async fn complete_pack(
             "complete_pack: manifest entry range exceeds pack size (parity check failed)"
         );
         return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Pack content verification: a pack whose bytes don't hash to the chunk
+    // ids its manifest claims must never be registered — every chunk in it
+    // would then be served as authoritative. Gated by the same
+    // `verify_chunks_on_complete` knob as the loose-chunk path (one policy,
+    // not a second knob an operator could half-disable without realising).
+    // Unlike the loose-chunk path (which reports `missing` for a retry), a
+    // pack is registered atomically: on mismatch we reject the whole pack
+    // rather than persist a manifest pointing at bad bytes.
+    if state.verify_chunks_on_complete {
+        let compressor = Arc::new(SmartCompressor::new());
+        let verify_start = std::time::Instant::now();
+        let bytes_claimed: u64 = req.manifest.iter().map(|e| e.length as u64).sum();
+        if let Some(bad) = first_pack_entry_failing_content_verification(
+            &storage,
+            &compressor,
+            &pack_key,
+            pack_size,
+            &req.manifest,
+            WHOLE_PACK_VERIFY_THRESHOLD_BYTES,
+        )
+        .await
+        {
+            tracing::error!(
+                repo = %repo,
+                pack = %req.pack_oid,
+                chunk = %bad.chunk_oid,
+                offset = bad.offset,
+                length = bad.length,
+                "complete_pack: chunk content does not match claimed id; rejecting pack (manifest not persisted)"
+            );
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        tracing::info!(
+            repo = %repo,
+            pack = %req.pack_oid,
+            entries = req.manifest.len(),
+            bytes_verified = bytes_claimed,
+            elapsed_ms = verify_start.elapsed().as_millis() as u64,
+            "complete_pack: pack contents verified"
+        );
     }
 
     // Persist to JSONL under <repo>/.mediagit/packs/<shard>/<pack_oid>.jsonl
@@ -1512,5 +1623,247 @@ mod tests {
     #[test]
     fn parity_check_empty_manifest_passes() {
         assert!(first_entry_exceeding_pack_size(&[], 0).is_none());
+    }
+}
+
+#[cfg(test)]
+mod complete_pack_content_verification_tests {
+    use super::*;
+
+    struct PackFixture {
+        pack_bytes: Vec<u8>,
+        manifest: Vec<ManifestEntry>,
+    }
+
+    /// Builds a well-formed two-chunk pack: each entry gets the real 5-byte
+    /// `[type:1][size:4]` header (content irrelevant — the server only skips
+    /// it) followed by its compressed bytes, and `chunk_oid` is the real
+    /// BLAKE3 of the uncompressed content — what a correct client produces.
+    fn build_valid_pack() -> PackFixture {
+        let compressor = SmartCompressor::new();
+        let contents: [&[u8]; 2] = [
+            b"the quick brown fox jumps over the lazy dog",
+            b"a second, different chunk of content in the same pack",
+        ];
+        let mut pack_bytes = Vec::new();
+        let mut manifest = Vec::new();
+        for content in contents {
+            let chunk_id = blake3::hash(content).to_hex().to_string();
+            let compressed = compressor.compress(content).expect("compress");
+            let offset = pack_bytes.len() as u64;
+            pack_bytes.extend_from_slice(&[0u8; 5]);
+            pack_bytes.extend_from_slice(&compressed);
+            let length = (5 + compressed.len()) as u32;
+            manifest.push(ManifestEntry {
+                chunk_oid: chunk_id,
+                offset,
+                length,
+                compressed_hash: None,
+            });
+        }
+        PackFixture {
+            pack_bytes,
+            manifest,
+        }
+    }
+
+    /// Same pack, but the *second* entry's compressed bytes are corrupted
+    /// (last byte flipped) so BLAKE3(decompressed) no longer matches its
+    /// claimed `chunk_oid` — a poisoned chunk shipped inside an otherwise
+    /// well-formed pack. Mirrors `write_corrupt_pack_entry` in transfer.rs.
+    fn build_pack_with_corrupted_entry() -> PackFixture {
+        let mut fixture = build_valid_pack();
+        let bad = &fixture.manifest[1];
+        let data_end = (bad.offset + bad.length as u64) as usize;
+        let last = data_end - 1;
+        fixture.pack_bytes[last] ^= 0xFF;
+        fixture
+    }
+
+    async fn setup(repo: &str) -> (tempfile::TempDir, Arc<AppState>, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join(repo);
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let state = Arc::new(AppState::new(tmp.path().to_path_buf()));
+        (tmp, state, repo_path)
+    }
+
+    #[tokio::test]
+    async fn accepts_valid_pack_and_persists_manifest() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let fixture = build_valid_pack();
+        let pack_oid = "aabbccddee";
+        storage
+            .put(&format!("packs/{pack_oid}"), &fixture.pack_bytes)
+            .await
+            .expect("put pack");
+
+        let req = CompletePackRequest {
+            pack_oid: pack_oid.to_string(),
+            manifest: fixture.manifest,
+        };
+        let status = complete_pack(Path(repo), State(Arc::clone(&state)), None, Json(req))
+            .await
+            .expect("valid pack must be accepted");
+        assert_eq!(status, StatusCode::CREATED);
+
+        let manifest_path = repo_path
+            .join(".mediagit")
+            .join("packs")
+            .join("aa")
+            .join(format!("{pack_oid}.jsonl"));
+        assert!(
+            manifest_path.exists(),
+            "manifest must be persisted for a pack whose content verifies"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_corrupted_chunk_and_does_not_persist_manifest() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let fixture = build_pack_with_corrupted_entry();
+        let bad_chunk_id = fixture.manifest[1].chunk_oid.clone();
+        let pack_oid = "ffeeddccbb";
+        storage
+            .put(&format!("packs/{pack_oid}"), &fixture.pack_bytes)
+            .await
+            .expect("put pack");
+
+        let req = CompletePackRequest {
+            pack_oid: pack_oid.to_string(),
+            manifest: fixture.manifest,
+        };
+        let result = complete_pack(
+            Path(repo.clone()),
+            State(Arc::clone(&state)),
+            None,
+            Json(req),
+        )
+        .await;
+        assert_eq!(
+            result,
+            Err(StatusCode::BAD_REQUEST),
+            "a pack with a chunk that doesn't hash to its claimed id must be rejected"
+        );
+
+        // Side effect, not just the status: the manifest JSONL was never written...
+        let manifest_path = repo_path
+            .join(".mediagit")
+            .join("packs")
+            .join("ff")
+            .join(format!("{pack_oid}.jsonl"));
+        assert!(
+            !manifest_path.exists(),
+            "manifest must NOT be persisted when a chunk fails content verification"
+        );
+        // ...and nothing was registered in the in-memory pack index either.
+        let idx = state.pack_index.read().await;
+        assert!(
+            idx.get(&repo)
+                .is_none_or(|m| !m.contains_key(&bad_chunk_id)),
+            "poisoned chunk must not be routable through the pack index"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepts_corrupted_pack_when_verification_disabled() {
+        let repo = "test-repo".to_string();
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join(&repo);
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let mut state = AppState::new(tmp.path().to_path_buf());
+        state.verify_chunks_on_complete = false;
+        let state = Arc::new(state);
+
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let fixture = build_pack_with_corrupted_entry();
+        let pack_oid = "01020304ab";
+        storage
+            .put(&format!("packs/{pack_oid}"), &fixture.pack_bytes)
+            .await
+            .expect("put pack");
+
+        let req = CompletePackRequest {
+            pack_oid: pack_oid.to_string(),
+            manifest: fixture.manifest,
+        };
+        let status = complete_pack(Path(repo), State(Arc::clone(&state)), None, Json(req))
+            .await
+            .expect("verification disabled: even a corrupted pack must be accepted");
+        assert_eq!(status, StatusCode::CREATED);
+
+        // Proves the knob actually does something (not just an ignored field).
+        let manifest_path = repo_path
+            .join(".mediagit")
+            .join("packs")
+            .join("01")
+            .join(format!("{pack_oid}.jsonl"));
+        assert!(manifest_path.exists());
+    }
+
+    /// Exercises the `get_range` fallback branch directly (the whole-pack
+    /// path is what `complete_pack` uses by default for small test packs, so
+    /// the HTTP-level tests above never take it). Threshold 0 forces every
+    /// entry through `get_range` instead of an in-memory slice.
+    #[tokio::test]
+    async fn get_range_fallback_matches_whole_pack_verdict() {
+        let repo = "test-repo".to_string();
+        let (_tmp, _state, repo_path) = setup(&repo).await;
+        let storage = LocalBackend::new(repo_path.join(".mediagit"))
+            .await
+            .expect("local backend");
+        let storage: Arc<dyn StorageBackend> = Arc::new(storage);
+        let compressor = Arc::new(SmartCompressor::new());
+
+        let valid = build_valid_pack();
+        storage
+            .put("packs/valid-via-range", &valid.pack_bytes)
+            .await
+            .expect("put pack");
+        let pack_size = valid.pack_bytes.len() as u64;
+        let bad = first_pack_entry_failing_content_verification(
+            &storage,
+            &compressor,
+            "packs/valid-via-range",
+            pack_size,
+            &valid.manifest,
+            0, // force get_range for every entry
+        )
+        .await;
+        assert!(
+            bad.is_none(),
+            "a valid pack must verify clean through the get_range branch too"
+        );
+
+        let corrupted = build_pack_with_corrupted_entry();
+        storage
+            .put("packs/corrupted-via-range", &corrupted.pack_bytes)
+            .await
+            .expect("put pack");
+        let pack_size = corrupted.pack_bytes.len() as u64;
+        let bad = first_pack_entry_failing_content_verification(
+            &storage,
+            &compressor,
+            "packs/corrupted-via-range",
+            pack_size,
+            &corrupted.manifest,
+            0, // force get_range for every entry
+        )
+        .await;
+        assert_eq!(
+            bad.map(|e| e.chunk_oid.clone()),
+            Some(corrupted.manifest[1].chunk_oid.clone()),
+            "the get_range branch must catch the same corrupted entry the whole-pack branch does"
+        );
     }
 }
