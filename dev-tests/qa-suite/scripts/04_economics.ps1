@@ -59,6 +59,25 @@ if ($videoFiles) { $families["video-variants"] = @($videoFiles | ForEach-Object 
 # ---- anchor gates: v11 measured floors minus 5pt tolerance, keyed on latest version's savedPct ----
 $anchors = @{ wav = 94.0; glb = 95.0; safetensors = 44.0 }  # safetensors rebased 48->44 on 2026-07-16: prior 48 was calibrated on lucky RANDOM-seed draws (48.9-50.9); under the pinned seed above the deterministic value is 45.5 (I11 RCA). wav pinned-seed value: 95.3.
 
+# Smallest ODB size, in MB, whose stats-vs-disk comparison may fail the gate.
+#
+# Keyed on the INPUT size (actual on-disk ODB), not on diffPct - same lesson as
+# 08_perf's $MIN_GATED_SIZE_MB: a floor keyed on the measurement is circular. Both
+# reportedMB and actual are independently rounded to 2 decimals ([math]::Round .. 2),
+# a +/-0.005MB resolution each; below 1MB that rounding alone can swing diffPct past
+# the 2% threshold (0.02 vs 0.03 MB -> 33%) even when nothing is actually wrong. At
+# 1MB the same rounding noise caps out at ~1%, safely under the 2% gate, while a real
+# accounting error still reads as a real percentage. Sub-floor records are still
+# logged - just not able to fail.
+#
+# What this floor COSTS, stated so nobody assumes it is free: on the 20260729-202252
+# corpus it ungates svg (0.03MB, the bug) and also jpg (0.63MB, which was fine). jpg's
+# own noise band is ~1.6%, close enough to the 2% threshold that gating it would mostly
+# be gating rounding. Every ungated family still prints its numbers each run, so the
+# cost stays visible instead of becoming silent coverage loss.
+$MIN_GATED_ODB_MB = 1.0
+$statsRecords = @()
+
 $gateFailCount = 0
 foreach ($fam in $families.Keys) {
   $files = @($families[$fam] | Where-Object { Test-Path $_ })
@@ -127,12 +146,40 @@ foreach ($fam in $families.Keys) {
   }
   if ($null -ne $reportedMB -and $odbActualMB -gt 0) {
     $diffPct = [math]::Abs($reportedMB - $odbActualMB) / $odbActualMB * 100
-    $statsPass = ($diffPct -le 2.0) -or ([math]::Abs($reportedMB - $odbActualMB) -le 0.05)  # absolute floor: pct is meaningless on ~0.01MB deltas (svg)
-    Write-QaGate $Phase "stats-vs-diskMB-$fam" $statsPass "reported=$reportedMB actual=$odbActualMB diffPct=$([math]::Round($diffPct,2))"
-    if (-not $statsPass) { $gateFailCount++ }
+    $gatable = $odbActualMB -ge $MIN_GATED_ODB_MB
+    $detail = "reported=$reportedMB actual=$odbActualMB diffPct=$([math]::Round($diffPct,2))"
+    if ($gatable) {
+      # Per-family gate retained deliberately: the aggregate below can only say
+      # "failures=N", and a failure you cannot attribute to a family and a
+      # magnitude is not actionable. These numbers ARE the decision inputs.
+      $famPass = ($diffPct -le 2.0)
+      Write-QaGate $Phase "stats-vs-diskMB-$fam" $famPass $detail
+      $statsRecords += [pscustomobject]@{ fam = $fam; pass = $famPass }
+    } else {
+      # Too small to support a percentage claim -> report, but do not gate. See $MIN_GATED_ODB_MB.
+      Write-QaLog $Phase "stats-vs-diskMB-$fam ungated, below floor: $detail (min-odb-size=${MIN_GATED_ODB_MB}MB)"
+      $statsRecords += [pscustomobject]@{ fam = $fam; pass = $null }
+    }
   } else {
     Write-QaLog $Phase "stats-vs-diskMB-$fam skipped: could not locate a storage-bytes field in stats --json"
   }
+}
+
+# Single aggregate gate across all families, mirroring 08_perf's baseline-regression
+# gate shape: gated=N/M is always printed so a floor set above every family reads as
+# a visible ratio, not silence. A gate that measured nothing must FAIL, not pass
+# vacuously - see $MIN_GATED_ODB_MB comment above and 08_perf's identical rule.
+$statsGated = @($statsRecords | Where-Object { $null -ne $_.pass })
+if ($statsGated.Count -eq 0) {
+  Write-QaGate $Phase "stats-vs-diskMB" $false `
+    "gated=0/$($statsRecords.Count) - the gate measured nothing (min-odb-size=${MIN_GATED_ODB_MB}MB)"
+  $gateFailCount++
+} else {
+  $statsFailed = @($statsGated | Where-Object { -not $_.pass })
+  $statsPassOverall = $statsFailed.Count -eq 0
+  Write-QaGate $Phase "stats-vs-diskMB" $statsPassOverall `
+    "gated=$($statsGated.Count)/$($statsRecords.Count) failures=$($statsFailed.Count) threshold=2% min-odb-size=${MIN_GATED_ODB_MB}MB"
+  if (-not $statsPassOverall) { $gateFailCount++ }
 }
 
 # ---- existing dedup regression gate (unchanged script, invoked as-is) ----
