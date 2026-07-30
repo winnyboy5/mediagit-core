@@ -811,6 +811,28 @@ fn is_hex_str(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// The one rule for "does this chunk match its claimed id": decompress
+/// `compressed` and compare BLAKE3(decompressed) to `chunk_id_hex`.
+///
+/// Shared by `chunks::upload_chunk` (proxy upload path) and
+/// `transfer::read_and_verify_chunk` (presigned-completion + strong-verify
+/// paths) so this check exists in exactly one place — a second, divergent
+/// copy is how this codebase got its recurring "ODB bypass" bug class.
+/// Returns `false` on either a decompression failure or a hash mismatch.
+pub(crate) async fn verify_chunk_content(
+    compressor: &Arc<SmartCompressor>,
+    chunk_id_hex: &str,
+    compressed: Bytes,
+) -> bool {
+    let compressor = Arc::clone(compressor);
+    let decompressed =
+        match tokio::task::spawn_blocking(move || compressor.decompress(&compressed)).await {
+            Ok(Ok(data)) => data,
+            _ => return false,
+        };
+    blake3::hash(&decompressed).to_hex().to_string() == chunk_id_hex
+}
+
 fn default_ref_head() -> String {
     "HEAD".to_string()
 }

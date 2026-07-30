@@ -414,6 +414,7 @@ Every key in `ServerConfig` (`crates/mediagit-server/src/config.rs:24-89`), `#[s
 | `rate_limit_burst` | u32 | `20` | Burst allowance, when rate limiting is enabled. |
 | `auth_store_dir` | path \| absent | *(resolved)* | Directory for `users.jsonl`/`api_keys.jsonl`. When unset, resolves to a sibling `auth/` directory next to `repos_dir` (`resolved_auth_store_dir`, `config.rs:190-197`) — e.g. `repos_dir = "./repos"` → `./auth`. |
 | `cors_allowed_origins` | array \| absent | absent (no CORS layer at all) | Allowed CORS origins, exact match (e.g. `"https://app.example.com"`). When unset, the server adds **no** CORS layer and emits no CORS headers — this is stricter than "allow none with headers present." |
+| `verify_content_on_complete` | bool | `true` | Server-enforced BLAKE3 content verification when a presigned chunk upload completes (`POST /:repo/chunks/complete`). Turning it off drops back to an existence-only `head()` check, which lets a client with `repo:write` store bytes that don't match their claimed chunk id; it also costs a full read-back+decompress of every completed chunk, so only disable it if that cost is a measured problem. |
 
 ### No `[storage]` section here
 

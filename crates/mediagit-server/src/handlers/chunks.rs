@@ -156,6 +156,25 @@ pub async fn upload_chunk(
     // Create storage backend
     let storage = get_or_init_storage(&state, &repo_path).await?;
 
+    // Verify the body actually hashes to the claimed chunk_id before storing
+    // anything — a client holding a valid repo:write grant must not be able
+    // to poison the store with bytes under an id they don't match. This is
+    // an in-memory check only (the body is already fully buffered above), so
+    // it costs no extra I/O. Note this rejects BAD BYTES, never REWRITES: a
+    // correct body under an already-existing id must still succeed, since
+    // `repair_remote` fixes poisoned chunks by re-uploading them
+    // unconditionally via this same endpoint.
+    let compressor = Arc::new(SmartCompressor::new());
+    if !verify_chunk_content(&compressor, &chunk_id, body.clone()).await {
+        tracing::warn!(
+            repo = %repo,
+            chunk_id = %chunk_id,
+            body_len = body.len(),
+            "Rejecting upload_chunk: body does not decompress+hash to the claimed chunk_id"
+        );
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     // Store chunk directly (already compressed)
     let chunk_key = format!("chunks/{}", chunk_id);
     storage.put(&chunk_key, &body).await.map_err(|e| {
@@ -1183,5 +1202,90 @@ mod j6_path_traversal_tests {
         .await;
 
         assert_eq!(result, Err(StatusCode::BAD_REQUEST));
+    }
+}
+
+#[cfg(test)]
+mod chunk_content_verification_tests {
+    use super::*;
+
+    /// A client with a valid `repo:write` grant must not be able to store
+    /// bytes that don't hash to their claimed chunk_id — the server has the
+    /// full body in memory already, so it must verify before `storage.put`.
+    #[tokio::test]
+    async fn upload_chunk_rejects_body_not_matching_claimed_id_and_stores_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = "test-repo".to_string();
+        let repo_path = tmp.path().join(&repo);
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let state = Arc::new(AppState::new(tmp.path().to_path_buf()));
+
+        // Compress real content but claim a chunk_id that doesn't match it.
+        let content = b"the actual bytes being uploaded".to_vec();
+        let compressor = SmartCompressor::new();
+        let compressed = compressor.compress(&content).expect("compress");
+        let wrong_id = blake3::hash(b"a completely different payload")
+            .to_hex()
+            .to_string();
+
+        let result = upload_chunk(
+            Path((repo.clone(), wrong_id.clone())),
+            State(Arc::clone(&state)),
+            None,
+            Bytes::from(compressed),
+        )
+        .await;
+
+        assert_eq!(result, Err(StatusCode::BAD_REQUEST));
+
+        // Nothing must have been stored under the claimed (mismatched) id.
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let key = format!("chunks/{}", wrong_id);
+        assert!(
+            !storage.exists(&key).await.unwrap(),
+            "poisoned chunk must not be persisted"
+        );
+    }
+
+    /// `repair_remote` fixes a poisoned chunk by re-uploading correct bytes
+    /// unconditionally via this same endpoint, under an id that already
+    /// exists in storage. The content check must reject bad bytes, never
+    /// refuse an overwrite — a correct body under an existing id must still
+    /// succeed, or the only repair tool for this class of bug breaks.
+    #[tokio::test]
+    async fn upload_chunk_allows_correct_body_to_overwrite_existing_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = "test-repo".to_string();
+        let repo_path = tmp.path().join(&repo);
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let state = Arc::new(AppState::new(tmp.path().to_path_buf()));
+
+        let content = b"content that repair_remote re-uploads".to_vec();
+        let chunk_id = blake3::hash(&content).to_hex().to_string();
+        let compressor = SmartCompressor::new();
+        let compressed = compressor.compress(&content).expect("compress");
+
+        // First upload establishes the chunk.
+        let first = upload_chunk(
+            Path((repo.clone(), chunk_id.clone())),
+            State(Arc::clone(&state)),
+            None,
+            Bytes::from(compressed.clone()),
+        )
+        .await;
+        assert_eq!(first, Ok(StatusCode::OK));
+
+        // Second upload of the SAME correct bytes under the SAME (now
+        // pre-existing) id — the repair path — must also succeed.
+        let second = upload_chunk(
+            Path((repo, chunk_id)),
+            State(Arc::clone(&state)),
+            None,
+            Bytes::from(compressed),
+        )
+        .await;
+        assert_eq!(second, Ok(StatusCode::OK));
     }
 }

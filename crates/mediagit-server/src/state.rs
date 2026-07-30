@@ -156,6 +156,14 @@ pub struct AppState {
     /// TTL (seconds) for presigned PUT URLs issued to clients.
     pub presigned_url_ttl_secs: u64,
 
+    /// Whether `complete_chunk_uploads` verifies chunk *content* (decompress
+    /// and hash with BLAKE3) rather than mere existence. Server-side knob
+    /// (not a client flag — see `ServerConfig::verify_content_on_complete`)
+    /// because the presigned path is the one place an untrusted client's
+    /// bytes reach storage without the server ever inspecting them. Defaults
+    /// to `true`.
+    pub verify_chunks_on_complete: bool,
+
     /// Cache of objects wanted by clients (request_id -> WantEntry)
     /// Uses unique request IDs to prevent race conditions between concurrent clients
     /// Bounded to prevent memory leaks from abandoned requests
@@ -234,6 +242,7 @@ impl AppState {
         Self {
             repos_dir,
             presigned_url_ttl_secs: 43200,
+            verify_chunks_on_complete: true,
             want_cache: Mutex::new(WantCache::new()),
             storage_backends: RwLock::new(HashMap::new()),
             odb_cache: RwLock::new(HashMap::new()),
@@ -270,6 +279,7 @@ impl AppState {
         Self {
             repos_dir,
             presigned_url_ttl_secs: 43200,
+            verify_chunks_on_complete: true,
             want_cache: Mutex::new(WantCache::new()),
             storage_backends: RwLock::new(HashMap::new()),
             odb_cache: RwLock::new(HashMap::new()),
@@ -313,6 +323,7 @@ impl AppState {
         Ok(Self {
             repos_dir,
             presigned_url_ttl_secs: 43200,
+            verify_chunks_on_complete: true,
             want_cache: Mutex::new(WantCache::new()),
             storage_backends: RwLock::new(HashMap::new()),
             odb_cache: RwLock::new(HashMap::new()),
@@ -329,6 +340,13 @@ impl AppState {
     /// Override the presigned URL TTL (called from `main` after reading config).
     pub fn with_presigned_ttl(mut self, secs: u64) -> Self {
         self.presigned_url_ttl_secs = secs;
+        self
+    }
+
+    /// Override whether `complete_chunk_uploads` verifies chunk content
+    /// (called from `main` after reading config).
+    pub fn with_verify_chunks_on_complete(mut self, on: bool) -> Self {
+        self.verify_chunks_on_complete = on;
         self
     }
 

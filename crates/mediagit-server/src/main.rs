@@ -207,7 +207,8 @@ async fn main() -> Result<()> {
         let auth_store_dir = config.resolved_auth_store_dir();
         let state = Arc::new(attach_metrics(
             AppState::new_with_full_auth(config.repos_dir.clone(), jwt_secret, &auth_store_dir)?
-                .with_presigned_ttl(config.presigned_url_ttl_seconds),
+                .with_presigned_ttl(config.presigned_url_ttl_seconds)
+                .with_verify_chunks_on_complete(config.verify_content_on_complete),
             metrics_registry.clone(),
         ));
 
@@ -265,10 +266,25 @@ async fn main() -> Result<()> {
         tracing::warn!("Authentication is DISABLED - not suitable for production!");
         Arc::new(attach_metrics(
             AppState::new(config.repos_dir.clone())
-                .with_presigned_ttl(config.presigned_url_ttl_seconds),
+                .with_presigned_ttl(config.presigned_url_ttl_seconds)
+                .with_verify_chunks_on_complete(config.verify_content_on_complete),
             metrics_registry.clone(),
         ))
     };
+
+    if config.verify_content_on_complete {
+        tracing::info!(
+            "Chunk content verification on complete is ENABLED (server reads back and \
+             BLAKE3-verifies every presigned-uploaded chunk; set \
+             verify_content_on_complete = false to disable)"
+        );
+    } else {
+        tracing::warn!(
+            "Chunk content verification on complete is DISABLED - presigned uploads are only \
+             checked for existence, not content; a client with repo:write can store bytes that \
+             do not match their claimed chunk id"
+        );
+    }
 
     // I1: startup probe — validate every repo's storage backend construction
     // before we start accepting traffic, so a bad S3/Azure/GCS config surfaces

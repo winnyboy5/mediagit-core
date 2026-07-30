@@ -105,6 +105,23 @@ pub struct ServerConfig {
     /// today's behavior of emitting no CORS headers at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cors_allowed_origins: Option<Vec<String>>,
+
+    /// Server-enforced content verification on `POST /:repo/chunks/complete`
+    /// (the presigned-upload completion check). When `true` (the default),
+    /// each newly-completed chunk is read back from storage, decompressed,
+    /// and its BLAKE3 hash compared against its claimed id — a mismatch is
+    /// reported in `missing` so the client re-uploads it. This is the only
+    /// server-side defense on the presigned path, since those bytes go
+    /// client→bucket directly and the server never otherwise sees them.
+    ///
+    /// Turning this off drops back to an existence-only check (`head`), which
+    /// accepts any bytes under a claimed id — a client with a valid
+    /// `repo:write` grant could poison the store. It also costs a full
+    /// read-back of every completed chunk, so this is the knob to disable if
+    /// that read-back volume is a measured problem, not a default to flip
+    /// casually.
+    #[serde(default = "default_verify_content_on_complete")]
+    pub verify_content_on_complete: bool,
 }
 
 fn default_port() -> u16 {
@@ -139,6 +156,10 @@ fn default_allow_open_registration() -> bool {
     true
 }
 
+fn default_verify_content_on_complete() -> bool {
+    true
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -160,6 +181,7 @@ impl Default for ServerConfig {
             rate_limit_burst: default_rate_limit_burst(),
             auth_store_dir: None,
             cors_allowed_origins: None,
+            verify_content_on_complete: default_verify_content_on_complete(),
         }
     }
 }

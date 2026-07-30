@@ -341,6 +341,61 @@ pub struct CompleteUploadResponse {
     missing: Vec<String>,
 }
 
+/// Read one chunk's bytes from storage — a loose object first, falling back
+/// to a cloud pack slice on a loose miss — and verify BLAKE3(decompressed)
+/// matches `chunk_id_hex` via [`verify_chunk_content`].
+///
+/// Shared by `complete_chunk_uploads` (server-enforced check after a
+/// presigned upload) and `verify_chunk_integrity` (client-triggered strong
+/// verify): same read-then-verify rule, one implementation.
+///
+/// Returns `Ok(bytes_read)` when the chunk is present and valid. Returns
+/// `Err(pack_loc)` when the chunk is missing everywhere or its content does
+/// not match its id — `pack_loc` is `Some` only when the chunk was found (but
+/// invalid) inside a pack, which callers need to evict the right manifest.
+async fn read_and_verify_chunk(
+    storage: &Arc<dyn StorageBackend>,
+    state: &Arc<AppState>,
+    repo: &str,
+    compressor: &Arc<SmartCompressor>,
+    chunk_id_hex: &str,
+) -> Result<u64, Option<PackLoc>> {
+    let key = format!("chunks/{}", chunk_id_hex);
+    let (bytes, pack_loc) = match storage.get(&key).await {
+        Ok(data) => (Some(data), None),
+        Err(_) => {
+            // Loose miss — the chunk may live only inside a cloud pack.
+            let loc = {
+                let idx = state.pack_index.read().await;
+                idx.get(repo).and_then(|m| m.get(chunk_id_hex)).cloned()
+            };
+            match &loc {
+                Some(l) if l.length >= 5 => {
+                    let pack_key = format!("packs/{}", l.pack_oid);
+                    // Skip 5-byte pack entry header [type:1][size:4].
+                    let data_offset = l.offset + 5;
+                    let data_len = (l.length as u64) - 5;
+                    match storage.get_range(&pack_key, data_offset, data_len).await {
+                        Ok(data) => (Some(data), loc),
+                        Err(_) => (None, loc),
+                    }
+                }
+                _ => (None, loc),
+            }
+        }
+    };
+
+    let Some(compressed) = bytes else {
+        return Err(pack_loc);
+    };
+    let len = compressed.len() as u64;
+    if verify_chunk_content(compressor, chunk_id_hex, Bytes::from(compressed)).await {
+        Ok(len)
+    } else {
+        Err(pack_loc)
+    }
+}
+
 /// POST /:repo/chunks/complete — Verify a batch of presigned chunk uploads landed in storage.
 ///
 /// Request: `{ chunk_ids: [hex, ...] }`
@@ -386,18 +441,46 @@ pub async fn complete_chunk_uploads(
             .unwrap_or_default()
     };
 
+    // Server-enforced content verification (default ON — see
+    // `ServerConfig::verify_content_on_complete`). Presigned uploads go
+    // client→bucket directly, so a mere `head()` existence check (the `else`
+    // branch below) accepts any bytes under a claimed id. This is the only
+    // point the server can catch that: read every completed chunk back,
+    // decompress, and compare BLAKE3 to its claimed id via the same
+    // `read_and_verify_chunk` helper `verify_chunk_integrity` uses.
+    let verify_enabled = state.verify_chunks_on_complete;
+    let compressor = Arc::new(SmartCompressor::new());
+    let verify_start = std::time::Instant::now();
+    let chunk_count = req.chunk_ids.len();
+    let verified_bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+
     let missing: Vec<String> = futures::stream::iter(req.chunk_ids)
         .map(|chunk_id_hex| {
             let storage = Arc::clone(&storage);
             let in_pack = in_pack_set.contains(&chunk_id_hex);
+            let compressor = Arc::clone(&compressor);
+            let state = Arc::clone(&state);
+            let repo = repo.clone();
+            let verified_bytes = Arc::clone(&verified_bytes);
             async move {
                 if in_pack {
                     return None;
                 }
-                let key = format!("chunks/{}", chunk_id_hex);
-                match storage.head(&key).await {
-                    Ok(Some(n)) if n > 0 => None,
-                    _ => Some(chunk_id_hex),
+                if !verify_enabled {
+                    let key = format!("chunks/{}", chunk_id_hex);
+                    return match storage.head(&key).await {
+                        Ok(Some(n)) if n > 0 => None,
+                        _ => Some(chunk_id_hex),
+                    };
+                }
+                match read_and_verify_chunk(&storage, &state, &repo, &compressor, &chunk_id_hex)
+                    .await
+                {
+                    Ok(len) => {
+                        verified_bytes.fetch_add(len, std::sync::atomic::Ordering::Relaxed);
+                        None
+                    }
+                    Err(_) => Some(chunk_id_hex),
                 }
             }
         })
@@ -406,11 +489,22 @@ pub async fn complete_chunk_uploads(
         .collect()
         .await;
 
-    tracing::debug!(
-        repo = %repo,
-        missing_count = missing.len(),
-        "Chunk upload completion verified"
-    );
+    if verify_enabled {
+        tracing::info!(
+            repo = %repo,
+            chunk_count = chunk_count,
+            verified_bytes = verified_bytes.load(std::sync::atomic::Ordering::Relaxed),
+            missing_count = missing.len(),
+            elapsed_ms = verify_start.elapsed().as_millis() as u64,
+            "Chunk content verification on complete finished"
+        );
+    } else {
+        tracing::debug!(
+            repo = %repo,
+            missing_count = missing.len(),
+            "Chunk upload completion verified (existence-only; content verification disabled)"
+        );
+    }
     Ok(Json(CompleteUploadResponse { missing }))
 }
 
@@ -485,46 +579,11 @@ pub async fn verify_chunk_integrity(
             let state = Arc::clone(&state);
             let repo = repo.clone();
             async move {
-                let key = format!("chunks/{}", chunk_id_hex);
-                let (bytes, pack_loc) = match storage.get(&key).await {
-                    Ok(data) => (Some(data), None),
-                    Err(_) => {
-                        // Loose miss — the chunk may live only inside a cloud pack.
-                        let loc = {
-                            let idx = state.pack_index.read().await;
-                            idx.get(&repo).and_then(|m| m.get(&chunk_id_hex)).cloned()
-                        };
-                        match &loc {
-                            Some(l) if l.length >= 5 => {
-                                let pack_key = format!("packs/{}", l.pack_oid);
-                                // Skip 5-byte pack entry header [type:1][size:4].
-                                let data_offset = l.offset + 5;
-                                let data_len = (l.length as u64) - 5;
-                                match storage.get_range(&pack_key, data_offset, data_len).await {
-                                    Ok(data) => (Some(data), loc),
-                                    Err(_) => (None, loc),
-                                }
-                            }
-                            _ => (None, loc),
-                        }
-                    }
-                };
-
-                let Some(compressed) = bytes else {
-                    return Some((chunk_id_hex, pack_loc));
-                };
-                let decompressed =
-                    match tokio::task::spawn_blocking(move || compressor.decompress(&compressed))
-                        .await
-                    {
-                        Ok(Ok(data)) => data,
-                        _ => return Some((chunk_id_hex, pack_loc)),
-                    };
-                let hash_hex = blake3::hash(&decompressed).to_hex().to_string();
-                if hash_hex == chunk_id_hex {
-                    None
-                } else {
-                    Some((chunk_id_hex, pack_loc))
+                match read_and_verify_chunk(&storage, &state, &repo, &compressor, &chunk_id_hex)
+                    .await
+                {
+                    Ok(_len) => None,
+                    Err(pack_loc) => Some((chunk_id_hex, pack_loc)),
                 }
             }
         })
@@ -1101,5 +1160,93 @@ mod tests {
 
         let idx = state.pack_index.read().await;
         assert!(idx.get(&repo).unwrap().get(&chunk_id).is_some());
+    }
+}
+
+#[cfg(test)]
+mod complete_chunk_uploads_content_verification_tests {
+    use super::*;
+
+    /// Store a loose chunk at `chunks/<claimed_id>` whose content does NOT
+    /// hash to `claimed_id` — simulates the presigned-upload hole this
+    /// layer closes: bytes landed directly in the bucket (or were corrupted
+    /// out-of-band) without ever passing through server-side content checks.
+    async fn write_corrupt_loose_chunk(storage: &dyn StorageBackend, claimed_id: &str) {
+        let content = b"real content that does not match claimed_id".to_vec();
+        let compressor = SmartCompressor::new();
+        let compressed = compressor.compress(&content).expect("compress");
+        let key = format!("chunks/{}", claimed_id);
+        storage
+            .put(&key, &compressed)
+            .await
+            .expect("put corrupt loose chunk");
+    }
+
+    #[tokio::test]
+    async fn complete_reports_corrupted_chunk_as_missing_when_verification_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = "test-repo".to_string();
+        let repo_path = tmp.path().join(&repo);
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let state = Arc::new(AppState::new(tmp.path().to_path_buf()));
+        assert!(
+            state.verify_chunks_on_complete,
+            "AppState::new must default content verification ON"
+        );
+
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let claimed_id = blake3::hash(b"a completely different payload")
+            .to_hex()
+            .to_string();
+        write_corrupt_loose_chunk(storage.as_ref(), &claimed_id).await;
+
+        let req = CompleteUploadRequest {
+            chunk_ids: vec![claimed_id.clone()],
+        };
+        let resp = complete_chunk_uploads(Path(repo), State(Arc::clone(&state)), None, Json(req))
+            .await
+            .expect("handler ok")
+            .0;
+
+        assert_eq!(
+            resp.missing,
+            vec![claimed_id],
+            "corrupted chunk must be reported missing so the client re-uploads it"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_does_not_report_corrupted_chunk_when_verification_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = "test-repo".to_string();
+        let repo_path = tmp.path().join(&repo);
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let mut state = AppState::new(tmp.path().to_path_buf());
+        state.verify_chunks_on_complete = false;
+        let state = Arc::new(state);
+
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let claimed_id = blake3::hash(b"a completely different payload")
+            .to_hex()
+            .to_string();
+        write_corrupt_loose_chunk(storage.as_ref(), &claimed_id).await;
+
+        let req = CompleteUploadRequest {
+            chunk_ids: vec![claimed_id.clone()],
+        };
+        let resp = complete_chunk_uploads(Path(repo), State(Arc::clone(&state)), None, Json(req))
+            .await
+            .expect("handler ok")
+            .0;
+
+        assert!(
+            resp.missing.is_empty(),
+            "with verification disabled the completion check must fall back to \
+             existence-only (head), proving the knob actually does something"
+        );
     }
 }
