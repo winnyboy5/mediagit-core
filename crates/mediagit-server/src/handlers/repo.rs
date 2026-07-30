@@ -1024,80 +1024,50 @@ fn first_entry_exceeding_pack_size(
         .find(|entry| entry.offset.saturating_add(entry.length as u64) > pack_size)
 }
 
-/// Packs at or under this size are read once into memory for content
-/// verification (one sequential GET, then cheap `Bytes::slice` per entry)
-/// instead of one `get_range` per manifest entry. Set to
-/// `pack::DEFAULT_PACK_BYTES` — the pack size an operator gets without
-/// touching `MEDIAGIT_PACK_BYTES` — so the common case pays for one read.
-/// Larger packs (only reachable by an operator raising the cap toward
-/// `MAX_PACK_BYTES`, 1 GiB) fall back to per-entry ranged reads: concurrent
-/// `complete_pack` calls each buffering a full oversized pack is exactly the
-/// "PACK_BYTES × concurrency" OOM shape this repo has already hit once (see
-/// ST-4 notes on push RAM).
-const WHOLE_PACK_VERIFY_THRESHOLD_BYTES: u64 = mediagit_versioning::DEFAULT_PACK_BYTES;
+/// Adapts a `blake3::Hasher` to `std::io::Write` so a streaming decompressor
+/// can feed it decompressed bytes directly — no buffer ever holds more than
+/// one `decompress_streaming` copy chunk (64 KiB) at a time.
+struct HashWriter(blake3::Hasher);
 
-/// Verify every manifest entry's chunk bytes hash to its claimed `chunk_oid`,
-/// reusing [`verify_chunk_content`] so this is the same BLAKE3-after-decompress
-/// rule the loose-chunk path enforces — never a second copy of it.
+impl std::io::Write for HashWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Verify every manifest entry's chunk bytes hash to its claimed `chunk_oid`.
 ///
-/// `threshold` gates whole-pack-in-memory vs per-entry `get_range` (see
-/// [`WHOLE_PACK_VERIFY_THRESHOLD_BYTES`]); it's a parameter rather than the
-/// constant directly so tests can force the `get_range` branch without
-/// allocating a huge pack.
+/// Single streaming path, no size threshold: each entry is read via
+/// `get_streaming_range` and fed through [`SmartCompressor::decompress_streaming`]
+/// straight into an incremental BLAKE3 hasher, so peak memory is bounded by a
+/// fixed per-entry copy buffer × concurrency — independent of both pack size
+/// and individual chunk size. No full pack, entry, or decompressed chunk is
+/// ever materialized. This makes the "PACK_BYTES × concurrency" OOM shape
+/// (see ST-4 notes on push RAM) structurally unreachable rather than merely
+/// avoided below a threshold.
 ///
 /// Returns the first manifest entry whose bytes don't match, if any.
 async fn first_pack_entry_failing_content_verification<'a>(
     storage: &Arc<dyn StorageBackend>,
     compressor: &Arc<SmartCompressor>,
     pack_key: &str,
-    pack_size: u64,
     manifest: &'a [ManifestEntry],
-    threshold: u64,
 ) -> Option<&'a ManifestEntry> {
-    use futures::stream::StreamExt;
+    use futures::stream::{StreamExt, TryStreamExt};
+    use tokio_util::io::{StreamReader, SyncIoBridge};
 
-    // ponytail: whole-pack read only below `threshold`; falls back to
-    // per-entry get_range on read failure too (e.g. backend hiccup), not just
-    // on size, so a transient error here surfaces as a verification failure
-    // rather than silently skipping the check.
-    let whole_pack: Option<Bytes> = if pack_size <= threshold {
-        storage.get(pack_key).await.ok().map(Bytes::from)
-    } else {
-        None
-    };
-
-    // Whole-pack branch: the bytes are already in memory, so slicing and hashing is
-    // CPU-bound and sequential is fine — there is nothing to overlap.
-    if let Some(bytes) = &whole_pack {
-        for entry in manifest {
-            // Same 5-byte pack entry header `[type:1][size:4]` that
-            // `read_and_verify_chunk` skips — see its comment for the layout.
-            if entry.length < 5 {
-                return Some(entry);
-            }
-            let start = (entry.offset + 5) as usize;
-            let end = start + ((entry.length as u64) - 5) as usize;
-            if end > bytes.len() {
-                return Some(entry);
-            }
-            if !verify_chunk_content(compressor, &entry.chunk_oid, bytes.slice(start..end)).await {
-                return Some(entry);
-            }
-        }
-        return None;
-    }
-
-    // Range branch: one network round trip PER ENTRY, so running these sequentially
-    // serialises N WAN latencies for no reason. `complete_chunk_uploads` and
-    // `verify_chunk_integrity` both already fan out with `buffer_unordered`; this was
-    // the odd one out. It only triggers for packs above the whole-pack threshold —
-    // i.e. exactly the operators with the most entries to check, where the serial cost
-    // is worst.
+    // One `get_range` PER ENTRY, run concurrently, so N WAN latencies don't
+    // serialise. `complete_chunk_uploads` and `verify_chunk_integrity` both
+    // already fan out with `buffer_unordered`; this was the odd one out.
     //
-    // Concurrency is bounded, not unbounded: each in-flight range read holds one
-    // entry's bytes, so peak memory is roughly PACK_VERIFY_RANGE_CONCURRENCY x chunk
-    // size. That bound is the whole point of being on this branch (see
-    // WHOLE_PACK_VERIFY_THRESHOLD_BYTES) and must not be widened casually.
+    // Concurrency is bounded, not unbounded: each in-flight verification holds
+    // only a fixed-size copy buffer, not an entry's compressed or decompressed
+    // bytes — see `SmartCompressor::decompress_streaming`. That bound is the
+    // whole point and must not be widened casually.
     const PACK_VERIFY_RANGE_CONCURRENCY: usize = 16;
     // Futures yield an INDEX, not a `&ManifestEntry`: keeping the borrow out of the
     // async block is what lets these be spawned concurrently without the lifetime
@@ -1114,21 +1084,36 @@ async fn first_pack_entry_failing_content_verification<'a>(
             let compressor = Arc::clone(compressor);
             let pack_key = pack_key.to_string();
             async move {
+                // Same 5-byte pack entry header `[type:1][size:4]` that
+                // `read_and_verify_chunk` skips — see its comment for the layout.
                 if length < 5 {
                     return Some(idx);
                 }
-                match storage.get_range(&pack_key, offset + 5, length - 5).await {
-                    Ok(data) => {
-                        if verify_chunk_content(&compressor, &chunk_oid, Bytes::from(data)).await {
-                            None
-                        } else {
-                            Some(idx)
-                        }
-                    }
+                let stream = match storage
+                    .get_streaming_range(&pack_key, (offset + 5)..(offset + length))
+                    .await
+                {
+                    Ok(s) => s,
                     // Fail closed: a read error means we could not verify, which is not
                     // the same as verified-good.
-                    Err(_) => Some(idx),
-                }
+                    Err(_) => return Some(idx),
+                };
+                let async_reader = StreamReader::new(stream.map_err(std::io::Error::other));
+                // Must be constructed here (captures the current Tokio Handle) and
+                // then moved into spawn_blocking — never used directly on an async
+                // worker thread.
+                let sync_reader = SyncIoBridge::new(async_reader);
+                let matches = tokio::task::spawn_blocking(move || {
+                    let mut hasher = HashWriter(blake3::Hasher::new());
+                    match compressor.decompress_streaming(sync_reader, &mut hasher) {
+                        Ok(()) => hasher.0.finalize().to_hex().to_string() == chunk_oid,
+                        // Fail closed: a decode error is not verified-good either.
+                        Err(_) => false,
+                    }
+                })
+                .await
+                .unwrap_or(false);
+                if matches { None } else { Some(idx) }
             }
         }))
         .buffer_unordered(PACK_VERIFY_RANGE_CONCURRENCY)
@@ -1138,13 +1123,11 @@ async fn first_pack_entry_failing_content_verification<'a>(
         .flatten()
         .min();
 
-    let first_bad = first_bad_idx.and_then(|i| manifest.get(i));
-
     // `.min()` on the collected indices, not "first future to resolve": concurrency must
     // not make the reported entry depend on network timing. Any failing entry rejects the
     // pack either way, but a nondeterministic error message is a bad thing to hand an
     // operator debugging a rejected push.
-    first_bad
+    first_bad_idx.and_then(|i| manifest.get(i))
 }
 
 /// POST /{repo}/packs/complete — Register a finished cloud pack and its chunk manifest.
@@ -1275,9 +1258,7 @@ pub async fn complete_pack(
             &storage,
             &compressor,
             &pack_key,
-            pack_size,
             &req.manifest,
-            WHOLE_PACK_VERIFY_THRESHOLD_BYTES,
         )
         .await
         {
@@ -1902,12 +1883,47 @@ mod complete_pack_content_verification_tests {
         assert!(manifest_path.exists());
     }
 
-    /// Exercises the `get_range` fallback branch directly (the whole-pack
-    /// path is what `complete_pack` uses by default for small test packs, so
-    /// the HTTP-level tests above never take it). Threshold 0 forces every
-    /// entry through `get_range` instead of an in-memory slice.
+    /// Same pack as [`build_valid_pack`], but with three chunks, and the
+    /// *last two* entries' compressed bytes corrupted (last byte flipped) —
+    /// used to prove `.min()` picks the lower-index failure deterministically.
+    fn build_pack_with_two_corrupted_entries() -> PackFixture {
+        let compressor = SmartCompressor::new();
+        let contents: [&[u8]; 3] = [
+            b"the quick brown fox jumps over the lazy dog",
+            b"a second, different chunk of content in the same pack",
+            b"a third chunk, also different, rounding out the pack",
+        ];
+        let mut pack_bytes = Vec::new();
+        let mut manifest = Vec::new();
+        for content in contents {
+            let chunk_id = blake3::hash(content).to_hex().to_string();
+            let compressed = compressor.compress(content).expect("compress");
+            let offset = pack_bytes.len() as u64;
+            pack_bytes.extend_from_slice(&[0u8; 5]);
+            pack_bytes.extend_from_slice(&compressed);
+            let length = (5 + compressed.len()) as u32;
+            manifest.push(ManifestEntry {
+                chunk_oid: chunk_id,
+                offset,
+                length,
+                compressed_hash: None,
+            });
+        }
+        for bad_idx in [1usize, 2usize] {
+            let bad = &manifest[bad_idx];
+            let last = (bad.offset + bad.length as u64) as usize - 1;
+            pack_bytes[last] ^= 0xFF;
+        }
+        PackFixture {
+            pack_bytes,
+            manifest,
+        }
+    }
+
+    /// Exercises the streaming verification path directly (the HTTP-level
+    /// tests above only prove `complete_pack`'s end-to-end behavior).
     #[tokio::test]
-    async fn get_range_fallback_matches_whole_pack_verdict() {
+    async fn streaming_verify_matches_expected_verdict_valid_and_corrupted() {
         let repo = "test-repo".to_string();
         let (_tmp, _state, repo_path) = setup(&repo).await;
         let storage = LocalBackend::new(repo_path.join(".mediagit"))
@@ -1918,43 +1934,133 @@ mod complete_pack_content_verification_tests {
 
         let valid = build_valid_pack();
         storage
-            .put("packs/valid-via-range", &valid.pack_bytes)
+            .put("packs/valid-via-stream", &valid.pack_bytes)
             .await
             .expect("put pack");
-        let pack_size = valid.pack_bytes.len() as u64;
         let bad = first_pack_entry_failing_content_verification(
             &storage,
             &compressor,
-            "packs/valid-via-range",
-            pack_size,
+            "packs/valid-via-stream",
             &valid.manifest,
-            0, // force get_range for every entry
         )
         .await;
-        assert!(
-            bad.is_none(),
-            "a valid pack must verify clean through the get_range branch too"
-        );
+        assert!(bad.is_none(), "a valid pack must verify clean");
 
         let corrupted = build_pack_with_corrupted_entry();
         storage
-            .put("packs/corrupted-via-range", &corrupted.pack_bytes)
+            .put("packs/corrupted-via-stream", &corrupted.pack_bytes)
             .await
             .expect("put pack");
-        let pack_size = corrupted.pack_bytes.len() as u64;
         let bad = first_pack_entry_failing_content_verification(
             &storage,
             &compressor,
-            "packs/corrupted-via-range",
-            pack_size,
+            "packs/corrupted-via-stream",
             &corrupted.manifest,
-            0, // force get_range for every entry
         )
         .await;
         assert_eq!(
             bad.map(|e| e.chunk_oid.clone()),
             Some(corrupted.manifest[1].chunk_oid.clone()),
-            "the get_range branch must catch the same corrupted entry the whole-pack branch does"
+            "streaming verification must identify the corrupted entry"
         );
+    }
+
+    /// Fail-closed: an entry whose declared length can't even hold the 5-byte
+    /// pack-entry header must be rejected without touching storage.
+    #[tokio::test]
+    async fn entry_shorter_than_header_is_rejected() {
+        let repo = "test-repo".to_string();
+        let (_tmp, _state, repo_path) = setup(&repo).await;
+        let storage = LocalBackend::new(repo_path.join(".mediagit"))
+            .await
+            .expect("local backend");
+        let storage: Arc<dyn StorageBackend> = Arc::new(storage);
+        let compressor = Arc::new(SmartCompressor::new());
+
+        let manifest = vec![ManifestEntry {
+            chunk_oid: "a".repeat(64),
+            offset: 0,
+            length: 4, // < 5-byte header
+            compressed_hash: None,
+        }];
+        let bad = first_pack_entry_failing_content_verification(
+            &storage,
+            &compressor,
+            "packs/does-not-matter",
+            &manifest,
+        )
+        .await;
+        assert_eq!(
+            bad.map(|e| e.chunk_oid.clone()),
+            Some("a".repeat(64)),
+            "an entry shorter than the pack-entry header must be rejected, not skipped"
+        );
+    }
+
+    /// Fail-closed: a storage read error (here, the pack object doesn't exist)
+    /// must reject the entry rather than treat it as verified.
+    #[tokio::test]
+    async fn range_read_error_is_rejected() {
+        let repo = "test-repo".to_string();
+        let (_tmp, _state, repo_path) = setup(&repo).await;
+        let storage = LocalBackend::new(repo_path.join(".mediagit"))
+            .await
+            .expect("local backend");
+        let storage: Arc<dyn StorageBackend> = Arc::new(storage);
+        let compressor = Arc::new(SmartCompressor::new());
+
+        let manifest = vec![ManifestEntry {
+            chunk_oid: "b".repeat(64),
+            offset: 0,
+            length: 10,
+            compressed_hash: None,
+        }];
+        let bad = first_pack_entry_failing_content_verification(
+            &storage,
+            &compressor,
+            "packs/never-uploaded",
+            &manifest,
+        )
+        .await;
+        assert_eq!(
+            bad.map(|e| e.chunk_oid.clone()),
+            Some("b".repeat(64)),
+            "a range read error must reject the entry, not verify it"
+        );
+    }
+
+    /// Determinism: with two corrupted entries, the LOWER-index one is always
+    /// reported, regardless of which concurrent read finishes first — proven
+    /// by repeating the check, not by inspecting the `.min()` call site.
+    #[tokio::test]
+    async fn lower_index_corrupted_entry_reported_deterministically() {
+        let repo = "test-repo".to_string();
+        let (_tmp, _state, repo_path) = setup(&repo).await;
+        let storage = LocalBackend::new(repo_path.join(".mediagit"))
+            .await
+            .expect("local backend");
+        let storage: Arc<dyn StorageBackend> = Arc::new(storage);
+        let compressor = Arc::new(SmartCompressor::new());
+
+        let fixture = build_pack_with_two_corrupted_entries();
+        storage
+            .put("packs/two-corrupted", &fixture.pack_bytes)
+            .await
+            .expect("put pack");
+
+        for _ in 0..20 {
+            let bad = first_pack_entry_failing_content_verification(
+                &storage,
+                &compressor,
+                "packs/two-corrupted",
+                &fixture.manifest,
+            )
+            .await;
+            assert_eq!(
+                bad.map(|e| e.chunk_oid.clone()),
+                Some(fixture.manifest[1].chunk_oid.clone()),
+                "the lower-index corrupted entry must be reported every time"
+            );
+        }
     }
 }

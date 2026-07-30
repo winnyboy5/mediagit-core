@@ -12,6 +12,9 @@
 // GNU Affero General Public License for more details.
 
 use super::*;
+use crate::CompressionAlgorithm;
+use crate::error::CompressionError;
+use std::io::{Cursor, Read, Write};
 
 /// Type-aware compressor trait
 pub trait TypeAwareCompressor: Send + Sync {
@@ -137,6 +140,88 @@ impl SmartCompressor {
         }
 
         Ok(compressed)
+    }
+
+    /// Decompress a byte stream, writing decompressed bytes to `sink` as they
+    /// become available instead of returning a buffered `Vec<u8>`.
+    ///
+    /// Reuses exactly the codec-detection rule [`decompress_typed`](TypeAwareCompressor::decompress_typed)
+    /// applies to a whole buffer — Store magic byte, then [`CompressionAlgorithm::detect`]
+    /// — so the streaming and whole-buffer paths can never diverge on what a
+    /// given chunk decodes to. Only ever buffers a fixed 4-byte peek (to pick
+    /// the codec) and a fixed-size copy buffer; never the compressed input or
+    /// the decompressed output in full. Callers needing an incremental digest
+    /// (rather than the bytes themselves) pass a `Write` that hashes and
+    /// discards, e.g. a `blake3::Hasher` wrapper.
+    pub fn decompress_streaming(
+        &self,
+        mut reader: impl Read,
+        mut sink: impl Write,
+    ) -> CompressionResult<()> {
+        // Same peek width as `CompressionAlgorithm::detect` inspects (Zstd/Brotli
+        // magics are 4 bytes; Zlib and Store need fewer).
+        let mut peek = [0u8; 4];
+        let mut peek_len = 0usize;
+        while peek_len < peek.len() {
+            match reader.read(&mut peek[peek_len..]) {
+                Ok(0) => break,
+                Ok(n) => peek_len += n,
+                Err(e) => {
+                    return Err(CompressionError::decompression_failed(format!(
+                        "stream read: {e}"
+                    )));
+                }
+            }
+        }
+        let peeked = &peek[..peek_len];
+
+        // Store prefix check first, mirroring decompress_typed exactly.
+        if peek_len > 0 && peeked[0] == 0x00 {
+            let mut combined = Cursor::new(peeked[1..].to_vec()).chain(reader);
+            return copy_streaming(&mut combined, &mut sink);
+        }
+
+        match CompressionAlgorithm::detect(peeked) {
+            CompressionAlgorithm::Zlib => {
+                let combined = Cursor::new(peeked.to_vec()).chain(reader);
+                let mut dec = flate2::read::ZlibDecoder::new(combined);
+                copy_streaming(&mut dec, &mut sink)
+            }
+            CompressionAlgorithm::Zstd => {
+                let combined = Cursor::new(peeked.to_vec()).chain(reader);
+                let mut dec = zstd::stream::read::Decoder::new(combined)
+                    .map_err(|e| CompressionError::zstd_error(format!("stream init: {e}")))?;
+                copy_streaming(&mut dec, &mut sink)
+            }
+            CompressionAlgorithm::Brotli => {
+                // The 4-byte "BRT\x01" marker is a marker we add on top of the
+                // real brotli stream (see BrotliCompressor::compress), not part
+                // of it — `detect` only returns Brotli once all 4 marker bytes
+                // are in `peeked`, so `reader` now starts exactly at the real
+                // payload; nothing to re-inject.
+                let mut dec = brotli::Decompressor::new(reader, 4096);
+                copy_streaming(&mut dec, &mut sink)
+            }
+            CompressionAlgorithm::None => {
+                let mut combined = Cursor::new(peeked.to_vec()).chain(reader);
+                copy_streaming(&mut combined, &mut sink)
+            }
+        }
+    }
+}
+
+/// Copy every byte from `r` to `w`, in fixed-size chunks, until EOF.
+fn copy_streaming(r: &mut impl Read, w: &mut impl Write) -> CompressionResult<()> {
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = r
+            .read(&mut buf)
+            .map_err(|e| CompressionError::decompression_failed(format!("stream decode: {e}")))?;
+        if n == 0 {
+            return Ok(());
+        }
+        w.write_all(&buf[..n])
+            .map_err(|e| CompressionError::decompression_failed(format!("stream sink: {e}")))?;
     }
 }
 
@@ -1446,5 +1531,76 @@ mod tests {
                 leader
             );
         }
+    }
+
+    /// `decompress_streaming` must agree with `decompress_typed` for every
+    /// codec branch — Store, Zlib, Zstd, Brotli, and the "not recognized,
+    /// pass through" case — since a divergence between them is exactly the
+    /// bug class `verify_chunk_content` exists to prevent a second copy of.
+    #[test]
+    fn decompress_streaming_matches_decompress_typed_for_every_codec() {
+        let sc = SmartCompressor::new();
+        let content = b"the quick brown fox jumps over the lazy dog ".repeat(200);
+
+        let cases: [(&str, Vec<u8>); 5] = [
+            (
+                "store",
+                sc.compress_with_strategy(&content, CompressionStrategy::Store)
+                    .unwrap(),
+            ),
+            (
+                "zlib",
+                ZlibCompressor::new(CompressionLevel::Default)
+                    .compress(&content)
+                    .unwrap(),
+            ),
+            ("zstd", sc.compress(&content).unwrap()),
+            (
+                "brotli",
+                BrotliCompressor::new(CompressionLevel::Default)
+                    .compress(&content)
+                    .unwrap(),
+            ),
+            ("raw/unrecognized", content.clone()),
+        ];
+
+        for (label, compressed) in cases {
+            let whole = sc
+                .decompress_typed(&compressed)
+                .unwrap_or_else(|e| panic!("{label}: decompress_typed failed: {e}"));
+
+            let mut streamed = Vec::new();
+            sc.decompress_streaming(Cursor::new(compressed.clone()), &mut streamed)
+                .unwrap_or_else(|e| panic!("{label}: decompress_streaming failed: {e}"));
+
+            assert_eq!(
+                whole, streamed,
+                "{label}: streaming output diverged from whole-buffer decompress_typed"
+            );
+            assert_eq!(
+                streamed, content,
+                "{label}: did not recover original content"
+            );
+        }
+    }
+
+    /// RED-verify: a corrupted zstd frame must surface as an `Err`, not
+    /// silently produce wrong bytes — the caller (pack verification) relies
+    /// on this to fail closed.
+    #[test]
+    fn decompress_streaming_corrupt_frame_is_err() {
+        let sc = SmartCompressor::new();
+        let mut corrupt = vec![0x28u8, 0xb5, 0x2f, 0xfd]; // zstd magic
+        corrupt.extend_from_slice(&[0xFFu8; 64]); // garbage body
+
+        let mut sink = Vec::new();
+        let err = sc
+            .decompress_streaming(Cursor::new(corrupt), &mut sink)
+            .expect_err("corrupt zstd frame must return Err, not a wrong-bytes Ok");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("decompression") || msg.contains("stream"),
+            "error must be a decompression error, got: {msg}"
+        );
     }
 }
