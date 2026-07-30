@@ -405,6 +405,7 @@ Every key in `ServerConfig` (`crates/mediagit-server/src/config.rs:24-89`), `#[s
 | `tls_cert_path` | path \| absent | absent | TLS certificate (PEM). Required unless `tls_self_signed`. |
 | `tls_key_path` | path \| absent | absent | TLS private key (PEM). Required unless `tls_self_signed`. |
 | `tls_self_signed` | bool | `false` | Generate a self-signed certificate for `localhost` at boot (development only). |
+| `tls_min_version` | `"1.2"` \| `"1.3"` \| absent | `"1.3"` | Minimum TLS protocol version to accept. Escape hatch for TLS 1.2-only clients/proxies; any other value fails config load. |
 | `enable_auth` | bool | `false` | Enable JWT/API-key authentication. |
 | `jwt_secret` | string \| absent | absent | Required when `enable_auth = true` (or set via `MEDIAGIT_JWT_SECRET`, which takes precedence — see Part 3). |
 | `presigned_url_ttl_seconds` | u64 | `43200` (12 h) | TTL for presigned PUT URLs issued for direct-to-bucket uploads. Lower this if your cloud credentials use short-lived STS sessions. |

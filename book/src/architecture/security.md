@@ -62,9 +62,14 @@ write outside a repo's namespace — a cross-tenant escape on a
 multi-repo server.
 
 ## Encryption
-- **At-rest (client-side)**: AES-256-GCM with Argon2id key derivation
-- **At-rest (cloud)**: Cloud provider encryption (SSE-S3, Azure SSE)
-- **In-transit**: TLS 1.3 on the server's TLS listener, enforced from `min_tls_version` (default 1.3; set 1.2 to also accept TLS 1.2). Client certificates (mTLS) are **not** wired — `TlsConfig` carries the fields but the server has no knob to set them and builds with `with_no_client_auth`.
+- **At-rest (client-side)**: **not wired.** `mediagit-security` implements AES-256-GCM
+  with Argon2id key derivation, with tests and benches, but it has zero CLI or server
+  call sites — MediaGit encrypts no stored byte itself. Tracked as an open decision, not
+  a shipped feature.
+- **At-rest (cloud)**: Cloud provider encryption (SSE-S3, Azure SSE) — a *different*
+  mechanism from the above, configured by `[storage] encryption`. The two were
+  conflated in these docs until 2026-07-29.
+- **In-transit**: TLS 1.3 on the server's TLS listener by default; set `tls_min_version = "1.2"` in `mediagit-server.toml` as an escape hatch for TLS 1.2-only clients/proxies (any other value fails config load). Client certificates (mTLS) are **not** wired — `TlsConfig` carries the fields but the server has no knob to set them and builds with `with_no_client_auth`.
 
 ## Best Practices
 1. Use IAM roles (avoid hardcoded keys)

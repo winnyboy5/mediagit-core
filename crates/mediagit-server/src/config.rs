@@ -54,6 +54,14 @@ pub struct ServerConfig {
     #[serde(default)]
     pub tls_self_signed: bool,
 
+    /// Minimum TLS protocol version to accept: `"1.2"` or `"1.3"`. Defaults
+    /// to `"1.3"` when unset. This is an escape hatch for clients/proxies
+    /// that only speak TLS 1.2 — an unrecognized value is a hard config
+    /// error (see `build_tls_config`), not a silent fallback, matching this
+    /// repo's closed-key-set convention for security settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_min_version: Option<String>,
+
     /// Enable authentication
     #[serde(default)]
     pub enable_auth: bool,
@@ -142,6 +150,7 @@ impl Default for ServerConfig {
             tls_cert_path: None,
             tls_key_path: None,
             tls_self_signed: false,
+            tls_min_version: None,
             enable_auth: false,
             jwt_secret: None,
             allow_open_registration: default_allow_open_registration(),
@@ -215,13 +224,27 @@ impl ServerConfig {
     /// Build TlsConfig from server configuration
     #[cfg(feature = "tls")]
     pub fn build_tls_config(&self) -> Result<TlsConfig> {
-        use mediagit_security::TlsConfigBuilder;
+        use mediagit_security::{TlsConfigBuilder, TlsVersion};
 
         if !self.enable_tls {
             return Ok(TlsConfig::default());
         }
 
         let mut builder = TlsConfigBuilder::new().enable();
+
+        // Escape hatch for TLS 1.2-only clients/proxies. Default (key absent)
+        // stays 1.3. An unrecognized value is a hard error, not a silent
+        // fallback — a typo here must not look configured while it isn't.
+        if let Some(version) = &self.tls_min_version {
+            let version = match version.as_str() {
+                "1.2" => TlsVersion::V1_2,
+                "1.3" => TlsVersion::V1_3,
+                other => anyhow::bail!(
+                    "invalid tls_min_version '{other}': accepted values are \"1.2\", \"1.3\""
+                ),
+            };
+            builder = builder.min_tls_version(version);
+        }
 
         if self.tls_self_signed {
             // Use self-signed certificate for development
@@ -352,5 +375,60 @@ mod tests {
         assert_eq!(reloaded2.jwt_secret, cfg2.jwt_secret);
         assert_eq!(reloaded2.auth_store_dir, cfg2.auth_store_dir);
         assert!(!reloaded2.allow_open_registration);
+    }
+
+    #[test]
+    #[cfg(feature = "tls")]
+    fn test_tls_min_version_absent_defaults_to_1_3() {
+        let cfg = ServerConfig {
+            enable_tls: true,
+            tls_self_signed: true,
+            tls_min_version: None,
+            ..Default::default()
+        };
+        let tls_config = cfg.build_tls_config().expect("build_tls_config");
+        assert_eq!(
+            tls_config.min_tls_version,
+            mediagit_security::TlsVersion::V1_3
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "tls")]
+    fn test_tls_min_version_1_2_is_honoured() {
+        let cfg = ServerConfig {
+            enable_tls: true,
+            tls_self_signed: true,
+            tls_min_version: Some("1.2".to_string()),
+            ..Default::default()
+        };
+        let tls_config = cfg.build_tls_config().expect("build_tls_config");
+        assert_eq!(
+            tls_config.min_tls_version,
+            mediagit_security::TlsVersion::V1_2
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "tls")]
+    fn test_tls_min_version_rejects_bogus_value() {
+        let cfg = ServerConfig {
+            enable_tls: true,
+            tls_self_signed: true,
+            tls_min_version: Some("1.1".to_string()),
+            ..Default::default()
+        };
+        let err = cfg
+            .build_tls_config()
+            .expect_err("bogus tls_min_version must be a hard error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("1.1"),
+            "error should name the bad value: {msg}"
+        );
+        assert!(
+            msg.contains("1.2") && msg.contains("1.3"),
+            "error should name accepted values: {msg}"
+        );
     }
 }

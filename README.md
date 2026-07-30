@@ -806,7 +806,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] Adaptive chunk sizes (1–8 MB) — replaces fixed 64 MB chunks
 - [x] Per-type similarity thresholds for delta compression
 - [ ] AES-256-GCM client-side encryption with Argon2id KDF — module implemented and tested, no CLI call sites yet
-- [x] TLS 1.3 on the server's TLS listener (`min_tls_version`, default 1.3)
+- [x] TLS 1.3 on the server's TLS listener (`tls_min_version`, default `"1.3"`; set `"1.2"` as an escape hatch)
 - [x] JWT + API key authentication (server mode)
 - [x] Video timeline and audio track-based merging
 - [x] Automated multi-platform release CI (Linux, macOS, Windows, Docker, crates.io)

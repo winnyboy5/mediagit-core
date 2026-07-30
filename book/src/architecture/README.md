@@ -140,9 +140,12 @@ sequenceDiagram
 - `mediagit verify` for repository health checks
 
 ### Encryption
-- At-rest: AES-256-GCM client-side encryption + cloud provider encryption (SSE-S3, Azure SSE)
-- In-transit: TLS 1.3 only when the server's TLS listener is enabled (`min_tls_version`, 1.3 by default). mTLS is not wired.
-- Client-side encryption: Fully implemented with Argon2id key derivation
+- At-rest: cloud provider encryption (SSE-S3, Azure SSE), configured via `[storage] encryption`
+- In-transit: TLS 1.3 by default when the server's TLS listener is enabled; `tls_min_version = "1.2"` in `mediagit-server.toml` is an escape hatch for TLS 1.2-only clients/proxies. mTLS is not wired.
+- Client-side encryption: **not wired.** `mediagit-security` implements AES-256-GCM
+  with Argon2id key derivation and has tests and benches, but nothing in the CLI or
+  server calls it, so no stored byte is encrypted by MediaGit itself. Distinct from
+  `[storage] encryption` above, which is real.
 
 ## Scalability
 

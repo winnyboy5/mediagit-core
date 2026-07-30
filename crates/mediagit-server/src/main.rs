@@ -574,6 +574,33 @@ async fn shutdown_signal() {
     }
 }
 
+/// Map a configured TLS floor onto the exact protocol-version list handed to rustls.
+///
+/// Extracted from `build_axum_rustls_config` purely so it is assertable:
+/// that function needs a parsed certificate and returns an opaque
+/// `RustlsConfig` whose accepted versions cannot be read back, so the one
+/// thing worth checking — that `tls_min_version` actually reaches rustls —
+/// was untestable inline. Same reason `clamp_cap`, `case_only_collisions`
+/// and `ensure_writable_object_size` are separate functions in this repo.
+///
+/// A *minimum* of 1.2 means 1.2 **and** 1.3 are accepted; it is not "1.2 only".
+#[cfg(feature = "tls")]
+fn rustls_protocol_versions(
+    min_version: mediagit_security::TlsVersion,
+) -> &'static [&'static rustls::SupportedProtocolVersion] {
+    // `static`, not an inline `&[..]` literal: temporary lifetime extension
+    // applies to a `let` binding (which is why this compiled inline) but not
+    // to a returned reference — E0515.
+    static V1_3_ONLY: &[&rustls::SupportedProtocolVersion] = &[&rustls::version::TLS13];
+    static V1_2_AND_UP: &[&rustls::SupportedProtocolVersion] =
+        &[&rustls::version::TLS12, &rustls::version::TLS13];
+
+    match min_version {
+        mediagit_security::TlsVersion::V1_3 => V1_3_ONLY,
+        mediagit_security::TlsVersion::V1_2 => V1_2_AND_UP,
+    }
+}
+
 /// Build axum-server RustlsConfig from Certificate
 #[cfg(feature = "tls")]
 fn build_axum_rustls_config(
@@ -603,10 +630,7 @@ fn build_axum_rustls_config(
     // default accepts **1.2 as well**. An operator reading the config believed
     // 1.3-only while the server happily negotiated 1.2: a silent downgrade,
     // which is worse than an honest 1.2 because nobody goes looking.
-    let versions: &[&rustls::SupportedProtocolVersion] = match min_version {
-        mediagit_security::TlsVersion::V1_3 => &[&rustls::version::TLS13],
-        mediagit_security::TlsVersion::V1_2 => &[&rustls::version::TLS12, &rustls::version::TLS13],
-    };
+    let versions = rustls_protocol_versions(min_version);
     tracing::info!("TLS minimum version: {:?}", min_version);
 
     // Build rustls ServerConfig with ALPN to enable HTTP/2 negotiation.
@@ -637,5 +661,52 @@ fn attach_metrics(
     match registry {
         Some(r) => state.with_metrics(r),
         None => state,
+    }
+}
+
+#[cfg(all(test, feature = "tls"))]
+mod tls_version_tests {
+    use super::rustls_protocol_versions;
+    use mediagit_security::TlsVersion;
+
+    /// The default. Nothing below 1.3 may be offered.
+    #[test]
+    fn v1_3_floor_offers_only_tls13() {
+        let v = rustls_protocol_versions(TlsVersion::V1_3);
+        assert_eq!(v.len(), 1, "1.3 floor must offer exactly one version");
+        assert_eq!(v[0].version, rustls::ProtocolVersion::TLSv1_3);
+    }
+
+    /// The escape hatch. A *minimum* of 1.2 must still allow 1.3 — an
+    /// operator relaxing the floor for one legacy client must not thereby
+    /// downgrade every modern client to 1.2.
+    #[test]
+    fn v1_2_floor_offers_both_and_still_allows_tls13() {
+        let v = rustls_protocol_versions(TlsVersion::V1_2);
+        let got: Vec<_> = v.iter().map(|p| p.version).collect();
+        assert!(
+            got.contains(&rustls::ProtocolVersion::TLSv1_2),
+            "1.2 floor must accept 1.2: {got:?}"
+        );
+        assert!(
+            got.contains(&rustls::ProtocolVersion::TLSv1_3),
+            "relaxing the floor must not disable 1.3: {got:?}"
+        );
+    }
+
+    /// Pins the asymmetry the two tests above rely on: the floors must not
+    /// resolve to the same list, or the knob would be inert while both
+    /// tests still passed.
+    #[test]
+    fn the_two_floors_are_not_the_same_list() {
+        let a: Vec<_> = rustls_protocol_versions(TlsVersion::V1_3)
+            .iter()
+            .map(|p| p.version)
+            .collect();
+        let b: Vec<_> = rustls_protocol_versions(TlsVersion::V1_2)
+            .iter()
+            .map(|p| p.version)
+            .collect();
+        assert_ne!(a, b, "tls_min_version has no effect on what rustls offers");
     }
 }
