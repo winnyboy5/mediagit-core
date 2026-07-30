@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, OnceCell, RwLock};
 
 use mediagit_metrics::MetricsRegistry;
 use mediagit_metrics::types::{OperationType as MetricOp, StorageBackend as MetricBackend};
@@ -148,6 +148,10 @@ pub struct PackLoc {
     pub compressed_hash: Option<String>,
 }
 
+/// D3 dedup guard map type for [`AppState::pack_verify_inflight`] — pulled
+/// out because the inline form trips clippy's `type_complexity` lint.
+type PackVerifyInflight = Mutex<HashMap<(String, String), Arc<OnceCell<bool>>>>;
+
 /// Shared application state
 pub struct AppState {
     /// Directory containing repositories
@@ -208,6 +212,18 @@ pub struct AppState {
     /// and repopulated at boot by the startup sweep for any marker that
     /// survived a crash.
     pub unverified_packs: RwLock<HashMap<String, HashSet<String>>>,
+
+    /// D3 dedup guard for presign-triggered full-pack verification
+    /// (`ensure_pack_verified_for_presign` in `handlers/transfer.rs`).
+    /// Minting a presigned URL is irrevocable, so an unverified pack must be
+    /// verified in FULL before a URL for it goes out — but concurrent
+    /// pullers (or a presign racing the background worker from
+    /// `complete_pack`) targeting the SAME pack must not each pull the whole
+    /// pack over the WAN. Keyed by (repo, pack_oid); one `OnceCell` per
+    /// pending pack means only the first caller runs verification and every
+    /// other caller awaits and reuses its result. Entries are removed once
+    /// resolved, so this only holds packs currently mid-verification.
+    pub pack_verify_inflight: PackVerifyInflight,
 
     /// Server-enforced file locks (Tracks B1-B3): repo -> path -> LockRecord.
     /// Lazily loaded per repo from `.mediagit/locks.jsonl` on first access,
@@ -270,6 +286,7 @@ impl AppState {
             odb_cache: RwLock::new(HashMap::new()),
             pack_index: RwLock::new(HashMap::new()),
             unverified_packs: RwLock::new(HashMap::new()),
+            pack_verify_inflight: Mutex::new(HashMap::new()),
             locks: RwLock::new(HashMap::new()),
             auth_layer: None,
             auth_service: None,
@@ -308,6 +325,7 @@ impl AppState {
             odb_cache: RwLock::new(HashMap::new()),
             pack_index: RwLock::new(HashMap::new()),
             unverified_packs: RwLock::new(HashMap::new()),
+            pack_verify_inflight: Mutex::new(HashMap::new()),
             locks: RwLock::new(HashMap::new()),
             auth_layer: Some(auth_layer),
             auth_service: Some(auth_service),
@@ -353,6 +371,7 @@ impl AppState {
             odb_cache: RwLock::new(HashMap::new()),
             pack_index: RwLock::new(HashMap::new()),
             unverified_packs: RwLock::new(HashMap::new()),
+            pack_verify_inflight: Mutex::new(HashMap::new()),
             locks: RwLock::new(HashMap::new()),
             auth_layer: Some(auth_layer),
             auth_service: Some(auth_service),

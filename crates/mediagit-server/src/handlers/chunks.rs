@@ -359,6 +359,33 @@ pub async fn download_chunk(
                     let data_len = (loc.length as u64) - 5;
                     match storage.get_range(&pack_key, data_offset, data_len).await {
                         Ok(data) => {
+                            // D1 (never-speculative reads): `complete_pack` registers
+                            // a pack before its background content verification has
+                            // run (see `state.unverified_packs`). Verify THIS slice
+                            // inline before serving it — the compressed bytes are
+                            // already in hand, so this is a decompress + BLAKE3, not
+                            // an extra round trip. Packs NOT in the unverified set
+                            // (the steady state) skip this entirely — same cost as
+                            // before this change.
+                            let is_unverified = {
+                                let unverified = state.unverified_packs.read().await;
+                                unverified
+                                    .get(&repo)
+                                    .is_some_and(|s| s.contains(&loc.pack_oid))
+                            };
+                            let body = Bytes::from(data);
+                            if is_unverified {
+                                let compressor = Arc::new(SmartCompressor::new());
+                                if !verify_chunk_content(&compressor, &chunk_id, body.clone()).await
+                                {
+                                    tracing::error!(
+                                        chunk = %chunk_id,
+                                        pack = %loc.pack_oid,
+                                        "download_chunk: refusing to serve — inline verification failed for unverified pack"
+                                    );
+                                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                                }
+                            }
                             tracing::debug!(
                                 chunk = %chunk_id,
                                 pack = %loc.pack_oid,
@@ -367,7 +394,7 @@ pub async fn download_chunk(
                             return Ok((
                                 StatusCode::OK,
                                 [("Content-Type", "application/octet-stream")],
-                                data,
+                                body,
                             )
                                 .into_response());
                         }
@@ -857,6 +884,17 @@ pub async fn batch_get_pack_chunks(
     let total_wanted: u64 = valid.iter().map(|(_, _, len)| *len as u64).sum();
     let whole_pack = pack_size > 0 && total_wanted.saturating_mul(2) >= pack_size;
 
+    // D2 (never-speculative reads): mirrors D1's inline check in
+    // `download_chunk` — a pack registered by `complete_pack` may still be
+    // pending background content verification (`state.unverified_packs`).
+    // Packs NOT in that set (the steady state) pay zero added cost below.
+    let is_unverified = {
+        let unverified = state.unverified_packs.read().await;
+        unverified
+            .get(&repo)
+            .is_some_and(|s| s.contains(&req.pack_oid))
+    };
+
     let semaphore = batch_get_semaphore();
     let permit = semaphore
         .acquire_owned()
@@ -871,6 +909,9 @@ pub async fn batch_get_pack_chunks(
     tokio::spawn(async move {
         let _permit = permit;
         let mut w = writer;
+        // Built only when the pack is unverified — `None` on the (steady
+        // state) fast path costs nothing below.
+        let compressor = is_unverified.then(|| Arc::new(SmartCompressor::new()));
         let result: anyhow::Result<()> = async {
             for chunk_oid in &invalid {
                 write_batch_frame(&mut w, chunk_oid, &[]).await?;
@@ -885,7 +926,16 @@ pub async fn batch_get_pack_chunks(
                     let start = *offset as usize + 5; // skip [type:1][size:4]
                     let end = *offset as usize + *length as usize;
                     match data.get(start..end) {
-                        Some(payload) => write_batch_frame(&mut w, chunk_oid, payload).await?,
+                        Some(payload) => {
+                            if let Some(c) = &compressor
+                                && !verify_chunk_content(c, chunk_oid, Bytes::copy_from_slice(payload)).await
+                            {
+                                tracing::error!(chunk = %chunk_oid, pack = %req.pack_oid, "batch-get: refusing to serve — inline verification failed for unverified pack");
+                                write_batch_frame(&mut w, chunk_oid, &[]).await?;
+                                continue;
+                            }
+                            write_batch_frame(&mut w, chunk_oid, payload).await?
+                        }
                         None => {
                             tracing::warn!(chunk = %chunk_oid, pack = %req.pack_oid, "batch-get: pack_index entry out of bounds");
                             write_batch_frame(&mut w, chunk_oid, &[]).await?;
@@ -907,7 +957,16 @@ pub async fn batch_get_pack_chunks(
                         let rel = (*offset - range_start) as usize + 5; // skip header
                         let rel_end = (*offset - range_start) as usize + *length as usize;
                         match buf.get(rel..rel_end) {
-                            Some(payload) => write_batch_frame(&mut w, chunk_oid, payload).await?,
+                            Some(payload) => {
+                                if let Some(c) = &compressor
+                                    && !verify_chunk_content(c, chunk_oid, Bytes::copy_from_slice(payload)).await
+                                {
+                                    tracing::error!(chunk = %chunk_oid, pack = %req.pack_oid, "batch-get: refusing to serve — inline verification failed for unverified pack");
+                                    write_batch_frame(&mut w, chunk_oid, &[]).await?;
+                                    continue;
+                                }
+                                write_batch_frame(&mut w, chunk_oid, payload).await?
+                            }
                             None => {
                                 tracing::warn!(chunk = %chunk_oid, pack = %req.pack_oid, "batch-get: range slice out of bounds");
                                 write_batch_frame(&mut w, chunk_oid, &[]).await?;
@@ -1131,6 +1190,106 @@ mod batch_get_tests {
         assert_eq!(frames[1].0, id_a);
         assert!(!frames[1].1.is_empty());
     }
+
+    /// D2 (never-speculative reads): a pack still pending background content
+    /// verification (`state.unverified_packs`) must have its corrupted
+    /// entries refused, not streamed as if valid. Same poisoning technique
+    /// as `write_pack_entry` above, with the last compressed byte flipped.
+    async fn write_corrupt_pack_entry(
+        state: &AppState,
+        storage: &Arc<dyn StorageBackend>,
+        repo: &str,
+        pack_oid: &str,
+        content: &[u8],
+    ) -> String {
+        let chunk_id = Oid::hash(content).to_hex();
+        let compressor = SmartCompressor::new();
+        let mut compressed = compressor.compress(content).expect("compress");
+        let last = compressed.len() - 1;
+        compressed[last] ^= 0xFF;
+
+        let mut entry_bytes = vec![0u8; 5]; // [type:1][size:4] header, unused by reader
+        entry_bytes.extend_from_slice(&compressed);
+        let length = entry_bytes.len() as u32;
+
+        let pack_key = format!("packs/{}", pack_oid);
+        storage
+            .put(&pack_key, &entry_bytes)
+            .await
+            .expect("put pack");
+
+        let loc = PackLoc {
+            pack_oid: pack_oid.to_string(),
+            offset: 0,
+            length,
+            compressed_hash: None,
+        };
+        {
+            let mut idx = state.pack_index.write().await;
+            idx.entry(repo.to_string())
+                .or_default()
+                .insert(chunk_id.clone(), loc);
+        }
+        chunk_id
+    }
+
+    #[tokio::test]
+    async fn batch_get_refuses_corrupted_entry_from_unverified_pack() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = "test-repo".to_string();
+        let repo_path = tmp.path().join(&repo);
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let state = Arc::new(AppState::new(tmp.path().to_path_buf()));
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+
+        let pack_oid = "a".repeat(64);
+        let content = b"content that gets corrupted inside the pack";
+        let chunk_id = write_corrupt_pack_entry(&state, &storage, &repo, &pack_oid, content).await;
+        let length = {
+            let idx = state.pack_index.read().await;
+            idx.get(&repo).unwrap().get(&chunk_id).unwrap().length
+        };
+        state
+            .unverified_packs
+            .write()
+            .await
+            .entry(repo.clone())
+            .or_default()
+            .insert(pack_oid.clone());
+
+        let req = BatchGetRequest {
+            pack_oid: pack_oid.clone(),
+            entries: vec![BatchGetEntry {
+                chunk_oid: chunk_id.clone(),
+                offset: 0,
+                length,
+            }],
+        };
+
+        let resp = batch_get_pack_chunks(
+            Path(repo.clone()),
+            State(Arc::clone(&state)),
+            None,
+            Json(req),
+        )
+        .await
+        .expect("handler ok");
+        let body = resp.into_body();
+        let reader = tokio_util::io::StreamReader::new(
+            body.into_data_stream()
+                .map(|r| r.map_err(std::io::Error::other)),
+        );
+        let frames = read_all_frames(reader).await;
+
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].0, chunk_id);
+        assert!(
+            frames[0].1.is_empty(),
+            "corrupted entry from an unverified pack must come back as a miss frame, not the bad bytes"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1287,5 +1446,162 @@ mod chunk_content_verification_tests {
         )
         .await;
         assert_eq!(second, Ok(StatusCode::OK));
+    }
+}
+
+/// D1 (never-speculative reads): `download_chunk`'s pack-proxy branch must
+/// inline-verify a slice from a pack still pending background content
+/// verification (`state.unverified_packs`), and must NOT re-verify a slice
+/// from a pack already marked verified — see `chunks.rs`'s `download_chunk`.
+#[cfg(test)]
+mod download_chunk_unverified_pack_tests {
+    use super::*;
+
+    /// Writes one packed chunk into storage and `pack_index` for `repo`.
+    /// When `corrupt` is set, the last compressed byte is flipped so
+    /// BLAKE3(decompressed) no longer matches the returned chunk id — same
+    /// poisoning technique as `write_corrupt_pack_entry` in transfer.rs.
+    async fn write_pack_entry(
+        state: &AppState,
+        storage: &Arc<dyn StorageBackend>,
+        repo: &str,
+        pack_oid: &str,
+        content: &[u8],
+        corrupt: bool,
+    ) -> String {
+        let chunk_id = Oid::hash(content).to_hex();
+        let compressor = SmartCompressor::new();
+        let mut compressed = compressor.compress(content).expect("compress");
+        if corrupt {
+            let last = compressed.len() - 1;
+            compressed[last] ^= 0xFF;
+        }
+
+        let mut entry_bytes = vec![0u8; 5]; // [type:1][size:4] header, unused by reader
+        entry_bytes.extend_from_slice(&compressed);
+        let length = entry_bytes.len() as u32;
+
+        let pack_key = format!("packs/{}", pack_oid);
+        storage
+            .put(&pack_key, &entry_bytes)
+            .await
+            .expect("put pack");
+
+        let loc = PackLoc {
+            pack_oid: pack_oid.to_string(),
+            offset: 0,
+            length,
+            compressed_hash: None,
+        };
+        {
+            let mut idx = state.pack_index.write().await;
+            idx.entry(repo.to_string())
+                .or_default()
+                .insert(chunk_id.clone(), loc);
+        }
+        chunk_id
+    }
+
+    async fn setup(
+        repo: &str,
+    ) -> (
+        tempfile::TempDir,
+        Arc<AppState>,
+        std::path::PathBuf,
+        Arc<dyn StorageBackend>,
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join(repo);
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let state = Arc::new(AppState::new(tmp.path().to_path_buf()));
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        (tmp, state, repo_path, storage)
+    }
+
+    /// Marks a pack unverified exactly as `complete_pack` (or the startup
+    /// sweep) would, via `state.unverified_packs` — the in-memory cache of
+    /// the durable `.pending` marker.
+    async fn mark_unverified(state: &AppState, repo: &str, pack_oid: &str) {
+        state
+            .unverified_packs
+            .write()
+            .await
+            .entry(repo.to_string())
+            .or_default()
+            .insert(pack_oid.to_string());
+    }
+
+    #[tokio::test]
+    async fn serves_good_bytes_from_an_unverified_pack_after_inline_verification() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, _repo_path, storage) = setup(&repo).await;
+        let pack_oid = "a".repeat(64);
+        let content = b"hello from an unverified pack";
+        let chunk_id = write_pack_entry(&state, &storage, &repo, &pack_oid, content, false).await;
+        mark_unverified(&state, &repo, &pack_oid).await;
+
+        let resp = download_chunk(
+            Path((repo.clone(), chunk_id.clone())),
+            State(Arc::clone(&state)),
+            None,
+        )
+        .await
+        .expect("good bytes in an unverified pack must still be served");
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let compressor = SmartCompressor::new();
+        let decompressed = compressor.decompress(&body).expect("decompress");
+        assert_eq!(decompressed, content);
+    }
+
+    #[tokio::test]
+    async fn refuses_corrupted_bytes_from_an_unverified_pack() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, _repo_path, storage) = setup(&repo).await;
+        let pack_oid = "b".repeat(64);
+        let content = b"content that gets corrupted inside the pack";
+        let chunk_id = write_pack_entry(&state, &storage, &repo, &pack_oid, content, true).await;
+        mark_unverified(&state, &repo, &pack_oid).await;
+
+        let result = download_chunk(
+            Path((repo.clone(), chunk_id.clone())),
+            State(Arc::clone(&state)),
+            None,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "corrupted bytes in an unverified pack must never be served, got Ok"
+        );
+    }
+
+    #[tokio::test]
+    async fn skips_verification_for_a_pack_not_marked_unverified() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, _repo_path, storage) = setup(&repo).await;
+        let pack_oid = "c".repeat(64);
+        let content = b"this pack is treated as verified even though its bytes are corrupt";
+        // Corrupted, but deliberately NOT registered in `unverified_packs` —
+        // proves the fast path genuinely skips the check rather than
+        // silently still verifying (which would make this assertion moot).
+        let chunk_id = write_pack_entry(&state, &storage, &repo, &pack_oid, content, true).await;
+
+        let resp = download_chunk(
+            Path((repo.clone(), chunk_id.clone())),
+            State(Arc::clone(&state)),
+            None,
+        )
+        .await
+        .expect("a pack absent from unverified_packs must be served without re-checking");
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!body.is_empty(), "corrupted-but-trusted bytes still served");
     }
 }

@@ -1197,6 +1197,43 @@ fn pending_marker_path(repo_path: &std::path::Path, pack_oid: &str) -> std::path
         .join(format!("{pack_oid}.pending"))
 }
 
+/// Reads and parses a pack's `.jsonl` manifest from disk into the
+/// `ManifestEntry` shape `verify_pack_in_background` needs. Shared by the
+/// startup sweep (`resume_pack_verification`) and the presign-triggered
+/// verifier (D3: `ensure_pack_verified_for_presign` in `handlers/transfer.rs`)
+/// — both need to hand the same manifest to the same verifier.
+///
+/// Returns `None` if the manifest is missing, unreadable, or parses to zero
+/// entries — callers must fail closed (leave/treat the pack as unverified)
+/// in that case, not treat an empty manifest as "nothing to verify."
+pub(crate) async fn read_pack_manifest(
+    repo_path: &std::path::Path,
+    pack_oid: &str,
+) -> Option<Vec<ManifestEntry>> {
+    let manifest_path = repo_path
+        .join(".mediagit")
+        .join("packs")
+        .join(pack_shard(pack_oid))
+        .join(format!("{pack_oid}.jsonl"));
+    let content = tokio::fs::read_to_string(&manifest_path).await.ok()?;
+    let manifest: Vec<ManifestEntry> = content
+        .lines()
+        .filter(|l| !l.is_empty())
+        .filter_map(|line| serde_json::from_str::<PackIndexLine>(line).ok())
+        .map(|e| ManifestEntry {
+            chunk_oid: e.chunk_oid,
+            offset: e.offset,
+            length: e.length,
+            compressed_hash: e.compressed_hash,
+        })
+        .collect();
+    if manifest.is_empty() {
+        None
+    } else {
+        Some(manifest)
+    }
+}
+
 /// Global (not per-repo) semaphore bounding concurrent pack content-verification
 /// read-backs. Serialised by default (`MEDIAGIT_PACK_VERIFY_CONCURRENCY=1`).
 ///
@@ -1241,14 +1278,20 @@ fn pack_verify_semaphore() -> &'static tokio::sync::Semaphore {
 /// why a bare `tokio::spawn` at the call site is safe here even though it
 /// silently swallows a task that never runs — the marker is the actual source
 /// of truth, and this task is just how the common case resolves it quickly.
-async fn verify_pack_in_background(
+///
+/// Returns `true` when the pack came out clean (every entry verified), `false`
+/// when one or more entries were quarantined. `pub(crate)` (not just called
+/// via `tokio::spawn` here) so D3's `ensure_pack_verified_for_presign`
+/// (`handlers/transfer.rs`) can await it directly — same verify-and-resolve
+/// logic, not a second implementation.
+pub(crate) async fn verify_pack_in_background(
     state: Arc<AppState>,
     repo_path: std::path::PathBuf,
     repo: String,
     pack_oid: String,
     storage: Arc<dyn StorageBackend>,
     manifest: Vec<ManifestEntry>,
-) {
+) -> bool {
     let compressor = Arc::new(SmartCompressor::new());
     let _permit = pack_verify_semaphore().acquire().await.ok();
 
@@ -1257,8 +1300,9 @@ async fn verify_pack_in_background(
     let bad =
         all_pack_entries_failing_content_verification(&storage, &compressor, &pack_key, &manifest)
             .await;
+    let clean = bad.is_empty();
 
-    if bad.is_empty() {
+    if clean {
         tracing::info!(
             repo = %repo,
             pack = %pack_oid,
@@ -1303,6 +1347,8 @@ async fn verify_pack_in_background(
             set.remove(&pack_oid);
         }
     }
+
+    clean
 }
 
 /// Startup-sweep hook (Stage C durability): given an orphaned `.pending`
@@ -1333,40 +1379,14 @@ pub async fn resume_pack_verification(
             .insert(pack_oid.to_string());
     }
 
-    let manifest_path = repo_path
-        .join(".mediagit")
-        .join("packs")
-        .join(pack_shard(pack_oid))
-        .join(format!("{pack_oid}.jsonl"));
-    let content = match tokio::fs::read_to_string(&manifest_path).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                repo, pack_oid, err = %e,
-                "startup sweep: could not read manifest for a pending pack; leaving unverified for a future sweep"
-            );
-            return;
-        }
-    };
-    let manifest: Vec<ManifestEntry> = content
-        .lines()
-        .filter(|l| !l.is_empty())
-        .filter_map(|line| serde_json::from_str::<PackIndexLine>(line).ok())
-        .map(|e| ManifestEntry {
-            chunk_oid: e.chunk_oid,
-            offset: e.offset,
-            length: e.length,
-            compressed_hash: e.compressed_hash,
-        })
-        .collect();
-    if manifest.is_empty() {
+    let Some(manifest) = read_pack_manifest(repo_path, pack_oid).await else {
         tracing::warn!(
             repo,
             pack_oid,
-            "startup sweep: manifest for a pending pack was empty or unparsable; leaving unverified for a future sweep"
+            "startup sweep: could not read or parse manifest for a pending pack; leaving unverified for a future sweep"
         );
         return;
-    }
+    };
 
     let storage = match get_or_init_storage(state, repo_path).await {
         Ok(s) => s,

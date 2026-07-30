@@ -847,6 +847,81 @@ pub struct PresignPackDownloadRequest {
     pub pack_ids: Vec<String>,
 }
 
+/// D3 (never-speculative reads): gate presigned-URL minting on content
+/// verification for a pack that's still pending it (`state.unverified_packs`
+/// — see `complete_pack`'s async PAC verification). Minting a presigned URL
+/// is irrevocable: once issued, the server is permanently out of that
+/// request path, with only the URL's TTL left to bound exposure. So unlike
+/// D1/D2 (which verify only the requested slice), this verifies the WHOLE
+/// pack before a URL for it goes out — reusing `verify_pack_in_background`
+/// (repo.rs), the exact same verify-and-quarantine logic the background
+/// worker uses, not a second implementation.
+///
+/// Concurrent callers for the same (repo, pack_oid) — multiple pullers, or a
+/// presign racing the background worker spawned by `complete_pack` — must
+/// not each pull the whole pack over the WAN. `state.pack_verify_inflight`
+/// holds one `OnceCell` per pending pack so only the first caller verifies;
+/// everyone else awaits and reuses that result.
+///
+/// Returns `true` when it's safe to mint: already verified (fast path, zero
+/// added cost — the steady state), or just verified/resolved by this call.
+/// Returns `false` when verification could not run (unreadable manifest) or
+/// the pack had corrupted entries (already quarantined at that point by
+/// `verify_pack_in_background`) — callers must not mint in that case.
+async fn ensure_pack_verified_for_presign(
+    state: &Arc<AppState>,
+    repo_path: &std::path::Path,
+    repo: &str,
+    storage: &Arc<dyn StorageBackend>,
+    pack_oid: &str,
+) -> bool {
+    {
+        let unverified = state.unverified_packs.read().await;
+        if !unverified.get(repo).is_some_and(|s| s.contains(pack_oid)) {
+            return true;
+        }
+    }
+
+    let key = (repo.to_string(), pack_oid.to_string());
+    let cell = {
+        let mut inflight = state.pack_verify_inflight.lock().await;
+        Arc::clone(
+            inflight
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
+        )
+    };
+
+    let clean = *cell
+        .get_or_init(|| async {
+            let Some(manifest) = read_pack_manifest(repo_path, pack_oid).await else {
+                tracing::warn!(
+                    repo,
+                    pack_oid,
+                    "presign_pack_downloads: could not read manifest for an unverified pack; refusing to mint"
+                );
+                return false;
+            };
+            verify_pack_in_background(
+                Arc::clone(state),
+                repo_path.to_path_buf(),
+                repo.to_string(),
+                pack_oid.to_string(),
+                Arc::clone(storage),
+                manifest,
+            )
+            .await
+        })
+        .await;
+
+    // Free the slot now that it's resolved — the fast path above already
+    // covers every future caller once `unverified_packs` reflects that, so
+    // this is just bounding memory, not a correctness step.
+    state.pack_verify_inflight.lock().await.remove(&key);
+
+    clean
+}
+
 /// POST /{repo}/packs/presign-download-urls — Mint presigned GET URLs for pack objects.
 ///
 /// Returns one URL per pack_id. Client uses these for Range-GET reconstruction.
@@ -888,7 +963,27 @@ pub async fn presign_pack_downloads(
         futures::stream::iter(req.pack_ids.into_iter().map(|pack_id| {
             let storage = Arc::clone(&storage);
             let repo = repo.clone();
+            let repo_path = repo_path.clone();
+            let state = Arc::clone(&state);
             async move {
+                // D3: an unverified pack must be verified in full — and,
+                // if corrupted, quarantined — before a URL for it is minted.
+                if !ensure_pack_verified_for_presign(
+                    &state,
+                    &repo_path,
+                    &repo,
+                    &storage,
+                    &pack_id,
+                )
+                .await
+                {
+                    tracing::error!(
+                        repo = %repo,
+                        pack = %pack_id,
+                        "presign_pack_downloads: refusing to mint — pack failed content verification"
+                    );
+                    return (pack_id, None);
+                }
                 let key = format!("packs/{}", pack_id);
                 let entry = match storage.presign_get(&key, ttl).await {
                     Ok(Some(p)) => Some(PresignedGetJson {
@@ -1254,6 +1349,335 @@ mod complete_chunk_uploads_content_verification_tests {
             resp.missing.is_empty(),
             "with verification disabled the completion check must fall back to \
              existence-only (head), proving the knob actually does something"
+        );
+    }
+}
+
+/// D3 (never-speculative reads): `ensure_pack_verified_for_presign` gates
+/// presigned-URL minting on full-pack content verification for a pack still
+/// pending it, and deduplicates concurrent verifications of the same pack.
+#[cfg(test)]
+mod presign_pack_downloads_verification_tests {
+    use super::*;
+
+    /// Wraps a real backend and counts calls to `get_streaming_range` — the
+    /// only storage method `pack_entries_failing_content_verification`
+    /// (repo.rs) calls, once per manifest entry per verification pass. Lets
+    /// the concurrency test below prove exactly ONE verification ran instead
+    /// of one per concurrent caller.
+    #[derive(Debug)]
+    struct CountingBackend {
+        inner: Arc<dyn StorageBackend>,
+        verify_reads: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl StorageBackend for CountingBackend {
+        async fn get(&self, key: &str) -> anyhow::Result<Vec<u8>> {
+            self.inner.get(key).await
+        }
+        /// Mints a fake URL. The local backend returns `None` here, which made an
+        /// earlier handler-level test vacuous: the pack mapped to `None` whether or
+        /// not the gate fired, so bypassing the gate still passed. A test double
+        /// that CAN presign is what makes "did not mint" a real assertion.
+        async fn presign_get(
+            &self,
+            key: &str,
+            ttl: std::time::Duration,
+        ) -> anyhow::Result<Option<mediagit_storage::PresignedDownload>> {
+            Ok(Some(mediagit_storage::PresignedDownload {
+                url: format!("https://test.invalid/{key}"),
+                headers: Vec::new(),
+                expires_in_secs: ttl.as_secs(),
+            }))
+        }
+        async fn put(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
+            self.inner.put(key, data).await
+        }
+        async fn exists(&self, key: &str) -> anyhow::Result<bool> {
+            self.inner.exists(key).await
+        }
+        async fn delete(&self, key: &str) -> anyhow::Result<()> {
+            self.inner.delete(key).await
+        }
+        async fn list_objects(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+            self.inner.list_objects(prefix).await
+        }
+        async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+            self.inner.head(key).await
+        }
+        async fn get_streaming_range(
+            &self,
+            key: &str,
+            range: std::ops::Range<u64>,
+        ) -> anyhow::Result<
+            std::pin::Pin<
+                Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+            >,
+        > {
+            self.verify_reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.get_streaming_range(key, range).await
+        }
+    }
+
+    struct PackFixture {
+        pack_bytes: Vec<u8>,
+        manifest: Vec<ManifestEntry>,
+    }
+
+    /// Builds a well-formed two-chunk pack — same shape as
+    /// `complete_pack_content_verification_tests::build_valid_pack` in
+    /// repo.rs (kept separate: that one is private to repo.rs's test mod).
+    fn build_valid_pack() -> PackFixture {
+        let compressor = SmartCompressor::new();
+        let contents: [&[u8]; 2] = [
+            b"the quick brown fox jumps over the lazy dog",
+            b"a second, different chunk of content in the same pack",
+        ];
+        let mut pack_bytes = Vec::new();
+        let mut manifest = Vec::new();
+        for content in contents {
+            let chunk_id = blake3::hash(content).to_hex().to_string();
+            let compressed = compressor.compress(content).expect("compress");
+            let offset = pack_bytes.len() as u64;
+            pack_bytes.extend_from_slice(&[0u8; 5]);
+            pack_bytes.extend_from_slice(&compressed);
+            let length = (5 + compressed.len()) as u32;
+            manifest.push(ManifestEntry {
+                chunk_oid: chunk_id,
+                offset,
+                length,
+                compressed_hash: None,
+            });
+        }
+        PackFixture {
+            pack_bytes,
+            manifest,
+        }
+    }
+
+    /// Same pack, but the second entry's compressed bytes are corrupted.
+    fn build_pack_with_corrupted_entry() -> PackFixture {
+        let mut fixture = build_valid_pack();
+        let bad = &fixture.manifest[1];
+        let data_end = (bad.offset + bad.length as u64) as usize;
+        let last = data_end - 1;
+        fixture.pack_bytes[last] ^= 0xFF;
+        fixture
+    }
+
+    async fn setup(repo: &str) -> (tempfile::TempDir, Arc<AppState>, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join(repo);
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let state = Arc::new(AppState::new(tmp.path().to_path_buf()));
+        (tmp, state, repo_path)
+    }
+
+    /// Writes a pack's raw bytes into storage and its manifest to
+    /// `.mediagit/packs/<shard>/<pack_oid>.jsonl` — the on-disk layout
+    /// `complete_pack` produces and `read_pack_manifest` reads back.
+    async fn write_pack_and_manifest(
+        storage: &Arc<dyn StorageBackend>,
+        repo_path: &std::path::Path,
+        pack_oid: &str,
+        fixture: &PackFixture,
+    ) {
+        storage
+            .put(&format!("packs/{pack_oid}"), &fixture.pack_bytes)
+            .await
+            .expect("put pack");
+        let shard = &pack_oid[..2];
+        let manifest_dir = repo_path.join(".mediagit").join("packs").join(shard);
+        tokio::fs::create_dir_all(&manifest_dir).await.unwrap();
+        let mut jsonl = String::new();
+        for e in &fixture.manifest {
+            jsonl.push_str(&format!(
+                "{{\"chunk_oid\":\"{}\",\"pack_oid\":\"{pack_oid}\",\"offset\":{},\"length\":{}}}\n",
+                e.chunk_oid, e.offset, e.length
+            ));
+        }
+        tokio::fs::write(manifest_dir.join(format!("{pack_oid}.jsonl")), jsonl)
+            .await
+            .unwrap();
+    }
+
+    async fn mark_unverified(state: &AppState, repo: &str, pack_oid: &str) {
+        state
+            .unverified_packs
+            .write()
+            .await
+            .entry(repo.to_string())
+            .or_default()
+            .insert(pack_oid.to_string());
+    }
+
+    #[tokio::test]
+    async fn verified_pack_mints_immediately_without_touching_disk() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        // No manifest on disk at all, and NOT marked unverified — the fast
+        // path must return `true` without ever trying to read one.
+        let pack_oid = "a".repeat(64);
+
+        let ok =
+            ensure_pack_verified_for_presign(&state, &repo_path, &repo, &storage, &pack_oid).await;
+        assert!(
+            ok,
+            "a pack absent from unverified_packs must be treated as already verified"
+        );
+    }
+
+    #[tokio::test]
+    async fn unverified_valid_pack_verifies_then_reports_mintable() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let fixture = build_valid_pack();
+        let pack_oid = "b".repeat(64);
+        write_pack_and_manifest(&storage, &repo_path, &pack_oid, &fixture).await;
+        mark_unverified(&state, &repo, &pack_oid).await;
+
+        let ok =
+            ensure_pack_verified_for_presign(&state, &repo_path, &repo, &storage, &pack_oid).await;
+        assert!(
+            ok,
+            "a valid unverified pack must verify clean and be reported mintable"
+        );
+        assert!(
+            !state
+                .unverified_packs
+                .read()
+                .await
+                .get(&repo)
+                .is_some_and(|s| s.contains(&pack_oid)),
+            "verification must clear the unverified marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn unverified_corrupted_pack_does_not_mint() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let fixture = build_pack_with_corrupted_entry();
+        let pack_oid = "c".repeat(64);
+        write_pack_and_manifest(&storage, &repo_path, &pack_oid, &fixture).await;
+        mark_unverified(&state, &repo, &pack_oid).await;
+
+        let ok =
+            ensure_pack_verified_for_presign(&state, &repo_path, &repo, &storage, &pack_oid).await;
+        assert!(
+            !ok,
+            "a pack with a corrupted entry must never be reported mintable, got true"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_presign_requests_verify_the_same_pack_exactly_once() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let base_storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let verify_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let storage: Arc<dyn StorageBackend> = Arc::new(CountingBackend {
+            inner: base_storage,
+            verify_reads: Arc::clone(&verify_reads),
+        });
+        let fixture = build_valid_pack();
+        let pack_oid = "d".repeat(64);
+        write_pack_and_manifest(&storage, &repo_path, &pack_oid, &fixture).await;
+        mark_unverified(&state, &repo, &pack_oid).await;
+
+        let entries_per_verify = fixture.manifest.len();
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let state = Arc::clone(&state);
+            let repo_path = repo_path.clone();
+            let repo = repo.clone();
+            let storage = Arc::clone(&storage);
+            let pack_oid = pack_oid.clone();
+            handles.push(tokio::spawn(async move {
+                ensure_pack_verified_for_presign(&state, &repo_path, &repo, &storage, &pack_oid)
+                    .await
+            }));
+        }
+        for h in handles {
+            assert!(
+                h.await.unwrap(),
+                "every concurrent caller must see the pack as mintable"
+            );
+        }
+
+        assert_eq!(
+            verify_reads.load(std::sync::atomic::Ordering::SeqCst),
+            entries_per_verify,
+            "8 concurrent presign requests for the same pack must trigger exactly ONE \
+             verification pass ({entries_per_verify} reads), not one per caller"
+        );
+    }
+
+    /// The four tests above call `ensure_pack_verified_for_presign` DIRECTLY.
+    /// They prove the helper is correct; they prove nothing about whether the
+    /// handler actually calls it. Found by red-verification: sabotaging the
+    /// call site in `presign_pack_downloads` to `if false && ...` left all four
+    /// green while the gate did nothing in production — a unit-tested guard
+    /// that is never invoked is not a guard.
+    ///
+    /// This test goes through the HANDLER. A corrupted, unverified pack must
+    /// come back mapped to `None` (the existing "client falls back" contract),
+    /// never a minted URL — because once a URL is minted the server is
+    /// permanently out of that request path and there is no revocation.
+    #[tokio::test]
+    async fn handler_refuses_to_mint_for_unverified_corrupted_pack() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let inner = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let fixture = build_pack_with_corrupted_entry();
+        let pack_oid = "d".repeat(64);
+        write_pack_and_manifest(&inner, &repo_path, &pack_oid, &fixture).await;
+        mark_unverified(&state, &repo, &pack_oid).await;
+
+        // Install a backend that CAN presign, so "did not mint" is a real
+        // assertion rather than an artefact of the local backend never minting.
+        let counting: Arc<dyn StorageBackend> = Arc::new(CountingBackend {
+            inner: Arc::clone(&inner),
+            verify_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        {
+            let mut backends = state.storage_backends.write().await;
+            let canon = repo_path
+                .canonicalize()
+                .unwrap_or_else(|_| repo_path.clone());
+            backends.insert(canon, Arc::clone(&counting));
+            backends.insert(repo_path.clone(), counting);
+        }
+
+        let resp = presign_pack_downloads(
+            Path(repo.clone()),
+            State(Arc::clone(&state)),
+            None,
+            Json(PresignPackDownloadRequest {
+                pack_ids: vec![pack_oid.clone()],
+            }),
+        )
+        .await
+        .expect("handler itself must succeed; the refusal is per-pack, not a 5xx");
+
+        assert!(
+            resp.0.get(&pack_oid).map(Option::is_none).unwrap_or(true),
+            "handler minted a presigned URL for a corrupted unverified pack — the              verification gate is not wired into presign_pack_downloads"
         );
     }
 }
