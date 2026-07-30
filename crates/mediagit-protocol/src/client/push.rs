@@ -818,13 +818,22 @@ impl ProtocolClient {
                 // null → falls through to the server-proxy PUT path.
                 let full_chunk_hexes: Vec<String> =
                     full_chunks.iter().map(|c| c.to_hex()).collect();
-                let chunk_sizes: std::collections::HashMap<String, u64> = manifest
-                    .chunks
-                    .iter()
-                    .filter(|c| missing_set.contains(&c.id.to_hex()))
-                    .filter(|c| full_chunks.iter().any(|fc| fc == &c.id))
-                    .map(|c| (c.id.to_hex(), c.size as u64))
-                    .collect();
+                // Bind the presigned URL's Content-Length to the actual compressed
+                // on-disk size (what will be PUT), not the manifest's uncompressed
+                // size — a mismatch there causes a 403 SignatureDoesNotMatch on
+                // compressible content. `None` (delta/repacked chunk) maps to 0,
+                // matching the server's "unbound URL" contract.
+                let chunk_sizes: std::collections::HashMap<String, u64> = {
+                    let lens = futures::future::join_all(
+                        full_chunks.iter().map(|id| odb.compressed_chunk_len(id)),
+                    )
+                    .await;
+                    full_chunks
+                        .iter()
+                        .zip(lens)
+                        .map(|(id, len)| (id.to_hex(), len.unwrap_or(0)))
+                        .collect()
+                };
                 let presigned_urls = std::sync::Arc::new(
                     self.request_chunk_upload_urls(&full_chunk_hexes, &chunk_sizes)
                         .await,
@@ -1688,13 +1697,22 @@ impl ProtocolClient {
                     // null → falls through to the server-proxy PUT path.
                     let full_chunk_hexes: Vec<String> =
                         full_chunks.iter().map(|c| c.to_hex()).collect();
-                    let chunk_sizes: std::collections::HashMap<String, u64> = manifest
-                        .chunks
-                        .iter()
-                        .filter(|c| missing_set.contains(&c.id.to_hex()))
-                        .filter(|c| full_chunks.iter().any(|fc| fc == &c.id))
-                        .map(|c| (c.id.to_hex(), c.size as u64))
-                        .collect();
+                    // Bind the presigned URL's Content-Length to the actual compressed
+                    // on-disk size (what will be PUT), not the manifest's uncompressed
+                    // size — a mismatch there causes a 403 SignatureDoesNotMatch on
+                    // compressible content. `None` (delta/repacked chunk) maps to 0,
+                    // matching the server's "unbound URL" contract.
+                    let chunk_sizes: std::collections::HashMap<String, u64> = {
+                        let lens = futures::future::join_all(
+                            full_chunks.iter().map(|id| odb.compressed_chunk_len(id)),
+                        )
+                        .await;
+                        full_chunks
+                            .iter()
+                            .zip(lens)
+                            .map(|(id, len)| (id.to_hex(), len.unwrap_or(0)))
+                            .collect()
+                    };
                     let presigned_urls = std::sync::Arc::new(
                         self.request_chunk_upload_urls(&full_chunk_hexes, &chunk_sizes)
                             .await,

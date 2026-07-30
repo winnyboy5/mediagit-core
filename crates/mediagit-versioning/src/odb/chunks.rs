@@ -2532,6 +2532,19 @@ impl ObjectDatabase {
         }
     }
 
+    /// Byte length of the chunk exactly as `get_compressed_chunk` would return it,
+    /// without reading the bytes — or `None` when it cannot be known cheaply.
+    ///
+    /// Mirrors the fast path of `get_compressed_chunk`: a loose chunk at
+    /// `chunks/<hex>` has its length `head`-ed directly. A delta-encoded or
+    /// gc-repacked chunk (no loose copy) returns `None` rather than guessing,
+    /// since its transfer length depends on a reconstruct+recompress that
+    /// hasn't happened yet.
+    pub async fn compressed_chunk_len(&self, chunk_id: &Oid) -> Option<u64> {
+        let chunk_key = format!("chunks/{}", chunk_id.to_hex());
+        self.storage.head(&chunk_key).await.ok().flatten()
+    }
+
     /// Store raw compressed chunk data (no compression)
     ///
     /// Used when receiving pre-compressed chunks from remote. Decompresses
@@ -3170,5 +3183,119 @@ mod chunk_delta_depth_tests {
         );
 
         let _ = v2;
+    }
+}
+
+/// `compressed_chunk_len` backs the presigned chunk-upload PUT's
+/// Content-Length. A wrong answer either 403s a valid upload (undersized) or
+/// silently accepts more than intended (oversized) — see the presign_put
+/// binding at mediagit-server's transfer.rs.
+#[cfg(test)]
+mod compressed_chunk_len_tests {
+    use super::*;
+    use crate::chunking::ChunkStrategy;
+    use mediagit_storage::mock::MockBackend;
+    use std::sync::Arc as StdArc;
+
+    /// The compressed length must match what `get_compressed_chunk` actually
+    /// returns — not the manifest's uncompressed size. Repeated bytes are
+    /// used specifically so zlib compresses them well below the input size;
+    /// this test would still pass if `compressed_chunk_len` wrongly returned
+    /// the uncompressed length unless the two are asserted distinct first.
+    #[tokio::test]
+    async fn matches_get_compressed_chunk_for_compressible_data() {
+        let storage = StdArc::new(MockBackend::new());
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let data: Vec<u8> = vec![b'a'; 64 * 1024];
+        let chunk_id = Oid::hash(&data);
+        odb.write_full_chunk(&chunk_id, &data)
+            .await
+            .expect("write_full_chunk should succeed");
+
+        let actual = odb
+            .get_compressed_chunk(&chunk_id)
+            .await
+            .expect("chunk was just written");
+
+        assert_ne!(
+            actual.len(),
+            data.len(),
+            "test setup invalid: compressible data must compress to a \
+             different size, or this test can't distinguish compressed \
+             from uncompressed length"
+        );
+
+        let len = odb
+            .compressed_chunk_len(&chunk_id)
+            .await
+            .expect("loose chunk must report a length");
+        assert_eq!(
+            len,
+            actual.len() as u64,
+            "compressed_chunk_len must equal the actual bytes get_compressed_chunk sends"
+        );
+    }
+
+    // RED-VERIFY (documented, not executed): if `compressed_chunk_len`
+    // returned the manifest/uncompressed size instead of `head`-ing the
+    // stored object, this test fails — `len` above would equal
+    // `data.len()` (65536), not `actual.len()` (much smaller after zlib).
+
+    /// A chunk with no loose copy at `chunks/<hex>` — because it is
+    /// delta-encoded — must yield `None` rather than a guessed length.
+    #[tokio::test]
+    async fn returns_none_for_delta_encoded_chunk() {
+        let storage = StdArc::new(MockBackend::new());
+        let odb = ObjectDatabase::with_optimizations(
+            storage.clone(),
+            10_000_000,
+            Some(ChunkStrategy::Fixed {
+                size: 2 * 1024 * 1024,
+            }),
+            true,
+            0,
+        );
+
+        // Two similar versions so the second is stored as a delta on the first
+        // (mirrors corrupt_base_chunk_fails_instead_of_reconstructing_garbage,
+        // which is a proven-reliable delta-producing setup in this file).
+        let mut content: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        odb.write_chunked(ObjectType::Blob, &content, "v1.bin")
+            .await
+            .expect("first write");
+        for k in 0..64usize {
+            content[1000 + k] = 0xAB;
+        }
+        odb.write_chunked(ObjectType::Blob, &content, "v2.bin")
+            .await
+            .expect("second write");
+
+        let metas = storage.list_objects("chunk-deltas/").await.unwrap();
+        let meta_key = metas
+            .iter()
+            .find(|k| k.ends_with(".meta"))
+            .expect("expected at least one chunk delta");
+        let delta_hex = meta_key
+            .trim_start_matches("chunk-deltas/")
+            .trim_end_matches(".meta");
+        let delta_id = Oid::from_hex(delta_hex).expect("delta id");
+
+        assert_eq!(
+            odb.compressed_chunk_len(&delta_id).await,
+            None,
+            "a delta-encoded chunk has no loose object at chunks/<hex> and \
+             must not report a guessed length"
+        );
+    }
+
+    /// A chunk id that was never written at all is likewise `None`.
+    #[tokio::test]
+    async fn returns_none_for_absent_chunk() {
+        let storage = StdArc::new(MockBackend::new());
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let absent_id = Oid::hash(b"never written");
+        assert_eq!(odb.compressed_chunk_len(&absent_id).await, None);
     }
 }

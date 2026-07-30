@@ -181,15 +181,16 @@ pub async fn presign_chunk_uploads(
         .collect();
 
     let entries: Vec<(String, Option<PresignedPutJson>)> =
-        futures::stream::iter(pairs.into_iter().map(|(chunk_id, _content_length)| {
+        futures::stream::iter(pairs.into_iter().map(|(chunk_id, content_length)| {
             let storage = Arc::clone(&storage);
             let repo = repo.clone();
             async move {
                 let key = format!("chunks/{}", chunk_id);
-                // Pass 0 — chunk compressed size is unknown at presign time, and binding
-                // the uncompressed manifest size would cause 403 SignatureDoesNotMatch
-                // when compressed bytes are PUT for compressible content.
-                let entry = match storage.presign_put(&key, 0, ttl).await {
+                // content_length is the compressed length the client will actually
+                // PUT (Odb::compressed_chunk_len), not the manifest's uncompressed
+                // size. 0 means it couldn't be known cheaply (delta-encoded or
+                // gc-repacked chunk) — the URL is intentionally left unbound.
+                let entry = match storage.presign_put(&key, content_length, ttl).await {
                     Ok(Some(p)) => Some(PresignedPutJson {
                         url: p.url,
                         method: p.method,
