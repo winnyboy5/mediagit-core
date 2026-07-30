@@ -1027,6 +1027,45 @@ fn first_entry_exceeding_pack_size(
 /// Adapts a `blake3::Hasher` to `std::io::Write` so a streaming decompressor
 /// can feed it decompressed bytes directly — no buffer ever holds more than
 /// one `decompress_streaming` copy chunk (64 KiB) at a time.
+/// Reader that BLAKE3-hashes every byte as it passes through.
+///
+/// Exists because `decompress_typed` (the whole-buffer path) falls back to the
+/// RAW bytes when a decoder errors — `detect()` can misfire on incompressible
+/// data that happens to start with a codec magic (raw 0x78 plus a byte that
+/// satisfies zlib's header checksum, ~1 in 8000 per the note in
+/// `decompress_typed`). Streaming reused `detect()` but NOT that recovery, so
+/// such a chunk decoded to an error and was FALSELY QUARANTINED. Caught by a
+/// real 1 GB push to S3: `bad_entries=9` on a pack that was entirely valid,
+/// with 2006 green unit tests behind it.
+///
+/// Teeing lets both candidate digests be computed in ONE pass with no
+/// buffering: the decompressed hash from the sink, and the raw hash from here.
+struct TeeHasher<R: std::io::Read> {
+    inner: R,
+    hasher: blake3::Hasher,
+    /// FUSED. The inner reader is a `SyncIoBridge` over a futures `Stream`, and
+    /// polling one of those after it has completed panics inside
+    /// `futures-util::stream::unfold`. The post-decode drain below reads until
+    /// EOF, so without this flag a successful decode (which already consumed to
+    /// EOF) would be polled once more and blow up on a worker thread.
+    eof: bool,
+}
+
+impl<R: std::io::Read> std::io::Read for TeeHasher<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.eof {
+            return Ok(0);
+        }
+        let n = self.inner.read(buf)?;
+        if n == 0 {
+            self.eof = true;
+        } else {
+            self.hasher.update(&buf[..n]);
+        }
+        Ok(n)
+    }
+}
+
 struct HashWriter(blake3::Hasher);
 
 impl std::io::Write for HashWriter {
@@ -1107,12 +1146,30 @@ async fn pack_entries_failing_content_verification(
                 // worker thread.
                 let sync_reader = SyncIoBridge::new(async_reader);
                 let matches = tokio::task::spawn_blocking(move || {
-                    let mut hasher = HashWriter(blake3::Hasher::new());
-                    match compressor.decompress_streaming(sync_reader, &mut hasher) {
-                        Ok(()) => hasher.0.finalize().to_hex().to_string() == chunk_oid,
-                        // Fail closed: a decode error is not verified-good either.
-                        Err(_) => false,
+                    // Compute BOTH candidate digests in one pass: the decompressed
+                    // bytes (normal case) and the raw bytes (the fallback
+                    // `decompress_typed` applies when a decoder errors on a
+                    // misdetected codec). Accepting either mirrors the whole-buffer
+                    // path exactly. Still fail-closed: a chunk matching NEITHER is
+                    // rejected.
+                    let mut tee = TeeHasher {
+                        inner: sync_reader,
+                        hasher: blake3::Hasher::new(),
+                        eof: false,
+                    };
+                    let mut decompressed = HashWriter(blake3::Hasher::new());
+                    let decoded_ok = compressor
+                        .decompress_streaming(&mut tee, &mut decompressed)
+                        .is_ok();
+                    // Drain whatever the decoder did not consume, so the RAW digest
+                    // covers the whole slice even when decoding aborted early.
+                    let _ = std::io::copy(&mut tee, &mut std::io::sink());
+
+                    let raw_hex = tee.hasher.finalize().to_hex().to_string();
+                    if raw_hex == chunk_oid {
+                        return true;
                     }
+                    decoded_ok && decompressed.0.finalize().to_hex().to_string() == chunk_oid
                 })
                 .await
                 .unwrap_or(false);
@@ -2122,6 +2179,67 @@ mod complete_pack_content_verification_tests {
         assert!(
             unverified.get(&repo).is_some_and(|s| s.contains(pack_oid)),
             "pack must be in the unverified set as soon as complete_pack returns"
+        );
+    }
+
+    /// Regression test for a FALSE QUARANTINE found only by a real 1 GB push to
+    /// S3 (`bad_entries=9` on an entirely valid pack, with 2006 green tests
+    /// behind it).
+    ///
+    /// `decompress_typed` falls back to the RAW bytes when a decoder errors,
+    /// because `detect()` misfires on incompressible data that happens to begin
+    /// with a codec magic — raw `0x78` followed by a byte satisfying zlib's
+    /// header checksum. The streaming path reused `detect()` but not that
+    /// recovery, so such a chunk decoded to an error and was rejected as
+    /// corrupt. Under PAC that means quarantining good data.
+    ///
+    /// The fixture is a chunk stored WITHOUT the Store prefix whose first two
+    /// bytes are a valid-looking zlib header — exactly the shape that fools
+    /// detection — with a chunk_oid over the raw bytes. Verification must accept
+    /// it.
+    #[tokio::test]
+    async fn accepts_a_chunk_whose_raw_bytes_look_like_a_codec_header() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+
+        // 0x78 0x9C is a textbook zlib header (0x789C % 31 == 0), so detect()
+        // returns Zlib — but the remainder is not a zlib stream, so the decoder
+        // errors and only the raw-bytes fallback can identify this chunk.
+        let mut body = vec![0x78u8, 0x9C];
+        body.extend_from_slice(b"raw bytes that merely look compressed, and are not");
+        let chunk_oid = blake3::hash(&body).to_hex().to_string();
+
+        let mut pack_bytes = Vec::new();
+        pack_bytes.extend_from_slice(&[0u8; 5]); // 5-byte entry header
+        pack_bytes.extend_from_slice(&body);
+        let manifest = vec![ManifestEntry {
+            chunk_oid: chunk_oid.clone(),
+            offset: 0,
+            length: (5 + body.len()) as u32,
+            compressed_hash: None,
+        }];
+
+        let pack_oid = "ee".repeat(32);
+        storage
+            .put(&format!("packs/{pack_oid}"), &pack_bytes)
+            .await
+            .expect("put pack");
+
+        let compressor = Arc::new(SmartCompressor::new());
+        let bad = first_pack_entry_failing_content_verification(
+            &storage,
+            &compressor,
+            &format!("packs/{pack_oid}"),
+            &manifest,
+        )
+        .await;
+
+        assert!(
+            bad.is_none(),
+            "a chunk whose RAW bytes hash to its id was rejected because detect()              misread them as zlib — the streaming path is missing the fallback that              decompress_typed applies, and would quarantine valid data"
         );
     }
 
