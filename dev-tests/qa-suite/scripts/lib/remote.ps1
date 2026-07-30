@@ -146,7 +146,20 @@ function Start-QaServer {
   if (Test-Path $srvDir) { Remove-Item -Recurse -Force $srvDir -ErrorAction SilentlyContinue }
   New-Item -ItemType Directory -Path (Join-Path $srvDir "repos") -Force | Out-Null
 
-  $repoName = "proj-$($QA.RunId)-$Phase"
+  # The sequence number belongs in the repo NAME too, not just the directory above.
+  # For cloud backends the repo name becomes the storage namespace, and `init --bare`
+  # mints a fresh repo_id every call — so two invocations that resolve to the same name
+  # on one bucket trip the layout-marker collision guard ("already owned by repo_id X").
+  # That guard is correct and must not be relaxed: it is what stops one repo's `gc` from
+  # deleting another's objects. The bug was here.
+  #
+  # Hit in campaign 20260730-camp2: phase 07 was killed mid-run, and re-running it under
+  # the SAME MG_QA_RUN_ID produced the same repo name with a new repo_id, so the server
+  # refused to start. Resuming a phase is exactly what the chunked-campaign workflow does
+  # after a kill, so this made campaigns non-resumable against minio/aws/azure/gcs while
+  # looking fine on local. `Restart-QaServer` reuses an existing handle and never calls
+  # this path, so restart-in-place semantics are unaffected.
+  $repoName = "proj-$($QA.RunId)-$Phase-$($script:QaSrvSeq)"
   $repoDir = Join-Path $srvDir "repos\$repoName"
   $r = Invoke-MG $null @("init", "--bare", $repoDir) $Phase
   if ($r.Exit -ne 0) { throw "init --bare failed for $repoDir : $($r.Out)" }
