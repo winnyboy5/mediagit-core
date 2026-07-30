@@ -204,6 +204,41 @@ pub fn maybe_start(op: &'static str, concurrency: usize) -> Option<Arc<BenchSess
     }
 }
 
+/// Emit a `[bench] op=commit` summary line.
+///
+/// Call once at the end of a successful `commit` with the wall-clock start time
+/// and the number of tree entries written. No-op unless `MEDIAGIT_BENCH=1`.
+///
+/// Deliberately does NOT report a throughput figure. `commit` writes tree and
+/// commit objects, not the blob bytes `add` already stored, so a bytes/second
+/// number here would describe nothing real — and this file's own history is that
+/// gating a derived metric alongside its source double-counts every regression
+/// (`hash_mbs` was dropped from `08_perf`'s gate set for exactly that).
+///
+/// Added 2026-07-30: `08_perf` had measured and written commit timings since it
+/// was created, but `commit` emitted no `[bench]` line, so the harness had no
+/// record to compare and silently skipped every one of them. Half that phase's
+/// workload was gated against nothing.
+pub fn emit_commit_summary(wall_start: std::time::Instant, files: u64) {
+    if !enabled() {
+        return;
+    }
+    let wall_s = wall_start.elapsed().as_secs_f64();
+    let knobs = collect_knobs();
+    eprintln!(
+        "[bench] bench_schema_version={schema} op=commit files={files} \
+         wall={wall:.2}s knobs={knobs}",
+        schema = BENCH_SCHEMA_VERSION,
+        files = files,
+        wall = wall_s,
+        knobs = if knobs.is_empty() {
+            "none".to_string()
+        } else {
+            knobs
+        },
+    );
+}
+
 /// Emit a `[bench] op=add` summary line (A9).
 ///
 /// Call once at the end of the `add` command with the wall-clock start time,

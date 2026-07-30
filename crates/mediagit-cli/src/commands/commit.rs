@@ -98,6 +98,11 @@ impl CommitCmd {
     pub async fn execute(&self) -> Result<()> {
         use crate::output;
 
+        // Wall clock for the `[bench] op=commit` line emitted on the success path
+        // below. Started here rather than after the early-return guards so the
+        // measurement covers the whole command, matching `add`'s.
+        let bench_wall_start = std::time::Instant::now();
+
         // The -a (--all) flag is not supported in MediaGit.
         // MediaGit uses an explicit `add` → `commit` workflow by design,
         // because `add` performs heavy processing (chunking, delta encoding,
@@ -209,6 +214,11 @@ impl CommitCmd {
                 }
             }
         }
+
+        // Staged-entry count for the `[bench] op=commit` line. Taken from the index
+        // rather than the finished tree: the tree also carries entries inherited from
+        // the parent commit, which this command did no work for.
+        let bench_files = index.entries().count() as u64;
 
         // Then, add/update entries from index (these override parent entries with same name)
         for entry in index.entries() {
@@ -438,6 +448,11 @@ or pass --author \"Your Name <you@example.com>\"."
         // Thresholded internally, silent unless work was actually done.
         let _ =
             crate::auto_gc::maybe_run(&repo_root, crate::auto_gc::TriggerMode::PostCommit).await;
+
+        // Emitted after auto-gc deliberately: it runs on every commit and its cost is
+        // part of what a commit actually charges the user, so excluding it would make
+        // the gate measure something no one experiences. No-op unless MEDIAGIT_BENCH=1.
+        mediagit_protocol::bench::emit_commit_summary(bench_wall_start, bench_files);
 
         Ok(())
     }
