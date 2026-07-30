@@ -1054,6 +1054,8 @@ async fn first_pack_entry_failing_content_verification<'a>(
     manifest: &'a [ManifestEntry],
     threshold: u64,
 ) -> Option<&'a ManifestEntry> {
+    use futures::stream::StreamExt;
+
     // ponytail: whole-pack read only below `threshold`; falls back to
     // per-entry get_range on read failure too (e.g. backend hiccup), not just
     // on size, so a transient error here surfaces as a verification failure
@@ -1064,33 +1066,85 @@ async fn first_pack_entry_failing_content_verification<'a>(
         None
     };
 
-    for entry in manifest {
-        // Same 5-byte pack entry header `[type:1][size:4]` that
-        // `read_and_verify_chunk` skips — see its comment for the layout.
-        if entry.length < 5 {
-            return Some(entry);
-        }
-        let data_offset = entry.offset + 5;
-        let data_len = (entry.length as u64) - 5;
-        let compressed = match &whole_pack {
-            Some(bytes) => {
-                let start = data_offset as usize;
-                let end = start + data_len as usize;
-                if end > bytes.len() {
-                    return Some(entry);
-                }
-                bytes.slice(start..end)
+    // Whole-pack branch: the bytes are already in memory, so slicing and hashing is
+    // CPU-bound and sequential is fine — there is nothing to overlap.
+    if let Some(bytes) = &whole_pack {
+        for entry in manifest {
+            // Same 5-byte pack entry header `[type:1][size:4]` that
+            // `read_and_verify_chunk` skips — see its comment for the layout.
+            if entry.length < 5 {
+                return Some(entry);
             }
-            None => match storage.get_range(pack_key, data_offset, data_len).await {
-                Ok(data) => Bytes::from(data),
-                Err(_) => return Some(entry),
-            },
-        };
-        if !verify_chunk_content(compressor, &entry.chunk_oid, compressed).await {
-            return Some(entry);
+            let start = (entry.offset + 5) as usize;
+            let end = start + ((entry.length as u64) - 5) as usize;
+            if end > bytes.len() {
+                return Some(entry);
+            }
+            if !verify_chunk_content(compressor, &entry.chunk_oid, bytes.slice(start..end)).await {
+                return Some(entry);
+            }
         }
+        return None;
     }
-    None
+
+    // Range branch: one network round trip PER ENTRY, so running these sequentially
+    // serialises N WAN latencies for no reason. `complete_chunk_uploads` and
+    // `verify_chunk_integrity` both already fan out with `buffer_unordered`; this was
+    // the odd one out. It only triggers for packs above the whole-pack threshold —
+    // i.e. exactly the operators with the most entries to check, where the serial cost
+    // is worst.
+    //
+    // Concurrency is bounded, not unbounded: each in-flight range read holds one
+    // entry's bytes, so peak memory is roughly PACK_VERIFY_RANGE_CONCURRENCY x chunk
+    // size. That bound is the whole point of being on this branch (see
+    // WHOLE_PACK_VERIFY_THRESHOLD_BYTES) and must not be widened casually.
+    const PACK_VERIFY_RANGE_CONCURRENCY: usize = 16;
+    // Futures yield an INDEX, not a `&ManifestEntry`: keeping the borrow out of the
+    // async block is what lets these be spawned concurrently without the lifetime
+    // fighting `buffer_unordered`'s HRTB inference.
+    let owned: Vec<(usize, u64, u64, String)> = manifest
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (i, e.offset, e.length as u64, e.chunk_oid.clone()))
+        .collect();
+
+    let first_bad_idx =
+        futures::stream::iter(owned.into_iter().map(|(idx, offset, length, chunk_oid)| {
+            let storage = Arc::clone(storage);
+            let compressor = Arc::clone(compressor);
+            let pack_key = pack_key.to_string();
+            async move {
+                if length < 5 {
+                    return Some(idx);
+                }
+                match storage.get_range(&pack_key, offset + 5, length - 5).await {
+                    Ok(data) => {
+                        if verify_chunk_content(&compressor, &chunk_oid, Bytes::from(data)).await {
+                            None
+                        } else {
+                            Some(idx)
+                        }
+                    }
+                    // Fail closed: a read error means we could not verify, which is not
+                    // the same as verified-good.
+                    Err(_) => Some(idx),
+                }
+            }
+        }))
+        .buffer_unordered(PACK_VERIFY_RANGE_CONCURRENCY)
+        .collect::<Vec<Option<usize>>>()
+        .await
+        .into_iter()
+        .flatten()
+        .min();
+
+    let first_bad = first_bad_idx.and_then(|i| manifest.get(i));
+
+    // `.min()` on the collected indices, not "first future to resolve": concurrency must
+    // not make the reported entry depend on network timing. Any failing entry rejects the
+    // pack either way, but a nondeterministic error message is a bad thing to hand an
+    // operator debugging a rejected push.
+    first_bad
 }
 
 /// POST /{repo}/packs/complete — Register a finished cloud pack and its chunk manifest.

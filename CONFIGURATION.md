@@ -414,7 +414,46 @@ Every key in `ServerConfig` (`crates/mediagit-server/src/config.rs:24-89`), `#[s
 | `rate_limit_burst` | u32 | `20` | Burst allowance, when rate limiting is enabled. |
 | `auth_store_dir` | path \| absent | *(resolved)* | Directory for `users.jsonl`/`api_keys.jsonl`. When unset, resolves to a sibling `auth/` directory next to `repos_dir` (`resolved_auth_store_dir`, `config.rs:190-197`) — e.g. `repos_dir = "./repos"` → `./auth`. |
 | `cors_allowed_origins` | array \| absent | absent (no CORS layer at all) | Allowed CORS origins, exact match (e.g. `"https://app.example.com"`). When unset, the server adds **no** CORS layer and emits no CORS headers — this is stricter than "allow none with headers present." |
-| `verify_content_on_complete` | bool | `true` | Server-enforced BLAKE3 content verification when a presigned chunk upload completes (`POST /:repo/chunks/complete`). Turning it off drops back to an existence-only `head()` check, which lets a client with `repo:write` store bytes that don't match their claimed chunk id; it also costs a full read-back+decompress of every completed chunk, so only disable it if that cost is a measured problem. |
+| `verify_content_on_complete` | bool | `true` | Server-enforced BLAKE3 content verification on presigned chunk completion (`POST /:repo/chunks/complete`) **and** pack registration (`POST /:repo/packs/complete`). Turning it off drops back to existence-only checks, which lets a client holding `repo:write` store bytes that don't hash to their claimed chunk id. **Measured cost — see below before changing this.** |
+
+### Cost of `verify_content_on_complete` (measured 2026-07-30)
+
+Presigned uploads go client→bucket directly, so the server never sees those bytes. The
+only way it can verify them is to read them back out of the bucket — one extra full read
+of everything you just pushed.
+
+Measured against real cloud backends, ~92 MiB of packs each (QA phase `06_remote`):
+
+| Backend | Read-back throughput | Time for 92 MiB |
+|---|---|---|
+| AWS S3 | 4.55 MiB/s | 20.3 s |
+| GCS | 4.78 MiB/s | 19.3 s |
+| Azure Blob | 2.95 MiB/s | 31.3 s |
+
+Against a ~7.5 MiB/s upload link that is roughly **2x total push time on AWS/GCS and
+~3.5x on Azure**. Throughput improves with pack size (an 8 MiB pack verified at
+~3 MiB/s, a 37 MiB pack at ~7-8 MiB/s), so production packs at the 64 MiB default
+(`MEDIAGIT_PACK_BYTES`) do better than these figures — but read-back still runs at
+roughly link speed, so it costs about as much as the upload itself.
+
+**Why it defaults to on despite that cost:** the failure it prevents is silent. Chunk
+ids are content addresses, and without this check any `repo:write` collaborator can
+store bytes that do not match theirs; nothing on the default path notices until someone
+reconstructs the file, long after other users have pulled it. A slow default is
+recoverable with this knob. A silently corruptible one is not.
+
+**Why it is not simply made asynchronous:** nothing is servable until it is verified —
+`complete_pack` returning *is* the sync point, and there is no re-verification anywhere
+on the read path. Deferring would mean serving unverified bytes during the window, and
+the server has no durable task machinery, so a restart mid-verification would drop the
+check permanently and leave the pack trusted forever. Doing it safely needs a persisted
+pending-verification record plus a startup sweep; that is a deliberate piece of work,
+not a flag flip.
+
+**Disable it if** you run a single-tenant server, or every client with `repo:write` is
+already trusted, and push latency over a WAN matters more than catching a malicious or
+buggy client. The proxy upload path (`PUT /:repo/chunks/:id`) verifies regardless — that
+check is free, because the server already holds those bytes in memory.
 
 ### No `[storage]` section here
 
