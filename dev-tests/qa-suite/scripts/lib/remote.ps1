@@ -159,7 +159,15 @@ function Start-QaServer {
   # after a kill, so this made campaigns non-resumable against minio/aws/azure/gcs while
   # looking fine on local. `Restart-QaServer` reuses an existing handle and never calls
   # this path, so restart-in-place semantics are unaffected.
-  $repoName = "proj-$($QA.RunId)-$Phase-$($script:QaSrvSeq)"
+  #
+  # $script:QaSrvSeq ALONE IS NOT ENOUGH and the first attempt at this fix proved it:
+  # the counter is per-PowerShell-process, so every `run_all.ps1` invocation resets it to
+  # 0 and the first server again claims "...-A2-1" — the exact name the previous attempt
+  # registered. That fixes collisions WITHIN a run while leaving the re-run case, which is
+  # the one that matters, still broken. $PID varies per invocation and keeps the name
+  # traceable back to the process that created it (a random suffix would too, but then a
+  # stranded bucket namespace cannot be matched to anything in the logs).
+  $repoName = "proj-$($QA.RunId)-$Phase-$PID-$($script:QaSrvSeq)"
   $repoDir = Join-Path $srvDir "repos\$repoName"
   $r = Invoke-MG $null @("init", "--bare", $repoDir) $Phase
   if ($r.Exit -ne 0) { throw "init --bare failed for $repoDir : $($r.Out)" }
