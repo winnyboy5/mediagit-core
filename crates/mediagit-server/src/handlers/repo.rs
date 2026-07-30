@@ -1237,6 +1237,37 @@ pub async fn complete_pack(
     // pack is registered atomically: on mismatch we reject the whole pack
     // rather than persist a manifest pointing at bad bytes.
     if state.verify_chunks_on_complete {
+        // Serialise pack verification across the whole server by default.
+        //
+        // The client uploads packs concurrently, so without this N `complete_pack`
+        // requests each pull a whole 64 MiB pack back over the SAME link at once and
+        // thrash it. Measured on a real 1 GB S3 push: per-pack throughput decayed
+        // monotonically as requests piled up (0.057 -> 0.032 MiB/s across 8 in flight)
+        // for an aggregate of 0.226 MiB/s, while the final pack — running alone —
+        // managed 1.458 MiB/s. Serialising is ~5.7x better in aggregate and 45x better
+        // per pack; the bottleneck is one shared WAN link, and queueing for it beats
+        // fighting over it.
+        //
+        // Global, not per-repo, because the constraint is the link, not the repository.
+        // Raise it only if your server's egress genuinely parallelises.
+        static VERIFY_SEM: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+        let sem = VERIFY_SEM.get_or_init(|| {
+            let permits = std::env::var("MEDIAGIT_PACK_VERIFY_CONCURRENCY")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(1);
+            tracing::info!(
+                permits,
+                "Pack content verification concurrency (MEDIAGIT_PACK_VERIFY_CONCURRENCY)"
+            );
+            tokio::sync::Semaphore::new(permits)
+        });
+        // Acquire before the read-back; released when `_verify_permit` drops at the end
+        // of this block. A closed semaphore is unreachable (never closed), so the error
+        // arm just proceeds rather than failing a legitimate push.
+        let _verify_permit = sem.acquire().await.ok();
+
         let compressor = Arc::new(SmartCompressor::new());
         let verify_start = std::time::Instant::now();
         let bytes_claimed: u64 = req.manifest.iter().map(|e| e.length as u64).sum();
@@ -1738,7 +1769,13 @@ mod complete_pack_content_verification_tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo_path = tmp.path().join(repo);
         tokio::fs::create_dir_all(&repo_path).await.unwrap();
-        let state = Arc::new(AppState::new(tmp.path().to_path_buf()));
+        // Verification defaults to OFF (see `ServerConfig::verify_content_on_complete`
+        // for the measured reason), so this fixture opts in explicitly — these tests
+        // exist to exercise verification, and a test that silently rode an implicit
+        // default would stop testing anything the day the default moved. Which is
+        // precisely what happened when it did.
+        let state =
+            Arc::new(AppState::new(tmp.path().to_path_buf()).with_verify_chunks_on_complete(true));
         (tmp, state, repo_path)
     }
 

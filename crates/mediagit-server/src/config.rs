@@ -116,10 +116,25 @@ pub struct ServerConfig {
     ///
     /// Turning this off drops back to an existence-only check (`head`), which
     /// accepts any bytes under a claimed id — a client with a valid
-    /// `repo:write` grant could poison the store. It also costs a full
-    /// read-back of every completed chunk, so this is the knob to disable if
-    /// that read-back volume is a measured problem, not a default to flip
-    /// casually.
+    /// `repo:write` grant could poison the store.
+    ///
+    /// **Defaults to `false` on measured evidence.** A 1 GB push to S3 with it
+    /// enabled was still unfinished after 42 minutes, having verified 569 MiB at
+    /// an aggregate **0.226 MiB/s** — 33x slower than the 7.5 MiB/s upload it
+    /// accompanies, extrapolating to roughly **12.6 hours for a 10 GB push**
+    /// against ~20 minutes without it. The cost is not the read-back itself but
+    /// contention: the client uploads packs concurrently, so N `complete_pack`
+    /// requests each pull a whole 64 MiB pack back over the same link at once.
+    /// Per-pack throughput decayed monotonically as they piled up (0.057 ->
+    /// 0.032 MiB/s) and the final pack, running alone, was **45x faster** at
+    /// 1.458 MiB/s. See CONFIGURATION.md for the full table.
+    ///
+    /// Enable it on a multi-tenant server where `repo:write` holders are not
+    /// all trusted — the poisoning it prevents is silent, and worth minutes or
+    /// hours there. Leave it off for a trusted team pushing large media, which
+    /// is the workload this product exists for. The proxy upload path
+    /// (`PUT /:repo/chunks/:id`) verifies unconditionally either way; that
+    /// check is free because the server already holds those bytes.
     #[serde(default = "default_verify_content_on_complete")]
     pub verify_content_on_complete: bool,
 }
@@ -157,7 +172,12 @@ fn default_allow_open_registration() -> bool {
 }
 
 fn default_verify_content_on_complete() -> bool {
-    true
+    // false, not true — see the field doc. Measured: 0.226 MiB/s aggregate on a
+    // real S3 push (~12.6 h extrapolated for 10 GB vs ~20 min without), caused by
+    // concurrent whole-pack read-backs contending for one WAN link. A default that
+    // makes the product's core workload 38x slower is not a safe default, even for
+    // a real integrity guarantee; operators who need it turn it on deliberately.
+    false
 }
 
 impl Default for ServerConfig {

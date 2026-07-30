@@ -414,46 +414,57 @@ Every key in `ServerConfig` (`crates/mediagit-server/src/config.rs:24-89`), `#[s
 | `rate_limit_burst` | u32 | `20` | Burst allowance, when rate limiting is enabled. |
 | `auth_store_dir` | path \| absent | *(resolved)* | Directory for `users.jsonl`/`api_keys.jsonl`. When unset, resolves to a sibling `auth/` directory next to `repos_dir` (`resolved_auth_store_dir`, `config.rs:190-197`) — e.g. `repos_dir = "./repos"` → `./auth`. |
 | `cors_allowed_origins` | array \| absent | absent (no CORS layer at all) | Allowed CORS origins, exact match (e.g. `"https://app.example.com"`). When unset, the server adds **no** CORS layer and emits no CORS headers — this is stricter than "allow none with headers present." |
-| `verify_content_on_complete` | bool | `true` | Server-enforced BLAKE3 content verification on presigned chunk completion (`POST /:repo/chunks/complete`) **and** pack registration (`POST /:repo/packs/complete`). Turning it off drops back to existence-only checks, which lets a client holding `repo:write` store bytes that don't hash to their claimed chunk id. **Measured cost — see below before changing this.** |
+| `verify_content_on_complete` | bool | `false` | Server-enforced BLAKE3 content verification on presigned chunk completion (`POST /:repo/chunks/complete`) **and** pack registration (`POST /:repo/packs/complete`). Off by default on measured evidence — **read the section below before enabling it.** |
 
-### Cost of `verify_content_on_complete` (measured 2026-07-30)
+### Cost of `verify_content_on_complete` (measured 2026-07-30, real S3)
 
 Presigned uploads go client→bucket directly, so the server never sees those bytes. The
 only way it can verify them is to read them back out of the bucket — one extra full read
 of everything you just pushed.
 
-Measured against real cloud backends, ~92 MiB of packs each (QA phase `06_remote`):
+A 1 GB push to AWS S3 with verification enabled was **still unfinished after 42 minutes**,
+having verified 569 MiB at an aggregate **0.226 MiB/s** — 33x slower than the ~7.5 MiB/s
+upload it accompanies. Extrapolated: **~12.6 hours for a 10 GB push**, against ~20 minutes
+with it off.
 
-| Backend | Read-back throughput | Time for 92 MiB |
-|---|---|---|
-| AWS S3 | 4.55 MiB/s | 20.3 s |
-| GCS | 4.78 MiB/s | 19.3 s |
-| Azure Blob | 2.95 MiB/s | 31.3 s |
+**The cost is contention, not bandwidth.** The client uploads packs concurrently, so N
+`complete_pack` requests each pull a whole 64 MiB pack back over the same link at once.
+Per-pack throughput decayed monotonically as requests piled up, and the final pack —
+running alone — was **45x faster**:
 
-Against a ~7.5 MiB/s upload link that is roughly **2x total push time on AWS/GCS and
-~3.5x on Azure**. Throughput improves with pack size (an 8 MiB pack verified at
-~3 MiB/s, a 37 MiB pack at ~7-8 MiB/s), so production packs at the 64 MiB default
-(`MEDIAGIT_PACK_BYTES`) do better than these figures — but read-back still runs at
-roughly link speed, so it costs about as much as the upload itself.
+| pack | size | elapsed | throughput |
+|---|---|---|---|
+| 1 | 65.0 MiB | 1147.8 s | 0.057 MiB/s |
+| 4 | 66.0 MiB | 1461.2 s | 0.045 MiB/s |
+| 8 | 65.7 MiB | 2021.0 s | 0.032 MiB/s |
+| **9 (alone)** | 37.1 MiB | **25.4 s** | **1.458 MiB/s** |
 
-**Why it defaults to on despite that cost:** the failure it prevents is silent. Chunk
-ids are content addresses, and without this check any `repo:write` collaborator can
-store bytes that do not match theirs; nothing on the default path notices until someone
-reconstructs the file, long after other users have pulled it. A slow default is
-recoverable with this knob. A silently corruptible one is not.
+`MEDIAGIT_PACK_VERIFY_CONCURRENCY` (default **1**) serialises verification server-wide for
+exactly this reason — queueing for one shared link beats fighting over it, and measured
+~5.7x better in aggregate. Raise it only if your server's egress genuinely parallelises.
+
+**Why it defaults off:** a default that makes the product's core workload ~38x slower is
+not a safe default, however real the guarantee. Large-media teams would hit it before
+they ever read this page.
+
+**Why you should still consider enabling it:** the failure it prevents is silent. Chunk
+ids are content addresses, and without this check any `repo:write` collaborator can store
+bytes that don't match theirs; nothing notices until someone reconstructs the file, long
+after others have pulled it. **Enable it on a multi-tenant server where not every
+`repo:write` holder is trusted** — there, minutes or hours of push time is the right
+trade. Leave it off for a trusted team.
 
 **Why it is not simply made asynchronous:** nothing is servable until it is verified —
-`complete_pack` returning *is* the sync point, and there is no re-verification anywhere
-on the read path. Deferring would mean serving unverified bytes during the window, and
-the server has no durable task machinery, so a restart mid-verification would drop the
-check permanently and leave the pack trusted forever. Doing it safely needs a persisted
-pending-verification record plus a startup sweep; that is a deliberate piece of work,
-not a flag flip.
+`complete_pack` returning *is* the sync point, and there is no re-verification anywhere on
+the read path. Deferring would mean serving unverified bytes during the window, and the
+server has no durable task machinery, so a restart mid-verification would drop the check
+permanently and leave the pack trusted forever. Doing it safely needs a persisted
+pending-verification record plus a startup sweep — a deliberate piece of work, not a flag
+flip, and the route to getting this guarantee at near-zero push cost.
 
-**Disable it if** you run a single-tenant server, or every client with `repo:write` is
-already trusted, and push latency over a WAN matters more than catching a malicious or
-buggy client. The proxy upload path (`PUT /:repo/chunks/:id`) verifies regardless — that
-check is free, because the server already holds those bytes in memory.
+**Always on regardless of this setting:** the proxy upload path
+(`PUT /:repo/chunks/:id`) verifies unconditionally. That check is free — the server
+already holds those bytes in memory.
 
 ### No `[storage]` section here
 

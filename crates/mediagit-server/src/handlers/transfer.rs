@@ -1188,10 +1188,17 @@ mod complete_chunk_uploads_content_verification_tests {
         let repo = "test-repo".to_string();
         let repo_path = tmp.path().join(&repo);
         tokio::fs::create_dir_all(&repo_path).await.unwrap();
-        let state = Arc::new(AppState::new(tmp.path().to_path_buf()));
+        // Opt in explicitly. Content verification defaults to OFF (see
+        // `ServerConfig::verify_content_on_complete` for the measured reason), so a
+        // test that wants it must ask for it — exactly as an operator must. This
+        // assertion used to read "AppState::new must default content verification ON",
+        // which was the test depending on an implicit default rather than stating its
+        // own precondition.
+        let state =
+            Arc::new(AppState::new(tmp.path().to_path_buf()).with_verify_chunks_on_complete(true));
         assert!(
             state.verify_chunks_on_complete,
-            "AppState::new must default content verification ON"
+            "this test requires content verification enabled"
         );
 
         let storage = get_or_init_storage(&state, &repo_path)
