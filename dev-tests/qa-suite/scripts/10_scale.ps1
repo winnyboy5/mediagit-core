@@ -249,15 +249,40 @@ function Drill-S2-Churn {
     }
 
     # Slope tripwire: fail only on runaway growth, not on the mild curve already observed.
-    # 3x between the first and last block is well clear of the measured ~2.1x, so this
-    # cannot fire on today's behaviour - it fires when degradation gets materially worse.
-    if ($blockTimes.Count -ge 2) {
-      $first = [double]$blockTimes[0]
-      $last = [double]$blockTimes[-1]
+    #
+    # The FIRST block is excluded as warm-up, and that is the whole point of this shape.
+    # The metric used to be last/first, which reads only 2 of N points and puts the
+    # noisiest one in the denominator. Campaign 20260730-camp1 measured
+    # 108.9, 240.5, 332.7, 428.6, 529.9s: blocks 2..5 grow almost perfectly linearly
+    # (+92, +96, +101s) while block 1 sits 2.2x below block 2 - a cold page cache on a
+    # freshly written 32 MB blob, not a history effect. last/first read 4.87x and failed;
+    # the same run over blocks 2..5 reads 2.20x. The 2026-07-27 reference behaves
+    # identically (210, 318, 444s -> 2.11x endpoint, 1.40x excluding warm-up).
+    #
+    # The cap stays at 3.0. Raising it to absorb 4.87 would have baselined away whatever
+    # signal is really in there; excluding a measurement that never described history
+    # growth is a different act, and it is the one that makes the number mean what the
+    # gate claims it means.
+    #
+    # Every block is still printed, warm-up included and labelled, so the exclusion is
+    # visible on every run rather than being a silent narrowing (the dead-gate lesson).
+    if ($blockTimes.Count -ge 3) {
+      $warmup = [double]$blockTimes[0]
+      $gatedBlocks = @($blockTimes | Select-Object -Skip 1)
+      $first = [double]$gatedBlocks[0]
+      $last = [double]$gatedBlocks[-1]
       $ratio = if ($first -gt 0) { [math]::Round($last / $first, 2) } else { 0 }
       $slopeOk = ($first -le 0) -or ($ratio -le 3.0)
       Rec $drill "local" "churn-cost-slope" $ratio $slopeOk `
-      ("blocks=$($blockTimes -join ',')s first=${first}s last=${last}s ratio=${ratio}x cap=3.0x")
+      ("blocks=$($blockTimes -join ',')s warmup-excluded=${warmup}s gated=$($gatedBlocks.Count)/$($blockTimes.Count) first=${first}s last=${last}s ratio=${ratio}x cap=3.0x")
+    }
+    else {
+      # <3 blocks means at most one gated block after dropping warm-up, and a ratio
+      # needs two. Report it as unmeasured rather than emitting a ratio computed from
+      # one point, or worse passing silently: a gate whose PASS is compatible with
+      # "measured nothing" is the defect this suite has now found nine times.
+      Rec $drill "local" "churn-cost-slope" 0 $false `
+      ("insufficient blocks to measure slope: got $($blockTimes.Count), need >=3 (100 commits per block, ChurnCommits=$iters)")
     }
 
     # Ground truth for the round trip below: what the worktree holds after the churn.
