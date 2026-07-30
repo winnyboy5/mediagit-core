@@ -995,7 +995,7 @@ pub async fn update_refs(
 // Pack Manifest Endpoints (F6) — Track-F cloud pack bundling
 // ============================================================================
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone)]
 pub struct ManifestEntry {
     pub chunk_oid: String,
     pub offset: u64,
@@ -1039,7 +1039,8 @@ impl std::io::Write for HashWriter {
     }
 }
 
-/// Verify every manifest entry's chunk bytes hash to its claimed `chunk_oid`.
+/// Core streaming verification, shared by the first-bad-entry and
+/// all-bad-entries views below.
 ///
 /// Single streaming path, no size threshold: each entry is read via
 /// `get_streaming_range` and fed through [`SmartCompressor::decompress_streaming`]
@@ -1050,13 +1051,15 @@ impl std::io::Write for HashWriter {
 /// (see ST-4 notes on push RAM) structurally unreachable rather than merely
 /// avoided below a threshold.
 ///
-/// Returns the first manifest entry whose bytes don't match, if any.
-async fn first_pack_entry_failing_content_verification<'a>(
+/// Returns the indices of every failing entry, sorted ascending — not "first
+/// future to resolve": concurrency must not make the reported entry/entries
+/// depend on network timing.
+async fn pack_entries_failing_content_verification(
     storage: &Arc<dyn StorageBackend>,
     compressor: &Arc<SmartCompressor>,
     pack_key: &str,
-    manifest: &'a [ManifestEntry],
-) -> Option<&'a ManifestEntry> {
+    manifest: &[ManifestEntry],
+) -> Vec<usize> {
     use futures::stream::{StreamExt, TryStreamExt};
     use tokio_util::io::{StreamReader, SyncIoBridge};
 
@@ -1078,7 +1081,7 @@ async fn first_pack_entry_failing_content_verification<'a>(
         .map(|(i, e)| (i, e.offset, e.length as u64, e.chunk_oid.clone()))
         .collect();
 
-    let first_bad_idx =
+    let mut bad: Vec<usize> =
         futures::stream::iter(owned.into_iter().map(|(idx, offset, length, chunk_oid)| {
             let storage = Arc::clone(storage);
             let compressor = Arc::clone(compressor);
@@ -1121,19 +1124,282 @@ async fn first_pack_entry_failing_content_verification<'a>(
         .await
         .into_iter()
         .flatten()
-        .min();
+        .collect();
 
-    // `.min()` on the collected indices, not "first future to resolve": concurrency must
-    // not make the reported entry depend on network timing. Any failing entry rejects the
-    // pack either way, but a nondeterministic error message is a bad thing to hand an
-    // operator debugging a rejected push.
-    first_bad_idx.and_then(|i| manifest.get(i))
+    bad.sort_unstable();
+    bad
+}
+
+/// Returns the first (lowest-index) manifest entry whose bytes don't hash to
+/// its claimed `chunk_oid`, if any. Test-only since the redesign: production
+/// code now always wants every bad entry (see
+/// [`all_pack_entries_failing_content_verification`]), but this single-answer
+/// view is kept for the deterministic-ordering tests below — see
+/// [`pack_entries_failing_content_verification`] for why it's deterministic
+/// under concurrency.
+#[cfg(test)]
+async fn first_pack_entry_failing_content_verification<'a>(
+    storage: &Arc<dyn StorageBackend>,
+    compressor: &Arc<SmartCompressor>,
+    pack_key: &str,
+    manifest: &'a [ManifestEntry],
+) -> Option<&'a ManifestEntry> {
+    pack_entries_failing_content_verification(storage, compressor, pack_key, manifest)
+        .await
+        .first()
+        .and_then(|&i| manifest.get(i))
+}
+
+/// Returns EVERY manifest entry whose bytes don't hash to its claimed
+/// `chunk_oid`, in deterministic ascending-index order. Used by the
+/// background verifier: a pack with two poisoned chunks must have both
+/// quarantined in one pass, not just the first one found (a partially
+/// quarantined pack would leave an unknown-status sibling chunk trusted).
+async fn all_pack_entries_failing_content_verification<'a>(
+    storage: &Arc<dyn StorageBackend>,
+    compressor: &Arc<SmartCompressor>,
+    pack_key: &str,
+    manifest: &'a [ManifestEntry],
+) -> Vec<&'a ManifestEntry> {
+    pack_entries_failing_content_verification(storage, compressor, pack_key, manifest)
+        .await
+        .into_iter()
+        .filter_map(|i| manifest.get(i))
+        .collect()
+}
+
+/// First 2 hex chars of a pack oid — the shard directory both its `.jsonl`
+/// manifest and its `.pending` marker live under
+/// (`<repo>/.mediagit/packs/<shard>/`). Pulled out so the marker path and the
+/// manifest path can never compute the shard differently.
+fn pack_shard(pack_oid: &str) -> &str {
+    if pack_oid.len() >= 2 {
+        &pack_oid[..2]
+    } else {
+        "00"
+    }
+}
+
+/// Path of a pack's durable "unverified" marker — a sibling of its
+/// `<pack_oid>.jsonl` manifest in the same shard directory.
+///
+/// Its PRESENCE, not any in-memory flag, is the source of truth for "this
+/// pack has not passed content verification yet": `state.unverified_packs`
+/// is a cache of it, kept in step under the same write lock as `pack_index`
+/// (see `complete_pack`). `load_jsonl_index` (`handlers/mod.rs`) filters to
+/// `extension() == "jsonl"`, so this sibling is silently invisible to the
+/// server's own manifest reader — no format change, no compat break.
+fn pending_marker_path(repo_path: &std::path::Path, pack_oid: &str) -> std::path::PathBuf {
+    repo_path
+        .join(".mediagit")
+        .join("packs")
+        .join(pack_shard(pack_oid))
+        .join(format!("{pack_oid}.pending"))
+}
+
+/// Global (not per-repo) semaphore bounding concurrent pack content-verification
+/// read-backs. Serialised by default (`MEDIAGIT_PACK_VERIFY_CONCURRENCY=1`).
+///
+/// The client uploads packs concurrently, so without this N verifications each
+/// pull a whole pack back over the SAME shared WAN link at once and thrash it.
+/// Measured on a real 1 GB S3 push: per-pack throughput decayed monotonically
+/// as requests piled up (0.057 -> 0.032 MiB/s across 8 in flight) for an
+/// aggregate of 0.226 MiB/s, while a pack verified alone hit 1.458 MiB/s — 45x
+/// better per pack. Global, not per-repo, because the constraint is the shared
+/// link, not the repository.
+fn pack_verify_semaphore() -> &'static tokio::sync::Semaphore {
+    static VERIFY_SEM: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    VERIFY_SEM.get_or_init(|| {
+        let permits = std::env::var("MEDIAGIT_PACK_VERIFY_CONCURRENCY")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(1);
+        tracing::info!(
+            permits,
+            "Pack content verification concurrency (MEDIAGIT_PACK_VERIFY_CONCURRENCY)"
+        );
+        tokio::sync::Semaphore::new(permits)
+    })
+}
+
+/// Background pack verification (PAC: async writes, sync reads). Runs off the
+/// push critical path — see `complete_pack`, which enqueues this instead of
+/// verifying inline.
+///
+/// Verifies EVERY manifest entry (not just the first bad one — a pack with
+/// two poisoned chunks must not stay half-quarantined with an unknown-status
+/// sibling), then always clears the `.pending` marker and the
+/// `unverified_packs` entry, whether the pack came out clean or had entries
+/// evicted. Verification is DONE either way once this returns; a partially
+/// quarantined pack's surviving entries are legitimately verified-clean.
+///
+/// Durability does NOT come from this task running to completion — it comes
+/// from the `.pending` marker plus the startup sweep (`resume_pack_verification`,
+/// invoked from `main.rs`). A dropped task (crash, panic) simply leaves the
+/// marker on disk; the sweep finds it on the next boot and re-enqueues. That's
+/// why a bare `tokio::spawn` at the call site is safe here even though it
+/// silently swallows a task that never runs — the marker is the actual source
+/// of truth, and this task is just how the common case resolves it quickly.
+async fn verify_pack_in_background(
+    state: Arc<AppState>,
+    repo_path: std::path::PathBuf,
+    repo: String,
+    pack_oid: String,
+    storage: Arc<dyn StorageBackend>,
+    manifest: Vec<ManifestEntry>,
+) {
+    let compressor = Arc::new(SmartCompressor::new());
+    let _permit = pack_verify_semaphore().acquire().await.ok();
+
+    let pack_key = format!("packs/{pack_oid}");
+    let verify_start = std::time::Instant::now();
+    let bad =
+        all_pack_entries_failing_content_verification(&storage, &compressor, &pack_key, &manifest)
+            .await;
+
+    if bad.is_empty() {
+        tracing::info!(
+            repo = %repo,
+            pack = %pack_oid,
+            entries = manifest.len(),
+            elapsed_ms = verify_start.elapsed().as_millis() as u64,
+            "background pack verification: pack verified clean"
+        );
+    } else {
+        let bad_ids: Vec<String> = bad.iter().map(|e| e.chunk_oid.clone()).collect();
+        tracing::error!(
+            repo = %repo,
+            pack = %pack_oid,
+            bad_entries = bad_ids.len(),
+            "background pack verification: quarantining corrupted chunk(s)"
+        );
+        if let Err(status) =
+            evict_pack_entries(&state, &repo_path, &repo, &pack_oid, &bad_ids).await
+        {
+            tracing::error!(
+                repo = %repo,
+                pack = %pack_oid,
+                ?status,
+                "background pack verification: failed to evict corrupted entries"
+            );
+        }
+    }
+
+    let marker_path = pending_marker_path(&repo_path, &pack_oid);
+    if let Err(e) = tokio::fs::remove_file(&marker_path).await
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            repo = %repo,
+            pack = %pack_oid,
+            err = %e,
+            "background pack verification: failed to remove .pending marker"
+        );
+    }
+    {
+        let mut unverified = state.unverified_packs.write().await;
+        if let Some(set) = unverified.get_mut(&repo) {
+            set.remove(&pack_oid);
+        }
+    }
+}
+
+/// Startup-sweep hook (Stage C durability): given an orphaned `.pending`
+/// marker found under a repo's pack dir, mark that pack unverified and
+/// (re-)enqueue background verification. Called once per marker discovered
+/// by `main.rs`'s existing startup probe.
+///
+/// Deliberately returns `()`, not `Result` — this can never `bail!` the way
+/// the storage-init probe does. A stuck or unreadable marker is a *data*
+/// problem, not a *config* problem; refusing to boot over one would turn
+/// recoverable state into an outage. Any failure here is logged and the pack
+/// is simply left marked unverified for a future sweep to retry — the read
+/// path (Stage D) refuses to serve an unverified pack blind, so correctness
+/// holds while it waits.
+pub async fn resume_pack_verification(
+    state: &Arc<AppState>,
+    repo_path: &std::path::Path,
+    repo: &str,
+    pack_oid: &str,
+) {
+    // Mark unverified FIRST, unconditionally — even if everything below fails,
+    // the in-memory state must reflect what the marker on disk already says.
+    {
+        let mut unverified = state.unverified_packs.write().await;
+        unverified
+            .entry(repo.to_string())
+            .or_default()
+            .insert(pack_oid.to_string());
+    }
+
+    let manifest_path = repo_path
+        .join(".mediagit")
+        .join("packs")
+        .join(pack_shard(pack_oid))
+        .join(format!("{pack_oid}.jsonl"));
+    let content = match tokio::fs::read_to_string(&manifest_path).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                repo, pack_oid, err = %e,
+                "startup sweep: could not read manifest for a pending pack; leaving unverified for a future sweep"
+            );
+            return;
+        }
+    };
+    let manifest: Vec<ManifestEntry> = content
+        .lines()
+        .filter(|l| !l.is_empty())
+        .filter_map(|line| serde_json::from_str::<PackIndexLine>(line).ok())
+        .map(|e| ManifestEntry {
+            chunk_oid: e.chunk_oid,
+            offset: e.offset,
+            length: e.length,
+            compressed_hash: e.compressed_hash,
+        })
+        .collect();
+    if manifest.is_empty() {
+        tracing::warn!(
+            repo,
+            pack_oid,
+            "startup sweep: manifest for a pending pack was empty or unparsable; leaving unverified for a future sweep"
+        );
+        return;
+    }
+
+    let storage = match get_or_init_storage(state, repo_path).await {
+        Ok(s) => s,
+        Err(status) => {
+            tracing::warn!(
+                repo,
+                pack_oid,
+                ?status,
+                "startup sweep: storage backend init failed for a pending pack; leaving unverified for a future sweep"
+            );
+            return;
+        }
+    };
+
+    tokio::spawn(verify_pack_in_background(
+        Arc::clone(state),
+        repo_path.to_path_buf(),
+        repo.to_string(),
+        pack_oid.to_string(),
+        storage,
+        manifest,
+    ));
 }
 
 /// POST /{repo}/packs/complete — Register a finished cloud pack and its chunk manifest.
 ///
 /// Server HEADs the pack object before accepting the manifest so a crash between
 /// PUT and complete cannot create a manifest pointing at a missing pack.
+///
+/// Content verification (when `verify_chunks_on_complete` is on) is PAC-async:
+/// it does not run on this request. Invariant: **a persisted manifest is
+/// either verified, or it carries a `.pending` marker** — never neither. See
+/// `pending_marker_path` and `verify_pack_in_background`.
 pub async fn complete_pack(
     Path(repo): Path<String>,
     State(state): State<Arc<AppState>>,
@@ -1211,89 +1477,49 @@ pub async fn complete_pack(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Pack content verification: a pack whose bytes don't hash to the chunk
-    // ids its manifest claims must never be registered — every chunk in it
-    // would then be served as authoritative. Gated by the same
-    // `verify_chunks_on_complete` knob as the loose-chunk path (one policy,
-    // not a second knob an operator could half-disable without realising).
-    // Unlike the loose-chunk path (which reports `missing` for a retry), a
-    // pack is registered atomically: on mismatch we reject the whole pack
-    // rather than persist a manifest pointing at bad bytes.
+    // Content verification (PAC, async): a pack whose bytes don't hash to the
+    // chunk ids its manifest claims must never be TRUSTED — but verifying it
+    // synchronously here is what made a 1 GB push take 42+ minutes (measured
+    // 2026-07-30: 0.226 MiB/s aggregate read-back vs ~7.5 MiB/s upload). So
+    // instead of blocking on it, this request writes a durable `.pending`
+    // marker BEFORE the manifest, registers the pack as UNVERIFIED, returns,
+    // and hands verification to a background task.
+    //
+    // Ordering is the entire safety property: a crash between the marker
+    // write and the manifest write leaves a marker with no manifest (harmless
+    // — nothing points at it yet). It must never leave a manifest with no
+    // marker, or that pack would be trusted forever with no record that it
+    // still needs checking. Gated by the same `verify_chunks_on_complete`
+    // knob as the loose-chunk path (one policy, not a second knob an operator
+    // could half-disable without realising) — when it's off, none of this
+    // runs and behavior is identical to today.
     if state.verify_chunks_on_complete {
-        // Serialise pack verification across the whole server by default.
-        //
-        // The client uploads packs concurrently, so without this N `complete_pack`
-        // requests each pull a whole 64 MiB pack back over the SAME link at once and
-        // thrash it. Measured on a real 1 GB S3 push: per-pack throughput decayed
-        // monotonically as requests piled up (0.057 -> 0.032 MiB/s across 8 in flight)
-        // for an aggregate of 0.226 MiB/s, while the final pack — running alone —
-        // managed 1.458 MiB/s. Serialising is ~5.7x better in aggregate and 45x better
-        // per pack; the bottleneck is one shared WAN link, and queueing for it beats
-        // fighting over it.
-        //
-        // Global, not per-repo, because the constraint is the link, not the repository.
-        // Raise it only if your server's egress genuinely parallelises.
-        static VERIFY_SEM: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
-        let sem = VERIFY_SEM.get_or_init(|| {
-            let permits = std::env::var("MEDIAGIT_PACK_VERIFY_CONCURRENCY")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-                .filter(|n| *n > 0)
-                .unwrap_or(1);
-            tracing::info!(
-                permits,
-                "Pack content verification concurrency (MEDIAGIT_PACK_VERIFY_CONCURRENCY)"
-            );
-            tokio::sync::Semaphore::new(permits)
-        });
-        // Acquire before the read-back; released when `_verify_permit` drops at the end
-        // of this block. A closed semaphore is unreachable (never closed), so the error
-        // arm just proceeds rather than failing a legitimate push.
-        let _verify_permit = sem.acquire().await.ok();
-
-        let compressor = Arc::new(SmartCompressor::new());
-        let verify_start = std::time::Instant::now();
-        let bytes_claimed: u64 = req.manifest.iter().map(|e| e.length as u64).sum();
-        if let Some(bad) = first_pack_entry_failing_content_verification(
-            &storage,
-            &compressor,
-            &pack_key,
-            &req.manifest,
-        )
-        .await
-        {
-            tracing::error!(
-                repo = %repo,
-                pack = %req.pack_oid,
-                chunk = %bad.chunk_oid,
-                offset = bad.offset,
-                length = bad.length,
-                "complete_pack: chunk content does not match claimed id; rejecting pack (manifest not persisted)"
-            );
-            return Err(StatusCode::BAD_REQUEST);
+        let marker_path = pending_marker_path(&repo_path, &req.pack_oid);
+        if let Some(parent) = marker_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         }
-        tracing::info!(
-            repo = %repo,
-            pack = %req.pack_oid,
-            entries = req.manifest.len(),
-            bytes_verified = bytes_claimed,
-            elapsed_ms = verify_start.elapsed().as_millis() as u64,
-            "complete_pack: pack contents verified"
-        );
+        let path = marker_path.clone();
+        tokio::task::spawn_blocking(move || {
+            mediagit_versioning::atomic_write::write_atomic(&path, b"")
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
 
     // Persist to JSONL under <repo>/.mediagit/packs/<shard>/<pack_oid>.jsonl
-    let shard = if req.pack_oid.len() >= 2 {
-        &req.pack_oid[..2]
-    } else {
-        "00"
-    };
-    let manifest_dir = repo_path.join(".mediagit").join("packs").join(shard);
+    let manifest_dir = repo_path
+        .join(".mediagit")
+        .join("packs")
+        .join(pack_shard(&req.pack_oid));
     tokio::fs::create_dir_all(&manifest_dir)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let manifest_path = manifest_dir.join(format!("{}.jsonl", req.pack_oid));
 
+    let manifest_len = req.manifest.len();
     let mut jsonl = String::new();
     for entry in &req.manifest {
         let line = PackIndexLine {
@@ -1316,6 +1542,8 @@ pub async fn complete_pack(
     }
     // Hold write lock for both JSONL write and in-memory update so concurrent
     // complete_pack calls don't interleave their appends (F9 concurrency guard).
+    // The unverified-set registration happens under this SAME lock so it can
+    // never drift from pack_index — the two are updated atomically together.
     {
         let mut idx = state.pack_index.write().await;
         // ST-2: atomic. This JSONL *is* the routing table for every chunk in
@@ -1347,12 +1575,30 @@ pub async fn complete_pack(
                 },
             );
         }
+        if state.verify_chunks_on_complete {
+            let mut unverified = state.unverified_packs.write().await;
+            unverified
+                .entry(repo.clone())
+                .or_default()
+                .insert(req.pack_oid.clone());
+        }
+    }
+
+    if state.verify_chunks_on_complete {
+        tokio::spawn(verify_pack_in_background(
+            Arc::clone(&state),
+            repo_path.clone(),
+            repo.clone(),
+            req.pack_oid.clone(),
+            Arc::clone(&storage),
+            req.manifest,
+        ));
     }
 
     tracing::info!(
         repo = %repo,
         pack = %req.pack_oid,
-        chunks = req.manifest.len(),
+        chunks = manifest_len,
         "Pack manifest registered"
     );
     Ok(StatusCode::CREATED)
@@ -1794,16 +2040,37 @@ mod complete_pack_content_verification_tests {
         );
     }
 
+    /// Polls until a pack leaves `state.unverified_packs`, i.e. until the
+    /// background verifier spawned by `complete_pack` (or resumed by
+    /// `resume_pack_verification`) has finished with it. Bounded so a real
+    /// regression (verification never runs, or never clears the set) fails
+    /// the test instead of hanging forever.
+    async fn wait_until_pack_verified(state: &AppState, repo: &str, pack_oid: &str) {
+        for _ in 0..200 {
+            {
+                let unverified = state.unverified_packs.read().await;
+                if !unverified.get(repo).is_some_and(|s| s.contains(pack_oid)) {
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("background pack verification did not complete within 2s");
+    }
+
+    /// PAC design: `complete_pack` must return before verification has run —
+    /// this is what earns back push throughput. Immediately after it returns,
+    /// the pack must already be durably marked unverified: the `.pending`
+    /// marker on disk AND the in-memory `unverified_packs` entry.
     #[tokio::test]
-    async fn rejects_corrupted_chunk_and_does_not_persist_manifest() {
+    async fn complete_pack_returns_before_verifying_and_marks_unverified() {
         let repo = "test-repo".to_string();
         let (_tmp, state, repo_path) = setup(&repo).await;
         let storage = get_or_init_storage(&state, &repo_path)
             .await
             .expect("storage");
-        let fixture = build_pack_with_corrupted_entry();
-        let bad_chunk_id = fixture.manifest[1].chunk_oid.clone();
-        let pack_oid = "ffeeddccbb";
+        let fixture = build_valid_pack();
+        let pack_oid = "55667788cc";
         storage
             .put(&format!("packs/{pack_oid}"), &fixture.pack_bytes)
             .await
@@ -1813,6 +2080,82 @@ mod complete_pack_content_verification_tests {
             pack_oid: pack_oid.to_string(),
             manifest: fixture.manifest,
         };
+        let status = complete_pack(
+            Path(repo.clone()),
+            State(Arc::clone(&state)),
+            None,
+            Json(req),
+        )
+        .await
+        .expect("push must return promptly, without waiting for verification");
+        assert_eq!(status, StatusCode::CREATED);
+
+        // No `.await` between complete_pack returning and these checks, so the
+        // spawned background task cannot have run yet — this proves the state
+        // complete_pack itself left behind, not a race with the worker.
+        let marker_path = pending_marker_path(&repo_path, pack_oid);
+        assert!(
+            marker_path.exists(),
+            "pending marker must exist as soon as complete_pack returns"
+        );
+        let unverified = state.unverified_packs.read().await;
+        assert!(
+            unverified.get(&repo).is_some_and(|s| s.contains(pack_oid)),
+            "pack must be in the unverified set as soon as complete_pack returns"
+        );
+    }
+
+    /// The ordering that makes the whole design crash-safe: the `.pending`
+    /// marker must land on disk strictly BEFORE the manifest.
+    ///
+    /// Asserted by INDUCING A MARKER-WRITE FAILURE, not by racing a poller
+    /// against the two writes. The earlier version of this test span-polled for
+    /// a window where the marker existed and the manifest did not; that window
+    /// is real but its observability depends on the scheduler, so a CORRECT
+    /// implementation could fail the test under load. An intermittent red on
+    /// correct code is worse than no test — this suite has already lost a long
+    /// investigation to one non-deterministic failure.
+    ///
+    /// Here a directory is planted at the marker path so `write_atomic` cannot
+    /// create the file. `complete_pack` must then fail BEFORE writing the
+    /// manifest. If the ordering were reversed the manifest would exist despite
+    /// the marker failing — so the absence of the manifest is positive proof of
+    /// the ordering, and it is deterministic.
+    #[tokio::test]
+    async fn marker_write_failure_prevents_manifest_from_being_written() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let fixture = build_valid_pack();
+        let pack_oid = "abcdef0123";
+        storage
+            .put(&format!("packs/{pack_oid}"), &fixture.pack_bytes)
+            .await
+            .expect("put pack");
+
+        // Plant a directory exactly where the marker file must go: write_atomic
+        // renames onto this path, which cannot succeed against a directory.
+        let marker_path = pending_marker_path(&repo_path, pack_oid);
+        tokio::fs::create_dir_all(&marker_path)
+            .await
+            .expect("plant blocking directory at marker path");
+
+        let manifest_path = repo_path
+            .join(".mediagit")
+            .join("packs")
+            .join(pack_shard(pack_oid))
+            .join(format!("{pack_oid}.jsonl"));
+        assert!(
+            !manifest_path.exists(),
+            "test precondition: manifest must not exist yet"
+        );
+
+        let req = CompletePackRequest {
+            pack_oid: pack_oid.to_string(),
+            manifest: fixture.manifest.clone(),
+        };
         let result = complete_pack(
             Path(repo.clone()),
             State(Arc::clone(&state)),
@@ -1820,28 +2163,232 @@ mod complete_pack_content_verification_tests {
             Json(req),
         )
         .await;
-        assert_eq!(
-            result,
-            Err(StatusCode::BAD_REQUEST),
-            "a pack with a chunk that doesn't hash to its claimed id must be rejected"
-        );
 
-        // Side effect, not just the status: the manifest JSONL was never written...
-        let manifest_path = repo_path
-            .join(".mediagit")
-            .join("packs")
-            .join("ff")
-            .join(format!("{pack_oid}.jsonl"));
+        assert!(
+            result.is_err(),
+            "complete_pack must fail when the .pending marker cannot be written"
+        );
         assert!(
             !manifest_path.exists(),
-            "manifest must NOT be persisted when a chunk fails content verification"
+            "manifest was written despite the marker failing — the marker is NOT being              written first, and a crash in that gap would leave a pack trusted forever"
         );
-        // ...and nothing was registered in the in-memory pack index either.
         let idx = state.pack_index.read().await;
         assert!(
-            idx.get(&repo)
-                .is_none_or(|m| !m.contains_key(&bad_chunk_id)),
-            "poisoned chunk must not be routable through the pack index"
+            idx.get(&repo).is_none_or(|m| {
+                fixture
+                    .manifest
+                    .iter()
+                    .all(|e| !m.contains_key(&e.chunk_oid))
+            }),
+            "no chunk may be routable after a failed registration"
+        );
+    }
+
+    /// Background verification, success path: once it runs, the marker is
+    /// removed and the pack leaves `unverified_packs`.
+    #[tokio::test]
+    async fn background_verification_success_clears_marker_and_unverified_set() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let fixture = build_valid_pack();
+        let pack_oid = "11223344bb";
+        storage
+            .put(&format!("packs/{pack_oid}"), &fixture.pack_bytes)
+            .await
+            .expect("put pack");
+
+        let req = CompletePackRequest {
+            pack_oid: pack_oid.to_string(),
+            manifest: fixture.manifest.clone(),
+        };
+        let status = complete_pack(
+            Path(repo.clone()),
+            State(Arc::clone(&state)),
+            None,
+            Json(req),
+        )
+        .await
+        .expect("valid pack must be accepted");
+        assert_eq!(status, StatusCode::CREATED);
+
+        let marker_path = pending_marker_path(&repo_path, pack_oid);
+        assert!(
+            marker_path.exists(),
+            "marker must exist right after complete_pack, before background verify runs"
+        );
+
+        wait_until_pack_verified(&state, &repo, pack_oid).await;
+
+        assert!(
+            !marker_path.exists(),
+            "marker must be removed once background verification completes cleanly"
+        );
+        let idx = state.pack_index.read().await;
+        let repo_idx = idx.get(&repo).expect("repo entry must exist");
+        for entry in &fixture.manifest {
+            assert!(
+                repo_idx.contains_key(&entry.chunk_oid),
+                "valid entries must remain routable after verification"
+            );
+        }
+    }
+
+    /// Background verification, failure path: with TWO corrupted entries in
+    /// one pack, BOTH must be evicted — not just the first found — and the
+    /// pack must still leave the unverified set once resolved.
+    #[tokio::test]
+    async fn background_verification_evicts_all_corrupted_entries_not_just_first() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let fixture = build_pack_with_two_corrupted_entries();
+        let bad_ids: Vec<String> = [1usize, 2usize]
+            .iter()
+            .map(|&i| fixture.manifest[i].chunk_oid.clone())
+            .collect();
+        let good_id = fixture.manifest[0].chunk_oid.clone();
+        let pack_oid = "99aabbccdd";
+        storage
+            .put(&format!("packs/{pack_oid}"), &fixture.pack_bytes)
+            .await
+            .expect("put pack");
+
+        let req = CompletePackRequest {
+            pack_oid: pack_oid.to_string(),
+            manifest: fixture.manifest,
+        };
+        let status = complete_pack(
+            Path(repo.clone()),
+            State(Arc::clone(&state)),
+            None,
+            Json(req),
+        )
+        .await
+        .expect("push must not block on verification, even for a pack that turns out bad");
+        assert_eq!(status, StatusCode::CREATED);
+
+        wait_until_pack_verified(&state, &repo, pack_oid).await;
+
+        let idx = state.pack_index.read().await;
+        let repo_idx = idx.get(&repo).expect("repo entry must exist");
+        for bad_id in &bad_ids {
+            assert!(
+                !repo_idx.contains_key(bad_id),
+                "corrupted entry must be evicted from pack_index: {bad_id}"
+            );
+        }
+        assert!(
+            repo_idx.contains_key(&good_id),
+            "the valid entry must remain routable"
+        );
+
+        let marker_path = pending_marker_path(&repo_path, pack_oid);
+        assert!(
+            !marker_path.exists(),
+            "marker must be cleared once background verification finishes, even on failure"
+        );
+    }
+
+    /// Startup sweep, recovery path: an orphaned `.pending` marker with no
+    /// corresponding in-memory state (simulating a fresh `AppState` after a
+    /// restart) must be picked up, marked unverified, and driven to
+    /// completion — exactly like a pack that just went through `complete_pack`.
+    #[tokio::test]
+    async fn resume_pack_verification_marks_orphaned_marker_unverified_and_completes() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let fixture = build_valid_pack();
+        let pack_oid = "ddeeff0011";
+        storage
+            .put(&format!("packs/{pack_oid}"), &fixture.pack_bytes)
+            .await
+            .expect("put pack");
+
+        // Write marker + manifest directly, bypassing complete_pack, so
+        // `state.unverified_packs` starts genuinely empty for this pack —
+        // exactly what a fresh AppState after a restart would see.
+        let manifest_dir = repo_path.join(".mediagit").join("packs").join("dd");
+        tokio::fs::create_dir_all(&manifest_dir).await.unwrap();
+        let mut jsonl = String::new();
+        for e in &fixture.manifest {
+            jsonl.push_str(&format!(
+                "{{\"chunk_oid\":\"{}\",\"pack_oid\":\"{pack_oid}\",\"offset\":{},\"length\":{}}}\n",
+                e.chunk_oid, e.offset, e.length
+            ));
+        }
+        tokio::fs::write(manifest_dir.join(format!("{pack_oid}.jsonl")), jsonl)
+            .await
+            .unwrap();
+        let marker_path = pending_marker_path(&repo_path, pack_oid);
+        tokio::fs::write(&marker_path, b"").await.unwrap();
+
+        assert!(
+            state.unverified_packs.read().await.get(&repo).is_none(),
+            "precondition: fresh AppState has no in-memory record of this pack"
+        );
+
+        resume_pack_verification(&state, &repo_path, &repo, pack_oid).await;
+
+        // Marked unverified synchronously by resume_pack_verification itself,
+        // before its own background spawn has necessarily run.
+        assert!(
+            state
+                .unverified_packs
+                .read()
+                .await
+                .get(&repo)
+                .is_some_and(|s| s.contains(pack_oid)),
+            "orphaned marker must mark the pack unverified"
+        );
+
+        wait_until_pack_verified(&state, &repo, pack_oid).await;
+        assert!(
+            !marker_path.exists(),
+            "orphaned marker must be cleared once the resumed verification completes"
+        );
+    }
+
+    /// Startup sweep, failure semantics: a marker whose manifest is missing
+    /// or unreadable must be logged and left unverified for a future sweep —
+    /// it must NEVER propagate an error or panic (the storage-init probe
+    /// `bail!`s on a bad config; a bad `.pending` marker is a data problem,
+    /// not a config problem, and must not turn into a boot failure).
+    #[tokio::test]
+    async fn resume_pack_verification_survives_unreadable_manifest_without_bailing() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let pack_oid = "feedface01";
+        // Marker exists, but there is no manifest at all — e.g. a crash
+        // between the marker write and the manifest write.
+        let marker_path = pending_marker_path(&repo_path, pack_oid);
+        if let Some(parent) = marker_path.parent() {
+            tokio::fs::create_dir_all(parent).await.unwrap();
+        }
+        tokio::fs::write(&marker_path, b"").await.unwrap();
+
+        // Must not panic (a bare .await here would abort the test on panic).
+        resume_pack_verification(&state, &repo_path, &repo, pack_oid).await;
+
+        assert!(
+            state
+                .unverified_packs
+                .read()
+                .await
+                .get(&repo)
+                .is_some_and(|s| s.contains(pack_oid)),
+            "an unreadable/missing manifest must still leave the pack marked unverified"
+        );
+        assert!(
+            marker_path.exists(),
+            "marker must be left in place (not falsely cleared) when the manifest could not be read"
         );
     }
 

@@ -1279,6 +1279,46 @@ mod tests {
         }
     }
 
+    /// The real compat argument for the `.pending` marker sidecar (PAC design):
+    /// `load_jsonl_index` filters strictly to `extension() == "jsonl"`, so a
+    /// `.pending` sibling in the same shard dir must be silently invisible to
+    /// it — not filtered by luck, but by the extension check every entry here
+    /// already goes through.
+    #[tokio::test]
+    async fn load_jsonl_index_ignores_pending_sibling() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo1");
+        let shard_dir = repo_path.join(".mediagit").join("packs").join("aa");
+        tokio::fs::create_dir_all(&shard_dir).await.unwrap();
+        let pack_oid = "aabbcc1122";
+        tokio::fs::write(
+            shard_dir.join(format!("{pack_oid}.jsonl")),
+            format!(
+                "{{\"chunk_oid\":\"c1\",\"pack_oid\":\"{pack_oid}\",\"offset\":0,\"length\":10}}\n"
+            ),
+        )
+        .await
+        .unwrap();
+        // The sibling this whole design depends on being invisible to the reader.
+        tokio::fs::write(shard_dir.join(format!("{pack_oid}.pending")), b"")
+            .await
+            .unwrap();
+
+        let state = AppState::new(tmp.path().to_path_buf());
+        load_jsonl_index(&state, "repo1", &repo_path)
+            .await
+            .expect("load must succeed despite the .pending sibling");
+
+        let idx = state.pack_index.read().await;
+        let repo_idx = idx.get("repo1").expect("repo entry must exist");
+        assert_eq!(
+            repo_idx.len(),
+            1,
+            "only the .jsonl entry should be indexed; the .pending sibling must be silently ignored"
+        );
+        assert!(repo_idx.contains_key("c1"));
+    }
+
     fn gcs_storage_config(prefix: &str) -> mediagit_config::GCSStorage {
         mediagit_config::GCSStorage {
             bucket: "bucket".to_string(),

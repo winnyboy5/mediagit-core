@@ -364,6 +364,79 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Durability sweep: resume any pack verification an earlier crash
+    // interrupted. Every `.mediagit/packs/<shard>/<pack_oid>.pending` marker
+    // is an orphan left by `complete_pack` (see
+    // `mediagit_server::handlers::repo::verify_pack_in_background`) — the
+    // marker is the durable source of truth for "unverified", so finding one
+    // here means the in-memory `unverified_packs` set from the crashed
+    // process is gone but the pack itself never got a second look.
+    //
+    // Deliberately unconditional (not gated by MEDIAGIT_STARTUP_PROBE): the
+    // probe above validates *configuration*, this repairs *data safety*.
+    // `resume_pack_verification` itself never bails — an unreadable marker or
+    // manifest is logged and the pack is simply left unverified for a future
+    // sweep, never a boot failure. Runs before the listener accepts traffic,
+    // but does not block on verification finishing — it re-enqueues the same
+    // background worker `complete_pack` uses and returns; the read path
+    // refuses to serve an unverified pack blind in the meantime.
+    {
+        let sweep_repo_dirs: Vec<PathBuf> = std::fs::read_dir(&config.repos_dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut resumed = 0usize;
+        for repo_path in sweep_repo_dirs {
+            let Some(repo_name) = repo_path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let packs_dir = repo_path.join(".mediagit").join("packs");
+            let Ok(mut shard_dirs) = tokio::fs::read_dir(&packs_dir).await else {
+                continue;
+            };
+            while let Ok(Some(shard)) = shard_dirs.next_entry().await {
+                let shard_path = shard.path();
+                if !shard_path.is_dir() {
+                    continue;
+                }
+                let Ok(mut files) = tokio::fs::read_dir(&shard_path).await else {
+                    continue;
+                };
+                while let Ok(Some(file)) = files.next_entry().await {
+                    let file_path = file.path();
+                    if file_path.extension().and_then(|e| e.to_str()) != Some("pending") {
+                        continue;
+                    }
+                    let Some(pack_oid) = file_path.file_stem().and_then(|s| s.to_str()) else {
+                        continue;
+                    };
+                    tracing::warn!(
+                        repo = repo_name,
+                        pack = pack_oid,
+                        "Startup sweep: found orphaned .pending marker; resuming verification"
+                    );
+                    mediagit_server::handlers::resume_pack_verification(
+                        &state, &repo_path, repo_name, pack_oid,
+                    )
+                    .await;
+                    resumed += 1;
+                }
+            }
+        }
+        if resumed > 0 {
+            tracing::info!(
+                resumed,
+                "Startup sweep: resumed verification for orphaned pending pack(s)"
+            );
+        }
+    }
+
     // P1-1: optional Prometheus /metrics endpoint on a separate listener, off
     // by default. Set MEDIAGIT_METRICS_ADDR=host:port to enable (e.g.
     // 127.0.0.1:9090). Pure wiring of the existing mediagit-metrics crate —

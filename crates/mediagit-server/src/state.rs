@@ -11,7 +11,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -195,6 +195,20 @@ pub struct AppState {
     /// Populated from local JSONL on first locate hit; updated on complete_pack.
     pub pack_index: RwLock<HashMap<String, HashMap<String, PackLoc>>>,
 
+    /// Packs registered but not yet content-verified: repo -> pack_oid.
+    ///
+    /// The durable `.pending` marker on disk (sibling of the pack's `.jsonl`
+    /// manifest — see `pending_marker_path` in `handlers/repo.rs`) is the
+    /// SOURCE OF TRUTH for "unverified": marker present means unverified,
+    /// marker absent means verified. This set is a cache of that fact, kept
+    /// in step under the same write lock as `pack_index` at registration
+    /// (`complete_pack`) so the two can't drift — see the "F9 concurrency
+    /// guard" pattern already used there. Cleared entry-by-entry by the
+    /// background verifier once a pack is resolved (clean or quarantined),
+    /// and repopulated at boot by the startup sweep for any marker that
+    /// survived a crash.
+    pub unverified_packs: RwLock<HashMap<String, HashSet<String>>>,
+
     /// Server-enforced file locks (Tracks B1-B3): repo -> path -> LockRecord.
     /// Lazily loaded per repo from `.mediagit/locks.jsonl` on first access,
     /// following the same double-checked pattern as `storage_backends`.
@@ -255,6 +269,7 @@ impl AppState {
             storage_backends: RwLock::new(HashMap::new()),
             odb_cache: RwLock::new(HashMap::new()),
             pack_index: RwLock::new(HashMap::new()),
+            unverified_packs: RwLock::new(HashMap::new()),
             locks: RwLock::new(HashMap::new()),
             auth_layer: None,
             auth_service: None,
@@ -292,6 +307,7 @@ impl AppState {
             storage_backends: RwLock::new(HashMap::new()),
             odb_cache: RwLock::new(HashMap::new()),
             pack_index: RwLock::new(HashMap::new()),
+            unverified_packs: RwLock::new(HashMap::new()),
             locks: RwLock::new(HashMap::new()),
             auth_layer: Some(auth_layer),
             auth_service: Some(auth_service),
@@ -336,6 +352,7 @@ impl AppState {
             storage_backends: RwLock::new(HashMap::new()),
             odb_cache: RwLock::new(HashMap::new()),
             pack_index: RwLock::new(HashMap::new()),
+            unverified_packs: RwLock::new(HashMap::new()),
             locks: RwLock::new(HashMap::new()),
             auth_layer: Some(auth_layer),
             auth_service: Some(auth_service),
