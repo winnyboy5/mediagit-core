@@ -1225,7 +1225,32 @@ async fn pack_entries_failing_content_verification(
                     // A partially-read slice hashes to garbage. Reporting that as a
                     // mismatch is what evicted valid chunks, so the transport
                     // verdict is checked BEFORE either digest is trusted.
-                    if tee.io_error || tee.bytes_seen != expected_len {
+                    //
+                    // The two cases are logged apart on purpose. A mid-stream
+                    // error is a visible transport failure; a SHORT read with no
+                    // error is a silent one (the body simply ends early and the
+                    // reader reports clean EOF), and only the byte count catches
+                    // it. Telling them apart in the log is what makes the next
+                    // occurrence diagnosable.
+                    if tee.io_error {
+                        tracing::warn!(
+                            pack = %pack_key,
+                            entry = idx,
+                            read = tee.bytes_seen,
+                            expected = expected_len,
+                            "pack verification: stream error mid-entry; entry unreadable"
+                        );
+                        return EntryVerification::Unreadable;
+                    }
+                    if tee.bytes_seen != expected_len {
+                        tracing::warn!(
+                            pack = %pack_key,
+                            entry = idx,
+                            read = tee.bytes_seen,
+                            expected = expected_len,
+                            "pack verification: range body ended early with no error \
+                             (silent short read); entry unreadable"
+                        );
                         return EntryVerification::Unreadable;
                     }
 
@@ -1280,31 +1305,6 @@ async fn first_pack_entry_failing_content_verification<'a>(
     let (corrupt, _unreadable) =
         pack_entries_failing_content_verification(storage, compressor, pack_key, manifest).await;
     corrupt.first().and_then(|&i| manifest.get(i))
-}
-
-/// Returns EVERY manifest entry whose bytes don't hash to its claimed
-/// `chunk_oid`, in deterministic ascending-index order. Used by the
-/// background verifier: a pack with two poisoned chunks must have both
-/// quarantined in one pass, not just the first one found (a partially
-/// quarantined pack would leave an unknown-status sibling chunk trusted).
-/// Returns `(corrupt_entries, unreadable_count)`. Only the first list may be
-/// quarantined; a non-zero second value means the pack's status is still
-/// UNKNOWN and it must stay unverified rather than be resolved either way.
-async fn all_pack_entries_failing_content_verification<'a>(
-    storage: &Arc<dyn StorageBackend>,
-    compressor: &Arc<SmartCompressor>,
-    pack_key: &str,
-    manifest: &'a [ManifestEntry],
-) -> (Vec<&'a ManifestEntry>, usize) {
-    let (corrupt, unreadable) =
-        pack_entries_failing_content_verification(storage, compressor, pack_key, manifest).await;
-    (
-        corrupt
-            .into_iter()
-            .filter_map(|i| manifest.get(i))
-            .collect(),
-        unreadable.len(),
-    )
 }
 
 /// First 2 hex chars of a pack oid — the shard directory both its `.jsonl`
@@ -1436,26 +1436,63 @@ pub(crate) async fn verify_pack_in_background(
 
     let pack_key = format!("packs/{pack_oid}");
     let verify_start = std::time::Instant::now();
-    let (bad, unreadable) =
-        all_pack_entries_failing_content_verification(&storage, &compressor, &pack_key, &manifest)
-            .await;
+
+    // Unreadable entries are retried IN PROCESS before the pack is parked.
+    // Without this, one blip left the pack pending until a restart or a pull
+    // happened to trigger the presign verifier — measured on a 1 GB S3 push
+    // (2026-08-03): 2 of 16 packs sat unresolved indefinitely. Only the
+    // still-unresolved entries are re-read, so a retry costs a few ranges, not
+    // another whole-pack pass.
+    const VERIFY_ATTEMPTS: usize = 3;
+    let mut bad: Vec<ManifestEntry> = Vec::new();
+    let mut outstanding: Vec<ManifestEntry> = manifest.clone();
+    for attempt in 1..=VERIFY_ATTEMPTS {
+        let (corrupt, unreadable_idx) = pack_entries_failing_content_verification(
+            &storage,
+            &compressor,
+            &pack_key,
+            &outstanding,
+        )
+        .await;
+        bad.extend(corrupt.iter().filter_map(|&i| outstanding.get(i).cloned()));
+        if unreadable_idx.is_empty() {
+            outstanding.clear();
+            break;
+        }
+        outstanding = unreadable_idx
+            .iter()
+            .filter_map(|&i| outstanding.get(i).cloned())
+            .collect();
+        if attempt < VERIFY_ATTEMPTS {
+            tracing::warn!(
+                repo = %repo,
+                pack = %pack_oid,
+                attempt,
+                unreadable = outstanding.len(),
+                "background pack verification: retrying unreadable entries"
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(2u64.pow(attempt as u32))).await;
+        }
+    }
+    let unreadable = outstanding.len();
     let clean = bad.is_empty() && unreadable == 0;
 
-    // Entries we could not read leave the pack's status UNKNOWN. Resolving it
-    // either way would be wrong: marking it verified would vouch for bytes we
-    // never saw, and quarantining would destroy data whose only sin was a
-    // flaky link. Leave the .pending marker and the unverified flag in place so
-    // the startup sweep (or the next presign) retries; reads keep gating on it
-    // meanwhile, so correctness holds while it is unresolved.
+    // Entries we still could not read leave the pack's status UNKNOWN.
+    // Resolving it either way would be wrong: marking it verified would vouch
+    // for bytes we never saw, and quarantining would destroy data whose only
+    // sin was a flaky link. Leave the .pending marker and the unverified flag
+    // in place so the startup sweep (or the next presign) retries; reads keep
+    // gating on it meanwhile, so correctness holds while it is unresolved.
     if unreadable > 0 {
         tracing::warn!(
             repo = %repo,
             pack = %pack_oid,
             unreadable,
             corrupt = bad.len(),
+            attempts = VERIFY_ATTEMPTS,
             elapsed_ms = verify_start.elapsed().as_millis() as u64,
-            "background pack verification: incomplete (entries unreadable); \
-             pack stays unverified for retry, nothing quarantined"
+            "background pack verification: incomplete after retries (entries unreadable); \
+             pack stays unverified for a later sweep, nothing quarantined"
         );
         return false;
     }
@@ -2594,7 +2631,13 @@ mod complete_pack_content_verification_tests {
         resume_pack_verification(&state, &repo_path, &repo, pack_oid).await;
         // Deliberately NOT wait_until_pack_verified: staying unverified IS the
         // expected outcome here, so waiting for it to clear would hang.
-        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        //
+        // Must outlast the in-process retry ladder (2s + 4s backoff) so this
+        // asserts the TERMINAL state. A shorter wait would observe verification
+        // still in flight, and would pass even if the final verdict were to
+        // quarantine — which is the exact bug under test. The truncation is
+        // permanent, so all attempts fail deterministically.
+        tokio::time::sleep(std::time::Duration::from_secs(9)).await;
 
         let idx = state.pack_index.read().await;
         let repo_idx = idx.get(&repo).expect("repo entry must exist");
