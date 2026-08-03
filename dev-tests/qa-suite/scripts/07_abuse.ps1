@@ -222,7 +222,22 @@ function Drill-A4-CorruptChunkAtRest {
     Invoke-MG $repo @("add", ".") $Phase | Out-Null
     Invoke-MG $repo @("commit", "-m", "c1") $Phase | Out-Null
     Invoke-MG $repo @("remote", "add", "origin", $srv.Url) $Phase | Out-Null
-    Invoke-MG $repo @("push", "origin") $Phase -TimeoutSec 1200 | Out-Null
+
+    # This push used to be `| Out-Null` - its result was discarded entirely, so the
+    # drill could only see corruption-detection and recovery. On 2026-08-03 that
+    # blindness hid a real defect: this exact push took 1,188s for 8 MiB (the
+    # adjacent identical push took 0.2s) and still exited 0, because the client
+    # burned four consecutive 300s upload timeouts and succeeded on the fifth.
+    # The phase reported PASS with a 20-minute stall inside it.
+    #
+    # So gate BOTH: the push must succeed, AND it must not stall. The seconds
+    # bound is deliberately absurd rather than tuned - 8 MiB in 120s is 0.07 MB/s,
+    # which no healthy path produces on a loopback backend - so this detects a
+    # stall without encoding this machine's speed (cf. the S2 note in 10_scale.ps1
+    # on why absolute-time gates are usually the wrong tool).
+    $a4push = Invoke-MG $repo @("push", "origin") $Phase -TimeoutSec 1200
+    Rec "A4-push-completes-without-stalling" (($a4push.Exit -eq 0) -and ($a4push.Sec -lt 120)) `
+      ("exit={0} sec={1} sizeMB=8 stallBoundSec=120" -f $a4push.Exit, $a4push.Sec)
 
     # flip a byte in the largest object under .mediagit (chunk or pack)
     $obj = Get-ChildItem (Join-Path $repo ".mediagit") -Recurse -File -ErrorAction SilentlyContinue |
