@@ -1140,12 +1140,35 @@ impl ProtocolClient {
                                             }
                                         }
                                         Err(e) => {
-                                            tracing::debug!(
-                                                chunk = %hex,
-                                                attempt,
-                                                err = %e,
-                                                "Direct upload network error; retrying"
-                                            );
+                                            // A TIMEOUT is never routine: the per-request
+                                            // budget is 300s, so each one burns five
+                                            // minutes, and MAX_ATTEMPTS of them can absorb
+                                            // ~25 minutes on a single chunk. If a later
+                                            // attempt then succeeds we `break 'direct` and
+                                            // nothing above debug is ever emitted, so the
+                                            // user is told only "Push successful" after a
+                                            // 20-minute wait (measured 2026-08-03: an 8 MiB
+                                            // push took 1,188s and printed no diagnostic).
+                                            // Warn on timeouts; keep fast connect/body
+                                            // errors at debug where they belong.
+                                            if e.is_timeout() {
+                                                tracing::warn!(
+                                                    chunk = %hex,
+                                                    attempt,
+                                                    err = %e,
+                                                    "Direct upload timed out after the \
+                                                     per-request budget; retrying (each \
+                                                     timeout costs the full budget, so a \
+                                                     push that looks merely slow is stalling)"
+                                                );
+                                            } else {
+                                                tracing::debug!(
+                                                    chunk = %hex,
+                                                    attempt,
+                                                    err = %e,
+                                                    "Direct upload network error; retrying"
+                                                );
+                                            }
                                             if attempt == MAX_ATTEMPTS - 1 {
                                                 tracing::warn!(
                                                     chunk = %hex,
@@ -2019,12 +2042,29 @@ impl ProtocolClient {
                                                 }
                                             }
                                             Err(e) => {
-                                                tracing::debug!(
-                                                    chunk = %hex,
-                                                    attempt,
-                                                    err = %e,
-                                                    "Direct upload network error; retrying"
-                                                );
+                                                // Same silent-stall gap as the first direct
+                                                // -upload loop above — see its comment. A
+                                                // timeout costs the full per-request budget,
+                                                // so it must not sit at debug.
+                                                if e.is_timeout() {
+                                                    tracing::warn!(
+                                                        chunk = %hex,
+                                                        attempt,
+                                                        err = %e,
+                                                        "Direct upload timed out after the \
+                                                         per-request budget; retrying (each \
+                                                         timeout costs the full budget, so a \
+                                                         push that looks merely slow is \
+                                                         stalling)"
+                                                    );
+                                                } else {
+                                                    tracing::debug!(
+                                                        chunk = %hex,
+                                                        attempt,
+                                                        err = %e,
+                                                        "Direct upload network error; retrying"
+                                                    );
+                                                }
                                                 if attempt == MAX_ATTEMPTS - 1 {
                                                     tracing::warn!(
                                                         chunk = %hex,
