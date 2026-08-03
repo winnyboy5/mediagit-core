@@ -76,6 +76,23 @@ function Invoke-MG([string]$Repo, [string[]]$MgArgs, [string]$Phase = "misc", [i
   $log = Join-Path $QA.Logs "$Phase-cmds.log"
   ("### mediagit {0}  (repo={1} exit={2} sec={3:n1})" -f ($MgArgs -join " "), $Repo, $code, $sw.Elapsed.TotalSeconds) | Add-Content $log
   $out | Add-Content $log
+
+  # Stall visibility. Most callers discard this result with `| Out-Null` (11
+  # pushes + 10 clones across the suite), so a command that takes absurdly long
+  # while still exiting 0 is invisible: on 2026-08-03 an 8 MiB push took 1,188s
+  # against a loopback backend and the phase reported PASS.
+  #
+  # A WARNING, not a gate, on purpose. S4 legitimately pushes 4 GB for minutes,
+  # so a blanket absolute-time gate would false-fire - see the S2 note in
+  # 10_scale.ps1 on absolute-time gates encoding this machine's speed rather
+  # than a defect. Enforcement stays per-drill where the payload size is known
+  # (e.g. A4 in 07_abuse.ps1).
+  $stallWarnSec = [int](_Env "MG_QA_STALL_WARN_SEC" "600")
+  if ($sw.Elapsed.TotalSeconds -ge $stallWarnSec) {
+    Write-QaLog $Phase ("SLOW: mediagit {0} took {1:n1}s (>= MG_QA_STALL_WARN_SEC={2}s, exit={3}) - possible stall" `
+      -f ($MgArgs -join " "), $sw.Elapsed.TotalSeconds, $stallWarnSec, $code)
+  }
+
   return @{ Exit = $code; Sec = [math]::Round($sw.Elapsed.TotalSeconds, 2); Out = $out }
 }
 

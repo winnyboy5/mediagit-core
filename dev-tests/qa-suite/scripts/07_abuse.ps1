@@ -597,11 +597,15 @@ function Drill-A10-BatchGetFallback {
     $fsckOk = if ($cl.Exit -eq 0) { Test-QaFsckClean $clone } else { $false }
 
     # Best-effort, informational only - never a gate (see header comment).
-    $srvLog = Join-Path $QA.Logs "server-minio-$Phase-A10.out.log"
+    # Glob, don't hardcode: server logs carry a per-phase sequence suffix
+    # (lib\remote.ps1) so that multiple servers in one phase stop truncating each
+    # other's log. A hardcoded name would silently match nothing and report 0
+    # hits, which reads identically to "the feature never fired".
+    $srvLogs = @(Get-ChildItem -Path $QA.Logs -Filter "server-minio-$Phase-A10*.out.log" -ErrorAction SilentlyContinue)
     $batchHits = 0; $chunkHits = 0
-    if (Test-Path $srvLog) {
-      $batchHits = (Select-String -Path $srvLog -Pattern "packs/batch-get" -ErrorAction SilentlyContinue | Measure-Object).Count
-      $chunkHits = (Select-String -Path $srvLog -Pattern "/chunks/" -ErrorAction SilentlyContinue | Measure-Object).Count
+    foreach ($sl in $srvLogs) {
+      $batchHits += (Select-String -Path $sl.FullName -Pattern "packs/batch-get" -ErrorAction SilentlyContinue | Measure-Object).Count
+      $chunkHits += (Select-String -Path $sl.FullName -Pattern "/chunks/" -ErrorAction SilentlyContinue | Measure-Object).Count
     }
     Write-QaLog $Phase ("A10 informational (best-effort, not gated): server-log batch-get hits=$batchHits " +
       "per-chunk hits=$chunkHits - MinIO presigns direct-to-bucket transfers, so this count is not a reliable signal")

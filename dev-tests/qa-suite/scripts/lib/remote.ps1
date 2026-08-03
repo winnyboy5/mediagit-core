@@ -201,8 +201,16 @@ repos_dir = "$reposDirFwd"$authLines
     Write-QaLog $Phase "bootstrapped admin '$AdminUser' via mediagit-server admin create"
   }
 
-  $outLog = Join-Path $QA.Logs "server-$Backend-$Phase.out.log"
-  $errLog = Join-Path $QA.Logs "server-$Backend-$Phase.err.log"
+  # Include the per-phase server sequence, matching the data-dir naming above.
+  # Without it, every server started under one phase name TRUNCATES the previous
+  # one's log (Start-Process -RedirectStandardOutput truncates), and 07_abuse
+  # starts >=4 servers under a single phase. That is exactly how the 2026-08-03
+  # A4 stall lost its only evidence: an 8 MiB push took 1,188s and by the time it
+  # was investigated its server log had been overwritten by a later drill's
+  # server, which also produced a wrong inference ("the server received zero
+  # requests" - it had simply been truncated).
+  $outLog = Join-Path $QA.Logs "server-$Backend-$Phase-$($script:QaSrvSeq).out.log"
+  $errLog = Join-Path $QA.Logs "server-$Backend-$Phase-$($script:QaSrvSeq).err.log"
   $proc = Start-Process -FilePath $QA.MGServer `
     -ArgumentList @("--config", (Join-Path $srvDir "server.toml")) `
     -PassThru -NoNewWindow -RedirectStandardOutput $outLog -RedirectStandardError $errLog
