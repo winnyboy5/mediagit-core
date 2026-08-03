@@ -1049,6 +1049,17 @@ struct TeeHasher<R: std::io::Read> {
     /// EOF, so without this flag a successful decode (which already consumed to
     /// EOF) would be polled once more and blow up on a worker thread.
     eof: bool,
+    /// Set when the underlying reader returned an I/O error, i.e. the slice was
+    /// never fully read. Without this, a transient transport failure produces a
+    /// digest over a PARTIAL slice, which is indistinguishable from a genuine
+    /// hash mismatch — and was quarantining valid data (measured: 26 valid
+    /// chunks evicted across 2 packs on a clean 1 GB S3 push, 2026-08-03).
+    io_error: bool,
+    /// Bytes actually observed. A backend that ends the body early WITHOUT an
+    /// error (a short/truncated range response) is the silent twin of
+    /// `io_error`: the digest would cover a prefix and mismatch. Counting lets
+    /// the caller tell "read it all" from "read some of it".
+    bytes_seen: u64,
 }
 
 impl<R: std::io::Read> std::io::Read for TeeHasher<R> {
@@ -1056,11 +1067,24 @@ impl<R: std::io::Read> std::io::Read for TeeHasher<R> {
         if self.eof {
             return Ok(0);
         }
-        let n = self.inner.read(buf)?;
+        let n = match self.inner.read(buf) {
+            Ok(n) => n,
+            Err(e) => {
+                // Record that the SLICE could not be fully read, as distinct from
+                // "the bytes decoded to the wrong digest". Both abort hashing, but
+                // only the latter is evidence of corruption — see
+                // `EntryVerification::Unreadable`. Fuse afterwards so a failed
+                // stream is not polled again.
+                self.io_error = true;
+                self.eof = true;
+                return Err(e);
+            }
+        };
         if n == 0 {
             self.eof = true;
         } else {
             self.hasher.update(&buf[..n]);
+            self.bytes_seen += n as u64;
         }
         Ok(n)
     }
@@ -1078,6 +1102,26 @@ impl std::io::Write for HashWriter {
     }
 }
 
+/// Outcome of verifying ONE pack entry.
+///
+/// The distinction between [`Self::Corrupt`] and [`Self::Unreadable`] is a
+/// data-safety boundary, not a nicety. Quarantining evicts entries from the
+/// manifest permanently; doing that because a range GET timed out destroys
+/// perfectly good data. "I could not verify this" must never be collapsed into
+/// "this is corrupt".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryVerification {
+    /// Slice was read in full and hashed to its claimed id.
+    Verified,
+    /// Slice was read IN FULL and hashed to something else. The only state that
+    /// justifies quarantine.
+    Corrupt,
+    /// Slice could not be read to completion (transport error, join failure).
+    /// Says nothing about the bytes — the pack simply stays unverified and is
+    /// retried later.
+    Unreadable,
+}
+
 /// Core streaming verification, shared by the first-bad-entry and
 /// all-bad-entries views below.
 ///
@@ -1090,15 +1134,15 @@ impl std::io::Write for HashWriter {
 /// (see ST-4 notes on push RAM) structurally unreachable rather than merely
 /// avoided below a threshold.
 ///
-/// Returns the indices of every failing entry, sorted ascending — not "first
-/// future to resolve": concurrency must not make the reported entry/entries
-/// depend on network timing.
+/// Returns `(corrupt, unreadable)` index lists, each sorted ascending — not
+/// "first future to resolve": concurrency must not make the reported
+/// entry/entries depend on network timing.
 async fn pack_entries_failing_content_verification(
     storage: &Arc<dyn StorageBackend>,
     compressor: &Arc<SmartCompressor>,
     pack_key: &str,
     manifest: &[ManifestEntry],
-) -> Vec<usize> {
+) -> (Vec<usize>, Vec<usize>) {
     use futures::stream::{StreamExt, TryStreamExt};
     use tokio_util::io::{StreamReader, SyncIoBridge};
 
@@ -1120,7 +1164,7 @@ async fn pack_entries_failing_content_verification(
         .map(|(i, e)| (i, e.offset, e.length as u64, e.chunk_oid.clone()))
         .collect();
 
-    let mut bad: Vec<usize> =
+    let results: Vec<(usize, EntryVerification)> =
         futures::stream::iter(owned.into_iter().map(|(idx, offset, length, chunk_oid)| {
             let storage = Arc::clone(storage);
             let compressor = Arc::clone(compressor);
@@ -1128,34 +1172,47 @@ async fn pack_entries_failing_content_verification(
             async move {
                 // Same 5-byte pack entry header `[type:1][size:4]` that
                 // `read_and_verify_chunk` skips — see its comment for the layout.
+                // A too-short entry is a manifest-level defect, not a transport
+                // one: the claim itself is impossible, so this IS corruption.
                 if length < 5 {
-                    return Some(idx);
+                    return (idx, EntryVerification::Corrupt);
                 }
                 let stream = match storage
                     .get_streaming_range(&pack_key, (offset + 5)..(offset + length))
                     .await
                 {
                     Ok(s) => s,
-                    // Fail closed: a read error means we could not verify, which is not
-                    // the same as verified-good.
-                    Err(_) => return Some(idx),
+                    // Could not verify != verified-bad. Reads still gate on this
+                    // pack (it stays unverified), but nothing is evicted.
+                    Err(e) => {
+                        tracing::warn!(
+                            pack = %pack_key,
+                            entry = idx,
+                            err = %e,
+                            "pack verification: range read failed; entry left unverified"
+                        );
+                        return (idx, EntryVerification::Unreadable);
+                    }
                 };
                 let async_reader = StreamReader::new(stream.map_err(std::io::Error::other));
                 // Must be constructed here (captures the current Tokio Handle) and
                 // then moved into spawn_blocking — never used directly on an async
                 // worker thread.
                 let sync_reader = SyncIoBridge::new(async_reader);
-                let matches = tokio::task::spawn_blocking(move || {
+                let outcome = tokio::task::spawn_blocking(move || {
                     // Compute BOTH candidate digests in one pass: the decompressed
                     // bytes (normal case) and the raw bytes (the fallback
                     // `decompress_typed` applies when a decoder errors on a
                     // misdetected codec). Accepting either mirrors the whole-buffer
                     // path exactly. Still fail-closed: a chunk matching NEITHER is
                     // rejected.
+                    let expected_len = length - 5;
                     let mut tee = TeeHasher {
                         inner: sync_reader,
                         hasher: blake3::Hasher::new(),
                         eof: false,
+                        io_error: false,
+                        bytes_seen: 0,
                     };
                     let mut decompressed = HashWriter(blake3::Hasher::new());
                     let decoded_ok = compressor
@@ -1165,26 +1222,45 @@ async fn pack_entries_failing_content_verification(
                     // covers the whole slice even when decoding aborted early.
                     let _ = std::io::copy(&mut tee, &mut std::io::sink());
 
+                    // A partially-read slice hashes to garbage. Reporting that as a
+                    // mismatch is what evicted valid chunks, so the transport
+                    // verdict is checked BEFORE either digest is trusted.
+                    if tee.io_error || tee.bytes_seen != expected_len {
+                        return EntryVerification::Unreadable;
+                    }
+
                     let raw_hex = tee.hasher.finalize().to_hex().to_string();
                     if raw_hex == chunk_oid {
-                        return true;
+                        return EntryVerification::Verified;
                     }
-                    decoded_ok && decompressed.0.finalize().to_hex().to_string() == chunk_oid
+                    if decoded_ok && decompressed.0.finalize().to_hex().to_string() == chunk_oid {
+                        return EntryVerification::Verified;
+                    }
+                    EntryVerification::Corrupt
                 })
                 .await
-                .unwrap_or(false);
-                if matches { None } else { Some(idx) }
+                // A JoinError means the check never produced a verdict — that is
+                // an absence of evidence, not evidence of corruption.
+                .unwrap_or(EntryVerification::Unreadable);
+                (idx, outcome)
             }
         }))
         .buffer_unordered(PACK_VERIFY_RANGE_CONCURRENCY)
-        .collect::<Vec<Option<usize>>>()
-        .await
-        .into_iter()
-        .flatten()
-        .collect();
+        .collect::<Vec<(usize, EntryVerification)>>()
+        .await;
 
-    bad.sort_unstable();
-    bad
+    let mut corrupt: Vec<usize> = Vec::new();
+    let mut unreadable: Vec<usize> = Vec::new();
+    for (idx, outcome) in results {
+        match outcome {
+            EntryVerification::Verified => {}
+            EntryVerification::Corrupt => corrupt.push(idx),
+            EntryVerification::Unreadable => unreadable.push(idx),
+        }
+    }
+    corrupt.sort_unstable();
+    unreadable.sort_unstable();
+    (corrupt, unreadable)
 }
 
 /// Returns the first (lowest-index) manifest entry whose bytes don't hash to
@@ -1201,10 +1277,9 @@ async fn first_pack_entry_failing_content_verification<'a>(
     pack_key: &str,
     manifest: &'a [ManifestEntry],
 ) -> Option<&'a ManifestEntry> {
-    pack_entries_failing_content_verification(storage, compressor, pack_key, manifest)
-        .await
-        .first()
-        .and_then(|&i| manifest.get(i))
+    let (corrupt, _unreadable) =
+        pack_entries_failing_content_verification(storage, compressor, pack_key, manifest).await;
+    corrupt.first().and_then(|&i| manifest.get(i))
 }
 
 /// Returns EVERY manifest entry whose bytes don't hash to its claimed
@@ -1212,17 +1287,24 @@ async fn first_pack_entry_failing_content_verification<'a>(
 /// background verifier: a pack with two poisoned chunks must have both
 /// quarantined in one pass, not just the first one found (a partially
 /// quarantined pack would leave an unknown-status sibling chunk trusted).
+/// Returns `(corrupt_entries, unreadable_count)`. Only the first list may be
+/// quarantined; a non-zero second value means the pack's status is still
+/// UNKNOWN and it must stay unverified rather than be resolved either way.
 async fn all_pack_entries_failing_content_verification<'a>(
     storage: &Arc<dyn StorageBackend>,
     compressor: &Arc<SmartCompressor>,
     pack_key: &str,
     manifest: &'a [ManifestEntry],
-) -> Vec<&'a ManifestEntry> {
-    pack_entries_failing_content_verification(storage, compressor, pack_key, manifest)
-        .await
-        .into_iter()
-        .filter_map(|i| manifest.get(i))
-        .collect()
+) -> (Vec<&'a ManifestEntry>, usize) {
+    let (corrupt, unreadable) =
+        pack_entries_failing_content_verification(storage, compressor, pack_key, manifest).await;
+    (
+        corrupt
+            .into_iter()
+            .filter_map(|i| manifest.get(i))
+            .collect(),
+        unreadable.len(),
+    )
 }
 
 /// First 2 hex chars of a pack oid — the shard directory both its `.jsonl`
@@ -1354,10 +1436,29 @@ pub(crate) async fn verify_pack_in_background(
 
     let pack_key = format!("packs/{pack_oid}");
     let verify_start = std::time::Instant::now();
-    let bad =
+    let (bad, unreadable) =
         all_pack_entries_failing_content_verification(&storage, &compressor, &pack_key, &manifest)
             .await;
-    let clean = bad.is_empty();
+    let clean = bad.is_empty() && unreadable == 0;
+
+    // Entries we could not read leave the pack's status UNKNOWN. Resolving it
+    // either way would be wrong: marking it verified would vouch for bytes we
+    // never saw, and quarantining would destroy data whose only sin was a
+    // flaky link. Leave the .pending marker and the unverified flag in place so
+    // the startup sweep (or the next presign) retries; reads keep gating on it
+    // meanwhile, so correctness holds while it is unresolved.
+    if unreadable > 0 {
+        tracing::warn!(
+            repo = %repo,
+            pack = %pack_oid,
+            unreadable,
+            corrupt = bad.len(),
+            elapsed_ms = verify_start.elapsed().as_millis() as u64,
+            "background pack verification: incomplete (entries unreadable); \
+             pack stays unverified for retry, nothing quarantined"
+        );
+        return false;
+    }
 
     if clean {
         tracing::info!(
@@ -2432,6 +2533,93 @@ mod complete_pack_content_verification_tests {
         );
     }
 
+    /// P0 regression: a pack whose bytes cannot be READ IN FULL must never be
+    /// quarantined. "I could not verify this" is not "this is corrupt", and
+    /// conflating them evicts valid data permanently.
+    ///
+    /// This is not hypothetical. On a clean 1 GB push to real S3 (2026-08-03)
+    /// transient range-read failures evicted 26 valid chunks across 2 packs
+    /// while the push reported success; the bytes were later proven byte-exact
+    /// against the source fixture. The old code returned the entry index for
+    /// BOTH a read error and a hash mismatch, so eviction followed either way.
+    ///
+    /// Reproduced deterministically as "the pack verified fine on push, then
+    /// the object could not be fully read on a later retry" — a crash-resume
+    /// where the link is flaky. Truncating the stored object makes the range
+    /// read end early, so the digest would cover a prefix. Required behaviour:
+    /// nothing evicted, pack stays unverified, `.pending` marker survives.
+    #[tokio::test]
+    async fn unreadable_pack_is_left_unverified_and_never_quarantined() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let fixture = build_valid_pack();
+        let all_ids: Vec<String> = fixture
+            .manifest
+            .iter()
+            .map(|e| e.chunk_oid.clone())
+            .collect();
+        let pack_oid = "aa11bb22cc";
+        let pack_key = format!("packs/{pack_oid}");
+        let full_bytes = fixture.pack_bytes.clone();
+        storage.put(&pack_key, &full_bytes).await.expect("put pack");
+
+        let req = CompletePackRequest {
+            pack_oid: pack_oid.to_string(),
+            manifest: fixture.manifest,
+        };
+        let status = complete_pack(
+            Path(repo.clone()),
+            State(Arc::clone(&state)),
+            None,
+            Json(req),
+        )
+        .await
+        .expect("complete_pack must still return promptly");
+        assert_eq!(status, StatusCode::CREATED);
+        wait_until_pack_verified(&state, &repo, pack_oid).await;
+
+        // Now the object becomes unreadable-in-full, and a sweep retries it.
+        // Every byte still present is genuine; there is simply not all of it.
+        storage
+            .put(&pack_key, &full_bytes[..full_bytes.len() / 2])
+            .await
+            .expect("truncate pack");
+        let marker_path = pending_marker_path(&repo_path, pack_oid);
+        mediagit_versioning::atomic_write::write_atomic(&marker_path, b"")
+            .expect("re-arm pending marker");
+
+        resume_pack_verification(&state, &repo_path, &repo, pack_oid).await;
+        // Deliberately NOT wait_until_pack_verified: staying unverified IS the
+        // expected outcome here, so waiting for it to clear would hang.
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+        let idx = state.pack_index.read().await;
+        let repo_idx = idx.get(&repo).expect("repo entry must exist");
+        for id in &all_ids {
+            assert!(
+                repo_idx.contains_key(id),
+                "unreadable != corrupt: entry {id} must NOT be evicted just because \
+                 its bytes could not be read in full"
+            );
+        }
+        drop(idx);
+
+        let unverified = state.unverified_packs.read().await;
+        assert!(
+            unverified.get(&repo).is_some_and(|s| s.contains(pack_oid)),
+            "a pack that could not be verified must stay UNVERIFIED, so reads keep gating on it"
+        );
+        drop(unverified);
+
+        assert!(
+            marker_path.exists(),
+            "the .pending marker must survive so a later sweep retries the check"
+        );
+    }
+
     /// Startup sweep, recovery path: an orphaned `.pending` marker with no
     /// corresponding in-memory state (simulating a fresh `AppState` after a
     /// restart) must be picked up, marked unverified, and driven to
@@ -2682,10 +2870,17 @@ mod complete_pack_content_verification_tests {
         );
     }
 
-    /// Fail-closed: a storage read error (here, the pack object doesn't exist)
-    /// must reject the entry rather than treat it as verified.
+    /// Fail-closed, but not fail-destructive: a storage read error (here, the
+    /// pack object doesn't exist) must NOT count as verified — and must also
+    /// not count as corrupt.
+    ///
+    /// This test previously asserted the entry came back in the single "bad"
+    /// list, which is precisely the conflation that evicted 26 valid chunks on
+    /// a clean S3 push (2026-08-03). The fail-closed intent is unchanged and
+    /// still asserted; what changed is that "unreadable" is now its own verdict
+    /// so quarantine cannot follow from it.
     #[tokio::test]
-    async fn range_read_error_is_rejected() {
+    async fn range_read_error_is_unreadable_not_corrupt() {
         let repo = "test-repo".to_string();
         let (_tmp, _state, repo_path) = setup(&repo).await;
         let storage = LocalBackend::new(repo_path.join(".mediagit"))
@@ -2700,7 +2895,7 @@ mod complete_pack_content_verification_tests {
             length: 10,
             compressed_hash: None,
         }];
-        let bad = first_pack_entry_failing_content_verification(
+        let (corrupt, unreadable) = pack_entries_failing_content_verification(
             &storage,
             &compressor,
             "packs/never-uploaded",
@@ -2708,9 +2903,14 @@ mod complete_pack_content_verification_tests {
         )
         .await;
         assert_eq!(
-            bad.map(|e| e.chunk_oid.clone()),
-            Some("b".repeat(64)),
-            "a range read error must reject the entry, not verify it"
+            unreadable,
+            vec![0],
+            "a range read error must be reported as unreadable"
+        );
+        assert!(
+            corrupt.is_empty(),
+            "a range read error says nothing about the bytes; treating it as corruption \
+             evicts valid data"
         );
     }
 

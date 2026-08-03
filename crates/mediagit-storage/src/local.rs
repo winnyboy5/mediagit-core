@@ -523,9 +523,11 @@ impl StorageBackend for LocalBackend {
                         (f, left),
                     ))
                 }
+                // Fuse: yield the error once, then end. Resuming after a failed
+                // read would splice a gap into the byte sequence.
                 Err(e) => Some((
                     Err(anyhow::anyhow!("get_streaming_range read: {}", e)),
-                    (f, left),
+                    (f, 0),
                 )),
             }
         });

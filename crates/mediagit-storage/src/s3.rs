@@ -645,24 +645,36 @@ impl StorageBackend for S3Backend {
         // ByteStream does not implement futures::Stream directly; convert to
         // tokio::io::AsyncRead and drive with unfold to yield 64 KiB Bytes chunks.
         let reader = response.body.into_async_read();
-        let stream = futures::stream::unfold((reader, stats), |(mut rdr, stats)| async move {
-            use tokio::io::AsyncReadExt;
-            let mut buf = vec![0u8; 65536];
-            match rdr.read(&mut buf).await {
-                Ok(0) => None,
-                Ok(n) => {
-                    buf.truncate(n);
-                    stats
-                        .total_bytes_downloaded
-                        .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
-                    Some((
-                        Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(buf)),
-                        (rdr, stats),
-                    ))
+        // `failed` fuses the stream: after an error we yield it once and stop.
+        // Continuing to poll the same reader could resume mid-object and hand a
+        // consumer a gap-spliced byte sequence that looks like valid data.
+        let stream = futures::stream::unfold(
+            (reader, stats, false),
+            |(mut rdr, stats, failed)| async move {
+                use tokio::io::AsyncReadExt;
+                if failed {
+                    return None;
                 }
-                Err(e) => Some((Err(anyhow!("get_streaming chunk: {}", e)), (rdr, stats))),
-            }
-        });
+                let mut buf = vec![0u8; 65536];
+                match rdr.read(&mut buf).await {
+                    Ok(0) => None,
+                    Ok(n) => {
+                        buf.truncate(n);
+                        stats
+                            .total_bytes_downloaded
+                            .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                        Some((
+                            Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(buf)),
+                            (rdr, stats, false),
+                        ))
+                    }
+                    Err(e) => Some((
+                        Err(anyhow!("get_streaming chunk: {}", e)),
+                        (rdr, stats, true),
+                    )),
+                }
+            },
+        );
 
         Ok(Box::pin(stream))
     }
@@ -692,27 +704,36 @@ impl StorageBackend for S3Backend {
             .map_err(|e| anyhow!("get_streaming_range {}: {}", key_clone, e))?;
 
         let reader = response.body.into_async_read();
-        let stream = futures::stream::unfold((reader, stats), |(mut rdr, stats)| async move {
-            use tokio::io::AsyncReadExt;
-            let mut buf = vec![0u8; 65536];
-            match rdr.read(&mut buf).await {
-                Ok(0) => None,
-                Ok(n) => {
-                    buf.truncate(n);
-                    stats
-                        .total_bytes_downloaded
-                        .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
-                    Some((
-                        Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(buf)),
-                        (rdr, stats),
-                    ))
+        // See `get_streaming`: fuse on error so a transient failure cannot be
+        // followed by more bytes. Pack verification depends on being able to
+        // tell "could not read it all" from "the bytes are wrong".
+        let stream = futures::stream::unfold(
+            (reader, stats, false),
+            |(mut rdr, stats, failed)| async move {
+                use tokio::io::AsyncReadExt;
+                if failed {
+                    return None;
                 }
-                Err(e) => Some((
-                    Err(anyhow!("get_streaming_range chunk: {}", e)),
-                    (rdr, stats),
-                )),
-            }
-        });
+                let mut buf = vec![0u8; 65536];
+                match rdr.read(&mut buf).await {
+                    Ok(0) => None,
+                    Ok(n) => {
+                        buf.truncate(n);
+                        stats
+                            .total_bytes_downloaded
+                            .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                        Some((
+                            Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(buf)),
+                            (rdr, stats, false),
+                        ))
+                    }
+                    Err(e) => Some((
+                        Err(anyhow!("get_streaming_range chunk: {}", e)),
+                        (rdr, stats, true),
+                    )),
+                }
+            },
+        );
         Ok(Box::pin(stream))
     }
 
