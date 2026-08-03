@@ -703,11 +703,12 @@ impl GarbageCollector {
                 if hex.len() == 64
                     && let Ok(oid) = Oid::from_hex(&hex)
                 {
-                    // Get object size
-                    let size = match self.storage.get(&key).await {
-                        Ok(data) => data.len() as u64,
-                        Err(_) => 0,
-                    };
+                    // Size only — `head()` stats, `get()` would read and decompress
+                    // the whole object just to call `.len()`. This scan runs on
+                    // EVERY add and commit via auto-gc, so reading the full corpus
+                    // here is what pegged the CPU as history grew (measured
+                    // 2026-08-03: 500-commit churn went 125s -> 1620s per 100).
+                    let size = self.storage.head(&key).await.ok().flatten().unwrap_or(0);
                     objects.push((oid, size));
                 }
             }
@@ -831,10 +832,8 @@ impl GarbageCollector {
 
         for key in all_keys {
             if key.starts_with("chunks/") {
-                let size = match self.storage.get(&key).await {
-                    Ok(data) => data.len() as u64,
-                    Err(_) => 0,
-                };
+                // Size only — see `list_all_objects`: stat, don't read.
+                let size = self.storage.head(&key).await.ok().flatten().unwrap_or(0);
                 chunks.push((key, size));
             }
         }
@@ -930,14 +929,15 @@ impl GarbageCollector {
                 && let Ok(oid) = Oid::from_hex(hex)
             {
                 let meta_key = format!("deltas/{}.meta", hex);
-                let delta_size = match self.storage.get(key).await {
-                    Ok(data) => data.len() as u64,
-                    Err(_) => 0,
-                };
-                let meta_size = match self.storage.get(&meta_key).await {
-                    Ok(data) => data.len() as u64,
-                    Err(_) => 0,
-                };
+                // Size only — see `list_all_objects`: stat, don't read.
+                let delta_size = self.storage.head(key).await.ok().flatten().unwrap_or(0);
+                let meta_size = self
+                    .storage
+                    .head(&meta_key)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0);
                 deltas.push((oid, key.clone(), meta_key, delta_size + meta_size));
             }
         }
@@ -961,14 +961,15 @@ impl GarbageCollector {
                 && !hex.contains('.')
             {
                 let meta_key = format!("chunk-deltas/{}.meta", hex);
-                let delta_size = match self.storage.get(key).await {
-                    Ok(data) => data.len() as u64,
-                    Err(_) => 0,
-                };
-                let meta_size = match self.storage.get(&meta_key).await {
-                    Ok(data) => data.len() as u64,
-                    Err(_) => 0,
-                };
+                // Size only — see `list_all_objects`: stat, don't read.
+                let delta_size = self.storage.head(key).await.ok().flatten().unwrap_or(0);
+                let meta_size = self
+                    .storage
+                    .head(&meta_key)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0);
                 chunk_deltas.push((key.clone(), meta_key, delta_size + meta_size));
             }
         }
