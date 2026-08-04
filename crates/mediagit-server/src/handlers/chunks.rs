@@ -91,11 +91,14 @@ pub async fn check_chunks_exist(
                 if exists {
                     None
                 } else {
+                    // `{:#}` not `{}`: the storage layer attaches the real cause with
+                    // `.context()`, and plain Display prints only the outermost context —
+                    // "Failed after 5 retries; last error follows" with nothing following.
                     if let Err(ref e) = full {
-                        tracing::warn!(chunk = %chunk_id_hex, error = %e, "Error checking chunk (full)");
+                        tracing::warn!(chunk = %chunk_id_hex, error = %format!("{e:#}"), "Error checking chunk (full)");
                     }
                     if let Err(ref e) = delta {
-                        tracing::warn!(chunk = %chunk_id_hex, error = %e, "Error checking chunk (delta)");
+                        tracing::warn!(chunk = %chunk_id_hex, error = %format!("{e:#}"), "Error checking chunk (delta)");
                     }
                     Some(chunk_id_hex)
                 }
@@ -178,7 +181,7 @@ pub async fn upload_chunk(
     // Store chunk directly (already compressed)
     let chunk_key = format!("chunks/{}", chunk_id);
     storage.put(&chunk_key, &body).await.map_err(|e| {
-        tracing::error!(chunk = %chunk_id, error = %e, "Failed to store chunk");
+        tracing::error!(chunk = %chunk_id, error = %format!("{e:#}"), "Failed to store chunk");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 

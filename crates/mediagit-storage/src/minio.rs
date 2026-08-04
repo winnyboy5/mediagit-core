@@ -1553,6 +1553,68 @@ mod tests {
         }
     }
 
+    /// `with_retry`'s exhaustion message ends "last error follows" — which is
+    /// only true if the caller renders the whole chain. Campaign
+    /// 20260804-scale-verify2 logged 1,082 of these with `{}`, so nothing
+    /// followed and every retry exhaustion was undiagnosable.
+    ///
+    /// Pins both halves: the cause must be absent from `{}` (the trap that
+    /// makes `{:#}` mandatory at call sites) and present in `{:#}`. Swapping
+    /// `.context()` for a message-replacing `map_err` fails the second.
+    #[tokio::test]
+    async fn with_retry_exhaustion_preserves_cause_in_chain() {
+        let creds = aws_sdk_s3::config::Credentials::new(
+            "ak".to_string(),
+            "sk".to_string(),
+            None,
+            None,
+            "synthetic",
+        );
+        let s3_config = aws_sdk_s3::config::Builder::new()
+            .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+            .endpoint_url("http://127.0.0.1:1")
+            .credentials_provider(creds)
+            .force_path_style(true)
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .build();
+        let cfg = MinIOConfig {
+            endpoint: "http://127.0.0.1:1".to_string(),
+            bucket: "b".to_string(),
+            access_key: "ak".to_string(),
+            secret_key: "sk".to_string(),
+            max_retries: 2,
+            initial_retry_delay_ms: 1,
+            ..Default::default()
+        };
+        let backend = MinIOBackend {
+            client: Client::from_conf(s3_config),
+            config: Arc::new(cfg.clone()),
+            stats: Arc::new(MinIOStats::new()),
+            mpu_sem: Arc::new(Semaphore::new(16)),
+            op_sem: Arc::new(Semaphore::new(4)),
+            endpoint: cfg.endpoint,
+            bucket: cfg.bucket,
+            _access_key: cfg.access_key,
+            _secret_key: cfg.secret_key,
+        };
+
+        const CAUSE: &str = "connection reset by peer at layer 7";
+        let result: Result<()> = backend
+            .with_retry(|| Box::pin(async move { Err(anyhow!(CAUSE)) }))
+            .await;
+        let err = result.expect_err("synthetic operation always errors");
+
+        assert!(
+            !format!("{err}").contains(CAUSE),
+            "plain Display is expected to hide the cause — if this starts passing, \
+             the `{{:#}}` requirement at call sites may have changed: {err}"
+        );
+        assert!(
+            format!("{err:#}").contains(CAUSE),
+            "alternate Display must carry the underlying cause, got: {err:#}"
+        );
+    }
+
     /// Regression test for the A7 abuse-drill finding: during a sustained
     /// backend outage, concurrent chunk uploads must not spin up unbounded
     /// concurrent retry chains against the dead backend (each chain holds a
