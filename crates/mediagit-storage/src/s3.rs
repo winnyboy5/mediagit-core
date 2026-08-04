@@ -717,6 +717,19 @@ impl StorageBackend for S3Backend {
             .range(format!("bytes={}-{}", range.start, range.end - 1))
             .send()
             .await
+            // No response was ever received here (e.g. SdkError::DispatchFailure, whose
+            // own docs say "an HTTP response was not received"), so the resume loop
+            // below is structurally unreachable for this class: there is no stream to
+            // resume. Deliberately NOT logged here — the sole caller
+            // (`handlers/repo.rs`, pack verification) already warns on this exact Err
+            // with strictly more context (pack, entry), and a second emit would double
+            // the volume on the dominant failure path. Absence of the "resumed" warn
+            // below is what distinguishes the two cases.
+            //
+            // Not retried here either: the client is built with
+            // `RetryConfig::standard().with_max_attempts(MEDIAGIT_AWS_MAX_ATTEMPTS)`
+            // (default 5), so a dispatch failure surfacing here has ALREADY exhausted
+            // the SDK's retries. Wrapping it again would just multiply the wait.
             .map_err(|e| anyhow!("get_streaming_range {}: {}", key_clone, e))?;
 
         let reader = response.body.into_async_read();
@@ -730,9 +743,26 @@ impl StorageBackend for S3Backend {
         // structurally cannot see an error that happens while the body streams.
         // Azure gets this for free from opendal's RetryLayer (resume-from-offset,
         // 3 attempts) and GCS from the storage client's AlwaysRetry + resume;
-        // S3's hand-rolled stream had neither, which is the whole reason AWS
-        // showed 93 mid-stream errors on a 2 GB corpus where Azure and GCS
-        // showed ~none (SCALE campaign 20260803-scale).
+        // S3's hand-rolled stream had neither, so the gap is real and this
+        // closes it.
+        //
+        // CORRECTION (2026-08-04): this was originally justified by "93 mid-stream
+        // errors on a 2 GB corpus" from campaign 20260803-scale. That attribution
+        // was WRONG. Re-reading those logs, 100% of the failures carry the
+        // `get_streaming_range {key}: {err}` format emitted at the `.send()` site
+        // above, with `err = dispatch failure` — i.e. no response was ever
+        // received. Per aws-smithy-runtime-api's own docs, DispatchFailure means
+        // no HTTP response arrived, so it cannot occur once the body is streaming
+        // and can never reach this loop. Confirmed empirically: neither of the two
+        // error strings this loop can produce ("after N resume attempt(s)",
+        // "resume at byte N failed") appears anywhere in campaign 20260803-scale
+        // or 20260804-scale-verify2, and neither does the "resumed" warn.
+        //
+        // So this code has never executed in a campaign. It is kept because it is
+        // correct for the class it targets — a connection dropping AFTER headers,
+        // mid-body — which remains possible; it is simply not the failure this
+        // deployment has been hitting. Do not cite the 93-error figure as evidence
+        // that it works.
         //
         // Byte-exactness matters more than resilience here: `consumed` counts
         // only bytes actually yielded downstream, so the resumed request starts
@@ -800,7 +830,10 @@ impl StorageBackend for S3Backend {
                             {
                                 Ok(resp) => {
                                     resumes += 1;
-                                    tracing::debug!(
+                                    // warn, not debug: the crate's default filter
+                                    // (mediagit_storage=warn) drops debug entirely, which
+                                    // would make a successful resume permanently invisible.
+                                    tracing::warn!(
                                         key = %key,
                                         resumed_from,
                                         attempt = resumes,
