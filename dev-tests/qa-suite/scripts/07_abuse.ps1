@@ -910,8 +910,15 @@ function Drill-A14-UnboundPresignedPut {
     if ($srv.OutLog -and (Test-Path $srv.OutLog)) {
       $log = Get-Content $srv.OutLog -Raw -EA SilentlyContinue
       if ($log) {
+        # Strip ANSI first. tracing's pretty formatter writes a field as
+        # `<esc>[3munbound<esc>[0m<esc>[2m=<esc>[0m5`, so a regex expecting
+        # `unbound=` matches NOTHING and the count silently reads 0 — which
+        # looked exactly like "the branch was never entered" on the first run
+        # of this drill, when the server had in fact reported unbound=5.
+        # Any regex over a server log needs this.
+        $log = $log -replace '\x1b\[[0-9;]*m', ''
         $presignCalls = ([regex]::Matches($log, 'Presigned chunk upload URLs generated')).Count
-        foreach ($m in [regex]::Matches($log, 'unbound[=:]\s*(\d+)')) {
+        foreach ($m in [regex]::Matches($log, 'unbound\s*=\s*(\d+)')) {
           $unbound += [int]$m.Groups[1].Value
         }
       }
