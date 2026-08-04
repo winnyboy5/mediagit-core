@@ -78,6 +78,26 @@ $anyFail = $false
 
 $scriptsDir = Join-Path $QA.Root "scripts"
 foreach ($tok in $Phases) {
+  # PowerShell strips the leading zero from an UNQUOTED numeric argument, so
+  # `-Phases 00,01` arrives as "0","1". Phase tokens GLOB, so "0" matched
+  # 00..09 - including 09_report, which would aggregate a half-finished
+  # campaign - and "1" matches 10_scale, 11_memprofile AND 12_safety.
+  # 11_memprofile samples peak RSS process-wide and its own header says it must
+  # run alone, so that is a silently corrupted measurement, not just noise.
+  #
+  # The NO-SCRIPT-MATCHES guard below was written for exactly this mistake
+  # (`-Phases 1,3`), but it only fires when a token matches NOTHING. Adding
+  # phases 10-12 gave "1" three matches, so that guard stopped covering the
+  # case it was written for. Normalising here restores it.
+  #
+  # Every phase script is named NN_*, so a bare single digit is always a
+  # stripped leading zero, never a deliberate prefix.
+  if ($tok -match '^\d$') {
+    $orig = $tok
+    $tok = "0$tok"
+    Write-QaLog $Phase "phase token '$orig' normalised to '$tok' (PowerShell strips leading zeros from unquoted numbers; quote them as '$tok')"
+  }
+
   $found = Get-ChildItem -Path $scriptsDir -Filter "$tok*.ps1" -File -EA SilentlyContinue |
     Where-Object { $_.Name -ne "run_all.ps1" } | Sort-Object Name
 
