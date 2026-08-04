@@ -114,7 +114,9 @@ foreach ($tok in $Phases) {
     $sw.Stop()
     # Exit 3 is Exit-QaPhase's "nothing verified": the phase failed nothing because it
     # checked nothing. It is a failure, and it is labelled so it is not read as a pass.
-    $status = if ($code -eq 0) { "PASS" } elseif ($code -eq 3) { "NOTHING-VERIFIED" } else { "FAIL" }
+    # Exit 2 is Exit-QaPhase's "ERROR": a drill blew up before it could measure anything
+    # (harness/infra fault). Distinct from FAIL so it is not read as a product defect.
+    $status = if ($code -eq 0) { "PASS" } elseif ($code -eq 3) { "NOTHING-VERIFIED" } elseif ($code -eq 2) { "ERROR" } else { "FAIL" }
     if ($status -ne "PASS") { $anyFail = $true }
 
     # 01_preflight is a PRECONDITION, not a phase. -ContinueOnFail exists so one bad

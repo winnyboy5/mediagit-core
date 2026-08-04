@@ -49,12 +49,17 @@ foreach ($g in ($gates | Group-Object phase)) {
   $failN = @($g.Group | Where-Object { $_.pass -eq "False" }).Count
   $skipN = @($g.Group | Where-Object { $_.pass -eq "SKIP" }).Count
   $warnN = @($g.Group | Where-Object { $_.pass -eq "WARN" }).Count
-  $phases[$g.Name] = @{ gates = @{ pass = $passN; fail = $failN; skip = $skipN; warn = $warnN } }
+  $errN  = @($g.Group | Where-Object { $_.pass -eq "ERROR" }).Count
+  $phases[$g.Name] = @{ gates = @{ pass = $passN; fail = $failN; skip = $skipN; warn = $warnN; error = $errN } }
 }
 $totalPass = @($gates | Where-Object { $_.pass -eq "True" }).Count
 $totalFail = @($gates | Where-Object { $_.pass -eq "False" }).Count
 $totalSkip = @($gates | Where-Object { $_.pass -eq "SKIP" }).Count
 $totalWarn = @($gates | Where-Object { $_.pass -eq "WARN" }).Count
+# ERROR = the drill blew up before it could measure anything (harness/infra fault,
+# e.g. a stream fault - see common.ps1 Invoke-MG). Counted apart from totalFail so a
+# voided drill is never read as a measured product defect (2026-08-04 postmortem).
+$totalError = @($gates | Where-Object { $_.pass -eq "ERROR" }).Count
 
 # ---- economics: latest savedPct per family (skip SKIP rows) ----
 $econSummary = [ordered]@{}
@@ -92,7 +97,7 @@ $summary = [ordered]@{
   mgVersion = $mgVersion
   timestamp = (Get-Date -Format "yyyy-MM-ddTHH:mm:ss")
   phases    = $phases
-  gateTotals = @{ pass = $totalPass; fail = $totalFail; skip = $totalSkip; warn = $totalWarn }
+  gateTotals = @{ pass = $totalPass; fail = $totalFail; skip = $totalSkip; warn = $totalWarn; error = $totalError }
   economics = $econSummary
   remote    = $remoteSummary
   perf      = $perfBench   # rows consumed by 08_perf.ps1 -Baseline on the next run
@@ -160,7 +165,7 @@ if (Test-Path $templatePath) {
 }
 
 function GateLabel([string]$v) {
-  switch ($v) { "True" { "PASS" } "SKIP" { "SKIP" } "WARN" { "WARN" } default { "FAIL" } }
+  switch ($v) { "True" { "PASS" } "SKIP" { "SKIP" } "WARN" { "WARN" } "ERROR" { "ERROR" } default { "FAIL" } }
 }
 $gateRows = @($gates | ForEach-Object {
   "| $(MdEsc $_.phase) | $(MdEsc $_.gate) | $(GateLabel $_.pass) | $(MdEsc $_.detail) |"
@@ -191,13 +196,15 @@ $perfRows = @($perfTime | ForEach-Object {
 })
 if (-not $perfRows) { $perfRows = @("| _none_ | | | |") }
 
-# Verdict. Skips are called out explicitly instead of being averaged into a pass:
-# "24 passed" and "24 passed, 30 skipped" are very different campaigns and the
-# summary line has to be able to say so.
-$counts = "pass=$totalPass fail=$totalFail skip=$totalSkip warn=$totalWarn"
+# Verdict. Skips and errors are called out explicitly instead of being averaged into
+# a pass: "24 passed" and "24 passed, 30 skipped" are very different campaigns, and a
+# gate that ERRORED (drill blew up before measuring anything) is neither - it must not
+# be silently swallowed into fail (a false product-defect report) or into pass.
+$counts = "pass=$totalPass fail=$totalFail skip=$totalSkip warn=$totalWarn error=$totalError"
 $verdict =
   if ($totalFail -gt 0) { "FAIL - $totalFail gate(s) failed ($counts) - see section 2." }
   elseif ($totalPass -eq 0) { "NOTHING-VERIFIED - no gate passed ($counts); this run proves nothing." }
+  elseif ($totalError -gt 0) { "PASS-WITH-ERRORS - $counts; $totalError gate(s) did not run (harness/infra fault, not a product defect) - see section 2." }
   elseif ($totalSkip -gt 0 -and $findings.Count -gt 0) { "PASS-WITH-SKIPS-AND-FINDINGS - $counts, $($findings.Count) matrix finding(s) - see sections 2 and 3." }
   elseif ($totalSkip -gt 0) { "PASS-WITH-SKIPS - $counts; $totalSkip gate(s) were NOT checked - see section 2." }
   elseif ($findings.Count -gt 0) { "PASS-WITH-FINDINGS - all gates green ($counts), $($findings.Count) matrix finding(s) - see section 3." }
@@ -293,8 +300,19 @@ Write-QaGate $Phase "summary-json-valid" $jsonOk $summaryPath
 # gates.tsv) reaches the same conclusion the report prints.
 Write-QaGate $Phase "campaign-no-gate-failures" ($totalFail -eq 0) "failed=$totalFail of $($gates.Count) gates"
 Write-QaGate $Phase "campaign-verified-something" ($totalPass -gt 0) $counts
+# Separating ERROR out of $totalFail (2026-08-04) silently widened
+# campaign-no-gate-failures: the run that voided S2/S3/S4 would now leave
+# $totalFail = 0 and that gate would PASS. A voided drill is not a passing drill,
+# so errors need a gate of their own - otherwise "no product defects found" and
+# "three drills never ran" are indistinguishable from the gate table, which is
+# the exact failure class 08_perf's dead gate already cost us once.
+Write-QaGate $Phase "campaign-no-harness-errors" ($totalError -eq 0) `
+  "errored=$totalError of $($gates.Count) gates (drills that blew up before measuring anything)"
 if ($totalSkip -gt 0) {
   Write-QaLog $Phase "NOTE $totalSkip gate(s) were SKIPPED - they were not checked and are not passes"
+}
+if ($totalError -gt 0) {
+  Write-QaLog $Phase "NOTE $totalError gate(s) ERRORED - the drill did not run; this is a harness/infra fault, not a product verdict"
 }
 
 Exit-QaPhase $Phase

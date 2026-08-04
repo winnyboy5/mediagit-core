@@ -51,26 +51,54 @@ function Invoke-MG([string]$Repo, [string[]]$MgArgs, [string]$Phase = "misc", [i
   if ($StdIn) { $proc.StartInfo.RedirectStandardInput = $true }
   $proc.StartInfo.CreateNoWindow = $true
 
-  $proc.Start() | Out-Null
-  if ($StdIn) {
-    foreach ($line in $StdIn) { $proc.StandardInput.WriteLine($line) }
-    $proc.StandardInput.Close()
-  }
-  # Threadpool drain: ReadToEnd-after-WaitForExit deadlocks once the child fills
-  # the pipe buffer; async tasks drain continuously without the PS event loop.
-  $outTask = $proc.StandardOutput.ReadToEndAsync()
-  $errTask = $proc.StandardError.ReadToEndAsync()
+  # try/finally Dispose(): Process (and the pipe handles behind StandardOutput/
+  # StandardError) is IDisposable, and letting $proc fall out of scope only makes
+  # it GC-eligible - the handles are not freed until the finalizer runs. Disposing
+  # deterministically is correct practice regardless, and measurably reduces
+  # handle churn: 400 spawns of mediagit.exe grew this host's handle count by
+  # +367 without Dispose vs +47 with it (measured 2026-08-04).
+  #
+  # HONEST SCOPE - this is hygiene, NOT a proven cure. It was added while
+  # investigating the 20260804-scale-verify2 S2/S3/S4 fault ("Stream was not
+  # readable", which voided three drills). The leak hypothesis did NOT survive
+  # testing: a 1,200-spawn burst - more than S2's whole churn loop - produced
+  # ZERO failures both with and without Dispose, and handle count plateaued at
+  # ~1,000, i.e. the finalizer does keep up. So the cause of that fault remains
+  # UNKNOWN; do not record it as solved. What actually protects the campaign is
+  # the catch block below plus the "ERROR" verdict, which stop a harness fault
+  # from being silently counted as a product failure.
+  try {
+    $proc.Start() | Out-Null
+    if ($StdIn) {
+      foreach ($line in $StdIn) { $proc.StandardInput.WriteLine($line) }
+      $proc.StandardInput.Close()
+    }
+    # Threadpool drain: ReadToEnd-after-WaitForExit deadlocks once the child fills
+    # the pipe buffer; async tasks drain continuously without the PS event loop.
+    $outTask = $proc.StandardOutput.ReadToEndAsync()
+    $errTask = $proc.StandardError.ReadToEndAsync()
 
-  if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
-    taskkill /T /F /PID $proc.Id 2>$null | Out-Null
-    $proc.WaitForExit() | Out-Null   # pipes close on kill; tasks then complete
+    if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+      taskkill /T /F /PID $proc.Id 2>$null | Out-Null
+      $proc.WaitForExit() | Out-Null   # pipes close on kill; tasks then complete
+      $sw.Stop()
+      $out = $outTask.Result + $errTask.Result + "`n[TIMEOUT after $TimeoutSec seconds]"
+      $code = 124
+    } else {
+      $sw.Stop()
+      $out = $outTask.Result + $errTask.Result
+      $code = $proc.ExitCode
+    }
+  } catch {
+    # A stream/pipe fault surfacing here (as above) must not escape this call and
+    # unwind past the drill that made it - that is what turned one harness fault
+    # into three voided drills. Report it as a harness-side ERROR result instead of
+    # throwing; the caller decides how to record it (see Get-QaVerdict "ERROR").
     $sw.Stop()
-    $out = $outTask.Result + $errTask.Result + "`n[TIMEOUT after $TimeoutSec seconds]"
-    $code = 124
-  } else {
-    $sw.Stop()
-    $out = $outTask.Result + $errTask.Result
-    $code = $proc.ExitCode
+    $out = "[INVOKE-MG-ERROR] $_"
+    $code = -1
+  } finally {
+    $proc.Dispose()
   }
 
   $log = Join-Path $QA.Logs "$Phase-cmds.log"
@@ -120,12 +148,18 @@ function Select-TierFiles([string[]]$Paths) {
 }
 
 # ---------------------------------------------------------------------------
-# Verdicts. A gate is one of exactly four values in gates.tsv's `pass` column:
+# Verdicts. A gate is one of exactly five values in gates.tsv's `pass` column:
 #   True  - checked, held.
-#   False - checked, failed.
+#   False - checked, failed. A measured product defect.
 #   SKIP  - NOT checked (capability/credential absent). Never a pass. A campaign
 #           whose gates are all SKIP has verified nothing and must not read green.
 #   WARN  - checked, informational only (e.g. no perf baseline exists yet).
+#   ERROR - NOT checked: the drill itself blew up (harness/infra fault - a stream
+#           fault, a server that vanished mid-drill, etc.) before it could measure
+#           anything. Distinct from False on purpose: a drill that failed to run is
+#           not evidence the product is broken, and folding it into False turns a
+#           harness bug into a false product-failure report (2026-08-04 postmortem,
+#           10_scale S2/S3/S4 - see Invoke-MG's catch in this file).
 # Anything that is not recognisably one of these is False: an unset/garbled verdict
 # is a harness bug, and the safe reading of "we don't know" is "not proven".
 # ---------------------------------------------------------------------------
@@ -133,6 +167,7 @@ function Get-QaVerdict($Pass) {
   $s = ("" + $Pass).Trim().ToUpper()
   if ($s -eq "SKIP") { return "SKIP" }
   if ($s -eq "WARN") { return "WARN" }
+  if ($s -eq "ERROR") { return "ERROR" }
   if ($Pass -eq $true -or $s -eq "TRUE") { return "True" }
   return "False"
 }
@@ -173,6 +208,7 @@ function Exit-QaPhase([string]$Phase, [bool]$ExtraFail = $false) {
   $fail = @($rows | Where-Object { $_.pass -eq "False" }).Count
   $skip = @($rows | Where-Object { $_.pass -eq "SKIP" }).Count
   $warn = @($rows | Where-Object { $_.pass -eq "WARN" }).Count
+  $err  = @($rows | Where-Object { $_.pass -eq "ERROR" }).Count
   $unexpectedSkip = @($rows | Where-Object {
       $_.pass -eq "SKIP" -and ("" + $_.detail) -notlike ("*" + $QA_SKIP_NOT_SELECTED + "*")
     }).Count
@@ -181,17 +217,24 @@ function Exit-QaPhase([string]$Phase, [bool]$ExtraFail = $false) {
   # This is the shape a phase takes when it dies early - a missing dot-source, a helper
   # that throws, a server that never starts - and reporting PASS for it is the same
   # greenwashing as counting a SKIP as a pass. Zero rows is never success.
+  #
+  # ERROR sits below FAIL and above PASS on purpose: it must not read as a product
+  # defect (that's what FAIL is for), but a phase that errored out cannot read as a
+  # clean PASS either - something there was never measured. exit 2 keeps it out of
+  # both of run_all.ps1's other buckets.
   $verdict =
     if ($fail -gt 0 -or $ExtraFail) { "FAIL" }
     elseif ($rows.Count -eq 0) { "NOTHING-VERIFIED" }
     elseif ($pass -eq 0 -and $unexpectedSkip -gt 0) { "NOTHING-VERIFIED" }
+    elseif ($err -gt 0) { "ERROR" }
     else { "PASS" }
-  Write-QaLog $Phase ("=== {0} done: {1} (pass={2} fail={3} skip={4} warn={5} unexpected-skip={6} extra-fail={7}) ===" -f `
-      $Phase, $verdict, $pass, $fail, $skip, $warn, $unexpectedSkip, $ExtraFail)
+  Write-QaLog $Phase ("=== {0} done: {1} (pass={2} fail={3} skip={4} warn={5} error={6} unexpected-skip={7} extra-fail={8}) ===" -f `
+      $Phase, $verdict, $pass, $fail, $skip, $warn, $err, $unexpectedSkip, $ExtraFail)
 
   switch ($verdict) {
     "FAIL" { exit 1 }
     "NOTHING-VERIFIED" { exit 3 }
+    "ERROR" { exit 2 }
     default { exit 0 }
   }
 }

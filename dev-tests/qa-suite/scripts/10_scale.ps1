@@ -59,7 +59,11 @@ function Get-ScaleBackends {
 function Rec([string]$Drill, [string]$Backend, [string]$Metric, $Value, $Pass, [string]$Detail) {
   Write-QaRow $TSV @("drill", "backend", "metric", "value", "pass", "detail") `
     @($Drill, $Backend, $Metric, $Value, $Pass, $Detail)
-  $tag = if ("$Pass" -eq "SKIP") { "SKIP" } elseif ($Pass) { "PASS" } else { "FAIL" }
+  # ERROR (the drill blew up before measuring anything - see the "unexpected error"
+  # catches below) is deliberately NOT folded into FAIL: it must not read as a
+  # product defect, and must not flip $script:AllPass (that would force the phase's
+  # own FAIL verdict via Exit-QaPhase's $ExtraFail and defeat the whole distinction).
+  $tag = if ("$Pass" -eq "SKIP") { "SKIP" } elseif ("$Pass" -eq "ERROR") { "ERROR" } elseif ($Pass) { "PASS" } else { "FAIL" }
   Write-QaLog $Phase ("{0} [{1}] {2}={3} -> {4}  {5}" -f $Drill, $Backend, $Metric, $Value, $tag, $Detail)
   Write-QaGate $Phase "$Drill-$Metric" $Pass $Detail
   if ($tag -eq "FAIL") { $script:AllPass = $false }
@@ -199,7 +203,7 @@ function Drill-S1-ForBackend([string]$backend) {
     Rec $drill $backend "clones-converge" $converged $pass `
       "n=$N exit0=$exitOk present=$present converged=$converged fsckClean=$fsckClean panics=$panics timedOut=$timedOut serverAlive=$srvAlive"
   } catch {
-    Rec $drill $backend "clones-converge" "" $false "unexpected error: $_"
+    Rec $drill $backend "clones-converge" "" "ERROR" "unexpected error: $_"
   } finally {
     Stop-QaServer $srv
     if ($src) { Remove-Item -Recurse -Force $src -ErrorAction SilentlyContinue }
@@ -328,7 +332,7 @@ function Drill-S2-Churn {
       "clone exit=$($c.Exit) hash-match=$roundTripOk fsck=$backFsck chainDepth=$($stats.MaxDepth)"
     Remove-Item -Recurse -Force $back -ErrorAction SilentlyContinue
   } catch {
-    Rec $drill "local" "churn" "" $false "unexpected error: $_"
+    Rec $drill "local" "churn" "" "ERROR" "unexpected error: $_"
   } finally {
     Stop-QaServer $srv
   }
@@ -438,7 +442,7 @@ function Drill-S3-Conflicts {
       ("ops=$($ops.Count) fsckClean=$consistent baselineIntact=$baselineIntact sharedSane=$sharedSane " +
        "sharedMissing=$sharedMissing panics=$panics timedOut=$timedOut exits=$($opExits -join ',')")
   } catch {
-    Rec $drill "local" "no-data-loss" "" $false "unexpected error: $_"
+    Rec $drill "local" "no-data-loss" "" "ERROR" "unexpected error: $_"
   }
 }
 
@@ -509,7 +513,7 @@ function Drill-S4-ResourcePressure {
       "bigMB=$bigMB pushExit=$($p.Exit) cloneExit=$($c.Exit) hash-match=$hashOk"
     Remove-Item -Recurse -Force $back -ErrorAction SilentlyContinue
   } catch {
-    Rec $drill "local" "peak-rss-mb" "" $false "unexpected error: $_"
+    Rec $drill "local" "peak-rss-mb" "" "ERROR" "unexpected error: $_"
   } finally {
     Stop-QaServer $srv
     if ($repo) { Remove-Item -Recurse -Force $repo -ErrorAction SilentlyContinue }  # reclaim the GB now
@@ -628,13 +632,13 @@ function Drill-S5-ThroughputDedup {
       Rec $drill $backend "clone-mbs" $cloneMbs $clonePass "parity=$parity sec=$($r.Sec) floor=$cloneFloorTxt exit=$($r.Exit)$sampleNote"
       Remove-Item -Recurse -Force $clone -ErrorAction SilentlyContinue
     } catch {
-      Rec $drill $backend "phase" "" $false "unexpected error: $_"
+      Rec $drill $backend "phase" "" "ERROR" "unexpected error: $_"
     } finally {
       Stop-QaServer $srv
     }
   }
   } catch {
-    Rec $drill "local" "setup" "" $false "S5 setup error: $_"
+    Rec $drill "local" "setup" "" "ERROR" "S5 setup error: $_"
   } finally {
     if ($src) { Remove-Item -Recurse -Force $src -ErrorAction SilentlyContinue }
     if ($cloudSrc) { Remove-Item -Recurse -Force $cloudSrc -ErrorAction SilentlyContinue }
