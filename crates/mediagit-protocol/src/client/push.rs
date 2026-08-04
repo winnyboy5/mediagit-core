@@ -13,6 +13,33 @@
 
 use super::*;
 
+/// Does this presigned URL's signed header set already carry `content-length`?
+///
+/// SigV4 signs `content-length` — it is NOT in aws-sigv4's `excluded_headers`
+/// (only Authorization, User-Agent, X-Ray-Trace-Id and Transfer-Encoding are) —
+/// so whenever the server presigns with a concrete length, `content-length`
+/// lands in `required_headers` and forms part of `SignedHeaders`.
+///
+/// Adding our own on top is not a harmless overwrite:
+/// `reqwest::RequestBuilder::header` calls `HeaderMap::append`, not `insert`, so
+/// it emits a SECOND `content-length` line. A duplicated signed header does not
+/// canonicalize back to the single value that was signed, and S3/MinIO answer
+/// `SignatureDoesNotMatch` — 976 and 748 of them in campaigns 20260803-scale and
+/// 20260804-scale-verify2, all on this per-chunk fallback path. The pack path
+/// (`pack_builder.rs`) never had the bug because it only ever replays
+/// `required_headers`, and it logged none.
+///
+/// `tests/presigned_put_headers.rs` pins this at the socket: hyper does not
+/// collapse the duplicate, so the second instance really does reach the peer.
+///
+/// The server still legitimately presigns unbound URLs (`content_length == 0`),
+/// which carry no signed `content-length`; those DO need one supplied.
+fn signs_content_length(required_headers: &[[String; 2]]) -> bool {
+    required_headers
+        .iter()
+        .any(|h| h[0].eq_ignore_ascii_case("content-length"))
+}
+
 impl ProtocolClient {
     /// Push local objects and update remote refs
     ///
@@ -943,12 +970,16 @@ impl ProtocolClient {
                                         .await;
                                     }
 
-                                    let mut req = direct_client
-                                        .put(&current_url)
-                                        .header(
+                                    // Only supply content-length when the signature
+                                    // does not already commit to one — see
+                                    // `signs_content_length`.
+                                    let mut req = direct_client.put(&current_url);
+                                    if !signs_content_length(&current_headers) {
+                                        req = req.header(
                                             reqwest::header::CONTENT_LENGTH,
                                             chunk_data.len(),
                                         );
+                                    }
                                     for [k, v] in &current_headers {
                                         req = req.header(k.as_str(), v.as_str());
                                     }
@@ -1854,12 +1885,16 @@ impl ProtocolClient {
                                             .await;
                                         }
 
-                                        let mut req = direct_client
-                                            .put(&current_url)
-                                            .header(
+                                        // Only supply content-length when the
+                                        // signature does not already commit to one
+                                        // — see `signs_content_length`.
+                                        let mut req = direct_client.put(&current_url);
+                                        if !signs_content_length(&current_headers) {
+                                            req = req.header(
                                                 reqwest::header::CONTENT_LENGTH,
                                                 chunk_data.len(),
                                             );
+                                        }
                                         for [k, v] in &current_headers {
                                             req = req.header(k.as_str(), v.as_str());
                                         }
@@ -2476,5 +2511,35 @@ async fn detect_object_type(odb: &ObjectDatabase, oid: &Oid) -> ObjectType {
         ObjectType::Tag
     } else {
         ObjectType::Blob
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::signs_content_length;
+
+    #[test]
+    fn detects_server_signed_content_length() {
+        let headers = [["content-length".to_string(), "1234".to_string()]];
+        assert!(signs_content_length(&headers));
+    }
+
+    /// HTTP header names are case-insensitive and neither the SDK nor the wire
+    /// guarantees a casing. Matching only the lowercase spelling would let a
+    /// `Content-Length` through and re-introduce the duplicate.
+    #[test]
+    fn header_match_is_case_insensitive() {
+        let headers = [["Content-Length".to_string(), "1234".to_string()]];
+        assert!(signs_content_length(&headers));
+    }
+
+    /// Unbound presigned URLs (server passed `content_length == 0`) sign no
+    /// length, so the client must still supply one — returning true here would
+    /// send a body with no content-length at all.
+    #[test]
+    fn unbound_url_still_needs_an_explicit_length() {
+        let headers = [["x-amz-checksum-crc32".to_string(), "abcd".to_string()]];
+        assert!(!signs_content_length(&headers));
+        assert!(!signs_content_length(&[]));
     }
 }
