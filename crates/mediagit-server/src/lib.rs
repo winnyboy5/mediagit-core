@@ -83,6 +83,38 @@ async fn health_handler() -> impl IntoResponse {
     )
 }
 
+/// OP-7: build the per-request tracing span, adding the client's
+/// correlation id (if any) as an `op_id` field so it lands on every log line
+/// emitted while handling the request -- including storage-layer errors,
+/// which is where diagnosing today's incidents actually needed it. Before
+/// this, the client error and the server log shared no join key but the
+/// timestamp, which doesn't scale to a concurrent multi-GB transfer.
+///
+/// Same shape as `tower_http::trace::DefaultMakeSpan`'s default (name
+/// "request", DEBUG, method/uri/version) plus `op_id`, so this isn't a
+/// second logging mechanism, just that one extended.
+///
+/// The header (`mediagit_protocol::client::OP_ID_HEADER`, NOT
+/// `X-Request-ID` -- that one is the load-bearing want-cache key for
+/// `GET /objects/pack`, see `handlers::repo`) is optional: curl, health
+/// checks, and older clients that never send it still get a span, just with
+/// a server-minted id that can't be joined back to a client-side log.
+fn make_request_span(request: &axum::extract::Request) -> tracing::Span {
+    let op_id = request
+        .headers()
+        .get(mediagit_protocol::client::OP_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .unwrap_or_else(state::generate_request_id);
+    tracing::debug_span!(
+        "request",
+        method = %request.method(),
+        uri = %request.uri(),
+        version = ?request.version(),
+        op_id = %op_id,
+    )
+}
+
 /// I4: wrap `router` with a `CorsLayer` restricted to `origins` (exact
 /// match), or return it unchanged if `origins` is `None`/empty — today's
 /// behavior (no CORS layer, no CORS headers) is preserved when CORS isn't
@@ -286,7 +318,7 @@ fn build_router(state: Arc<AppState>, rate_limiter: Option<SharedRateLimiter>) -
         .layer(middleware::from_fn(security::audit_middleware))
         .layer(middleware::from_fn(security::security_headers_middleware))
         .layer(middleware::from_fn(security::request_validation_middleware))
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http().make_span_with(make_request_span));
 
     // Path validation middleware must be applied as the outermost layer
     // to intercept requests before routing

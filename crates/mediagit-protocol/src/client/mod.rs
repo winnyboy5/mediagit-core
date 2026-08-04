@@ -136,11 +136,37 @@ impl Credentials {
     }
 }
 
-/// Build the control-plane `reqwest::Client` with the given credentials
-/// baked in as a default header (present on every request sent through this
-/// client instance). Shared by `ProtocolClient::new` and `with_credentials`
-/// so both construct the client identically apart from the header.
-fn build_control_plane_client(creds: &Credentials) -> reqwest::Client {
+/// Header carrying the OP-7 correlation id (see `ProtocolClient::new`).
+///
+/// Deliberately distinct from `X-Request-ID`: that header is already
+/// load-bearing as the want-cache key for `GET /objects/pack` (client sets
+/// it from `WantResponse::request_id` in `pull.rs`; server reads it in
+/// `handlers::repo`), scoped to one pack negotiation. Reusing it here would
+/// collide with that and break pack download.
+pub const OP_ID_HEADER: &str = "x-mediagit-op-id";
+
+/// Mint a correlation id for one client operation (push/pull/clone/...).
+///
+/// Same cheap idiom as the server's own `generate_request_id` (timestamp +
+/// process-local counter, not a UUID) — protocol can't depend on
+/// mediagit-server to reuse that one directly, and a client-side id only
+/// needs to be unique within this process's lifetime.
+fn generate_operation_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("{timestamp}-{id}")
+}
+
+/// Build the control-plane `reqwest::Client` with the given credentials and
+/// operation id baked in as default headers (present on every request sent
+/// through this client instance). Shared by `ProtocolClient::new` and
+/// `with_credentials` so both construct the client identically apart from
+/// the credentials header.
+fn build_control_plane_client(creds: &Credentials, op_id: &str) -> reqwest::Client {
     let pool_max = http_pool_max();
     crate::ensure_crypto_provider();
     let mut builder = reqwest::Client::builder()
@@ -169,11 +195,19 @@ fn build_control_plane_client(creds: &Credentials) -> reqwest::Client {
     // request ceiling here causes spurious "error sending request"
     // failures on healthy slow uploads. See dev-tests/azure-manual-
     // test for the regression that motivated removing this.
+    let mut headers = reqwest::header::HeaderMap::new();
     if let Some((name, value)) = creds.header()
         && let Ok(header_value) = reqwest::header::HeaderValue::from_str(&value)
     {
-        let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(reqwest::header::HeaderName::from_static(name), header_value);
+    }
+    if let Ok(header_value) = reqwest::header::HeaderValue::from_str(op_id) {
+        headers.insert(
+            reqwest::header::HeaderName::from_static(OP_ID_HEADER),
+            header_value,
+        );
+    }
+    if !headers.is_empty() {
         builder = builder.default_headers(headers);
     }
     builder.build().unwrap_or_else(|_| reqwest::Client::new())
@@ -188,6 +222,11 @@ pub struct ProtocolClient {
     /// `with_credentials` can rebuild `client` and so callers can inspect
     /// what's configured.
     credentials: Credentials,
+    /// OP-7 correlation id for this operation (one push/pull/clone), sent as
+    /// `OP_ID_HEADER` on every control-plane request via `client`'s default
+    /// headers. Stored so `with_credentials` can carry it over when it
+    /// rebuilds `client`.
+    operation_id: String,
     /// Optional override for parallel chunk-upload fan-out. Takes precedence
     /// over the internal default (32) but is itself overridden by the
     /// `MEDIAGIT_UPLOAD_CONCURRENCY` env var. Set via `with_concurrent_uploads`.
@@ -319,10 +358,17 @@ impl ProtocolClient {
     /// * `base_url` - Base URL of the MediaGit server (e.g., "http://localhost:3000/repo")
     pub fn new(base_url: impl Into<String>) -> Self {
         let credentials = Credentials::None;
+        // OP-7: one id per operation, minted here because this is where a
+        // push/pull/clone actually begins — the CLI constructs a fresh
+        // `ProtocolClient` per command (see crates/mediagit-cli/src/commands/
+        // {push,pull,clone}.rs), so "one client instance" already matches
+        // "one user-facing operation".
+        let operation_id = generate_operation_id();
         Self {
             base_url: base_url.into(),
-            client: build_control_plane_client(&credentials),
+            client: build_control_plane_client(&credentials, &operation_id),
             credentials,
+            operation_id,
             concurrent_uploads: None,
             concurrent_downloads: None,
         }
@@ -333,9 +379,10 @@ impl ProtocolClient {
     /// makes. Rebuilds the internal HTTP client with the same pool/timeout
     /// settings as `new` — direct/presigned cloud-storage requests use their
     /// own separately-built client and never see this header regardless.
-    /// `Credentials::None` (the default) attaches no header at all.
+    /// `Credentials::None` (the default) attaches no header at all. Keeps
+    /// the same OP-7 operation id minted in `new`.
     pub fn with_credentials(mut self, credentials: Credentials) -> Self {
-        self.client = build_control_plane_client(&credentials);
+        self.client = build_control_plane_client(&credentials, &self.operation_id);
         self.credentials = credentials;
         self
     }
@@ -343,6 +390,13 @@ impl ProtocolClient {
     /// The credentials currently configured on this client.
     pub fn credentials(&self) -> &Credentials {
         &self.credentials
+    }
+
+    /// The OP-7 correlation id for this operation, sent as `OP_ID_HEADER` on
+    /// every control-plane request. Lets a caller report the id it should
+    /// grep server logs for.
+    pub fn operation_id(&self) -> &str {
+        &self.operation_id
     }
 
     /// Override the parallel chunk-upload fan-out used by
@@ -373,6 +427,7 @@ impl ProtocolClient {
             base_url: self.base_url.clone(),
             client: self.client.clone(),
             credentials: self.credentials.clone(),
+            operation_id: self.operation_id.clone(),
             concurrent_uploads: self.concurrent_uploads,
             concurrent_downloads: Some(n),
         }
