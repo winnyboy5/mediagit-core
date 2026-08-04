@@ -13,6 +13,42 @@
 
 use super::*;
 
+/// Attempts to retry a chunk GET that failed transiently, beyond the first try.
+///
+/// Deliberately small. The server has already exhausted its own storage retries
+/// before it answers 503, so this is a second-order backstop for a
+/// moment-in-time condition, not a substitute for backend resilience.
+const CHUNK_GET_MAX_RETRIES: u32 = 3;
+
+/// Is this chunk-GET outcome worth retrying?
+///
+/// 5xx and 429 are weather; 404/403/409 are verdicts. Retrying a verdict just
+/// delays a failure the caller needs to see — and 409 specifically is
+/// *meaningful* here (the chunk is delta-only and the caller re-routes to
+/// `/chunk-deltas/<id>`), so retrying it would break that path.
+fn chunk_get_is_transient(status: reqwest::StatusCode) -> bool {
+    status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+}
+
+/// One place to turn a failed chunk GET into an error.
+///
+/// 503 earns its own text: it means the *server* could not reach its storage
+/// backend, which is an operator problem, and "failed with status: 503" gives
+/// no hint of that. This lived only on `download_chunk` (the sequential path)
+/// while clone runs the parallel path below, so the actionable message was
+/// unreachable in exactly the case it was written for — campaign
+/// 20260804-sigfix hit it and reported the generic text.
+fn chunk_get_error(chunk_id: &Oid, status: reqwest::StatusCode) -> anyhow::Error {
+    if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+        anyhow::anyhow!(
+            "GET /chunks/{} failed: server storage backend unreachable (503) — verify the storage service (MinIO/S3/Azure) is running and accessible to the server",
+            chunk_id
+        )
+    } else {
+        anyhow::anyhow!("GET /chunks/{} failed with status: {}", chunk_id, status)
+    }
+}
+
 impl ProtocolClient {
     /// Pull objects from remote and return pack data with chunked object OIDs
     ///
@@ -403,18 +439,8 @@ impl ProtocolClient {
             .await
             .context(format!("Failed to GET /chunks/{}", chunk_id))?;
 
-        if response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
-            anyhow::bail!(
-                "GET /chunks/{} failed: server storage backend unreachable (503) — verify the storage service (MinIO/S3/Azure) is running and accessible to the server",
-                chunk_id
-            );
-        }
         if !response.status().is_success() {
-            anyhow::bail!(
-                "GET /chunks/{} failed with status: {}",
-                chunk_id,
-                response.status()
-            );
+            return Err(chunk_get_error(chunk_id, response.status()));
         }
 
         Ok(response.bytes().await?.to_vec())
@@ -878,9 +904,51 @@ impl ProtocolClient {
                                 }
                                 // Proxy GET fallback
                                 let url = format!("{}/chunks/{}", base_url, hex);
-                                let response = client.get(&url).send().await.map_err(|e| {
-                                    anyhow::anyhow!("Failed to download chunk {}: {}", chunk_id, e)
-                                })?;
+                                // Bounded retry. Without it, ONE transient failure aborts an
+                                // entire multi-GB clone: campaign 20260804-sigfix lost a 2 GB
+                                // AWS clone to a single chunk whose GET returned 503 after the
+                                // server had already spent 137s on its own retries. Retrying a
+                                // handful of times costs seconds; not retrying costs the whole
+                                // transfer and every byte already downloaded.
+                                //
+                                // Transport errors are retried alongside 5xx/429 — a dropped
+                                // connection mid-clone is the same class of weather on a
+                                // WAN-bound product. `MEDIAGIT_PULL_DEADLINE_SECS` still bounds
+                                // the whole download, so this cannot stall a clone forever.
+                                let mut attempt = 0u32;
+                                let response = loop {
+                                    let outcome = client.get(&url).send().await;
+                                    let retryable = match &outcome {
+                                        Ok(r) => chunk_get_is_transient(r.status()),
+                                        Err(_) => true,
+                                    };
+                                    if retryable && attempt < CHUNK_GET_MAX_RETRIES {
+                                        let backoff_ms = 500u64 << attempt;
+                                        attempt += 1;
+                                        tracing::warn!(
+                                            chunk = %hex,
+                                            attempt,
+                                            backoff_ms,
+                                            outcome = %match &outcome {
+                                                Ok(r) => r.status().to_string(),
+                                                Err(e) => e.to_string(),
+                                            },
+                                            "chunk GET failed transiently; retrying"
+                                        );
+                                        tokio::time::sleep(std::time::Duration::from_millis(
+                                            backoff_ms,
+                                        ))
+                                        .await;
+                                        continue;
+                                    }
+                                    break outcome.map_err(|e| {
+                                        anyhow::anyhow!(
+                                            "Failed to download chunk {}: {}",
+                                            chunk_id,
+                                            e
+                                        )
+                                    })?;
+                                };
                                 // F3: server returns 409 when the chunk is delta-only.
                                 // This happens when our POST /chunk-deltas/check probe failed
                                 // silently and we ended up in the wrong (full-chunk) pass.
@@ -914,11 +982,7 @@ impl ProtocolClient {
                                     );
                                 }
                                 if !response.status().is_success() {
-                                    anyhow::bail!(
-                                        "GET /chunks/{} failed with status: {}",
-                                        chunk_id,
-                                        response.status()
-                                    );
+                                    return Err(chunk_get_error(&chunk_id, response.status()));
                                 }
                                 if stream_to_disk {
                                     // B4: stream proxy response to temp file to reduce peak RAM.
@@ -1081,5 +1145,59 @@ impl ProtocolClient {
             b.summary();
         }
         Ok((total_chunks_downloaded, total_net_bytes))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{chunk_get_error, chunk_get_is_transient};
+    use reqwest::StatusCode;
+
+    #[test]
+    fn server_errors_and_throttling_are_transient() {
+        for s in [
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::GATEWAY_TIMEOUT,
+            StatusCode::TOO_MANY_REQUESTS,
+        ] {
+            assert!(chunk_get_is_transient(s), "{s} should be retried");
+        }
+    }
+
+    /// 409 is the load-bearing case: the server answers it when a chunk is
+    /// delta-only, and the caller re-routes to `/chunk-deltas/<id>`. Retrying
+    /// it would burn the backoff and then fail a request that was never going
+    /// to change — and could mask the re-route path entirely.
+    #[test]
+    fn verdicts_are_not_retried() {
+        for s in [
+            StatusCode::NOT_FOUND,
+            StatusCode::FORBIDDEN,
+            StatusCode::CONFLICT,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::OK,
+        ] {
+            assert!(!chunk_get_is_transient(s), "{s} must not be retried");
+        }
+    }
+
+    /// The 503 text names the operator action. It previously existed only on
+    /// the sequential path while clone runs the parallel one, so it was
+    /// unreachable in the case it was written for.
+    #[test]
+    fn service_unavailable_reports_the_operator_action() {
+        let oid = mediagit_versioning::Oid::from_bytes([7u8; 32]);
+        let msg = format!("{}", chunk_get_error(&oid, StatusCode::SERVICE_UNAVAILABLE));
+        assert!(msg.contains("storage backend unreachable"), "got: {msg}");
+        assert!(msg.contains("MinIO/S3/Azure"), "got: {msg}");
+    }
+
+    #[test]
+    fn other_statuses_report_the_status() {
+        let oid = mediagit_versioning::Oid::from_bytes([7u8; 32]);
+        let msg = format!("{}", chunk_get_error(&oid, StatusCode::NOT_FOUND));
+        assert!(msg.contains("404"), "got: {msg}");
     }
 }
