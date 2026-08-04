@@ -49,6 +49,52 @@ fn chunk_get_error(chunk_id: &Oid, status: reqwest::StatusCode) -> anyhow::Error
     }
 }
 
+/// Bounded retry for the proxy chunk-GET fallback.
+///
+/// Without it, ONE transient failure aborts an entire multi-GB clone: campaign
+/// 20260804-sigfix lost a 2 GB AWS clone to a single chunk whose GET returned
+/// 503 after the server had already spent 137s on its own retries. Retrying a
+/// handful of times costs seconds; not retrying costs the whole transfer and
+/// every byte already downloaded.
+///
+/// Transport errors are retried alongside 5xx/429 — a dropped connection
+/// mid-clone is the same class of weather on a WAN-bound product.
+/// `MEDIAGIT_PULL_DEADLINE_SECS` still bounds the whole download, so this
+/// cannot stall a clone forever.
+async fn get_chunk_with_retry(
+    client: &reqwest::Client,
+    url: &str,
+    chunk_id: &Oid,
+) -> anyhow::Result<reqwest::Response> {
+    let hex = chunk_id.to_hex();
+    let mut attempt = 0u32;
+    loop {
+        let outcome = client.get(url).send().await;
+        let retryable = match &outcome {
+            Ok(r) => chunk_get_is_transient(r.status()),
+            Err(_) => true,
+        };
+        if retryable && attempt < CHUNK_GET_MAX_RETRIES {
+            let backoff_ms = 500u64 << attempt;
+            attempt += 1;
+            tracing::warn!(
+                chunk = %hex,
+                attempt,
+                backoff_ms,
+                outcome = %match &outcome {
+                    Ok(r) => r.status().to_string(),
+                    Err(e) => e.to_string(),
+                },
+                "chunk GET failed transiently; retrying"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+            continue;
+        }
+        return outcome
+            .map_err(|e| anyhow::anyhow!("Failed to download chunk {}: {}", chunk_id, e));
+    }
+}
+
 impl ProtocolClient {
     /// Pull objects from remote and return pack data with chunked object OIDs
     ///
@@ -904,51 +950,8 @@ impl ProtocolClient {
                                 }
                                 // Proxy GET fallback
                                 let url = format!("{}/chunks/{}", base_url, hex);
-                                // Bounded retry. Without it, ONE transient failure aborts an
-                                // entire multi-GB clone: campaign 20260804-sigfix lost a 2 GB
-                                // AWS clone to a single chunk whose GET returned 503 after the
-                                // server had already spent 137s on its own retries. Retrying a
-                                // handful of times costs seconds; not retrying costs the whole
-                                // transfer and every byte already downloaded.
-                                //
-                                // Transport errors are retried alongside 5xx/429 — a dropped
-                                // connection mid-clone is the same class of weather on a
-                                // WAN-bound product. `MEDIAGIT_PULL_DEADLINE_SECS` still bounds
-                                // the whole download, so this cannot stall a clone forever.
-                                let mut attempt = 0u32;
-                                let response = loop {
-                                    let outcome = client.get(&url).send().await;
-                                    let retryable = match &outcome {
-                                        Ok(r) => chunk_get_is_transient(r.status()),
-                                        Err(_) => true,
-                                    };
-                                    if retryable && attempt < CHUNK_GET_MAX_RETRIES {
-                                        let backoff_ms = 500u64 << attempt;
-                                        attempt += 1;
-                                        tracing::warn!(
-                                            chunk = %hex,
-                                            attempt,
-                                            backoff_ms,
-                                            outcome = %match &outcome {
-                                                Ok(r) => r.status().to_string(),
-                                                Err(e) => e.to_string(),
-                                            },
-                                            "chunk GET failed transiently; retrying"
-                                        );
-                                        tokio::time::sleep(std::time::Duration::from_millis(
-                                            backoff_ms,
-                                        ))
-                                        .await;
-                                        continue;
-                                    }
-                                    break outcome.map_err(|e| {
-                                        anyhow::anyhow!(
-                                            "Failed to download chunk {}: {}",
-                                            chunk_id,
-                                            e
-                                        )
-                                    })?;
-                                };
+                                let response =
+                                    get_chunk_with_retry(&client, &url, &chunk_id).await?;
                                 // F3: server returns 409 when the chunk is delta-only.
                                 // This happens when our POST /chunk-deltas/check probe failed
                                 // silently and we ended up in the wrong (full-chunk) pass.
@@ -1150,8 +1153,10 @@ impl ProtocolClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{chunk_get_error, chunk_get_is_transient};
+    use super::{chunk_get_error, chunk_get_is_transient, get_chunk_with_retry};
     use reqwest::StatusCode;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn server_errors_and_throttling_are_transient() {
@@ -1199,5 +1204,184 @@ mod tests {
         let oid = mediagit_versioning::Oid::from_bytes([7u8; 32]);
         let msg = format!("{}", chunk_get_error(&oid, StatusCode::NOT_FOUND));
         assert!(msg.contains("404"), "got: {msg}");
+    }
+
+    /// Serves `total_requests` sequential connections: the first `fail_count`
+    /// get a bare 503, the rest get 200 + `body`. `Connection: close` on every
+    /// reply forces the client onto a fresh socket per attempt, so this exercises
+    /// the retry loop the same way a real transient backend failure would --
+    /// each attempt is an independent request, not a replay on one connection.
+    ///
+    /// `served` counts connections actually accepted. That count is what makes
+    /// the negative test load-bearing: without it, "budget exhausted" is
+    /// satisfied just as well by a build that never retries at all, so the test
+    /// would pass against the very defect it exists to catch.
+    async fn serve_flaky_chunk(
+        listener: TcpListener,
+        fail_count: usize,
+        total_requests: usize,
+        body: Vec<u8>,
+        served: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        for i in 0..total_requests {
+            let (mut sock, _) = listener.accept().await.expect("accept");
+            served.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let n = sock.read(&mut chunk).await.expect("read");
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            if i < fail_count {
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+            } else {
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(&body).await;
+            }
+            let _ = sock.flush().await;
+        }
+    }
+
+    /// Proves the loop actually retries and recovers: two injected 503s, then
+    /// a real body.
+    ///
+    /// This is the load-bearing test of the pair. Its expectations are
+    /// **hardcoded** (2 failures, 3 total requests) rather than derived from
+    /// `CHUNK_GET_MAX_RETRIES`, which is what lets it detect the budget being
+    /// removed. Red-verified 2026-08-04: with the constant set to 0 it fails on
+    /// `assertion failed: response.status().is_success()`, while the
+    /// exhaustion test — whose expectation tracks the constant — still passes.
+    /// Keep these counts literal; deriving them would make this test blind to
+    /// the defect it exists for.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn retries_past_transient_failures_and_recovers() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let body: Vec<u8> = (0u16..4096).map(|b| (b % 251) as u8).collect();
+        let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server = tokio::spawn(serve_flaky_chunk(
+            listener,
+            2,
+            3,
+            body.clone(),
+            std::sync::Arc::clone(&served),
+        ));
+
+        crate::ensure_crypto_provider();
+        let client = reqwest::Client::builder().build().expect("client");
+        let oid = mediagit_versioning::Oid::from_bytes([9u8; 32]);
+        let url = format!("http://{addr}/chunks/{}", oid.to_hex());
+
+        let response = get_chunk_with_retry(&client, &url, &oid)
+            .await
+            .expect("should recover after transient 503s");
+        assert!(response.status().is_success());
+        let got = response.bytes().await.expect("body").to_vec();
+        assert_eq!(got, body, "recovered body must be byte-identical");
+        assert_eq!(
+            served.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "recovery must have taken exactly the 2 failed attempts plus 1 success"
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), server)
+            .await
+            .expect("server task timed out")
+            .expect("server task panicked");
+    }
+
+    /// The complementary negative: failures that exceed the retry budget must
+    /// not spin forever. `CHUNK_GET_MAX_RETRIES` is 3, so 4 straight 503s (the
+    /// initial attempt + all 3 retries) must exhaust the budget.
+    ///
+    /// `get_chunk_with_retry` itself doesn't turn a terminal non-success
+    /// status into `Err` -- it hands back the last response as-is, same as
+    /// before this loop was extracted, because the caller needs that response
+    /// object intact to special-case 409 (delta re-route). The status check
+    /// that turns a terminal failure into an error lives in the caller,
+    /// immediately after the loop, unchanged by this extraction. So the
+    /// contract this test pins is: bounded attempts (proved by the timeout
+    /// below -- a loop that ignored `CHUNK_GET_MAX_RETRIES` would hang past
+    /// it) and the failing status surfacing intact for that caller-side check.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gives_up_once_the_retry_budget_is_exhausted() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let total = (super::CHUNK_GET_MAX_RETRIES + 1) as usize;
+        let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server = tokio::spawn(serve_flaky_chunk(
+            listener,
+            total,
+            total,
+            Vec::new(),
+            std::sync::Arc::clone(&served),
+        ));
+        let _ = &server;
+
+        crate::ensure_crypto_provider();
+        let client = reqwest::Client::builder().build().expect("client");
+        let oid = mediagit_versioning::Oid::from_bytes([9u8; 32]);
+        let url = format!("http://{addr}/chunks/{}", oid.to_hex());
+
+        // Bounded wait: a loop that doesn't respect CHUNK_GET_MAX_RETRIES
+        // (spins forever) fails this test instead of hanging the suite.
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            get_chunk_with_retry(&client, &url, &oid),
+        )
+        .await
+        .expect("retry loop did not return -- it is not respecting the retry budget")
+        .expect("transport-level error even though the server always answered");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "budget exhausted: the still-failing status must surface for the \
+             caller's post-loop check to turn into an error"
+        );
+        assert!(
+            !chunk_get_error(&oid, response.status())
+                .to_string()
+                .is_empty(),
+            "the caller-side check that follows this loop must be able to \
+             turn this terminal response into an error"
+        );
+        // Pins that every attempt in the budget actually reached the server,
+        // rather than the loop returning early.
+        //
+        // NOTE ON WHAT THIS CANNOT CATCH: `total` is derived from
+        // CHUNK_GET_MAX_RETRIES, so mutating that constant moves the
+        // expectation with it and this test still passes -- confirmed by
+        // running it at 0. That is correct for a contract test (the constant is
+        // the spec, and changing the budget deliberately should not fail it),
+        // but it means this test does NOT independently prove retries happen.
+        // `retries_past_transient_failures_and_recovers` is the load-bearing
+        // one: its counts are hardcoded (2 failures, 3 requests) and it DOES
+        // fail at 0 retries.
+        assert_eq!(
+            served.load(std::sync::atomic::Ordering::SeqCst),
+            total,
+            "expected the initial attempt plus all {} retries to reach the server",
+            super::CHUNK_GET_MAX_RETRIES
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), server)
+            .await
+            .expect("server task timed out -- client made fewer requests than expected")
+            .expect("server task panicked");
     }
 }
