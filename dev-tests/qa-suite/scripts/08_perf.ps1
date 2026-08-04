@@ -121,8 +121,10 @@ function Find-BaselineValue([int]$SizeMB, [string]$Op, [string]$Field) {
 }
 
 $regressionCount = 0
-$gatedCount = 0
+$gatedCount = 0        # size-eligible records (>= $MIN_GATED_SIZE_MB)
+$comparedCount = 0     # records actually held against a baseline value
 $recordCount = 0
+$missingBaseline = @() # size/op/field combos eligible to gate but absent from the baseline
 
 foreach ($sizeMB in $sizeClassesMB) {
   $sb = New-SandboxRepo "perf-$sizeMB" $Phase
@@ -156,12 +158,28 @@ foreach ($sizeMB in $sizeClassesMB) {
       $baseVal = Find-BaselineValue $sizeMB $rec['op'] $field
       Write-QaRow $BENCH_OUT $BENCH_HEADER @($sizeMB, $rec['op'], $field, $value, $(if ($null -ne $baseVal) { $baseVal } else { "none" }))
 
+      # A record can be size-eligible ($gatable) and still never be compared,
+      # because the baseline has no row for this (sizeMB, op, field). That is
+      # invisible in `gated=N/M`, which counts eligibility only: when the
+      # baseline carried zero `commit` rows, every campaign still reported
+      # gated=4/8 while comparing 2 add records and nothing else. Track the
+      # combinations that were eligible but unbacked so a missing baseline row
+      # is loud instead of silent.
+      if ($gatable -and $GATE_FIELDS -contains $field -and $null -eq $baseVal) {
+        $missingBaseline += "$sizeMB/$($rec['op'])/$field"
+      }
+
       if ($gatable -and $GATE_FIELDS -contains $field -and $null -ne $baseVal) {
         $cur = 0.0; $base = 0.0
         # strip trailing s/% units (wall=0.02s, util_pct=89%) - same normalization as diff_bench.ps1
         $curStr = "$value" -replace '[s%]$', ''
         $baseStr = "$baseVal" -replace '[s%]$', ''
         if ([double]::TryParse($curStr, [ref]$cur) -and [double]::TryParse($baseStr, [ref]$base) -and $base -ne 0) {
+          # Counted HERE, not at $gatable: this is the only point at which a
+          # number was actually held against the baseline. A parse failure
+          # above silently skips the comparison, which is how the 2026-07-29
+          # dead gate passed while checking nothing.
+          $comparedCount++
           $deltaPct = (($cur - $base) / [Math]::Abs($base)) * 100.0
           $regressed = ($HIGHER_IS_BETTER -contains $field -and $deltaPct -lt -$REGRESSION_PCT) -or
                        ($LOWER_IS_BETTER -contains $field -and $deltaPct -gt $REGRESSION_PCT)
@@ -181,12 +199,23 @@ if ($baseRows) {
   # record cleared it, either the parse broke (as it did once) or the floor is
   # set above every workload, and both look identical to "no regressions" from
   # the outside. Silence is not success.
-  if ($gatedCount -eq 0) {
+  # Report the combinations that could have been gated but had no baseline row.
+  # This is what makes a half-covered baseline visible: `commit` had no rows at
+  # all for months and every campaign still printed a healthy-looking gated=4/8.
+  if ($missingBaseline.Count -gt 0) {
+    Write-QaLog $Phase ("NOTE {0} gatable record(s) had NO baseline row and were not compared: {1}" -f `
+      $missingBaseline.Count, (($missingBaseline | Sort-Object -Unique) -join ", "))
+  }
+
+  # `$comparedCount`, not `$gatedCount`. The two differ whenever the baseline is
+  # missing rows, and it is precisely that case the guard has to catch -- a gate
+  # that compared nothing must never read as "no regressions".
+  if ($comparedCount -eq 0) {
     Write-QaGate $Phase "baseline-regression" $false `
-      "gated 0 of $recordCount records against $Baseline - the gate measured nothing (min-size=${MIN_GATED_SIZE_MB}MB)"
+      "compared 0 of $recordCount records against $Baseline - the gate measured nothing (gatable=$gatedCount, min-size=${MIN_GATED_SIZE_MB}MB)"
   } else {
   Write-QaGate $Phase "baseline-regression" ($regressionCount -eq 0) `
-    "count=$regressionCount gated=$gatedCount/$recordCount threshold=$REGRESSION_PCT% min-size=${MIN_GATED_SIZE_MB}MB baseline=$Baseline"
+    "count=$regressionCount compared=$comparedCount gated=$gatedCount/$recordCount threshold=$REGRESSION_PCT% min-size=${MIN_GATED_SIZE_MB}MB baseline=$Baseline"
   }
 } else {
   # WARN, not PASS: nothing was compared. Reported as informational so the first
