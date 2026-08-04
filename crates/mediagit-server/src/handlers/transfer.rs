@@ -179,6 +179,14 @@ pub async fn presign_chunk_uploads(
             (id, size)
         })
         .collect();
+    // How many URLs will be signed WITHOUT a content-length. `0` means the
+    // client could not learn the compressed length cheaply — a delta-encoded or
+    // gc-repacked chunk, which has no loose copy to `head`. Worth reporting for
+    // two reasons: it is a useful operational signal (it tracks how much of a
+    // push is reconstructed rather than sent from loose storage), and it is the
+    // only way to tell from outside that the *unbound* signing path was taken at
+    // all. Without it, a test claiming to exercise that path cannot prove it did.
+    let unbound = pairs.iter().filter(|(_, len)| *len == 0).count();
 
     let entries: Vec<(String, Option<PresignedPutJson>)> =
         futures::stream::iter(pairs.into_iter().map(|(chunk_id, content_length)| {
@@ -224,6 +232,7 @@ pub async fn presign_chunk_uploads(
     tracing::info!(
         repo = %repo,
         count = count,
+        unbound = unbound,
         "Presigned chunk upload URLs generated"
     );
     Ok(Json(urls))

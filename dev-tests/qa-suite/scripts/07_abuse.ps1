@@ -856,8 +856,97 @@ Drill-A8-DiskFull
 Drill-A9-LockE2E
 Drill-A10-BatchGetFallback
 Drill-A11-DeltaChainDepth
+# ---------------------------------------------------------------------------
+# A14: presigned PUT on the UNBOUND path. The server signs a content-length
+# into the URL whenever the client can tell it one; that signed header is then
+# part of SignedHeaders, and the client must NOT add its own (doing so appended
+# a second header and produced SignatureDoesNotMatch - 976+748 of them across
+# two campaigns, fixed in 82977f5).
+#
+# The complementary branch - the client supplying content-length itself because
+# the signature does NOT commit to one - had only unit coverage. It is reached
+# only when `compressed_chunk_len` returns None, i.e. a chunk with no loose copy
+# at `chunks/<hex>`: delta-encoded or gc-repacked (odb/chunks.rs:2543,
+# push.rs:851). A13 cannot reach it - fresh fixtures are all loose.
+#
+# So: build the repo, `gc --repack` to pack the loose chunks away, THEN push
+# with packs off. Anti-vacuous: the server now reports `unbound=N` on its
+# presign log line, so this drill can prove the branch was entered rather than
+# assume it. unbound=0 fails deliberately - it means the condition was never
+# created and any "pass" would be empty.
+# ---------------------------------------------------------------------------
+function Drill-A14-UnboundPresignedPut {
+  $drill = "A14-unbound-presigned-put"
+  $srv = $null
+  $prevPack = $env:MEDIAGIT_CLOUD_PACKS
+  try {
+    $env:MEDIAGIT_CLOUD_PACKS = "0"
+    $srv = Start-QaServer -Backend "minio" -Phase "$Phase-A14"
+    $repo = New-SandboxRepo "a14-unbound" $Phase
+
+    # Compressible content on purpose: the original bug only bit when the
+    # compressed length differed from the uncompressed one.
+    for ($i = 0; $i -lt 3; $i++) {
+      $txt = Join-Path $repo "doc$i.txt"
+      (1..4000 | ForEach-Object { "line $_ of document $i - repetitive compressible payload" }) |
+        Set-Content $txt -Encoding ASCII
+    }
+    New-QaBinaryFixture (Join-Path $repo "asset.bin") 8 77120
+    Invoke-MG $repo @("add", ".") $Phase | Out-Null
+    Invoke-MG $repo @("commit", "-m", "a14 base") $Phase | Out-Null
+
+    # Pack the loose chunks away so their length is no longer cheaply knowable.
+    $gc = Invoke-MG $repo @("gc", "--repack", "-y") $Phase -TimeoutSec 900
+
+    $srcHashes = @{}
+    Get-ChildItem $repo -File | ForEach-Object { $srcHashes[$_.Name] = (Get-QaHash $_.FullName) }
+
+    Invoke-MG $repo @("remote", "add", "origin", $srv.Url) $Phase | Out-Null
+    $push = Invoke-MG $repo @("push", "-u", "origin", "main") $Phase -TimeoutSec 1800
+
+    # Did any URL actually get signed WITHOUT a content-length?
+    $unbound = 0
+    $presignCalls = 0
+    if ($srv.OutLog -and (Test-Path $srv.OutLog)) {
+      $log = Get-Content $srv.OutLog -Raw -EA SilentlyContinue
+      if ($log) {
+        $presignCalls = ([regex]::Matches($log, 'Presigned chunk upload URLs generated')).Count
+        foreach ($m in [regex]::Matches($log, 'unbound[=:]\s*(\d+)')) {
+          $unbound += [int]$m.Groups[1].Value
+        }
+      }
+    }
+
+    # Bytes must survive the round trip - a signature the peer accepts is not
+    # the same claim as a body it stored intact.
+    $back = Join-Path $QA.Work "a14-clone"
+    if (Test-Path $back) { Remove-Item -Recurse -Force $back -EA SilentlyContinue }
+    $clone = Invoke-MG $null @("clone", $srv.Url, $back) $Phase -TimeoutSec 1800
+    $hashOk = $true
+    foreach ($name in $srcHashes.Keys) {
+      $f = Join-Path $back $name
+      if (-not (Test-Path $f) -or ((Get-QaHash $f) -ne $srcHashes[$name])) { $hashOk = $false }
+    }
+    $fsckOk = if (Test-Path $back) { Test-QaFsckClean $back } else { $false }
+    Remove-Item -Recurse -Force $back -EA SilentlyContinue
+
+    $exercised = ($unbound -gt 0)
+    $pass = ($push.Exit -eq 0) -and ($clone.Exit -eq 0) -and $hashOk -and $fsckOk -and $exercised
+    $note = if ($exercised) { "" } else {
+      " -- UNBOUND PATH NOT EXERCISED: gc --repack may not pack chunks, or the branch is unreachable in practice. Investigate before treating this as covered." }
+    Rec $drill $pass ("gc=$($gc.Exit) push=$($push.Exit) clone=$($clone.Exit) hash-ok=$hashOk fsck=$fsckOk " +
+      "presign-calls=$presignCalls unbound=$unbound exercised=$exercised$note")
+  } catch {
+    if ("$_" -match "^SKIP:") { Rec $drill "SKIP" "$_" } else { Rec $drill $false "unexpected error: $_" }
+  } finally {
+    Stop-QaServer $srv
+    $env:MEDIAGIT_CLOUD_PACKS = $prevPack
+  }
+}
+
 Drill-A12-DeltaChainCycle
 Drill-A13-PerChunkFallbackNoRateLimit
+Drill-A14-UnboundPresignedPut
 
 Write-QaLog $Phase "=== 07_abuse done: overall=$(if ($script:AllPass) { 'PASS' } else { 'FAIL' }) ==="
 # Teardown: reclaim this phase's own work/ scratch so a long campaign cannot run the
