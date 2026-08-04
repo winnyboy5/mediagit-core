@@ -234,6 +234,45 @@ Write-QaGate $Phase "no-errtext-exit0" ($errtextExit0Count -eq 0) "errtextExit0C
 # A command that never returns is as broken as one that panics, and it is invisible in
 # an exit-code-only view: gate it explicitly.
 Write-QaGate $Phase "no-hangs" ($timeoutCount -eq 0) "timeoutCount=$timeoutCount"
+
+# ---- coverage-matrix placeholder regression gate ----
+# A `COVERED-BY:` row (see file header) names a phase instead of running one - it
+# asserts nothing. Nothing was holding that count to any limit, so it grew silently
+# (55 -> 63) before anyone noticed. This reads the FULL file directly (not $allRows,
+# which -Rows/-Filter can subset) so the count is never affected by a partial run.
+$COV_BASELINE = Join-Path $QA.Root "baselines\coverage-placeholders.tsv"
+$covDataRows = $null
+if (Test-Path $TSV_IN) {
+  try { $covDataRows = @(Get-Content $TSV_IN -ErrorAction Stop | Select-Object -Skip 1) } catch { $covDataRows = $null }
+}
+if (-not $covDataRows -or $covDataRows.Count -eq 0) {
+  # Absence must not read as "no placeholders" - an unreadable/empty matrix is a
+  # harness fault, not a clean bill of health.
+  Write-QaGate $Phase "coverage-placeholder-regression" $false `
+    "coverage_matrix.tsv missing, unreadable, or has 0 data rows at $TSV_IN"
+} else {
+  $placeholderCount = @($covDataRows | Where-Object { $_ -match "COVERED-BY:" }).Count
+  $baselineCount = $null
+  if (Test-Path $COV_BASELINE) {
+    $baseDataLines = @(Get-Content $COV_BASELINE | Select-Object -Skip 1)
+    if ($baseDataLines.Count -ge 1) {
+      $rawVal = ($baseDataLines[0] -split "`t")[1]
+      $parsed = 0
+      if ([int]::TryParse(("" + $rawVal).Trim(), [ref]$parsed)) { $baselineCount = $parsed }
+    }
+  }
+  if ($null -eq $baselineCount) {
+    Write-QaGate $Phase "coverage-placeholder-regression" $false `
+      "no readable baseline at $COV_BASELINE (placeholders=$placeholderCount rows=$($covDataRows.Count))"
+  } else {
+    $covDetail = "placeholders=$placeholderCount baseline=$baselineCount rows=$($covDataRows.Count)"
+    if ($placeholderCount -lt $baselineCount) {
+      $covDetail += " (DROPPED below baseline - re-lock baselines\coverage-placeholders.tsv to $placeholderCount)"
+    }
+    Write-QaGate $Phase "coverage-placeholder-regression" ($placeholderCount -le $baselineCount) $covDetail
+  }
+}
+
 Write-QaLog $Phase "done: $($selected.Count) rows invoked; $counts"
 
 Exit-QaPhase $Phase
