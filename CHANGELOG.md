@@ -7,7 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.3.0-rc.3] - 2026-08-04
+
+Correctness and transfer-reliability cycle. No wire or persisted-format changes,
+so the `docs/FORMATS.md` §11 compat promise (in effect since v0.3.0-rc.1) is
+preserved.
+
+The headline is a cloud-upload defect that had been costing roughly 200
+permanently-failed chunk uploads per large push while remaining invisible: the
+client fell back to a slower path and the affected gate had a floor low enough
+to pass anyway. Fixing it took MinIO's 10 GB push from a failure to comfortably
+inside its SLO, and made an 11 GB clone that had been attributed to MinIO's own
+limits complete with byte parity. All four backends — MinIO, AWS S3, Azure and
+GCS — now push *and* clone with verified byte parity.
+
 ### Fixed
+- **Presigned PUT sent two `Content-Length` headers, so the signature could not
+  verify** (transfer reliability, cloud): the per-chunk upload path set
+  `CONTENT_LENGTH` explicitly *and* replayed the server's signed
+  `required_headers`, which already carry one whenever the server presigns a
+  concrete length. `reqwest::RequestBuilder::header` **appends** rather than
+  inserts, so both reached the wire, and SigV4 signs `content-length` — a
+  duplicated signed header does not canonicalize back to what was signed, and
+  S3/MinIO answer `SignatureDoesNotMatch`. Two QA campaigns logged 976 and 748
+  of them, with a permanent-failure counter reaching 198. It stayed hidden
+  because the failure classifies as permanent, so each chunk silently fell back
+  to the authenticated server-proxy relay and the push still completed. **No
+  data was ever at risk** — `verify_chunk_uploads` re-checks every chunk — but
+  the cost was a wasted direct PUT plus a slower relayed round-trip, roughly 200
+  times per large push. Measured effect on a 10,990 MB MinIO push: **9.87 MB/s
+  and a failed push → 55.14 MB/s and a clean one**, with the 11 GB clone
+  completing at 67 MB/s with byte parity for the first time. The pack upload
+  path never had the defect, because it only ever replays `required_headers`.
+- **Azure transfers timed out on slow links** (transfer reliability): the
+  OpenDAL `TimeoutLayer` was constructed with its default **10 s `io_timeout`**,
+  which is a *per-IO* deadline rather than a whole-operation one. That is
+  reasonable on a LAN and wrong over a WAN — a 2 GB push at ~1.8 MB/s with
+  concurrent block writes exceeded it, the server returned 500, the client's
+  retry hit the same wall, and the push failed outright. Raised to 120 s and
+  made configurable via `MEDIAGIT_AZURE_IO_TIMEOUT_SECS`; `0` falls back to the
+  default rather than being honoured, since OpenDAL reads it as an
+  already-expired deadline. The non-IO timeout keeps OpenDAL's default, because
+  stat/delete/list are small round-trips where a long hang is a real fault worth
+  surfacing quickly.
+- **A single transient chunk download aborted an entire clone** (transfer
+  reliability): the parallel download path had no retry at all, so one `503`
+  discarded a multi-GB clone along with every byte already transferred. Adds a
+  bounded retry (3 attempts, 500 ms doubling) for 5xx, 429 and transport errors.
+  Deliberately does not retry verdicts: `404`/`403` are answers, and `409` is
+  load-bearing — the server returns it when a chunk is delta-only and the client
+  re-routes accordingly. The existing pull deadline still bounds the whole
+  download.
+- **Storage retry exhaustion reported no cause** (diagnosability): the storage
+  layer attaches the underlying error via `.context()` and its message ends
+  "last error follows" — but the chunk handlers rendered it with plain
+  `Display`, which prints only the outermost context. Every exhausted retry
+  therefore ended at "follows" with nothing following it: 4,092 undiagnosable
+  errors across two campaigns, including the one failure that sank a throughput
+  gate. All three sites now render the full chain.
+- **Actionable `503` guidance was unreachable** (diagnosability): the message
+  naming the operator action ("server storage backend unreachable — verify the
+  storage service is running") existed only on the sequential chunk-download
+  path, while clone uses the parallel one. Both now share a single error
+  constructor, so they cannot drift apart again.
+
+### Fixed (QA harness — these gate the release, so their defects hide product bugs)
+- **A drill that failed to run was indistinguishable from one that measured a
+  failure.** Three scale drills died mid-campaign and reported `FAIL` exactly as
+  a real product defect would, so churn-cost, conflict-data-loss and peak-RSS
+  silently had no result for that build while appearing to be three bugs. Adds a
+  distinct `ERROR` verdict carried through the phase runner, gate table and
+  report, plus a `campaign-no-harness-errors` gate — because separating errors
+  out of the failure count would otherwise have let a campaign that voided three
+  drills report "no gate failures".
+- **The performance gate counted what it *could* have compared, not what it
+  did.** Its coverage number counted size-eligible records rather than records
+  actually held against a baseline; while the baseline lacked `commit` rows,
+  every campaign reported healthy-looking coverage while comparing half as much,
+  and the "measured nothing" guard could not fire. Now counts actual
+  comparisons, fails when none occur, and names any measurement that had no
+  baseline row.
+- **Unquoted phase numbers ran the wrong phases.** PowerShell strips a leading
+  zero from an unquoted numeric argument and phase tokens glob, so `00` became
+  `0` and matched nineteen scripts including the report aggregator, while `1`
+  matched the memory profiler — which must run alone. Single digits are now
+  normalized, and the correction is logged rather than applied silently.
+
+### Changed
+- The S3 range-read resume path added in the previous cycle is now documented as
+  never having executed: the failures it was introduced for are dispatch
+  failures, which by definition occur before any response exists and therefore
+  cannot reach a loop that runs only after one succeeds. The code is retained —
+  it remains correct for genuine mid-body interruptions — but its original
+  justification was a misattribution and is corrected in place, and a successful
+  resume is now logged at a level the default filter does not discard.
+
+### Fixed (GA correctness program, earlier in this cycle)
 - **Clone could silently omit objects and still report success** (data integrity,
   P0): the want-side walk (`collect_objects_bfs`) read each object with
   `odb.read(..).ok()` and, on `None`, logged a warning and continued — dropping
@@ -791,7 +886,8 @@ throughput improvements, pack negotiation fixes, and several cloud-backend bug f
 - Dependency security audits in CI
 - Encryption at rest with Argon2 key derivation
 
-[Unreleased]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.6-beta.3...HEAD
+[Unreleased]: https://github.com/winnyboy5/mediagit-core/compare/v0.3.0-rc.3...HEAD
+[v0.3.0-rc.3]: https://github.com/winnyboy5/mediagit-core/compare/v0.3.0-rc.2...v0.3.0-rc.3
 [v0.2.6-beta.3]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.6-beta.2...v0.2.6-beta.3
 [v0.2.6-beta.2]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.6-beta.1...v0.2.6-beta.2
 [v0.2.6-beta.1]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.5-beta.1...v0.2.6-beta.1
