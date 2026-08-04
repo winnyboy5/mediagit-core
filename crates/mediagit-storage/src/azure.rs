@@ -137,8 +137,50 @@ fn strip_prefix_with<'a>(prefix: &str, full: &'a str) -> &'a str {
 }
 
 /// Wrap an OpenDAL operator with the layers every code path expects.
+///
+/// `TimeoutLayer`'s `io_timeout` defaults to **10 s**, and it is a *per-IO*
+/// deadline, not a whole-operation one. That is reasonable on a LAN and wrong
+/// on a WAN: campaign 20260804-azgcs failed an Azure push outright with
+/// `Unexpected (temporary) at write, context: { timeout: 10 } => io operation
+/// timeout reached`, pushing 2 GB of chunks at ~1.8 MB/s. Under
+/// `MEDIAGIT_AZURE_PUT_BLOCK_CONCURRENCY` (default 8) concurrent block writes,
+/// each write gets a fraction of an already-slow link and a single one
+/// comfortably exceeds 10 s. The server turned that into a 500, the client's
+/// retry hit the same wall, and the whole push exited 1.
+///
+/// Only the IO deadline is raised. The non-IO timeout (stat/delete/list) keeps
+/// OpenDAL's default, because those are small round-trips where a long hang is
+/// a real fault worth surfacing quickly, not a slow transfer.
+///
+/// Layer order is OpenDAL's own documented production order — retry inner,
+/// timeout outer. Do NOT reorder it to match the Go binding's guidance
+/// ("timeout before retry"); the Rust docs specify this order, and the two
+/// bindings differ.
 fn with_layers(op: Operator) -> Operator {
-    op.layer(RetryLayer::new()).layer(TimeoutLayer::new())
+    op.layer(RetryLayer::new())
+        .layer(TimeoutLayer::new().with_io_timeout(Duration::from_secs(azure_io_timeout_secs())))
+}
+
+/// Per-IO deadline for Azure transfers, in seconds.
+///
+/// Generous by default because the failure mode it prevents is a failed push
+/// of an entire repository, while the cost of being too generous is a slow
+/// operation taking longer to report a genuine hang.
+fn azure_io_timeout_secs() -> u64 {
+    parse_io_timeout_secs(std::env::var("MEDIAGIT_AZURE_IO_TIMEOUT_SECS").ok())
+}
+
+/// Split from the env lookup so it is assertable: `#![forbid(unsafe_code)]` plus
+/// edition 2024 make `set_var` an `unsafe` call, so a test that drove the real
+/// variable could not be written without punching a hole in that. Same reason
+/// `clamp_cap` in mediagit-versioning takes an `Option<String>`.
+fn parse_io_timeout_secs(raw: Option<String>) -> u64 {
+    const DEFAULT_IO_TIMEOUT_SECS: u64 = 120;
+    raw.and_then(|v| v.trim().parse::<u64>().ok())
+        // 0 means "deadline already passed" to OpenDAL, not "no timeout".
+        // Accepting it would fail every transfer instantly, so it falls back.
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_IO_TIMEOUT_SECS)
 }
 
 /// Install ring as the process-level rustls provider, once.
@@ -951,5 +993,30 @@ mod tests {
             map_error(&other, "get k"),
             StorageError::Backend(_)
         ));
+    }
+
+    /// The 10s OpenDAL default failed a 2 GB Azure push on a WAN link
+    /// (campaign 20260804-azgcs). Absent/garbage input must land on the
+    /// generous default, not on something that reintroduces that failure.
+    #[test]
+    fn io_timeout_defaults_are_generous_enough_for_a_wan() {
+        assert_eq!(super::parse_io_timeout_secs(None), 120);
+        assert_eq!(
+            super::parse_io_timeout_secs(Some("not-a-number".into())),
+            120
+        );
+        assert!(
+            super::parse_io_timeout_secs(None) > 10,
+            "default must exceed the OpenDAL default that caused the failure"
+        );
+    }
+
+    /// 0 means "deadline already passed" to OpenDAL, so honouring it would
+    /// fail every transfer instantly. It must fall back, not be obeyed.
+    #[test]
+    fn io_timeout_rejects_zero_and_honours_valid_overrides() {
+        assert_eq!(super::parse_io_timeout_secs(Some("0".into())), 120);
+        assert_eq!(super::parse_io_timeout_secs(Some("45".into())), 45);
+        assert_eq!(super::parse_io_timeout_secs(Some("  300  ".into())), 300);
     }
 }
