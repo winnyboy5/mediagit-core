@@ -67,25 +67,41 @@ function Invoke-MG([string]$Repo, [string[]]$MgArgs, [string]$Phase = "misc", [i
   # UNKNOWN; do not record it as solved. What actually protects the campaign is
   # the catch block below plus the "ERROR" verdict, which stop a harness fault
   # from being silently counted as a product failure.
+  # Which call was in flight when a fault hit. `$_` alone cannot answer this,
+  # and it is the first thing you need: "Stream was not readable" thrown by
+  # Start() (pipe/handle creation failed) is a completely different defect from
+  # the same message thrown while draining (the stream died mid-read). Three
+  # campaigns recorded that fault and none recorded which one it was.
+  $stage = "start"
+  $started = $false
   try {
     $proc.Start() | Out-Null
+    $started = $true
     if ($StdIn) {
+      $stage = "stdin"
       foreach ($line in $StdIn) { $proc.StandardInput.WriteLine($line) }
       $proc.StandardInput.Close()
     }
     # Threadpool drain: ReadToEnd-after-WaitForExit deadlocks once the child fills
     # the pipe buffer; async tasks drain continuously without the PS event loop.
-    $outTask = $proc.StandardOutput.ReadToEndAsync()
-    $errTask = $proc.StandardError.ReadToEndAsync()
+    $stage = "open-streams"
+    $stdout = $proc.StandardOutput
+    $stderr = $proc.StandardError
+    $stage = "begin-drain"
+    $outTask = $stdout.ReadToEndAsync()
+    $errTask = $stderr.ReadToEndAsync()
 
+    $stage = "wait"
     if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
       taskkill /T /F /PID $proc.Id 2>$null | Out-Null
       $proc.WaitForExit() | Out-Null   # pipes close on kill; tasks then complete
       $sw.Stop()
+      $stage = "collect-after-timeout"
       $out = $outTask.Result + $errTask.Result + "`n[TIMEOUT after $TimeoutSec seconds]"
       $code = 124
     } else {
       $sw.Stop()
+      $stage = "collect"
       $out = $outTask.Result + $errTask.Result
       $code = $proc.ExitCode
     }
@@ -95,8 +111,59 @@ function Invoke-MG([string]$Repo, [string[]]$MgArgs, [string]$Phase = "misc", [i
     # into three voided drills. Report it as a harness-side ERROR result instead of
     # throwing; the caller decides how to record it (see Get-QaVerdict "ERROR").
     $sw.Stop()
-    $out = "[INVOKE-MG-ERROR] $_"
+    $ex = $_.Exception
+
+    # `"$_"` is the MESSAGE ONLY. No type, no inner exception, no stack - which
+    # is exactly why "Stream was not readable" has been recorded three times and
+    # diagnosed zero times. Everything below is what was missing.
+    $exType = if ($ex) { $ex.GetType().FullName } else { "(none)" }
+    $inner = if ($ex -and $ex.InnerException) { "$($ex.InnerException.GetType().FullName): $($ex.InnerException.Message)" } else { "" }
+    # AggregateException from a faulted ReadToEndAsync hides the real cause one
+    # level down; a bare .Message reads "One or more errors occurred".
+    $flat = ""
+    if ($ex -is [System.AggregateException]) {
+      $flat = (($ex.Flatten().InnerExceptions | ForEach-Object { "$($_.GetType().FullName): $($_.Message)" }) -join " | ")
+    }
+    # Statement form, not `$x = try {...} catch {...}`: `try` is not an
+    # expression in PS 5.1 (which this harness targets), so the assignment
+    # form silently yields $null and every one of these fields logs blank --
+    # which is exactly the "recorded nothing while looking like it recorded"
+    # failure this whole block exists to end. Caught by probing it.
+    # Gate on $started rather than catching around .HasExited: PowerShell makes
+    # a throwing property access NON-terminating, so `try { $proc.HasExited }
+    # catch {}` never enters the catch and just yields $null -- logging an empty
+    # field that reads as "no data" when the truth is "there was no child".
+    # Probed: the catch version printed `hasExited=` and the fix prints
+    # `hasExited=n/a (never started)`.
+    $hasExited = "n/a (never started)"; $childExit = "n/a"; $handles = "unknown"
+    if ($started) {
+      $hasExited = "$($proc.HasExited)"
+      $childExit = $(if ($proc.HasExited) { "$($proc.ExitCode)" } else { "still running" })
+    }
+    try { $handles = "$([Diagnostics.Process]::GetCurrentProcess().HandleCount)" } catch {}
+
+    $detail = @(
+      "[INVOKE-MG-ERROR] stage=$stage type=$exType"
+      "message: $($_)"
+      $(if ($inner) { "inner: $inner" })
+      $(if ($flat) { "aggregated: $flat" })
+      "child: hasExited=$hasExited exitCode=$childExit elapsed=$([math]::Round($sw.Elapsed.TotalSeconds,2))s"
+      "harness-process-handles: $handles"
+      "command: $($QA.MG) $argLine"
+      "exception:"
+      $(if ($ex) { $ex.ToString() } else { "(no exception object)" })
+      "script-stack:"
+      "$($_.ScriptStackTrace)"
+    ) | Where-Object { $_ } | Out-String
+
+    $out = $detail
     $code = -1
+
+    # One collated file for the whole campaign. Per-phase logs are where these
+    # faults went to die: by the time anyone looked, the interesting run was
+    # buried under a dozen phases of ordinary output.
+    try { $detail | Add-Content (Join-Path $QA.Logs "harness-faults.log") -Encoding UTF8 } catch {}
+    Write-Warning "harness fault at stage '$stage' ($exType) - see logs\harness-faults.log"
   } finally {
     $proc.Dispose()
   }
