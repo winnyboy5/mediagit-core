@@ -162,6 +162,27 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&config.repos_dir)?;
     tracing::info!("Repositories directory: {:?}", config.repos_dir);
 
+    // AU-10: one process per directory. Taken before any store is opened, so a
+    // second instance is refused before it can load — and therefore before it
+    // can later full-rewrite — the auth store, the lock file or the repo state.
+    // See `instance_lock` for the eight pieces of shared state that a sibling
+    // silently corrupts.
+    //
+    // Bound with `let _name`, not `let _`: `let _` would drop the guard on the
+    // spot and release the lock while the server ran on unprotected.
+    let _instance_lock =
+        mediagit_server::instance_lock::acquire_or_warn(&config.repos_dir, &bind_addr)?;
+
+    // The auth store defaults to a *sibling* of repos_dir (`../auth`), so
+    // locking repos_dir alone leaves two servers with separate repo dirs free
+    // to share — and shred — one auth store.
+    let auth_dir = config.resolved_auth_store_dir();
+    let _auth_lock = if config.enable_auth && auth_dir != config.repos_dir {
+        mediagit_server::instance_lock::acquire_or_warn(&auth_dir, &bind_addr)?
+    } else {
+        None
+    };
+
     // DC-4: build the registry *before* the state, so the same instance backs
     // both the recording side (handlers, via AppState) and the scrape endpoint.
     // It used to be constructed inside the metrics block below and moved

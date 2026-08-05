@@ -951,9 +951,105 @@ function Drill-A14-UnboundPresignedPut {
   }
 }
 
+function Drill-A15-SecondInstanceRefused {
+  # AU-10. Two servers sharing one repos_dir silently discard each other's auth
+  # writes, lock records and delta-chain guards. Nothing about that fails
+  # loudly, so the only enforceable place is startup.
+  $drill = "A15-second-instance-refused"
+  $srv = $null
+  try {
+    $srv = Start-QaServer -Backend "local" -Phase "$Phase-A15"
+
+    # A DIFFERENT port on purpose. Reusing the first server's port would make
+    # the second process die on bind, and the drill would pass while proving
+    # nothing about the lock -- which is precisely the deployment that eats
+    # data: two instances, different ports, one directory.
+    $otherPort = Get-QaFreePort
+    $out2 = Join-Path $QA.Logs "a15-second-instance.out.log"
+    $err2 = Join-Path $QA.Logs "a15-second-instance.err.log"
+    $p2 = Start-Process -FilePath $QA.MGServer `
+      -ArgumentList @("--config", $srv.ConfigPath, "--port", "$otherPort") `
+      -PassThru -NoNewWindow -RedirectStandardOutput $out2 -RedirectStandardError $err2
+    $exited = $p2.WaitForExit(30000)
+    if (-not $exited) { Stop-Process -Id $p2.Id -Force -EA SilentlyContinue }
+    $exitCode = if ($exited) { $p2.ExitCode } else { -1 }
+
+    # Read from the redirect files, never from $p2.StandardOutput: reading a
+    # redirected stream after the process has exited is where the harness's
+    # "Stream was not readable" faults come from.
+    $text = ""
+    foreach ($f in @($out2, $err2)) {
+      if (Test-Path $f) { $text += ((Get-Content $f -Raw -EA SilentlyContinue) + "`n") }
+    }
+    $text = $text -replace '\x1b\[[0-9;]*m', ''
+
+    $refusedForLock = ($text -match 'already owns')
+    $namesDir = ($text -match [regex]::Escape((Split-Path $srv.ConfigPath -Parent)))
+    # A bind collision would also produce a non-zero exit. Reject that reading
+    # explicitly rather than accept any failure as evidence of the lock.
+    $notABindError = -not ($text -match 'address .*in use|10048')
+
+    # ANTI-VACUOUS: a drill that only checks "the second one died" also passes
+    # if BOTH died. The survivor is the whole point of the feature.
+    $firstAlive = $false
+    try {
+      $resp = Invoke-WebRequest -Uri "$($srv.BaseUrl)/health" -UseBasicParsing -TimeoutSec 5 -EA Stop
+      $firstAlive = ($resp.StatusCode -eq 200)
+    } catch {}
+
+    $pass = ($exitCode -ne 0) -and $refusedForLock -and $namesDir -and $notABindError -and $firstAlive
+    Rec $drill $pass ("exit=$exitCode refused-for-lock=$refusedForLock names-dir=$namesDir " +
+      "not-a-bind-error=$notABindError first-server-still-serving=$firstAlive port2=$otherPort")
+
+    # The escape hatch must actually let the operator through, or it is not an
+    # escape hatch and the only way past a false positive is a code change.
+    $prevAllow = $env:MEDIAGIT_ALLOW_MULTI_INSTANCE
+    try {
+      $env:MEDIAGIT_ALLOW_MULTI_INSTANCE = "1"
+      $port3 = Get-QaFreePort
+      $out3 = Join-Path $QA.Logs "a15-override.out.log"
+      $err3 = Join-Path $QA.Logs "a15-override.err.log"
+      $p3 = Start-Process -FilePath $QA.MGServer `
+        -ArgumentList @("--config", $srv.ConfigPath, "--port", "$port3") `
+        -PassThru -NoNewWindow -RedirectStandardOutput $out3 -RedirectStandardError $err3
+      $up3 = $false
+      for ($i = 0; $i -lt 20; $i++) {
+        if ($p3.HasExited) { break }
+        try {
+          $r3 = Invoke-WebRequest -Uri "http://127.0.0.1:$port3/health" -UseBasicParsing -TimeoutSec 2 -EA Stop
+          if ($r3.StatusCode -eq 200) { $up3 = $true; break }
+        } catch {}
+        Start-Sleep -Milliseconds 500
+      }
+      if (-not $p3.HasExited) { & taskkill /PID $p3.Id /T /F 2>$null | Out-Null }
+      $warned = $false
+      foreach ($f in @($out3, $err3)) {
+        if (Test-Path $f) {
+          $t3 = ((Get-Content $f -Raw -EA SilentlyContinue) -replace '\x1b\[[0-9;]*m', '')
+          if ($t3 -match 'MEDIAGIT_ALLOW_MULTI_INSTANCE=1') { $warned = $true }
+        }
+      }
+      # Starting is not enough: an override that starts SILENTLY is worse than
+      # no override, because the operator gets no record of what they disabled.
+      Rec "$drill-override" ($up3 -and $warned) "started=$up3 warned-loudly=$warned port3=$port3"
+    } finally {
+      if ($null -eq $prevAllow) {
+        Remove-Item Env:MEDIAGIT_ALLOW_MULTI_INSTANCE -EA SilentlyContinue
+      } else {
+        $env:MEDIAGIT_ALLOW_MULTI_INSTANCE = $prevAllow
+      }
+    }
+  } catch {
+    if ("$_" -match "^SKIP:") { Rec $drill "SKIP" "$_" } else { Rec $drill $false "unexpected error: $_" }
+  } finally {
+    Stop-QaServer $srv
+  }
+}
+
 Drill-A12-DeltaChainCycle
 Drill-A13-PerChunkFallbackNoRateLimit
 Drill-A14-UnboundPresignedPut
+Drill-A15-SecondInstanceRefused
 
 Write-QaLog $Phase "=== 07_abuse done: overall=$(if ($script:AllPass) { 'PASS' } else { 'FAIL' }) ==="
 # Teardown: reclaim this phase's own work/ scratch so a long campaign cannot run the

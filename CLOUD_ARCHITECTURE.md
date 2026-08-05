@@ -377,9 +377,42 @@ flowchart LR
 
 | Component | Strategy |
 |-----------|----------|
-| **Servers** | Stateless, horizontally scalable |
-| **Load Balancer** | Health checks, auto-failover |
+| **Servers** | **Single instance per directory — enforced at boot.** See [Server topology](#server-topology) |
+| **Load Balancer** | Health checks; failover to a standby that owns its own `repos_dir` |
 | **Storage** | Cloud-managed durability (11 9s) |
+
+### Server topology
+
+**Supported: one `mediagit-server` process per `repos_dir` (and per
+`auth_store_dir`).** The server takes an exclusive lock on both at startup and
+refuses to start if another process holds one. The lock lives on an open file
+handle, so the OS releases it on any exit — a crashed server does not block its
+own restart.
+
+This is a real constraint, not caution. The server keeps state that is
+per-process, and a second instance sharing a directory corrupts it *silently*:
+
+| State | What a second instance does |
+|---|---|
+| `users.jsonl` / `grants.jsonl` | each loads at boot and full-rewrites on mutation; the slower writer's snapshot wins and the other's users and grants vanish |
+| `locks.jsonl` | same full rewrite, and the double-lock 409 guard is per-process, so two clients can both hold one path |
+| circular chunk-delta guard | in-process only; two instances can write A→B and B→A and leave the repo unpushable |
+| pack verification | the same pack is verified twice over the WAN |
+| token revocation | logout does not propagate; the sibling keeps accepting a revoked JWT |
+| rate limiter | N instances serve N× the configured budget |
+| want-cache | negotiation state is per-process, so clone/push negotiation breaks |
+
+None of those raise an error, which is why the enforcement is at boot rather
+than at each site.
+
+To scale out today, give each instance its own `repos_dir` and `auth_store_dir`
+and shard repositories across them at the load balancer. True horizontal scale —
+several instances over one shared store — needs the state above moved to a
+shared store (Postgres/Redis) and is **not implemented**.
+
+`MEDIAGIT_ALLOW_MULTI_INSTANCE=1` downgrades the refusal to a warning. It exists
+for an operator who has genuinely separated every directory and is only tripping
+over a lock file on a shared mount. It does not make the sharing safe.
 
 ### Disaster Recovery
 

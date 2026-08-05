@@ -133,9 +133,20 @@ async fn save_locks_file(path: &Path, locks: &HashMap<String, LockRecord>) -> an
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    let tmp = path.with_extension("jsonl.tmp");
-    tokio::fs::write(&tmp, content.as_bytes()).await?;
-    tokio::fs::rename(&tmp, path).await?;
+    // Unique temp name, not `path.with_extension("jsonl.tmp")`. The shared name
+    // is the VC-4 anti-pattern (`atomic_write.rs`): two writers open the *same*
+    // temp path, the second truncates the first's in-flight file, and whichever
+    // rename lands last wins. AU-10's instance lock now makes two server
+    // processes impossible, so this is belt-and-braces — but it is four lines,
+    // and `write_atomic` also fsyncs before the rename, which the plain
+    // write+rename here never did (atomic against a racing writer, not against
+    // a power cut).
+    let path = path.to_path_buf();
+    let bytes = content.into_bytes();
+    tokio::task::spawn_blocking(move || {
+        mediagit_versioning::atomic_write::write_atomic(&path, &bytes)
+    })
+    .await??;
     Ok(())
 }
 

@@ -25,7 +25,8 @@
 //! "no users registered" instead of "storage is broken".
 
 use serde::{Serialize, de::DeserializeOwned};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::AuthError;
 
@@ -135,14 +136,47 @@ pub(crate) async fn save_jsonl<T: Serialize>(path: &Path, records: &[T]) -> Resu
             .await
             .map_err(|e| AuthError::Internal(anyhow::anyhow!(e)))?;
     }
-    let tmp = path.with_extension("jsonl.tmp");
-    tokio::fs::write(&tmp, content.as_bytes())
-        .await
-        .map_err(|e| AuthError::Internal(anyhow::anyhow!(e)))?;
-    tokio::fs::rename(&tmp, path)
-        .await
-        .map_err(|e| AuthError::Internal(anyhow::anyhow!(e)))?;
+    let tmp = tmp_path_for(path);
+    let write = async {
+        let mut f = tokio::fs::File::create(&tmp).await?;
+        tokio::io::AsyncWriteExt::write_all(&mut f, content.as_bytes()).await?;
+        // Durable before visible: without this the rename can land while the
+        // bytes are still in the page cache, so a power cut leaves an empty or
+        // truncated auth store — and `load_jsonl` has no recovery path, it just
+        // reports a corrupt store and every login fails.
+        f.sync_all().await?;
+        drop(f);
+        tokio::fs::rename(&tmp, path).await
+    };
+    if let Err(e) = write.await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(AuthError::Internal(anyhow::anyhow!(e)));
+    }
     Ok(())
+}
+
+/// A temp path unique to this process, thread and call.
+///
+/// Deliberately NOT `path.with_extension("jsonl.tmp")`. That gives every writer
+/// of a given file the *same* temp path, so two of them truncate each other's
+/// in-flight file and the last rename silently discards the other's users and
+/// grants. It is the VC-4 anti-pattern that `mediagit-versioning`'s
+/// `atomic_write` module exists to document; this crate does not depend on
+/// that one, and one helper does not justify the edge.
+///
+/// Appends to the full file name rather than replacing the extension, so
+/// `users.jsonl` and `users.json` cannot collide either.
+fn tmp_path_for(path: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(
+        ".{}.{:?}.{}.mgtmp",
+        std::process::id(),
+        std::thread::current().id(),
+        n
+    ));
+    path.with_file_name(name)
 }
 
 #[cfg(test)]
@@ -162,6 +196,50 @@ mod tests {
         std::fs::write(&path, "{\"v\":2}\n").unwrap();
         let result: Result<Vec<Rec>, AuthError> = load_jsonl(&path);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn tmp_paths_never_collide() {
+        let path = Path::new("/store/users.jsonl");
+        let a = tmp_path_for(path);
+        let b = tmp_path_for(path);
+        assert_ne!(
+            a, b,
+            "two writers of one file must get different temp paths; a shared \
+             `users.jsonl.tmp` lets the second truncate the first's in-flight \
+             file and the last rename silently discards the other's users"
+        );
+        assert_eq!(
+            a.parent(),
+            path.parent(),
+            "temp must stay beside the target so the rename is same-filesystem and therefore atomic"
+        );
+
+        // Extension replacement would map these onto one temp path.
+        assert_ne!(
+            tmp_path_for(Path::new("/store/users.jsonl")),
+            tmp_path_for(Path::new("/store/users.json"))
+        );
+    }
+
+    #[tokio::test]
+    async fn save_jsonl_leaves_no_temp_files_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.jsonl");
+        save_jsonl(&path, &[Rec { id: 1 }]).await.unwrap();
+        save_jsonl(&path, &[Rec { id: 2 }]).await.unwrap();
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("mgtmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "unique temp names must still be cleaned up, or every mutation \
+             litters the auth store directory: {leftovers:?}"
+        );
     }
 
     #[tokio::test]

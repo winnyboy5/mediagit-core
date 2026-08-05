@@ -45,6 +45,7 @@
 pub mod auth_routes;
 pub mod config;
 pub mod handlers;
+pub mod instance_lock;
 pub mod locks;
 pub mod security;
 pub mod state;
