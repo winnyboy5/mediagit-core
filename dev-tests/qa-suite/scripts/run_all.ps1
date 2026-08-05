@@ -32,10 +32,14 @@ if (-not $Phases -or $Phases.Count -eq 0) {
   # Phase 12 (safety axis) runs before 09/report so the report aggregates it.
   # It is cheap - a handful of tiny sandboxes - and it is the axis whose absence
   # let 17 data-loss defects pass every other phase, so it runs on every tier.
+  # Phase 13 (docs) also runs before 09/report. It only shells out to `--help`
+  # for ~28 commands, so it is seconds - and two book/src/cli pages have already
+  # been found to be outright fiction by a human happening to read them, with
+  # nothing checking in between.
   $Phases = if ($QA.Tier -eq "SCALE") {
-    @("00", "01", "02", "03", "04", "05", "06", "07", "08", "10", "12", "09")
+    @("00", "01", "02", "03", "04", "05", "06", "07", "08", "10", "12", "13", "09")
   } else {
-    @("00", "01", "02", "03", "04", "05", "06", "07", "08", "12", "09")
+    @("00", "01", "02", "03", "04", "05", "06", "07", "08", "12", "13", "09")
   }
 }
 
