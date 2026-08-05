@@ -339,9 +339,18 @@ impl ContentChunker {
             self.seed,
         );
 
-        for result in stream_cdc {
+        // PERF-V10-PSD: this loop is the serial producer feeding N parallel
+        // workers, and it does three quite different jobs. Splitting them is
+        // what tells "boundary detection is the ceiling" (cdc) apart from
+        // "hashing is the ceiling" (hash) apart from "the workers cannot keep
+        // up and the producer is idle" (send_block) — three conclusions the
+        // single `wall` number cannot distinguish, and which imply opposite
+        // fixes. Timing is inert unless MEDIAGIT_BENCH=1.
+        use crate::add_phases::{Phase, time};
+        let mut stream_cdc = stream_cdc;
+        while let Some(result) = time(Phase::Cdc, || stream_cdc.next()) {
             let entry = result.map_err(|e| anyhow::anyhow!("FastCDC streaming error: {}", e))?;
-            let id = Oid::hash(&entry.data);
+            let id = time(Phase::Hash, || Oid::hash(&entry.data));
             let chunk = ContentChunk {
                 id,
                 data: entry.data,
@@ -351,8 +360,7 @@ impl ContentChunker {
                 perceptual_hash: None,
                 codec_hint: CodecHint::Unknown,
             };
-            sender
-                .blocking_send(chunk)
+            time(Phase::SendBlock, || sender.blocking_send(chunk))
                 .map_err(|_| anyhow::anyhow!("Chunk worker channel closed unexpectedly"))?;
         }
 

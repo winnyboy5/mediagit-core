@@ -247,7 +247,21 @@ impl AddCmd {
         let storage_path = repo_root.join(".mediagit");
         let storage = create_storage_backend(&repo_root).await?;
 
-        let delta_enabled = !self.no_delta;
+        // MEDIAGIT_DELTA_ENABLED was read into `RepoConfig` (config.rs:149) and
+        // never consulted here, so `add` — the one command whose cost it
+        // governs — ignored it entirely. That is not a cosmetic gap: chunk-delta
+        // is 96% of `add`'s wall on a large PSD (measured 95.79s with, 0.59s
+        // with --no-delta), so an A/B run with the env var set produced two
+        // identical measurements while appearing to be a controlled comparison.
+        // Same dead-knob class as MEDIAGIT_CHUNK_WRITE_CONCURRENCY on the
+        // streaming path and GCS_UPLOAD_CONCURRENCY on the presigned path.
+        //
+        // Either switch turns delta OFF; neither can force it back ON past the
+        // other. An env var that overrode an explicit `--no-delta` would be a
+        // surprise in the dangerous direction.
+        let env_delta_off = std::env::var("MEDIAGIT_DELTA_ENABLED").as_deref() == Ok("0")
+            || std::env::var("MEDIAGIT_DELTA_ENABLED").as_deref() == Ok("false");
+        let delta_enabled = !self.no_delta && !env_delta_off;
         let chunk_strategy = if self.no_chunking {
             None
         } else {
@@ -687,8 +701,16 @@ impl AddCmd {
         // orphans the previous version's chunks immediately; the threshold
         // gate (50 MiB or 100 orphans) makes trivial adds a no-op.
         if !self.dry_run && added_count > 0 {
+            // Timed separately because `wall` below includes it. An `add` that
+            // happened to trip the gc threshold looked like a slow `add`, which
+            // is a plausible way for a perf claim to be wrong for a whole cycle.
+            let gc_timer = std::time::Instant::now();
             let _ =
                 crate::auto_gc::maybe_run(&repo_root, crate::auto_gc::TriggerMode::PostAdd).await;
+            mediagit_versioning::add_phases::record(
+                mediagit_versioning::add_phases::Phase::AutoGc,
+                gc_timer.elapsed(),
+            );
         }
 
         mediagit_protocol::bench::emit_add_summary(_add_wall, total_bytes, added_count);
@@ -774,6 +796,14 @@ impl AddCmd {
             // MEDIAGIT_HASH_PARALLEL: default ON. Set to "0" to force sequential.
             // Falls back to sequential hash automatically when mmap is unavailable
             // (e.g. network FS, locked file, 32-bit address exhaustion).
+            // PERF-V10-PSD: this is the FIRST of two walks over the file — the
+            // whole-file dedup OID here, then StreamCDC reads it again to chunk
+            // it. The second walk is the work itself; this one is the candidate
+            // for removal (the streaming pass already hashes every chunk). It
+            // is only worth removing if it is a material fraction, hence the
+            // measurement before the optimisation. Covers both branches, so a
+            // machine where mmap falls back to sequential is still measured.
+            let _oid_timer = std::time::Instant::now();
             let content_oid = if std::env::var("MEDIAGIT_HASH_PARALLEL").as_deref() != Ok("0") {
                 let path_owned = file_path.to_path_buf();
                 match tokio::task::spawn_blocking(move || Oid::from_file_mmap_parallel(&path_owned))
@@ -790,6 +820,10 @@ impl AddCmd {
                     .await
                     .context(format!("Failed to hash file: {}", file_path.display()))?
             };
+            mediagit_versioning::add_phases::record(
+                mediagit_versioning::add_phases::Phase::Oid,
+                _oid_timer.elapsed(),
+            );
 
             // Check if unchanged from HEAD
             if let Some(head_oid) = head_files.get(&relative_path)

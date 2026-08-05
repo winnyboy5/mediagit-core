@@ -126,15 +126,39 @@ $comparedCount = 0     # records actually held against a baseline value
 $recordCount = 0
 $missingBaseline = @() # size/op/field combos eligible to gate but absent from the baseline
 
+# Cases, not just sizes. Every perf record until now came from a synthetic
+# `.bin`, so PERF-V10-PSD - open since v10, specifically about PSD - was never
+# measured by the gate that would have caught it moving. A real PSD costs 96%
+# of its `add` wall in chunk-delta encoding, which a random .bin never triggers,
+# so the synthetic sizes cannot stand in for it.
+$cases = @()
 foreach ($sizeMB in $sizeClassesMB) {
-  $sb = New-SandboxRepo "perf-$sizeMB" $Phase
-  $assetPath = Join-Path $sb "asset.bin"
-  New-SyntheticFile $assetPath $sizeMB
+  $cases += [pscustomobject]@{ sizeMB = $sizeMB; op = "add"; name = "asset.bin"; src = $null }
+}
+$psdSrc = Get-ChildItem (Join-Path $QA.TestFiles "psd") -Filter *.psd -EA SilentlyContinue |
+  Sort-Object Length -Descending | Select-Object -First 1
+if ($psdSrc) {
+  # Keyed by its real size and a DISTINCT op label, so a PSD record can never
+  # collide with a synthetic record of the same size class in the
+  # (sizeMB, op, field) baseline lookup.
+  $psdMB = [int][math]::Round($psdSrc.Length / 1MB)
+  $cases += [pscustomobject]@{ sizeMB = $psdMB; op = "add-psd"; name = $psdSrc.Name; src = $psdSrc.FullName }
+  Write-QaLog $Phase "PSD perf case: $($psdSrc.Name) ${psdMB}MB"
+} else {
+  # Recorded, not silent. An absent fixture must not read as "PSD is fine".
+  Write-QaLog $Phase "NO PSD fixture under $(Join-Path $QA.TestFiles 'psd') - PSD perf case SKIPPED"
+}
+
+foreach ($case in $cases) {
+  $sizeMB = $case.sizeMB
+  $sb = New-SandboxRepo "perf-$($case.op)-$sizeMB" $Phase
+  $assetPath = Join-Path $sb $case.name
+  if ($case.src) { Copy-Item $case.src $assetPath -Force } else { New-SyntheticFile $assetPath $sizeMB }
 
   $env:MEDIAGIT_BENCH = "1"
   try {
-    $addRes = Invoke-MG $sb @("add", "asset.bin") $Phase
-    $commitRes = Invoke-MG $sb @("commit", "-m", "perf-$sizeMB") $Phase
+    $addRes = Invoke-MG $sb @("add", $case.name) $Phase -TimeoutSec 1800
+    $commitRes = Invoke-MG $sb @("commit", "-m", "perf-$sizeMB") $Phase -TimeoutSec 1800
   } finally {
     Remove-Item Env:\MEDIAGIT_BENCH -EA SilentlyContinue
   }
@@ -145,6 +169,9 @@ foreach ($sizeMB in $sizeClassesMB) {
   # @() guard: with a single bench record PS unrolls the function's return array to the bare hashtable
   $records = @(Parse-BenchLines ($addRes.Out + "`n" + $commitRes.Out))
   foreach ($rec in $records) {
+    # The binary reports op=add for both cases; relabel so the PSD record gets
+    # its own baseline key rather than overwriting the synthetic one.
+    if ($case.op -ne "add" -and $rec['op'] -eq "add") { $rec['op'] = $case.op }
     # Too small to support a percentage claim -> report, but do not gate.
     # See $MIN_GATED_SIZE_MB.
     $gatable = $sizeMB -ge $MIN_GATED_SIZE_MB

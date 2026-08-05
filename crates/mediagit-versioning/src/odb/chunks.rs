@@ -1041,7 +1041,19 @@ impl ObjectDatabase {
                 .unwrap_or(262_144); // 256 KiB — below this, spawn overhead > compression cost
 
         // --- Parallel pipeline: spawn workers FIRST, then produce chunks ---
-        let num_workers = num_cpus::get().clamp(2, 16);
+        //
+        // MEDIAGIT_CHUNK_WRITE_CONCURRENCY was documented as the knob for this
+        // and never reached here — the streaming path (the production path for
+        // files >= 5 MB) hardcoded the worker count, so setting it did nothing.
+        // A dead knob is worse than no knob: it makes a measurement look
+        // controlled when it is not, which is how GCS_UPLOAD_CONCURRENCY wasted
+        // a cycle on the presigned path. Same clamp as before, so the default
+        // is byte-for-byte the old behaviour; only an explicit setting changes it.
+        let num_workers = std::env::var("MEDIAGIT_CHUNK_WRITE_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or_else(|| num_cpus::get().clamp(2, 16));
         let (tx, rx) =
             async_channel::bounded::<(usize, crate::chunking::ContentChunk, Option<Oid>)>(64);
 
@@ -1077,8 +1089,16 @@ impl ObjectDatabase {
                     // 1. Dedup check
                     let chunk_key = format!("chunks/{}", chunk.id.to_hex());
                     let delta_meta_key = format!("chunk-deltas/{}.meta", chunk.id.to_hex());
+                    // Two round trips to storage per chunk, before any work is
+                    // done. Cheap on a local ODB, not cheap on a remote one, and
+                    // invisible in the wall figure until now.
+                    let _dedup_timer = std::time::Instant::now();
                     let chunk_exists = storage.exists(&chunk_key).await.unwrap_or(false);
                     let delta_exists = storage.exists(&delta_meta_key).await.unwrap_or(false);
+                    crate::add_phases::record(
+                        crate::add_phases::Phase::Dedup,
+                        _dedup_timer.elapsed(),
+                    );
 
                     if chunk_exists || delta_exists {
                         debug!(chunk_id = %chunk.id, "Streaming parallel: chunk deduplicated");
@@ -1092,6 +1112,12 @@ impl ObjectDatabase {
                     // 2. Delta encoding using the base pre-selected by the
                     //    producer (deterministic: same chunk order every run).
                     let mut stored_as_delta = false;
+                    // Whole delta attempt: base resolution, the chain walk, the
+                    // base fetch/decompress, the encode and the .meta write. It
+                    // is the largest single unknown in `add` and was entirely
+                    // absent from the breakdown's first version, which left 74%
+                    // of a 357 MB PSD add unaccounted for.
+                    let _delta_timer = std::time::Instant::now();
                     if let Some(nominated_base) = base_oid_opt {
                         // Cycle AND depth prevention in one chain walk (see the
                         // parallel non-streaming variant above for the full
@@ -1252,8 +1278,18 @@ impl ObjectDatabase {
                     // per-chunk codec-aware compression (e.g., Zstd for PCM audio,
                     // Brotli for subtitles, Store for H.264).  Falls back to file-level
                     // strategy when codec is unknown.
+                    crate::add_phases::record(
+                        crate::add_phases::Phase::Delta,
+                        _delta_timer.elapsed(),
+                    );
+
                     if !stored_as_delta {
                         let codec_hint = to_chunk_codec_hint(chunk.codec_hint, chunk.chunk_type);
+                        // PERF-V10-PSD: compress and write are the two consumer-side
+                        // costs. Measured separately from the producer so a high
+                        // `send_block_ms` upstream can be attributed to one of them
+                        // rather than guessed at.
+                        let _compress_timer = std::time::Instant::now();
                         let data_to_store = if compress_blocking
                             && chunk.data.len() >= compress_blocking_threshold
                         {
@@ -1302,9 +1338,19 @@ impl ObjectDatabase {
                         } else {
                             chunk.data.clone()
                         };
+                        crate::add_phases::record(
+                            crate::add_phases::Phase::Compress,
+                            _compress_timer.elapsed(),
+                        );
 
                         // Tolerate concurrent writes
-                        if let Err(e) = storage.put(&chunk_key, &data_to_store).await
+                        let _write_timer = std::time::Instant::now();
+                        let put_result = storage.put(&chunk_key, &data_to_store).await;
+                        crate::add_phases::record(
+                            crate::add_phases::Phase::Write,
+                            _write_timer.elapsed(),
+                        );
+                        if let Err(e) = put_result
                             && !storage.exists(&chunk_key).await.unwrap_or(false)
                         {
                             return Err(anyhow::anyhow!("Store chunk: {}", e));

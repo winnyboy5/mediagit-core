@@ -18,7 +18,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Schema version for the `[bench]` summary line. Increment when fields change.
-const BENCH_SCHEMA_VERSION: u8 = 3;
+///
+/// 4: `op=add` gained the per-phase breakdown
+/// (`oid_ms`/`cdc_ms`/`hash_ms`/`send_block_ms`/`compress_ms`/`write_ms`/`autogc_ms`).
+const BENCH_SCHEMA_VERSION: u8 = 4;
 
 /// Collect all `MEDIAGIT_*` env vars as a sorted `KEY=val,...` string.
 fn collect_knobs() -> String {
@@ -255,14 +258,31 @@ pub fn emit_add_summary(wall_start: std::time::Instant, total_bytes: u64, files:
         0.0
     };
     let knobs = collect_knobs();
+    // PERF-V10-PSD: the per-phase breakdown. `wall` alone cannot say whether
+    // `add` is bound by the whole-file OID, by serial CDC, by hashing, by the
+    // workers, or by auto-gc — which `wall` also silently included. Every phase
+    // is printed even at zero, so "this phase costs nothing" stays
+    // distinguishable from "this phase was never instrumented".
+    //
+    // These do NOT sum to `wall`: the producer and the worker pool overlap by
+    // design, so compress_ms + write_ms are wall-clock across N workers while
+    // cdc_ms/hash_ms are one serial thread. Read them as attribution, not as a
+    // partition — a breakdown that appeared to add up would be the misleading
+    // version.
+    let phases = mediagit_versioning::add_phases::snapshot()
+        .into_iter()
+        .map(|(k, ms)| format!("{k}={ms:.1}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     eprintln!(
         "[bench] bench_schema_version={schema} op=add files={files} \
-         total_bytes={bytes} wall={wall:.2}s hash_mbs={mbs:.2} knobs={knobs}",
+         total_bytes={bytes} wall={wall:.2}s hash_mbs={mbs:.2} {phases} knobs={knobs}",
         schema = BENCH_SCHEMA_VERSION,
         files = files,
         bytes = total_bytes,
         wall = wall_s,
         mbs = mbs,
+        phases = phases,
         knobs = if knobs.is_empty() {
             "none".to_string()
         } else {
