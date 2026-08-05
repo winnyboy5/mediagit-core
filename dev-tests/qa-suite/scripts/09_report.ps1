@@ -315,4 +315,39 @@ if ($totalError -gt 0) {
   Write-QaLog $Phase "NOTE $totalError gate(s) ERRORED - the drill did not run; this is a harness/infra fault, not a product verdict"
 }
 
+# ---- harness faults: surface the diagnostic, do not just count the symptom ----
+#
+# `Invoke-MG` writes a full record (stage, exception type, inner exception,
+# flattened AggregateException, child state, handle count, stack) to
+# logs\harness-faults.log whenever a spawn or a stream read blows up. The gate
+# above counts the CONSEQUENCE - N gates errored - and says nothing about where
+# the evidence is.
+#
+# That gap is the whole reason "Stream was not readable" survived three
+# campaigns undiagnosed: the campaign reported errored drills, nobody knew a
+# richer record existed, and by the time anyone looked the run was gone. The
+# fault is parked deliberately (it cannot be reproduced on demand), so the ONLY
+# thing that makes parking safe is that its next occurrence is impossible to
+# miss. Print the stages and types inline and name the file.
+$faultLog = Join-Path $QA.Logs "harness-faults.log"
+if (Test-Path $faultLog) {
+  $faultText = Get-Content $faultLog -Raw -EA SilentlyContinue
+  $stages = [regex]::Matches(("" + $faultText), '\[INVOKE-MG-ERROR\] stage=(\S+) type=(\S+)')
+  $summary = @{}
+  foreach ($m in $stages) {
+    $k = "stage=$($m.Groups[1].Value) type=$($m.Groups[2].Value)"
+    $summary[$k] = [int]$summary[$k] + 1
+  }
+  $lines = @($summary.Keys | Sort-Object | ForEach-Object { "$_ x$($summary[$_])" })
+  Write-QaLog $Phase ("HARNESS FAULTS: {0} recorded -- {1}" -f $stages.Count, ($lines -join " | "))
+  Write-QaLog $Phase "HARNESS FAULTS: full records (exception type, inner, stack) in $faultLog -- READ IT, this is the evidence a recurrence exists to provide"
+  # A gate, so it lands in gates.tsv and the report table rather than only in a
+  # log nobody opens. Failing is correct: a harness fault means some part of the
+  # campaign did not measure what it claimed to.
+  Write-QaGate $Phase "campaign-no-harness-faults" ($stages.Count -eq 0) `
+    ("faults={0}; see logs\harness-faults.log -- {1}" -f $stages.Count, ($lines -join " | "))
+} else {
+  Write-QaGate $Phase "campaign-no-harness-faults" $true "no harness-faults.log written"
+}
+
 Exit-QaPhase $Phase
