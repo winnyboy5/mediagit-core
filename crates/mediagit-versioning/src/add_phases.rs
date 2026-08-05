@@ -60,6 +60,18 @@ pub enum Phase {
     Dedup,
     /// Chunk-delta encoding: base resolution, chain walk, delta write.
     Delta,
+    /// Waiting to acquire the global `delta_written_pairs` mutex. Measured
+    /// apart from the work because that lock is held across storage I/O (a
+    /// chain re-walk and the `.meta` put), so N workers serialise on it — and
+    /// a single `delta_ms` cannot tell "computing" from "waiting in line".
+    DeltaLock,
+    /// `resolve_delta_base` chain walks. Twice per chunk — once before the
+    /// lock, once under it — each doing storage lookups per hop.
+    DeltaResolve,
+    /// `DeltaEncoder::encode` itself: the actual delta computation.
+    DeltaEncode,
+    /// Compressing the encoded delta before storing it.
+    DeltaCompress,
     /// Per-chunk compression in the worker pool.
     Compress,
     /// Per-chunk `storage.put`.
@@ -69,7 +81,7 @@ pub enum Phase {
 }
 
 impl Phase {
-    const COUNT: usize = 9;
+    const COUNT: usize = 13;
 
     fn index(self) -> usize {
         match self {
@@ -79,9 +91,13 @@ impl Phase {
             Phase::SendBlock => 3,
             Phase::Dedup => 4,
             Phase::Delta => 5,
-            Phase::Compress => 6,
-            Phase::Write => 7,
-            Phase::AutoGc => 8,
+            Phase::DeltaLock => 6,
+            Phase::DeltaResolve => 7,
+            Phase::DeltaEncode => 8,
+            Phase::DeltaCompress => 9,
+            Phase::Compress => 10,
+            Phase::Write => 11,
+            Phase::AutoGc => 12,
         }
     }
 
@@ -94,6 +110,10 @@ impl Phase {
             Phase::SendBlock => "send_block_ms",
             Phase::Dedup => "dedup_ms",
             Phase::Delta => "delta_ms",
+            Phase::DeltaLock => "delta_lock_ms",
+            Phase::DeltaResolve => "delta_resolve_ms",
+            Phase::DeltaEncode => "delta_encode_ms",
+            Phase::DeltaCompress => "delta_compress_ms",
             Phase::Compress => "compress_ms",
             Phase::Write => "write_ms",
             Phase::AutoGc => "autogc_ms",
@@ -107,6 +127,10 @@ impl Phase {
         Phase::SendBlock,
         Phase::Dedup,
         Phase::Delta,
+        Phase::DeltaLock,
+        Phase::DeltaResolve,
+        Phase::DeltaEncode,
+        Phase::DeltaCompress,
         Phase::Compress,
         Phase::Write,
         Phase::AutoGc,

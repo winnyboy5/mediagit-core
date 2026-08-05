@@ -1123,7 +1123,14 @@ impl ObjectDatabase {
                         // parallel non-streaming variant above for the full
                         // rationale, including why the producer pre-cache means
                         // a delta-stored base is still a cache hit here).
-                        match resolve_delta_base(&*storage, nominated_base, chunk.id).await {
+                        let _resolve_timer = std::time::Instant::now();
+                        let resolved =
+                            resolve_delta_base(&*storage, nominated_base, chunk.id).await;
+                        crate::add_phases::record(
+                            crate::add_phases::Phase::DeltaResolve,
+                            _resolve_timer.elapsed(),
+                        );
+                        match resolved {
                             None => {
                                 debug!(
                                     chunk_id = %chunk.id,
@@ -1169,8 +1176,13 @@ impl ObjectDatabase {
                                 };
 
                                 if let Some(base_data) = base_data_arc {
+                                    let _encode_timer = std::time::Instant::now();
                                     let delta = DeltaEncoder::encode(&base_data, &chunk.data);
                                     let delta_bytes = delta.to_bytes();
+                                    crate::add_phases::record(
+                                        crate::add_phases::Phase::DeltaEncode,
+                                        _encode_timer.elapsed(),
+                                    );
                                     let delta_ratio =
                                         delta_bytes.len() as f64 / chunk.data.len() as f64;
 
@@ -1179,6 +1191,7 @@ impl ObjectDatabase {
                                     if delta_ratio < threshold {
                                         let delta_key =
                                             format!("chunk-deltas/{}", chunk.id.to_hex());
+                                        let _dcomp_timer = std::time::Instant::now();
                                         let compressed_delta = if let Some(ref smart) = smart_comp {
                                             smart
                                                 .compress_typed(
@@ -1198,7 +1211,27 @@ impl ObjectDatabase {
                                         // Lock held through the chain re-walk AND the meta
                                         // write — same cycle-closing race as the other two
                                         // chunk-delta write sites (see the sequential path).
+                                        crate::add_phases::record(
+                                            crate::add_phases::Phase::DeltaCompress,
+                                            _dcomp_timer.elapsed(),
+                                        );
+
+                                        // Queueing on this mutex is the suspected
+                                        // bottleneck: it is global and held across storage
+                                        // I/O below, so N workers serialise here.
+                                        let _lock_timer = std::time::Instant::now();
                                         let mut pairs = delta_pairs.lock().await;
+                                        crate::add_phases::record(
+                                            crate::add_phases::Phase::DeltaLock,
+                                            _lock_timer.elapsed(),
+                                        );
+                                        // Nested rather than an `else if` chain so the
+                                        // cheap in-memory check still SHORT-CIRCUITS the
+                                        // chain re-walk. Hoisting the re-walk to satisfy
+                                        // clippy would have made it unconditional — extra
+                                        // storage I/O inside the very critical section
+                                        // that is this path's measured bottleneck
+                                        // (269 ms/chunk, serialised).
                                         let should_write = if pairs.contains(&(base_id, chunk.id)) {
                                             debug!(
                                                 chunk_id = %chunk.id,
@@ -1206,22 +1239,29 @@ impl ObjectDatabase {
                                                 "Streaming parallel: TOCTOU delta race — reverse pair committed; skipping write"
                                             );
                                             false
-                                        } else if resolve_delta_base(&*storage, base_id, chunk.id)
-                                            .await
-                                            != Some(base_id)
-                                        {
+                                        } else {
                                             // Re-decide under the lock, same answer
                                             // required — the delta bytes are bound to
                                             // this specific `base_id`.
-                                            debug!(
-                                                chunk_id = %chunk.id,
-                                                base_id = %base_id,
-                                                "Streaming parallel: refusing chunk delta at commit — concurrent writes would close a cycle"
+                                            let _relock_timer = std::time::Instant::now();
+                                            let rewalk_base =
+                                                resolve_delta_base(&*storage, base_id, chunk.id)
+                                                    .await;
+                                            crate::add_phases::record(
+                                                crate::add_phases::Phase::DeltaResolve,
+                                                _relock_timer.elapsed(),
                                             );
-                                            false
-                                        } else {
-                                            pairs.insert((chunk.id, base_id));
-                                            true
+                                            if rewalk_base != Some(base_id) {
+                                                debug!(
+                                                    chunk_id = %chunk.id,
+                                                    base_id = %base_id,
+                                                    "Streaming parallel: refusing chunk delta at commit — concurrent writes would close a cycle"
+                                                );
+                                                false
+                                            } else {
+                                                pairs.insert((chunk.id, base_id));
+                                                true
+                                            }
                                         };
 
                                         if should_write {
