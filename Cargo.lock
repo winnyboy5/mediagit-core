@@ -3408,6 +3408,7 @@ dependencies = [
  "brotli",
  "criterion",
  "flate2",
+ "mediagit-security",
  "proptest",
  "serde",
  "serde_json",

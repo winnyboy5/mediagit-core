@@ -32,6 +32,7 @@
 
 // Re-export encryption and KDF modules
 pub mod encryption;
+pub mod envelope;
 pub mod kdf;
 
 // Audit logging module

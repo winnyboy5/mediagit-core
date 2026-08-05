@@ -62,13 +62,27 @@ write outside a repo's namespace — a cross-tenant escape on a
 multi-repo server.
 
 ## Encryption
-- **At-rest (client-side)**: **not wired.** `mediagit-security` implements AES-256-GCM
-  with Argon2id key derivation, with tests and benches, but it has zero CLI or server
-  call sites — MediaGit encrypts no stored byte itself. Tracked as an open decision, not
-  a shipped feature.
-- **At-rest (cloud)**: Cloud provider encryption (SSE-S3, Azure SSE) — a *different*
-  mechanism from the above, configured by `[storage] encryption`. The two were
-  conflated in these docs until 2026-07-29.
+- **At-rest (MediaGit's own)**: **partially implemented; cannot be turned on.**
+  The object envelope exists and is wired: `mediagit-security` implements AES-256-GCM
+  with Argon2id key derivation, and `SmartCompressor` now seals every object it writes
+  and opens every sealed object it reads (`MGEN`, `FORMATS.md` §10b). What does **not**
+  exist is key management — nothing decides where a key comes from, wraps a per-repo
+  key, or delivers one to a client for the presigned-upload path. So no configuration
+  enables this today and **no stored byte is encrypted in practice**. With no key
+  configured the bytes written are byte-for-byte identical to a build without the
+  feature, which is asserted by test. Tracked as DC-7.
+- **At-rest (cloud)**: **also not wired.** `[storage] encryption` and
+  `[storage] encryption_algorithm` are parsed and *validated* (`validation.rs:130`
+  rejects anything but `AES256` / `aws:kms*`), which makes them look live — but no
+  storage backend reads either field. Grep for `ServerSideEncryption` / `sse_algorithm`
+  returns nothing: no `PutObject` call sets an SSE header on any backend. Setting these
+  keys has no effect.
+  These docs previously described this as "a *different, real* thing" from the above.
+  It is different; it is not real. The 2026-07-29 correction fixed the client-side claim
+  and introduced this one in its place. Verified 2026-08-05.
+  Bucket-level encryption configured **outside** MediaGit (an S3 bucket default, an
+  Azure storage-account policy) does of course still apply — it simply has nothing to do
+  with these config keys.
 - **In-transit**: TLS 1.3 on the server's TLS listener by default; set `tls_min_version = "1.2"` in `mediagit-server.toml` as an escape hatch for TLS 1.2-only clients/proxies (any other value fails config load). Client certificates (mTLS) are **not** wired — `TlsConfig` carries the fields but the server has no knob to set them and builds with `with_no_client_auth`.
 
 ## Best Practices

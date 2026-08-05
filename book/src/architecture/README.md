@@ -140,12 +140,16 @@ sequenceDiagram
 - `mediagit verify` for repository health checks
 
 ### Encryption
-- At-rest: cloud provider encryption (SSE-S3, Azure SSE), configured via `[storage] encryption`
+- At-rest, MediaGit's own: **partially implemented, cannot be enabled.** The `MGEN`
+  object envelope is wired into `SmartCompressor` (AES-256-GCM), but key management does
+  not exist, so nothing turns it on and no stored byte is encrypted in practice. With no
+  key configured, output is byte-for-byte identical to a build without the feature.
+  Tracked as DC-7; see [Security](security.md).
+- At-rest, cloud SSE: **not wired either.** `[storage] encryption` /
+  `encryption_algorithm` are parsed and validated but read by no storage backend — no
+  request sets an SSE header. Setting them has no effect. (Bucket-level encryption
+  configured outside MediaGit still applies; it just isn't these keys.)
 - In-transit: TLS 1.3 by default when the server's TLS listener is enabled; `tls_min_version = "1.2"` in `mediagit-server.toml` is an escape hatch for TLS 1.2-only clients/proxies. mTLS is not wired.
-- Client-side encryption: **not wired.** `mediagit-security` implements AES-256-GCM
-  with Argon2id key derivation and has tests and benches, but nothing in the CLI or
-  server calls it, so no stored byte is encrypted by MediaGit itself. Distinct from
-  `[storage] encryption` above, which is real.
 
 ## Scalability
 

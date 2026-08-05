@@ -847,7 +847,7 @@ flowchart TD
 
 | Module | Files | Purpose |
 |--------|-------|---------|
-| **Encryption** | `encryption.rs` | AES-256-GCM at-rest encryption |
+| **Encryption** | `encryption.rs`, `envelope.rs` | AES-256-GCM primitives + the `MGEN` object envelope. Wired into `SmartCompressor`, but **key management does not exist**, so nothing enables it and no stored byte is encrypted in practice (DC-7) |
 | **KDF** | `kdf.rs` | Key derivation (Argon2/PBKDF2) |
 | **Auth** | `auth/jwt.rs`, `auth/apikey.rs`, `auth/credentials.rs` | JWT tokens + API keys |
 | **Middleware** | `auth/middleware.rs` | Axum auth extraction |

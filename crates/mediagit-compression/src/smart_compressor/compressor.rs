@@ -14,6 +14,7 @@
 use super::*;
 use crate::CompressionAlgorithm;
 use crate::error::CompressionError;
+use mediagit_security::encryption::EncryptionKey;
 use std::io::{Cursor, Read, Write};
 
 /// Type-aware compressor trait
@@ -51,6 +52,15 @@ pub struct SmartCompressor {
     zstd_default: ZstdCompressor,
     zstd_best: ZstdCompressor,
     brotli_best: BrotliCompressor,
+    /// DC-7: at-rest encryption key, `None` for every repo that has not opted in.
+    ///
+    /// It lives here, and not at the ~30 `compress`/`decompress` call sites in
+    /// `odb/`, because this type is the one thing all of them route through.
+    /// Encrypting per call site would be 30 edits and 30 chances to miss one —
+    /// and a missed READ site is not a missed feature, it is a repository that
+    /// cannot be read back. The "ODB bypass" bug class has recurred six times
+    /// in this codebase for exactly that reason.
+    key: Option<EncryptionKey>,
 }
 
 impl SmartCompressor {
@@ -62,7 +72,64 @@ impl SmartCompressor {
             zstd_default: ZstdCompressor::new(CompressionLevel::Default),
             zstd_best: ZstdCompressor::new(CompressionLevel::Best),
             brotli_best: BrotliCompressor::new(CompressionLevel::Best),
+            key: None,
         }
+    }
+
+    /// Encrypt everything this compressor writes, and decrypt what it reads.
+    ///
+    /// Objects are sealed **after** compression, so compression still happens
+    /// and still pays before the payload becomes incompressible.
+    ///
+    /// Reads stay tolerant in one direction only: with a key set, an object
+    /// that is *not* sealed still reads normally, so a repo that switches
+    /// encryption on keeps its existing objects readable and new writes are
+    /// sealed. The reverse is deliberately fatal — see [`Self::unseal`].
+    pub fn with_key(mut self, key: EncryptionKey) -> Self {
+        self.key = Some(key);
+        self
+    }
+
+    /// Is at-rest encryption configured?
+    pub fn is_encrypted(&self) -> bool {
+        self.key.is_some()
+    }
+
+    /// Seal `data` if a key is configured, otherwise hand it back untouched.
+    ///
+    /// The untouched path is what keeps the frozen format frozen: with no key,
+    /// the bytes written are byte-for-byte what they were before DC-7 existed.
+    fn seal(&self, data: Vec<u8>) -> CompressionResult<Vec<u8>> {
+        match &self.key {
+            None => Ok(data),
+            Some(k) => mediagit_security::envelope::seal(k, &data)
+                .map_err(|e| CompressionError::compression_failed(format!("seal object: {e}"))),
+        }
+    }
+
+    /// Unseal `data` if it is sealed, otherwise hand it back untouched.
+    ///
+    /// A sealed object with **no key configured** is a hard error, never a
+    /// pass-through. Returning ciphertext here would send it on to the codec
+    /// sniffer, which would find no magic it recognises, classify it as
+    /// uncompressed, and hand a caller random bytes as if they were content.
+    /// The caller's next act is to check an OID or write the result somewhere:
+    /// silent corruption. Failing closed turns a misconfiguration into a
+    /// message.
+    fn unseal<'a>(&self, data: &'a [u8]) -> CompressionResult<std::borrow::Cow<'a, [u8]>> {
+        if !mediagit_security::envelope::is_sealed(data) {
+            return Ok(std::borrow::Cow::Borrowed(data));
+        }
+        let Some(k) = &self.key else {
+            return Err(CompressionError::decompression_failed(
+                "object is encrypted (MGEN envelope) but no encryption key is configured \
+                 for this repository"
+                    .to_string(),
+            ));
+        };
+        mediagit_security::envelope::open(k, data)
+            .map(std::borrow::Cow::Owned)
+            .map_err(|e| CompressionError::decompression_failed(format!("open object: {e}")))
     }
 
     /// Compress a demuxed chunk using codec-aware strategy.
@@ -92,7 +159,7 @@ impl SmartCompressor {
             let mut result = Vec::with_capacity(data.len() + 1);
             result.push(0x00); // Store magic byte
             result.extend_from_slice(data);
-            return Ok(result);
+            return self.seal(result);
         }
 
         let compressed = match strategy {
@@ -136,10 +203,10 @@ impl SmartCompressor {
             let mut result = Vec::with_capacity(data.len() + 1);
             result.push(0x00); // Store magic byte
             result.extend_from_slice(data);
-            return Ok(result);
+            return self.seal(result);
         }
 
-        Ok(compressed)
+        self.seal(compressed)
     }
 
     /// Decompress a byte stream, writing decompressed bytes to `sink` as they
@@ -174,6 +241,32 @@ impl SmartCompressor {
             }
         }
         let peeked = &peek[..peek_len];
+
+        // DC-7: the peek is exactly four bytes, which is exactly the MGEN magic,
+        // so a sealed object is recognised here for free.
+        //
+        // It cannot then be streamed. AES-GCM authenticates with a tag at the
+        // END of the message, so there is no honest way to emit a plaintext
+        // prefix before the whole envelope has been read and verified —
+        // "streaming" it would mean handing out bytes that might yet fail
+        // authentication, which is the one thing this must never do. So an
+        // encrypted object is buffered, opened, and only then fed back through
+        // the ordinary codec path.
+        //
+        // That is a real cost and it is stated rather than hidden: with
+        // encryption on, this function's constant-memory guarantee becomes
+        // "constant per object" instead of "constant, full stop". Unencrypted
+        // repos are unaffected — they never take this branch.
+        if mediagit_security::envelope::is_sealed(peeked) {
+            let mut sealed = peeked.to_vec();
+            reader.read_to_end(&mut sealed).map_err(|e| {
+                CompressionError::decompression_failed(format!("stream read (sealed): {e}"))
+            })?;
+            let plain = self.decompress_typed(&sealed)?;
+            return sink.write_all(&plain).map_err(|e| {
+                CompressionError::decompression_failed(format!("stream write (sealed): {e}"))
+            });
+        }
 
         // Store prefix check first, mirroring decompress_typed exactly.
         if peek_len > 0 && peeked[0] == 0x00 {
@@ -271,6 +364,14 @@ impl TypeAwareCompressor for SmartCompressor {
     }
 
     fn decompress_typed(&self, data: &[u8]) -> CompressionResult<Vec<u8>> {
+        // DC-7: unwrap the MGEN envelope BEFORE any sniffing. AES-GCM output is
+        // indistinguishable from random, so there is no leading byte the
+        // detector below could correctly interpret — it would pick whichever
+        // codec the first random byte resembled. Borrowed when there is no
+        // envelope, so an unencrypted repo pays one 4-byte comparison.
+        let unsealed = self.unseal(data)?;
+        let data: &[u8] = &unsealed;
+
         // Auto-detect compression algorithm
         use crate::CompressionAlgorithm;
 
@@ -1602,5 +1703,151 @@ mod tests {
             msg.contains("decompression") || msg.contains("stream"),
             "error must be a decompression error, got: {msg}"
         );
+    }
+
+    // ---- DC-7: at-rest encryption ----
+
+    fn enc_key() -> EncryptionKey {
+        EncryptionKey::from_bytes(vec![7u8; 32]).unwrap()
+    }
+
+    /// THE format-freeze guarantee. `FORMATS.md` has been frozen since rc.1, and
+    /// DC-7 is only additive if a repo with no key writes exactly what it wrote
+    /// before. Asserted over every strategy and over content that trips the
+    /// expand-to-Store fallback, because that path has its own return.
+    #[test]
+    fn without_a_key_output_is_byte_identical() {
+        let plain = SmartCompressor::new();
+        let cases: Vec<Vec<u8>> = vec![
+            b"highly compressible text ".repeat(200),
+            (0u8..=255).cycle().take(5000).collect(),
+            vec![0x78, 0xF9, 0x00, 0x01, 0x02],
+            vec![],
+        ];
+        for strategy in [
+            CompressionStrategy::Store,
+            CompressionStrategy::Zlib(CompressionLevel::Default),
+            CompressionStrategy::Zstd(CompressionLevel::Default),
+            CompressionStrategy::Brotli(CompressionLevel::Best),
+        ] {
+            for data in &cases {
+                let out = plain.compress_with_strategy(data, strategy).unwrap();
+                assert!(
+                    !mediagit_security::envelope::is_sealed(&out),
+                    "a compressor with no key must never emit an envelope"
+                );
+                // And the bytes still round-trip through the untouched path.
+                assert_eq!(&plain.decompress_typed(&out).unwrap(), data);
+            }
+        }
+    }
+
+    #[test]
+    fn with_a_key_every_write_is_sealed_and_round_trips() {
+        let enc = SmartCompressor::new().with_key(enc_key());
+        assert!(enc.is_encrypted());
+        for strategy in [
+            CompressionStrategy::Store,
+            CompressionStrategy::Zstd(CompressionLevel::Default),
+            CompressionStrategy::Brotli(CompressionLevel::Best),
+        ] {
+            // Incompressible content too, so the expand-to-Store fallback exit
+            // is covered as well as the ordinary one.
+            for data in [
+                b"compressible ".repeat(300),
+                (0u8..=255).cycle().take(777).collect(),
+            ] {
+                let out = enc.compress_with_strategy(&data, strategy).unwrap();
+                assert!(
+                    mediagit_security::envelope::is_sealed(&out),
+                    "every exit of the compress sink must seal, including the                      expand-to-Store fallback"
+                );
+                assert_eq!(enc.decompress_typed(&out).unwrap(), data);
+            }
+        }
+    }
+
+    /// A repo that turns encryption on must keep reading what it wrote before.
+    /// Without this, enabling the feature would orphan every existing object.
+    #[test]
+    fn a_keyed_compressor_still_reads_unencrypted_objects() {
+        let plain = SmartCompressor::new();
+        let data = b"written before encryption was switched on".repeat(20);
+        let legacy = plain
+            .compress_with_strategy(&data, CompressionStrategy::Zstd(CompressionLevel::Default))
+            .unwrap();
+
+        let enc = SmartCompressor::new().with_key(enc_key());
+        assert_eq!(enc.decompress_typed(&legacy).unwrap(), data);
+    }
+
+    /// The opposite direction must NOT be tolerant. Handing ciphertext back
+    /// would send it to the codec sniffer, which finds no magic it knows,
+    /// classifies it as uncompressed and returns random bytes as content.
+    #[test]
+    fn a_sealed_object_without_a_key_is_an_error_not_garbage() {
+        let enc = SmartCompressor::new().with_key(enc_key());
+        let sealed = enc
+            .compress_with_strategy(b"secret", CompressionStrategy::Store)
+            .unwrap();
+
+        let err = SmartCompressor::new()
+            .decompress_typed(&sealed)
+            .expect_err("a sealed object with no key must fail, never pass through");
+        assert!(
+            format!("{err}").contains("encryption key"),
+            "the error must say what is missing, got: {err}"
+        );
+    }
+
+    #[test]
+    fn the_wrong_key_is_an_error_not_garbage() {
+        let sealed = SmartCompressor::new()
+            .with_key(EncryptionKey::from_bytes(vec![1u8; 32]).unwrap())
+            .compress_with_strategy(b"secret", CompressionStrategy::Store)
+            .unwrap();
+        assert!(
+            SmartCompressor::new()
+                .with_key(EncryptionKey::from_bytes(vec![2u8; 32]).unwrap())
+                .decompress_typed(&sealed)
+                .is_err()
+        );
+    }
+
+    /// The invariant the existing `decompress_streaming` tests defend, extended
+    /// to sealed objects: the two read paths must agree, or an object written by
+    /// one and read by the other is corrupt. This is the case where they are
+    /// most likely to drift, because the streaming path has to abandon streaming
+    /// to handle an envelope at all.
+    #[test]
+    fn both_read_paths_agree_on_a_sealed_object() {
+        let enc = SmartCompressor::new().with_key(enc_key());
+        let data = b"payload read two different ways".repeat(50);
+        let sealed = enc
+            .compress_with_strategy(&data, CompressionStrategy::Zstd(CompressionLevel::Default))
+            .unwrap();
+
+        let buffered = enc.decompress_typed(&sealed).unwrap();
+        let mut streamed = Vec::new();
+        enc.decompress_streaming(Cursor::new(sealed), &mut streamed)
+            .unwrap();
+        assert_eq!(buffered, streamed);
+        assert_eq!(streamed, data);
+    }
+
+    #[test]
+    fn the_streaming_path_also_fails_closed_without_a_key() {
+        let sealed = SmartCompressor::new()
+            .with_key(enc_key())
+            .compress_with_strategy(b"secret", CompressionStrategy::Store)
+            .unwrap();
+        let mut sink = Vec::new();
+        assert!(
+            SmartCompressor::new()
+                .decompress_streaming(Cursor::new(sealed), &mut sink)
+                .is_err(),
+            "the streaming path must fail closed exactly like the buffered one"
+        );
+        assert!(sink.is_empty(), "nothing must reach the sink on failure");
     }
 }
