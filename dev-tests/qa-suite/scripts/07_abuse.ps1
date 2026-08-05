@@ -957,6 +957,13 @@ function Drill-A15-SecondInstanceRefused {
   # loudly, so the only enforceable place is startup.
   $drill = "A15-second-instance-refused"
   $srv = $null
+  # Clear the escape hatch for the refusal half. If it is set in the ambient
+  # environment - by a developer, or by the override half below leaking - the
+  # second instance STARTS, and this drill would report PASS while proving the
+  # exact opposite of what it exists to prove. Found by red-verifying: with the
+  # var set, the drill passed.
+  $prevAllowOuter = $env:MEDIAGIT_ALLOW_MULTI_INSTANCE
+  Remove-Item Env:MEDIAGIT_ALLOW_MULTI_INSTANCE -EA SilentlyContinue
   try {
     $srv = Start-QaServer -Backend "local" -Phase "$Phase-A15"
 
@@ -970,9 +977,21 @@ function Drill-A15-SecondInstanceRefused {
     $p2 = Start-Process -FilePath $QA.MGServer `
       -ArgumentList @("--config", $srv.ConfigPath, "--port", "$otherPort") `
       -PassThru -NoNewWindow -RedirectStandardOutput $out2 -RedirectStandardError $err2
+    # Touching .Handle caches the process handle while the process is still
+    # alive. Without it, Start-Process -PassThru hands back an object whose
+    # .ExitCode reads $null after exit - and `$null -ne 0` is TRUE, so the
+    # assertion below passed on an exit code that was never read. Probed: the
+    # drill reported `exit=` blank and PASS at the same time.
+    $null = $p2.Handle
     $exited = $p2.WaitForExit(30000)
     if (-not $exited) { Stop-Process -Id $p2.Id -Force -EA SilentlyContinue }
-    $exitCode = if ($exited) { $p2.ExitCode } else { -1 }
+    # The parameterless WaitForExit() after the timed one is NOT redundant: the
+    # timed overload returns as soon as the process signals, but .ExitCode can
+    # still be unpopulated on the Start-Process -PassThru object, and reading it
+    # then yields empty. Probed - the drill first reported `exit=` with no value,
+    # which would have made the "exit -ne 0" assertion pass on nothing at all.
+    $exitCode = -1
+    if ($exited) { $p2.WaitForExit(); $exitCode = $p2.ExitCode }
 
     # Read from the redirect files, never from $p2.StandardOutput: reading a
     # redirected stream after the process has exited is where the harness's
@@ -983,8 +1002,19 @@ function Drill-A15-SecondInstanceRefused {
     }
     $text = $text -replace '\x1b\[[0-9;]*m', ''
 
-    $refusedForLock = ($text -match 'already owns')
-    $namesDir = ($text -match [regex]::Escape((Split-Path $srv.ConfigPath -Parent)))
+    # 'refusing to start', not 'already owns'. The override path WARNS and
+    # continues, and that warning quotes the underlying error - which contains
+    # 'already owns'. Matching on it therefore reported a refusal for a server
+    # that had started perfectly happily. Only the refusal says "refusing to
+    # start"; the warning cannot.
+    $refusedForLock = ($text -match 'refusing to start') -and ($text -notmatch 'MEDIAGIT_ALLOW_MULTI_INSTANCE=1:')
+    # Normalise separators on BOTH sides before comparing. The server writes
+    # repos_dir into server.toml with forward slashes and echoes it back that
+    # way, while Split-Path hands back backslashes - so an exact match is
+    # guaranteed to fail and `names-dir` read False against a refusal that did
+    # name the directory perfectly well. Probed.
+    $reposDir = (Join-Path (Split-Path $srv.ConfigPath -Parent) "repos") -replace '\\', '/'
+    $namesDir = (($text -replace '\\', '/') -match [regex]::Escape($reposDir))
     # A bind collision would also produce a non-zero exit. Reject that reading
     # explicitly rather than accept any failure as evidence of the lock.
     $notABindError = -not ($text -match 'address .*in use|10048')
@@ -997,9 +1027,22 @@ function Drill-A15-SecondInstanceRefused {
       $firstAlive = ($resp.StatusCode -eq 200)
     } catch {}
 
-    $pass = ($exitCode -ne 0) -and $refusedForLock -and $namesDir -and $notABindError -and $firstAlive
-    Rec $drill $pass ("exit=$exitCode refused-for-lock=$refusedForLock names-dir=$namesDir " +
-      "not-a-bind-error=$notABindError first-server-still-serving=$firstAlive port2=$otherPort")
+    # `$exitCode -is [int]` first, and not as a formality: an unreadable exit
+    # code must FAIL, not pass. `$null -ne 0` is True in PowerShell, so the
+    # obvious spelling turns "we could not read the exit code" into evidence of
+    # a clean refusal - a gate passing on a measurement it never made.
+    $exitRead = ($exitCode -is [int])
+    # `$exited` is load-bearing and separate from the exit code. A second
+    # instance that STARTS and keeps running gets killed at the 30s timeout and
+    # reports -1, which is "-ne 0" and read as a refusal. That is the precise
+    # shape of the failure this drill must catch, so "it exited on its own" has
+    # to be asserted, not inferred from a nonzero code.
+    $pass = $exited -and $exitRead -and ($exitCode -ne 0) -and $refusedForLock -and $namesDir `
+      -and $notABindError -and $firstAlive
+    Rec $drill $pass ("exited-on-its-own=$exited exit=$exitCode exit-code-read=$exitRead " +
+      "refused-for-lock=$refusedForLock names-dir=$namesDir " +
+      "not-a-bind-error=$notABindError " +
+      "first-server-still-serving=$firstAlive port2=$otherPort")
 
     # The escape hatch must actually let the operator through, or it is not an
     # escape hatch and the only way past a false positive is a code change.
@@ -1043,6 +1086,13 @@ function Drill-A15-SecondInstanceRefused {
     if ("$_" -match "^SKIP:") { Rec $drill "SKIP" "$_" } else { Rec $drill $false "unexpected error: $_" }
   } finally {
     Stop-QaServer $srv
+    # Put back whatever the campaign had before this drill cleared it, so a
+    # later phase sees the environment it expects.
+    if ($null -eq $prevAllowOuter) {
+      Remove-Item Env:MEDIAGIT_ALLOW_MULTI_INSTANCE -EA SilentlyContinue
+    } else {
+      $env:MEDIAGIT_ALLOW_MULTI_INSTANCE = $prevAllowOuter
+    }
   }
 }
 
