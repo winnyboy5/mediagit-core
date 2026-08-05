@@ -113,6 +113,16 @@ $posMap = @{
   "auth admin revoke-grant" = @("--server", $DEAD_URL, "mxuser", "mxrepo")
 }
 $valMap = @(
+  # --server must be a REACHABLE-SHAPED url that nothing answers, not the generic
+  # "x". With "x" the row proves only that a malformed URL is rejected; with the
+  # dead URL it proves the thing this file's header actually claims to test --
+  # that a server-bound command with nothing listening fails POLITELY. Must
+  # precede the catch-all.
+  @{rx = 'server'; v = $DEAD_URL },
+  # Real enum values, so the row exercises the flag rather than the rejection
+  # path for an invalid one. `parse_role` accepts read|write|admin
+  # (crates/mediagit-cli/src/commands/auth.rs).
+  @{rx = 'permissions|role'; v = "read" },
   @{rx = 'message|^-m$'; v = "msg" },
   @{rx = 'color'; v = "never" },
   @{rx = 'format'; v = "short" },
@@ -133,7 +143,11 @@ function ValFor([string]$flag) {
 # ---- load + filter rows ----
 $allRows = Get-Content $TSV_IN | Select-Object -Skip 1 | ForEach-Object {
   $c = $_ -split "`t"
-  [pscustomobject]@{ cmd = $c[0]; flag = $c[1]; takes = $c[2] }
+  # $c[3] is the RECORDED class. It used to be read by nothing at all, so the
+  # matrix carried an expected-result column that was never compared to an
+  # actual result - decoration, not an assertion. It is now the baseline for
+  # the class-drift gate below.
+  [pscustomobject]@{ cmd = $c[0]; flag = $c[1]; takes = $c[2]; expect = $c[3] }
 }
 $selected = @()
 for ($idx = 0; $idx -lt $allRows.Count; $idx++) {
@@ -154,6 +168,7 @@ if ($Filter) {
 
 Write-QaLog $Phase "running $($selected.Count) of $($allRows.Count) rows (Rows='$Rows' Filter='$Filter')"
 
+$script:drift = @()
 $panicCount = 0
 $errtextExit0Count = 0
 $timeoutCount = 0
@@ -201,7 +216,24 @@ foreach ($item in $selected) {
 
   $outText = $res.Out
   $panic = $outText -match "panicked|RUST_BACKTRACE"
-  $errtext = ($r.cmd -notmatch '^completions') -and ($outText -match "Error|error:")
+  # -cmatch, not -match. PowerShell's -match is CASE-INSENSITIVE, so the `Error`
+  # alternative matched the word "error" anywhere in any casing - including
+  # inside a warning that merely quotes a transport failure ("could not verify
+  # identity: ... client error ... os error 10061"). That is how `auth login
+  # --token` against an unreachable server was classified ERRTEXT-EXIT0, i.e.
+  # "printed an error yet claimed success", when the credential really was
+  # stored and exit 0 really was correct.
+  # Case-sensitively, the two alternatives mean what they were written to mean:
+  # `Error` is the anyhow/CLI failure prefix and `error:` is clap's. Both real
+  # failure shapes are still caught; prose containing "error" is not.
+  # ...and anchored to the start of a line. Unanchored, `error:` also matches
+  # mid-sentence prose - "tcp connect error: No connection could be made" inside
+  # that same warning - which is the second way this one row kept tripping. Both
+  # real failure shapes are emitted at the START of a line: anyhow/CLI prints
+  # `Error: ...`, clap prints `error: ...`. Anchoring is what makes the class
+  # mean "this command reported failure" rather than "this command said the word
+  # error somewhere".
+  $errtext = ($r.cmd -notmatch '^completions') -and ($outText -cmatch '(?m)^\s*(Error\b|error:)')
   $usage = $outText -match "(?i)usage:|unexpected argument|invalid value|required"
   $class =
     if ($panic) { "PANIC" }
@@ -221,6 +253,15 @@ foreach ($item in $selected) {
   }
   $classCounts[$class] = [int]$classCounts[$class] + 1
 
+  # Class drift. A row whose recorded class no longer matches what the binary
+  # does is either a regression or an intentional change someone forgot to
+  # re-record; both need a human. Rows still carrying a `COVERED-BY:`
+  # placeholder are skipped here and counted by the placeholder gate instead,
+  # so the two gates never double-report the same debt.
+  if ($r.expect -and $r.expect -notmatch '^COVERED-BY:' -and $r.expect -ne $class) {
+    $script:drift += "row $i ($($r.cmd) $($r.flag)): recorded=$($r.expect) observed=$class"
+  }
+
   Write-QaRow $OUT $HEADER @($i, "$($r.cmd) $($r.flag)", $class, $res.Exit, $res.Sec, "$Phase-cmds.log")
 }
 Remove-Item -Recurse -Force $sb -EA SilentlyContinue
@@ -234,6 +275,27 @@ Write-QaGate $Phase "no-errtext-exit0" ($errtextExit0Count -eq 0) "errtextExit0C
 # A command that never returns is as broken as one that panics, and it is invisible in
 # an exit-code-only view: gate it explicitly.
 Write-QaGate $Phase "no-hangs" ($timeoutCount -eq 0) "timeoutCount=$timeoutCount"
+
+# ---- class-drift gate ----
+# Every row already ran; until now nothing checked WHAT it did against what the
+# matrix says it should do, so a flag that silently changed from OK to USAGE
+# (or to a clean error) passed the sweep unremarked. The row count compared is
+# reported so a run where the comparison itself did nothing - a Rows/Filter
+# selection, or every row still a placeholder - is visibly distinct from a run
+# where 282 rows matched. `compared=0` is not a pass.
+$comparedRows = @($selected | Where-Object { $_.row.expect -and $_.row.expect -notmatch '^COVERED-BY:' }).Count
+$driftDetail = "compared=$comparedRows drift=$($script:drift.Count)"
+if ($script:drift.Count -gt 0) {
+  $driftDetail += " :: " + (($script:drift | Select-Object -First 10) -join " | ")
+  if ($script:drift.Count -gt 10) { $driftDetail += " (+$($script:drift.Count - 10) more)" }
+  foreach ($d in $script:drift) { Write-QaLog $Phase "CLASS-DRIFT $d" }
+}
+if ($comparedRows -eq 0) {
+  Write-QaGate $Phase "coverage-matrix-class-drift" $false `
+    "$driftDetail -- compared nothing, so this gate proved nothing"
+} else {
+  Write-QaGate $Phase "coverage-matrix-class-drift" ($script:drift.Count -eq 0) $driftDetail
+}
 
 # ---- coverage-matrix placeholder regression gate ----
 # A `COVERED-BY:` row (see file header) names a phase instead of running one - it
