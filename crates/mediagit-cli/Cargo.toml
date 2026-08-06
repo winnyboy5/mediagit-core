@@ -19,6 +19,7 @@ mediagit-observability = { path = "../mediagit-observability" }
 mediagit-protocol = { path = "../mediagit-protocol" }
 mediagit-media = { path = "../mediagit-media" }
 mediagit-security = { path = "../mediagit-security", features = ["auth", "middleware"] }
+mediagit-compression = { path = "../mediagit-compression" }  # DC-7: installs the process-global at-rest key at startup
 
 # Workspace dependencies
 tokio.workspace = true
@@ -35,6 +36,7 @@ toml.workspace = true
 chrono.workspace = true
 rayon.workspace = true
 blake3.workspace = true
+hex.workspace = true  # DC-7: wrapped-key and salt encoding in .mediagit/encryption-key
 
 # Additional dependencies
 dialoguer = "0.12"

@@ -49,6 +49,16 @@ pub mod auth;
 #[cfg(feature = "tls")]
 pub mod tls;
 
+/// Re-exported so callers can build the `SecretString` that [`kdf::derive_key`]
+/// takes without taking their own `secrecy` dependency (and risking a second,
+/// incompatible version of it in the tree).
+pub use secrecy::SecretString;
+
+/// Re-exported for the same reason as [`SecretString`]: callers that hold raw
+/// key material only long enough to hand it somewhere else need a `Drop`-time
+/// wipe, and should get it from the one `zeroize` version this tree agrees on.
+pub use zeroize::Zeroizing;
+
 // Re-export commonly used types
 pub use audit::{
     AuditEvent, AuditEventType, log_access_denied, log_authentication_failed,

@@ -245,6 +245,7 @@ async fn chunk_delta_chain_contains_impl(
 const CHAIN_WALK_CAP: usize = (MAX_DELTA_DEPTH as usize) * 4;
 
 /// Outcome of one `chunk-deltas/` chain traversal.
+#[derive(Debug)]
 pub(crate) struct ChainWalk {
     /// The requested `target` appears on the chain — writing `target -> start`
     /// would close a cycle.
@@ -258,6 +259,257 @@ pub(crate) struct ChainWalk {
     /// The walk stopped early (cycle, malformed meta, or `CHAIN_WALK_CAP`), so
     /// `depth` is a lower bound and `root` is unknown.
     pub truncated: bool,
+    /// Every edge this traversal actually read from storage: `child ->
+    /// Some(base)` for a delta hop, `child -> None` for the terminal full
+    /// chunk. Empty for the in-memory twin ([`DeltaGraph::chain_walk`]),
+    /// which reads nothing. Feeds [`DeltaGraph::merge_observed`] so the
+    /// under-lock re-check can answer from memory instead of re-reading —
+    /// the two storage round trips per hop were 76.6% of chunk-delta worker
+    /// time on a 357 MB PSD, all of it inside the global mutex.
+    pub observed: Vec<(Oid, Option<Oid>)>,
+}
+
+/// Shared in-memory view of the `chunk-deltas/` graph, guarded by one mutex.
+///
+/// Two things live here because they answer the same question and must be
+/// updated atomically with each other:
+///
+/// * `pairs` — committed `(chunk_id, base_id)` pairs, unchanged in meaning
+///   from when this was a bare `HashSet`; the reverse-pair lookup is what
+///   catches a direct A→B / B→A race.
+/// * `edges` — memoized delta edges, `child -> Some(base)` or `child -> None`
+///   for a terminal full chunk with no `.meta` sidecar.
+///
+/// **Ordering invariant (this is the whole safety argument).** An edge is
+/// inserted here *before* its `.meta` reaches disk, so at every instant the
+/// in-memory edge set is a superset of the on-disk one. A cycle check over a
+/// superset can only refuse more cycles, never fewer — so walking memory
+/// instead of storage cannot weaken the guard that closed the A→B→C→A defect
+/// (AWS deep-test 2026-07-07: three video chunks stored as mutual deltas,
+/// unreconstructable, repository unpushable).
+///
+/// Memoizing edges that were already on disk is sound because nothing rewrites
+/// a `.meta` while deltas are being written: `instance_lock` keeps one process
+/// per repository, and the paths that *do* delete or rewrite sidecars — `fsck
+/// --repair` flattening, `gc` orphan cleanup — are whole commands of their own,
+/// not something running alongside an add. A memo left over from before such a
+/// command is stale only towards an edge that no longer exists, which
+/// over-counts a depth walk and never hides a cycle: the same direction the
+/// superset invariant already tolerates.
+#[derive(Default)]
+pub(crate) struct DeltaGraph {
+    pairs: std::collections::HashSet<(Oid, Oid)>,
+    edges: std::collections::HashMap<Oid, Option<Oid>>,
+}
+
+/// Edge-memo size at which [`DeltaGraph::merge_observed`] drops what it learned
+/// from storage. Every walked node is memoized — terminal chunks included — so
+/// in the server, which holds ODBs in `odb_cache` for the process lifetime,
+/// this is otherwise a map that only ever grows: ~70 bytes an entry, so a
+/// 10M-chunk repository is most of a gigabyte that is never reclaimed.
+///
+/// ponytail: clear-and-reseed, not an LRU. A chain is walked once per chunk, so
+/// there is little reuse to preserve, and the miss path is already correct (it
+/// re-reads storage and retries). Upgrade path: an LRU if a profile ever shows
+/// the re-reads mattering.
+const EDGE_MEMO_CAP: usize = 250_000;
+
+impl DeltaGraph {
+    /// Fold edges read from storage into the memo.
+    ///
+    /// `or_insert`, never overwrite: an observation made before a concurrent
+    /// worker committed `X -> Some(base)` would otherwise downgrade that edge
+    /// back to "terminal" and break the superset invariant above. Entries only
+    /// ever move `None -> Some` via [`Self::insert_edge`].
+    fn merge_observed(&mut self, observed: Vec<(Oid, Option<Oid>)>) {
+        if self.edges.len() > EDGE_MEMO_CAP {
+            self.shrink_memo();
+        }
+        for (child, base) in observed {
+            self.edges.entry(child).or_insert(base);
+        }
+    }
+
+    /// Drop the memo down to the edges this process committed itself.
+    ///
+    /// The survivors are exactly `pairs`, and that is the whole safety
+    /// argument: everything else in `edges` was *read* from storage, so
+    /// forgetting it costs only a re-read. A committed edge is different — it
+    /// is registered before its `.meta` reaches disk, so forgetting one during
+    /// that window would let a storage re-read report the child as terminal
+    /// and break the superset invariant above, which is how a longer cycle
+    /// gets through. `pairs` itself is never evicted for the same reason.
+    fn shrink_memo(&mut self) {
+        self.edges.clear();
+        for &(child, base) in &self.pairs {
+            self.edges.insert(child, Some(base));
+        }
+    }
+
+    /// Register a committed delta, before its `.meta` is written.
+    fn insert_edge(&mut self, child: Oid, base: Oid) {
+        self.pairs.insert((child, base));
+        self.edges.insert(child, Some(base));
+    }
+
+    /// Same registration, for an edge written by a path outside this ODB.
+    ///
+    /// Separate from [`Self::insert_edge`] only so the call site reads as what
+    /// it is; the graph cannot tell the two apart and must not, since the
+    /// superset invariant is about *all* on-disk edges regardless of author.
+    /// See `ObjectDatabase::register_external_delta_edge`.
+    pub(crate) fn register_edge(&mut self, child: Oid, base: Oid) {
+        self.insert_edge(child, base);
+    }
+
+    /// Undo [`Self::insert_edge`] after a failed `.meta` or binary put.
+    ///
+    /// Mandatory: a stale edge left behind would make the guard permanently
+    /// refuse a legitimate delta later in the same run, which shows up not as
+    /// an error but as silently reduced storage savings.
+    fn remove_edge(&mut self, child: Oid, base: Oid) {
+        self.pairs.remove(&(child, base));
+        self.edges.remove(&child);
+    }
+
+    /// In-memory twin of [`chunk_delta_chain_walk`] — same questions, same
+    /// cap, same cycle detection, no I/O.
+    ///
+    /// `Err(oid)` means that node is not memoized and the caller must read it
+    /// from storage; it is not a refusal. On the hot path the pre-lock walk
+    /// has just memoized the entire chain, so this is a rare-correctness path
+    /// (the chain grew under us), never a hot one.
+    fn chain_walk(&self, start: Oid, target: Option<Oid>) -> Result<ChainWalk, Oid> {
+        let mut walk = ChainWalk {
+            contains_target: target == Some(start),
+            depth: 0,
+            root: None,
+            truncated: false,
+            observed: Vec::new(),
+        };
+        if walk.contains_target {
+            walk.truncated = true;
+            return Ok(walk);
+        }
+
+        let mut current = start;
+        let mut visited = std::collections::HashSet::new();
+        for _ in 0..CHAIN_WALK_CAP {
+            if !visited.insert(current) {
+                walk.truncated = true;
+                return Ok(walk);
+            }
+            match self.edges.get(&current) {
+                None => return Err(current),
+                Some(None) => {
+                    walk.root = Some(current);
+                    return Ok(walk);
+                }
+                Some(&Some(next)) => {
+                    walk.depth += 1;
+                    current = next;
+                    if target == Some(current) {
+                        walk.contains_target = true;
+                        return Ok(walk);
+                    }
+                }
+            }
+        }
+        walk.truncated = true;
+        Ok(walk)
+    }
+
+    /// In-memory twin of [`resolve_delta_base`]. Policy is duplicated rather
+    /// than shared because the storage version is `async`; the drift test
+    /// `test_memo_walk_agrees_with_storage_walk` is what keeps the two honest.
+    fn resolve_delta_base(&self, nominated_base: Oid, new_chunk: Oid) -> Result<Option<Oid>, Oid> {
+        if nominated_base == new_chunk {
+            return Ok(None);
+        }
+        let walk = self.chain_walk(nominated_base, Some(new_chunk))?;
+        if walk.contains_target || walk.truncated {
+            return Ok(None);
+        }
+        let Some(root) = walk.root else {
+            return Ok(None);
+        };
+        if walk.depth < MAX_DELTA_DEPTH as usize {
+            return Ok(Some(nominated_base));
+        }
+        if root == new_chunk {
+            Ok(None)
+        } else {
+            Ok(Some(root))
+        }
+    }
+}
+
+/// Decide, under the shared lock, whether `chunk_id -> base_id` may be
+/// committed — and register it if so.
+///
+/// The single chokepoint for the TOCTOU guard: all three chunk-delta write
+/// paths route through it, so a new call site cannot half-implement the
+/// protocol (which is exactly how four hand-rolled guards each remembered
+/// cycles and forgot depth).
+///
+/// Returns `true` when the caller must now write the `.meta` and then the
+/// delta binary, and `false` when the chunk must be stored in full. On any
+/// write failure the caller **must** call [`rollback_delta_pair`].
+///
+/// No `.await` on storage happens while the lock is held: the re-check reads
+/// the memo, and the rare memo miss drops the lock, reads the missing node,
+/// merges it and re-decides from scratch — so the final decision is always
+/// validated under the lock immediately before the insert.
+pub(crate) async fn commit_delta_pair(
+    storage: &dyn StorageBackend,
+    graph: &Mutex<DeltaGraph>,
+    chunk_id: Oid,
+    base_id: Oid,
+) -> bool {
+    // Bounded because each successful fallback teaches the memo at least one
+    // hop, and a chain is at most `CHAIN_WALK_CAP` hops long. Exhausting the
+    // budget refuses the delta, which is the safe direction.
+    for _ in 0..CHAIN_WALK_CAP {
+        let mut g = graph.lock().await;
+        // Reverse pair already committed: skip all writes, no orphaned binary.
+        if g.pairs.contains(&(base_id, chunk_id)) {
+            return false;
+        }
+        // Re-decide and require the *same* answer: the delta bytes were
+        // encoded against `base_id`, so a re-target here would be invalid.
+        // Any change (a concurrent write closed a cycle, or pushed the chain
+        // to the cap) means this delta is no longer safe.
+        match g.resolve_delta_base(base_id, chunk_id) {
+            Ok(resolved) => {
+                if resolved != Some(base_id) {
+                    return false;
+                }
+                g.insert_edge(chunk_id, base_id);
+                return true;
+            }
+            Err(missing) => {
+                drop(g);
+                let observed = chunk_delta_chain_walk(storage, missing, None)
+                    .await
+                    .observed;
+                let learned = observed.iter().any(|(child, _)| *child == missing);
+                graph.lock().await.merge_observed(observed);
+                if !learned {
+                    // Storage could not describe that node either (malformed
+                    // sidecar or read error) — never extend a chain we cannot
+                    // read.
+                    return false;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Undo a [`commit_delta_pair`] registration after a failed `.meta` or delta
+/// binary put. See [`DeltaGraph::remove_edge`] for why this is not optional.
+pub(crate) async fn rollback_delta_pair(graph: &Mutex<DeltaGraph>, chunk_id: Oid, base_id: Oid) {
+    graph.lock().await.remove_edge(chunk_id, base_id);
 }
 
 /// Walk a chunk-delta chain once, answering both questions the write paths ask:
@@ -283,6 +535,7 @@ async fn chunk_delta_chain_walk(
         depth: 0,
         root: None,
         truncated: false,
+        observed: Vec::new(),
     };
     if walk.contains_target {
         walk.truncated = true;
@@ -303,6 +556,7 @@ async fn chunk_delta_chain_walk(
         match storage.exists(&meta_key).await {
             Ok(true) => {}
             Ok(false) => {
+                walk.observed.push((current, None));
                 walk.root = Some(current);
                 return walk;
             }
@@ -334,6 +588,7 @@ async fn chunk_delta_chain_walk(
                 return walk;
             }
         };
+        walk.observed.push((current, Some(next)));
         walk.depth += 1;
         current = next;
         if target == Some(current) {
@@ -369,20 +624,40 @@ pub(crate) async fn resolve_delta_base(
     nominated_base: Oid,
     new_chunk: Oid,
 ) -> Option<Oid> {
+    resolve_delta_base_observing(storage, nominated_base, new_chunk)
+        .await
+        .0
+}
+
+/// [`resolve_delta_base`], plus every edge the walk read on the way.
+///
+/// The chunk-delta write paths use this variant and feed the observations to
+/// [`DeltaGraph::merge_observed`], so the under-lock re-check that follows can
+/// answer from memory. The walk happens outside the lock either way — this
+/// just stops the answer being thrown away and re-derived from storage inside
+/// the critical section.
+pub(crate) async fn resolve_delta_base_observing(
+    storage: &dyn StorageBackend,
+    nominated_base: Oid,
+    new_chunk: Oid,
+) -> (Option<Oid>, Vec<(Oid, Option<Oid>)>) {
     if nominated_base == new_chunk {
-        return None;
+        return (None, Vec::new());
     }
     let walk = chunk_delta_chain_walk(storage, nominated_base, Some(new_chunk)).await;
     if walk.contains_target || walk.truncated {
-        return None;
+        return (None, walk.observed);
     }
     // `truncated == false` guarantees a terminal full chunk was reached.
-    let root = walk.root?;
+    let Some(root) = walk.root else {
+        return (None, walk.observed);
+    };
     if walk.depth < MAX_DELTA_DEPTH as usize {
-        return Some(nominated_base);
+        return (Some(nominated_base), walk.observed);
     }
     // At the cap: fall back to the chain root rather than abandoning the delta.
-    if root == new_chunk { None } else { Some(root) }
+    let base = if root == new_chunk { None } else { Some(root) };
+    (base, walk.observed)
 }
 
 /// Object Database with content-addressable storage
@@ -461,9 +736,11 @@ pub struct ObjectDatabase {
     /// Avoids re-reading and re-decompressing the same base chunk across workers.
     base_chunk_cache: Cache<Oid, Arc<Vec<u8>>>,
 
-    /// Tracks committed chunk-delta pairs (chunk_id, base_id) to prevent TOCTOU cycles.
-    /// In-memory O(1) check inside a short-held lock; all network IO happens outside the lock.
-    delta_written_pairs: Arc<Mutex<std::collections::HashSet<(Oid, Oid)>>>,
+    /// Tracks committed chunk-delta pairs (chunk_id, base_id) plus the memoized
+    /// delta graph, to prevent TOCTOU cycles. See [`DeltaGraph`] for the
+    /// superset invariant that makes the in-memory check as strict as the
+    /// on-disk one. All storage IO happens outside the lock.
+    delta_written_pairs: Arc<Mutex<DeltaGraph>>,
 
     /// Lazily-built set of OIDs embedded in pack indexes. `None` until the
     /// first `chunk_exists()` call (or a repack) populates it — packs are
@@ -702,6 +979,287 @@ mod tests {
         let storage = Arc::new(MockBackend::new());
         let a = Oid::hash(b"self-a");
         assert_eq!(resolve_delta_base(&*storage, a, a).await, None);
+    }
+
+    /// Fold every chain reachable from `starts` into the memo, exactly the way
+    /// the write paths do: walk storage once, outside any lock, keep the edges.
+    async fn memoize(storage: &Arc<MockBackend>, graph: &Mutex<DeltaGraph>, starts: &[Oid]) {
+        for start in starts {
+            let observed = chunk_delta_chain_walk(&**storage, *start, None)
+                .await
+                .observed;
+            graph.lock().await.merge_observed(observed);
+        }
+    }
+
+    /// A cycle that was already on disk before this run started must still be
+    /// reported as `truncated` when the memo answers instead of storage —
+    /// otherwise the in-memory path would silently extend an unreadable chain.
+    #[tokio::test]
+    async fn test_memo_walk_reports_preexisting_on_disk_cycle() {
+        let storage = Arc::new(MockBackend::new());
+        let a = Oid::hash(b"memo-cyc-a");
+        let b = Oid::hash(b"memo-cyc-b");
+        for (from, to) in [(a, b), (b, a)] {
+            storage
+                .put(
+                    &format!("chunk-deltas/{}.meta", from.to_hex()),
+                    format!("base:{}", to.to_hex()).as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+        let graph = Mutex::new(DeltaGraph::default());
+        memoize(&storage, &graph, &[a, b]).await;
+
+        let newcomer = Oid::hash(b"memo-cyc-new");
+        let walk = graph
+            .lock()
+            .await
+            .chain_walk(a, Some(newcomer))
+            .expect("the cycle is fully memoized, so no storage fallback");
+        assert!(
+            walk.truncated,
+            "memo walk must report the cycle as truncated"
+        );
+        assert_eq!(walk.root, None);
+        assert!(
+            !commit_delta_pair(&*storage, &graph, newcomer, a).await,
+            "a chain we cannot read must never be extended"
+        );
+    }
+
+    /// The memo is capped, and the cap must not drop an edge this process
+    /// committed — those are the ones whose `.meta` may still be in flight, so
+    /// forgetting one would let a storage re-read call the child terminal.
+    #[test]
+    fn test_edge_memo_eviction_keeps_committed_pairs() {
+        let mut graph = DeltaGraph::default();
+        let learned: Vec<_> = (0..=EDGE_MEMO_CAP)
+            .map(|i| (Oid::hash(format!("memo-cap-{i}").as_bytes()), None))
+            .collect();
+        let a_learned = learned[0].0;
+        graph.merge_observed(learned);
+
+        let (child, base) = (Oid::hash(b"memo-cap-child"), Oid::hash(b"memo-cap-base"));
+        graph.insert_edge(child, base);
+
+        // Over the cap, so this merge evicts first.
+        graph.merge_observed(vec![(Oid::hash(b"memo-cap-after"), None)]);
+
+        assert_eq!(
+            graph.edges.get(&child),
+            Some(&Some(base)),
+            "a committed edge must survive eviction"
+        );
+        assert!(
+            graph.pairs.contains(&(child, base)),
+            "eviction must never touch the committed-pair set"
+        );
+        assert!(
+            !graph.edges.contains_key(&a_learned),
+            "storage-learned edges are what eviction is for"
+        );
+        assert!(graph.edges.len() <= 2, "got {}", graph.edges.len());
+    }
+
+    /// A chain at exactly `MAX_DELTA_DEPTH` still falls back to the chain root
+    /// rather than abandoning the delta — the memo must not cost savings at
+    /// the one depth where the policy is most easily got wrong.
+    #[tokio::test]
+    async fn test_memo_resolve_retargets_to_root_at_max_depth() {
+        let storage = Arc::new(MockBackend::new());
+        let (leaf, root) = plant_chain(&storage, "memo-deep", MAX_DELTA_DEPTH as usize).await;
+        let graph = Mutex::new(DeltaGraph::default());
+        memoize(&storage, &graph, &[leaf]).await;
+
+        assert_eq!(
+            graph
+                .lock()
+                .await
+                .resolve_delta_base(leaf, Oid::hash(b"memo-deep-new")),
+            Ok(Some(root)),
+            "at MAX_DELTA_DEPTH the memo must re-target to the root, like storage"
+        );
+    }
+
+    /// Drift test: the in-memory walk and the storage walk must agree on the
+    /// same graph. The two implementations are duplicated (one is `async`) and
+    /// are most likely to diverge on the truncation edge cases, so every one of
+    /// them is exercised here.
+    #[tokio::test]
+    async fn test_memo_walk_agrees_with_storage_walk() {
+        let storage = Arc::new(MockBackend::new());
+        let (shallow, shallow_root) = plant_chain(&storage, "drift-shallow", 3).await;
+        let (capped, capped_root) =
+            plant_chain(&storage, "drift-cap", MAX_DELTA_DEPTH as usize).await;
+        let (over, over_root) = plant_chain(&storage, "drift-over", CHAIN_WALK_CAP + 5).await;
+
+        // A pre-existing cycle, the case the whole guard exists for.
+        let cyc_a = Oid::hash(b"drift-cyc-a");
+        let cyc_b = Oid::hash(b"drift-cyc-b");
+        for (from, to) in [(cyc_a, cyc_b), (cyc_b, cyc_a)] {
+            storage
+                .put(
+                    &format!("chunk-deltas/{}.meta", from.to_hex()),
+                    format!("base:{}", to.to_hex()).as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+
+        let graph = Mutex::new(DeltaGraph::default());
+        memoize(&storage, &graph, &[shallow, capped, over, cyc_a, cyc_b]).await;
+
+        let unrelated = Oid::hash(b"drift-new");
+        let cases: &[(Oid, Option<Oid>)] = &[
+            (shallow, None),
+            (shallow, Some(unrelated)),
+            (shallow, Some(shallow_root)),
+            (shallow, Some(shallow)),
+            (capped, Some(unrelated)),
+            (capped, Some(capped_root)),
+            (over, Some(unrelated)),
+            (over, Some(over_root)),
+            (cyc_a, Some(unrelated)),
+            (cyc_b, Some(cyc_a)),
+        ];
+        let g = graph.lock().await;
+        for (start, target) in cases {
+            let disk = chunk_delta_chain_walk(&*storage, *start, *target).await;
+            let memo = g
+                .chain_walk(*start, *target)
+                .expect("every node on these chains was memoized");
+            assert_eq!(
+                (disk.contains_target, disk.depth, disk.root, disk.truncated),
+                (memo.contains_target, memo.depth, memo.root, memo.truncated),
+                "memo walk drifted from storage walk for start={start} target={target:?}"
+            );
+            assert_eq!(
+                resolve_delta_base(&*storage, *start, target.unwrap_or(unrelated)).await,
+                g.resolve_delta_base(*start, target.unwrap_or(unrelated))
+                    .expect("memoized"),
+                "memo base policy drifted for start={start}"
+            );
+        }
+    }
+
+    /// A node the memo has never seen is a miss, not a refusal: the caller
+    /// reads it from storage and re-decides. Refusing instead would silently
+    /// cost storage savings, which is the failure mode nobody notices.
+    #[tokio::test]
+    async fn test_memo_miss_falls_back_to_storage() {
+        let storage = Arc::new(MockBackend::new());
+        let (leaf, _root) = plant_chain(&storage, "miss", 2).await;
+        let graph = Mutex::new(DeltaGraph::default());
+        // Deliberately memoize nothing.
+        assert!(
+            matches!(graph.lock().await.chain_walk(leaf, None), Err(missing) if missing == leaf),
+            "an unknown node must report a miss, not a terminal chunk"
+        );
+        assert!(
+            commit_delta_pair(&*storage, &graph, Oid::hash(b"miss-new"), leaf).await,
+            "the fallback must recover the chain and allow the legitimate delta"
+        );
+    }
+
+    /// Rollback after a failed `.meta`/binary put must clear both the pair and
+    /// the edge. A stale edge is not an error anyone sees — it is a permanent
+    /// refusal of a legitimate delta for the rest of the run, i.e. silently
+    /// reduced savings.
+    #[tokio::test]
+    async fn test_commit_delta_pair_rollback_clears_edge() {
+        let storage = Arc::new(MockBackend::new());
+        let base = Oid::hash(b"rb-base");
+        let chunk = Oid::hash(b"rb-chunk");
+        storage
+            .put(&format!("chunks/{}", base.to_hex()), b"full")
+            .await
+            .unwrap();
+
+        let graph = Mutex::new(DeltaGraph::default());
+        memoize(&storage, &graph, &[base]).await;
+        assert!(commit_delta_pair(&*storage, &graph, chunk, base).await);
+        assert!(graph.lock().await.pairs.contains(&(chunk, base)));
+
+        // Simulate the `.meta` put failing: nothing reached disk.
+        rollback_delta_pair(&graph, chunk, base).await;
+        {
+            let g = graph.lock().await;
+            assert!(!g.pairs.contains(&(chunk, base)), "pair must be dropped");
+            assert!(!g.edges.contains_key(&chunk), "edge must be dropped");
+        }
+
+        // ...and the retry must be allowed, not refused by our own leftovers.
+        assert!(
+            commit_delta_pair(&*storage, &graph, chunk, base).await,
+            "a rolled-back delta must remain legal to re-attempt"
+        );
+    }
+
+    /// Workers racing to form A→B→C→A must still be refused. The pre-walks all
+    /// pass (no meta is on disk yet), so the only thing standing between this
+    /// and an unpushable repository is the in-memory registration ordering.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_writers_cannot_close_a_cycle() {
+        let storage = Arc::new(MockBackend::new());
+        let a = Oid::hash(b"race-a");
+        let b = Oid::hash(b"race-b");
+        let c = Oid::hash(b"race-c");
+        let graph = Arc::new(Mutex::new(DeltaGraph::default()));
+
+        let mut handles = Vec::new();
+        for (chunk, base) in [(a, b), (b, c), (c, a)] {
+            let storage = storage.clone();
+            let graph = graph.clone();
+            handles.push(tokio::spawn(async move {
+                // Exactly the production sequence: walk outside the lock,
+                // memoize what it saw, then commit under the lock.
+                let (resolved, observed) =
+                    resolve_delta_base_observing(&*storage, base, chunk).await;
+                graph.lock().await.merge_observed(observed);
+                if resolved != Some(base) {
+                    return false;
+                }
+                if !commit_delta_pair(&*storage, &graph, chunk, base).await {
+                    return false;
+                }
+                storage
+                    .put(
+                        &format!("chunk-deltas/{}.meta", chunk.to_hex()),
+                        format!("base:{}", base.to_hex()).as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                true
+            }));
+        }
+        let mut committed = 0;
+        for h in handles {
+            if h.await.unwrap() {
+                committed += 1;
+            }
+        }
+        assert!(
+            committed <= 2,
+            "all three edges committed — that is the A→B→C→A cycle"
+        );
+
+        // Whatever landed must be acyclic, on disk and in memory alike.
+        let g = graph.lock().await;
+        for start in [a, b, c] {
+            assert!(
+                !chunk_delta_chain_walk(&*storage, start, None)
+                    .await
+                    .truncated,
+                "on-disk chain from {start} is cyclic"
+            );
+            let walk = g.chain_walk(start, None);
+            assert!(
+                walk.is_err() || !walk.unwrap().truncated,
+                "in-memory chain from {start} is cyclic"
+            );
+        }
     }
 
     #[tokio::test]

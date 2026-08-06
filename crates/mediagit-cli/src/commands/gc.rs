@@ -19,8 +19,8 @@ use console::style;
 use dialoguer::Confirm;
 use mediagit_storage::StorageBackend;
 use mediagit_versioning::{
-    BranchManager, ChunkManifest, Commit, FileMode, Index, ObjectType, Oid, RefDatabase, RefType,
-    Reflog, Tag, Tree,
+    BranchManager, Commit, FileMode, Index, ObjectType, Oid, RefDatabase, RefType, Reflog, Tag,
+    Tree,
 };
 use std::collections::HashSet;
 use std::path::Path;
@@ -877,19 +877,19 @@ impl GarbageCollector {
         let mut reachable_chunk_keys: HashSet<String> = HashSet::new();
 
         for oid in &reachable_manifest_oids {
-            let manifest_key = format!("manifests/{}", oid.to_hex());
-            match self.storage.get(&manifest_key).await {
-                Ok(data) => match ChunkManifest::from_bytes(&data) {
-                    Ok(manifest) => {
-                        for chunk_ref in &manifest.chunks {
-                            let chunk_key = format!("chunks/{}", chunk_ref.id.to_hex());
-                            reachable_chunk_keys.insert(chunk_key);
-                        }
+            // Through the ODB, never `storage.get`: on a keyed repo the manifest
+            // is sealed, and a raw read would fail to parse — leaving every
+            // chunk it references looking unreachable, i.e. deletable.
+            match self.odb.get_chunk_manifest(oid).await {
+                Ok(Some(manifest)) => {
+                    for chunk_ref in &manifest.chunks {
+                        let chunk_key = format!("chunks/{}", chunk_ref.id.to_hex());
+                        reachable_chunk_keys.insert(chunk_key);
                     }
-                    Err(e) => {
-                        debug!("Failed to deserialize manifest {}: {}", oid, e);
-                    }
-                },
+                }
+                Ok(None) => {
+                    debug!("Manifest {} vanished between listing and read", oid);
+                }
                 Err(e) => {
                     debug!("Failed to read manifest {}: {}", oid, e);
                 }
@@ -1010,14 +1010,11 @@ impl GarbageCollector {
         let mut reachable_chunk_ids: HashSet<String> = HashSet::new();
 
         for (oid, _) in &all_manifests {
-            if reachable.contains(oid) {
-                let manifest_key = format!("manifests/{}", oid.to_hex());
-                if let Ok(data) = self.storage.get(&manifest_key).await
-                    && let Ok(manifest) = ChunkManifest::from_bytes(&data)
-                {
-                    for chunk_ref in &manifest.chunks {
-                        reachable_chunk_ids.insert(chunk_ref.id.to_hex());
-                    }
+            if reachable.contains(oid)
+                && let Ok(Some(manifest)) = self.odb.get_chunk_manifest(oid).await
+            {
+                for chunk_ref in &manifest.chunks {
+                    reachable_chunk_ids.insert(chunk_ref.id.to_hex());
                 }
             }
         }

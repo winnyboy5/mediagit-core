@@ -126,6 +126,37 @@ impl PushCmd {
 
         // Validate repository
         let repo_root = find_repo_root()?;
+
+        // DC-7: an encrypted repository cannot be pushed yet.
+        //
+        // Push hands chunk bytes to object storage over presigned PUT URLs
+        // (see `mediagit-protocol/src/client/push.rs`), which is a path the
+        // server never sees the bytes on. Client escrow of the repo key — D4 —
+        // is what makes that safe, and D4 is not built. Rather than upload
+        // objects the server has no way to verify, register, or ever hand back
+        // correctly, this refuses loudly.
+        //
+        // Deliberately a hard error and not a silent fall-back to the proxy
+        // path: the proxy would succeed, and a push that appears to work while
+        // populating a remote with objects nothing can validate is the worse
+        // failure. `has_key` is a filesystem check — no unlocking, no prompt —
+        // so it costs nothing on the unencrypted repos that are the norm.
+        if crate::encryption::has_key(&repo_root) {
+            tracing::error!(
+                repo = %repo_root.display(),
+                "refusing to push an at-rest-encrypted repository (DC-7: no client key escrow yet)"
+            );
+            anyhow::bail!(
+                "this repository has at-rest encryption enabled ({}), and pushing an \
+                 encrypted repository is not supported yet.\n\
+                 \n\
+                 Push uploads object bytes directly to the remote's object storage, and \
+                 there is no way yet for the server to make sense of objects sealed with a \
+                 key it does not have. Nothing was uploaded.",
+                crate::encryption::key_file_path(&repo_root).display()
+            );
+        }
+
         let storage_path = repo_root.join(".mediagit");
         let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);

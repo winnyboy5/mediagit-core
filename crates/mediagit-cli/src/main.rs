@@ -15,6 +15,7 @@
 
 mod auto_gc;
 mod commands;
+mod encryption;
 mod ignore_rules;
 mod media_meta;
 mod output;
@@ -108,6 +109,9 @@ enum Commands {
 
     /// Manage authentication with a MediaGit server
     Auth(AuthCmd),
+
+    /// Manage at-rest encryption for this repository
+    Key(EncryptionKeyCmd),
 
     /// Merge branches
     Merge(MergeCmd),
@@ -448,6 +452,32 @@ async fn async_main(cli: Cli) -> Result<()> {
     // concurrently, and this spawns one.
     spawn_interrupt_handler();
 
+    // DC-7/D3: name the repository whose at-rest key this process may need.
+    // The unlock itself happens in `repo::create_storage_backend`, on the
+    // first command that actually builds storage.
+    //
+    // Ordering is still the whole correctness argument. `SmartCompressor::new()`
+    // captures the process key at construction, and every ODB builds one when
+    // it is created — so the key must be in place before that. Deferring it to
+    // `create_storage_backend` keeps it there: that is where every local ODB's
+    // storage comes from, and it runs before the ODB exists.
+    //
+    // The root is resolved *here* rather than at unlock time on purpose: this
+    // runs before any command has had a chance to create a nested repository,
+    // so it is the outer, encrypted repo that gets armed — which is what makes
+    // `clone`/`init` of a nested repo hit the key-scope guard.
+    //
+    // Skipped for `key` itself: `key status` must be able to report on a repo
+    // it cannot unlock, and `key init` must not be gated on the key it is
+    // about to create. Outside a repository (or in one with no key) this is a
+    // silent no-op — encryption is opt-in and unconfigured repos must behave
+    // exactly as they did before DC-7.
+    if !matches!(cli.command, Some(Commands::Key(_)))
+        && let Ok(root) = repo::find_repo_root()
+    {
+        encryption::arm_process_key(root);
+    }
+
     // Execute command
     match cli.command {
         Some(Commands::Init(cmd)) => cmd.execute().await,
@@ -468,6 +498,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         }
         Some(Commands::Lock(cmd)) => cmd.execute().await,
         Some(Commands::Auth(cmd)) => cmd.execute().await,
+        Some(Commands::Key(cmd)) => cmd.execute().await,
         Some(Commands::Merge(cmd)) => cmd.execute().await,
         Some(Commands::Rebase(cmd)) => cmd.execute().await,
         Some(Commands::CherryPick(cmd)) => cmd.execute().await,
@@ -526,6 +557,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             println!("  revert       Revert existing commits");
             println!("  lock         Lock files against concurrent edits");
             println!("  auth         Manage server credentials");
+            println!("  key          Manage at-rest encryption for this repository");
             println!("  gc           Clean up repository");
             println!("  fsck         Check repository integrity");
             println!("  verify       Verify commits and signatures");

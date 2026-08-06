@@ -39,6 +39,20 @@ $env:MEDIAGIT_NO_KEYRING = "1"
 Remove-Item Env:MEDIAGIT_TOKEN -ErrorAction SilentlyContinue
 Remove-Item Env:MEDIAGIT_API_KEY -ErrorAction SilentlyContinue
 
+# Same rule, same reason, different keychain entry: `key init` with no
+# MEDIAGIT_ENCRYPTION_KEYFILE falls back to the OS keychain (encryption.rs's
+# provision_master), which MEDIAGIT_NO_KEYRING above does NOT gate - that
+# variable is read only by repo.rs's credential path. cli_encryption_test.rs
+# pins this exact env var for exactly this reason: "a test suite has no
+# business writing to the developer's real OS keychain". Point every `key
+# init` row at a throwaway scratch keyfile instead of the real one.
+$prevKeyfileEnv = $env:MEDIAGIT_ENCRYPTION_KEYFILE
+$matrixKeyfile = Join-Path $QA.Work "matrix-encryption.key"
+$keyBytes = New-Object byte[] 32
+(New-Object Security.Cryptography.RNGCryptoServiceProvider).GetBytes($keyBytes)
+[IO.File]::WriteAllBytes($matrixKeyfile, $keyBytes)
+$env:MEDIAGIT_ENCRYPTION_KEYFILE = $matrixKeyfile
+
 # ---- template repo: 2 commits, extra branch, tag (mirrors v11 sandboxing approach) ----
 $TPL = New-SandboxRepo "matrix-template" $Phase
 
@@ -206,11 +220,13 @@ foreach ($item in $selected) {
   if ($r.cmd -eq "init") { $argv += "init-sub-$i" }
 
   Write-QaLog $Phase "ROW $i : mediagit $($argv -join ' ')"
-  # `auth` prompts interactively (dialoguer Input/Password). Closing stdin immediately
-  # gives it EOF, which it must report as an error rather than blocking forever; the
-  # short timeout turns a hang into a recorded TIMEOUT row instead of stalling the phase.
+  # `auth` prompts interactively (dialoguer Input/Password); so does a bare `key
+  # recover` (dialoguer Password for the recovery code - opts.code is None with
+  # no positional supplied here). Closing stdin immediately gives it EOF, which
+  # it must report as an error rather than blocking forever; the short timeout
+  # turns a hang into a recorded TIMEOUT row instead of stalling the phase.
   $res =
-    if ($r.cmd -match '^auth') { Invoke-MG $sb $argv $Phase -TimeoutSec 30 -StdIn @("") }
+    if ($r.cmd -match '^(auth|key recover)') { Invoke-MG $sb $argv $Phase -TimeoutSec 30 -StdIn @("") }
     elseif ($isRemote) { Invoke-MG $sb $argv $Phase -TimeoutSec 60 }
     else { Invoke-MG $sb $argv $Phase }
 
@@ -267,7 +283,9 @@ foreach ($item in $selected) {
 Remove-Item -Recurse -Force $sb -EA SilentlyContinue
 Remove-Item -Recurse -Force (Join-Path $QA.Work "matrix-clone-dest") -EA SilentlyContinue
 Remove-Item -Recurse -Force $TPL -EA SilentlyContinue
+Remove-Item -Force $matrixKeyfile -EA SilentlyContinue
 $env:MEDIAGIT_NO_KEYRING = $prevNoKeyring
+if ($null -eq $prevKeyfileEnv) { Remove-Item Env:MEDIAGIT_ENCRYPTION_KEYFILE -EA SilentlyContinue } else { $env:MEDIAGIT_ENCRYPTION_KEYFILE = $prevKeyfileEnv }
 
 $counts = (($classCounts.Keys | Sort-Object | ForEach-Object { "$_=$($classCounts[$_])" }) -join " ")
 Write-QaGate $Phase "no-panics" ($panicCount -eq 0) "panicCount=$panicCount"

@@ -188,9 +188,9 @@ pub struct AppState {
     pub storage_backends: RwLock<HashMap<PathBuf, Arc<dyn StorageBackend>>>,
 
     /// Per-repo cache of ObjectDatabase templates. Handlers clone() from this
-    /// so all concurrent writers share the same Arc<delta_written_pairs> HashSet,
+    /// so all concurrent writers share the same Arc<delta_written_pairs> DeltaGraph,
     /// which is required for the TOCTOU circular-delta-chain prevention to work.
-    /// Without sharing, each handler has its own HashSet → guard is ineffective.
+    /// Without sharing, each handler has its own graph → guard is ineffective.
     pub odb_cache: RwLock<HashMap<PathBuf, ObjectDatabase>>,
 
     /// In-memory pack manifest index: repo -> chunk_oid_hex -> PackLoc.

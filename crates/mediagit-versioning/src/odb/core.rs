@@ -33,6 +33,34 @@ use crate::pack::{
     pack_bytes_cap as repack_pack_bytes_cap, pack_chunks_cap as repack_pack_chunks_cap,
 };
 
+/// Whether this process holds an at-rest encryption key (DC-7).
+fn process_key_is_set() -> bool {
+    mediagit_compression::process_key().is_some()
+}
+
+/// A `SmartCompressor` whenever the process is keyed, otherwise `None`.
+///
+/// At-rest encryption is applied by `SmartCompressor`, and only on the
+/// compression path. An `ObjectDatabase` built *without* one therefore writes
+/// **plaintext** — silently, into a repository whose owner ran
+/// `mediagit key init`. The process-global key (DC-7 D3) makes every
+/// `SmartCompressor::new()` site pick the key up automatically, but it can do
+/// nothing about a database that has no smart compressor at all.
+///
+/// No production call site builds one today — every one uses
+/// `with_smart_compression` or `with_optimizations` — so this closes a latent
+/// trap rather than a live bug. It is guarded here instead of left to
+/// convention because the "ODB bypass" class (a path that skips the shared
+/// entry point) has recurred six-plus times in this codebase, and this
+/// instance would fail in the worst possible direction: quietly, and only for
+/// the users who explicitly asked for encryption.
+///
+/// With no key set — the norm — this returns `None` and every constructor
+/// behaves exactly as before, so unencrypted output stays byte-identical.
+fn sealing_compressor_if_keyed() -> Option<Arc<SmartCompressor>> {
+    process_key_is_set().then(|| Arc::new(SmartCompressor::new()))
+}
+
 impl ObjectDatabase {
     pub fn new(storage: Arc<dyn StorageBackend>, cache_capacity: u64) -> Self {
         info!(
@@ -53,7 +81,7 @@ impl ObjectDatabase {
             metrics: Arc::new(RwLock::new(OdbMetrics::new())),
             compressor: Arc::new(ZlibCompressor::default_level()),
             compression_enabled: true,
-            smart_compressor: None,
+            smart_compressor: sealing_compressor_if_keyed(),
             chunk_strategy: None,
             cdc_seed: 0,
             delta_enabled: true, // ✅ CRITICAL FIX: Enable delta compression by default for storage savings
@@ -61,7 +89,7 @@ impl ObjectDatabase {
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
             ))),
             base_chunk_cache: build_base_chunk_cache(),
-            delta_written_pairs: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            delta_written_pairs: Arc::new(Mutex::new(crate::odb::DeltaGraph::default())),
             pack_membership: Arc::new(RwLock::new(None)),
         }
     }
@@ -96,8 +124,11 @@ impl ObjectDatabase {
                 .build(),
             metrics: Arc::new(RwLock::new(OdbMetrics::new())),
             compressor,
-            compression_enabled,
-            smart_compressor: None,
+            // A caller-supplied `false` cannot be honoured while a process key
+            // is set: see `sealing_compressor_if_keyed`, sealing only happens
+            // through the compression path.
+            compression_enabled: compression_enabled || process_key_is_set(),
+            smart_compressor: sealing_compressor_if_keyed(),
             chunk_strategy: None,
             cdc_seed: 0,
             delta_enabled: true, // ✅ Enable delta compression for storage savings
@@ -105,7 +136,7 @@ impl ObjectDatabase {
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
             ))),
             base_chunk_cache: build_base_chunk_cache(),
-            delta_written_pairs: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            delta_written_pairs: Arc::new(Mutex::new(crate::odb::DeltaGraph::default())),
             pack_membership: Arc::new(RwLock::new(None)),
         }
     }
@@ -138,7 +169,7 @@ impl ObjectDatabase {
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
             ))),
             base_chunk_cache: build_base_chunk_cache(),
-            delta_written_pairs: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            delta_written_pairs: Arc::new(Mutex::new(crate::odb::DeltaGraph::default())),
             pack_membership: Arc::new(RwLock::new(None)),
         }
     }
@@ -177,7 +208,7 @@ impl ObjectDatabase {
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
             ))),
             base_chunk_cache: build_base_chunk_cache(),
-            delta_written_pairs: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            delta_written_pairs: Arc::new(Mutex::new(crate::odb::DeltaGraph::default())),
             pack_membership: Arc::new(RwLock::new(None)),
         }
     }
@@ -201,8 +232,11 @@ impl ObjectDatabase {
                 .build(),
             metrics: Arc::new(RwLock::new(OdbMetrics::new())),
             compressor: Arc::new(ZlibCompressor::default_level()),
-            compression_enabled: false,
-            smart_compressor: None,
+            // `without_compression` stores raw bytes, which for a keyed
+            // process would mean storing PLAINTEXT. Encryption outranks the
+            // caller's compression preference.
+            compression_enabled: process_key_is_set(),
+            smart_compressor: sealing_compressor_if_keyed(),
             chunk_strategy: None,
             cdc_seed: 0,
             delta_enabled: false,
@@ -210,7 +244,7 @@ impl ObjectDatabase {
                 crate::similarity::MAX_SIMILARITY_CANDIDATES,
             ))),
             base_chunk_cache: build_base_chunk_cache(),
-            delta_written_pairs: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            delta_written_pairs: Arc::new(Mutex::new(crate::odb::DeltaGraph::default())),
             pack_membership: Arc::new(RwLock::new(None)),
         }
     }
@@ -742,7 +776,19 @@ impl ObjectDatabase {
                                         "Using delta encoding in pack"
                                     );
 
-                                    pack_writer.add_delta_object(*oid, base_oid, &delta_data);
+                                    // DC-7: the pack copy REPLACES the loose
+                                    // sealed object (deleted below when
+                                    // `remove_loose`), so it has to carry the
+                                    // same protection. The regular-object
+                                    // branch gets this from `compress_typed`;
+                                    // a delta never reaches the compressor, so
+                                    // without this `gc --repack` would quietly
+                                    // and permanently un-encrypt it.
+                                    // `PackReader::read_delta_object` opens it
+                                    // symmetrically.
+                                    let sealed_delta =
+                                        mediagit_compression::seal_at_rest(&delta_data)?;
+                                    pack_writer.add_delta_object(*oid, base_oid, &sealed_delta);
                                     stats.delta_objects += 1;
                                     packed_oids.push(*oid);
                                     continue;

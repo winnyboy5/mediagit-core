@@ -800,6 +800,13 @@ impl PackReader {
         // Get base object (may be another delta, so use depth tracking)
         let (base_type, base_data) = self.get_object_with_type_depth(&base_oid, depth + 1)?;
 
+        // DC-7: on a keyed repo `repack` sealed these bytes before they were
+        // written (see `ObjectDatabase::repack`). Unsealed input passes
+        // straight through, so packs written before encryption existed parse
+        // exactly as they did.
+        let delta_data = &mediagit_compression::open_at_rest(delta_data)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+
         // Parse and apply delta
         let delta = Delta::from_bytes(delta_data).map_err(|e| {
             io::Error::new(

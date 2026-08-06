@@ -150,6 +150,24 @@ impl EncryptionKey {
     }
 }
 
+/// Constant-time equality, so callers outside this crate can ask "is this the
+/// same key?" without [`EncryptionKey::expose_key`] having to become public.
+///
+/// DC-7's process-global key registry needs exactly this and nothing more: it
+/// distinguishes "installed twice, same key" (idempotent, fine) from
+/// "installed twice, different key" (a hard error). Keeping the comparison
+/// here rather than handing out bytes keeps key material inside this module.
+impl PartialEq for EncryptionKey {
+    fn eq(&self, other: &Self) -> bool {
+        let (a, b) = (self.expose_key(), other.expose_key());
+        // Both operands are fixed-size, but fold rather than short-circuit so
+        // the timing carries no information about where they first differ.
+        a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    }
+}
+
+impl Eq for EncryptionKey {}
+
 impl std::fmt::Debug for EncryptionKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EncryptionKey")

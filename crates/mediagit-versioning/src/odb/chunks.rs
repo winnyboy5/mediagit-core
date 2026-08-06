@@ -31,6 +31,32 @@ fn similarity_seed_max_chunks() -> usize {
     }
 }
 
+/// DC-7: a chunk manifest as it goes to **local** storage.
+///
+/// A manifest names the file and lists the plaintext hash of every one of its
+/// chunks, so leaving it in the clear hands an attacker the filename and a
+/// confirmation oracle for content they can guess — most of what at-rest
+/// encryption was bought to prevent.
+///
+/// Sealing lives here, at the storage boundary, and deliberately **not** in
+/// `ChunkManifest::to_bytes`: the exact same bytes travel over the wire
+/// (`PUT /manifests/{oid}`) to a server that holds no key, and that format
+/// must not move. Local writers seal, local readers open, everything else is
+/// untouched.
+fn seal_manifest(bytes: &[u8]) -> anyhow::Result<std::borrow::Cow<'_, [u8]>> {
+    mediagit_compression::seal_at_rest(bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to seal chunk manifest: {e}"))
+}
+
+/// Inverse of [`seal_manifest`]. Every local reader of `manifests/<oid>` must
+/// come through here — a raw `storage.get` is the "ODB bypass" defect this
+/// codebase has shipped six times, and on a keyed repo it now returns
+/// ciphertext that `from_bytes` will misparse.
+fn open_manifest(bytes: &[u8]) -> anyhow::Result<std::borrow::Cow<'_, [u8]>> {
+    mediagit_compression::open_at_rest(bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to open chunk manifest: {e}"))
+}
+
 impl ObjectDatabase {
     /// Try to store a chunk as delta against a similar existing chunk.
     ///
@@ -89,7 +115,15 @@ impl ObjectDatabase {
                 detector.add_object(chunk_meta);
                 return Ok(false);
             } else {
-                match resolve_delta_base(&*self.storage, nominated_base, chunk.id).await {
+                let (resolved, observed) =
+                    resolve_delta_base_observing(&*self.storage, nominated_base, chunk.id).await;
+                // Memoize the chain this walk just read so the guard below can
+                // re-check it without storage I/O inside the lock.
+                self.delta_written_pairs
+                    .lock()
+                    .await
+                    .merge_observed(observed);
+                match resolved {
                     Some(id) => id,
                     None => {
                         debug!(
@@ -130,24 +164,21 @@ impl ObjectDatabase {
                     // reverse pair (base_id, chunk.id) is already committed, skip all
                     // writes — no orphaned binary on disk.
                     //
-                    // The lock is held through the chain re-walk AND the meta write:
-                    // the walk at the top of this fn races with concurrent writers
-                    // (three parallel writes can form A→B→C→A with every pre-walk
-                    // passing, because no meta is on disk yet). Serializing
-                    // [walk + meta write] means whichever write closes a loop sees
-                    // the completed chain and refuses.
-                    let mut pairs = self.delta_written_pairs.lock().await;
-                    if pairs.contains(&(base_id, chunk.id)) {
-                        return Ok(false);
-                    }
-                    // Re-decide under the lock and require the *same* answer:
-                    // the delta bytes above were encoded against `base_id`, so a
-                    // re-target here would be invalid. Any change (a concurrent
-                    // write closed a cycle, or pushed the chain to the cap)
-                    // means this delta is no longer safe — store the full chunk.
-                    if resolve_delta_base(&*self.storage, base_id, chunk.id).await != Some(base_id)
+                    // The re-check is serialized with the *registration*, not with
+                    // the meta write: the walk at the top of this fn races with
+                    // concurrent writers (three parallel writes can form A→B→C→A
+                    // with every pre-walk passing, because no meta is on disk yet).
+                    // Registering under the lock, strictly before the meta reaches
+                    // disk, means whichever write closes a loop sees the completed
+                    // chain in memory and refuses — see `DeltaGraph`.
+                    if !commit_delta_pair(
+                        &*self.storage,
+                        &self.delta_written_pairs,
+                        chunk.id,
+                        base_id,
+                    )
+                    .await
                     {
-                        drop(pairs);
                         debug!(
                             chunk_id = %chunk.id,
                             base_id = %base_id,
@@ -157,7 +188,6 @@ impl ObjectDatabase {
                         detector.add_object(chunk_meta);
                         return Ok(false);
                     }
-                    pairs.insert((chunk.id, base_id));
 
                     // Write .meta FIRST — it is the durability anchor for all existence
                     // probes (odb.rs:exists, check_chunk_deltas_exist). Writing meta before
@@ -170,15 +200,18 @@ impl ObjectDatabase {
                     if let Err(e) = self.storage.put(&meta_key, meta_data.as_bytes()).await
                         && !self.storage.exists(&meta_key).await.unwrap_or(false)
                     {
+                        // Drop the registration too, or the guard would refuse a
+                        // legitimate delta for this chunk later in the same run.
+                        rollback_delta_pair(&self.delta_written_pairs, chunk.id, base_id).await;
                         return Err(anyhow::anyhow!("Failed to store chunk delta meta: {}", e));
                     }
-                    drop(pairs);
 
                     if let Err(e) = self.storage.put(&delta_key, &compressed_delta).await {
                         // Best-effort cleanup: remove the .meta we already committed so the
                         // chunk is not permanently misrouted. If the delete also fails, gc
                         // will collect the orphaned sidecar on next run.
                         let _ = self.storage.delete(&meta_key).await;
+                        rollback_delta_pair(&self.delta_written_pairs, chunk.id, base_id).await;
                         return Err(anyhow::anyhow!("Failed to store chunk delta binary: {}", e));
                     }
                     debug!(
@@ -419,6 +452,7 @@ impl ObjectDatabase {
         let manifest_data = manifest.to_bytes().map_err(|e| {
             anyhow::anyhow!("Failed to serialize chunk manifest for {}: {}", oid, e)
         })?;
+        let manifest_data = seal_manifest(&manifest_data)?;
         self.storage
             .put(&manifest_key, &manifest_data)
             .await
@@ -703,7 +737,12 @@ impl ObjectDatabase {
                         // stored as a delta is still a cache HIT here. Without a
                         // depth guard each similar chunk adds a hop and the chain
                         // grows past what `get_chunk` will reconstruct.
-                        match resolve_delta_base(&*storage, nominated_base, chunk.id).await {
+                        let (resolved, observed) =
+                            resolve_delta_base_observing(&*storage, nominated_base, chunk.id).await;
+                        // Memoize the chain this walk just read so the guard
+                        // below can re-check it without storage I/O under the lock.
+                        delta_pairs.lock().await.merge_observed(observed);
+                        match resolved {
                             None => {
                                 debug!(
                                     chunk_id = %chunk.id,
@@ -713,6 +752,12 @@ impl ObjectDatabase {
                             }
                             Some(base_id) => {
                                 let base_key = format!("chunks/{}", base_id.to_hex());
+                                // Fetching + decompressing the base was the
+                                // only unmeasured region inside `delta_ms`.
+                                // Once the delta lock was removed it became
+                                // the dominant cost (~69% of delta_ms), and it
+                                // was invisible except as a subtraction.
+                                let _basefetch_timer = std::time::Instant::now();
                                 // Check decompressed base chunk cache before hitting storage
                                 let base_data_arc = if let Some(cached) =
                                     base_chunk_cache.get(&base_id).await
@@ -747,6 +792,10 @@ impl ObjectDatabase {
                                         _ => None,
                                     }
                                 };
+                                crate::add_phases::record(
+                                    crate::add_phases::Phase::DeltaBaseFetch,
+                                    _basefetch_timer.elapsed(),
+                                );
 
                                 if let Some(base_data) = base_data_arc {
                                     let delta = DeltaEncoder::encode(&base_data, &chunk.data);
@@ -775,46 +824,28 @@ impl ObjectDatabase {
                                         };
 
                                         // TOCTOU guard FIRST: check+register before any I/O.
-                                        // Lock held through the chain re-walk AND the meta
-                                        // write: the pre-walk above races with concurrent
-                                        // writers (three parallel writes can form A→B→C→A
-                                        // with every pre-walk passing, since no meta is on
-                                        // disk yet). Serializing [walk + meta write] means
+                                        // The registration is serialized with the re-check,
+                                        // and lands strictly before the meta reaches disk:
+                                        // the pre-walk above races with concurrent writers
+                                        // (three parallel writes can form A→B→C→A with every
+                                        // pre-walk passing, since no meta is on disk yet), so
                                         // whichever write closes a loop sees the completed
-                                        // chain and refuses. Only the small meta put happens
-                                        // under the lock; the delta binary put stays outside.
-                                        let mut pairs = delta_pairs.lock().await;
-                                        let should_write = if pairs.contains(&(base_id, chunk.id)) {
-                                            debug!(
-                                                chunk_id = %chunk.id,
-                                                base_id = %base_id,
-                                                "Parallel: TOCTOU delta race — reverse pair committed; skipping write"
-                                            );
-                                            false
-                                        } else if resolve_delta_base(&*storage, base_id, chunk.id)
-                                            .await
-                                            != Some(base_id)
-                                        {
-                                            // Re-decide under the lock and require the
-                                            // SAME answer: the delta bytes were encoded
-                                            // against `base_id`, so re-targeting here
-                                            // would be invalid. Any change means this
-                                            // delta is no longer safe to write.
-                                            debug!(
-                                                chunk_id = %chunk.id,
-                                                base_id = %base_id,
-                                                "Parallel: refusing chunk delta at commit — concurrent writes would close a cycle or exceed max depth"
-                                            );
-                                            false
-                                        } else {
-                                            pairs.insert((chunk.id, base_id));
-                                            true
-                                        };
+                                        // chain in memory and refuses. No storage I/O happens
+                                        // under the lock at all.
+                                        let should_write = commit_delta_pair(
+                                            &*storage,
+                                            &delta_pairs,
+                                            chunk.id,
+                                            base_id,
+                                        )
+                                        .await;
 
+                                        // See the streaming path for why these
+                                        // two puts are timed separately.
+                                        let _dwrite_timer = std::time::Instant::now();
                                         if should_write {
                                             // Write .meta FIRST (durability anchor — see the
-                                            // sequential path above), still under the lock so
-                                            // concurrent chain walks observe it atomically.
+                                            // sequential path above).
                                             let meta_key =
                                                 format!("chunk-deltas/{}.meta", chunk.id.to_hex());
                                             let meta_data = format!("base:{}", base_id.to_hex());
@@ -822,12 +853,17 @@ impl ObjectDatabase {
                                                 storage.put(&meta_key, meta_data.as_bytes()).await
                                                 && !storage.exists(&meta_key).await.unwrap_or(false)
                                             {
+                                                rollback_delta_pair(
+                                                    &delta_pairs,
+                                                    chunk.id,
+                                                    base_id,
+                                                )
+                                                .await;
                                                 return Err(anyhow::anyhow!(
                                                     "Store delta meta: {}",
                                                     e
                                                 ));
                                             }
-                                            drop(pairs);
 
                                             // Tolerate concurrent writes: if put fails but chunk exists, treat as dedup
                                             if let Err(e) =
@@ -840,6 +876,12 @@ impl ObjectDatabase {
                                                 // Remove the routing sidecar so the chunk is
                                                 // not permanently misrouted to a missing binary.
                                                 let _ = storage.delete(&meta_key).await;
+                                                rollback_delta_pair(
+                                                    &delta_pairs,
+                                                    chunk.id,
+                                                    base_id,
+                                                )
+                                                .await;
                                                 return Err(anyhow::anyhow!("Store delta: {}", e));
                                             }
 
@@ -850,8 +892,16 @@ impl ObjectDatabase {
                                                 "Parallel: stored chunk as delta"
                                             );
                                             stored_as_delta = true;
+                                            crate::add_phases::record(
+                                                crate::add_phases::Phase::DeltaWrite,
+                                                _dwrite_timer.elapsed(),
+                                            );
                                         } else {
-                                            drop(pairs);
+                                            debug!(
+                                                chunk_id = %chunk.id,
+                                                base_id = %base_id,
+                                                "Parallel: refusing chunk delta at commit — concurrent writes would close a cycle or exceed max depth"
+                                            );
                                         }
                                     }
                                 }
@@ -927,7 +977,7 @@ impl ObjectDatabase {
             .to_bytes()
             .map_err(|e| anyhow::anyhow!("Failed to serialize manifest: {}", e))?;
         self.storage
-            .put(&manifest_key, &manifest_data)
+            .put(&manifest_key, &seal_manifest(&manifest_data)?)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to store manifest: {}", e))?;
 
@@ -1124,8 +1174,12 @@ impl ObjectDatabase {
                         // rationale, including why the producer pre-cache means
                         // a delta-stored base is still a cache hit here).
                         let _resolve_timer = std::time::Instant::now();
-                        let resolved =
-                            resolve_delta_base(&*storage, nominated_base, chunk.id).await;
+                        let (resolved, observed) =
+                            resolve_delta_base_observing(&*storage, nominated_base, chunk.id).await;
+                        // Memoize the chain this walk just read so the guard
+                        // below can re-check it without storage I/O under the
+                        // lock — that re-walk was the serialised section.
+                        delta_pairs.lock().await.merge_observed(observed);
                         crate::add_phases::record(
                             crate::add_phases::Phase::DeltaResolve,
                             _resolve_timer.elapsed(),
@@ -1140,6 +1194,12 @@ impl ObjectDatabase {
                             }
                             Some(base_id) => {
                                 let base_key = format!("chunks/{}", base_id.to_hex());
+                                // Fetching + decompressing the base was the
+                                // only unmeasured region inside `delta_ms`.
+                                // Once the delta lock was removed it became
+                                // the dominant cost (~69% of delta_ms), and it
+                                // was invisible except as a subtraction.
+                                let _basefetch_timer = std::time::Instant::now();
                                 // Check decompressed base chunk cache before hitting storage
                                 let base_data_arc = if let Some(cached) =
                                     base_chunk_cache.get(&base_id).await
@@ -1174,6 +1234,10 @@ impl ObjectDatabase {
                                         _ => None,
                                     }
                                 };
+                                crate::add_phases::record(
+                                    crate::add_phases::Phase::DeltaBaseFetch,
+                                    _basefetch_timer.elapsed(),
+                                );
 
                                 if let Some(base_data) = base_data_arc {
                                     let _encode_timer = std::time::Instant::now();
@@ -1207,67 +1271,44 @@ impl ObjectDatabase {
                                             })?
                                         };
 
-                                        // TOCTOU guard FIRST: check+register before any I/O.
-                                        // Lock held through the chain re-walk AND the meta
-                                        // write — same cycle-closing race as the other two
+                                        // TOCTOU guard FIRST: check+register before any I/O
+                                        // — same cycle-closing race as the other two
                                         // chunk-delta write sites (see the sequential path).
                                         crate::add_phases::record(
                                             crate::add_phases::Phase::DeltaCompress,
                                             _dcomp_timer.elapsed(),
                                         );
 
-                                        // Queueing on this mutex is the suspected
-                                        // bottleneck: it is global and held across storage
-                                        // I/O below, so N workers serialise here.
+                                        // Queueing on this mutex WAS the bottleneck: it is
+                                        // global and used to be held across a full chain
+                                        // re-walk and the meta put, so N workers serialised
+                                        // here for a measured 269 ms/chunk. The critical
+                                        // section is now memory-only; this still times the
+                                        // whole guard so a regression is visible.
                                         let _lock_timer = std::time::Instant::now();
-                                        let mut pairs = delta_pairs.lock().await;
+                                        let should_write = commit_delta_pair(
+                                            &*storage,
+                                            &delta_pairs,
+                                            chunk.id,
+                                            base_id,
+                                        )
+                                        .await;
                                         crate::add_phases::record(
                                             crate::add_phases::Phase::DeltaLock,
                                             _lock_timer.elapsed(),
                                         );
-                                        // Nested rather than an `else if` chain so the
-                                        // cheap in-memory check still SHORT-CIRCUITS the
-                                        // chain re-walk. Hoisting the re-walk to satisfy
-                                        // clippy would have made it unconditional — extra
-                                        // storage I/O inside the very critical section
-                                        // that is this path's measured bottleneck
-                                        // (269 ms/chunk, serialised).
-                                        let should_write = if pairs.contains(&(base_id, chunk.id)) {
-                                            debug!(
-                                                chunk_id = %chunk.id,
-                                                base_id = %base_id,
-                                                "Streaming parallel: TOCTOU delta race — reverse pair committed; skipping write"
-                                            );
-                                            false
-                                        } else {
-                                            // Re-decide under the lock, same answer
-                                            // required — the delta bytes are bound to
-                                            // this specific `base_id`.
-                                            let _relock_timer = std::time::Instant::now();
-                                            let rewalk_base =
-                                                resolve_delta_base(&*storage, base_id, chunk.id)
-                                                    .await;
-                                            crate::add_phases::record(
-                                                crate::add_phases::Phase::DeltaResolve,
-                                                _relock_timer.elapsed(),
-                                            );
-                                            if rewalk_base != Some(base_id) {
-                                                debug!(
-                                                    chunk_id = %chunk.id,
-                                                    base_id = %base_id,
-                                                    "Streaming parallel: refusing chunk delta at commit — concurrent writes would close a cycle"
-                                                );
-                                                false
-                                            } else {
-                                                pairs.insert((chunk.id, base_id));
-                                                true
-                                            }
-                                        };
 
+                                        // The two puts below were the last
+                                        // unmeasured region inside `delta_ms`.
+                                        // Splitting them out distinguishes
+                                        // "the writes are slow" from "the task
+                                        // waited for a runtime thread" — these
+                                        // counters are per-task elapsed wall,
+                                        // so scheduling delay lands in the gap
+                                        // rather than in any named phase.
+                                        let _dwrite_timer = std::time::Instant::now();
                                         if should_write {
-                                            // Write .meta FIRST (durability anchor), still
-                                            // under the lock so concurrent chain walks
-                                            // observe it atomically.
+                                            // Write .meta FIRST (durability anchor).
                                             let meta_key =
                                                 format!("chunk-deltas/{}.meta", chunk.id.to_hex());
                                             let meta_data = format!("base:{}", base_id.to_hex());
@@ -1275,12 +1316,17 @@ impl ObjectDatabase {
                                                 storage.put(&meta_key, meta_data.as_bytes()).await
                                                 && !storage.exists(&meta_key).await.unwrap_or(false)
                                             {
+                                                rollback_delta_pair(
+                                                    &delta_pairs,
+                                                    chunk.id,
+                                                    base_id,
+                                                )
+                                                .await;
                                                 return Err(anyhow::anyhow!(
                                                     "Store delta meta: {}",
                                                     e
                                                 ));
                                             }
-                                            drop(pairs);
 
                                             // Tolerate concurrent writes: if put fails but chunk exists, treat as dedup
                                             if let Err(e) =
@@ -1293,6 +1339,12 @@ impl ObjectDatabase {
                                                 // Remove the routing sidecar so the chunk is
                                                 // not permanently misrouted to a missing binary.
                                                 let _ = storage.delete(&meta_key).await;
+                                                rollback_delta_pair(
+                                                    &delta_pairs,
+                                                    chunk.id,
+                                                    base_id,
+                                                )
+                                                .await;
                                                 return Err(anyhow::anyhow!("Store delta: {}", e));
                                             }
 
@@ -1303,8 +1355,16 @@ impl ObjectDatabase {
                                                 "Streaming parallel: stored chunk as delta"
                                             );
                                             stored_as_delta = true;
+                                            crate::add_phases::record(
+                                                crate::add_phases::Phase::DeltaWrite,
+                                                _dwrite_timer.elapsed(),
+                                            );
                                         } else {
-                                            drop(pairs);
+                                            debug!(
+                                                chunk_id = %chunk.id,
+                                                base_id = %base_id,
+                                                "Streaming parallel: refusing chunk delta at commit — concurrent writes would close a cycle"
+                                            );
                                         }
                                     }
                                 }
@@ -1550,7 +1610,9 @@ impl ObjectDatabase {
 
         let manifest_data = manifest.to_bytes()?;
         let manifest_key = format!("manifests/{}", file_oid.to_hex());
-        self.storage.put(&manifest_key, &manifest_data).await?;
+        self.storage
+            .put(&manifest_key, &seal_manifest(&manifest_data)?)
+            .await?;
 
         info!(
             "Streaming parallel write complete: {} chunks, {}MB written",
@@ -1736,7 +1798,7 @@ impl ObjectDatabase {
         // Load chunk manifest (use to_hex() for consistent storage paths)
         let manifest_key = format!("manifests/{}", oid.to_hex());
         let manifest_data = self.storage.get(&manifest_key).await?;
-        let manifest: ChunkManifest = ChunkManifest::from_bytes(&manifest_data)
+        let manifest: ChunkManifest = ChunkManifest::from_bytes(&open_manifest(&manifest_data)?)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
 
         debug!(
@@ -1893,8 +1955,9 @@ impl ObjectDatabase {
             info!(oid = %oid, "Streaming chunked object to file");
 
             let manifest_data = self.storage.get(&manifest_key).await?;
-            let manifest: ChunkManifest = ChunkManifest::from_bytes(&manifest_data)
-                .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
+            let manifest: ChunkManifest =
+                ChunkManifest::from_bytes(&open_manifest(&manifest_data)?)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
 
             // Ensure parent directory exists
             if let Some(parent) = path.parent() {
@@ -2186,8 +2249,9 @@ impl ObjectDatabase {
         let manifest_key = format!("manifests/{}", oid.to_hex());
         if self.storage.exists(&manifest_key).await? {
             let manifest_data = self.storage.get(&manifest_key).await?;
-            let manifest: ChunkManifest = ChunkManifest::from_bytes(&manifest_data)
-                .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
+            let manifest: ChunkManifest =
+                ChunkManifest::from_bytes(&open_manifest(&manifest_data)?)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
             return Ok(manifest.total_size as usize);
         }
 
@@ -2221,7 +2285,7 @@ impl ObjectDatabase {
 
         let manifest_data = self.storage.get(&manifest_key).await?;
         let manifest: crate::chunking::ChunkManifest =
-            crate::chunking::ChunkManifest::from_bytes(&manifest_data)
+            crate::chunking::ChunkManifest::from_bytes(&open_manifest(&manifest_data)?)
                 .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
 
         Ok(Some(manifest))
@@ -2668,8 +2732,15 @@ impl ObjectDatabase {
         }
 
         let chunk_key = format!("chunks/{}", chunk_id.to_hex());
+        // DC-7: `data` came off the wire from a server that holds no key, so
+        // it is unsealed. Seal it here — after the hash check, which is
+        // computed over the plaintext — or a `pull` into a keyed repo would
+        // leave the ODB half encrypted. `unseal` passes unsealed bytes
+        // through, so nothing would report the split; the reads would just
+        // keep working over plaintext on disk.
+        let sealed = mediagit_compression::seal_at_rest(data)?;
         self.storage
-            .put(&chunk_key, data)
+            .put(&chunk_key, &sealed)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to store chunk {}: {}", chunk_id, e))
     }
@@ -2679,12 +2750,28 @@ impl ObjectDatabase {
     /// Delegates to `StorageBackend::put_file`. On `LocalBackend` this is a
     /// zero-copy atomic rename; cloud backends fall back to reading the file
     /// and uploading.
+    ///
+    /// DC-7: a keyed repo forfeits the rename. The temp file holds the
+    /// remote's unsealed bytes, and there is no way to seal them without
+    /// reading them, so the fast path stays available only to the (unkeyed)
+    /// majority — where it behaves exactly as it always has.
     pub async fn put_compressed_chunk_from_file(
         &self,
         chunk_id: &Oid,
         path: &std::path::Path,
     ) -> anyhow::Result<()> {
         let chunk_key = format!("chunks/{}", chunk_id.to_hex());
+        if mediagit_compression::process_key().is_some() {
+            let data = tokio::fs::read(path).await.map_err(|e| {
+                anyhow::anyhow!("Failed to read staged chunk {}: {}", path.display(), e)
+            })?;
+            let sealed = mediagit_compression::seal_at_rest(&data)?;
+            return self
+                .storage
+                .put(&chunk_key, &sealed)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to store chunk {}: {}", chunk_id, e));
+        }
         self.storage
             .put_file(&chunk_key, path)
             .await
@@ -2702,9 +2789,35 @@ impl ObjectDatabase {
             .to_bytes()
             .map_err(|e| anyhow::anyhow!("Failed to serialize manifest: {}", e))?;
         self.storage
-            .put(&manifest_key, &manifest_data)
+            .put(&manifest_key, &seal_manifest(&manifest_data)?)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to store manifest {}: {}", oid, e))
+    }
+
+    /// Register a chunk-delta edge that is about to be written to storage by
+    /// something OTHER than this ODB's own delta path.
+    ///
+    /// The under-lock cycle/depth re-check reads the in-memory `DeltaGraph`
+    /// rather than storage, and that is only sound while
+    /// **in-memory edges ⊇ on-disk edges**. Every writer of a
+    /// `chunk-deltas/<id>.meta` sidecar must therefore register here *before*
+    /// the sidecar reaches disk, or the graph will report a node as terminal
+    /// when disk says it is a delta — which **undercounts chain depth** and
+    /// lets a chain slip past `MAX_DELTA_DEPTH`.
+    ///
+    /// That is not hypothetical: `upload_chunk_delta` (the push-receive
+    /// handler) writes the sidecar directly, and a server process runs it
+    /// alongside this ODB's own delta writes. Campaign 20260805-repro-a9
+    /// caught the result — `A11-delta-chain-depth maxDepth=11 (limit=10)`,
+    /// with `fsck`, push and clone all failing on the resulting repository.
+    ///
+    /// The instance lock guarantees one *process* per repo; it does not
+    /// guarantee one *writer* inside it. Registering here restores that.
+    pub async fn register_external_delta_edge(&self, chunk_id: Oid, base_id: Oid) {
+        self.delta_written_pairs
+            .lock()
+            .await
+            .register_edge(chunk_id, base_id);
     }
 
     /// Check if a chunk exists (including delta-encoded chunks and chunks

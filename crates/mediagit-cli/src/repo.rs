@@ -233,8 +233,9 @@ fn keyring_disabled() -> bool {
     std::env::var_os("MEDIAGIT_NO_KEYRING").is_some()
 }
 
-/// Service name every MediaGit keychain entry is stored under.
-const KEYRING_SERVICE: &str = "mediagit";
+/// Service name every MediaGit keychain entry is stored under. Shared with
+/// `encryption.rs`, which keys the at-rest master key under the same service.
+pub(crate) const KEYRING_SERVICE: &str = "mediagit";
 
 /// scheme+host+port for a remote URL — the shared "origin" normalization
 /// used both as the keychain account key (I11, below) and to gate
@@ -599,6 +600,21 @@ async fn resolve_repo_id(repo_root: &Path, config: &mediagit_config::Config) -> 
 /// # Returns
 /// An `Arc<dyn StorageBackend>` configured per the repository's config.toml
 pub async fn create_storage_backend(repo_root: &Path) -> Result<Arc<dyn StorageBackend>> {
+    // DC-7/D3: the at-rest key is installed once per process, from the root
+    // `find_repo_root()` walks *upward* to. Every local ODB gets its storage
+    // from here, so this is the one place that can tell whether the repository
+    // about to be opened is the one that key belongs to. It is not: `mediagit
+    // clone <url> sub` run inside an encrypted repo would seal `sub`'s objects
+    // under the outer repo's key, and `sub` gets no key file of its own.
+    // Checked before any I/O — a guard after the first write is not a guard.
+    //
+    // The unlock comes first: it is deferred to here (see
+    // `encryption::install_armed_key`) so commands that never build storage do
+    // not pay for a key they never use, which means the scope check has to run
+    // after it or it would have nothing installed to compare against.
+    crate::encryption::install_armed_key()?;
+    mediagit_compression::ensure_key_scope(repo_root)?;
+
     let mediagit_dir = repo_root.join(".mediagit");
 
     // Load config (returns default if config.toml doesn't exist)

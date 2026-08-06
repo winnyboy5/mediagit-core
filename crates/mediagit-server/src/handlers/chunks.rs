@@ -641,6 +641,34 @@ pub async fn upload_chunk_delta(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    // Register the edge in the shared per-repo delta graph BEFORE the sidecar
+    // reaches disk. The ODB's cycle/depth guard re-checks against that graph
+    // instead of storage, which is sound only while in-memory edges are a
+    // superset of on-disk ones — and this handler is a second, independent
+    // writer of `.meta` inside the same process. Skipping it let a chain reach
+    // depth 11 against a cap of 10 (campaign 20260805-repro-a9, A11), leaving
+    // a repository that failed fsck, push and clone.
+    if let (Ok(chunk_oid), Ok(base_oid)) = (Oid::from_hex(&chunk_id), Oid::from_hex(&base_hex)) {
+        // Loud, but not fatal: the chunk payload above is already stored, and
+        // failing the request over bookkeeping would throw that away. The
+        // sidecar below still lands, so the invariant is broken only until
+        // something re-learns this edge from storage — which the miss path
+        // does on its own. That self-healing is exactly what makes this easy
+        // to never notice, hence `error!`.
+        match get_or_init_odb(&state, &repo_path).await {
+            Ok(odb) => odb.register_external_delta_edge(chunk_oid, base_oid).await,
+            Err(status) => tracing::error!(
+                repo = %repo,
+                chunk_id = %chunk_id,
+                base = %base_hex,
+                status = %status,
+                "Chunk-delta edge not registered in the in-memory graph: the ODB \
+                 could not be opened. The cycle/depth guard will re-read this edge \
+                 from storage instead."
+            ),
+        }
+    }
+
     let meta_key = format!("chunk-deltas/{}.meta", chunk_id);
     let meta_body = format!("base:{}", base_hex);
     storage

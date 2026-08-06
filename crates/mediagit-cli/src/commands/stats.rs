@@ -414,8 +414,13 @@ impl StatsCmd {
         // Read manifests to extract original file sizes (per-category
         // compression-ratio breakdown).
         for manifest_key in &manifest_keys {
+            // On a keyed repo the stored manifest is sealed (DC-7). This loop
+            // works from storage keys rather than OIDs, so it opens the bytes
+            // with the same primitive `ObjectDatabase` uses rather than going
+            // back through the ODB by OID.
             if let Ok(data) = storage.get(manifest_key).await
-                && let Ok(manifest) = mediagit_versioning::ChunkManifest::from_bytes(&data)
+                && let Ok(plain) = mediagit_compression::open_at_rest(&data)
+                && let Ok(manifest) = mediagit_versioning::ChunkManifest::from_bytes(&plain)
             {
                 stats.original_bytes += manifest.total_size;
 

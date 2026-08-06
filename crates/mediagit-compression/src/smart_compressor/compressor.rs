@@ -64,7 +64,14 @@ pub struct SmartCompressor {
 }
 
 impl SmartCompressor {
-    /// Create new smart compressor with all algorithms ready
+    /// Create new smart compressor with all algorithms ready.
+    ///
+    /// Adopts the process-global at-rest key if one was installed at startup
+    /// (see [`crate::process_key`]). That indirection is the point: a new
+    /// `SmartCompressor::new()` anywhere in the tree is encrypted-repo-correct
+    /// without its author knowing encryption exists. With no key installed —
+    /// the default, and every repo that has not opted in — this is one atomic
+    /// load and the behaviour is byte-for-byte what it was before DC-7.
     pub fn new() -> Self {
         Self {
             zlib: ZlibCompressor::new(CompressionLevel::Default),
@@ -72,11 +79,16 @@ impl SmartCompressor {
             zstd_default: ZstdCompressor::new(CompressionLevel::Default),
             zstd_best: ZstdCompressor::new(CompressionLevel::Best),
             brotli_best: BrotliCompressor::new(CompressionLevel::Best),
-            key: None,
+            key: crate::process_key::process_key().cloned(),
         }
     }
 
     /// Encrypt everything this compressor writes, and decrypt what it reads.
+    ///
+    /// Overrides the process-global key from [`crate::process_key`] for this
+    /// one compressor. Kept as an explicit escape hatch because tests need to
+    /// build keyed and unkeyed compressors side by side in one process, which
+    /// a set-once global cannot express.
     ///
     /// Objects are sealed **after** compression, so compression still happens
     /// and still pays before the payload becomes incompressible.

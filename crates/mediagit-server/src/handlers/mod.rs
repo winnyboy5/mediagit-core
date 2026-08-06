@@ -229,9 +229,9 @@ pub async fn get_or_init_storage(
 }
 
 /// Per-handler entry: returns a clone of the cached ObjectDatabase for this repo.
-/// All clones share the same Arc<delta_written_pairs> HashSet, which is required
+/// All clones share the same Arc<delta_written_pairs> DeltaGraph, which is required
 /// for the TOCTOU circular-delta-chain prevention guard to function correctly.
-/// Without sharing, each concurrent handler has its own HashSet and the guard
+/// Without sharing, each concurrent handler has its own graph and the guard
 /// is ineffective against parallel writers within the same pack upload.
 async fn get_or_init_odb(
     state: &AppState,

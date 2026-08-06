@@ -447,11 +447,10 @@ impl FsckChecker {
     /// itself. Never guesses; an empty result means "no chunk was proven bad",
     /// which is what keeps `repair` from deleting a healthy chunk.
     async fn identify_corrupt_chunks(&self, oid: &Oid) -> Vec<Oid> {
-        let manifest_key = format!("manifests/{}", oid.to_hex());
-        let Ok(bytes) = self.storage.get(&manifest_key).await else {
-            return Vec::new();
-        };
-        let Ok(manifest) = crate::chunking::ChunkManifest::from_bytes(&bytes) else {
+        // Through the ODB, not `storage.get`: on a keyed repo the manifest is
+        // sealed, and a raw read would parse ciphertext and silently report
+        // "not chunked" for every chunked object in the repository.
+        let Ok(Some(manifest)) = self.odb.get_chunk_manifest(oid).await else {
             return Vec::new();
         };
 

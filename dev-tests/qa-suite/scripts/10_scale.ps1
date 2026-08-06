@@ -203,7 +203,8 @@ function Drill-S1-ForBackend([string]$backend) {
     Rec $drill $backend "clones-converge" $converged $pass `
       "n=$N exit0=$exitOk present=$present converged=$converged fsckClean=$fsckClean panics=$panics timedOut=$timedOut serverAlive=$srvAlive"
   } catch {
-    Rec $drill $backend "clones-converge" "" "ERROR" "unexpected error: $_"
+    $fault = Write-QaFault "$drill-$backend" $_
+    Rec $drill $backend "clones-converge" "" "ERROR" $fault
   } finally {
     Stop-QaServer $srv
     if ($src) { Remove-Item -Recurse -Force $src -ErrorAction SilentlyContinue }
@@ -332,7 +333,8 @@ function Drill-S2-Churn {
       "clone exit=$($c.Exit) hash-match=$roundTripOk fsck=$backFsck chainDepth=$($stats.MaxDepth)"
     Remove-Item -Recurse -Force $back -ErrorAction SilentlyContinue
   } catch {
-    Rec $drill "local" "churn" "" "ERROR" "unexpected error: $_"
+    $fault = Write-QaFault $drill $_
+    Rec $drill "local" "churn" "" "ERROR" $fault
   } finally {
     Stop-QaServer $srv
   }
@@ -442,7 +444,8 @@ function Drill-S3-Conflicts {
       ("ops=$($ops.Count) fsckClean=$consistent baselineIntact=$baselineIntact sharedSane=$sharedSane " +
        "sharedMissing=$sharedMissing panics=$panics timedOut=$timedOut exits=$($opExits -join ',')")
   } catch {
-    Rec $drill "local" "no-data-loss" "" "ERROR" "unexpected error: $_"
+    $fault = Write-QaFault $drill $_
+    Rec $drill "local" "no-data-loss" "" "ERROR" $fault
   }
 }
 
@@ -513,7 +516,8 @@ function Drill-S4-ResourcePressure {
       "bigMB=$bigMB pushExit=$($p.Exit) cloneExit=$($c.Exit) hash-match=$hashOk"
     Remove-Item -Recurse -Force $back -ErrorAction SilentlyContinue
   } catch {
-    Rec $drill "local" "peak-rss-mb" "" "ERROR" "unexpected error: $_"
+    $fault = Write-QaFault $drill $_
+    Rec $drill "local" "peak-rss-mb" "" "ERROR" $fault
   } finally {
     Stop-QaServer $srv
     if ($repo) { Remove-Item -Recurse -Force $repo -ErrorAction SilentlyContinue }  # reclaim the GB now
@@ -632,13 +636,15 @@ function Drill-S5-ThroughputDedup {
       Rec $drill $backend "clone-mbs" $cloneMbs $clonePass "parity=$parity sec=$($r.Sec) floor=$cloneFloorTxt exit=$($r.Exit)$sampleNote"
       Remove-Item -Recurse -Force $clone -ErrorAction SilentlyContinue
     } catch {
-      Rec $drill $backend "phase" "" "ERROR" "unexpected error: $_"
+      $fault = Write-QaFault "$drill-$backend" $_
+      Rec $drill $backend "phase" "" "ERROR" $fault
     } finally {
       Stop-QaServer $srv
     }
   }
   } catch {
-    Rec $drill "local" "setup" "" "ERROR" "S5 setup error: $_"
+    $fault = Write-QaFault "$drill-setup" $_
+    Rec $drill "local" "setup" "" "ERROR" $fault
   } finally {
     if ($src) { Remove-Item -Recurse -Force $src -ErrorAction SilentlyContinue }
     if ($cloudSrc) { Remove-Item -Recurse -Force $cloudSrc -ErrorAction SilentlyContinue }

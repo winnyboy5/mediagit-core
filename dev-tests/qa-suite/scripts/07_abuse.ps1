@@ -50,6 +50,39 @@ function Test-QaFsckClean([string]$Repo) {
   return -not (($r.Out -match "(?i)corrupt|missing|error|failed") -or ($r.Exit -ne 0))
 }
 
+# A32-byte MEDIAGIT_ENCRYPTION_KEYFILE master key. Raw bytes, not hex text - one of
+# the two shapes encryption.rs's keyfile_master() accepts (the other is 64 hex chars).
+function New-QaEncryptionKeyfile([string]$Path) {
+  $dir = Split-Path $Path -Parent
+  if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+  $bytes = New-Object byte[] 32
+  (New-Object Security.Cryptography.RNGCryptoServiceProvider).GetBytes($bytes)
+  [IO.File]::WriteAllBytes($Path, $bytes)
+}
+
+# Every regular file under .mediagit/objects, examined for the MGEN envelope magic
+# (mediagit-security/src/envelope.rs). Mirrors cli_encryption_test.rs's own
+# object_files()/any_object_is_sealed() helpers - same question, asked from the
+# outside: does the ODB actually contain sealed bytes, not just an unlocked repo.
+function Get-QaEncryptionSealStats([string]$Repo) {
+  $stats = @{ Examined = 0; Sealed = 0 }
+  $objRoot = Join-Path $Repo ".mediagit\objects"
+  if (-not (Test-Path $objRoot)) { return $stats }
+  Get-ChildItem $objRoot -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+    $head = New-Object byte[] 4
+    $fs = $null
+    try {
+      $fs = [IO.File]::OpenRead($_.FullName)
+      $n = $fs.Read($head, 0, 4)
+    } catch { $n = 0 } finally { if ($fs) { $fs.Dispose() } }
+    if ($n -eq 4) {
+      $stats.Examined++
+      if ([Text.Encoding]::ASCII.GetString($head) -eq "MGEN") { $stats.Sealed++ }
+    }
+  }
+  return $stats
+}
+
 # Capability probe for A7: is the named docker container reachable at all?
 # False on any docker error (daemon not running, container missing, docker
 # not installed) - callers SKIP rather than fail when this is false.
@@ -1096,10 +1129,182 @@ function Drill-A15-SecondInstanceRefused {
   }
 }
 
+# ---------------------------------------------------------------------------
+# A16: at-rest encryption (DC-7/D2+D3) lifecycle - status off, init, sealed
+# objects, round-trip with the key, fail-closed without it, push refused
+# (D4 escrow does not exist yet), re-init refused. Shipped today with hand
+# verification only (crates/mediagit-cli/tests/cli_encryption_test.rs) and
+# zero campaign coverage.
+#
+# MEDIAGIT_ENCRYPTION_KEYFILE is the only non-interactive master-key source
+# (keychain and passphrase both prompt); cli_encryption_test.rs pins the same
+# variable for the same reason - a keyfile is the one source this harness can
+# drive without a TTY, and without it `key init` would write a real secret
+# into this machine's OS keychain.
+# ---------------------------------------------------------------------------
+function Drill-A16-EncryptionLifecycle {
+  $drill = "A16-encryption-lifecycle"
+  $prevKeyfileEnv = $env:MEDIAGIT_ENCRYPTION_KEYFILE
+  Remove-Item Env:MEDIAGIT_ENCRYPTION_KEYFILE -ErrorAction SilentlyContinue
+  try {
+    $repo = New-SandboxRepo "a16-encryption" $Phase
+
+    # 1. an ordinary repo reports encryption off.
+    $st1 = Invoke-MG $repo @("key", "status") $Phase
+    $statusOffOk = ($st1.Exit -eq 0) -and ($st1.Out -match "At-rest encryption: off")
+
+    $keyfile = Join-Path $QA.Work "a16-master.key"
+    New-QaEncryptionKeyfile $keyfile
+    $env:MEDIAGIT_ENCRYPTION_KEYFILE = $keyfile
+
+    # 2. init succeeds and prints a one-time recovery code. Captured into a
+    # variable only - never Write-QaLog'd, never put in a Rec detail string.
+    # (Invoke-MG's own $Phase-cmds.log transcript still contains it, same as
+    # it would for any command's stdout; that file is gitignored scratch, not
+    # a report artifact - see the caveat in the drill-author's own notes.)
+    $init1 = Invoke-MG $repo @("key", "init") $Phase
+    $recoveryCode = $null
+    if ($init1.Exit -eq 0) {
+      $recoveryCode = ($init1.Out -split "`r?`n" | ForEach-Object { $_.Trim() } |
+        Where-Object { $_.Length -eq 71 -and (($_.ToCharArray() | Where-Object { $_ -eq '-' }).Count -eq 7) } |
+        Select-Object -First 1)
+    }
+    $initOk = ($init1.Exit -eq 0) -and ($null -ne $recoveryCode)
+
+    # 3. objects written by `add` are sealed. Anti-vacuous: a run that examines
+    # zero objects passes for the wrong reason (this exact mistake shipped once
+    # already, per the task brief - an equivalent Rust test passed against an
+    # empty listing).
+    $asset = Join-Path $repo "asset.bin"
+    New-QaBinaryFixture $asset 2 91601
+    $origHash = Get-QaHash $asset
+    Invoke-MG $repo @("add", "asset.bin") $Phase | Out-Null
+    Invoke-MG $repo @("commit", "-m", "sealed commit") $Phase | Out-Null
+    $seal = Get-QaEncryptionSealStats $repo
+    $sealExercised = ($seal.Examined -gt 0)
+    $sealOk = $sealExercised -and ($seal.Sealed -gt 0)
+
+    # 4. round-trip WITH the key: delete the working file, reset --hard, hash matches.
+    Remove-Item $asset -Force
+    $reset1 = Invoke-MG $repo @("reset", "--hard", "HEAD") $Phase
+    $roundTripOk = ($reset1.Exit -eq 0) -and (Test-Path $asset) -and ((Get-QaHash $asset) -eq $origHash)
+
+    # 5. read WITHOUT the key must fail - both halves gated separately. A
+    # nonzero exit alone would also be "true" for a run that failed AFTER
+    # quietly writing the plaintext back out; the file must simply not be there.
+    Remove-Item $asset -Force -ErrorAction SilentlyContinue
+    Remove-Item Env:MEDIAGIT_ENCRYPTION_KEYFILE -ErrorAction SilentlyContinue
+    $reset2 = Invoke-MG $repo @("reset", "--hard", "HEAD") $Phase
+    $env:MEDIAGIT_ENCRYPTION_KEYFILE = $keyfile
+    $nokeyFailed = ($reset2.Exit -ne 0)
+    $nokeyNotRestored = -not (Test-Path $asset)
+
+    # 6. push on an encrypted repo is refused - D4 (client key escrow) does not
+    # exist, so push must refuse before ever touching a remote. has_key() is a
+    # pure filesystem check that fires before remote resolution (push.rs), so
+    # this needs no server and no `remote add` at all.
+    $push = Invoke-MG $repo @("push") $Phase
+    $pushRefused = ($push.Exit -ne 0) -and ($push.Out -match "(?i)at-rest encryption")
+
+    # 7. a second `key init` must be refused - overwriting the key would orphan
+    # every object already sealed under it.
+    $init2 = Invoke-MG $repo @("key", "init") $Phase
+    $reinitRefused = ($init2.Exit -ne 0) -and ($init2.Out -match "(?i)already has an encryption key")
+
+    $pass = $statusOffOk -and $initOk -and $sealOk -and $roundTripOk -and
+      $nokeyFailed -and $nokeyNotRestored -and $pushRefused -and $reinitRefused
+    Rec $drill $pass ("status-off=$statusOffOk init-ok=$initOk recovery-code-captured=$($null -ne $recoveryCode) " +
+      "objects-examined=$($seal.Examined) sealed=$($seal.Sealed) seal-exercised=$sealExercised " +
+      "roundtrip-with-key=$roundTripOk nokey-reset-exit=$($reset2.Exit) nokey-failed=$nokeyFailed " +
+      "nokey-file-not-restored=$nokeyNotRestored push-refused=$pushRefused (mentions at-rest encryption) " +
+      "reinit-refused=$reinitRefused")
+  } catch {
+    if ("$_" -match "^SKIP:") { Rec $drill "SKIP" "$_" } else { Rec $drill $false "unexpected error: $_" }
+  } finally {
+    if ($null -eq $prevKeyfileEnv) { Remove-Item Env:MEDIAGIT_ENCRYPTION_KEYFILE -ErrorAction SilentlyContinue }
+    else { $env:MEDIAGIT_ENCRYPTION_KEYFILE = $prevKeyfileEnv }
+  }
+}
+
+# ---------------------------------------------------------------------------
+# A17: encryption recovery (DC-7 recovery slot). The master keyfile is the only
+# copy of the master key this harness holds - destroying it and confirming
+# reads fail is the "lost my USB stick" scenario the recovery code exists for.
+# `key recover` unlocks under a brand new keyfile and re-wraps there; a wrong
+# code must be refused and must not touch the key file at all.
+# ---------------------------------------------------------------------------
+function Drill-A17-EncryptionRecovery {
+  $drill = "A17-encryption-recovery"
+  $prevKeyfileEnv = $env:MEDIAGIT_ENCRYPTION_KEYFILE
+  Remove-Item Env:MEDIAGIT_ENCRYPTION_KEYFILE -ErrorAction SilentlyContinue
+  try {
+    $repo = New-SandboxRepo "a17-recovery" $Phase
+    $keyfile1 = Join-Path $QA.Work "a17-master1.key"
+    New-QaEncryptionKeyfile $keyfile1
+    $env:MEDIAGIT_ENCRYPTION_KEYFILE = $keyfile1
+
+    $init = Invoke-MG $repo @("key", "init") $Phase
+    $recoveryCode = $null
+    if ($init.Exit -eq 0) {
+      $recoveryCode = ($init.Out -split "`r?`n" | ForEach-Object { $_.Trim() } |
+        Where-Object { $_.Length -eq 71 -and (($_.ToCharArray() | Where-Object { $_ -eq '-' }).Count -eq 7) } |
+        Select-Object -First 1)
+    }
+    if (-not $recoveryCode) { Rec $drill $false "key init did not produce a usable recovery code (exit=$($init.Exit))"; return }
+
+    $asset = Join-Path $repo "asset.bin"
+    New-QaBinaryFixture $asset 2 91701
+    $origHash = Get-QaHash $asset
+    Invoke-MG $repo @("add", "asset.bin") $Phase | Out-Null
+    Invoke-MG $repo @("commit", "-m", "before recovery") $Phase | Out-Null
+
+    # 8a. destroy the master keyfile; reads must now fail.
+    Remove-Item $keyfile1 -Force
+    $logNoKey = Invoke-MG $repo @("log") $Phase
+    $readsFailAfterDestroy = ($logNoKey.Exit -ne 0)
+
+    # 8b. recover against a brand new keyfile.
+    $keyfile2 = Join-Path $QA.Work "a17-master2.key"
+    New-QaEncryptionKeyfile $keyfile2
+    $env:MEDIAGIT_ENCRYPTION_KEYFILE = $keyfile2
+    $recover = Invoke-MG $repo @("key", "recover", $recoveryCode) $Phase
+    $recoverOk = ($recover.Exit -eq 0) -and ($recover.Out -match "(?i)Repository unlocked")
+
+    # confirm the original data reads back byte-identical under the new master key.
+    $logAfter = Invoke-MG $repo @("log") $Phase
+    $logShowsCommit = ($logAfter.Exit -eq 0) -and ($logAfter.Out -match "before recovery")
+    Remove-Item $asset -Force
+    $resetAfter = Invoke-MG $repo @("reset", "--hard", "HEAD") $Phase
+    $recoveredHashOk = ($resetAfter.Exit -eq 0) -and (Test-Path $asset) -and ((Get-QaHash $asset) -eq $origHash)
+
+    # 9. a WRONG recovery code must be refused and must change nothing on disk.
+    $keyFilePath = Join-Path $repo ".mediagit\encryption-key"
+    $beforeWrongBytes = Get-QaHash $keyFilePath
+    $wrongCode = $recoveryCode.Substring(0, $recoveryCode.Length - 1) +
+      $(if ($recoveryCode.Substring($recoveryCode.Length - 1) -eq "0") { "1" } else { "0" })
+    $wrongAttempt = Invoke-MG $repo @("key", "recover", $wrongCode) $Phase
+    $wrongRefused = ($wrongAttempt.Exit -ne 0)
+    $wrongChangedNothing = ((Get-QaHash $keyFilePath) -eq $beforeWrongBytes)
+
+    $pass = $readsFailAfterDestroy -and $recoverOk -and $logShowsCommit -and $recoveredHashOk -and
+      $wrongRefused -and $wrongChangedNothing
+    Rec $drill $pass ("reads-fail-after-keyfile-destroyed=$readsFailAfterDestroy recover-exit=$($recover.Exit) " +
+      "recover-ok=$recoverOk log-shows-commit=$logShowsCommit recovered-hash-ok=$recoveredHashOk " +
+      "wrong-code-refused=$wrongRefused (exit=$($wrongAttempt.Exit)) wrong-code-changed-nothing=$wrongChangedNothing")
+  } catch {
+    if ("$_" -match "^SKIP:") { Rec $drill "SKIP" "$_" } else { Rec $drill $false "unexpected error: $_" }
+  } finally {
+    if ($null -eq $prevKeyfileEnv) { Remove-Item Env:MEDIAGIT_ENCRYPTION_KEYFILE -ErrorAction SilentlyContinue }
+    else { $env:MEDIAGIT_ENCRYPTION_KEYFILE = $prevKeyfileEnv }
+  }
+}
+
 Drill-A12-DeltaChainCycle
 Drill-A13-PerChunkFallbackNoRateLimit
 Drill-A14-UnboundPresignedPut
 Drill-A15-SecondInstanceRefused
+Drill-A16-EncryptionLifecycle
+Drill-A17-EncryptionRecovery
 
 Write-QaLog $Phase "=== 07_abuse done: overall=$(if ($script:AllPass) { 'PASS' } else { 'FAIL' }) ==="
 # Teardown: reclaim this phase's own work/ scratch so a long campaign cannot run the

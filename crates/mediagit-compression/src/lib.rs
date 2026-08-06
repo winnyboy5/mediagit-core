@@ -94,6 +94,7 @@ pub mod brotli_compressor;
 pub mod error;
 pub mod metrics;
 pub mod per_type_compressor;
+pub mod process_key;
 pub mod smart_compressor;
 pub mod zlib_compressor;
 pub mod zstd_compressor;
@@ -108,6 +109,9 @@ pub use brotli_compressor::BrotliCompressor;
 pub use error::{CompressionError, CompressionResult};
 pub use metrics::CompressionMetrics;
 pub use per_type_compressor::{CompressionProfile, PerObjectTypeCompressor, PerTypeStats};
+pub use process_key::{
+    ProcessKeyError, ensure_key_scope, open_at_rest, process_key, seal_at_rest, set_process_key,
+};
 pub use smart_compressor::{
     ChunkCodecHint, CompressionStrategy, ObjectCategory, ObjectType, SmartCompressor,
     TypeAwareCompressor,

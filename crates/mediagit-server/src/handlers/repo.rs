@@ -196,7 +196,7 @@ async fn upload_pack_inner(
         return Err(reject_streamed(body, StatusCode::NOT_FOUND).await);
     }
 
-    // Initialize ODB (shared per-repo so delta_written_pairs HashSet is shared
+    // Initialize ODB (shared per-repo so the delta_written_pairs graph is shared
     // across concurrent handlers — required for TOCTOU cycle prevention).
     let odb = get_or_init_odb(&state, &repo_path).await?;
 

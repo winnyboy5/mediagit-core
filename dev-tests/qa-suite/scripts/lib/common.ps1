@@ -17,9 +17,27 @@ $ErrorActionPreference = "Continue"
 if (-not $env:MEDIAGIT_AUTHOR_NAME)  { $env:MEDIAGIT_AUTHOR_NAME  = "QA-Suite" }
 if (-not $env:MEDIAGIT_AUTHOR_EMAIL) { $env:MEDIAGIT_AUTHOR_EMAIL = "qa-suite@mediagit.local" }
 
+# A campaign appends to a handful of shared log/TSV files thousands of times over many
+# hours; a scanner/indexer briefly opening one for a read is enough to win the race and
+# throw "being used by another process" (seen 2026-08-06, S2-churn, full stack traced to
+# this exact pattern - see harness-faults.log). Add-Content itself has no retry, so that
+# single lost write used to abort the whole drill. Three attempts with a short backoff
+# rides out a momentary external lock without masking a real, persistent one.
+function Add-QaContentRetry($Path, $Value, [string]$Encoding = $null) {
+  for ($attempt = 1; $attempt -le 3; $attempt++) {
+    try {
+      if ($Encoding) { $Value | Add-Content $Path -Encoding $Encoding } else { $Value | Add-Content $Path }
+      return
+    } catch [System.IO.IOException] {
+      if ($attempt -eq 3) { throw }
+      Start-Sleep -Milliseconds (100 * $attempt)
+    }
+  }
+}
+
 function Write-QaLog([string]$Phase, [string]$Msg) {
   $line = "{0} [{1}] {2}" -f (Get-Date -Format "HH:mm:ss"), $Phase, $Msg
-  $line | Add-Content (Join-Path $QA.Logs "$Phase.log")
+  Add-QaContentRetry (Join-Path $QA.Logs "$Phase.log") $line
   Write-Host $line
 }
 
@@ -27,7 +45,53 @@ function Write-QaLog([string]$Phase, [string]$Msg) {
 function Write-QaRow([string]$Path, [string[]]$Header, [object[]]$Values) {
   if (-not (Test-Path $Path)) { ($Header -join "`t") | Set-Content $Path -Encoding ASCII }
   $clean = $Values | ForEach-Object { ("" + $_) -replace "`t", " " -replace "`r?`n", " | " }
-  ($clean -join "`t") | Add-Content $Path -Encoding ASCII
+  Add-QaContentRetry $Path ($clean -join "`t") "ASCII"
+}
+
+# Exception detail shared by every catch that logs a harness fault: type, message, inner
+# exception, flattened AggregateException, exception ToString(), and PS stack trace.
+# `"$_"` alone is MESSAGE ONLY - no type, no inner exception, no stack - which is exactly
+# why "Stream was not readable" was recorded three times (Invoke-MG's own catch, below)
+# and diagnosed zero times, and then recorded a fourth time by 10_scale.ps1's drill-level
+# catches with only "$_" too. This is the one place that logic lives now; Invoke-MG and
+# Write-QaFault (below) both call it instead of re-deriving it.
+# Returns @{ ExType; Lines } - Lines is the ordered detail block, empty entries dropped.
+function Get-QaExceptionDetail($ErrorRecord) {
+  $ex = $ErrorRecord.Exception
+  $exType = if ($ex) { $ex.GetType().FullName } else { "(none)" }
+  $inner = if ($ex -and $ex.InnerException) { "$($ex.InnerException.GetType().FullName): $($ex.InnerException.Message)" } else { "" }
+  # AggregateException from a faulted async op (e.g. ReadToEndAsync) hides the real cause
+  # one level down; a bare .Message reads "One or more errors occurred".
+  $flat = ""
+  if ($ex -is [System.AggregateException]) {
+    $flat = (($ex.Flatten().InnerExceptions | ForEach-Object { "$($_.GetType().FullName): $($_.Message)" }) -join " | ")
+  }
+  return @{
+    ExType = $exType
+    Lines  = @(
+      "message: $ErrorRecord"
+      $(if ($inner) { "inner: $inner" })
+      $(if ($flat) { "aggregated: $flat" })
+      "exception:"
+      $(if ($ex) { $ex.ToString() } else { "(no exception object)" })
+      "script-stack:"
+      "$($ErrorRecord.ScriptStackTrace)"
+    ) | Where-Object { $_ }
+  }
+}
+
+# For catches OUTSIDE Invoke-MG (a drill body's own try/catch, not the subprocess wrapper):
+# logs the same class of detail Invoke-MG's catch captures to the same collated
+# logs\harness-faults.log, so 09_report's campaign-no-harness-faults gate sees it too.
+# $Context identifies the call site (e.g. "S2-churn-minio") since every source appends to
+# one file. Returns a short one-line summary for a TSV cell - the long form goes to the log,
+# not the cell (see 10_scale.ps1's drill catches).
+function Write-QaFault([string]$Context, $ErrorRecord) {
+  $xd = Get-QaExceptionDetail $ErrorRecord
+  $detail = (@("[QA-FAULT] stage=$Context type=$($xd.ExType)") + $xd.Lines) | Out-String
+  try { $detail | Add-Content (Join-Path $QA.Logs "harness-faults.log") -Encoding UTF8 } catch {}
+  Write-Warning "harness fault [$Context] ($($xd.ExType)) - see logs\harness-faults.log"
+  return "$($xd.ExType): $ErrorRecord (see harness-faults.log)"
 }
 
 # Run mediagit against a repo. Returns @{Exit; Sec; Out} - Out is combined stdout+stderr text.
@@ -115,15 +179,11 @@ function Invoke-MG([string]$Repo, [string[]]$MgArgs, [string]$Phase = "misc", [i
 
     # `"$_"` is the MESSAGE ONLY. No type, no inner exception, no stack - which
     # is exactly why "Stream was not readable" has been recorded three times and
-    # diagnosed zero times. Everything below is what was missing.
-    $exType = if ($ex) { $ex.GetType().FullName } else { "(none)" }
-    $inner = if ($ex -and $ex.InnerException) { "$($ex.InnerException.GetType().FullName): $($ex.InnerException.Message)" } else { "" }
-    # AggregateException from a faulted ReadToEndAsync hides the real cause one
-    # level down; a bare .Message reads "One or more errors occurred".
-    $flat = ""
-    if ($ex -is [System.AggregateException]) {
-      $flat = (($ex.Flatten().InnerExceptions | ForEach-Object { "$($_.GetType().FullName): $($_.Message)" }) -join " | ")
-    }
+    # diagnosed zero times. Get-QaExceptionDetail (below in this file) is what
+    # was missing; it is shared with every other catch that logs a harness fault
+    # so the fix does not need re-deriving at each call site.
+    $xd = Get-QaExceptionDetail $_
+    $exType = $xd.ExType
     # Statement form, not `$x = try {...} catch {...}`: `try` is not an
     # expression in PS 5.1 (which this harness targets), so the assignment
     # form silently yields $null and every one of these fields logs blank --
@@ -142,19 +202,13 @@ function Invoke-MG([string]$Repo, [string[]]$MgArgs, [string]$Phase = "misc", [i
     }
     try { $handles = "$([Diagnostics.Process]::GetCurrentProcess().HandleCount)" } catch {}
 
-    $detail = @(
+    $detail = (@(
       "[INVOKE-MG-ERROR] stage=$stage type=$exType"
-      "message: $($_)"
-      $(if ($inner) { "inner: $inner" })
-      $(if ($flat) { "aggregated: $flat" })
+    ) + $xd.Lines + @(
       "child: hasExited=$hasExited exitCode=$childExit elapsed=$([math]::Round($sw.Elapsed.TotalSeconds,2))s"
       "harness-process-handles: $handles"
       "command: $($QA.MG) $argLine"
-      "exception:"
-      $(if ($ex) { $ex.ToString() } else { "(no exception object)" })
-      "script-stack:"
-      "$($_.ScriptStackTrace)"
-    ) | Where-Object { $_ } | Out-String
+    )) | Where-Object { $_ } | Out-String
 
     $out = $detail
     $code = -1
@@ -169,8 +223,8 @@ function Invoke-MG([string]$Repo, [string[]]$MgArgs, [string]$Phase = "misc", [i
   }
 
   $log = Join-Path $QA.Logs "$Phase-cmds.log"
-  ("### mediagit {0}  (repo={1} exit={2} sec={3:n1})" -f ($MgArgs -join " "), $Repo, $code, $sw.Elapsed.TotalSeconds) | Add-Content $log
-  $out | Add-Content $log
+  Add-QaContentRetry $log ("### mediagit {0}  (repo={1} exit={2} sec={3:n1})" -f ($MgArgs -join " "), $Repo, $code, $sw.Elapsed.TotalSeconds)
+  Add-QaContentRetry $log $out
 
   # Stall visibility. Most callers discard this result with `| Out-Null` (11
   # pushes + 10 clones across the suite), so a command that takes absurdly long

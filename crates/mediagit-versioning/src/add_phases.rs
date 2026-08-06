@@ -72,6 +72,20 @@ pub enum Phase {
     DeltaEncode,
     /// Compressing the encoded delta before storing it.
     DeltaCompress,
+    /// The `.meta` sidecar put plus the delta binary put. Named so that
+    /// "the writes are slow" can be told apart from "the task was waiting for
+    /// a runtime thread": these counters are per-task elapsed wall time, so
+    /// scheduling delay shows up as the gap between `delta_ms` and the sum of
+    /// its sub-phases, not inside any of them.
+    DeltaWrite,
+    /// Fetching the base chunk and decompressing it, before `DeltaEncode` can
+    /// run. This was the one region inside [`Phase::Delta`] with no counter,
+    /// and once the `delta_written_pairs` lock was removed it became the
+    /// dominant cost: 964 s of a 1,390 s `delta_ms` on a 357 MB PSD, ~69%,
+    /// visible only as the gap between `delta_ms` and its sub-phases. A
+    /// measured gap is not a diagnosis — name it so the next claim about it
+    /// starts from a number.
+    DeltaBaseFetch,
     /// Per-chunk compression in the worker pool.
     Compress,
     /// Per-chunk `storage.put`.
@@ -81,7 +95,7 @@ pub enum Phase {
 }
 
 impl Phase {
-    const COUNT: usize = 13;
+    const COUNT: usize = 15;
 
     fn index(self) -> usize {
         match self {
@@ -95,6 +109,8 @@ impl Phase {
             Phase::DeltaResolve => 7,
             Phase::DeltaEncode => 8,
             Phase::DeltaCompress => 9,
+            Phase::DeltaBaseFetch => 13,
+            Phase::DeltaWrite => 14,
             Phase::Compress => 10,
             Phase::Write => 11,
             Phase::AutoGc => 12,
@@ -114,6 +130,8 @@ impl Phase {
             Phase::DeltaResolve => "delta_resolve_ms",
             Phase::DeltaEncode => "delta_encode_ms",
             Phase::DeltaCompress => "delta_compress_ms",
+            Phase::DeltaBaseFetch => "delta_basefetch_ms",
+            Phase::DeltaWrite => "delta_write_ms",
             Phase::Compress => "compress_ms",
             Phase::Write => "write_ms",
             Phase::AutoGc => "autogc_ms",
@@ -131,6 +149,8 @@ impl Phase {
         Phase::DeltaResolve,
         Phase::DeltaEncode,
         Phase::DeltaCompress,
+        Phase::DeltaBaseFetch,
+        Phase::DeltaWrite,
         Phase::Compress,
         Phase::Write,
         Phase::AutoGc,

@@ -332,7 +332,12 @@ if ($totalError -gt 0) {
 $faultLog = Join-Path $QA.Logs "harness-faults.log"
 if (Test-Path $faultLog) {
   $faultText = Get-Content $faultLog -Raw -EA SilentlyContinue
-  $stages = [regex]::Matches(("" + $faultText), '\[INVOKE-MG-ERROR\] stage=(\S+) type=(\S+)')
+  # Two tags land here: [INVOKE-MG-ERROR] from the subprocess wrapper itself, and
+  # [QA-FAULT] from drill-body catches (Write-QaFault in lib\common.ps1) - a fault that
+  # never went through Invoke-MG at all, e.g. the S1-S5 "unexpected error" catches in
+  # 10_scale.ps1. Both must count here or this gate is blind to half its sources, which
+  # is exactly what let three drills die with a PASS on this gate (2026-08-04/06).
+  $stages = [regex]::Matches(("" + $faultText), '\[(?:INVOKE-MG-ERROR|QA-FAULT)\] stage=(\S+) type=(\S+)')
   $summary = @{}
   foreach ($m in $stages) {
     $k = "stage=$($m.Groups[1].Value) type=$($m.Groups[2].Value)"
