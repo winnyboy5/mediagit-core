@@ -1399,6 +1399,29 @@ fn pack_verify_semaphore() -> &'static tokio::sync::Semaphore {
     })
 }
 
+/// Get-or-create the shared in-flight cell for (repo, pack_oid) so a push's
+/// own background verification and a racing clone's presign-triggered
+/// verification (`transfer.rs::ensure_pack_verified_for_presign`) never both
+/// run a full read-and-hash pass of the same pack. Whoever gets here first
+/// does the real work via `cell.get_or_init`; everyone else awaits that same
+/// cell instead of starting a second one.
+///
+/// Without this, a clone that lands within seconds of the push it's reading
+/// back (the common "push then pull to confirm" shape, and exactly what the
+/// QA scale drill does) paid for TWO full WAN read-and-hash passes of the
+/// pack back to back — measured turning a ~5 min GCS clone into 15-50+ min.
+pub(crate) async fn get_or_create_pack_verify_cell(
+    state: &Arc<AppState>,
+    key: &(String, String),
+) -> Arc<tokio::sync::OnceCell<bool>> {
+    let mut inflight = state.pack_verify_inflight.lock().await;
+    Arc::clone(
+        inflight
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
+    )
+}
+
 /// Background pack verification (PAC: async writes, sync reads). Runs off the
 /// push critical path — see `complete_pack`, which enqueues this instead of
 /// verifying inline.
@@ -1800,14 +1823,28 @@ pub async fn complete_pack(
     }
 
     if state.verify_chunks_on_complete {
-        tokio::spawn(verify_pack_in_background(
-            Arc::clone(&state),
-            repo_path.clone(),
-            repo.clone(),
-            req.pack_oid.clone(),
-            Arc::clone(&storage),
-            req.manifest,
-        ));
+        let state2 = Arc::clone(&state);
+        let repo_path2 = repo_path.clone();
+        let repo2 = repo.clone();
+        let pack_oid2 = req.pack_oid.clone();
+        let storage2 = Arc::clone(&storage);
+        let manifest2 = req.manifest;
+        tokio::spawn(async move {
+            let key = (repo2.clone(), pack_oid2.clone());
+            let cell = get_or_create_pack_verify_cell(&state2, &key).await;
+            cell.get_or_init(|| {
+                verify_pack_in_background(
+                    Arc::clone(&state2),
+                    repo_path2,
+                    repo2,
+                    pack_oid2,
+                    storage2,
+                    manifest2,
+                )
+            })
+            .await;
+            state2.pack_verify_inflight.lock().await.remove(&key);
+        });
     }
 
     tracing::info!(

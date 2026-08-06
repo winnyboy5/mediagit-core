@@ -892,14 +892,7 @@ async fn ensure_pack_verified_for_presign(
     }
 
     let key = (repo.to_string(), pack_oid.to_string());
-    let cell = {
-        let mut inflight = state.pack_verify_inflight.lock().await;
-        Arc::clone(
-            inflight
-                .entry(key.clone())
-                .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
-        )
-    };
+    let cell = get_or_create_pack_verify_cell(state, &key).await;
 
     let clean = *cell
         .get_or_init(|| async {
@@ -1632,6 +1625,93 @@ mod presign_pack_downloads_verification_tests {
             entries_per_verify,
             "8 concurrent presign requests for the same pack must trigger exactly ONE \
              verification pass ({entries_per_verify} reads), not one per caller"
+        );
+    }
+
+    /// `complete_pack` and `ensure_pack_verified_for_presign` are two SEPARATE
+    /// call sites into `verify_pack_in_background` (a push completing, and a
+    /// clone racing that same push). Before both routed through
+    /// `get_or_create_pack_verify_cell`, they each started their own
+    /// independent verification pass for the same pack — a clone landing
+    /// within seconds of the push it reads back (the common "push then pull"
+    /// shape) paid for the WAN read-and-hash pass twice. This proves the two
+    /// entry points now share one in-flight cell, the same way 8 concurrent
+    /// presign callers already do above.
+    #[tokio::test]
+    async fn a_racing_push_completion_and_presign_verify_the_same_pack_exactly_once() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let base_storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let verify_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let storage: Arc<dyn StorageBackend> = Arc::new(CountingBackend {
+            inner: base_storage,
+            verify_reads: Arc::clone(&verify_reads),
+        });
+        let fixture = build_valid_pack();
+        let pack_oid = "e".repeat(64);
+        write_pack_and_manifest(&storage, &repo_path, &pack_oid, &fixture).await;
+        mark_unverified(&state, &repo, &pack_oid).await;
+
+        let entries_per_verify = fixture.manifest.len();
+
+        // Simulates complete_pack's spawn: get-or-create the shared cell,
+        // resolve it via verify_pack_in_background, then release the slot.
+        let push_side = {
+            let state = Arc::clone(&state);
+            let repo_path = repo_path.clone();
+            let repo = repo.clone();
+            let storage = Arc::clone(&storage);
+            let pack_oid = pack_oid.clone();
+            let manifest = fixture.manifest.clone();
+            tokio::spawn(async move {
+                let key = (repo.clone(), pack_oid.clone());
+                let cell = get_or_create_pack_verify_cell(&state, &key).await;
+                let clean = *cell
+                    .get_or_init(|| {
+                        verify_pack_in_background(
+                            Arc::clone(&state),
+                            repo_path,
+                            repo,
+                            pack_oid,
+                            storage,
+                            manifest,
+                        )
+                    })
+                    .await;
+                state.pack_verify_inflight.lock().await.remove(&key);
+                clean
+            })
+        };
+
+        // The real presign entry point, racing the same pack.
+        let presign_side = {
+            let state = Arc::clone(&state);
+            let repo_path = repo_path.clone();
+            let repo = repo.clone();
+            let storage = Arc::clone(&storage);
+            let pack_oid = pack_oid.clone();
+            tokio::spawn(async move {
+                ensure_pack_verified_for_presign(&state, &repo_path, &repo, &storage, &pack_oid)
+                    .await
+            })
+        };
+
+        assert!(
+            push_side.await.unwrap(),
+            "push-side verification must find the pack clean"
+        );
+        assert!(
+            presign_side.await.unwrap(),
+            "the racing presign call must see the pack as mintable"
+        );
+
+        assert_eq!(
+            verify_reads.load(std::sync::atomic::Ordering::SeqCst),
+            entries_per_verify,
+            "a push's own verification and a racing presign's verification of the SAME \
+             pack must share one in-flight pass ({entries_per_verify} reads), not run it twice"
         );
     }
 
