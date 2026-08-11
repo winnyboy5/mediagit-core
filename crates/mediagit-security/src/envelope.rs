@@ -28,14 +28,20 @@
 //! Hence a four-byte magic, checked **before** any sniffing:
 //!
 //! ```text
-//! [ "MGEN" : 4 ][ version : 1 ][ nonce : 12 ][ ciphertext ][ GCM tag : 16 ]
-//!  \___ this module ___/ \_____ crate::encryption::encrypt output _____/
+//! [ "MGEN" : 4 ][ version=2 : 1 ][ nonce : 24 ][ ciphertext ][ GCM tag : 16 ]
+//!  \___ this module ___/ \________ crate::encryption::encrypt output _______/
 //! ```
 //!
-//! 33 bytes of overhead. The magic cannot collide with any codec this project
-//! emits (`M` is `0x4D`), so the discrimination is exact in both directions:
-//! a sealed object is never mistaken for a compressed one, and — the property
-//! that matters for a frozen format — an object written **without** a key is
+//! 45 bytes of overhead (up from 33 in envelope v1 — see
+//! `crate::encryption`'s module doc for why the nonce grew to 192 bits).
+//! Reading stays version-dispatched: v1 objects sealed by earlier builds
+//! still open (`crate::encryption::decrypt` picks the framing from the
+//! version byte), this module just never *writes* v1 again.
+//!
+//! The magic cannot collide with any codec this project emits (`M` is
+//! `0x4D`), so the discrimination is exact in both directions: a sealed
+//! object is never mistaken for a compressed one, and — the property that
+//! matters for a frozen format — an object written **without** a key is
 //! byte-for-byte what it was before this module existed.
 //!
 //! Modelled on the `MGCM` manifest envelope, the one existing precedent in the
@@ -47,7 +53,9 @@ use crate::encryption::{EncryptionError, EncryptionKey, decrypt, encrypt};
 pub const MGEN_MAGIC: &[u8; 4] = b"MGEN";
 
 /// Bytes added to a payload by [`seal`]: magic + version + nonce + GCM tag.
-pub const ENVELOPE_OVERHEAD: usize = MGEN_MAGIC.len() + 1 + 12 + 16;
+/// Envelope v2 (24-byte nonce); a v1 object read back by [`open`] carries 12
+/// fewer bytes of overhead, but this crate never writes v1 again.
+pub const ENVELOPE_OVERHEAD: usize = MGEN_MAGIC.len() + 1 + 24 + 16;
 
 /// Is this a sealed object?
 ///
@@ -102,6 +110,37 @@ mod tests {
         let sealed = seal(&k, &plain).unwrap();
         assert!(is_sealed(&sealed));
         assert_eq!(open(&k, &sealed).unwrap(), plain);
+    }
+
+    /// An envelope v1 object — `MGEN` + `[version=1][nonce:12][ct+tag]`, as
+    /// pre-XAES-256-GCM builds wrote and as existing encrypted repos still
+    /// hold — must keep opening. `seal` only ever writes v2 now, so this is
+    /// hand-built rather than produced by round-tripping through it.
+    #[test]
+    fn a_v1_sealed_object_still_opens() {
+        use aes_gcm::{
+            Aes256Gcm, Nonce,
+            aead::{Aead, KeyInit},
+        };
+
+        let k = key();
+        let plain = b"pre-XAES object, sealed by an earlier build".to_vec();
+
+        let cipher = Aes256Gcm::new_from_slice(k.expose_key()).unwrap();
+        let nonce_bytes = [9u8; 12];
+        // v1 had no associated data at all.
+        let body = cipher
+            .encrypt(Nonce::from_slice(&nonce_bytes), plain.as_slice())
+            .unwrap();
+
+        let mut v1 = Vec::new();
+        v1.extend_from_slice(MGEN_MAGIC);
+        v1.push(1); // legacy version byte
+        v1.extend_from_slice(&nonce_bytes);
+        v1.extend_from_slice(&body);
+
+        assert!(is_sealed(&v1));
+        assert_eq!(open(&k, &v1).unwrap(), plain);
     }
 
     #[test]

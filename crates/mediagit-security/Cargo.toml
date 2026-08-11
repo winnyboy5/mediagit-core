@@ -13,6 +13,11 @@ description = "Authentication, encryption, and audit trail"
 [dependencies]
 # Encryption
 aes-gcm = "0.10"
+# Raw AES-256 block cipher, for the XAES-256-GCM key/nonce derivation
+# (envelope v2) — NOT a new crypto primitive, it's the same block cipher
+# aes-gcm 0.10 already pulls in at this exact version; used directly rather
+# than adding a dependency on the (unmaintained) `xaes-256-gcm` crate.
+aes = "0.8"
 
 # Key derivation
 argon2 = { version = "0.5", features = ["std"] }
@@ -22,7 +27,8 @@ zeroize = { version = "1.8", features = ["derive"] }
 secrecy = { version = "0.10", features = ["serde"] }
 
 # Random number generation
-rand = "0.10"
+rand = "0.10"  # kept for auth/apikey.rs; encryption.rs nonces/keys use getrandom (fork-safe)
+getrandom = "0.4"
 
 # Serialization
 serde.workspace = true
@@ -42,6 +48,9 @@ tracing.workspace = true
 hex = { workspace = true, features = ["serde"] }
 sha2.workspace = true
 chrono.workspace = true
+# EncryptionKey::derive_subkey's domain separation (already a workspace dep,
+# used at this same pinned version by mediagit-cli et al.)
+blake3.workspace = true
 
 # Authentication (optional)
 jsonwebtoken = { version = "10.3", features = ["rust_crypto"], optional = true }

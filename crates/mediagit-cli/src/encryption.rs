@@ -34,16 +34,27 @@
 //! with it.
 //!
 //! ```toml
-//! version  = 1
-//! master   = "keyfile" | "keychain" | "passphrase"   # how it was wrapped
-//! salt     = "<32 hex chars>"                        # passphrase master only
-//! wrapped  = "<hex>"        # MGEN envelope over the 32-byte repo key
-//! recovery = "<hex>"        # optional: the same repo key, under the recovery code
+//! version     = 1
+//! master      = "keyfile" | "keychain" | "passphrase"   # how it was wrapped
+//! salt        = "<32 hex chars>"                        # passphrase master only
+//! wrapped     = "<hex>"     # MGEN envelope over the 32-byte repo key
+//! recovery    = "<hex>"     # optional: the same repo key, under the recovery code
+//! fingerprint = "<64 hex chars>"   # BLAKE3(repo key), checked after every unwrap
 //! ```
 //!
 //! `wrapped` is an ordinary [`mediagit_security::envelope`] envelope, so a
 //! wrong master key fails GCM authentication rather than yielding 32 bytes of
-//! garbage that would then be used to "decrypt" the whole repository.
+//! garbage that would then be used to "decrypt" the whole repository. It is
+//! sealed under a subkey *derived* from the master key
+//! ([`EncryptionKey::derive_subkey`]), not the master key itself — see that
+//! method's doc for why.
+//!
+//! `fingerprint` is a second, independent check on top of GCM: AES-GCM is not
+//! key-committing, so on its own it does not guarantee a ciphertext can only
+//! authenticate under one key. Recording `BLAKE3(repo key)` and checking it
+//! after every unwrap closes that gap regardless of which slot produced the
+//! key. `#[serde(default)]`, so key files written before this field existed
+//! still parse — they simply have nothing to check against.
 //!
 //! # The recovery slot
 //!
@@ -100,6 +111,11 @@ const KEY_FILE: &str = "encryption-key";
 /// Repo/master key length — AES-256.
 const KEY_LEN: usize = 32;
 
+/// [`EncryptionKey::derive_subkey`] context for wrapping the repo key. Fixed
+/// and never reused for anything else — that's the entire point of a
+/// domain-separation context.
+const WRAP_CONTEXT: &str = "mediagit/wrap/v2";
+
 /// Which master-key source unlocks (or wrapped) a repo key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MasterSource {
@@ -144,6 +160,12 @@ struct StoredKey {
     /// existed still parse — they simply have no slot to fall back on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     recovery: Option<String>,
+    /// `BLAKE3(repo key)`, hex-encoded. Checked by [`verify_fingerprint`]
+    /// after every unwrap — see the module doc's "key commitment" note.
+    /// `default` so key files written before this field existed still parse;
+    /// they simply have nothing to check the unwrapped key against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fingerprint: Option<String>,
 }
 
 /// Path of the wrapped-key file for `repo_root`.
@@ -198,10 +220,18 @@ pub fn load_repo_key(repo_root: &Path) -> Result<Option<EncryptionKey>> {
             tried.push(source.describe());
             continue;
         };
+        let wrap_key = master
+            .derive_subkey(WRAP_CONTEXT)
+            .map_err(|e| anyhow!("deriving the wrapping subkey: {e}"))?;
         // Authenticated: a wrong master key is a GCM failure here, never 32
         // bytes of garbage that would go on to "decrypt" the whole repository.
-        if let Ok(bytes) = envelope::open(&master, &wrapped) {
-            let key = EncryptionKey::from_bytes(bytes)
+        if let Ok(bytes) = envelope::open(&wrap_key, &wrapped) {
+            // Zeroized on every exit from here, not just the happy path: the
+            // fingerprint check below can bail! before `bytes` ever becomes an
+            // `EncryptionKey` (whose own zeroizing wouldn't cover this copy).
+            let bytes = Zeroizing::new(bytes);
+            verify_fingerprint(&stored, &bytes)?;
+            let key = EncryptionKey::from_bytes(bytes.to_vec())
                 .map_err(|e| anyhow!("encryption-key: unwrapped key is unusable: {e}"))?;
             return Ok(Some(key));
         }
@@ -287,26 +317,35 @@ pub fn init_repo_key(repo_root: &Path) -> Result<InitOutcome> {
     }
 
     let (master, source, salt) = provision_master()?;
+    let wrap_key = master
+        .derive_subkey(WRAP_CONTEXT)
+        .map_err(|e| anyhow!("deriving the wrapping subkey: {e}"))?;
 
     let repo_key = random_key_bytes().context("generating the repository key")?;
     let recovery_secret = random_key_bytes().context("generating the recovery code")?;
     let recovery_key = EncryptionKey::from_bytes(recovery_secret.to_vec())
         .map_err(|e| anyhow!("recovery code is unusable: {e}"))?;
+    let recovery_wrap_key = recovery_key
+        .derive_subkey(WRAP_CONTEXT)
+        .map_err(|e| anyhow!("deriving the recovery wrapping subkey: {e}"))?;
+
+    let fingerprint = blake3::hash(&repo_key[..]).to_hex().to_string();
 
     let stored = StoredKey {
         version: 1,
         master: source.as_str().to_string(),
         salt,
         wrapped: hex::encode(
-            envelope::seal(&master, &repo_key[..])
+            envelope::seal(&wrap_key, &repo_key[..])
                 .map_err(|e| anyhow!("wrapping the repo key: {e}"))?,
         ),
         // Same key, second slot. Sealed independently, so neither slot's
         // ciphertext tells you anything about the other's wrapping key.
         recovery: Some(hex::encode(
-            envelope::seal(&recovery_key, &repo_key[..])
+            envelope::seal(&recovery_wrap_key, &repo_key[..])
                 .map_err(|e| anyhow!("wrapping the recovery slot: {e}"))?,
         )),
+        fingerprint: Some(fingerprint),
     };
     write_new(&path, &stored)?;
 
@@ -335,23 +374,52 @@ pub fn recover_repo_key(repo_root: &Path, code: &str) -> Result<MasterSource> {
         hex::decode(recovery_hex.trim()).context("encryption-key: `recovery` is not valid hex")?;
 
     let recovery_key = decode_recovery_code(code)?;
+    let recovery_wrap_key = recovery_key
+        .derive_subkey(WRAP_CONTEXT)
+        .map_err(|e| anyhow!("deriving the recovery wrapping subkey: {e}"))?;
     // Fails closed on a mistyped code: GCM authentication rejects it rather
     // than handing back 32 bytes that would then "decrypt" every object.
-    let repo_key = envelope::open(&recovery_key, &recovery_blob).map_err(|_| {
+    let repo_key = envelope::open(&recovery_wrap_key, &recovery_blob).map_err(|_| {
         anyhow!(
             "that recovery code does not open this repository. Check it for transcription \
              errors — nothing has been changed."
         )
     })?;
+    // Zeroized on every exit from here: `repo_key` is re-sealed by reference
+    // below, not consumed, so nothing else would wipe this copy.
+    let repo_key = Zeroizing::new(repo_key);
+    verify_fingerprint(&stored, &repo_key)?;
 
     let (master, source, salt) = provision_master()?;
+    let wrap_key = master
+        .derive_subkey(WRAP_CONTEXT)
+        .map_err(|e| anyhow!("deriving the wrapping subkey: {e}"))?;
     stored.master = source.as_str().to_string();
     stored.salt = salt;
     stored.wrapped = hex::encode(
-        envelope::seal(&master, &repo_key).map_err(|e| anyhow!("re-wrapping the repo key: {e}"))?,
+        envelope::seal(&wrap_key, &repo_key)
+            .map_err(|e| anyhow!("re-wrapping the repo key: {e}"))?,
     );
     write_over(&key_file_path(repo_root), &stored)?;
     Ok(source)
+}
+
+/// Verify the just-unwrapped repo key against the recorded fingerprint, if
+/// any. See the module doc's "key commitment" note for why this exists
+/// alongside GCM authentication rather than instead of it. Older key files
+/// have no fingerprint (`#[serde(default)]`) and skip the check.
+fn verify_fingerprint(stored: &StoredKey, repo_key: &[u8]) -> Result<()> {
+    let Some(expected) = stored.fingerprint.as_deref() else {
+        return Ok(());
+    };
+    let actual = blake3::hash(repo_key).to_hex();
+    if actual.as_str() != expected {
+        bail!(
+            "encryption-key: the unwrapped repo key does not match its recorded fingerprint \
+             — the key file may be corrupted or tampered with"
+        );
+    }
+    Ok(())
 }
 
 /// 32 bytes from the OS RNG, wiped when the caller drops them. Every caller
@@ -486,21 +554,26 @@ fn master_key(source: MasterSource, stored: &StoredKey) -> Result<Option<Encrypt
 fn keyfile_master() -> Result<EncryptionKey> {
     let path = std::env::var_os(KEYFILE_ENV).ok_or_else(|| anyhow!("{KEYFILE_ENV} is not set"))?;
     let path = PathBuf::from(path);
-    let raw = std::fs::read(&path)
-        .with_context(|| format!("reading {KEYFILE_ENV} at {}", path.display()))?;
+    // Zeroized regardless of which arm below fires: the hex arm's `raw` is
+    // the master key spelled out in ASCII (equally sensitive to the raw-bytes
+    // form), and the raw-bytes arm's `raw` *is* the key.
+    let raw = Zeroizing::new(
+        std::fs::read(&path)
+            .with_context(|| format!("reading {KEYFILE_ENV} at {}", path.display()))?,
+    );
 
     let bytes = match std::str::from_utf8(&raw).map(str::trim) {
-        Ok(text) if text.len() == KEY_LEN * 2 => {
-            hex::decode(text).with_context(|| format!("{} is not valid hex", path.display()))?
-        }
-        _ if raw.len() == KEY_LEN => raw,
+        Ok(text) if text.len() == KEY_LEN * 2 => Zeroizing::new(
+            hex::decode(text).with_context(|| format!("{} is not valid hex", path.display()))?,
+        ),
+        _ if raw.len() == KEY_LEN => Zeroizing::new(raw.to_vec()),
         _ => bail!(
             "{} must contain a 32-byte key, either as {} hex characters or {KEY_LEN} raw bytes",
             path.display(),
             KEY_LEN * 2
         ),
     };
-    EncryptionKey::from_bytes(bytes).map_err(|e| anyhow!("{}: {e}", path.display()))
+    EncryptionKey::from_bytes(bytes.to_vec()).map_err(|e| anyhow!("{}: {e}", path.display()))
 }
 
 /// True when `MEDIAGIT_NO_KEYRING` is set, in which case the OS-keychain tier
@@ -617,7 +690,13 @@ fn write_over(path: &Path, stored: &StoredKey) -> Result<()> {
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, render(stored)?).with_context(|| format!("writing {}", tmp.display()))?;
     restrict_permissions(&tmp);
-    std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        // A failed rename would otherwise leave `encryption-key.tmp` behind —
+        // holding the same key material as `path`, but under whatever ACL the
+        // parent directory happened to hand a freshly created file.
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("replacing {}", path.display()));
+    }
     Ok(())
 }
 
@@ -646,7 +725,28 @@ fn restrict_permissions(path: &Path) {
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
 }
 
-#[cfg(not(unix))]
+/// Windows has no owner-only mode bit; a freshly created file just inherits
+/// its parent directory's ACL. `icacls /inheritance:r` breaks that
+/// inheritance and `/grant:r "<user>:F"` leaves only the current user with
+/// access — the posture OpenSSH requires of private key files. Shells out to
+/// the built-in `icacls.exe` rather than the raw ACL Win32 APIs: this crate
+/// denies `unsafe_code`, and `icacls` needs none. Best-effort, same posture as
+/// the unix branch: failure here weakens the file's protection, it doesn't
+/// expose the key directly (the file holds ciphertext).
+#[cfg(windows)]
+fn restrict_permissions(path: &Path) {
+    let Ok(user) = std::env::var("USERNAME") else {
+        return;
+    };
+    let _ = std::process::Command::new("icacls")
+        .arg(path)
+        .arg("/inheritance:r")
+        .arg("/grant:r")
+        .arg(format!("{user}:F"))
+        .output();
+}
+
+#[cfg(not(any(unix, windows)))]
 fn restrict_permissions(_path: &Path) {}
 
 #[cfg(test)]
@@ -680,6 +780,42 @@ mod tests {
             format!("{err:#}").contains("newer MediaGit"),
             "got: {err:#}"
         );
+    }
+
+    fn stored_fixture(fingerprint: Option<String>) -> StoredKey {
+        StoredKey {
+            version: 1,
+            master: "keyfile".to_string(),
+            salt: None,
+            wrapped: String::new(),
+            recovery: None,
+            fingerprint,
+        }
+    }
+
+    /// A key file whose recorded fingerprint doesn't match its unwrapped repo
+    /// key must be rejected — closes the AES-GCM-isn't-key-committing gap
+    /// regardless of which master source produced the key.
+    #[test]
+    fn a_mismatched_fingerprint_is_rejected() {
+        let stored = stored_fixture(Some(hex::encode([0xAAu8; 32])));
+        assert!(verify_fingerprint(&stored, &[7u8; KEY_LEN]).is_err());
+    }
+
+    /// A matching fingerprint passes.
+    #[test]
+    fn a_matching_fingerprint_is_accepted() {
+        let repo_key = [7u8; KEY_LEN];
+        let stored = stored_fixture(Some(blake3::hash(&repo_key).to_hex().to_string()));
+        assert!(verify_fingerprint(&stored, &repo_key).is_ok());
+    }
+
+    /// Key files written before the fingerprint field existed have nothing to
+    /// check against — must not block loading.
+    #[test]
+    fn a_missing_fingerprint_is_not_checked() {
+        let stored = stored_fixture(None);
+        assert!(verify_fingerprint(&stored, &[7u8; KEY_LEN]).is_ok());
     }
 
     /// The stored file must never contain the repo key in the clear — the

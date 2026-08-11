@@ -3506,13 +3506,16 @@ dependencies = [
 name = "mediagit-security"
 version = "0.3.0-rc.3"
 dependencies = [
+ "aes",
  "aes-gcm",
  "anyhow",
  "argon2",
  "axum",
  "bcrypt",
+ "blake3",
  "chrono",
  "criterion",
+ "getrandom 0.4.3",
  "hex",
  "http 1.4.2",
  "jsonwebtoken",
