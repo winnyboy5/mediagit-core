@@ -310,9 +310,18 @@ fn a_keyed_repository_fails_closed_without_the_right_master_key() {
         .stdout(predicate::str::contains("At-rest encryption: on"));
 }
 
-/// Enabling encryption must not orphan what the repository already holds.
+/// Encryption is enabled at creation or not at all.
+///
+/// This replaces an earlier test that asserted the opposite — that `key init`
+/// on a populated repository succeeded and left the older objects readable.
+/// It did, and that was the problem: the result was a repository reporting
+/// "At-rest encryption: on" while everything committed before the key stayed
+/// in the clear forever. Sealing what is already there means rewriting every
+/// object and every pack, which is deferred; until then the honest answer is
+/// to refuse, because a half-encrypted repository cannot make the promise
+/// people read into the word.
 #[test]
-fn objects_written_before_key_init_stay_readable() {
+fn key_init_refuses_on_a_repository_that_already_has_objects() {
     let dir = TempDir::new().unwrap();
     let keyfile = write_keyfile(dir.path(), 0x11);
     let repo = dir.path().join("repo");
@@ -339,28 +348,72 @@ fn objects_written_before_key_init_stay_readable() {
         .arg("init")
         .current_dir(&repo)
         .assert()
-        .success();
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("already contains objects"))
+        .stderr(predicate::str::contains("Nothing was changed"));
 
-    // Same objects, now read by a keyed process.
-    mediagit(Some(&keyfile))
+    // "Nothing was changed" has to be literally true, not just reassuring:
+    // a key file left behind by a refused init would make the repository
+    // report itself encrypted while none of its contents are.
+    assert!(
+        !repo.join(".mediagit").join("encryption-key").exists(),
+        "a refused `key init` must not leave a key file behind"
+    );
+    mediagit(None)
+        .arg("key")
+        .arg("status")
+        .current_dir(&repo)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("At-rest encryption: off"));
+
+    // And the repository still works, unencrypted, exactly as before.
+    mediagit(None)
         .arg("log")
         .current_dir(&repo)
         .assert()
         .success()
         .stdout(predicate::str::contains("plaintext commit"));
+}
 
-    fs::remove_file(repo.join("old.txt")).unwrap();
+/// An empty repository is the supported path, and must stay supported.
+#[test]
+fn key_init_succeeds_on_a_freshly_initialised_repository() {
+    let dir = TempDir::new().unwrap();
+    let keyfile = write_keyfile(dir.path(), 0x12);
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+
+    // `mediagit init` writes objects/<namespace>/LAYOUT on an otherwise empty
+    // repository. That marker is not an object, and a gate that counted it
+    // would refuse every repository there is.
     mediagit(Some(&keyfile))
-        .arg("reset")
-        .arg("--hard")
-        .arg("HEAD")
+        .arg("key")
+        .arg("init")
         .current_dir(&repo)
         .assert()
         .success();
-    assert_eq!(
-        fs::read_to_string(repo.join("old.txt")).unwrap(),
-        "written in the clear ".repeat(50),
-        "a keyed repo must still read objects written before the key existed"
+
+    fs::write(repo.join("new.txt"), "sealed from the start ".repeat(50)).unwrap();
+    mediagit(Some(&keyfile))
+        .arg("add")
+        .arg("new.txt")
+        .current_dir(&repo)
+        .assert()
+        .success();
+    mediagit(Some(&keyfile))
+        .arg("commit")
+        .arg("-m")
+        .arg("encrypted commit")
+        .current_dir(&repo)
+        .assert()
+        .success();
+
+    assert!(
+        any_object_is_sealed(&repo),
+        "objects written after `key init` on an empty repo must be sealed"
     );
 }
 

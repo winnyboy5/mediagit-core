@@ -301,11 +301,50 @@ pub struct InitOutcome {
     pub recovery_code: Zeroizing<String>,
 }
 
+/// Directories under `.mediagit` that hold object data. If any of them holds a
+/// file, the repository has content that a later `key init` could not have
+/// sealed.
+const OBJECT_DIRS: [&str; 4] = ["objects", "chunks", "packs", "chunk-deltas"];
+
+/// Bookkeeping files that live among the object directories without being
+/// objects. `mediagit init` writes `objects/<namespace>/LAYOUT` on a
+/// completely empty repository, so counting it would make every repository
+/// look non-empty and this gate would refuse everything.
+const NON_OBJECT_FILES: [&str; 1] = ["LAYOUT"];
+
+/// Does this repository already hold objects?
+///
+/// A shallow existence walk, not a count: the answer is only ever used as a
+/// yes/no gate, and a repository with a large ODB is exactly the case where
+/// counting would be slowest and least useful.
+fn repo_has_objects(repo_root: &Path) -> bool {
+    fn any_object(dir: &Path) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        entries.flatten().any(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => any_object(&e.path()),
+            Ok(t) if t.is_file() => !NON_OBJECT_FILES
+                .iter()
+                .any(|n| e.file_name().to_str() == Some(n)),
+            _ => false,
+        })
+    }
+    let base = repo_root.join(".mediagit");
+    OBJECT_DIRS.iter().any(|d| any_object(&base.join(d)))
+}
+
 /// Generate this repository's key, wrap it under both slots, and store it.
 ///
 /// Refuses if a key already exists: overwriting one orphans every object
 /// already sealed under it, and nothing in the repository records which key an
 /// object used, so the damage would be silent and total.
+///
+/// Refuses, too, if the repository already holds objects. Encryption is
+/// enabled at creation or not at all: sealing what is already there means
+/// rewriting every object and every pack, and the guarantee people read into
+/// the word "encrypted" is not one a half-converted repository can make.
+/// Lifting this needs the re-seal pass, which is deferred.
 pub fn init_repo_key(repo_root: &Path) -> Result<InitOutcome> {
     let path = key_file_path(repo_root);
     if path.exists() {
@@ -313,6 +352,20 @@ pub fn init_repo_key(repo_root: &Path) -> Result<InitOutcome> {
             "this repository already has an encryption key ({}). Overwriting it would \
              make every object already written unreadable, so `key init` will not do it.",
             path.display()
+        );
+    }
+    if repo_has_objects(repo_root) {
+        bail!(
+            "this repository already contains objects, and at-rest encryption can only \
+             be enabled on an empty one.\n\
+             \n\
+             Everything already committed here was written in the clear. Enabling a key \
+             now would encrypt only what comes next, leaving a repository that reports \
+             itself as encrypted while most of its contents are not. Encrypting an \
+             existing repository is not supported yet.\n\
+             \n\
+             To get an encrypted repository: run `mediagit key init` in a fresh one, \
+             then add your files. Nothing was changed here."
         );
     }
 
