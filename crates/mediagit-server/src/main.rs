@@ -98,6 +98,16 @@ async fn main() -> Result<()> {
     // Load configuration from file (use path from --config, default is "mediagit-server.toml")
     let mut config = ServerConfig::load(&args.config)?;
 
+    // Refuse to serve with at-rest encryption switched on but no usable master
+    // key. Deferring this to the first escrow request would mean the operator
+    // hears about it from a user whose push failed.
+    mediagit_server::encryption::verify_startup_config(&config.encryption)?;
+    if config.encryption.enabled {
+        tracing::info!(
+            "At-rest encryption: enabled (repository keys wrapped under the server master key)"
+        );
+    }
+
     // Override config with CLI arguments if provided
     if let Some(port) = args.port {
         tracing::info!("Overriding port from CLI: {} -> {}", config.port, port);

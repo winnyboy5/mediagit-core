@@ -126,17 +126,6 @@ impl Validator for S3Storage {
             ));
         }
 
-        // Validate encryption algorithm (it's a String, not Option<String>)
-        if self.encryption_algorithm != "AES256"
-            && self.encryption_algorithm != "aws:kms"
-            && !self.encryption_algorithm.starts_with("aws:kms:")
-        {
-            return Err(ConfigError::invalid_value(
-                "storage.encryption_algorithm",
-                format!("unsupported algorithm: {}", self.encryption_algorithm),
-            ));
-        }
-
         Ok(())
     }
 }
@@ -533,20 +522,6 @@ impl Validator for SecurityConfig {
             }
 
             if let Some(key_path) = &self.tls_key_path
-                && !Path::new(key_path).exists()
-            {
-                return Err(ConfigError::FileNotFound(key_path.clone().into()));
-            }
-        }
-
-        if self.encryption_at_rest {
-            if self.encryption_key_path.is_none() {
-                return Err(ConfigError::MissingRequired(
-                    "security.encryption_key_path".to_string(),
-                ));
-            }
-
-            if let Some(key_path) = &self.encryption_key_path
                 && !Path::new(key_path).exists()
             {
                 return Err(ConfigError::FileNotFound(key_path.clone().into()));

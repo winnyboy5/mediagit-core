@@ -425,14 +425,6 @@ pub struct S3Storage {
     /// Object prefix
     #[serde(default)]
     pub prefix: String,
-
-    /// Enable server-side encryption
-    #[serde(default)]
-    pub encryption: bool,
-
-    /// Encryption algorithm (AES256, aws:kms)
-    #[serde(default = "default_encryption_algorithm")]
-    pub encryption_algorithm: String,
 }
 
 /// How to authenticate to Azure Blob Storage.
@@ -781,14 +773,14 @@ pub struct SecurityConfig {
     #[serde(default)]
     pub cors_origins: Vec<String>,
 
-    /// Enable encryption at rest
-    #[serde(default)]
-    pub encryption_at_rest: bool,
-
-    /// Encryption key path (can be overridden via env)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub encryption_key_path: Option<String>,
-
+    // `encryption_at_rest` and `encryption_key_path` used to live here, and
+    // several documents described them as the server's at-rest encryption
+    // switch. Nothing ever read them: the server loads its own `ServerConfig`,
+    // and this type's `validate()` is never called on the server path either,
+    // so even the "key path must exist" check never ran. The real switch is
+    // `[encryption]` in `mediagit-server`'s config. Removed rather than left in
+    // place, because a setting that looks like it enables encryption and
+    // silently does not is worse than no setting.
     /// Rate limiting configuration
     pub rate_limiting: RateLimitConfig,
 }
@@ -971,10 +963,6 @@ fn default_min_size() -> u64 {
 
 fn default_file_permissions() -> String {
     "0644".to_string()
-}
-
-fn default_encryption_algorithm() -> String {
-    "AES256".to_string()
 }
 
 fn default_max_concurrency() -> usize {
@@ -1202,8 +1190,6 @@ impl Default for SecurityConfig {
             api_key: None,
             auth_enabled: false,
             cors_origins: vec!["http://localhost:3000".to_string()],
-            encryption_at_rest: false,
-            encryption_key_path: None,
             rate_limiting: RateLimitConfig::default(),
         }
     }

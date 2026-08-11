@@ -18,6 +18,37 @@ use std::path::PathBuf;
 #[cfg(feature = "tls")]
 use mediagit_security::TlsConfig;
 
+/// Server-side at-rest encryption.
+///
+/// This is the switch. An earlier `security.encryption_at_rest` existed in
+/// `mediagit-config` and was documented as the server's setting, but the server
+/// loads [`ServerConfig`] and never read it — setting it did nothing at all. It
+/// has been removed rather than left to look load-bearing.
+///
+/// What `enabled` turns on is the server's willingness to *hold* repository
+/// keys: the escrow endpoints, and per-repo sealing of what it writes. It is
+/// not a mandate — unencrypted repositories keep working on the same server,
+/// and clients that send nothing encrypted are unaffected.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EncryptionConfig {
+    /// Accept escrowed repository keys and permit encrypted repositories.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// File holding this server's master key, which wraps every repository key
+    /// it stores.
+    ///
+    /// Required when `enabled` is true: without it the server would have to
+    /// keep repository keys in the clear on its own disk, and the threat model
+    /// this feature exists for — a compromised object store — usually means the
+    /// object store's credentials are on that same disk.
+    ///
+    /// Same format the client accepts: 64 hex characters or 32 raw bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub master_key_path: Option<PathBuf>,
+}
+
 /// Server configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -61,6 +92,13 @@ pub struct ServerConfig {
     /// repo's closed-key-set convention for security settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_min_version: Option<String>,
+
+    /// At-rest encryption of stored objects.
+    ///
+    /// Off by default, and absent from existing config files, which parse
+    /// unchanged and keep behaving exactly as they did.
+    #[serde(default)]
+    pub encryption: EncryptionConfig,
 
     /// Enable authentication
     #[serde(default)]
@@ -200,6 +238,7 @@ impl Default for ServerConfig {
             port: default_port(),
             repos_dir: default_repos_dir(),
             host: default_host(),
+            encryption: EncryptionConfig::default(),
             enable_tls: false,
             tls_port: default_tls_port(),
             tls_cert_path: None,

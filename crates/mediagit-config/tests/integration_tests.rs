@@ -335,8 +335,6 @@ fn test_validation_s3_bucket_name_too_short() {
             secret_access_key: None,
             endpoint: None,
             prefix: String::new(),
-            encryption: false,
-            encryption_algorithm: "AES256".to_string(),
         }),
         ..Default::default()
     };
