@@ -62,15 +62,17 @@ write outside a repo's namespace — a cross-tenant escape on a
 multi-repo server.
 
 ## Encryption
-- **At-rest (MediaGit's own)**: **partially implemented; cannot be turned on.**
+- **At-rest (MediaGit's own)**: **implemented; local-only.**
   The object envelope exists and is wired: `mediagit-security` implements AES-256-GCM
-  with Argon2id key derivation, and `SmartCompressor` now seals every object it writes
-  and opens every sealed object it reads (`MGEN`, `FORMATS.md` §10b). What does **not**
-  exist is key management — nothing decides where a key comes from, wraps a per-repo
-  key, or delivers one to a client for the presigned-upload path. So no configuration
-  enables this today and **no stored byte is encrypted in practice**. With no key
-  configured the bytes written are byte-for-byte identical to a build without the
-  feature, which is asserted by test. Tracked as DC-7.
+  with Argon2id key derivation, and `SmartCompressor` seals every object it writes
+  and opens every sealed object it reads (`MGEN`, `FORMATS.md` §10b). Key management
+  is implemented too (`mediagit key init/status/recover`) — a master key from a
+  passphrase (Argon2id), the OS keychain, or a keyfile/env var. What's still missing
+  is delivering that key to a client for the presigned-upload path, so `push`
+  **hard-refuses** on an encrypted repository by design — encrypted repos can only be
+  used entirely locally today. With no key configured the bytes written are
+  byte-for-byte identical to a build without the feature, which is asserted by test.
+  Tracked as DC-7 (D4 open).
 - **At-rest (cloud)**: **also not wired.** `[storage] encryption` and
   `[storage] encryption_algorithm` are parsed and *validated* (`validation.rs:130`
   rejects anything but `AES256` / `aws:kms*`), which makes them look live — but no

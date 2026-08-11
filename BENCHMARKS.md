@@ -243,4 +243,4 @@ Other formats have no minimum anchor (strong baseline in production if savings r
 - **QA campaign report:** `dev-tests/qa-suite/reports/20260716-172951/REPORT.md`
 - **Measurement script:** `dev-tests/qa-suite/scripts/04_economics.ps1`
 - **Fixture generation:** `dev-tests/qa-suite/scripts/gen_chain_fixtures.py`
-- **Architecture guide:** `docs/ARCHITECTURE.md` (chunking strategy, compression pipeline)
+- **Architecture guide:** `ARCHITECTURE.md` (chunking strategy, compression pipeline)

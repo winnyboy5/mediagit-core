@@ -847,7 +847,7 @@ flowchart TD
 
 | Module | Files | Purpose |
 |--------|-------|---------|
-| **Encryption** | `encryption.rs`, `envelope.rs` | AES-256-GCM primitives + the `MGEN` object envelope. Wired into `SmartCompressor`, but **key management does not exist**, so nothing enables it and no stored byte is encrypted in practice (DC-7) |
+| **Encryption** | `encryption.rs`, `envelope.rs` | AES-256-GCM primitives + the `MGEN` object envelope. Wired into `SmartCompressor`. Key management (`mediagit key init/status/recover`; passphrase+Argon2id, OS keychain, or keyfile-env) is implemented and works. Encrypted repos are **local-only**: `push` hard-refuses (`commands/push.rs:144`) by design, pending client key escrow (DC-7 D4) |
 | **KDF** | `kdf.rs` | Key derivation (Argon2/PBKDF2) |
 | **Auth** | `auth/jwt.rs`, `auth/apikey.rs`, `auth/credentials.rs` | JWT tokens + API keys |
 | **Middleware** | `auth/middleware.rs` | Axum auth extraction |

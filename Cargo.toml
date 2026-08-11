@@ -179,4 +179,4 @@ publish-prereleases = false
 create = true
 
 [workspace.metadata.cargo-machete]
-ignored = ["prost", "husky-rs"]
+ignored = ["husky-rs"]

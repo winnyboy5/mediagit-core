@@ -194,7 +194,7 @@ claudedocs/
 .superpowers/
 .mcp.json
 test-files/
-docs/
+docs/*
 dev-tests/*
 !dev-tests/qa-suite/
 !dev-tests/qa-suite/scripts/lib/
@@ -230,3 +230,13 @@ test-archives/
 # Leaked-secret remediation 2026-07-18 — never re-track
 enc_key
 enc_key.pub
+
+# graphify
+graphify-out/
+.graphifyignore
+
+# docs/ is gitignored above, but docs/adr/ (ADRs, created lazily by
+# /domain-modeling) must be tracked. Placed last so this negation wins.
+# docs/agents/ (skill setup config) stays local-only, intentionally.
+!docs/adr/
+!docs/adr/**

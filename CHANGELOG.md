@@ -340,7 +340,7 @@ STANDARD suite green on all 4 backends (MinIO/AWS/Azure/GCS), zero findings.
   now hard-errors on an unknown or higher version instead of silently
   misparsing.
 - New docs: `docs/OPERATIONS.md` (backup/restore), `docs/DEPLOYMENT.md` (TLS
-  direct + reverse proxy), `docs/BENCHMARKS.md`, `docs/PRODUCTION_ROADMAP.md`.
+  direct + reverse proxy), `BENCHMARKS.md`, `docs/PRODUCTION_ROADMAP.md`.
 - **Server setup wizard** (`mediagit-server init`): interactive/flag-driven
   bootstrap that creates the first admin account
   (`--admin-username`/`--admin-email`/`--admin-password`), generates a random

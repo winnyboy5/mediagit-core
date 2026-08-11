@@ -5,7 +5,7 @@
 [![CI](https://github.com/winnyboy5/mediagit-core/workflows/CI/badge.svg)](https://github.com/winnyboy5/mediagit-core/actions)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Rust Version](https://img.shields.io/badge/rust-1.97+-orange.svg)](https://www.rust-lang.org)
-[![Features](https://img.shields.io/badge/features-100%25%20complete-success.svg)](claudedocs/2026-02-27/UNIMPLEMENTED_FEATURES.md)
+[![Features](https://img.shields.io/badge/features-100%25%20complete-success.svg)](FUTURE_TODOS.md)
 
 ## 🎯 Status
 
@@ -106,7 +106,7 @@ Instead of uploading thousands of individual chunk objects, MediaGit bundles chu
 Uploads and downloads bypass the server entirely when the backend supports signing. The server mints presigned PUT/GET URLs; the client communicates directly with cloud storage. On unsigned backends (GCS with ADC) or 404, the client automatically falls back to server-proxy transfer. Large chunks use presigned multipart upload (MPU) on S3/MinIO.
 
 🔒 **Security**
-- Encryption at rest via the storage backend (e.g. S3 SSE, configured under `[storage]`). MediaGit's own AES-256-GCM + Argon2id module is implemented and tested but **not yet wired into the CLI**, so client-side encryption is not available in this release
+- Encryption at rest via the storage backend (e.g. S3 SSE, configured under `[storage]`). MediaGit's own AES-256-GCM + Argon2id at-rest encryption is implemented and wired into the CLI (`mediagit key init/status/recover`), but encrypted repos are **local-only** — `push` hard-refuses until client key escrow ships
 - JWT + API key authentication, persisted to disk (`users.jsonl`/`api_keys.jsonl`/`grants.jsonl`, atomic writes; `MEDIAGIT_AUTH_PERSIST`)
 - Per-repo authorization grants (Read < Write < Admin; `MEDIAGIT_GRANTS_ENFORCE`) plus admin endpoints for user/key management
 - OS-keychain credential storage for CLI remote credentials (Windows Credential Manager; env → config.toml → keychain)
