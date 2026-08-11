@@ -377,6 +377,142 @@ fn key_init_refuses_on_a_repository_that_already_has_objects() {
         .stdout(predicate::str::contains("plaintext commit"));
 }
 
+/// Rotating the master must swap the lock without touching the key.
+///
+/// The failure this guards against is silent: a rotation that dropped or
+/// re-generated the recovery slot would leave the user holding a code that no
+/// longer opens anything, and they would not find out until the day they
+/// needed it.
+#[test]
+fn rotate_master_keeps_the_repo_key_and_the_recovery_code() {
+    let dir = TempDir::new().unwrap();
+    let first = write_keyfile(dir.path(), 0x31);
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+
+    let code = key_init(&repo, &first);
+
+    fs::write(repo.join("secret.txt"), "sealed content ".repeat(80)).unwrap();
+    mediagit(Some(&first))
+        .arg("add")
+        .arg("secret.txt")
+        .current_dir(&repo)
+        .assert()
+        .success();
+    mediagit(Some(&first))
+        .arg("commit")
+        .arg("-m")
+        .arg("before rotation")
+        .current_dir(&repo)
+        .assert()
+        .success();
+
+    // Rotate onto a different master. The old keyfile still names the current
+    // master (that is what authorises the rotation); the destination has to be
+    // named separately, since both would otherwise read the same env var.
+    let second = dir.path().join("second.key");
+    fs::write(&second, "32".repeat(32)).unwrap();
+    mediagit(Some(&first))
+        .arg("key")
+        .arg("rotate-master")
+        .arg("--new-keyfile")
+        .arg(&second)
+        .current_dir(&repo)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Master key rotated"));
+
+    // The new master opens the repository.
+    mediagit(Some(&second))
+        .arg("log")
+        .current_dir(&repo)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("before rotation"));
+
+    // The old master does not. If it still did, rotation would be cosmetic —
+    // and worthless as a response to a compromised master key.
+    mediagit(Some(&first))
+        .arg("log")
+        .current_dir(&repo)
+        .assert()
+        .failure();
+
+    // The recovery code still works: it wraps the same repo key, which rotation
+    // did not change.
+    let third = dir.path().join("third.key");
+    fs::write(&third, "44".repeat(32)).unwrap();
+    mediagit(Some(&third))
+        .arg("key")
+        .arg("recover")
+        .arg(&code)
+        .current_dir(&repo)
+        .assert()
+        .success();
+    mediagit(Some(&third))
+        .arg("log")
+        .current_dir(&repo)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("before rotation"));
+}
+
+/// A rotation that lands on the master it started from must not report success.
+///
+/// Both the unwrap and the new-master choice read the same sources, so the
+/// no-argument case naturally re-wraps under the current master. Someone
+/// rotating because that master leaked would be told it worked.
+#[test]
+fn rotate_master_refuses_to_rewrap_under_the_same_master() {
+    let dir = TempDir::new().unwrap();
+    let keyfile = write_keyfile(dir.path(), 0x33);
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    key_init(&repo, &keyfile);
+
+    mediagit(Some(&keyfile))
+        .arg("key")
+        .arg("rotate-master")
+        .arg("--new-keyfile")
+        .arg(&keyfile)
+        .current_dir(&repo)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("changes nothing"))
+        .stderr(predicate::str::contains("Nothing was changed"));
+
+    // Still openable by the original master — the refusal left the file alone.
+    mediagit(Some(&keyfile))
+        .arg("key")
+        .arg("status")
+        .current_dir(&repo)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("At-rest encryption: on"));
+}
+
+/// Rotating a repository that has no key at all is a mistake worth naming.
+#[test]
+fn rotate_master_refuses_on_an_unencrypted_repository() {
+    let dir = TempDir::new().unwrap();
+    let keyfile = write_keyfile(dir.path(), 0x35);
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+
+    mediagit(Some(&keyfile))
+        .arg("key")
+        .arg("rotate-master")
+        .current_dir(&repo)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("does not have at-rest encryption"));
+}
+
 /// An empty repository is the supported path, and must stay supported.
 #[test]
 fn key_init_succeeds_on_a_freshly_initialised_repository() {

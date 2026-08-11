@@ -198,10 +198,23 @@ pub fn load_repo_key(repo_root: &Path) -> Result<Option<EncryptionKey>> {
         return Ok(None);
     }
     let stored = read_stored(repo_root)?;
+    let (bytes, _master) = unwrap_repo_key_bytes(&stored)?;
+    let key = EncryptionKey::from_bytes(bytes.to_vec())
+        .map_err(|e| anyhow!("encryption-key: unwrapped key is unusable: {e}"))?;
+    Ok(Some(key))
+}
+
+/// Open the `wrapped` slot with whichever master source this machine can
+/// supply, and hand back the raw repo key.
+///
+/// Separate from [`load_repo_key`] because [`rotate_master_key`] needs the
+/// bytes themselves to re-seal them, and `EncryptionKey` deliberately offers no
+/// way back out to its contents.
+fn unwrap_repo_key_bytes(stored: &StoredKey) -> Result<(Zeroizing<Vec<u8>>, EncryptionKey)> {
     let wrapped =
         hex::decode(stored.wrapped.trim()).context("encryption-key: `wrapped` is not valid hex")?;
 
-    let candidates = candidates(&stored);
+    let candidates = candidates(stored);
     if candidates.is_empty() {
         bail!(
             "this repository is encrypted, but no master key is available on this machine \
@@ -213,7 +226,7 @@ pub fn load_repo_key(repo_root: &Path) -> Result<Option<EncryptionKey>> {
 
     let mut tried = Vec::new();
     for source in candidates {
-        let Some(master) = master_key(source, &stored)? else {
+        let Some(master) = master_key(source, stored)? else {
             // A candidate that turned out to be unusable is still a candidate
             // that was *tried*: without this the final message can name no
             // source at all, which reads like the code never looked.
@@ -227,13 +240,11 @@ pub fn load_repo_key(repo_root: &Path) -> Result<Option<EncryptionKey>> {
         // bytes of garbage that would go on to "decrypt" the whole repository.
         if let Ok(bytes) = envelope::open(&wrap_key, &wrapped) {
             // Zeroized on every exit from here, not just the happy path: the
-            // fingerprint check below can bail! before `bytes` ever becomes an
-            // `EncryptionKey` (whose own zeroizing wouldn't cover this copy).
+            // fingerprint check below can bail! before the caller ever takes
+            // ownership of these bytes.
             let bytes = Zeroizing::new(bytes);
-            verify_fingerprint(&stored, &bytes)?;
-            let key = EncryptionKey::from_bytes(bytes.to_vec())
-                .map_err(|e| anyhow!("encryption-key: unwrapped key is unusable: {e}"))?;
-            return Ok(Some(key));
+            verify_fingerprint(stored, &bytes)?;
+            return Ok((bytes, master));
         }
         tried.push(source.describe());
     }
@@ -444,16 +455,89 @@ pub fn recover_repo_key(repo_root: &Path, code: &str) -> Result<MasterSource> {
     verify_fingerprint(&stored, &repo_key)?;
 
     let (master, source, salt) = provision_master()?;
+    rewrap_under_new_master(repo_root, &mut stored, &repo_key, master, source, salt)
+}
+
+/// Re-wrap the repository's existing key under a newly provisioned master,
+/// rewriting the key file.
+///
+/// The repo key itself is unchanged, so every object stays readable and
+/// nothing needs rewriting — this swaps only the lock on the key, not the key.
+/// Changing the repo key would mean re-encrypting the entire repository, which
+/// is a different and much larger operation.
+///
+/// Use when the master key is compromised or simply inconvenient: a stolen
+/// laptop, a passphrase to change, a move from the OS keychain to a keyfile.
+pub fn rotate_master_key(repo_root: &Path, new_keyfile: Option<&Path>) -> Result<MasterSource> {
+    if !has_key(repo_root) {
+        bail!(
+            "this repository does not have at-rest encryption enabled, so there is no \
+             master key to rotate. Run `mediagit key init` in an empty repository to \
+             enable it."
+        );
+    }
+    let mut stored = read_stored(repo_root)?;
+    // Unwrapping under the *current* master is what authorises the rotation:
+    // someone who cannot open the key file has no business re-locking it.
+    let (repo_key, old_master) = unwrap_repo_key_bytes(&stored)?;
+
+    let (new_master, source, salt) = match new_keyfile {
+        Some(path) => (
+            keyfile_master_at(path)?,
+            MasterSource::Keyfile,
+            // A keyfile master is used as-is, so there is no salt to record.
+            // Leaving a stale one behind would describe the wrong derivation.
+            None,
+        ),
+        None => provision_master()?,
+    };
+
+    // Both the unwrap above and `provision_master` consult the same sources, so
+    // without this a rotation that named no new destination would cheerfully
+    // re-wrap under the master it started with and report success. Someone
+    // rotating because their master leaked would walk away believing they had
+    // fixed it.
+    if new_master == old_master {
+        bail!(
+            "that would re-wrap the repository under the master key it already uses, \
+             which changes nothing.\n\
+             \n\
+             Point `--new-keyfile` at a different key file, or change the source the \
+             new master comes from ({KEYFILE_ENV}, the OS keychain, or a passphrase). \
+             Nothing was changed."
+        );
+    }
+
+    rewrap_under_new_master(repo_root, &mut stored, &repo_key, new_master, source, salt)
+}
+
+/// Provision a fresh master, re-seal `repo_key` under it, and write the key
+/// file. Shared by [`recover_repo_key`] and [`rotate_master_key`], which differ
+/// only in how they get the repo key back — the recovery slot versus the
+/// current master.
+///
+/// The recovery slot is carried over untouched. It wraps the same repo key
+/// under a secret the user wrote down, so a new master does not invalidate it,
+/// and silently dropping it here would turn one recovery into the last one they
+/// get.
+fn rewrap_under_new_master(
+    repo_root: &Path,
+    stored: &mut StoredKey,
+    repo_key: &[u8],
+    master: EncryptionKey,
+    source: MasterSource,
+    salt: Option<String>,
+) -> Result<MasterSource> {
     let wrap_key = master
         .derive_subkey(WRAP_CONTEXT)
         .map_err(|e| anyhow!("deriving the wrapping subkey: {e}"))?;
     stored.master = source.as_str().to_string();
     stored.salt = salt;
     stored.wrapped = hex::encode(
-        envelope::seal(&wrap_key, &repo_key)
+        envelope::seal(&wrap_key, repo_key)
             .map_err(|e| anyhow!("re-wrapping the repo key: {e}"))?,
     );
-    write_over(&key_file_path(repo_root), &stored)?;
+    write_over(&key_file_path(repo_root), stored)?;
     Ok(source)
 }
 
@@ -606,13 +690,21 @@ fn master_key(source: MasterSource, stored: &StoredKey) -> Result<Option<Encrypt
 /// /dev/urandom` or an `openssl rand -hex 32` actually produces.
 fn keyfile_master() -> Result<EncryptionKey> {
     let path = std::env::var_os(KEYFILE_ENV).ok_or_else(|| anyhow!("{KEYFILE_ENV} is not set"))?;
-    let path = PathBuf::from(path);
+    keyfile_master_at(&PathBuf::from(path))
+}
+
+/// Read a master key out of a named file.
+///
+/// Split from [`keyfile_master`] because rotation needs to name the *new*
+/// keyfile explicitly: unwrapping the old key and provisioning the new one both
+/// consult `MEDIAGIT_ENCRYPTION_KEYFILE`, so without this a keyfile-to-keyfile
+/// rotation could only ever re-wrap under the master it started with.
+fn keyfile_master_at(path: &Path) -> Result<EncryptionKey> {
     // Zeroized regardless of which arm below fires: the hex arm's `raw` is
     // the master key spelled out in ASCII (equally sensitive to the raw-bytes
     // form), and the raw-bytes arm's `raw` *is* the key.
     let raw = Zeroizing::new(
-        std::fs::read(&path)
-            .with_context(|| format!("reading {KEYFILE_ENV} at {}", path.display()))?,
+        std::fs::read(path).with_context(|| format!("reading key file at {}", path.display()))?,
     );
 
     let bytes = match std::str::from_utf8(&raw).map(str::trim) {

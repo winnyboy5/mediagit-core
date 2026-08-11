@@ -22,6 +22,7 @@ use crate::output;
 use crate::repo::find_repo_root;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 /// Manage at-rest encryption for this repository
 #[derive(Parser, Debug)]
@@ -38,10 +39,19 @@ use clap::{Parser, Subcommand};
     # Master key lost — get back in with the code printed at `key init`
     mediagit key recover
 
+    # Master key compromised, or just changing where it lives
+    mediagit key rotate-master --new-keyfile /media/usb/new.key
+
 NOTES:
-    Objects written after `key init` are sealed; objects written before it stay
-    readable. There is no `key rotate` and no way to remove a key: both would
-    have to rewrite every object in the repository.
+    Encryption is enabled at creation or not at all: `key init` refuses on a
+    repository that already holds objects, because sealing what is already there
+    means rewriting every object, and a half-encrypted repository cannot make the
+    promise the word implies.
+
+    `key rotate-master` replaces the master key that protects the repository key.
+    The repository key itself is unchanged, so nothing is rewritten and the
+    recovery code keeps working. There is no way to replace the repository key,
+    and no way to remove encryption: both would have to rewrite every object.
 
     The master key is not stored in the repository. `key init` prints a one-time
     recovery code which is the only other way in; if both are lost, the objects
@@ -61,6 +71,30 @@ pub enum KeySubcommand {
 
     /// Unlock with the recovery code and re-wrap under this machine's master key
     Recover(RecoverOpts),
+
+    /// Re-lock this repository's key under a new master key
+    ///
+    /// Changes only what protects the key, not the key itself, so no object is
+    /// rewritten and the recovery code keeps working. Use it after a stolen
+    /// laptop, to change a passphrase, or to move between the OS keychain and a
+    /// keyfile.
+    ///
+    /// This does NOT replace the repository's encryption key. Doing that would
+    /// mean re-encrypting every object, which is not supported yet.
+    RotateMaster(RotateMasterOpts),
+}
+
+/// Re-lock this repository's key under a new master key
+#[derive(Parser, Debug)]
+pub struct RotateMasterOpts {
+    /// Key file holding the new master key
+    ///
+    /// Needed when rotating from one key file to another: unwrapping the old
+    /// key and choosing the new one both read MEDIAGIT_ENCRYPTION_KEYFILE, so
+    /// the destination has to be named separately. Omit it to let the new
+    /// master come from the usual sources — the OS keychain, or a passphrase.
+    #[arg(long, value_name = "PATH")]
+    pub new_keyfile: Option<PathBuf>,
 }
 
 /// Unlock with the recovery code and re-wrap under this machine's master key
@@ -122,6 +156,27 @@ impl EncryptionKeyCmd {
                 output::success("Repository unlocked and re-wrapped");
                 println!("  Master key: {}", source.describe());
                 println!("  Your recovery code is unchanged — keep it.");
+                Ok(())
+            }
+            KeySubcommand::RotateMaster(opts) => {
+                let source =
+                    encryption::rotate_master_key(&repo_root, opts.new_keyfile.as_deref())?;
+                output::success("Master key rotated");
+                println!("  Master key: {}", source.describe());
+                println!(
+                    "  Wrapped key: {}",
+                    encryption::key_file_path(&repo_root).display()
+                );
+                println!("  Your recovery code is unchanged — keep it.");
+                println!();
+                // Worth saying plainly: someone rotating after a compromise may
+                // assume this re-encrypted the repository. It did not, and the
+                // difference matters if the old master leaked alongside a copy
+                // of the object store.
+                println!(
+                    "  This replaced the master key that protects the repository key.\n  \
+                     The repository key itself is unchanged, so no object was rewritten."
+                );
                 Ok(())
             }
             KeySubcommand::Status => {
