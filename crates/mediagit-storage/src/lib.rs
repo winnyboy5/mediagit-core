@@ -765,7 +765,7 @@ pub async fn check_or_write_layout_marker(
             if found_version != expected_version.to_string() {
                 anyhow::bail!(
                     "storage layout version mismatch: found '{found_version}', expected '{expected_version}'. \
-                     MediaGit is in beta and does not migrate layouts automatically — \
+                     MediaGit does not migrate storage layouts automatically — \
                      re-init or re-clone this repository."
                 );
             }
@@ -806,7 +806,7 @@ pub async fn check_or_write_layout_marker(
             if has_data {
                 anyhow::bail!(
                     "storage has existing data but no LAYOUT marker (pre-layout-v2). \
-                     MediaGit is in beta and does not migrate layouts automatically — \
+                     MediaGit does not migrate storage layouts automatically — \
                      re-init or re-clone this repository."
                 );
             }
