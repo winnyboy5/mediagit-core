@@ -129,7 +129,11 @@ function Start-QaServer {
     # BEFORE the server process starts (no --force needed, store not yet held in
     # memory). Returned handle gains .AdminUser/.AdminPass for the caller.
     [string]$AdminUser,
-    [string]$AdminPass
+    [string]$AdminPass,
+    # DC-7/D4: serve encrypted repositories. The server needs a master key of
+    # its own to wrap each repo key it is handed via `PUT /{repo}/encryption-key`;
+    # without one it answers 404 there and an encrypted push refuses.
+    [string]$EncryptionKeyfile
   )
   if ($AdminUser) { $EnableAuth = $true }
 
@@ -184,10 +188,17 @@ function Start-QaServer {
   if ($EnableAuth) {
     $authLines = "`nenable_auth = true`njwt_secret = `"qa-suite-jwt-secret-0123456789abcdef0123456789abcdef`""
   }
+  # `[encryption]` goes LAST: ServerConfig is flat apart from that section, so
+  # any table header swallows every top-level key written after it.
+  $encLines = ""
+  if ($EncryptionKeyfile) {
+    $kfFwd = $EncryptionKeyfile.Replace('\', '/')
+    $encLines = "`n`n[encryption]`nenabled = true`nmaster_key_path = `"$kfFwd`""
+  }
   @"
 port = $port
 host = "127.0.0.1"
-repos_dir = "$reposDirFwd"$authLines
+repos_dir = "$reposDirFwd"$authLines$encLines
 "@ | Set-Content (Join-Path $srvDir "server.toml") -Encoding Ascii
 
   # Bootstrap the first Admin offline before the process starts: the store is not
