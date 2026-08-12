@@ -122,3 +122,88 @@ async fn no_key_means_no_change() {
     );
     assert_eq!(odb.read(&oid).await.unwrap(), payload);
 }
+
+/// Bytes that arrive already sealed must not be sealed a second time.
+///
+/// This is the shape that broke encrypted clone. `put_compressed_chunk` used
+/// to assume its input was plaintext "because the server holds no key" -- true
+/// before DC-7/D4, false after it, since the server now holds the repository
+/// key and hands back exactly the bytes the client uploaded. Wrapping them
+/// again produced a double envelope: the read unseals once, finds another
+/// envelope, the codec sniffer recognises no magic and calls it uncompressed,
+/// and the chunk fails its own hash check. Every cloned chunk, silently, with
+/// the whole unit suite green.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chunk_that_arrives_sealed_is_stored_once_not_twice() {
+    let payload = b"the bytes a clone pulls back down are already wrapped".repeat(30);
+
+    // Producer: a keyed repo, exactly what the uploading client had.
+    let origin_store = Arc::new(MockBackend::new());
+    let origin = ObjectDatabase::with_smart_compression(origin_store.clone(), 100)
+        .with_at_rest_key(Some(key(3)));
+    let oid = origin.write(ObjectType::Blob, &payload).await.unwrap();
+
+    // The wire bytes: what the server hands back is what the client stored.
+    let wire = {
+        let keys = origin_store.list_objects("").await.unwrap();
+        let k = keys
+            .iter()
+            .find(|k| k.contains(&oid.to_hex()))
+            .expect("the object we just wrote");
+        origin_store.get(k).await.unwrap()
+    };
+    assert!(
+        mediagit_security::envelope::is_sealed(&wire),
+        "the premise of this test is that the wire bytes are sealed"
+    );
+
+    // Consumer: the cloning repo, same key (escrow hands back the same one).
+    let clone_store = Arc::new(MockBackend::new());
+    let clone = ObjectDatabase::with_smart_compression(clone_store.clone(), 100)
+        .with_at_rest_key(Some(key(3)));
+    clone.put_compressed_chunk(&oid, &wire).await.unwrap();
+
+    // Stored exactly as received -- one envelope, not two.
+    let stored = clone_store
+        .get(&format!("chunks/{}", oid.to_hex()))
+        .await
+        .unwrap();
+    assert_eq!(
+        stored, wire,
+        "already-sealed input must be stored verbatim; a second envelope is unreadable"
+    );
+
+    // And it reads back. This is what actually failed in the field.
+    assert_eq!(clone.get_chunk(&oid).await.unwrap(), payload);
+}
+
+/// The other direction still works: plaintext off the wire gets sealed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chunk_that_arrives_plaintext_is_sealed_on_the_way_in() {
+    let payload = b"an unencrypted remote into a keyed clone".repeat(30);
+
+    let plain_store = Arc::new(MockBackend::new());
+    let plain = ObjectDatabase::with_smart_compression(plain_store.clone(), 100);
+    let oid = plain.write(ObjectType::Blob, &payload).await.unwrap();
+    let wire = {
+        let keys = plain_store.list_objects("").await.unwrap();
+        let k = keys.iter().find(|k| k.contains(&oid.to_hex())).unwrap();
+        plain_store.get(k).await.unwrap()
+    };
+    assert!(!mediagit_security::envelope::is_sealed(&wire));
+
+    let clone_store = Arc::new(MockBackend::new());
+    let clone = ObjectDatabase::with_smart_compression(clone_store.clone(), 100)
+        .with_at_rest_key(Some(key(4)));
+    clone.put_compressed_chunk(&oid, &wire).await.unwrap();
+
+    let stored = clone_store
+        .get(&format!("chunks/{}", oid.to_hex()))
+        .await
+        .unwrap();
+    assert!(
+        mediagit_security::envelope::is_sealed(&stored),
+        "plaintext must not land in the clear inside a keyed repository"
+    );
+    assert_eq!(clone.get_chunk(&oid).await.unwrap(), payload);
+}

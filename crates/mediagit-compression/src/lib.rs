@@ -113,6 +113,9 @@ pub use error::{CompressionError, CompressionResult};
 /// not reachable from this crate, so no caller outside `mediagit-security`
 /// could name it.
 pub use mediagit_security::encryption::EncryptionKey;
+/// Does `data` carry the MGEN envelope? Re-exported so callers can ask without
+/// depending on `mediagit-security` directly.
+pub use mediagit_security::envelope::is_sealed;
 pub use metrics::CompressionMetrics;
 pub use per_type_compressor::{CompressionProfile, PerObjectTypeCompressor, PerTypeStats};
 pub use process_key::{

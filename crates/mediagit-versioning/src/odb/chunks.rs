@@ -61,6 +61,31 @@ fn seal_manifest<'a>(
     }
 }
 
+/// Seal bytes that arrived from a **remote**, for storage in this database.
+///
+/// Two rules, both learned the hard way:
+///
+/// 1. **Never wrap twice.** Since DC-7/D4 the server holds the repository key
+///    and hands back exactly what the client uploaded, so on an encrypted repo
+///    these arrive already sealed. A second envelope unseals to a first one,
+///    which the codec sniffer calls uncompressed and returns as content --
+///    caught only by the chunk's hash check, and reported as corruption.
+/// 2. **Key from the database, not the process.** `seal_at_rest` reads the
+///    process-global key, which the server does not have; a per-repo-keyed
+///    database would silently store plaintext through it.
+fn seal_from_wire<'a>(
+    compressor: Option<&SmartCompressor>,
+    data: &'a [u8],
+) -> anyhow::Result<std::borrow::Cow<'a, [u8]>> {
+    if mediagit_compression::is_sealed(data) {
+        return Ok(std::borrow::Cow::Borrowed(data));
+    }
+    match compressor {
+        Some(c) => Ok(std::borrow::Cow::Owned(c.seal_bytes(data.to_vec())?)),
+        None => Ok(mediagit_compression::seal_at_rest(data)?),
+    }
+}
+
 /// Inverse of [`seal_manifest`]. Every local reader of `manifests/<oid>` must
 /// come through here — a raw `storage.get` is the "ODB bypass" defect this
 /// codebase has shipped six times, and on a keyed repo it now returns
@@ -2767,13 +2792,19 @@ impl ObjectDatabase {
         }
 
         let chunk_key = format!("chunks/{}", chunk_id.to_hex());
-        // DC-7: `data` came off the wire from a server that holds no key, so
-        // it is unsealed. Seal it here — after the hash check, which is
-        // computed over the plaintext — or a `pull` into a keyed repo would
-        // leave the ODB half encrypted. `unseal` passes unsealed bytes
-        // through, so nothing would report the split; the reads would just
-        // keep working over plaintext on disk.
-        let sealed = mediagit_compression::seal_at_rest(data)?;
+        // DC-7: seal what came off the wire, or a `pull` into a keyed repo
+        // leaves the ODB half encrypted -- `unseal` passes unsealed bytes
+        // through, so nothing would report the split and reads would just keep
+        // working over plaintext on disk.
+        //
+        // `_once`, not `seal_at_rest`: this used to assume the wire bytes were
+        // unsealed "because the server holds no key". Since D4 the server holds
+        // the key and hands back exactly what was uploaded, so on an encrypted
+        // repo they arrive sealed and wrapping them again made every cloned
+        // chunk fail its hash check. The decompress above has already opened
+        // them under this repo's key, so passing them through is verified, not
+        // assumed.
+        let sealed = seal_from_wire(self.smart_compressor.as_deref(), data)?;
         self.storage
             .put(&chunk_key, &sealed)
             .await
@@ -2800,7 +2831,9 @@ impl ObjectDatabase {
             let data = tokio::fs::read(path).await.map_err(|e| {
                 anyhow::anyhow!("Failed to read staged chunk {}: {}", path.display(), e)
             })?;
-            let sealed = mediagit_compression::seal_at_rest(&data)?;
+            // See `put_compressed_chunk`: bytes staged from a remote may
+            // already carry an envelope, and a second one is unreadable.
+            let sealed = seal_from_wire(self.smart_compressor.as_deref(), &data)?;
             return self
                 .storage
                 .put(&chunk_key, &sealed)

@@ -1199,12 +1199,15 @@ function Drill-A16-EncryptionLifecycle {
     $nokeyFailed = ($reset2.Exit -ne 0)
     $nokeyNotRestored = -not (Test-Path $asset)
 
-    # 6. push on an encrypted repo is refused - D4 (client key escrow) does not
-    # exist, so push must refuse before ever touching a remote. has_key() is a
-    # pure filesystem check that fires before remote resolution (push.rs), so
-    # this needs no server and no `remote add` at all.
+    # 6. push escrows the key BEFORE it uploads anything, and stops there if it
+    # cannot (DC-7/D4). The remote is a closed port, which is the bluntest
+    # version of "escrow did not happen": push must fail while still talking
+    # about the encryption key, not after moving objects. If the escrow step
+    # were ever reordered behind the upload, this reads as an ordinary
+    # connection failure with no mention of a key, and fails.
+    Invoke-MG $repo @("remote", "add", "origin", "http://127.0.0.1:59999/a16") $Phase | Out-Null
     $push = Invoke-MG $repo @("push") $Phase
-    $pushRefused = ($push.Exit -ne 0) -and ($push.Out -match "(?i)at-rest encryption")
+    $pushRefused = ($push.Exit -ne 0) -and ($push.Out -match "(?i)encryption-key")
 
     # 7. a second `key init` must be refused - overwriting the key would orphan
     # every object already sealed under it.
@@ -1216,7 +1219,7 @@ function Drill-A16-EncryptionLifecycle {
     Rec $drill $pass ("status-off=$statusOffOk init-ok=$initOk recovery-code-captured=$($null -ne $recoveryCode) " +
       "objects-examined=$($seal.Examined) sealed=$($seal.Sealed) seal-exercised=$sealExercised " +
       "roundtrip-with-key=$roundTripOk nokey-reset-exit=$($reset2.Exit) nokey-failed=$nokeyFailed " +
-      "nokey-file-not-restored=$nokeyNotRestored push-refused=$pushRefused (mentions at-rest encryption) " +
+      "nokey-file-not-restored=$nokeyNotRestored push-stopped-at-escrow=$pushRefused " +
       "reinit-refused=$reinitRefused")
   } catch {
     if ("$_" -match "^SKIP:") { Rec $drill "SKIP" "$_" } else { Rec $drill $false "unexpected error: $_" }
