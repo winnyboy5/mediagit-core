@@ -300,6 +300,15 @@ pub(crate) struct ChainWalk {
 pub(crate) struct DeltaGraph {
     pairs: std::collections::HashSet<(Oid, Oid)>,
     edges: std::collections::HashMap<Oid, Option<Oid>>,
+    /// Reverse of `edges`: base -> chunks that delta against it.
+    ///
+    /// Depth is not a property of the chain below a node alone. A chunk that is
+    /// already the base of a subtree can *later* become a delta itself, and
+    /// every descendant deepens by however far the new chain runs. Without the
+    /// reverse direction that is invisible: the guard measures downward, the
+    /// subtree grows upward, and the cap is passed with every individual check
+    /// having said yes.
+    children: std::collections::HashMap<Oid, Vec<Oid>>,
 }
 
 /// Edge-memo size at which [`DeltaGraph::merge_observed`] drops what it learned
@@ -326,7 +335,13 @@ impl DeltaGraph {
             self.shrink_memo();
         }
         for (child, base) in observed {
-            self.edges.entry(child).or_insert(base);
+            use std::collections::hash_map::Entry;
+            if let Entry::Vacant(slot) = self.edges.entry(child) {
+                slot.insert(base);
+                if let Some(b) = base {
+                    self.children.entry(b).or_default().push(child);
+                }
+            }
         }
     }
 
@@ -341,15 +356,19 @@ impl DeltaGraph {
     /// gets through. `pairs` itself is never evicted for the same reason.
     fn shrink_memo(&mut self) {
         self.edges.clear();
+        self.children.clear();
         for &(child, base) in &self.pairs {
             self.edges.insert(child, Some(base));
+            self.children.entry(base).or_default().push(child);
         }
     }
 
     /// Register a committed delta, before its `.meta` is written.
     fn insert_edge(&mut self, child: Oid, base: Oid) {
         self.pairs.insert((child, base));
-        self.edges.insert(child, Some(base));
+        if self.edges.insert(child, Some(base)) != Some(Some(base)) {
+            self.children.entry(base).or_default().push(child);
+        }
     }
 
     /// Same registration, for an edge written by a path outside this ODB.
@@ -370,6 +389,50 @@ impl DeltaGraph {
     fn remove_edge(&mut self, child: Oid, base: Oid) {
         self.pairs.remove(&(child, base));
         self.edges.remove(&child);
+        if let Some(kids) = self.children.get_mut(&base) {
+            kids.retain(|&c| c != child);
+            if kids.is_empty() {
+                self.children.remove(&base);
+            }
+        }
+    }
+
+    /// How far the subtree ABOVE `node` already reaches — hops from `node` up
+    /// to its deepest descendant.
+    ///
+    /// The other half of the depth question. `chain_walk` answers "how deep is
+    /// the base already", which bounds the chain below the edge being written.
+    /// It says nothing about chunks that are *already* deltas against `node`,
+    /// and those move down by exactly the same amount when `node` itself stops
+    /// being a root.
+    ///
+    /// That is not theoretical. Measured on a 25-version add: a chunk was
+    /// committed as a root, three chunks chained onto it, and it was then
+    /// re-parented onto a depth-3 chain -- taking its subtree to 6 and, four
+    /// commits later, to 11 against a cap of 10. Every individual check had
+    /// passed.
+    ///
+    /// Capped at `CHAIN_WALK_CAP`: a subtree deeper than the cap can never be
+    /// made legal by any base, so the exact number past it is not interesting.
+    fn height_above(&self, node: Oid) -> usize {
+        let mut best = 0usize;
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![(node, 0usize)];
+        while let Some((cur, d)) = stack.pop() {
+            if d >= CHAIN_WALK_CAP {
+                return CHAIN_WALK_CAP;
+            }
+            if !seen.insert(cur) {
+                continue;
+            }
+            best = best.max(d);
+            if let Some(kids) = self.children.get(&cur) {
+                for &k in kids {
+                    stack.push((k, d + 1));
+                }
+            }
+        }
+        best
     }
 
     /// In-memory twin of [`chunk_delta_chain_walk`] — same questions, same
@@ -433,10 +496,17 @@ impl DeltaGraph {
         let Some(root) = walk.root else {
             return Ok(None);
         };
-        if walk.depth < MAX_DELTA_DEPTH as usize {
+        // The deepest node this edge would create is not `new_chunk` — it is
+        // whatever already hangs off `new_chunk`. Counting only downward is how
+        // a chain reached 11 with every check passing.
+        let above = self.height_above(new_chunk);
+        if walk.depth + 1 + above <= MAX_DELTA_DEPTH as usize {
             return Ok(Some(nominated_base));
         }
-        if root == new_chunk {
+        // At the cap, re-target to the chain root rather than abandoning the
+        // delta — but only if the subtree fits there too. `1 + above` because
+        // the root is a full chunk at depth 0.
+        if root == new_chunk || 1 + above > MAX_DELTA_DEPTH as usize {
             Ok(None)
         } else {
             Ok(Some(root))
