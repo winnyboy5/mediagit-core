@@ -23,6 +23,35 @@ Encrypted vs unencrypted, same corpus, same seed. Budget was ≤5% wall.
 identical (681 → 681) and delta count identical, so dedup and delta selection are
 unaffected — sealing happens after compression and dedup keys on the plaintext hash.
 
+### Delta savings under encryption (measured 2026-08-12)
+
+The wall-clock run above could say nothing about deltas: its VFX corpus is
+incompressible and produced `deltas=0` in **both** variants. Storage savings is
+the differentiator and every delta path fails *soft* -- `try_store_chunk_as_delta`
+returns `Ok(false)`, pull falls back to a full chunk, repack continues past -- so
+a decrypt failure inside one would drop savings toward zero with the suite green.
+Measured separately, on a corpus that cannot avoid deltas: a 64 MB compressible
+asset, committed, then edited in a distinct 256 KB region and re-committed 14 times.
+
+| | Unencrypted | Encrypted |
+|---|---|---|
+| deltas | 14 | **14** |
+| chunks | 1 | 1 |
+| delta bytes | 3,671,080 | 3,672,606 |
+| on disk | 3,759,267 B | 3,763,745 B (**+0.119%**) |
+| restored byte-exact | yes | **yes** |
+
+960 MB of committed content across 15 commits stored in 3.76 MB, with 97.7% of
+that being delta bytes. Encryption changes the delta count not at all, and the
+reconstruction path returns the asset byte-exact -- which is the check that
+matters, since a decrypt failure mid-chain surfaces as corruption rather than as
+a missing saving.
+
+A second corpus (`fixtures-synthetic/chains`, three versions of six audio assets)
+agreed but was too thin to rely on: dedup absorbed nearly all its redundancy and
+left exactly one delta, whose `delta_bytes` differed by 68 → 113 = one 45-byte
+envelope.
+
 Two notes on method, because both changed the answer:
 
 - **`commit` is not gated.** It lands around 50 ms, where a few ms of jitter reads as a
