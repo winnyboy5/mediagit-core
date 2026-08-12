@@ -40,21 +40,42 @@ fn similarity_seed_max_chunks() -> usize {
 ///
 /// Sealing lives here, at the storage boundary, and deliberately **not** in
 /// `ChunkManifest::to_bytes`: the exact same bytes travel over the wire
-/// (`PUT /manifests/{oid}`) to a server that holds no key, and that format
-/// must not move. Local writers seal, local readers open, everything else is
-/// untouched.
-fn seal_manifest(bytes: &[u8]) -> anyhow::Result<std::borrow::Cow<'_, [u8]>> {
-    mediagit_compression::seal_at_rest(bytes)
-        .map_err(|e| anyhow::anyhow!("Failed to seal chunk manifest: {e}"))
+/// (`PUT /manifests/{oid}`) and that format must not move. Storage writers
+/// seal, storage readers open, everything else is untouched.
+///
+/// Keyed from the database's own compressor rather than the process-global
+/// key, because the server holds a key per repository and has no process key
+/// at all -- with the global, a server writing a manifest for a keyed
+/// repository wrote it in the clear.
+fn seal_manifest<'a>(
+    compressor: Option<&SmartCompressor>,
+    bytes: &'a [u8],
+) -> anyhow::Result<std::borrow::Cow<'a, [u8]>> {
+    match compressor {
+        Some(c) => c
+            .seal_bytes(bytes.to_vec())
+            .map(std::borrow::Cow::Owned)
+            .map_err(|e| anyhow::anyhow!("Failed to seal chunk manifest: {e}")),
+        None => mediagit_compression::seal_at_rest(bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to seal chunk manifest: {e}")),
+    }
 }
 
 /// Inverse of [`seal_manifest`]. Every local reader of `manifests/<oid>` must
 /// come through here — a raw `storage.get` is the "ODB bypass" defect this
 /// codebase has shipped six times, and on a keyed repo it now returns
 /// ciphertext that `from_bytes` will misparse.
-fn open_manifest(bytes: &[u8]) -> anyhow::Result<std::borrow::Cow<'_, [u8]>> {
-    mediagit_compression::open_at_rest(bytes)
-        .map_err(|e| anyhow::anyhow!("Failed to open chunk manifest: {e}"))
+fn open_manifest<'a>(
+    compressor: Option<&SmartCompressor>,
+    bytes: &'a [u8],
+) -> anyhow::Result<std::borrow::Cow<'a, [u8]>> {
+    match compressor {
+        Some(c) => c
+            .open_bytes(bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to open chunk manifest: {e}")),
+        None => mediagit_compression::open_at_rest(bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to open chunk manifest: {e}")),
+    }
 }
 
 impl ObjectDatabase {
@@ -452,7 +473,7 @@ impl ObjectDatabase {
         let manifest_data = manifest.to_bytes().map_err(|e| {
             anyhow::anyhow!("Failed to serialize chunk manifest for {}: {}", oid, e)
         })?;
-        let manifest_data = seal_manifest(&manifest_data)?;
+        let manifest_data = seal_manifest(self.smart_compressor.as_deref(), &manifest_data)?;
         self.storage
             .put(&manifest_key, &manifest_data)
             .await
@@ -977,7 +998,10 @@ impl ObjectDatabase {
             .to_bytes()
             .map_err(|e| anyhow::anyhow!("Failed to serialize manifest: {}", e))?;
         self.storage
-            .put(&manifest_key, &seal_manifest(&manifest_data)?)
+            .put(
+                &manifest_key,
+                &seal_manifest(self.smart_compressor.as_deref(), &manifest_data)?,
+            )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to store manifest: {}", e))?;
 
@@ -1611,7 +1635,10 @@ impl ObjectDatabase {
         let manifest_data = manifest.to_bytes()?;
         let manifest_key = format!("manifests/{}", file_oid.to_hex());
         self.storage
-            .put(&manifest_key, &seal_manifest(&manifest_data)?)
+            .put(
+                &manifest_key,
+                &seal_manifest(self.smart_compressor.as_deref(), &manifest_data)?,
+            )
             .await?;
 
         info!(
@@ -1798,8 +1825,11 @@ impl ObjectDatabase {
         // Load chunk manifest (use to_hex() for consistent storage paths)
         let manifest_key = format!("manifests/{}", oid.to_hex());
         let manifest_data = self.storage.get(&manifest_key).await?;
-        let manifest: ChunkManifest = ChunkManifest::from_bytes(&open_manifest(&manifest_data)?)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
+        let manifest: ChunkManifest = ChunkManifest::from_bytes(&open_manifest(
+            self.smart_compressor.as_deref(),
+            &manifest_data,
+        )?)
+        .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
 
         debug!(
             oid = %oid,
@@ -1955,9 +1985,11 @@ impl ObjectDatabase {
             info!(oid = %oid, "Streaming chunked object to file");
 
             let manifest_data = self.storage.get(&manifest_key).await?;
-            let manifest: ChunkManifest =
-                ChunkManifest::from_bytes(&open_manifest(&manifest_data)?)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
+            let manifest: ChunkManifest = ChunkManifest::from_bytes(&open_manifest(
+                self.smart_compressor.as_deref(),
+                &manifest_data,
+            )?)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
 
             // Ensure parent directory exists
             if let Some(parent) = path.parent() {
@@ -2249,9 +2281,11 @@ impl ObjectDatabase {
         let manifest_key = format!("manifests/{}", oid.to_hex());
         if self.storage.exists(&manifest_key).await? {
             let manifest_data = self.storage.get(&manifest_key).await?;
-            let manifest: ChunkManifest =
-                ChunkManifest::from_bytes(&open_manifest(&manifest_data)?)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
+            let manifest: ChunkManifest = ChunkManifest::from_bytes(&open_manifest(
+                self.smart_compressor.as_deref(),
+                &manifest_data,
+            )?)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
             return Ok(manifest.total_size as usize);
         }
 
@@ -2284,9 +2318,10 @@ impl ObjectDatabase {
         }
 
         let manifest_data = self.storage.get(&manifest_key).await?;
-        let manifest: crate::chunking::ChunkManifest =
-            crate::chunking::ChunkManifest::from_bytes(&open_manifest(&manifest_data)?)
-                .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
+        let manifest: crate::chunking::ChunkManifest = crate::chunking::ChunkManifest::from_bytes(
+            &open_manifest(self.smart_compressor.as_deref(), &manifest_data)?,
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
 
         Ok(Some(manifest))
     }
@@ -2789,7 +2824,10 @@ impl ObjectDatabase {
             .to_bytes()
             .map_err(|e| anyhow::anyhow!("Failed to serialize manifest: {}", e))?;
         self.storage
-            .put(&manifest_key, &seal_manifest(&manifest_data)?)
+            .put(
+                &manifest_key,
+                &seal_manifest(self.smart_compressor.as_deref(), &manifest_data)?,
+            )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to store manifest {}: {}", oid, e))
     }

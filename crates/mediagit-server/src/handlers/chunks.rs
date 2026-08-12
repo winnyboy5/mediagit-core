@@ -283,9 +283,21 @@ pub async fn upload_manifest(
     // Create storage backend
     let storage = get_or_init_storage(&state, &repo_path).await?;
 
-    // Store manifest
+    // Store manifest, sealed if this repository is encrypted.
+    //
+    // The wire format does not move -- the client sends and receives plaintext
+    // manifest bytes either way. Sealing happens at the storage boundary,
+    // matching what `ObjectDatabase` does locally, because a manifest names a
+    // file and lists the plaintext hash of every one of its chunks: leaving it
+    // in the clear on the server hands an attacker with the bucket the
+    // filename and a confirmation oracle for content they can guess.
     let manifest_key = format!("manifests/{}", oid);
-    storage.put(&manifest_key, &body).await.map_err(|e| {
+    let compressor = crate::handlers::repo_compressor(&state, &repo_path)?;
+    let to_store = compressor.seal_bytes(body.to_vec()).map_err(|e| {
+        tracing::error!(oid = %oid, error = %e, "Failed to seal manifest");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    storage.put(&manifest_key, &to_store).await.map_err(|e| {
         tracing::error!(oid = %oid, error = %e, "Failed to store manifest");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
@@ -731,12 +743,22 @@ pub async fn download_manifest(
     // Create storage backend
     let storage = get_or_init_storage(&state, &repo_path).await?;
 
-    // Read manifest
+    // Read manifest, unsealing it if this repository is encrypted -- the
+    // inverse of `upload_manifest`. The client is handed plaintext, which is
+    // what it sent and what every version of this endpoint has returned.
     let manifest_key = format!("manifests/{}", oid);
-    let manifest_data = storage.get(&manifest_key).await.map_err(|e| {
+    let stored = storage.get(&manifest_key).await.map_err(|e| {
         tracing::warn!(oid = %oid, error = %e, "Manifest not found");
         StatusCode::NOT_FOUND
     })?;
+    let compressor = crate::handlers::repo_compressor(&state, &repo_path)?;
+    let manifest_data = compressor
+        .open_bytes(&stored)
+        .map_err(|e| {
+            tracing::error!(oid = %oid, error = %e, "Failed to open manifest");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .into_owned();
 
     tracing::debug!(oid = %oid, size = manifest_data.len(), "Manifest downloaded");
     Ok((

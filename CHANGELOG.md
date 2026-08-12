@@ -7,11 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [v0.3.0-rc.3] - 2026-08-04
+## [v0.3.0-rc.3] - 2026-08-12
 
-Correctness and transfer-reliability cycle. No wire or persisted-format changes,
-so the `docs/FORMATS.md` §11 compat promise (in effect since v0.3.0-rc.1) is
-preserved.
+At-rest encryption, plus a correctness and transfer-reliability cycle.
+
+**Compat.** rc.3 adds two things that are new rather than changed: the `MGEN`
+object envelope (persisted, additive, and written only by a repository that
+opted in) and the key-escrow endpoints (a new wire API). The
+`docs/FORMATS.md` §11 promise, in effect since v0.3.0-rc.1, still holds —
+nothing changes how an existing format reads, and with no key configured the
+bytes written are byte-for-byte what they were before, which is asserted by
+test and by the frozen-fixture gate.
+
+### Added — at-rest encryption (DC-7)
+
+Opt-in per repository, at creation time: `mediagit key init` on a fresh repo,
+then commit as usual. Objects, chunk manifests and reachability bitmaps are
+sealed under a per-repository key; that key is wrapped under a master taken
+from a keyfile/env var, the OS keychain, or a passphrase (Argon2id, m=64 MiB
+t=3 p=4). A one-time recovery code is a second, independent way in.
+
+- **`MGEN` v2 envelope, XAES-256-GCM.** Per-message subkey via the SP 800-108r1
+  KDF and a 192-bit nonce, which lifts NIST SP 800-38D's 2³² messages-per-key
+  cap to roughly 2⁸⁰ — the repository key is permanent and never rotates, so
+  the original cap was reachable. Magic and version are bound as AAD, nonces
+  come from `getrandom`, and a BLAKE3 fingerprint in the key file gives the
+  key commitment AES-GCM does not. Implemented inline against the `aes` crate
+  already present and checked against the published C2SP test vectors: no new
+  dependency, and none of it is a pre-release AEAD.
+- **Push and clone work, via key escrow.** On the first push the client hands
+  its repository key to `PUT /{repo}/encryption-key` (`repo:write`); the
+  server wraps it under `MEDIAGIT_SERVER_ENCRYPTION_KEYFILE` and keeps it in
+  `<repo>/.mediagit/key.json`. It needs the key because presigned uploads go
+  client→bucket directly, leaving the server holding objects it must still
+  verify, register and walk. A clone fetches it back with `repo:read` — key
+  access *is* read access — and re-wraps it under a local master without
+  prompting. Escrow never overwrites: a different key is `409 Conflict`,
+  because replacing it would orphan everything already sealed under the first.
+- **`mediagit key rotate-master`** re-wraps the same repository key under a new
+  master, for the stolen-laptop case. The repository key itself does not
+  change, so nothing needs re-sealing and escrow is untouched.
+- **The threat model is a compromised object store**, not a compromised server.
+
+Known limits, deliberate for this release: encryption can only be enabled on an
+**empty** repository (`key init` refuses otherwise — encrypting an existing one
+needs a full re-seal pass, which is not built); there is no full repository-key
+rotation; and `chunk-deltas/*.meta` sidecars stay plaintext, leaking which
+chunk deltas against which base — shape, not content.
+
+### Fixed — the rest of the cycle
 
 The headline is a cloud-upload defect that had been costing roughly 200
 permanently-failed chunk uploads per large push while remaining invisible: the
