@@ -157,3 +157,68 @@ async fn concurrent_writes_of_similar_versions_never_exceed_max_delta_depth() {
         }
     }
 }
+
+/// `write_chunk_delta` (the pull/clone ingest path) must respect the depth cap
+/// the add path respects.
+///
+/// **What this pins, honestly:** the cap on that path, nothing more. It passes
+/// against the pre-fix code as well -- checked -- because the old hand-rolled
+/// guard walked *storage*, and by then the `.meta` sidecars were on disk, so it
+/// reached the same verdict sequentially. What the fix changed is that the
+/// decision and the write are now atomic and the edge is registered in the
+/// in-memory graph, restoring the documented "in-memory edges superset of
+/// on-disk edges" invariant. Demonstrating a failure from the missing
+/// registration needs a concurrent second writer using the in-memory guard
+/// while a pull is in flight, which this does not construct.
+///
+/// It is kept anyway: it is a real regression guard for the cap on a path that
+/// had no test at all, and the shape it covers -- a clone hanging one delta
+/// after another off a growing chain -- is exactly how the reported
+/// unpushable-repository bug arrived.
+#[tokio::test(flavor = "multi_thread")]
+async fn pull_side_delta_writes_respect_the_depth_cap() {
+    use mediagit_versioning::Oid;
+
+    let storage = Arc::new(MockBackend::new());
+    let odb = ObjectDatabase::with_optimizations(
+        storage.clone(),
+        10_000_000,
+        Some(ChunkStrategy::MediaAware),
+        true,
+        0,
+    );
+
+    // A root chunk, then a chain hung off it one `write_chunk_delta` at a time
+    // -- what a clone does when the server reports each chunk as a delta.
+    let root_payload = vec![0xABu8; 64 * 1024];
+    let root = odb
+        .write(ObjectType::Blob, &root_payload)
+        .await
+        .expect("root write");
+
+    let mut prev = root;
+    let mut accepted = 0usize;
+    for i in 0..40u32 {
+        // The payload is irrelevant to the guard; the base pointer is the point.
+        let child = Oid::hash(&[&i.to_le_bytes()[..], b"child"].concat());
+        match odb.write_chunk_delta(&child, &prev, b"delta-bytes").await {
+            Ok(()) => {
+                accepted += 1;
+                prev = child;
+            }
+            // Refusing is the correct outcome once the cap is reached.
+            Err(_) => break,
+        }
+    }
+
+    assert!(
+        accepted > 0,
+        "no delta was accepted at all — this test is measuring nothing"
+    );
+    let depth = max_on_disk_depth(&storage).await;
+    assert!(
+        depth <= 10,
+        "pull-side chunk-delta chain reached depth {depth} against a cap of 10 \
+         ({accepted} accepted) — a cloned repository would be unpushable"
+    );
+}

@@ -2982,8 +2982,30 @@ impl ObjectDatabase {
         // bound to the exact base it was encoded against. Refusing with an
         // error is correct here: callers (pull.rs) already fall back to
         // fetching the full chunk when this returns Err.
+        // Through `commit_delta_pair`, like every other chunk-delta writer.
+        //
+        // This used to call `resolve_delta_base` against storage and then write,
+        // which broke the graph's stated invariant -- in-memory edges must be a
+        // SUPERSET of on-disk ones -- in two ways: the check was not atomic with
+        // the write, and the resulting edge was never registered at all. A pull
+        // running alongside anything else that writes deltas would leave the
+        // in-memory guard believing a node was terminal when disk said it was a
+        // delta, which undercounts depth. That is the same shape as the defect
+        // fixed in `0fb6f6c`, where an undercounted chain reached 15 against a
+        // cap of 10 and left the repository unpushable.
+        //
+        // `commit_delta_pair` keeps the semantics this path needs: it refuses
+        // unless the base re-decides to exactly `base_id`, never re-targets --
+        // which matters here because the delta bytes are already encoded
+        // against `base_id` and a different base would be invalid.
         if chunk_id == base_id
-            || resolve_delta_base(&*self.storage, *base_id, *chunk_id).await != Some(*base_id)
+            || !commit_delta_pair(
+                &*self.storage,
+                &self.delta_written_pairs,
+                *chunk_id,
+                *base_id,
+            )
+            .await
         {
             anyhow::bail!(
                 "refusing chunk delta: chunk {} base {} would create a cycle or exceed max chain depth {}",
@@ -3003,6 +3025,9 @@ impl ObjectDatabase {
         if let Err(e) = self.storage.put(&meta_key, meta_data.as_bytes()).await
             && !self.storage.exists(&meta_key).await.unwrap_or(false)
         {
+            // Drop the registration, or the guard refuses a legitimate delta
+            // for this chunk later in the same process.
+            rollback_delta_pair(&self.delta_written_pairs, *chunk_id, *base_id).await;
             return Err(anyhow::anyhow!("Failed to store chunk delta meta: {}", e));
         }
 
@@ -3013,6 +3038,7 @@ impl ObjectDatabase {
             // Remove the routing sidecar so the chunk is not permanently
             // misrouted to a missing binary.
             let _ = self.storage.delete(&meta_key).await;
+            rollback_delta_pair(&self.delta_written_pairs, *chunk_id, *base_id).await;
             return Err(anyhow::anyhow!("Failed to store chunk delta: {}", e));
         }
 

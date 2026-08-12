@@ -670,6 +670,23 @@ async fn chunk_delta_chain_walk(
     walk
 }
 
+/// Base policy against storage, for tests only.
+///
+/// Production has no callers left: every chunk-delta writer now goes through
+/// [`commit_delta_pair`], which decides and registers under one lock. This
+/// wrapper survives because the policy tests below assert on the decision
+/// itself, without a graph.
+#[cfg(test)]
+pub(crate) async fn resolve_delta_base(
+    storage: &dyn StorageBackend,
+    nominated_base: Oid,
+    new_chunk: Oid,
+) -> Option<Oid> {
+    resolve_delta_base_observing(storage, nominated_base, new_chunk)
+        .await
+        .0
+}
+
 /// Decide which chunk a new delta should be written against.
 ///
 /// This is the single choke point for chunk-delta base policy — all write
@@ -689,17 +706,10 @@ async fn chunk_delta_chain_walk(
 ///   storage savings are the product's differentiator, so hitting the cap must
 ///   not silently degrade to storing everything in full — but it restarts at
 ///   depth 1, so chains self-balance and never exceed the cap.
-pub(crate) async fn resolve_delta_base(
-    storage: &dyn StorageBackend,
-    nominated_base: Oid,
-    new_chunk: Oid,
-) -> Option<Oid> {
-    resolve_delta_base_observing(storage, nominated_base, new_chunk)
-        .await
-        .0
-}
-
-/// [`resolve_delta_base`], plus every edge the walk read on the way.
+///
+/// Also returns every edge the walk read on the way. The chunk-delta write
+/// paths feed those to [`DeltaGraph::merge_observed`] so the under-lock
+/// re-check that follows can answer from memory.
 ///
 /// The chunk-delta write paths use this variant and feed the observations to
 /// [`DeltaGraph::merge_observed`], so the under-lock re-check that follows can
