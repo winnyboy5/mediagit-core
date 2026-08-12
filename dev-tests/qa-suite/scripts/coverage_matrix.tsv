@@ -280,6 +280,6 @@ auth admin create-user	--role	yes	EXPECTED-ERR
 auth admin reset-password	-(bare invocation)	no	EXPECTED-ERR
 auth admin grant	-(bare invocation)	no	EXPECTED-ERR
 auth admin revoke-grant	-(bare invocation)	no	EXPECTED-ERR
-key init	-(bare invocation)	no	OK
+key init	-(bare invocation)	no	EXPECTED-ERR
 key status	-(bare invocation)	no	OK
 key recover	-(bare invocation)	no	ERROR
