@@ -1150,18 +1150,26 @@ async fn pack_entries_failing_content_verification(
     // serialise. `complete_chunk_uploads` and `verify_chunk_integrity` both
     // already fan out with `buffer_unordered`; this was the odd one out.
     //
-    // Concurrency is bounded, not unbounded. The 16 was chosen on the promise
-    // that each in-flight verification holds only a fixed-size copy buffer --
-    // but `SmartCompressor::decompress_streaming` abandons streaming for a
-    // sealed object, so on an encrypted repository the cost per slot becomes
-    // one whole object rather than one buffer. Halve it there rather than let
-    // 16 concurrent whole-object buffers stand on a promise the code no longer
-    // keeps. `MEDIAGIT_PACK_VERIFY_CONCURRENCY` overrides either way.
+    // Concurrency is bounded, not unbounded, and the bound is 16 on every
+    // repository -- encrypted or not.
+    //
+    // The 16 was chosen on the promise that each in-flight verification holds
+    // only a fixed-size copy buffer, and `SmartCompressor::decompress_streaming`
+    // does abandon streaming for a sealed object, so on an encrypted repository
+    // a slot costs one whole object instead. This briefly halved the bound to 8
+    // on that ground. Measured, that cost **34% of push wall time** on an
+    // 824 MB corpus -- against a 5% budget -- while buying headroom this
+    // workload never needed: entries here are chunks, roughly 1 MiB each, so
+    // the difference is ~8 MiB of peak. Trading a third of push throughput on
+    // the differentiator path for that is not a good trade.
+    //
+    // `MEDIAGIT_PACK_VERIFY_CONCURRENCY` is the knob for an operator who does
+    // hold large non-chunked objects and wants the peak bounded harder.
     let range_concurrency: usize = std::env::var("MEDIAGIT_PACK_VERIFY_CONCURRENCY")
         .ok()
         .and_then(|v| v.parse().ok())
         .filter(|&n: &usize| n > 0)
-        .unwrap_or(if compressor.is_encrypted() { 8 } else { 16 });
+        .unwrap_or(16);
     // Futures yield an INDEX, not a `&ManifestEntry`: keeping the borrow out of the
     // async block is what lets these be spawned concurrently without the lifetime
     // fighting `buffer_unordered`'s HRTB inference.

@@ -4,6 +4,40 @@
 
 > Numbers below were measured on build `0.2.8-beta.1`. Current release is `0.3.0-rc.3`; the storage-savings pipeline is unchanged since this run, but figures have not been re-measured on the current build.
 
+## At-rest encryption cost (DC-7, measured 2026-08-12)
+
+**Build:** `0.3.0-rc.3` release | **Corpus:** 824,415,190 B synthetic VFX, 681 chunks |
+**Pinned:** `MEDIAGIT_CDC_SEED=424242`, pack/upload/download workers = 8 |
+**Backend:** local filesystem over a loopback server | **5 reps, medians, alternating variant order**
+
+Encrypted vs unencrypted, same corpus, same seed. Budget was ≤5% wall.
+
+| Phase | Unencrypted | Encrypted | Delta |
+|---|---|---|---|
+| `add` | 28.67 s | 29.06 s | +1.4% |
+| `commit` | 0.05 s | 0.05 s | below measurement resolution |
+| `push` | 3.55 s | 3.56 s | +0.5% |
+| `clone` | 16.84 s | 17.44 s | +3.6% |
+
+**Storage:** 824,421,710 B → 824,648,429 B = **+0.0275%** envelope overhead. Chunk count
+identical (681 → 681) and delta count identical, so dedup and delta selection are
+unaffected — sealing happens after compression and dedup keys on the plaintext hash.
+
+Two notes on method, because both changed the answer:
+
+- **`commit` is not gated.** It lands around 50 ms, where a few ms of jitter reads as a
+  double-digit percentage. A 3-rep run reported −11.8% on it, which measured the clock.
+- **Variant order alternates per rep.** Running unencrypted first every time put the
+  encrypted run on a more-loaded machine each round; with a fixed order, `clone` reported
+  +17.0% that a 5-rep alternating run resolved to +3.6%.
+
+A first pass had `push` at +34%. That was not the crypto: it was a since-reverted change
+halving `PACK_VERIFY_RANGE_CONCURRENCY` from 16 to 8 on encrypted repositories. Pinning
+`MEDIAGIT_PACK_VERIFY_CONCURRENCY=16` for both variants moved `push` to +0.5%, which is
+the number above.
+
+---
+
 MediaGit applies format-aware chunking and zstd-dict deltas to achieve cross-version deduplication across media formats. This document publishes measured storage savings and methodology, with reproducibility as the primary goal.
 
 ---
