@@ -167,7 +167,7 @@ pub async fn upload_chunk(
     // correct body under an already-existing id must still succeed, since
     // `repair_remote` fixes poisoned chunks by re-uploading them
     // unconditionally via this same endpoint.
-    let compressor = Arc::new(SmartCompressor::new());
+    let compressor = Arc::new(crate::handlers::repo_compressor(&state, &repo_path)?);
     if !verify_chunk_content(&compressor, &chunk_id, body.clone()).await {
         tracing::warn!(
             repo = %repo,
@@ -378,7 +378,8 @@ pub async fn download_chunk(
                             };
                             let body = Bytes::from(data);
                             if is_unverified {
-                                let compressor = Arc::new(SmartCompressor::new());
+                                let compressor =
+                                    Arc::new(crate::handlers::repo_compressor(&state, &repo_path)?);
                                 if !verify_chunk_content(&compressor, &chunk_id, body.clone()).await
                                 {
                                     tracing::error!(
@@ -935,14 +936,22 @@ pub async fn batch_get_pack_chunks(
     const MAX_GAP_BYTES: u64 = 1_048_576;
     const MAX_RANGE_BYTES: u64 = 8_388_608;
 
+    // Built only when the pack is unverified — `None` on the (steady state)
+    // fast path costs nothing below. Built out here rather than inside the
+    // task because it needs the repository's at-rest key, and `state` does
+    // not survive the move.
+    let compressor = match is_unverified {
+        true => Some(Arc::new(crate::handlers::repo_compressor(
+            &state, &repo_path,
+        )?)),
+        false => None,
+    };
+
     let (reader, writer) = tokio::io::duplex(256 * 1024);
 
     tokio::spawn(async move {
         let _permit = permit;
         let mut w = writer;
-        // Built only when the pack is unverified — `None` on the (steady
-        // state) fast path costs nothing below.
-        let compressor = is_unverified.then(|| Arc::new(SmartCompressor::new()));
         let result: anyhow::Result<()> = async {
             for chunk_oid in &invalid {
                 write_batch_frame(&mut w, chunk_oid, &[]).await?;

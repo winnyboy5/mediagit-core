@@ -1454,7 +1454,17 @@ pub(crate) async fn verify_pack_in_background(
     storage: Arc<dyn StorageBackend>,
     manifest: Vec<ManifestEntry>,
 ) -> bool {
-    let compressor = Arc::new(SmartCompressor::new());
+    let compressor = match crate::handlers::repo_compressor(&state, &repo_path) {
+        Ok(c) => Arc::new(c),
+        Err(_) => {
+            tracing::error!(
+                repo = %repo,
+                pack = %pack_oid,
+                "Cannot verify pack: this repository's at-rest key is unreadable"
+            );
+            return false;
+        }
+    };
     let _permit = pack_verify_semaphore().acquire().await.ok();
 
     let pack_key = format!("packs/{pack_oid}");

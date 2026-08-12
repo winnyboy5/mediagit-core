@@ -458,7 +458,7 @@ pub async fn complete_chunk_uploads(
     // decompress, and compare BLAKE3 to its claimed id via the same
     // `read_and_verify_chunk` helper `verify_chunk_integrity` uses.
     let verify_enabled = state.verify_chunks_on_complete;
-    let compressor = Arc::new(SmartCompressor::new());
+    let compressor = Arc::new(crate::handlers::repo_compressor(&state, &repo_path)?);
     let verify_start = std::time::Instant::now();
     let chunk_count = req.chunk_ids.len();
     let verified_bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -565,7 +565,7 @@ pub async fn verify_chunk_integrity(
         return Err(StatusCode::NOT_FOUND);
     }
     let storage = get_or_init_storage(&state, &repo_path).await?;
-    let compressor = std::sync::Arc::new(SmartCompressor::new());
+    let compressor = std::sync::Arc::new(crate::handlers::repo_compressor(&state, &repo_path)?);
 
     // Lazy-load pack index from JSONL if not yet warm (mirrors locate_chunks).
     // Without this, a verify on a freshly restarted server sees an empty index,

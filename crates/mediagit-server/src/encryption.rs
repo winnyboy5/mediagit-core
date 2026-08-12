@@ -238,6 +238,25 @@ pub fn store_repo_key(repo_path: &Path, master: &EncryptionKey, repo_key: &[u8])
 /// `Ok(None)` means the repository is not encrypted, which is silent and cheap
 /// — the common case.
 pub fn load_repo_key(repo_path: &Path, master: &EncryptionKey) -> Result<Option<EncryptionKey>> {
+    let Some(bytes) = load_repo_key_bytes(repo_path, master)? else {
+        return Ok(None);
+    };
+    let key = EncryptionKey::from_bytes(bytes.to_vec())
+        .map_err(|e| anyhow!("key.json: unwrapped key is unusable: {e}"))?;
+    Ok(Some(key))
+}
+
+/// The escrowed key as raw bytes.
+///
+/// Separate from [`load_repo_key`] because the escrow endpoint has to put the
+/// key on the wire, and [`EncryptionKey`] deliberately offers no way back out
+/// to its contents — a property worth keeping rather than punching a hole in
+/// for one caller. Returned in a [`Zeroizing`] so the copy is wiped once the
+/// response body has been built.
+pub fn load_repo_key_bytes(
+    repo_path: &Path,
+    master: &EncryptionKey,
+) -> Result<Option<Zeroizing<Vec<u8>>>> {
     let path = key_file_path(repo_path);
     if !path.exists() {
         return Ok(None);
@@ -270,9 +289,7 @@ pub fn load_repo_key(repo_path: &Path, master: &EncryptionKey) -> Result<Option<
         );
     }
 
-    let key = EncryptionKey::from_bytes(bytes.to_vec())
-        .map_err(|e| anyhow!("key.json: unwrapped key is unusable: {e}"))?;
-    Ok(Some(key))
+    Ok(Some(bytes))
 }
 
 fn read_stored(path: &Path) -> Result<StoredRepoKey> {

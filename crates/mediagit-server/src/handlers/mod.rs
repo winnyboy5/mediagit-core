@@ -243,6 +243,26 @@ async fn get_or_init_odb(
 
     // Fast path: cached ODB template — clone shares all Arc fields.
     if let Some(odb) = state.odb_cache.read().await.get(&key).cloned() {
+        // A cached database whose key state no longer matches the repository
+        // is the one thing this cache cannot be allowed to serve: too early
+        // and it writes plaintext into an encrypted repo, too late and it
+        // cannot read what is already there. Rebuilding is not the answer —
+        // that hands out a fresh `DeltaGraph` while in-flight handlers hold
+        // the old one, which is how `A11-delta-chain-depth maxDepth=11` and
+        // an unpushable repo happened once already. So: fail loudly.
+        //
+        // `has_escrowed_key` is one `exists()` and only runs on a server with
+        // encryption configured at all, which is not the default.
+        if state.encryption_master.is_some()
+            && crate::encryption::has_escrowed_key(repo_path) != odb.is_at_rest_encrypted()
+        {
+            tracing::error!(
+                repo = %repo_path.display(),
+                cached_encrypted = odb.is_at_rest_encrypted(),
+                "Cached ODB disagrees with the repository's escrowed key; refusing to serve it"
+            );
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
         return Ok(odb);
     }
 
@@ -251,10 +271,53 @@ async fn get_or_init_odb(
     if let Some(odb) = map.get(&key).cloned() {
         return Ok(odb);
     }
+    let at_rest = repo_at_rest_key(state, repo_path)?;
     let storage = get_or_init_storage(state, repo_path).await?;
-    let odb = ObjectDatabase::with_smart_compression(storage, 1000);
+    let odb = ObjectDatabase::with_smart_compression(storage, 1000).with_at_rest_key(at_rest);
     map.insert(key, odb.clone());
     Ok(odb)
+}
+
+/// This repository's at-rest key, or `None` when there is nothing to unwrap.
+///
+/// `None` on every server that has not switched encryption on, which is the
+/// default — the whole call is one `Option::is_some` in that case.
+///
+/// The server cannot use the process-global key (`mediagit_compression::process_key`)
+/// the CLI uses: it is a `OnceLock` bound to a single repo root, and this
+/// process serves many repositories.
+pub(crate) fn repo_at_rest_key(
+    state: &AppState,
+    repo_path: &StdPath,
+) -> Result<Option<mediagit_compression::EncryptionKey>, StatusCode> {
+    let Some(master) = state.encryption_master.as_ref() else {
+        return Ok(None);
+    };
+    crate::encryption::load_repo_key(repo_path, master).map_err(|e| {
+        tracing::error!(
+            repo = %repo_path.display(),
+            error = %e,
+            "Failed to unwrap this repository's escrowed key"
+        );
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
+/// A `SmartCompressor` that can read this repository's objects.
+///
+/// Every server-side verification path needs one of these rather than a bare
+/// `SmartCompressor::new()`. A bare one on an encrypted repo does not error —
+/// it fails to decrypt, reports `EntryVerification::Corrupt`, and quarantines
+/// a perfectly good pack. That is the ODB-bypass bug class, which has now
+/// recurred seven times here, and this is its most destructive shape.
+pub(crate) fn repo_compressor(
+    state: &AppState,
+    repo_path: &StdPath,
+) -> Result<SmartCompressor, StatusCode> {
+    Ok(match repo_at_rest_key(state, repo_path)? {
+        Some(key) => SmartCompressor::new().with_key(key),
+        None => SmartCompressor::new(),
+    })
 }
 
 /// Determine the effective repo namespace (layout v2) for a served repo:
@@ -1342,5 +1405,66 @@ mod tests {
     fn gcs_backend_config_empty_prefix_stays_none() {
         let cfg = gcs_config_with_prefix(&gcs_storage_config(""));
         assert_eq!(cfg.prefix, None);
+    }
+}
+
+#[cfg(test)]
+mod at_rest_key_tests {
+    use super::*;
+    use mediagit_security::encryption::EncryptionKey;
+
+    /// A repos dir with one repository in it, and a server master key.
+    fn fixture(master: Option<u8>) -> (tempfile::TempDir, AppState, std::path::PathBuf) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repos = dir.path().join("repos");
+        let repo = repos.join("demo");
+        std::fs::create_dir_all(repo.join(".mediagit")).unwrap();
+        let state = AppState::new(repos).with_encryption_master(
+            master.map(|b| EncryptionKey::from_bytes(vec![b; 32]).unwrap()),
+        );
+        (dir, state, repo)
+    }
+
+    #[test]
+    fn a_server_without_a_master_never_looks_for_a_key() {
+        let (_d, state, repo) = fixture(None);
+        // Even with a key file sitting right there — no master, no unwrap, and
+        // no cost on the path every unencrypted deployment takes.
+        std::fs::write(crate::encryption::key_file_path(&repo), "{}").unwrap();
+        assert!(repo_at_rest_key(&state, &repo).unwrap().is_none());
+        assert!(!repo_compressor(&state, &repo).unwrap().is_encrypted());
+    }
+
+    #[test]
+    fn an_unencrypted_repository_gets_a_bare_compressor() {
+        let (_d, state, repo) = fixture(Some(0x11));
+        assert!(repo_at_rest_key(&state, &repo).unwrap().is_none());
+        assert!(!repo_compressor(&state, &repo).unwrap().is_encrypted());
+    }
+
+    #[test]
+    fn an_escrowed_key_reaches_the_compressor() {
+        let (_d, state, repo) = fixture(Some(0x22));
+        let master = state.encryption_master.clone().unwrap();
+        crate::encryption::store_repo_key(&repo, &master, &[0x5c; 32]).unwrap();
+
+        assert!(repo_at_rest_key(&state, &repo).unwrap().is_some());
+        // This is the assertion the whole work item exists for: a bare
+        // compressor here does not error, it fails to decrypt and quarantines
+        // good packs.
+        assert!(repo_compressor(&state, &repo).unwrap().is_encrypted());
+    }
+
+    #[test]
+    fn an_unreadable_key_is_an_error_not_a_bare_compressor() {
+        let (_d, state, repo) = fixture(Some(0x33));
+        let wrong = EncryptionKey::from_bytes(vec![0x99; 32]).unwrap();
+        crate::encryption::store_repo_key(&repo, &wrong, &[0x5c; 32]).unwrap();
+
+        // Wrong master — as if the operator restored the wrong key file. The
+        // repository is encrypted and this server cannot open it; handing back
+        // a bare compressor would let it quarantine every pack it touched.
+        assert!(repo_at_rest_key(&state, &repo).is_err());
+        assert!(repo_compressor(&state, &repo).is_err());
     }
 }

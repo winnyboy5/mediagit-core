@@ -32,6 +32,7 @@ fn repack_chunks_cloud_enabled() -> bool {
 use crate::pack::{
     pack_bytes_cap as repack_pack_bytes_cap, pack_chunks_cap as repack_pack_chunks_cap,
 };
+use mediagit_compression::EncryptionKey;
 
 /// Whether this process holds an at-rest encryption key (DC-7).
 fn process_key_is_set() -> bool {
@@ -172,6 +173,37 @@ impl ObjectDatabase {
             delta_written_pairs: Arc::new(Mutex::new(crate::odb::DeltaGraph::default())),
             pack_membership: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Seal every object this database writes under `key`, and open what it
+    /// reads back with it.
+    ///
+    /// This is the server's only way in. The process-global key
+    /// (`crate::process_key`) is bound to a single repo root and is therefore
+    /// structurally unusable in a process serving many repositories, so the
+    /// server carries the key per repo and hands it here instead.
+    ///
+    /// `None` is a no-op, which is what keeps the unencrypted path byte-for-byte
+    /// what it was: an unkeyed compressor writes exactly what it wrote before
+    /// DC-7 existed.
+    pub fn with_at_rest_key(mut self, key: Option<EncryptionKey>) -> Self {
+        if let Some(key) = key {
+            self.smart_compressor = Some(Arc::new(SmartCompressor::new().with_key(key)));
+            self.compression_enabled = true;
+        }
+        self
+    }
+
+    /// Does this database seal what it writes?
+    ///
+    /// Used by the server to catch a cached database whose key state no longer
+    /// matches the repository on disk — a mismatch there means either plaintext
+    /// written to an encrypted repo or unreadable objects, so it is an error
+    /// rather than something to silently correct.
+    pub fn is_at_rest_encrypted(&self) -> bool {
+        self.smart_compressor
+            .as_ref()
+            .is_some_and(|c| c.is_encrypted())
     }
 
     /// Create ObjectDatabase with full optimization features

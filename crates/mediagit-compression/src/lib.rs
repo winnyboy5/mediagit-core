@@ -107,6 +107,12 @@ pub use adaptive::{
 };
 pub use brotli_compressor::BrotliCompressor;
 pub use error::{CompressionError, CompressionResult};
+/// The at-rest key type `SmartCompressor::with_key` takes.
+///
+/// Re-exported because that constructor is public but its parameter type was
+/// not reachable from this crate, so no caller outside `mediagit-security`
+/// could name it.
+pub use mediagit_security::encryption::EncryptionKey;
 pub use metrics::CompressionMetrics;
 pub use per_type_compressor::{CompressionProfile, PerObjectTypeCompressor, PerTypeStats};
 pub use process_key::{
