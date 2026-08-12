@@ -107,6 +107,23 @@ impl SmartCompressor {
         self.key.is_some()
     }
 
+    /// Seal `data` under this compressor's key, for bytes that never go
+    /// through the compression path at all.
+    ///
+    /// Reachability bitmaps are the case: they are written and read straight
+    /// from storage, so without this they stay plaintext in an encrypted
+    /// repository and publish the object graph in the clear — the same leak
+    /// `seal_manifest` argues is unacceptable for manifests.
+    pub fn seal_bytes(&self, data: Vec<u8>) -> CompressionResult<Vec<u8>> {
+        self.seal(data)
+    }
+
+    /// The inverse of [`Self::seal_bytes`]. Unsealed input passes through, so
+    /// bitmaps written before a repository was keyed still read.
+    pub fn open_bytes<'a>(&self, data: &'a [u8]) -> CompressionResult<std::borrow::Cow<'a, [u8]>> {
+        self.unseal(data)
+    }
+
     /// Seal `data` if a key is configured, otherwise hand it back untouched.
     ///
     /// The untouched path is what keeps the frozen format frozen: with no key,

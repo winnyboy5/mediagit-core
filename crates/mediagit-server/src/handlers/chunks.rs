@@ -167,8 +167,19 @@ pub async fn upload_chunk(
     // correct body under an already-existing id must still succeed, since
     // `repair_remote` fixes poisoned chunks by re-uploading them
     // unconditionally via this same endpoint.
+    //
+    // Bounded: this is a decompress (and, on an encrypted repository, a
+    // decrypt) of a whole chunk body, and it was the one verification path in
+    // the server with no cap at all -- limited only by how many HTTP
+    // connections a client cared to open. Every sibling path has one.
     let compressor = Arc::new(crate::handlers::repo_compressor(&state, &repo_path)?);
-    if !verify_chunk_content(&compressor, &chunk_id, body.clone()).await {
+    let verify_permit = upload_verify_semaphore()
+        .acquire()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let content_ok = verify_chunk_content(&compressor, &chunk_id, body.clone()).await;
+    drop(verify_permit);
+    if !content_ok {
         tracing::warn!(
             repo = %repo,
             chunk_id = %chunk_id,
@@ -765,6 +776,18 @@ pub struct BatchGetRequest {
 /// same TCP/memory exhaustion the GCS upload path hit (see
 /// project_gcs_concurrent_upload_fix). Default 4, override via
 /// `MEDIAGIT_BATCH_GET_CONCURRENCY`.
+fn upload_verify_semaphore() -> &'static tokio::sync::Semaphore {
+    static SEM: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    SEM.get_or_init(|| {
+        let n: usize = std::env::var("MEDIAGIT_UPLOAD_VERIFY_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n: &usize| n > 0)
+            .unwrap_or(32);
+        tokio::sync::Semaphore::new(n)
+    })
+}
+
 fn batch_get_semaphore() -> Arc<tokio::sync::Semaphore> {
     static SEM: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
     Arc::clone(SEM.get_or_init(|| {

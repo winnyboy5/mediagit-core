@@ -31,6 +31,10 @@ tokio-util = { version = "0.7", features = ["io"] }
 futures = "0.3"
 
 tempfile = { workspace = true }
+hex = { workspace = true }
+# DC-7/D4: the repo key passes through this crate on its way to and from the
+# remote's escrow endpoint; it must not be left in a dropped heap buffer.
+zeroize = "1.8"
 
 # Internal dependencies
 mediagit-versioning = { path = "../mediagit-versioning" }

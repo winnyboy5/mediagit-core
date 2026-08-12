@@ -287,12 +287,22 @@ impl ObjectDatabase {
     /// model (keyed by commit OID, not by a hash of their own bytes), so
     /// they don't go through `exists()`/pack-membership like objects do.
     pub async fn get_bitmap(&self, key: &str) -> anyhow::Result<Vec<u8>> {
-        self.storage.get(key).await
+        let raw = self.storage.get(key).await?;
+        match &self.smart_compressor {
+            Some(c) => Ok(c.open_bytes(&raw)?.into_owned()),
+            None => Ok(raw),
+        }
     }
 
     /// Store a reachability bitmap at the given storage key.
+    /// Sealed in an encrypted repository. A bitmap is a map of the object
+    /// graph; leaving it in the clear says who points at what, which is most
+    /// of what the objects were hiding.
     pub async fn put_bitmap(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
-        self.storage.put(key, data).await
+        match &self.smart_compressor {
+            Some(c) => self.storage.put(key, &c.seal_bytes(data.to_vec())?).await,
+            None => self.storage.put(key, data).await,
+        }
     }
 
     /// Delete a reachability bitmap at the given storage key.

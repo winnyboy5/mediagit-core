@@ -808,11 +808,19 @@ fn a_repo_without_a_recovery_slot_still_works() {
         .stderr(predicate::str::contains("no recovery slot"));
 }
 
-/// The push interlock. D4 (client key escrow) does not exist, so push must
-/// refuse loudly rather than populate a remote with objects nothing there can
-/// verify or hand back.
+/// D4: escrow comes first, and it is a gate, not a best-effort step.
+///
+/// An encrypted push now works — but only against a remote that will take the
+/// key. If the escrow call cannot be completed for any reason, the push must
+/// stop there rather than upload objects the remote could never verify,
+/// register, or hand back. This pins the ordering: the failure happens before
+/// any object leaves, so nothing is uploaded.
+///
+/// The remote here is a closed port, which is the bluntest version of "escrow
+/// did not happen". The 404 case — a real server with encryption switched off
+/// — is covered server-side in `escrow_routes_test`.
 #[test]
-fn push_refuses_on_an_encrypted_repository() {
+fn push_refuses_when_it_cannot_escrow_the_key() {
     let dir = TempDir::new().unwrap();
     let keyfile = write_keyfile(dir.path(), 0x9D);
     let repo = dir.path().join("repo");
@@ -853,8 +861,7 @@ fn push_refuses_on_an_encrypted_repository() {
         .current_dir(&repo)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("at-rest encryption"))
-        .stderr(predicate::str::contains("Nothing was uploaded"));
+        .stderr(predicate::str::contains("encryption-key"));
 }
 
 /// F3: the at-rest key is a per-repository secret living in a process-global

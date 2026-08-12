@@ -127,36 +127,6 @@ impl PushCmd {
         // Validate repository
         let repo_root = find_repo_root()?;
 
-        // DC-7: an encrypted repository cannot be pushed yet.
-        //
-        // Push hands chunk bytes to object storage over presigned PUT URLs
-        // (see `mediagit-protocol/src/client/push.rs`), which is a path the
-        // server never sees the bytes on. Client escrow of the repo key — D4 —
-        // is what makes that safe, and D4 is not built. Rather than upload
-        // objects the server has no way to verify, register, or ever hand back
-        // correctly, this refuses loudly.
-        //
-        // Deliberately a hard error and not a silent fall-back to the proxy
-        // path: the proxy would succeed, and a push that appears to work while
-        // populating a remote with objects nothing can validate is the worse
-        // failure. `has_key` is a filesystem check — no unlocking, no prompt —
-        // so it costs nothing on the unencrypted repos that are the norm.
-        if crate::encryption::has_key(&repo_root) {
-            tracing::error!(
-                repo = %repo_root.display(),
-                "refusing to push an at-rest-encrypted repository (DC-7: no client key escrow yet)"
-            );
-            anyhow::bail!(
-                "this repository has at-rest encryption enabled ({}), and pushing an \
-                 encrypted repository is not supported yet.\n\
-                 \n\
-                 Push uploads object bytes directly to the remote's object storage, and \
-                 there is no way yet for the server to make sense of objects sealed with a \
-                 key it does not have. Nothing was uploaded.",
-                crate::encryption::key_file_path(&repo_root).display()
-            );
-        }
-
         let storage_path = repo_root.join(".mediagit");
         let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
@@ -214,6 +184,45 @@ impl PushCmd {
             c
         };
         let mut client = build_client(credentials.clone());
+
+        // DC-7/D4: an encrypted repository escrows its key with the remote
+        // before anything is uploaded.
+        //
+        // Push hands object bytes to storage over presigned PUT URLs, a path
+        // the server never sees the bytes on. Without the key it ends up
+        // holding objects it cannot verify, register, or hand back correctly
+        // -- which is why this refused outright until now. `has_key` is a
+        // filesystem check, so unencrypted repositories pay nothing.
+        //
+        // Deliberately before the first object leaves: a remote that will not
+        // take the key must stop the push, not fail it halfway through.
+        if crate::encryption::has_key(&repo_root) {
+            let key = crate::encryption::load_repo_key_bytes(&repo_root)?
+                .expect("has_key said there is one");
+            match client.get_encryption_key().await? {
+                mediagit_protocol::client::escrow::EscrowedKey::Present(remote_key) => {
+                    if remote_key.as_slice() != key.as_slice() {
+                        anyhow::bail!(
+                            "the remote holds a DIFFERENT encryption key for this repository.                              Its objects are sealed under that key, so pushing these would                              produce a repository nothing can read end to end. Nothing was                              uploaded."
+                        );
+                    }
+                }
+                _ => {
+                    // Absent, or a remote with no escrow route at all -- either
+                    // way, offer it. `put_encryption_key` turns a 404 into the
+                    // "this remote does not support encrypted repositories"
+                    // message, which is the honest reading of both.
+                    client.put_encryption_key(&key).await?;
+                    if !self.quiet {
+                        println!(
+                            "{} Escrowed this repository's encryption key with {}",
+                            style("🔑").cyan(),
+                            style(remote).yellow()
+                        );
+                    }
+                }
+            }
+        }
 
         // Initialize ODB with smart compression for consistent read/write
         let odb = Arc::new(mediagit_versioning::ObjectDatabase::with_smart_compression(

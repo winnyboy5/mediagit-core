@@ -278,11 +278,19 @@ url = "{}"
         // performs the LAYOUT marker check/write itself (one of the two
         // production wrap-points), keyed off the repo_id just written above.
         init_spinner.set_message("Connecting to remote...");
-        let storage = create_storage_backend(&target_dir).await?;
-        let odb = Arc::new(ObjectDatabase::with_smart_compression(
-            Arc::clone(&storage),
-            1000,
-        ));
+
+        // F3: a `clone` run *inside* an encrypted repository would seal the new
+        // repository's objects under the outer repo's process key while the new
+        // one gets no key file of its own — permanently unopenable.
+        //
+        // The guard normally rides along inside `create_storage_backend`, but
+        // that now happens after the escrow round trip (the ODB must capture
+        // the cloned repo's key at construction). Run it here so the refusal
+        // still comes before any network call: a guard the user only reaches
+        // after a connection error is not a guard.
+        crate::encryption::install_armed_key()?;
+        mediagit_compression::ensure_key_scope(&target_dir)?;
+
         let refdb = RefDatabase::new(&storage_path);
 
         // Initialize protocol client. config.toml was just written above with
@@ -324,6 +332,41 @@ url = "{}"
         };
         crate::repo::remember_credentials(&clone_config, "origin", &credentials);
         init_spinner.finish_with_message("Connected");
+
+        // DC-7/D4: if the remote holds an encryption key for this repository,
+        // adopt it before a single object is written.
+        //
+        // Everything about to be downloaded is sealed under it, and the ODB
+        // built below captures the key at construction — so this has to happen
+        // first or the clone writes objects it cannot read and reports success.
+        // The local master comes from the same precedence `key init` uses
+        // (keyfile, keychain, then a keychain entry provisioned on the spot),
+        // so a clone never prompts.
+        //
+        // 404 means the remote does not do escrow, which is every remote that
+        // is not serving encrypted repositories: nothing to adopt, carry on.
+        if let mediagit_protocol::client::escrow::EscrowedKey::Present(key) =
+            client.get_encryption_key().await?
+        {
+            let source = crate::encryption::adopt_repo_key(&target_dir, &key)?;
+            let repo_key = mediagit_security::encryption::EncryptionKey::from_bytes(key.to_vec())
+                .map_err(|e| anyhow::anyhow!("the remote's encryption key is unusable: {e}"))?;
+            mediagit_compression::set_process_key(&target_dir, repo_key)
+                .context("installing the cloned repository's at-rest encryption key")?;
+            if !self.quiet {
+                println!(
+                    "{} This repository is encrypted; its key is now held by {}",
+                    style("🔑").cyan(),
+                    style(source.describe()).yellow()
+                );
+            }
+        }
+
+        let storage = create_storage_backend(&target_dir).await?;
+        let odb = Arc::new(ObjectDatabase::with_smart_compression(
+            Arc::clone(&storage),
+            1000,
+        ));
 
         // Inherit the remote's CDC seed (if advertised) so this clone produces
         // matching chunk boundaries for better cross-clone dedup. Missing

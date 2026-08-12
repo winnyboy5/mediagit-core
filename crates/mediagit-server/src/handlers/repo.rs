@@ -1150,11 +1150,18 @@ async fn pack_entries_failing_content_verification(
     // serialise. `complete_chunk_uploads` and `verify_chunk_integrity` both
     // already fan out with `buffer_unordered`; this was the odd one out.
     //
-    // Concurrency is bounded, not unbounded: each in-flight verification holds
-    // only a fixed-size copy buffer, not an entry's compressed or decompressed
-    // bytes — see `SmartCompressor::decompress_streaming`. That bound is the
-    // whole point and must not be widened casually.
-    const PACK_VERIFY_RANGE_CONCURRENCY: usize = 16;
+    // Concurrency is bounded, not unbounded. The 16 was chosen on the promise
+    // that each in-flight verification holds only a fixed-size copy buffer --
+    // but `SmartCompressor::decompress_streaming` abandons streaming for a
+    // sealed object, so on an encrypted repository the cost per slot becomes
+    // one whole object rather than one buffer. Halve it there rather than let
+    // 16 concurrent whole-object buffers stand on a promise the code no longer
+    // keeps. `MEDIAGIT_PACK_VERIFY_CONCURRENCY` overrides either way.
+    let range_concurrency: usize = std::env::var("MEDIAGIT_PACK_VERIFY_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n: &usize| n > 0)
+        .unwrap_or(if compressor.is_encrypted() { 8 } else { 16 });
     // Futures yield an INDEX, not a `&ManifestEntry`: keeping the borrow out of the
     // async block is what lets these be spawned concurrently without the lifetime
     // fighting `buffer_unordered`'s HRTB inference.
@@ -1270,7 +1277,7 @@ async fn pack_entries_failing_content_verification(
                 (idx, outcome)
             }
         }))
-        .buffer_unordered(PACK_VERIFY_RANGE_CONCURRENCY)
+        .buffer_unordered(range_concurrency)
         .collect::<Vec<(usize, EntryVerification)>>()
         .await;
 

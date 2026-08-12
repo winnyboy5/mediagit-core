@@ -3490,6 +3490,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "futures",
+ "hex",
  "http 1.4.2",
  "mediagit-versioning",
  "reqwest",
@@ -3500,6 +3501,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]

@@ -62,17 +62,31 @@ write outside a repo's namespace — a cross-tenant escape on a
 multi-repo server.
 
 ## Encryption
-- **At-rest (MediaGit's own)**: **implemented; local-only.**
-  The object envelope exists and is wired: `mediagit-security` implements AES-256-GCM
-  with Argon2id key derivation, and `SmartCompressor` seals every object it writes
-  and opens every sealed object it reads (`MGEN`, `FORMATS.md` §10b). Key management
-  is implemented too (`mediagit key init/status/recover`) — a master key from a
-  passphrase (Argon2id), the OS keychain, or a keyfile/env var. What's still missing
-  is delivering that key to a client for the presigned-upload path, so `push`
-  **hard-refuses** on an encrypted repository by design — encrypted repos can only be
-  used entirely locally today. With no key configured the bytes written are
-  byte-for-byte identical to a build without the feature, which is asserted by test.
-  Tracked as DC-7 (D4 open).
+- **At-rest (MediaGit's own)**: **implemented, including push and clone.**
+  `mediagit-security` implements XAES-256-GCM with Argon2id key derivation, and
+  `SmartCompressor` seals every object it writes and opens every sealed object it
+  reads (`MGEN` v2, `FORMATS.md` §10b). Key management is implemented
+  (`mediagit key init/status/recover/rotate-master`) — a master key from a
+  passphrase (Argon2id), the OS keychain, or a keyfile/env var.
+
+  Push and clone work through **key escrow** (DC-7 D4). On the first push the
+  client hands its repository key to the server over `PUT /{repo}/encryption-key`;
+  the server wraps it under its own master key (`MEDIAGIT_SERVER_ENCRYPTION_KEYFILE`)
+  and keeps it in `<repo>/.mediagit/key.json`. It needs the key because
+  presigned uploads go client→bucket directly, leaving the server holding objects
+  it must still verify, register and walk. A clone fetches the key back with
+  `repo:read` — key access *is* read access — and re-wraps it under a local
+  master. Escrow never overwrites: a different key is `409 Conflict`, because
+  replacing it would orphan everything already sealed under the first.
+
+  The threat model is a compromised **object store**, not a compromised server.
+
+  Encryption is enabled at repository creation or not at all: `key init` refuses
+  on a repository that already holds objects. Encrypting an existing repository
+  needs a full re-seal pass, which is not built.
+
+  With no key configured the bytes written are byte-for-byte identical to a build
+  without the feature, which is asserted by test.
 - **At-rest (cloud)**: **also not wired.** `[storage] encryption` and
   `[storage] encryption_algorithm` are parsed and *validated* (`validation.rs:130`
   rejects anything but `AES256` / `aws:kms*`), which makes them look live — but no

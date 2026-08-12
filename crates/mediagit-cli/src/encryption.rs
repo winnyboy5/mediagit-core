@@ -204,6 +204,67 @@ pub fn load_repo_key(repo_root: &Path) -> Result<Option<EncryptionKey>> {
     Ok(Some(key))
 }
 
+/// This repository's key as raw bytes, for escrowing it with a remote.
+///
+/// Separate from [`load_repo_key`] because `EncryptionKey` deliberately offers
+/// no way back out to its contents — and the bytes are exactly what the escrow
+/// endpoint needs. `Zeroizing`, so a push that fails partway does not leave
+/// the repository's key in a dropped buffer.
+pub fn load_repo_key_bytes(repo_root: &Path) -> Result<Option<Zeroizing<Vec<u8>>>> {
+    if !has_key(repo_root) {
+        return Ok(None);
+    }
+    let stored = read_stored(repo_root)?;
+    let (bytes, _master) = unwrap_repo_key_bytes(&stored)?;
+    Ok(Some(bytes))
+}
+
+/// Adopt `key` as this repository's key, wrapped under a local master.
+///
+/// For clone: the repository key comes from the remote, and this machine has
+/// to be able to open it again tomorrow without asking anyone. Master source
+/// follows the same precedence as `key init` — keyfile, then keychain, then a
+/// keychain entry provisioned on the spot — so cloning never prompts.
+///
+/// Refuses if the repository already has a key file. Overwriting one would
+/// orphan whatever is already sealed under it.
+pub fn adopt_repo_key(repo_root: &Path, key: &[u8]) -> Result<MasterSource> {
+    if has_key(repo_root) {
+        bail!(
+            "{} already exists; refusing to overwrite this repository's encryption key",
+            key_file_path(repo_root).display()
+        );
+    }
+    if key.len() != KEY_LEN {
+        bail!(
+            "an encryption key must be {KEY_LEN} bytes, got {}",
+            key.len()
+        );
+    }
+
+    let (master, source, salt) = provision_master()?;
+    let wrap_key = master
+        .derive_subkey(WRAP_CONTEXT)
+        .map_err(|e| anyhow!("deriving the wrapping subkey: {e}"))?;
+
+    let stored = StoredKey {
+        version: 1,
+        master: source.as_str().to_string(),
+        salt,
+        wrapped: hex::encode(
+            envelope::seal(&wrap_key, key).map_err(|e| anyhow!("wrapping the repo key: {e}"))?,
+        ),
+        // No recovery slot. A clone's recovery path is the remote it came
+        // from, which still holds this key; minting a second code here would
+        // be one more secret to lose for no gain the original does not
+        // already cover.
+        recovery: None,
+        fingerprint: Some(blake3::hash(key).to_hex().to_string()),
+    };
+    write_new(&key_file_path(repo_root), &stored)?;
+    Ok(source)
+}
+
 /// Open the `wrapped` slot with whichever master source this machine can
 /// supply, and hand back the raw repo key.
 ///

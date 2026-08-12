@@ -343,6 +343,7 @@ where
 }
 
 pub(crate) mod browse;
+pub mod escrow;
 pub(crate) mod locks;
 pub(crate) mod packs;
 pub(crate) mod pull;
