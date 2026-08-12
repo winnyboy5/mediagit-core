@@ -260,9 +260,30 @@ pub struct AppState {
     /// One registry, created once and passed in — not constructed here. Two
     /// instances would agree only on their zeroes (the AU-9 shape).
     pub metrics: Option<MetricsRegistry>,
+
+    /// This server's at-rest encryption master key, when `[encryption]` is
+    /// enabled. Wraps every repository key the server holds.
+    ///
+    /// `None` is both the default and the overwhelmingly common case, and it
+    /// must stay completely silent: a server with encryption off behaves
+    /// exactly as it did before DC-7.
+    pub encryption_master: Option<mediagit_security::encryption::EncryptionKey>,
 }
 
 impl AppState {
+    /// Supply the at-rest encryption master key read from `[encryption]`.
+    ///
+    /// A builder rather than a constructor parameter for the same reason
+    /// [`Self::with_metrics`] is one: three constructors already exist, and
+    /// encryption is off in nearly every server that runs.
+    pub fn with_encryption_master(
+        mut self,
+        master: Option<mediagit_security::encryption::EncryptionKey>,
+    ) -> Self {
+        self.encryption_master = master;
+        self
+    }
+
     /// Attach the registry `/metrics` serves so handlers can record into it.
     ///
     /// Takes the registry rather than making one: the same instance must back
@@ -291,6 +312,7 @@ impl AppState {
             grants: GrantsStore::new(),
             bitmap_hits: AtomicU64::new(0),
             metrics: None,
+            encryption_master: None,
         }
     }
 
@@ -330,6 +352,7 @@ impl AppState {
             grants: GrantsStore::new(),
             bitmap_hits: AtomicU64::new(0),
             metrics: None,
+            encryption_master: None,
         }
     }
 
@@ -376,6 +399,7 @@ impl AppState {
             grants,
             bitmap_hits: AtomicU64::new(0),
             metrics: None,
+            encryption_master: None,
         })
     }
 

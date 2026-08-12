@@ -102,6 +102,7 @@ async fn main() -> Result<()> {
     // key. Deferring this to the first escrow request would mean the operator
     // hears about it from a user whose push failed.
     mediagit_server::encryption::verify_startup_config(&config.encryption)?;
+    let encryption_master = mediagit_server::encryption::load_master_key(&config.encryption)?;
     if config.encryption.enabled {
         tracing::info!(
             "At-rest encryption: enabled (repository keys wrapped under the server master key)"
@@ -239,7 +240,8 @@ async fn main() -> Result<()> {
         let state = Arc::new(attach_metrics(
             AppState::new_with_full_auth(config.repos_dir.clone(), jwt_secret, &auth_store_dir)?
                 .with_presigned_ttl(config.presigned_url_ttl_seconds)
-                .with_verify_chunks_on_complete(config.verify_content_on_complete),
+                .with_verify_chunks_on_complete(config.verify_content_on_complete)
+                .with_encryption_master(encryption_master.clone()),
             metrics_registry.clone(),
         ));
 
@@ -298,7 +300,8 @@ async fn main() -> Result<()> {
         Arc::new(attach_metrics(
             AppState::new(config.repos_dir.clone())
                 .with_presigned_ttl(config.presigned_url_ttl_seconds)
-                .with_verify_chunks_on_complete(config.verify_content_on_complete),
+                .with_verify_chunks_on_complete(config.verify_content_on_complete)
+                .with_encryption_master(encryption_master.clone()),
             metrics_registry.clone(),
         ))
     };

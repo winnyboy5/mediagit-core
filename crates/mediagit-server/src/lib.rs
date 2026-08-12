@@ -271,6 +271,12 @@ fn build_router(state: Arc<AppState>, rate_limiter: Option<SharedRateLimiter>) -
         )
         .route("/{repo}/packs/{pack_id}", put(handlers::upload_pack_proxy))
         .route("/{repo}/chunks/locate", post(handlers::locate_chunks))
+        // DC-7/D4 key escrow. Both 404 when `[encryption]` is off, so a server
+        // without the feature is indistinguishable from one that predates it.
+        .route(
+            "/{repo}/encryption-key",
+            put(handlers::put_encryption_key).get(handlers::get_encryption_key),
+        )
         .route(
             "/{repo}/packs/presign-download-urls",
             post(handlers::presign_pack_downloads),
