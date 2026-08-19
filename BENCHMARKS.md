@@ -1,8 +1,12 @@
 # Storage Savings Benchmarks
 
-**Run date:** July 16, 2026 | **Build:** mediagit 0.2.8-beta.1 | **CDC Seed:** 20260716 (pinned for determinism)
+**Run date:** August 18, 2026 | **Build:** mediagit 0.3.0-rc.3 | **CDC Seed:** 20260716 (pinned for determinism)
+**Source:** `dev-tests/qa-suite/logs/20260818-gagate8/economics.tsv` (full SCALE campaign, 220 gates, 0 failures)
 
-> Numbers below were measured on build `0.2.8-beta.1`. Current release is `0.3.0-rc.3`; the storage-savings pipeline is unchanged since this run, but figures have not been re-measured on the current build.
+> Re-measured on `0.3.0-rc.3`. The previous publication was `0.2.8-beta.1` (July 16, 2026) and
+> claimed the savings pipeline was unchanged since; that claim is now **verified rather than
+> asserted** — 56 of the 57 per-version rows are byte-identical to the earlier run. The two
+> differences are named in the table's footnotes; neither is a pipeline change.
 
 ## At-rest encryption cost (DC-7, measured 2026-08-12)
 
@@ -83,10 +87,10 @@ MediaGit applies format-aware chunking and zstd-dict deltas to achieve cross-ver
 | **Machine Learning** | | | | |
 | Safetensors (model chain: v1→v5 weights) | v5 | 150.00 MB | 81.81 MB | **45.5%** |
 | NPZ (checkpoint chain: v1→v3) | v3 | 50.00 MB | 11.63 MB | **76.7%** |
-| Parquet (dataset v1→v3) | v3 | 22.06 MB | 19.13 MB | 13.3% |
+| Parquet (dataset v1→v3) | v3 | 21.45 MB | 20.30 MB | 5.4%[^3] |
 | ONNX (inference model: v1→v2) | v2 | 24.82 MB | 22.94 MB | 7.6% |
 | **Design/VFX** | | | | |
-| PSD (Photoshop: v1→v3 edits) | v3 | 340.63 MB | 113.40 MB | **66.7%** |
+| PSD (Photoshop: v1→v3 edits) | v3 | 340.63 MB | 111.89 MB | **67.2%**[^4] |
 | AI (Illustrator: v1→v3 edits) | v3 | 123.02 MB | 90.64 MB | **26.3%** |
 | **Images** | | | | |
 | PNG (render: v1→v5 edits) | v5 | 1.09 MB | 1.09 MB | 0% |
@@ -95,10 +99,17 @@ MediaGit applies format-aware chunking and zstd-dict deltas to achieve cross-ver
 | **Video** | | | | |
 | Video variants (codec mix: v1→v9) | v9 | 4.89 MB | 4.89 MB | 0% |
 
-**Mixed-corpus aggregate: ~26.5%** — measured on the release campaign's mixed real-file corpus (`dev-tests/qa-suite/reports/20260716-172951/REPORT.md`), not derived from the chain table above. Corpus composition drives the aggregate: real repositories are dominated by pre-compressed bytes (video, JPEG/PNG, compressed containers), which dedup at ~0%. The chain fixture set itself totals 49.0% cumulative savings across all versions (see the Git LFS comparison below).
+**Mixed-corpus aggregate: ~26.5%** — this one figure is **not** from the rc.3 run. It was measured on `0.2.8-beta.1` against the release campaign's mixed real-file corpus (`dev-tests/qa-suite/reports/20260716-172951/REPORT.md`), and the SCALE campaign does not rebuild that corpus, so there is no rc.3 counterpart to restate it from. Treat it as the older number it is. It is not derived from the chain table above. Corpus composition drives the aggregate: real repositories are dominated by pre-compressed bytes (video, JPEG/PNG, compressed containers), which dedup at ~0%. The chain fixture set itself totals **49.2%** cumulative savings across all versions (2330.42 MB raw → 1183.42 MB stored; see the Git LFS comparison below).
 
 [^1]: GLB v3 incremental ODB growth rounds to 0.00 MB — the edited model dedups bit-for-bit against prior versions.
 [^2]: SVG stored size rounds to 0.01 MB; percentages are coarse at sub-MB scale.
+[^3]: Parquet is the one row whose **raw** size moved (22.06 → 21.45 MB), so
+    rc.3 is not comparable to the earlier figure: the generated fixture changed
+    between the two runs, not the compressor. The figure given is the rc.3 fixture
+    measured on rc.3.
+[^4]: PSD improved by 1.51 MB (66.7% → 67.2%). Delta-base selection is
+    order-sensitive under concurrent chunk writes, so this row moves by a few
+    tenths of a percent between runs in either direction. Not a pipeline change.
 
 ---
 
@@ -271,7 +282,7 @@ Two follow-up approaches were measured and rejected before deployment: whole-fil
 **Cumulative example** (the full chain fixture set above, all versions of all families, computed from `economics.tsv`):
 - Git LFS stores every version in full: **2,331.9 MB**
 - MediaGit total ODB after the same adds: **1,188.2 MB**
-- **49.0% less storage** across the version history
+- **49.2% less storage** across the version history
 
 Per-family cumulative highlights: WAV chain 201.1 → 42.3 MB (79.0% less), GLB 39.5 → 7.8 MB (80.2% less), safetensors 750.0 → 410.0 MB (45.3% less), PSD 624.4 → 197.7 MB (68.3% less). Pre-compressed formats (JPG/PNG/video) store the same bytes as LFS would.
 

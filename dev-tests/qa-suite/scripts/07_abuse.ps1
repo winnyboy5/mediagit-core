@@ -466,7 +466,16 @@ function Drill-A7-BackendOutage {
 function Drill-A8-DiskFull {
   $drill = "A8-disk-full"
   if (-not (Test-QaAdminRights)) {
-    Rec $drill "SKIP" "requires admin rights to attach a small fixed-size VHD via diskpart; not available on this host"
+    # Actionable, because this skip is permanent otherwise: it has been the one
+    # standing unexpected-skip in every campaign, and a skip nobody knows how to
+    # clear eventually reads as "this drill does not exist". There is no
+    # non-elevated equivalent on Windows -- diskpart, New-VHD and fsutil quota
+    # all require it -- so the only alternatives are an elevated shell or a
+    # fault-injection hook in the product, and the latter is not worth a test.
+    Rec $drill "SKIP" ("requires admin: a size-capped volume needs diskpart 'attach vdisk'. " +
+      "To run it, start the campaign from an elevated PowerShell " +
+      "(Start-Process powershell -Verb RunAs) and re-run run_all.ps1; everything " +
+      "else in the suite runs unelevated.")
     return
   }
 
