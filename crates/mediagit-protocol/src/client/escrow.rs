@@ -50,10 +50,7 @@ impl ProtocolClient {
         let url = format!("{}/encryption-key", self.base_url);
         tracing::debug!("GET {}", url);
 
-        let response = self
-            .client
-            .get(&url)
-            .send()
+        let response = crate::client::send_with_rate_limit_retry(|| self.client.get(&url).send())
             .await
             .context("Failed to send GET /encryption-key")?;
 
@@ -98,15 +95,16 @@ impl ProtocolClient {
         let url = format!("{}/encryption-key", self.base_url);
         tracing::debug!("PUT {}", url);
 
-        let response = self
-            .client
-            .put(&url)
-            .json(&RepoKeyPayload {
-                key: hex::encode(key),
-            })
-            .send()
-            .await
-            .context("Failed to send PUT /encryption-key")?;
+        let response = crate::client::send_with_rate_limit_retry(|| {
+            self.client
+                .put(&url)
+                .json(&RepoKeyPayload {
+                    key: hex::encode(key),
+                })
+                .send()
+        })
+        .await
+        .context("Failed to send PUT /encryption-key")?;
 
         match response.status().as_u16() {
             200 | 201 | 204 => Ok(()),

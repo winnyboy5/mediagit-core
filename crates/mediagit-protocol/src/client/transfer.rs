@@ -24,13 +24,10 @@ impl ProtocolClient {
             "Checking chunk existence on remote"
         );
 
-        let response = self
-            .client
-            .post(&url)
-            .json(&chunk_ids)
-            .send()
-            .await
-            .context("Failed to POST /chunks/check")?;
+        let response =
+            send_with_rate_limit_retry(|| self.client.post(&url).json(&chunk_ids).send())
+                .await
+                .context("Failed to POST /chunks/check")?;
 
         if !response.status().is_success() {
             anyhow::bail!(
@@ -64,12 +61,13 @@ impl ProtocolClient {
 
         let url = format!("{}/chunks/upload-urls", self.base_url);
         let result = async {
-            let resp = self
-                .client
-                .post(&url)
-                .json(&Req { chunk_ids, sizes })
-                .send()
-                .await?;
+            let resp = send_with_rate_limit_retry(|| {
+                self.client
+                    .post(&url)
+                    .json(&Req { chunk_ids, sizes })
+                    .send()
+            })
+            .await?;
             if !resp.status().is_success() {
                 anyhow::bail!("POST /chunks/upload-urls returned {}", resp.status());
             }
@@ -125,12 +123,14 @@ impl ProtocolClient {
             .map(|batch| async move {
                 let url = format!("{}/chunks/download-urls", base_url);
                 let result = async {
-                    let resp = client
-                        .post(&url)
-                        .json(&Req { chunks: batch })
-                        .timeout(std::time::Duration::from_secs(20))
-                        .send()
-                        .await?;
+                    let resp = send_with_rate_limit_retry(|| {
+                        client
+                            .post(&url)
+                            .json(&Req { chunks: batch })
+                            .timeout(std::time::Duration::from_secs(20))
+                            .send()
+                    })
+                    .await?;
                     if !resp.status().is_success() {
                         anyhow::bail!("POST /chunks/download-urls returned {}", resp.status());
                     }
@@ -171,12 +171,9 @@ impl ProtocolClient {
         }
 
         let url = format!("{}/chunks/complete", self.base_url);
-        let resp = self
-            .client
-            .post(&url)
-            .json(&Req { chunk_ids })
-            .send()
-            .await?;
+        let resp =
+            send_with_rate_limit_retry(|| self.client.post(&url).json(&Req { chunk_ids }).send())
+                .await?;
         if !resp.status().is_success() {
             anyhow::bail!("POST /chunks/complete returned {}", resp.status());
         }
@@ -217,15 +214,16 @@ impl ProtocolClient {
         let url = format!("{}/chunks/verify-integrity", self.base_url);
         let mut invalid = Vec::new();
         for batch in chunk_ids.chunks(BATCH_SIZE) {
-            let resp = self
-                .client
-                .post(&url)
-                .json(&Req {
-                    chunk_ids: batch,
-                    evict_invalid,
-                })
-                .send()
-                .await?;
+            let resp = send_with_rate_limit_retry(|| {
+                self.client
+                    .post(&url)
+                    .json(&Req {
+                        chunk_ids: batch,
+                        evict_invalid,
+                    })
+                    .send()
+            })
+            .await?;
             if !resp.status().is_success() {
                 anyhow::bail!("POST /chunks/verify-integrity returned {}", resp.status());
             }
@@ -264,15 +262,16 @@ impl ProtocolClient {
         let url = format!("{}/objects/verify-integrity", self.base_url);
         let mut invalid = Vec::new();
         for batch in oids.chunks(BATCH_SIZE) {
-            let resp = self
-                .client
-                .post(&url)
-                .json(&Req {
-                    oids: batch,
-                    evict_invalid,
-                })
-                .send()
-                .await?;
+            let resp = send_with_rate_limit_retry(|| {
+                self.client
+                    .post(&url)
+                    .json(&Req {
+                        oids: batch,
+                        evict_invalid,
+                    })
+                    .send()
+            })
+            .await?;
             if !resp.status().is_success() {
                 anyhow::bail!("POST /objects/verify-integrity returned {}", resp.status());
             }
@@ -327,7 +326,11 @@ impl ProtocolClient {
         let url = format!("{}/chunk-deltas/check", self.base_url);
         let payload: Vec<String> = chunk_ids.iter().map(|o| o.to_hex()).collect();
 
-        let response = match self.client.post(&url).json(&payload).send().await {
+        let response = match send_with_rate_limit_retry(|| {
+            self.client.post(&url).json(&payload).send()
+        })
+        .await
+        {
             Ok(r) => r,
             Err(e) => {
                 // Transport failure is unexpected — warn so production issues surface

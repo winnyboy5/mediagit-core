@@ -54,12 +54,12 @@ impl ProtocolClient {
         }
         url.query_pairs_mut().append_pair("ref", ref_name);
 
-        let response = self
-            .client
-            .get(url)
-            .send()
-            .await
-            .context("Failed to GET file")?;
+        // `url` is cloned per attempt: the closure is `Fn` and is re-invoked
+        // on a 429, and `reqwest::Url` is not `Copy`.
+        let response =
+            crate::client::send_with_rate_limit_retry(|| self.client.get(url.clone()).send())
+                .await
+                .context("Failed to GET file")?;
 
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             anyhow::bail!("File '{}' not found at ref '{}'", file_path, ref_name);

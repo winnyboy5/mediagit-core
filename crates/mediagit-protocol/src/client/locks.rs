@@ -52,13 +52,19 @@ impl ProtocolClient {
         }
 
         let url = format!("{}/locks", self.base_url);
-        let resp = self
-            .client
-            .post(&url)
-            .json(&Req { path, owner })
-            .send()
-            .await
-            .context("Failed to POST /locks")?;
+        let resp = crate::client::send_with_rate_limit_retry(|| {
+            // `owner` is cloned, not moved: the closure is `Fn` and gets
+            // re-invoked per 429 retry, so moving it out compiles only once.
+            self.client
+                .post(&url)
+                .json(&Req {
+                    path,
+                    owner: owner.clone(),
+                })
+                .send()
+        })
+        .await
+        .context("Failed to POST /locks")?;
 
         if resp.status().as_u16() == 409 {
             let conflict: Conflict = resp

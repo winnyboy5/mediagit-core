@@ -256,16 +256,17 @@ impl ProtocolClient {
         }
 
         let url = format!("{}/chunks/locate", self.base_url);
-        let resp = self
-            .client
-            .post(&url)
-            .json(&Req {
-                chunk_ids,
-                wants_full_repo,
-            })
-            .send()
-            .await
-            .context("POST /chunks/locate")?;
+        let resp = send_with_rate_limit_retry(|| {
+            self.client
+                .post(&url)
+                .json(&Req {
+                    chunk_ids,
+                    wants_full_repo,
+                })
+                .send()
+        })
+        .await
+        .context("POST /chunks/locate")?;
         if !resp.status().is_success() {
             anyhow::bail!("POST /chunks/locate returned {}", resp.status());
         }
@@ -300,12 +301,10 @@ impl ProtocolClient {
         }
         let url = format!("{}/packs/presign-download-urls", self.base_url);
         let result = async {
-            let resp = self
-                .client
-                .post(&url)
-                .json(&Req { pack_ids })
-                .send()
-                .await?;
+            let resp = send_with_rate_limit_retry(|| {
+                self.client.post(&url).json(&Req { pack_ids }).send()
+            })
+            .await?;
             if !resp.status().is_success() {
                 anyhow::bail!(
                     "POST /packs/presign-download-urls returned {}",
@@ -632,6 +631,9 @@ async fn fetch_pack_slices_presigned(
             b.record_range_get(covered > 1);
         }
         let hdr = format!("bytes={}-{}", range_start, range_end.saturating_sub(1));
+        // Presigned direct-to-bucket GET — not routed through
+        // send_with_rate_limit_retry, which only applies to the server's own
+        // 429s and Retry-After semantics.
         let resp = client
             .get(url)
             .header("Range", &hdr)
@@ -716,7 +718,7 @@ async fn fetch_pack_slices_batch(
     chunks: &[(String, u64, u32)],
     comp_hashes: &std::collections::HashMap<String, String>,
 ) -> Result<Vec<(Oid, Vec<u8>)>> {
-    #[derive(serde::Serialize)]
+    #[derive(serde::Serialize, Clone)]
     struct Entry<'a> {
         chunk_oid: &'a str,
         offset: u64,
@@ -738,12 +740,17 @@ async fn fetch_pack_slices_batch(
         .collect();
 
     let url = format!("{}/packs/batch-get", base_url);
-    let resp = client
-        .post(&url)
-        .json(&Req { pack_oid, entries })
-        .send()
-        .await
-        .with_context(|| format!("POST /packs/batch-get for pack {}", pack_oid))?;
+    let resp = send_with_rate_limit_retry(|| {
+        client
+            .post(&url)
+            .json(&Req {
+                pack_oid,
+                entries: entries.clone(),
+            })
+            .send()
+    })
+    .await
+    .with_context(|| format!("POST /packs/batch-get for pack {}", pack_oid))?;
 
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         tracing::debug!(pack = %pack_oid, "batch-get 404 (old server); pack falls back to per-chunk");

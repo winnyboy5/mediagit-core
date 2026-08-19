@@ -316,14 +316,15 @@ impl ProtocolClient {
         let url = format!("{}/objects/pack", self.base_url);
         tracing::debug!("POST {} ({} bytes)", url, pack_data.len());
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/octet-stream")
-            .body(pack_data.to_vec())
-            .send()
-            .await
-            .context("Failed to upload pack file")?;
+        let response = crate::client::send_with_rate_limit_retry(|| {
+            self.client
+                .post(&url)
+                .header("Content-Type", "application/octet-stream")
+                .body(pack_data.to_vec())
+                .send()
+        })
+        .await
+        .context("Failed to upload pack file")?;
 
         let status = response.status();
         if !status.is_success() {
@@ -585,14 +586,18 @@ impl ProtocolClient {
         compressed_delta_bytes: Vec<u8>,
     ) -> Result<()> {
         let url = format!("{}/chunk-deltas/{}", self.base_url, chunk_id.to_hex());
-        let response = self
-            .client
-            .put(&url)
-            .header("x-mediagit-delta-base", base_id.to_hex())
-            .body(compressed_delta_bytes)
-            .send()
-            .await
-            .context(format!("Failed to PUT /chunk-deltas/{}", chunk_id))?;
+        // Bytes outside the closure, .clone() inside — send_with_rate_limit_retry
+        // re-invokes `make` per attempt, and `Fn` cannot move an owned Vec out.
+        let compressed_delta_bytes: bytes::Bytes = compressed_delta_bytes.into();
+        let response = crate::client::send_with_rate_limit_retry(|| {
+            self.client
+                .put(&url)
+                .header("x-mediagit-delta-base", base_id.to_hex())
+                .body(compressed_delta_bytes.clone())
+                .send()
+        })
+        .await
+        .context(format!("Failed to PUT /chunk-deltas/{}", chunk_id))?;
 
         if !response.status().is_success() {
             anyhow::bail!(
@@ -612,13 +617,11 @@ impl ProtocolClient {
     async fn upload_manifest(&self, oid: &Oid, data: &[u8]) -> Result<()> {
         let url = format!("{}/manifests/{}", self.base_url, oid.to_hex());
 
-        let response = self
-            .client
-            .put(&url)
-            .body(data.to_vec())
-            .send()
-            .await
-            .context(format!("Failed to PUT /manifests/{}", oid))?;
+        let response = crate::client::send_with_rate_limit_retry(|| {
+            self.client.put(&url).body(data.to_vec()).send()
+        })
+        .await
+        .context(format!("Failed to PUT /manifests/{}", oid))?;
 
         if !response.status().is_success() {
             anyhow::bail!(
@@ -1448,21 +1451,20 @@ impl ProtocolClient {
                         let client = self.client.clone();
                         let base_url = self.base_url.clone();
                         async move {
+                            let delta_bytes: bytes::Bytes = delta_bytes.into();
                             let delta_size = delta_bytes.len() as u64;
                             let url = format!("{}/chunk-deltas/{}", base_url, chunk_id.to_hex());
-                            let resp = client
-                                .put(&url)
-                                .header("x-mediagit-delta-base", base_id.to_hex())
-                                .body(delta_bytes)
-                                .send()
-                                .await
-                                .map_err(|e| {
-                                    anyhow::anyhow!(
-                                        "Failed to upload chunk-delta {}: {}",
-                                        chunk_id,
-                                        e
-                                    )
-                                })?;
+                            let resp = crate::client::send_with_rate_limit_retry(|| {
+                                client
+                                    .put(&url)
+                                    .header("x-mediagit-delta-base", base_id.to_hex())
+                                    .body(delta_bytes.clone())
+                                    .send()
+                            })
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!("Failed to upload chunk-delta {}: {}", chunk_id, e)
+                            })?;
                             if !resp.status().is_success() {
                                 anyhow::bail!(
                                     "PUT /chunk-deltas/{} failed with status: {}",
@@ -2123,20 +2125,21 @@ impl ProtocolClient {
                                 }
 
                                 // Proxy path: used when no presigned URL was issued, or all
-                                // direct attempts for this chunk were exhausted.
+                                // direct attempts for this chunk were exhausted. One
+                                // control-plane request per chunk, so wait out 429
+                                // rather than failing (mirrors the pipelined path).
                                 let url = format!("{}/chunks/{}", base_url, hex);
-                                let resp = client
-                                    .put(&url)
-                                    .body(chunk_data)
-                                    .send()
-                                    .await
-                                    .map_err(|e| {
-                                        anyhow::anyhow!(
-                                            "Failed to upload chunk {}: {}",
-                                            chunk_id,
-                                            e
-                                        )
-                                    })?;
+                                let resp = crate::client::send_with_rate_limit_retry(|| {
+                                    client.put(&url).body(chunk_data.clone()).send()
+                                })
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "Failed to upload chunk {}: {}",
+                                        chunk_id,
+                                        e
+                                    )
+                                })?;
                                 if !resp.status().is_success() {
                                     anyhow::bail!(
                                         "PUT /chunks/{} failed with status: {}",
@@ -2194,13 +2197,17 @@ impl ProtocolClient {
                                 let base_url = self.base_url.clone();
                                 let odb = odb.clone();
                                 async move {
-                                    let chunk_data = odb.get_compressed_chunk(&chunk_id).await?;
+                                    let chunk_data: bytes::Bytes =
+                                        odb.get_compressed_chunk(&chunk_id).await?.into();
                                     let chunk_size = chunk_data.len() as u64;
                                     let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
-                                    let resp =
-                                        client.put(&url).body(chunk_data).send().await.map_err(
-                                            |e| anyhow::anyhow!("Retry chunk {}: {}", chunk_id, e),
-                                        )?;
+                                    let resp = crate::client::send_with_rate_limit_retry(|| {
+                                        client.put(&url).body(chunk_data.clone()).send()
+                                    })
+                                    .await
+                                    .map_err(|e| {
+                                        anyhow::anyhow!("Retry chunk {}: {}", chunk_id, e)
+                                    })?;
                                     if !resp.status().is_success() {
                                         anyhow::bail!(
                                             "Retry PUT /chunks/{} failed: {}",
@@ -2276,18 +2283,17 @@ impl ProtocolClient {
                             let base_url = self.base_url.clone();
                             let odb = odb.clone();
                             async move {
-                                let chunk_data = odb.get_compressed_chunk(&chunk_id).await?;
+                                let chunk_data: bytes::Bytes =
+                                    odb.get_compressed_chunk(&chunk_id).await?.into();
                                 let chunk_size = chunk_data.len() as u64;
                                 let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
-                                let resp = client.put(&url).body(chunk_data).send().await.map_err(
-                                    |e| {
-                                        anyhow::anyhow!(
-                                            "Failed to upload chunk {}: {}",
-                                            chunk_id,
-                                            e
-                                        )
-                                    },
-                                )?;
+                                let resp = crate::client::send_with_rate_limit_retry(|| {
+                                    client.put(&url).body(chunk_data.clone()).send()
+                                })
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!("Failed to upload chunk {}: {}", chunk_id, e)
+                                })?;
                                 if !resp.status().is_success() {
                                     anyhow::bail!(
                                         "PUT /chunks/{} failed with status: {}",
@@ -2323,22 +2329,25 @@ impl ProtocolClient {
                             let client = self.client.clone();
                             let base_url = self.base_url.clone();
                             async move {
+                                let delta_bytes: bytes::Bytes = delta_bytes.into();
                                 let delta_size = delta_bytes.len() as u64;
                                 let url =
                                     format!("{}/chunk-deltas/{}", base_url, chunk_id.to_hex());
-                                let resp = client
-                                    .put(&url)
-                                    .header("x-mediagit-delta-base", base_id.to_hex())
-                                    .body(delta_bytes)
-                                    .send()
-                                    .await
-                                    .map_err(|e| {
-                                        anyhow::anyhow!(
-                                            "Failed to upload chunk-delta {}: {}",
-                                            chunk_id,
-                                            e
-                                        )
-                                    })?;
+                                let resp = crate::client::send_with_rate_limit_retry(|| {
+                                    client
+                                        .put(&url)
+                                        .header("x-mediagit-delta-base", base_id.to_hex())
+                                        .body(delta_bytes.clone())
+                                        .send()
+                                })
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "Failed to upload chunk-delta {}: {}",
+                                        chunk_id,
+                                        e
+                                    )
+                                })?;
                                 if !resp.status().is_success() {
                                     anyhow::bail!(
                                         "PUT /chunk-deltas/{} failed with status: {}",

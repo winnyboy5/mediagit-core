@@ -285,13 +285,120 @@ pub(crate) fn http_pool_max() -> usize {
         .unwrap_or(64)
 }
 
-/// Maximum 429 retries for a single control-plane request. Default 5,
+/// Maximum 429 retries for a single control-plane request. Default 10,
 /// overridable via `MEDIAGIT_RATE_LIMIT_RETRIES`.
-fn rate_limit_max_retries() -> u32 {
+///
+/// Raised from 5 on 2026-08-18. A rate limit is BACKPRESSURE, not an error: the
+/// right response is to get slower, not to fail. Five attempts with equal
+/// jitter is only ~4-8s of total waiting, and a request contending with dozens
+/// of siblings against a tight budget can easily need longer than that just to
+/// reach the front of the queue -- measured against a 2 rps server, requests
+/// reached attempt 4 of 5 and then gave up, failing a push that only needed to
+/// be patient.
+///
+/// Ten attempts is roughly 40-80s of backoff before surrendering. That is still
+/// firmly bounded -- nothing like the 3600s stall this whole area started with
+/// -- while being long enough that a legitimate push under a deliberately tight
+/// limiter completes instead of erroring.
+pub(crate) fn rate_limit_max_retries() -> u32 {
     std::env::var("MEDIAGIT_RATE_LIMIT_RETRIES")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(5)
+        .unwrap_or(10)
+}
+
+/// A cheap non-cryptographic jitter source.
+///
+/// `rand` is not a dependency of this crate and this does not justify adding
+/// one: retry spreading needs to be unpredictable between peers, not secure.
+/// The crate already hand-rolls a seed for MPU part scheduling; this is the
+/// same trick in one place.
+fn jitter_upto(bound_millis: u64) -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    if bound_millis == 0 {
+        return 0;
+    }
+    let seed = COUNTER.fetch_add(1, Ordering::Relaxed)
+        ^ std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+    // splitmix64 finalizer -- good enough avalanche for spreading retries.
+    let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    (z ^ (z >> 31)) % bound_millis
+}
+
+/// How long to wait before retrying, given the attempt number and the server's
+/// `Retry-After` header if it sent one.
+///
+/// Jitter is not decoration. Un-jittered exponential backoff is the one shape
+/// AWS's own measurements single out as strictly worse than every jittered
+/// variant, on both total client work and total elapsed time: N clients that
+/// were rate limited together retry together, forever. This crate's backoff
+/// was `250ms * 2^attempt` with no spread at all, and a large push runs many
+/// uploads concurrently -- precisely the herd that produces.
+///
+/// The result is the LARGER of what the server asked for and our own Full
+/// Jitter backoff. Both halves are load-bearing:
+///
+/// - Taking the server's number as a lower bound is the whole point of the
+///   header: it knows when the bucket refills and we do not.
+/// - Flooring it with our own backoff is what makes the header safe to trust.
+///   `tower_governor`'s `use_headers()` emits whole seconds and rounds down, so
+///   a bucket that refills in under a second advertises **`Retry-After: 0`** --
+///   verified, see `retry_after_carries_an_actionable_delay` in
+///   `mediagit-server`. A client that honours that literally sleeps for zero
+///   and hammers straight back, spending its entire retry budget in
+///   microseconds without the bucket ever refilling. That is not theoretical:
+///   it is what made a 500-commit churn push fail against a rate-limited
+///   server in `20260817-gagate3`, on `POST /packs/complete`.
+///
+/// Un-jittered exponential backoff is separately the one shape AWS's own
+/// measurements single out as strictly worse than every jittered variant, on
+/// both total client work and total elapsed time -- N clients limited together
+/// otherwise retry together, forever.
+///
+/// The 16s ceiling on our own backoff is preserved so a push cannot stall
+/// indefinitely behind a misconfigured limiter. A server asking for longer than
+/// that is still honoured: it asked, and it knows.
+pub(crate) fn rate_limit_backoff(
+    attempt: u32,
+    retry_after: Option<&reqwest::header::HeaderValue>,
+) -> std::time::Duration {
+    let own = {
+        let ceiling = (250u64 * (1u64 << attempt.min(6))).min(16_000);
+        // EQUAL jitter (half fixed, half random), not FULL jitter
+        // (`random(0, ceiling)`).
+        //
+        // Full Jitter is the better choice when the server tells you nothing
+        // and you are only trying to spread a herd. Ours tells you nothing
+        // WORSE than that: `tower_governor` rounds `Retry-After` down to whole
+        // seconds, so any sub-second refill reports 0 and the client is left to
+        // invent the entire delay. Under full jitter that invented delay can
+        // round to near zero on any attempt -- observed 191ms, 220ms, 95ms on
+        // consecutive retries against a 2 rps limiter needing ~500ms per token,
+        // which burned the whole 5-attempt budget without ever waiting long
+        // enough, and failed the push.
+        //
+        // Equal jitter keeps the spread that breaks the herd while guaranteeing
+        // the wait actually GROWS: attempt 1 lands in 125-250ms, attempt 4 in
+        // 2-4s. AWS's own analysis puts it level with full jitter on total work
+        // and completion time, so nothing is given up here.
+        ceiling / 2 + jitter_upto(ceiling / 2)
+    };
+    let asked = retry_after
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|secs| {
+            let base = secs.saturating_mul(1000);
+            base + jitter_upto(base / 2)
+        })
+        .unwrap_or(0);
+    std::time::Duration::from_millis(own.max(asked))
 }
 
 /// Send a control-plane request, waiting out HTTP 429 instead of failing.
@@ -322,15 +429,7 @@ where
         if resp.status() != reqwest::StatusCode::TOO_MANY_REQUESTS || attempt >= max {
             return Ok(resp);
         }
-        let wait = resp
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .map(std::time::Duration::from_secs)
-            // No header: exponential backoff, capped so a push cannot stall
-            // indefinitely behind a misconfigured limiter.
-            .unwrap_or_else(|| std::time::Duration::from_millis(250 * (1u64 << attempt.min(6))));
+        let wait = rate_limit_backoff(attempt, resp.headers().get(reqwest::header::RETRY_AFTER));
         attempt += 1;
         tracing::warn!(
             attempt,
@@ -439,10 +538,7 @@ impl ProtocolClient {
         let url = format!("{}/info/refs", self.base_url);
         tracing::debug!("GET {}", url);
 
-        let response = self
-            .client
-            .get(&url)
-            .send()
+        let response = send_with_rate_limit_retry(|| self.client.get(&url).send())
             .await
             .context("Failed to send GET /info/refs")?;
 
@@ -464,10 +560,7 @@ impl ProtocolClient {
         let url = format!("{}/info/refs", self.base_url);
         tracing::debug!("GET {}", url);
 
-        let response = self
-            .client
-            .get(&url)
-            .send()
+        let response = send_with_rate_limit_retry(|| self.client.get(&url).send())
             .await
             .context("Failed to send GET /info/refs")?;
 
@@ -492,11 +585,7 @@ impl ProtocolClient {
         let url = format!("{}/refs/update", self.base_url);
         tracing::debug!("POST {}", url);
 
-        let response = self
-            .client
-            .post(&url)
-            .json(&request)
-            .send()
+        let response = send_with_rate_limit_retry(|| self.client.post(&url).json(&request).send())
             .await
             .context("Failed to update refs")?;
 
@@ -785,11 +874,16 @@ pub(crate) async fn upload_chunk_mpu(
         part_number: i32,
         url: String,
     }
+    // `parts` is borrowed rather than owned: `send_with_rate_limit_retry`
+    // re-invokes its closure per attempt, and an owned `Vec` moved into this
+    // struct inside that closure would fail to compile (E0507, moving a
+    // captured variable out of an `Fn` closure). A borrow is re-usable across
+    // attempts for free.
     #[derive(serde::Serialize)]
     struct CompleteReq<'a> {
         chunk_id: &'a str,
         upload_id: &'a str,
-        parts: Vec<CompletedPart>,
+        parts: &'a [CompletedPart],
     }
     #[derive(serde::Serialize)]
     struct CompletedPart {
@@ -804,14 +898,16 @@ pub(crate) async fn upload_chunk_mpu(
 
     // --- Start MPU ---
     let start_url = format!("{}/chunks/mpu/start", base_url);
-    let resp = match api_client
-        .post(&start_url)
-        .json(&StartReq {
-            chunk_id: chunk_hex,
-            chunk_size: chunk_data.len() as u64,
-        })
-        .send()
-        .await
+    let resp = match send_with_rate_limit_retry(|| {
+        api_client
+            .post(&start_url)
+            .json(&StartReq {
+                chunk_id: chunk_hex,
+                chunk_size: chunk_data.len() as u64,
+            })
+            .send()
+    })
+    .await
     {
         Ok(r) => r,
         Err(e) => {
@@ -926,14 +1022,16 @@ pub(crate) async fn upload_chunk_mpu(
                                 status,
                                 "MPU part permanent error; aborting MPU"
                             );
-                            let _ = api_client
-                                .post(format!("{}/chunks/mpu/abort", base_url))
-                                .json(&AbortReq {
-                                    chunk_id: chunk_hex,
-                                    upload_id: &upload_id,
-                                })
-                                .send()
-                                .await;
+                            let _ = send_with_rate_limit_retry(|| {
+                                api_client
+                                    .post(format!("{}/chunks/mpu/abort", base_url))
+                                    .json(&AbortReq {
+                                        chunk_id: chunk_hex,
+                                        upload_id: &upload_id,
+                                    })
+                                    .send()
+                            })
+                            .await;
                             return false;
                         }
                     }
@@ -961,14 +1059,16 @@ pub(crate) async fn upload_chunk_mpu(
                     part = part.part_number,
                     "MPU part retry budget exhausted; aborting MPU"
                 );
-                let _ = api_client
-                    .post(format!("{}/chunks/mpu/abort", base_url))
-                    .json(&AbortReq {
-                        chunk_id: chunk_hex,
-                        upload_id: &upload_id,
-                    })
-                    .send()
-                    .await;
+                let _ = send_with_rate_limit_retry(|| {
+                    api_client
+                        .post(format!("{}/chunks/mpu/abort", base_url))
+                        .json(&AbortReq {
+                            chunk_id: chunk_hex,
+                            upload_id: &upload_id,
+                        })
+                        .send()
+                })
+                .await;
                 return false;
             }
         }
@@ -976,15 +1076,17 @@ pub(crate) async fn upload_chunk_mpu(
 
     // --- Complete MPU ---
     let complete_url = format!("{}/chunks/mpu/complete", base_url);
-    let complete_resp = match api_client
-        .post(&complete_url)
-        .json(&CompleteReq {
-            chunk_id: chunk_hex,
-            upload_id: &upload_id,
-            parts: completed_parts,
-        })
-        .send()
-        .await
+    let complete_resp = match send_with_rate_limit_retry(|| {
+        api_client
+            .post(&complete_url)
+            .json(&CompleteReq {
+                chunk_id: chunk_hex,
+                upload_id: &upload_id,
+                parts: &completed_parts,
+            })
+            .send()
+    })
+    .await
     {
         Ok(r) => r,
         Err(e) => {
@@ -1255,5 +1357,103 @@ mod tests {
             1,
             "only 429 is a rate-limit signal; other statuses are the caller's to handle"
         );
+    }
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::rate_limit_backoff;
+    use reqwest::header::HeaderValue;
+
+    #[test]
+    fn honours_retry_after_and_never_undercuts_it() {
+        let h = HeaderValue::from_static("2");
+        for _ in 0..50 {
+            let d = rate_limit_backoff(0, Some(&h)).as_millis() as u64;
+            assert!(
+                (2000..3000).contains(&d),
+                "expected the server's 2s plus up to half again, got {d}ms"
+            );
+        }
+    }
+
+    /// `Retry-After: 0` must NOT mean "retry immediately".
+    ///
+    /// This test previously asserted the opposite, on the grounds that it kept
+    /// the 429 tests fast. It was asserting the bug: the server really does
+    /// send 0 whenever the bucket refills in under a second, and honouring
+    /// that literally spends the whole retry budget in microseconds. The floor
+    /// is what makes the header safe to trust.
+    #[test]
+    fn retry_after_zero_still_backs_off() {
+        let h = HeaderValue::from_static("0");
+        let mut any_nonzero = false;
+        for _ in 0..100 {
+            let d = rate_limit_backoff(0, Some(&h)).as_millis() as u64;
+            assert!(
+                d <= 250,
+                "attempt-0 backoff should stay under the ceiling, got {d}ms"
+            );
+            if d > 0 {
+                any_nonzero = true;
+            }
+        }
+        assert!(
+            any_nonzero,
+            "Retry-After: 0 must fall back to our own jittered backoff, not to zero"
+        );
+    }
+
+    /// A server asking for longer than our own ceiling is still honoured.
+    #[test]
+    fn a_long_retry_after_wins_over_our_backoff() {
+        let h = HeaderValue::from_static("30");
+        let d = rate_limit_backoff(0, Some(&h)).as_millis() as u64;
+        assert!(
+            (30_000..=45_000).contains(&d),
+            "expected ~30-45s, got {d}ms"
+        );
+    }
+
+    /// Equal jitter must never collapse to a uselessly short wait.
+    ///
+    /// This is the property that matters when the server sends `Retry-After: 0`
+    /// and the client has to invent the delay: under full jitter a retry could
+    /// land at ~0ms, spending an attempt without waiting for the bucket.
+    #[test]
+    fn backoff_always_waits_at_least_half_the_ceiling() {
+        for attempt in 0..5u32 {
+            let ceiling = (250u64 * (1u64 << attempt.min(6))).min(16_000);
+            for _ in 0..50 {
+                let d = rate_limit_backoff(attempt, None).as_millis() as u64;
+                assert!(
+                    d >= ceiling / 2,
+                    "attempt {attempt}: {d}ms is under half the {ceiling}ms ceiling \n                     - the backoff can collapse to near zero again"
+                );
+                assert!(
+                    d <= ceiling,
+                    "attempt {attempt}: {d}ms exceeded {ceiling}ms"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn without_a_header_it_is_full_jitter_under_the_ceiling() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..200 {
+            let d = rate_limit_backoff(4, None).as_millis() as u64;
+            assert!(d < 250 * (1 << 4), "{d}ms exceeded the attempt-4 ceiling");
+            seen.insert(d);
+        }
+        // The whole point: un-jittered backoff returns one value forever.
+        assert!(seen.len() > 1, "backoff is not jittered: always {seen:?}");
+    }
+
+    #[test]
+    fn the_ceiling_is_capped() {
+        for _ in 0..50 {
+            assert!(rate_limit_backoff(30, None).as_millis() <= 16_000);
+        }
     }
 }

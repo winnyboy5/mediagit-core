@@ -153,12 +153,11 @@ pub async fn upload_and_register(
         "pack_ids": [pack_oid_hex],
         "sizes": [byte_len],
     });
-    let presign_resp = http_client
-        .post(&presign_url)
-        .json(&presign_body)
-        .send()
-        .await
-        .context("POST /packs/upload-urls")?;
+    let presign_resp = crate::client::send_with_rate_limit_retry(|| {
+        http_client.post(&presign_url).json(&presign_body).send()
+    })
+    .await
+    .context("POST /packs/upload-urls")?;
 
     if !presign_resp.status().is_success() {
         anyhow::bail!("POST /packs/upload-urls returned {}", presign_resp.status());
@@ -170,9 +169,12 @@ pub async fn upload_and_register(
         .context("parse /packs/upload-urls response")?;
 
     // 2. Upload pack bytes
-    let pack_data = tokio::fs::read(&result.temp_path)
+    // B5: Bytes so the proxy-fallback retry closure below clones a refcount
+    // bump, not the whole pack.
+    let pack_data: bytes::Bytes = tokio::fs::read(&result.temp_path)
         .await
-        .context("read pack temp file")?;
+        .context("read pack temp file")?
+        .into();
 
     if let Some(Some(purl)) = presign_map.get(&pack_oid_hex) {
         let put_url = purl["url"].as_str().unwrap_or("").to_string();
@@ -187,6 +189,10 @@ pub async fn upload_and_register(
                 }
             }
         }
+        // Presigned direct-to-bucket PUT — not server-bound, so not routed
+        // through send_with_rate_limit_retry; a 429 here comes from the
+        // bucket, not the server's limiter, and is handled by the caller's
+        // own retry loop (see push.rs's per-chunk presigned PUT handling).
         let resp = req.send().await.context("presigned PUT of pack")?;
         if !resp.status().is_success() {
             anyhow::bail!("presigned PUT returned {}", resp.status());
@@ -196,12 +202,11 @@ pub async fn upload_and_register(
     } else {
         // Proxy fallback: PUT to /packs/<oid> so complete_pack's head("packs/<oid>") succeeds
         let proxy_url = format!("{}/packs/{}", base_url, pack_oid_hex);
-        let resp = http_client
-            .put(&proxy_url)
-            .body(pack_data)
-            .send()
-            .await
-            .context("proxy PUT of pack")?;
+        let resp = crate::client::send_with_rate_limit_retry(|| {
+            http_client.put(&proxy_url).body(pack_data.clone()).send()
+        })
+        .await
+        .context("proxy PUT of pack")?;
         if !resp.status().is_success() {
             anyhow::bail!("proxy PUT returned {}", resp.status());
         }
@@ -232,12 +237,11 @@ pub async fn upload_and_register(
         "pack_oid": pack_oid_hex,
         "manifest": manifest,
     });
-    let complete_resp = http_client
-        .post(&complete_url)
-        .json(&complete_body)
-        .send()
-        .await
-        .context("POST /packs/complete")?;
+    let complete_resp = crate::client::send_with_rate_limit_retry(|| {
+        http_client.post(&complete_url).json(&complete_body).send()
+    })
+    .await
+    .context("POST /packs/complete")?;
 
     if !complete_resp.status().is_success() {
         anyhow::bail!("POST /packs/complete returned {}", complete_resp.status());

@@ -74,8 +74,47 @@ async fn get_chunk_with_retry(
             Ok(r) => chunk_get_is_transient(r.status()),
             Err(_) => true,
         };
-        if retryable && attempt < CHUNK_GET_MAX_RETRIES {
-            let backoff_ms = 500u64 << attempt;
+        // A 429 and a 503 are not the same kind of failure and must not share
+        // a budget. 503 means the server already exhausted its own storage
+        // retries, so trying many more times is just delaying a real error --
+        // hence the deliberately small CHUNK_GET_MAX_RETRIES. A 429 means the
+        // server is healthy and asking us to slow down; the correct response is
+        // to wait it out, and giving up after 3 fails a clone that only needed
+        // patience. Measured: with the push path fixed, a clone against a 2 rps
+        // server still failed here alone.
+        let rate_limited =
+            matches!(&outcome, Ok(r) if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS);
+        let budget = if rate_limited {
+            super::rate_limit_max_retries()
+        } else {
+            CHUNK_GET_MAX_RETRIES
+        };
+        if retryable && attempt < budget {
+            // Deliberately a floor plus jitter, not the shared Full Jitter
+            // helper on its own. This loop retries 5xx and transport errors,
+            // not just 429s -- it exists for a storage backend that is
+            // already struggling, where jitter that can round down to ~0ms
+            // would retry *harder* than the flat 500/1000/2000ms it replaces.
+            // The floor keeps the old pacing; the jitter stops every
+            // concurrent chunk GET in a clone from retrying in lockstep,
+            // which is what turned one slow backend into a thundering herd.
+            // Rate limited: use the shared backoff, which honours the
+            // server's Retry-After. The 500ms<<attempt floor below is for a
+            // STRUGGLING BACKEND (the 20260804-sigfix incident) and would
+            // needlessly slow a limiter that is merely pacing us.
+            let backoff_ms = if rate_limited {
+                super::rate_limit_backoff(
+                    attempt,
+                    outcome
+                        .as_ref()
+                        .ok()
+                        .and_then(|r| r.headers().get(reqwest::header::RETRY_AFTER)),
+                )
+                .as_millis() as u64
+            } else {
+                let floor_ms = 500u64 << attempt;
+                floor_ms + super::rate_limit_backoff(attempt, None).as_millis() as u64
+            };
             attempt += 1;
             tracing::warn!(
                 chunk = %hex,
@@ -158,13 +197,11 @@ impl ProtocolClient {
 
         let want_req = WantRequest { want, have };
 
-        let response = self
-            .client
-            .post(&want_url)
-            .json(&want_req)
-            .send()
-            .await
-            .context("Failed to send want request")?;
+        let response = crate::client::send_with_rate_limit_retry(|| {
+            self.client.post(&want_url).json(&want_req).send()
+        })
+        .await
+        .context("Failed to send want request")?;
 
         if !response.status().is_success() {
             anyhow::bail!(
@@ -187,13 +224,22 @@ impl ProtocolClient {
             want_response.request_id
         );
 
-        let response = self
-            .client
-            .get(&pack_url)
-            .header("X-Request-ID", &want_response.request_id)
-            .send()
-            .await
-            .context("Failed to download pack file")?;
+        // Wrapped despite being a streaming download. An earlier pass skipped
+        // both `/objects/pack` GETs as "streaming, higher risk" -- wrong call:
+        // this is the FIRST server-bound request a clone makes after the want
+        // exchange, so an unretried 429 here kills the clone outright before a
+        // single byte moves ("GET /objects/pack failed (429 Too Many Requests):
+        // Wait for 0s", observed against a 2 rps server, dead in 2.3s).
+        // Retrying is safe: the wrapper only re-sends on 429, which the limiter
+        // returns before the handler runs, so no body has been consumed.
+        let response = crate::client::send_with_rate_limit_retry(|| {
+            self.client
+                .get(&pack_url)
+                .header("X-Request-ID", &want_response.request_id)
+                .send()
+        })
+        .await
+        .context("Failed to download pack file")?;
 
         if !response.status().is_success() {
             // Include the server's message. An incomplete-closure refusal is
@@ -274,13 +320,11 @@ impl ProtocolClient {
         let declared_have: std::collections::HashSet<String> = have.iter().cloned().collect();
         let want_req = WantRequest { want, have };
 
-        let response = self
-            .client
-            .post(&want_url)
-            .json(&want_req)
-            .send()
-            .await
-            .context("Failed to send want request")?;
+        let response = crate::client::send_with_rate_limit_retry(|| {
+            self.client.post(&want_url).json(&want_req).send()
+        })
+        .await
+        .context("Failed to send want request")?;
 
         if !response.status().is_success() {
             anyhow::bail!(
@@ -302,13 +346,22 @@ impl ProtocolClient {
             want_response.request_id
         );
 
-        let response = self
-            .client
-            .get(&pack_url)
-            .header("X-Request-ID", &want_response.request_id)
-            .send()
-            .await
-            .context("Failed to download pack file")?;
+        // Wrapped despite being a streaming download. An earlier pass skipped
+        // both `/objects/pack` GETs as "streaming, higher risk" -- wrong call:
+        // this is the FIRST server-bound request a clone makes after the want
+        // exchange, so an unretried 429 here kills the clone outright before a
+        // single byte moves ("GET /objects/pack failed (429 Too Many Requests):
+        // Wait for 0s", observed against a 2 rps server, dead in 2.3s).
+        // Retrying is safe: the wrapper only re-sends on 429, which the limiter
+        // returns before the handler runs, so no body has been consumed.
+        let response = crate::client::send_with_rate_limit_retry(|| {
+            self.client
+                .get(&pack_url)
+                .header("X-Request-ID", &want_response.request_id)
+                .send()
+        })
+        .await
+        .context("Failed to download pack file")?;
 
         if !response.status().is_success() {
             // Include the server's message. An incomplete-closure refusal is
@@ -455,10 +508,7 @@ impl ProtocolClient {
     pub async fn download_manifest(&self, oid: &Oid) -> Result<ChunkManifest> {
         let url = format!("{}/manifests/{}", self.base_url, oid.to_hex());
 
-        let response = self
-            .client
-            .get(&url)
-            .send()
+        let response = crate::client::send_with_rate_limit_retry(|| self.client.get(&url).send())
             .await
             .context(format!("Failed to GET /manifests/{}", oid))?;
 
@@ -478,10 +528,7 @@ impl ProtocolClient {
     pub async fn download_chunk(&self, chunk_id: &Oid) -> Result<Vec<u8>> {
         let url = format!("{}/chunks/{}", self.base_url, chunk_id.to_hex());
 
-        let response = self
-            .client
-            .get(&url)
-            .send()
+        let response = crate::client::send_with_rate_limit_retry(|| self.client.get(&url).send())
             .await
             .context(format!("Failed to GET /chunks/{}", chunk_id))?;
 
@@ -607,11 +654,16 @@ impl ProtocolClient {
                     async move {
                         // 1. Fetch manifest (HTTP — inlined download_manifest body)
                         let url = format!("{}/manifests/{}", base_url, oid.to_hex());
-                        let resp = http_client
-                            .get(&url)
-                            .send()
-                            .await
-                            .with_context(|| format!("Failed to GET /manifests/{}", oid))?;
+                        // Wrapped like every other server-bound call. The
+                        // PARALLEL fan-out was missed when the sequential
+                        // manifest fetch was wrapped, so a clone still died on
+                        // an unretried 429 here - one unwrapped site in a fan-out
+                        // is enough to fail the whole clone.
+                        let resp = crate::client::send_with_rate_limit_retry(|| {
+                            http_client.get(&url).send()
+                        })
+                        .await
+                        .with_context(|| format!("Failed to GET /manifests/{}", oid))?;
                         if !resp.status().is_success() {
                             anyhow::bail!(
                                 "GET /manifests/{} failed with status: {}",
@@ -964,7 +1016,11 @@ impl ProtocolClient {
                                     if let Ok(base_id) = Oid::from_hex(base_hex) {
                                         let delta_url =
                                             format!("{}/chunk-deltas/{}", base_url, hex);
-                                        match client.get(&delta_url).send().await {
+                                        match crate::client::send_with_rate_limit_retry(
+                                            || client.get(&delta_url).send(),
+                                        )
+                                        .await
+                                        {
                                             Ok(dr) if dr.status().is_success() => {
                                                 let delta_bytes = dr.bytes().await?.to_vec();
                                                 let net = delta_bytes.len() as u64;
@@ -1058,7 +1114,11 @@ impl ProtocolClient {
                             async move {
                                 let url =
                                     format!("{}/chunk-deltas/{}", base_url, chunk_id.to_hex());
-                                let response = client.get(&url).send().await.map_err(|e| {
+                                let response = crate::client::send_with_rate_limit_retry(|| {
+                                    client.get(&url).send()
+                                })
+                                .await
+                                .map_err(|e| {
                                     anyhow::anyhow!(
                                         "Failed to download chunk-delta {}: {}",
                                         chunk_id,
