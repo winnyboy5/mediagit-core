@@ -383,6 +383,41 @@ async fn resolve_server_target(server: &Option<String>) -> Result<ServerTarget> 
         let origin = crate::repo::remote_origin(url).with_context(|| {
             format!("--server '{url}' is not a valid URL (need scheme://host[:port])")
         })?;
+
+        // If this origin is one of the current repository's remotes, resolve
+        // credentials the way that remote would.
+        //
+        // `Explicit` never loads the repo config, so it skips the config tier
+        // entirely and only ever sees env + keychain. That made `auth status
+        // --server <url>` report a tier that a push to the SAME origin does not
+        // use: with a token in `remotes.origin.token` and a stale keychain
+        // entry, push correctly used the config token while status reported
+        // "OS keychain". A credential-debugging command that names the wrong
+        // tier is worse than one that says nothing.
+        //
+        // Falls through to `Explicit` when we are not in a repo, or the origin
+        // belongs to no configured remote -- there is genuinely no config tier
+        // to consult then.
+        if let Ok(repo_root) = find_repo_root()
+            && let Ok(config) = mediagit_config::Config::load(&repo_root).await
+            && let Some(remote) = config
+                .remotes
+                .iter()
+                .filter_map(|(name, r)| {
+                    crate::repo::remote_origin(&r.url)
+                        .filter(|o| *o == origin)
+                        .map(|_| name.clone())
+                })
+                .min()
+        {
+            return Ok(ServerTarget::FromRepo {
+                repo_root,
+                config: Box::new(config),
+                remote,
+                origin,
+            });
+        }
+
         return Ok(ServerTarget::Explicit { origin });
     }
 
