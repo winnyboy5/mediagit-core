@@ -714,13 +714,16 @@ impl StorageBackend for GcsBackend {
         let key = key.as_str();
         let bucket_path = self.bucket_path();
 
-        match self
-            .control
-            .get_object()
-            .set_bucket(&bucket_path)
-            .set_object(key)
-            .send()
-            .await
+        match with_io_deadline(
+            gcs_control_deadline(),
+            "get_object (exists)",
+            self.control
+                .get_object()
+                .set_bucket(&bucket_path)
+                .set_object(key)
+                .send(),
+        )
+        .await?
         {
             Ok(_) => Ok(true),
             Err(e) if Self::is_not_found(&e) => Ok(false),
@@ -742,13 +745,16 @@ impl StorageBackend for GcsBackend {
         let key = key.as_str();
         let bucket_path = self.bucket_path();
 
-        match self
-            .control
-            .get_object()
-            .set_bucket(&bucket_path)
-            .set_object(key)
-            .send()
-            .await
+        match with_io_deadline(
+            gcs_control_deadline(),
+            "get_object (size)",
+            self.control
+                .get_object()
+                .set_bucket(&bucket_path)
+                .set_object(key)
+                .send(),
+        )
+        .await?
         {
             Ok(obj) => Ok(Some(obj.size as u64)),
             Err(e) if Self::is_not_found(&e) => Ok(None),
@@ -770,13 +776,16 @@ impl StorageBackend for GcsBackend {
         let key = key.as_str();
         let bucket_path = self.bucket_path();
 
-        match self
-            .control
-            .delete_object()
-            .set_bucket(&bucket_path)
-            .set_object(key)
-            .send()
-            .await
+        match with_io_deadline(
+            gcs_control_deadline(),
+            "delete_object",
+            self.control
+                .delete_object()
+                .set_bucket(&bucket_path)
+                .set_object(key)
+                .send(),
+        )
+        .await?
         {
             Ok(_) => {
                 debug!(key = %key, "Successfully deleted object from GCS");
@@ -829,9 +838,8 @@ impl StorageBackend for GcsBackend {
                 builder = builder.set_page_token(&page_token);
             }
 
-            let response = builder
-                .send()
-                .await
+            let response = with_io_deadline(gcs_control_deadline(), "list_objects", builder.send())
+                .await?
                 .map_err(|e| anyhow::anyhow!("GCS list_objects error: {}", e))?;
 
             for obj in &response.objects {
@@ -1062,6 +1070,23 @@ where
              (raise MEDIAGIT_GCS_IO_TIMEOUT_SECS if this link is legitimately slower)"
         )
     })
+}
+
+/// Deadline for GCS *control-plane* calls (`get_object`, `delete_object`,
+/// `list_objects`), as distinct from the data-plane transfer deadline.
+///
+/// These are metadata round-trips that normally finish in well under a second,
+/// so they get a tighter bound than a multi-GB transfer does: waiting the full
+/// transfer deadline to discover one is wedged is dead time, and `exists` runs
+/// once per chunk on the push path.
+///
+/// Not tighter than this, though — see the note at `upload_semaphore` about
+/// concurrent uploads exhausting GCS TCP connections and producing ~20-25s
+/// transport timeouts. A bound near that band would convert congested-but-
+/// recoverable calls into hard errors. Fixed rather than env-tunable until
+/// something demonstrates it needs to move.
+fn gcs_control_deadline() -> std::time::Duration {
+    std::time::Duration::from_secs(60)
 }
 
 /// The per-IO deadline as a `Duration`, ready to hand to [`with_io_deadline`].
