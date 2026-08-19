@@ -45,6 +45,10 @@ $PULL_FLOOR_MBS  = [math]::Round(10240.0 / 600.0, 2)   # 10GB <=10min pull SLO -
 # Perturbed safetensors chains measure ~74% dedup in practice; 15% was so far below the
 # observed floor that a near-total dedup collapse would still have passed.
 $DEDUP_FLOOR_PCT = 35.0
+# Seconds to idle between S5 backends. S5 is the only drill that runs multi-GB
+# payloads back-to-back across backends, and 186cb4d made that local-then-MinIO
+# without a pause: ~22 GB through the host I/O path in minutes. 0 disables.
+$S5_COOLDOWN_SEC = [int]($env:MG_QA_S5_COOLDOWN_SEC | ForEach-Object { if ($_) { $_ } else { 60 } })
 # Cloud backends are WAN-bound, so their throughput floor is an operator-set knob rather
 # than a fixed SLO. 0 (default) records the number without gating - set MG_QA_CLOUD_MBS_FLOOR
 # once a link's real capability has been measured.
@@ -585,7 +589,16 @@ function Drill-S5-ThroughputDedup {
   # held to the SLO" branch -- reachable only through minio, so a local-path
   # throughput regression had nothing to fail against. Same helper as S1 now,
   # so "which backends does scale cover" has one answer.
+  $s5First = $true
   foreach ($backend in (Get-ScaleBackends)) {
+    # Let the page cache and the host's filesystem filter drain before the next
+    # multi-GB payload. Between backends only, so a single-backend run is unaffected.
+    if (-not $s5First -and $S5_COOLDOWN_SEC -gt 0) {
+      Write-QaLog $Phase "S5 cooldown ${S5_COOLDOWN_SEC}s before [$backend] (MG_QA_S5_COOLDOWN_SEC=0 disables)"
+      Start-Sleep -Seconds $S5_COOLDOWN_SEC
+    }
+    $s5First = $false
+
     $srv = $null
     try {
       try { $srv = Start-QaServer -Backend $backend -Phase "$Phase-S5" } catch {

@@ -22,6 +22,7 @@ if (-not $env:MG_QA_RUN_ID) {
 }
 
 . (Join-Path $PSScriptRoot "lib\common.ps1")
+. (Join-Path $PSScriptRoot "lib\watchdog.ps1")
 # After common.ps1 (which sets Continue) so it wins. The orchestrator decides the
 # campaign verdict; an error swallowed HERE would mis-report every phase under it.
 $ErrorActionPreference = "Stop"
@@ -81,6 +82,10 @@ $results = @()
 $anyFail = $false
 
 $scriptsDir = Join-Path $QA.Root "scripts"
+# Arm before any phase runs: the 2026-08-19 wedge began 90 seconds into a
+# drill and stayed silent for 41 minutes. See lib\watchdog.ps1.
+Start-QaWatchdog -Phase $Phase -LogDir $QA.Logs -MinioEndpoint $QA.MinioEndpoint
+
 foreach ($tok in $Phases) {
   # PowerShell strips the leading zero from an UNQUOTED numeric argument, so
   # `-Phases 00,01` arrives as "0","1". Phase tokens GLOB, so "0" matched
@@ -157,11 +162,26 @@ foreach ($tok in $Phases) {
       exit 1
     }
 
+    # Host wedged mid-phase: every later gate would measure an absent machine,
+    # exactly as the preflight guard above reasons about a broken environment.
+    $tripped = Test-QaWatchdogTripped -LogDir $QA.Logs
+    if ($tripped) {
+      Write-QaLog $Phase ("phase {0} : {1} VOID - host watchdog tripped" -f $tok, $script.Name)
+      Write-QaRow $summaryTsv $summaryHeader @($tok, $script.Name, "VOID-HOST-WEDGED", $code, [math]::Round($sw.Elapsed.TotalSeconds, 1))
+      Stop-QaWatchdog -Phase $Phase
+      Write-Host ""
+      Write-Host "ABORT: the host wedged - this campaign is void, not failed."
+      Write-Host $tripped
+      exit 2
+    }
+
     Write-QaLog $Phase ("phase {0} : {1} {2} (exit={3} sec={4:n1})" -f $tok, $script.Name, $status, $code, $sw.Elapsed.TotalSeconds)
     Write-QaRow $summaryTsv $summaryHeader @($tok, $script.Name, $status, $code, [math]::Round($sw.Elapsed.TotalSeconds, 1))
     $results += [pscustomobject]@{ Phase = $tok; Script = $script.Name; Status = $status; Exit = $code; Sec = [math]::Round($sw.Elapsed.TotalSeconds, 1) }
   }
 }
+
+Stop-QaWatchdog -Phase $Phase
 
 Set-Content $tierMarker $QA.Tier -Encoding ASCII
 
