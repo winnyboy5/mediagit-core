@@ -214,7 +214,12 @@ function Run-M4 {
   $mg = Invoke-MG $repo @("merge", "exp-2") $Phase
   if ($mg.Exit -ne 0) {
     # conflict (main did not advance, so ff/clean is expected - record either way)
-    Add-Row $id "merge" "merge exp-2" "record actual" $mg.Exit "PASS" $mg.Sec "outcome=conflict; resolving with exp-2 bytes"
+    # "record actual" means either outcome is legitimate -- it does NOT mean any
+    # exit code is. Hardcoding PASS here made this row unable to fail: a panic or
+    # an argument error read exactly like a conflict. 0 = clean, 1 = conflict;
+    # anything else is the crash this row should catch.
+    Add-Row $id "merge" "merge exp-2" "exit 0 (clean) or 1 (conflict)" $mg.Exit `
+      $(if ($mg.Exit -in 0, 1) { "PASS" } else { "FAIL" }) $mg.Sec "outcome=conflict; resolving with exp-2 bytes"
     $side = Join-Path $QA.Work "ml-M4-exp2.bin"
     Invoke-MG $repo @("branch", "switch", "exp-2") $Phase | Out-Null
     Copy-Item -LiteralPath $dest -Destination $side -Force
@@ -224,7 +229,8 @@ function Run-M4 {
     $mc = Invoke-MG $repo @("merge", "--continue") $Phase
     Add-Row $id "merge-resolve" "merge --continue-merge exp-2" "exit 0" $mc.Exit $(if ($mc.Exit -eq 0) { "PASS" } else { "FAIL" }) $mc.Sec ""
   } else {
-    Add-Row $id "merge" "merge exp-2" "record actual" $mg.Exit "PASS" $mg.Sec "outcome=clean"
+    Add-Row $id "merge" "merge exp-2" "exit 0 (clean) or 1 (conflict)" $mg.Exit `
+      $(if ($mg.Exit -in 0, 1) { "PASS" } else { "FAIL" }) $mg.Sec "outcome=clean"
   }
   Assert-HashEq $id "main-is-exp2" $expHashes["exp-2"] (Get-QaHash $dest) "main after merge"
 

@@ -155,7 +155,19 @@ function Run-D2 {
   Add-Row $id "merge-b" "merge client-b" "exit 1 (conflict)" $m2.Exit $(if ($m2.Exit -ne 0) { "PASS" } else { "FAIL" }) $m2.Sec $m2.Out.Substring(0, [Math]::Min(200, $m2.Out.Length))
 
   $st = Invoke-MG $repo @("status") $Phase
-  Add-Row $id "status" "status" "shows conflict" $st.Exit "PASS" $st.Sec $st.Out.Substring(0, [Math]::Min(200, $st.Out.Length))
+  # The expect column says "shows conflict"; until now nothing checked that, so
+  # a status command that printed nothing about the conflict still passed.
+  #
+  # Matched against MediaGit's actual wording, not git's. The first version of
+  # this assertion looked for "conflict"/"unmerged"/"both modified" and failed a
+  # perfectly correct status: MediaGit says "Merge in progress" and lists
+  # "Unresolved path(s)". Both halves are required, so a status that mentions
+  # the merge but forgets to name the unresolved files still fails.
+  $stShowsConflict = ($st.Out -match "(?i)merge in progress") -and `
+                     ($st.Out -match "(?i)unresolved")
+  Add-Row $id "status" "status" "shows conflict" $st.Exit `
+    $(if (($st.Exit -eq 0) -and $stShowsConflict) { "PASS" } else { "FAIL" }) $st.Sec `
+    $st.Out.Substring(0, [Math]::Min(200, $st.Out.Length))
 
   # resolve by choosing client-b's version
   Copy-Item -LiteralPath $sideB -Destination $dest -Force

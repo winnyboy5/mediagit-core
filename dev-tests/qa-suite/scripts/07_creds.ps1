@@ -89,8 +89,12 @@ try {
 
   # ---- C2-status-tier ----
   $st = Invoke-MG $work @("auth", "status", "--server", $base) $Phase
-  $namesTier = ($st.Out -match "config") -or ($st.Out -match "keychain") -or ($st.Out -match "env")
-  Rec "C2-status-tier" (($st.Exit -eq 0) -and $namesTier) "status-exit=$($st.Exit) names-a-tier=$namesTier"
+  # C1 just proved config beats the keychain in this exact state, so status must
+  # name CONFIG. Accepting any tier word meant a status command that always
+  # printed "env" passed a test about tier precedence.
+  $namesRightTier = ($st.Out -match "(?i)config")
+  Rec "C2-status-tier" (($st.Exit -eq 0) -and $namesRightTier) `
+    "status-exit=$($st.Exit) names-config-tier=$namesRightTier"
 
 } catch {
   $skip = "$_" -match "^SKIP:"

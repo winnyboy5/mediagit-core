@@ -136,7 +136,11 @@ function Run-V2 {
   # merge codec-test into main: ff or clean expected (main has no divergent commit) - record actual
   $mg = Invoke-MG $repo @("merge", "codec-test") $Phase
   $mergeKind = if ($mg.Exit -eq 0) { "clean" } else { "conflict" }
-  Add-Row $id "merge" "merge codec-test into main" "record actual" $mg.Exit "PASS" $mg.Sec "outcome=$mergeKind"
+  # See the note in 03_persona_ml.ps1 M4: "record actual" is about which of two
+  # legitimate outcomes occurred, not about accepting any exit code. A hardcoded
+  # PASS here could not distinguish a conflict from a panic.
+  Add-Row $id "merge" "merge codec-test into main" "exit 0 (clean) or 1 (conflict)" $mg.Exit `
+    $(if ($mg.Exit -in 0, 1) { "PASS" } else { "FAIL" }) $mg.Sec "outcome=$mergeKind"
   if ($mg.Exit -ne 0) {
     # resolve by taking codec-test's version so fsck runs on a settled repo
     Copy-Item -LiteralPath $h265 -Destination $dest -Force

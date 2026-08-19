@@ -123,19 +123,41 @@ function Test-QaAdminRights {
 function Drill-A1-KillMidAdd {
   $drill = "A1-kill-mid-add"
   $repo = New-SandboxRepo "a1-killadd" $Phase
-  New-QaBinaryFixture (Join-Path $repo "big.bin") 200 71001
+  # 600MB, for exactly the reason A2 below is 600MB. Observed in 20260818-gagate4:
+  # a 200MB add finished inside the 1.5s sleep, so `$p.HasExited` was already true,
+  # Stop-Process never fired, and the drill recorded PASS with killed=False -
+  # having tested "add, add again, commit, fsck" and nothing about surviving a
+  # kill. The arming assertion below is what stops that reading as success.
+  New-QaBinaryFixture (Join-Path $repo "big.bin") 600 71001
   $origHash = Get-QaHash (Join-Path $repo "big.bin")
   $p = Start-Process $QA.MG -ArgumentList @("-C", $repo, "add", "big.bin") -PassThru -NoNewWindow `
     -RedirectStandardOutput (Join-Path $QA.Logs "a1-add.out") -RedirectStandardError (Join-Path $QA.Logs "a1-add.err")
-  Start-Sleep -Milliseconds 1500
+  # Kill EARLY, and stop racing a fixed sleep.
+  #
+  # 1500ms was a coin flip: standalone the 600MB add ran past it (killed=True),
+  # but inside a campaign the same add finished first (killed=False, gagate6)
+  # because the fixture was still warm in the page cache. A drill whose arming
+  # depends on which way that race lands is not a drill.
+  #
+  # 250ms cannot be beaten by a 600MB add - that would need ~2.4 GB/s end to
+  # end, including chunking and BLAKE3 - while still landing well inside the
+  # operation. Polled rather than slept in one go so the kill goes in at the
+  # first opportunity.
   $killed = $false
+  for ($waited = 0; $waited -lt 250; $waited += 25) {
+    Start-Sleep -Milliseconds 25
+    if ($p.HasExited) { break }
+  }
   if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force; $killed = $true }
   $fsck1 = Test-QaFsckClean $repo
   $retry = Invoke-MG $repo @("add", "big.bin") $Phase -TimeoutSec 1200
   $cmt = Invoke-MG $repo @("commit", "-m", "after kill") $Phase
   $fsck2 = Test-QaFsckClean $repo
   $hashOk = (Get-QaHash (Join-Path $repo "big.bin")) -eq $origHash
-  $pass = $fsck2 -and ($retry.Exit -eq 0) -and ($cmt.Exit -eq 0) -and $hashOk
+  # $killed is an ARMING condition, not decoration: without it this drill cannot
+  # fail for the reason it exists, because everything below is equally true of an
+  # add that was never interrupted.
+  $pass = $killed -and $fsck2 -and ($retry.Exit -eq 0) -and ($cmt.Exit -eq 0) -and $hashOk
   # silent-corruption guard: fsck clean but hash mismatch is the hard-fail combination
   if ($fsck2 -and -not $hashOk) { $pass = $false }
   Rec $drill $pass "killed=$killed post-kill-fsck=$fsck1 retry-add=$($retry.Exit) commit=$($cmt.Exit) final-fsck=$fsck2 hash-ok=$hashOk"

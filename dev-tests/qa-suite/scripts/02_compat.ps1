@@ -40,7 +40,12 @@ Write-QaGate $Phase "compat-fixture-covers-formats" $coverageOk `
 
 # The gate: a current build must read the frozen bytes clean.
 $r = Invoke-MG $work @("fsck") $Phase -TimeoutSec 300
-$fsckOk = ($r.Exit -eq 0) -and ($r.Out -match "PERFECT|integrity")
+# "integrity" appears in fsck's PERFECT, OK-with-warnings AND FAILED lines
+# alike, so the old `PERFECT|integrity` alternation matched unconditionally and
+# the gate was really just the exit code -- which tolerates warnings. The point
+# of a frozen-format fixture is that a current build reads it CLEAN, so match
+# the verdict itself.
+$fsckOk = ($r.Exit -eq 0) -and ($r.Out -match "integrity:\s*PERFECT")
 Write-QaGate $Phase "compat-fixture-fsck-clean" $fsckOk ("exit=$($r.Exit)")
 
 # work/ scratch: the fixture copy this phase made.

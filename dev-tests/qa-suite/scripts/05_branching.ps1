@@ -108,7 +108,11 @@ function Check-02-RebaseConflictDetected {
   Sw $repo "topic" -ExtraArgs @("-f") | Out-Null
   New-QaCommit $repo "f.bin" "topic edits f" 2 203
   $r = Invoke-MG $repo @("rebase", "main") $Phase
-  $conflictSignaled = ($r.Exit -ne 0) -or ($r.Out -match "(?i)conflict")
+  # AND, not OR. This check exists because rebase once skipped conflict
+  # detection entirely (BUG-CLI-B4); with OR, a rebase that panics for any
+  # unrelated reason also reads as "conflict correctly detected", which is the
+  # same blind spot wearing the opposite mask. Nothing else backstops this one.
+  $conflictSignaled = ($r.Exit -ne 0) -and ($r.Out -match "(?i)conflict")
   Rec $id "rebase" $conflictSignaled "exit=$($r.Exit) out-tail=$(($r.Out -split "`n" | Select-Object -Last 1))"
 }
 
@@ -161,8 +165,17 @@ function Check-04-CherryPickConflictRealContent {
   Sw $repo "main" -ExtraArgs @("-f") | Out-Null
   Invoke-MG $repo @("cherry-pick", $theirs) $Phase | Out-Null
   $content = Get-Content (Join-Path $repo "f.txt") -Raw
-  $pass = ($content -notmatch "Oid\(")
-  Rec $id "cherry-pick-conflict" $pass "marker-content-has-oid-placeholder=$(-not $pass)"
+  # Arming proof first. The real assertion is "conflict markers contain the file
+  # content, not `Oid(...)` placeholders" (BUG-CLI-B5, a data-corruption class).
+  # Checking only for the absence of "Oid(" passed when the cherry-pick failed
+  # outright and left f.txt at its pre-attempt content -- no markers, no
+  # placeholders, no conflict, green. Require the markers to exist before
+  # judging what is inside them.
+  $hasMarkers = ($content -match "<<<<<<<")
+  $noPlaceholder = ($content -notmatch "Oid\(")
+  $pass = $hasMarkers -and $noPlaceholder
+  Rec $id "cherry-pick-conflict" $pass `
+    "conflict-markers-present=$hasMarkers oid-placeholder-in-markers=$(-not $noPlaceholder)"
 }
 
 # ============================================================================
