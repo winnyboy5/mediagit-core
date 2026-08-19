@@ -138,7 +138,7 @@ async fn main() -> Result<()> {
     let auth_state = if config.enable_auth { "ON" } else { "OFF" };
     let rl_state = if config.enable_rate_limiting {
         format!(
-            "ON ({} rps, burst {})",
+            "ON ({} rps, burst {}, per credential)",
             config.rate_limit_rps, config.rate_limit_burst
         )
     } else {
@@ -517,7 +517,7 @@ async fn main() -> Result<()> {
     // Build router with optional rate limiting
     let (app, rate_limiter) = if config.enable_rate_limiting {
         tracing::info!(
-            "Rate limiting ENABLED: {} req/s, burst {}",
+            "Rate limiting ENABLED: {} req/s, burst {}, keyed per credential (client IP for unauthenticated requests)",
             config.rate_limit_rps,
             config.rate_limit_burst
         );
@@ -624,7 +624,15 @@ async fn main() -> Result<()> {
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
                 axum_server::bind_rustls(addr, rustls_config)
                     .handle(https_handle)
-                    .serve(https_app.into_make_service())
+                    // ConnectInfo, for the same reason the two HTTP listeners
+                    // supply it: without it the rate limiter's IP fallback
+                    // 500s with "Unable to extract key!" on every request.
+                    // This listener was the one that did not, so TLS plus
+                    // `enable_rate_limiting = true` failed every HTTPS request
+                    // -- on the port the SV-1 note above calls the one most
+                    // likely to face the internet. Invisible because rate
+                    // limiting is off by default and no test enabled it.
+                    .serve(https_app.into_make_service_with_connect_info::<std::net::SocketAddr>())
                     .await
             });
 
