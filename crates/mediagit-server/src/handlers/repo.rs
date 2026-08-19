@@ -2439,7 +2439,9 @@ mod complete_pack_content_verification_tests {
 
         assert!(
             bad.is_none(),
-            "a chunk whose RAW bytes hash to its id was rejected because detect()              misread them as zlib — the streaming path is missing the fallback that              decompress_typed applies, and would quarantine valid data"
+            "a chunk whose RAW bytes hash to its id was rejected because detect() \
+                misread them as zlib — the streaming path is missing the fallback that \
+                decompress_typed applies, and would quarantine valid data"
         );
     }
 
@@ -2508,7 +2510,8 @@ mod complete_pack_content_verification_tests {
         );
         assert!(
             !manifest_path.exists(),
-            "manifest was written despite the marker failing — the marker is NOT being              written first, and a crash in that gap would leave a pack trusted forever"
+            "manifest was written despite the marker failing — the marker is NOT being \
+                written first, and a crash in that gap would leave a pack trusted forever"
         );
         let idx = state.pack_index.read().await;
         assert!(

@@ -221,7 +221,8 @@ impl JwtAuth {
         let claims = self.decode_claims(refresh_token)?;
         if claims.token_type != TokenType::Refresh {
             return Err(AuthError::InvalidToken(
-                "an access token cannot be exchanged for a new access token;                  present the refresh token"
+                "an access token cannot be exchanged for a new access token; \
+                    present the refresh token"
                     .to_string(),
             ));
         }

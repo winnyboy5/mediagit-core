@@ -1789,7 +1789,8 @@ mod tests {
                 let out = enc.compress_with_strategy(&data, strategy).unwrap();
                 assert!(
                     mediagit_security::envelope::is_sealed(&out),
-                    "every exit of the compress sink must seal, including the                      expand-to-Store fallback"
+                    "every exit of the compress sink must seal, including the \
+                        expand-to-Store fallback"
                 );
                 assert_eq!(enc.decompress_typed(&out).unwrap(), data);
             }

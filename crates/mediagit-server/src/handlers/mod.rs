@@ -676,7 +676,9 @@ impl CollectError {
     pub fn client_message(&self) -> String {
         match self {
             Self::Unreadable(oid) => format!(
-                "repository is missing objects required to serve this request: {oid}                  is unreadable or absent. The server cannot produce a complete pack;                  run `mediagit fsck` on the server repository.",
+                "repository is missing objects required to serve this request: {oid} \
+                    is unreadable or absent. The server cannot produce a complete pack; \
+                    run `mediagit fsck` on the server repository.",
             ),
             Self::Other(_) => "failed to collect objects".to_string(),
         }
@@ -1291,7 +1293,8 @@ mod tests {
         assert!(granted.is_ok(), "granted repo should be allowed");
         assert!(
             ungranted.is_err(),
-            "strict mode must deny a repo with no grants instead of falling              back to the flat role"
+            "strict mode must deny a repo with no grants instead of falling \
+                back to the flat role"
         );
     }
 

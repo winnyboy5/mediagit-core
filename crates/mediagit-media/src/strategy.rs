@@ -278,7 +278,8 @@ impl ImageStrategy {
                 let _ = &merged_metadata;
                 info!("Image metadata is mergeable but re-encoding is unsupported");
                 Ok(MergeResult::Conflict(
-                    "only metadata differs and it could be merged, but MediaGit cannot                      re-encode the image. Resolve by keeping one side and staging it."
+                    "only metadata differs and it could be merged, but MediaGit cannot \
+                        re-encode the image. Resolve by keeping one side and staging it."
                         .to_string(),
                 ))
             }
@@ -340,7 +341,9 @@ impl PsdStrategy {
                     merged_psd.layers.len()
                 );
                 Ok(MergeResult::Conflict(format!(
-                    "layer edits do not overlap ({} layers), but MediaGit cannot                      write a merged PSD — the format is read-only here. Resolve by                      combining the layers in your editor and staging the result.",
+                    "layer edits do not overlap ({} layers), but MediaGit cannot \
+                        write a merged PSD — the format is read-only here. Resolve by \
+                        combining the layers in your editor and staging the result.",
                     merged_psd.layers.len()
                 )))
             }
@@ -389,12 +392,15 @@ impl VideoStrategy {
                 // this crate does not do. Returning timeline JSON as
                 // `AutoMerged` would overwrite the user's video with metadata.
                 info!(
-                    "Video timeline is separable ({} tracks, {} segments) but                      re-encoding is unsupported",
+                    "Video timeline is separable ({} tracks, {} segments) but \
+                        re-encoding is unsupported",
                     merged_video.tracks.len(),
                     merged_video.segments.len()
                 );
                 Ok(MergeResult::Conflict(format!(
-                    "timeline edits do not overlap ({} tracks, {} segments), but                      MediaGit cannot render a merged video — that needs re-encoding.                      Resolve in your editor and stage the result.",
+                    "timeline edits do not overlap ({} tracks, {} segments), but \
+                        MediaGit cannot render a merged video — that needs re-encoding. \
+                        Resolve in your editor and stage the result.",
                     merged_video.tracks.len(),
                     merged_video.segments.len()
                 )))
@@ -450,7 +456,8 @@ impl AudioStrategy {
                     merged_audio.tracks.len()
                 );
                 Ok(MergeResult::Conflict(format!(
-                    "different tracks were modified ({} tracks), but MediaGit cannot                      mix a merged audio file. Resolve in your editor and stage the result.",
+                    "different tracks were modified ({} tracks), but MediaGit cannot \
+                        mix a merged audio file. Resolve in your editor and stage the result.",
                     merged_audio.tracks.len()
                 )))
             }
@@ -669,7 +676,9 @@ mod tests {
             if let Ok(result) = strategy.merge(base, ours, theirs, name).await {
                 assert!(
                     !matches!(result, MergeResult::AutoMerged(_)),
-                    "{name}: strategy returned AutoMerged; its bytes get written                      over the user's file, so they must be real {media_type:?}                      content, not metadata"
+                    "{name}: strategy returned AutoMerged; its bytes get written \
+                        over the user's file, so they must be real {media_type:?} \
+                        content, not metadata"
                 );
             }
         }

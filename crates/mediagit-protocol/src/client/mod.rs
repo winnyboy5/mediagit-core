@@ -1428,7 +1428,8 @@ mod backoff_tests {
                 let d = rate_limit_backoff(attempt, None).as_millis() as u64;
                 assert!(
                     d >= ceiling / 2,
-                    "attempt {attempt}: {d}ms is under half the {ceiling}ms ceiling \n                     - the backoff can collapse to near zero again"
+                    "attempt {attempt}: {d}ms is under half the {ceiling}ms ceiling \
+                        - the backoff can collapse to near zero again"
                 );
                 assert!(
                     d <= ceiling,

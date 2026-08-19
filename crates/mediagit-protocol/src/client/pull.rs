@@ -465,7 +465,9 @@ impl ProtocolClient {
         }
         if !missing.is_empty() {
             anyhow::bail!(
-                "transfer incomplete: the server did not deliver {} requested object(s),                  first missing {}. The local repository is not usable for these objects;                  re-run the operation, and run `mediagit fsck` on the server if it persists.",
+                "transfer incomplete: the server did not deliver {} requested object(s), \
+                    first missing {}. The local repository is not usable for these objects; \
+                    re-run the operation, and run `mediagit fsck` on the server if it persists.",
                 missing.len(),
                 missing[0]
             );

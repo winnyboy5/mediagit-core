@@ -94,7 +94,8 @@ impl PullCmd {
         // like a way out of a bad pull and did nothing at all.
         if self.abort {
             anyhow::bail!(
-                "pull --abort is not yet implemented. A pull that stopped in                  conflict left a merge in progress: use `mediagit merge --abort`."
+                "pull --abort is not yet implemented. A pull that stopped in \
+                    conflict left a merge in progress: use `mediagit merge --abort`."
             );
         }
         if self.no_commit {

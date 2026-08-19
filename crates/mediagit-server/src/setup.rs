@@ -134,7 +134,12 @@ pub async fn run_init(args: &InitArgs) -> Result<()> {
                 (Some(u), Some(e), Some(p)) => Some((u.clone(), e.clone(), p)),
                 _ => {
                     eprintln!(
-                        "auth enabled but --admin-username, --admin-email and                          MEDIAGIT_ADMIN_PASSWORD were not all supplied; skipping                          admin creation. Run `mediagit-server admin create`                          separately before starting the server. (The password is                          read from the environment, not a flag, so it does not                          appear in `ps` output or shell history.)"
+                        "auth enabled but --admin-username, --admin-email and \
+                            MEDIAGIT_ADMIN_PASSWORD were not all supplied; skipping \
+                            admin creation. Run `mediagit-server admin create` \
+                            separately before starting the server. (The password is \
+                            read from the environment, not a flag, so it does not \
+                            appear in `ps` output or shell history.)"
                     );
                     None
                 }

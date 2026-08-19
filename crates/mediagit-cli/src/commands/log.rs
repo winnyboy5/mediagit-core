@@ -563,7 +563,9 @@ fn parse_date_bound(raw: &str, flag: &str) -> Result<chrono::DateTime<chrono::Ut
     }
 
     anyhow::bail!(
-        "{flag}: could not parse {raw:?} as a date. Use YYYY-MM-DD          (e.g. 2024-01-31) or an RFC 3339 timestamp          (e.g. 2024-01-31T14:30:00Z)."
+        "{flag}: could not parse {raw:?} as a date. Use YYYY-MM-DD \
+            (e.g. 2024-01-31) or an RFC 3339 timestamp \
+            (e.g. 2024-01-31T14:30:00Z)."
     )
 }
 

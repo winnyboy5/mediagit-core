@@ -1082,7 +1082,8 @@ mod tests {
             .expect_err("locked account must refuse");
         assert!(
             !err.to_string().to_lowercase().contains("lock"),
-            "lockout leaked to a caller who does not know the password —              that confirms the account exists. Got: {err}"
+            "lockout leaked to a caller who does not know the password — \
+                that confirms the account exists. Got: {err}"
         );
     }
 }

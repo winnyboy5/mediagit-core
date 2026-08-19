@@ -273,7 +273,8 @@ impl CommitCmd {
                     (name, email)
                 }
                 _ => anyhow::bail!(
-                    "--author must be \"Name <email>\"; got {author_str:?}.                      Refusing rather than recording a placeholder address."
+                    "--author must be \"Name <email>\"; got {author_str:?}. \
+                        Refusing rather than recording a placeholder address."
                 ),
             }
         } else {

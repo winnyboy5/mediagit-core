@@ -254,14 +254,19 @@ impl ConfigMigration for MigrationV2ToV3 {
         let auth = match (&account_key, &connection_string) {
             (Some(_), Some(_)) => {
                 return Err(ConfigError::ValidationError(
-                    "Azure config has both account_key and connection_string;                      cannot migrate automatically because only you know which was                      in use. Replace them by hand with a single `auth` block:                      auth = { type = \"account_key\", account_name = \"...\", account_key = \"...\" }                      or auth = { type = \"connection_string\", value = \"...\" }"
+                    "Azure config has both account_key and connection_string; \
+                        cannot migrate automatically because only you know which was \
+                        in use. Replace them by hand with a single `auth` block: \
+                        auth = { type = \"account_key\", account_name = \"...\", account_key = \"...\" } \
+                        or auth = { type = \"connection_string\", value = \"...\" }"
                         .to_string(),
                 ));
             }
             (Some(key), None) => {
                 let Some(name) = account_name.clone() else {
                     return Err(ConfigError::ValidationError(
-                        "Azure config has account_key but no account_name; cannot migrate.                          Write the `auth` block by hand."
+                        "Azure config has account_key but no account_name; cannot migrate. \
+                            Write the `auth` block by hand."
                             .to_string(),
                     ));
                 };
@@ -270,7 +275,9 @@ impl ConfigMigration for MigrationV2ToV3 {
             (None, Some(cs)) => json!({ "type": "connection_string", "value": cs }),
             (None, None) => {
                 return Err(ConfigError::ValidationError(
-                    "Azure config has neither account_key nor connection_string;                      nothing to migrate. Add an `auth` block explicitly — use                      { type = \"emulator\" } for local Azurite."
+                    "Azure config has neither account_key nor connection_string; \
+                        nothing to migrate. Add an `auth` block explicitly — use \
+                        { type = \"emulator\" } for local Azurite."
                         .to_string(),
                 ));
             }

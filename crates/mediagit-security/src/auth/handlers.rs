@@ -226,14 +226,17 @@ pub fn validate_password_strength(password: &str) -> Result<(), String> {
     // of multibyte glyphs can exceed the limit.
     if password.len() > MAX_PASSWORD_BYTES {
         return Err(format!(
-            "Password must be at most {MAX_PASSWORD_BYTES} bytes; anything longer is              silently truncated by the password hash, so the extra characters would              not protect the account"
+            "Password must be at most {MAX_PASSWORD_BYTES} bytes; anything longer is \
+                silently truncated by the password hash, so the extra characters would \
+                not protect the account"
         ));
     }
 
     let lowered = password.to_lowercase();
     if COMMON_PASSWORDS.contains(&lowered.as_str()) {
         return Err(
-            "Password is among the most commonly used and would be guessed immediately;              choose something else"
+            "Password is among the most commonly used and would be guessed immediately; \
+                choose something else"
                 .to_string(),
         );
     }
@@ -286,7 +289,8 @@ pub fn validate_registration_input(
     // this path knows who the account belongs to.
     if password_echoes_identity(password, username, email) {
         return Err(
-            "Password must not contain your username or email address; those are the              first things an attacker tries"
+            "Password must not contain your username or email address; those are the \
+                first things an attacker tries"
                 .to_string(),
         );
     }

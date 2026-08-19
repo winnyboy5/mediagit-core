@@ -1766,7 +1766,8 @@ mod presign_pack_downloads_verification_tests {
 
         assert!(
             resp.0.get(&pack_oid).map(Option::is_none).unwrap_or(true),
-            "handler minted a presigned URL for a corrupted unverified pack — the              verification gate is not wired into presign_pack_downloads"
+            "handler minted a presigned URL for a corrupted unverified pack — the \
+                verification gate is not wired into presign_pack_downloads"
         );
     }
 }

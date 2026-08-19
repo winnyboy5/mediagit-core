@@ -127,7 +127,8 @@ impl InfoOpts {
             // read-only info command. Say so and exit clean instead.
             other => {
                 println!(
-                    "'.{other}' is listed as supported but has no metadata parser wired —                      this is a bug, please report it"
+                    "'.{other}' is listed as supported but has no metadata parser wired — \
+                        this is a bug, please report it"
                 );
                 Ok(())
             }

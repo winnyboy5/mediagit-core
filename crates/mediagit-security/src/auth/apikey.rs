@@ -333,7 +333,8 @@ mod tests {
 
         assert_eq!(
             created.last_used, None,
-            "a freshly minted key has never been used, which must be              distinguishable from 'used long ago'"
+            "a freshly minted key has never been used, which must be \
+                distinguishable from 'used long ago'"
         );
 
         let validated = auth.validate_key(&plaintext).await.unwrap();
@@ -345,7 +346,8 @@ mod tests {
             listed
                 .iter()
                 .any(|k| k.id == created.id && k.last_used.is_some()),
-            "the recorded use must be visible to an audit, not only to the              request that caused it"
+            "the recorded use must be visible to an audit, not only to the \
+                request that caused it"
         );
     }
 
@@ -367,7 +369,9 @@ mod tests {
             let again = auth.validate_key(&plaintext).await.unwrap().last_used;
             assert_eq!(
                 again, first,
-                "within the resolution interval the timestamp must be left                  alone; rewriting it would mean a lock and a disk write per                  authenticated request"
+                "within the resolution interval the timestamp must be left \
+                    alone; rewriting it would mean a lock and a disk write per \
+                    authenticated request"
             );
         }
     }

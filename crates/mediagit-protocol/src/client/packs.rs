@@ -585,7 +585,8 @@ fn slice_verifies(
         None => {
             tracing::warn!(
                 chunk = %hex,
-                "pack manifest carries no compressed_hash for this chunk;                  refusing the slice unverified and falling back to per-chunk"
+                "pack manifest carries no compressed_hash for this chunk; \
+                    refusing the slice unverified and falling back to per-chunk"
             );
             false
         }
@@ -889,7 +890,8 @@ mod tests {
 
         assert!(
             !slice_verifies(&hex, data, &empty),
-            "a manifest with no compressed_hash left the slice unverified and              accepted it — fail-open on an integrity check"
+            "a manifest with no compressed_hash left the slice unverified and \
+                accepted it — fail-open on an integrity check"
         );
     }
 

@@ -642,7 +642,8 @@ mod tests {
         }
         assert!(
             missing.is_empty(),
-            "bare `mediagit` does not list these commands, so users cannot              discover them: {missing:?}"
+            "bare `mediagit` does not list these commands, so users cannot \
+                discover them: {missing:?}"
         );
     }
 }

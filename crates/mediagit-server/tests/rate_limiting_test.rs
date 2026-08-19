@@ -504,7 +504,8 @@ async fn retry_after_carries_an_actionable_delay() {
     // broke a 500-commit churn push on POST /packs/complete in 20260817-gagate3.
     assert_eq!(
         secs, 0,
-        "expected 0 for a sub-second refill; if the server now sends a real          delay, keep the client-side floor in rate_limit_backoff regardless"
+        "expected 0 for a sub-second refill; if the server now sends a real \
+            delay, keep the client-side floor in rate_limit_backoff regardless"
     );
 }
 

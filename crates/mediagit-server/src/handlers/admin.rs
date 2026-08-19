@@ -507,7 +507,8 @@ pub async fn set_disabled(
         id,
         disabled: req.disabled,
         note: if req.disabled {
-            "Account suspended. Existing sessions stop working on their next              request - the user store is consulted per request, not the token."
+            "Account suspended. Existing sessions stop working on their next \
+                request - the user store is consulted per request, not the token."
                 .to_string()
         } else {
             "Account restored.".to_string()

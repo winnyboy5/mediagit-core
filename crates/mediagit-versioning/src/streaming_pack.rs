@@ -757,7 +757,8 @@ mod tests {
     fn accepted_object_sizes_always_fit_the_u32_size_field() {
         assert!(
             MAX_PACK_OBJECT_SIZE <= u32::MAX as usize,
-            "MAX_PACK_OBJECT_SIZE ({MAX_PACK_OBJECT_SIZE}) exceeds u32::MAX, so an              object passing the size guard would still truncate its header"
+            "MAX_PACK_OBJECT_SIZE ({MAX_PACK_OBJECT_SIZE}) exceeds u32::MAX, so an \
+                object passing the size guard would still truncate its header"
         );
     }
 

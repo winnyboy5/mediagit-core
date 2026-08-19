@@ -3387,7 +3387,8 @@ mod chunk_delta_depth_tests {
             .count();
         assert!(
             delta_count > 0,
-            "no chunk deltas were written — this test is not exercising the              chain-depth path and proves nothing"
+            "no chunk deltas were written — this test is not exercising the \
+                chain-depth path and proves nothing"
         );
 
         let depth = max_chain_depth(&storage).await;
@@ -3475,7 +3476,9 @@ mod chunk_delta_depth_tests {
         let result = odb.get_chunk(&delta_id).await;
         assert!(
             result.is_err(),
-            "get_chunk reconstructed on top of a corrupt base and returned              success — those bytes are silently wrong, and              get_compressed_chunk would re-pack them under a valid id"
+            "get_chunk reconstructed on top of a corrupt base and returned \
+                success — those bytes are silently wrong, and \
+                get_compressed_chunk would re-pack them under a valid id"
         );
 
         let _ = v2;

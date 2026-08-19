@@ -524,7 +524,8 @@ mod tests {
         let reloaded = GrantsStore::load_or_new(dir.path()).unwrap();
         assert!(
             reloaded.get("victim", "repoX").is_none(),
-            "a concurrent grant overwrote the revoke on disk; it would come              back on restart"
+            "a concurrent grant overwrote the revoke on disk; it would come \
+                back on restart"
         );
         for i in 0..16 {
             assert_eq!(

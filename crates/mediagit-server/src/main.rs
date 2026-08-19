@@ -500,7 +500,8 @@ async fn main() -> Result<()> {
                     }
                     None => {
                         tracing::error!(
-                            "Metrics endpoint requested but the registry failed to build;                              /metrics not started"
+                            "Metrics endpoint requested but the registry failed to build; \
+                                /metrics not started"
                         );
                     }
                 }

@@ -694,7 +694,8 @@ async fn create_inner_storage_backend(
             use mediagit_config::AzureAuth;
             let Some(auth) = &azure_config.auth else {
                 anyhow::bail!(
-                    "Azure backend config is missing its `auth` block (pre-v3 flat format?);                      run any mediagit command in the repo to migrate, or see CONFIGURATION.md"
+                    "Azure backend config is missing its `auth` block (pre-v3 flat format?); \
+                        run any mediagit command in the repo to migrate, or see CONFIGURATION.md"
                 );
             };
             let storage = match auth {

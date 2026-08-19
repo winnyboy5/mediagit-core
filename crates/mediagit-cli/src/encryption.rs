@@ -272,7 +272,10 @@ pub async fn verify_remote_key_compatible(
         (Some(local), EscrowedKey::Present(remote)) => {
             if local.as_slice() != remote.as_slice() {
                 bail!(
-                    "the remote holds a DIFFERENT encryption key for this repository. \n                     Its objects are sealed under that key, so mixing the two would \n                     produce a repository nothing can read end to end. Nothing was \n                     transferred."
+                    "the remote holds a DIFFERENT encryption key for this repository. \
+                        Its objects are sealed under that key, so mixing the two would \
+                        produce a repository nothing can read end to end. Nothing was \
+                        transferred."
                 );
             }
             Ok(None)
@@ -281,7 +284,11 @@ pub async fn verify_remote_key_compatible(
         // `push` offers the key, read paths carry on.
         (Some(local), _) => Ok(Some(local)),
         (None, EscrowedKey::Present(_)) => bail!(
-            "the remote holds an encryption key for this repository, but this one has \n             none. Its objects are sealed, so nothing here could read them, and pushing \n             from here would mix plaintext into a repository that reports itself as \n             encrypted. Clone the repository again to receive the key. Nothing was \n             transferred."
+            "the remote holds an encryption key for this repository, but this one has \
+                none. Its objects are sealed, so nothing here could read them, and pushing \
+                from here would mix plaintext into a repository that reports itself as \
+                encrypted. Clone the repository again to receive the key. Nothing was \
+                transferred."
         ),
         (None, _) => Ok(None),
     }

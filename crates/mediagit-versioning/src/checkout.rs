@@ -134,7 +134,10 @@ async fn write_entry_to_disk(
                         path = %full_path.display(),
                         target = %target,
                         error = %e,
-                        "could not create a symlink; writing the target as a regular file                          instead. This file's contents are a path, not the linked data —                          committing it will store it that way. Enable Developer Mode on                          Windows to get real symlinks."
+                        "could not create a symlink; writing the target as a regular file \
+                            instead. This file's contents are a path, not the linked data — \
+                            committing it will store it that way. Enable Developer Mode on \
+                            Windows to get real symlinks."
                     );
                     fs::write(full_path, target.as_bytes()).with_context(|| {
                         format!("Failed to write symlink file: {}", full_path.display())
