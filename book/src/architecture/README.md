@@ -140,11 +140,13 @@ sequenceDiagram
 - `mediagit verify` for repository health checks
 
 ### Encryption
-- At-rest, MediaGit's own: **partially implemented, cannot be enabled.** The `MGEN`
-  object envelope is wired into `SmartCompressor` (AES-256-GCM), but key management does
-  not exist, so nothing turns it on and no stored byte is encrypted in practice. With no
-  key configured, output is byte-for-byte identical to a build without the feature.
-  Tracked as DC-7; see [Security](security.md).
+- At-rest, MediaGit's own: **implemented and enabled per repository.** The `MGEN` v2
+  object envelope (XAES-256-GCM) is wired into `SmartCompressor`, and `mediagit key init`
+  turns it on -- on an *empty* repository only, since sealing what is already there would
+  mean rewriting every object. Key escrow delivers the key to the client on the
+  presigned-upload path, so encrypted `push` and `clone` both work. With no key
+  configured, output is byte-for-byte identical to a build without the feature.
+  Encrypting an *existing* repository is not supported. See [Security](security.md).
 - At-rest, cloud SSE: **not wired either.** `[storage] encryption` /
   `encryption_algorithm` are parsed and validated but read by no storage backend — no
   request sets an SSE header. Setting them has no effect. (Bucket-level encryption

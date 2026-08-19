@@ -53,6 +53,7 @@
   - [verify](./cli/verify.md)
   - [stats](./cli/stats.md)
   - [reflog](./cli/reflog.md)
+  - [key](./cli/key.md)
 
 # Architecture
 

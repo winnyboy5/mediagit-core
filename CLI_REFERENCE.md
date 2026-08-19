@@ -1131,6 +1131,41 @@ mediagit stats --json > stats.json
 
 ---
 
+## Encryption
+
+### `mediagit key`
+
+Manage this repository's at-rest encryption key. Encryption is per repository
+and is **enabled at creation or not at all** — `key init` refuses on a
+repository that already holds objects, because sealing them would mean
+rewriting every one.
+
+```bash
+mediagit key init            # enable encryption (empty repository only)
+mediagit key status          # is this repository encrypted, and how does it unlock
+mediagit key recover         # unlock with the one-time recovery code
+mediagit key rotate-master   # re-lock the key under a new master key
+```
+
+`rotate-master` accepts `--new-keyfile <PATH>`, needed when rotating from one
+key file to another. It changes only what protects the repository key, not the
+key itself, so no object is rewritten and the recovery code keeps working.
+
+There is no way to encrypt an existing repository, to remove encryption, or to
+replace the repository key — all three would have to rewrite every object.
+
+`key init` prints a one-time recovery code. If both it and the master key are
+lost, the objects cannot be recovered.
+
+| Variable | Effect |
+| --- | --- |
+| `MEDIAGIT_ENCRYPTION_KEYFILE` | File holding the master key, used instead of the OS keychain |
+| `MEDIAGIT_NO_KEYRING` | Skip the OS keychain entirely |
+
+See [book/src/cli/key.md](book/src/cli/key.md) for the long form.
+
+---
+
 ## Meta
 
 ### `mediagit version`

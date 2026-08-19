@@ -312,9 +312,13 @@ This `[observability]` table is part of the client schema (round-trips through `
 | `api_key` | string \| absent | absent | — |
 | `auth_enabled` | bool | `false` | — |
 | `cors_origins` | array | `["http://localhost:3000"]` | — |
-| `encryption_at_rest` | bool | `false` | — |
-| `encryption_key_path` | string \| absent | absent | — |
 | `rate_limiting` | table | `{ enabled = false, requests_per_second = 1000, burst_size = 2000 }` | — |
+
+> `encryption_at_rest` and `encryption_key_path` were listed here until
+> 2026-08-17. They have been **removed from the schema** — nothing ever read
+> them, so they looked like an at-rest encryption switch and silently were not
+> one. At-rest encryption is per repository via `mediagit key init`; the server
+> side is `[encryption]` in `mediagit-server`'s own config.
 
 **Verified:** `config.security.*` (and `config.app.*`, also present in the schema) is never read anywhere outside `mediagit-config`'s own loader/validation/tests. `mediagit init` writes this section with its defaults into every new `config.toml`, but it has no effect on either the CLI or `mediagit-server` — the actual server security/TLS/auth/rate-limit/CORS configuration lives entirely in `mediagit-server.toml` (Part 2 of this document). Treat `[security]` in the client config as vestigial; do not rely on it to configure server behavior.
 
