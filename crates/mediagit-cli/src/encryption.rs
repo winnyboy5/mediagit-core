@@ -219,6 +219,74 @@ pub fn load_repo_key_bytes(repo_root: &Path) -> Result<Option<Zeroizing<Vec<u8>>
     Ok(Some(bytes))
 }
 
+/// Refuse, before any object moves, when this repository's encryption state
+/// and the remote's cannot both be true.
+///
+/// Every transfer command needs this question answered and each one used to
+/// answer it differently. `push` asked only when the LOCAL repository held a
+/// key, so an unencrypted clone pushing to a keyed remote skipped the check
+/// entirely and uploaded plaintext into a repository the server considered
+/// encrypted -- silently, because reads pass unsealed bytes straight through
+/// (`process_key::open_at_rest`). `fetch`, `pull` and `download` never asked at
+/// all, so a sealed object arrived and failed deep in the compressor talking
+/// about MGEN envelopes. One function now, so the answer cannot drift apart
+/// again.
+///
+/// Deliberately does NOT adopt a key the way [`adopt_repo_key`] does for
+/// `clone`. Clone owns a directory it just created -- the same empty-repository
+/// precondition `key init` enforces. Every other command runs against a
+/// repository that may already hold plaintext objects, and keying that one
+/// would manufacture exactly the half-sealed state the empty-repo refusal
+/// exists to prevent. It would also fail outright on the second call, because
+/// `adopt_repo_key` refuses once a key file is present -- so a repeat `pull`
+/// on an encrypted repository would break, which is the most ordinary
+/// workflow there is.
+///
+/// Returns this repository's key when it holds one the remote does not; only
+/// `push` acts on that, by escrowing it.
+pub async fn verify_remote_key_compatible(
+    repo_root: &Path,
+    client: &mediagit_protocol::ProtocolClient,
+) -> Result<Option<Zeroizing<Vec<u8>>>> {
+    use mediagit_protocol::client::escrow::EscrowedKey;
+
+    let local = load_repo_key_bytes(repo_root)?;
+
+    // A repository that holds a key must know the remote's state: getting it
+    // wrong writes objects nothing can read back. Without one the check is
+    // advisory, and a transport failure must not become an encryption-shaped
+    // error -- before this existed, an unencrypted transfer touched the network
+    // for the first time when it moved an object, and that is where the useful
+    // message lives. A remote we cannot reach cannot be transferred with
+    // either way, so nothing is lost by carrying on.
+    let remote = match client.get_encryption_key().await {
+        Ok(remote) => remote,
+        Err(e) if local.is_none() => {
+            tracing::debug!("encryption-key pre-flight check skipped: {e:#}");
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    };
+
+    match (local, remote) {
+        (Some(local), EscrowedKey::Present(remote)) => {
+            if local.as_slice() != remote.as_slice() {
+                bail!(
+                    "the remote holds a DIFFERENT encryption key for this repository. \n                     Its objects are sealed under that key, so mixing the two would \n                     produce a repository nothing can read end to end. Nothing was \n                     transferred."
+                );
+            }
+            Ok(None)
+        }
+        // Absent, or a remote with no escrow route at all. The caller decides:
+        // `push` offers the key, read paths carry on.
+        (Some(local), _) => Ok(Some(local)),
+        (None, EscrowedKey::Present(_)) => bail!(
+            "the remote holds an encryption key for this repository, but this one has \n             none. Its objects are sealed, so nothing here could read them, and pushing \n             from here would mix plaintext into a repository that reports itself as \n             encrypted. Clone the repository again to receive the key. Nothing was \n             transferred."
+        ),
+        (None, _) => Ok(None),
+    }
+}
+
 /// Adopt `key` as this repository's key, wrapped under a local master.
 ///
 /// For clone: the repository key comes from the remote, and this machine has

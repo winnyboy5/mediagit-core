@@ -126,6 +126,13 @@ impl FetchCmd {
         };
         // Arc-wrap for the parallel --all path (pull_streaming/download_chunked_objects take &self).
         let mut client = Arc::new(build_client(credentials.clone()));
+
+        // DC-7: refuse before any object moves when this repository and the
+        // remote disagree about encryption. Without it a sealed object arrived
+        // and failed deep in the compressor talking about MGEN envelopes, with
+        // nothing naming the actual problem. The returned key is push's
+        // business only -- read paths have nothing to escrow.
+        let _ = crate::encryption::verify_remote_key_compatible(&repo_root, &client).await?;
         let odb = Arc::new(ObjectDatabase::with_smart_compression(
             Arc::clone(&storage),
             1000,

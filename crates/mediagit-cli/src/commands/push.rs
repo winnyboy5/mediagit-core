@@ -191,36 +191,33 @@ impl PushCmd {
         // Push hands object bytes to storage over presigned PUT URLs, a path
         // the server never sees the bytes on. Without the key it ends up
         // holding objects it cannot verify, register, or hand back correctly
-        // -- which is why this refused outright until now. `has_key` is a
-        // filesystem check, so unencrypted repositories pay nothing.
+        // -- which is why this refused outright until now. It costs one GET,
+        // including for unencrypted repositories: they used to pay nothing
+        // because they were not checked at all, which was the bug.
         //
         // Deliberately before the first object leaves: a remote that will not
         // take the key must stop the push, not fail it halfway through.
-        if crate::encryption::has_key(&repo_root) {
-            let key = crate::encryption::load_repo_key_bytes(&repo_root)?
-                .expect("has_key said there is one");
-            match client.get_encryption_key().await? {
-                mediagit_protocol::client::escrow::EscrowedKey::Present(remote_key) => {
-                    if remote_key.as_slice() != key.as_slice() {
-                        anyhow::bail!(
-                            "the remote holds a DIFFERENT encryption key for this repository.                              Its objects are sealed under that key, so pushing these would                              produce a repository nothing can read end to end. Nothing was                              uploaded."
-                        );
-                    }
-                }
-                _ => {
-                    // Absent, or a remote with no escrow route at all -- either
-                    // way, offer it. `put_encryption_key` turns a 404 into the
-                    // "this remote does not support encrypted repositories"
-                    // message, which is the honest reading of both.
-                    client.put_encryption_key(&key).await?;
-                    if !self.quiet {
-                        println!(
-                            "{} Escrowed this repository's encryption key with {}",
-                            style("🔑").cyan(),
-                            style(remote).yellow()
-                        );
-                    }
-                }
+        //
+        // Both directions of mismatch are checked, and the check lives in one
+        // place (`encryption::verify_remote_key_compatible`) shared with fetch,
+        // pull and download -- this used to be push-only logic keyed on the
+        // LOCAL repository holding a key, which meant an unencrypted clone
+        // pushing to a keyed remote skipped it entirely and uploaded plaintext
+        // into a repository the server considered encrypted. Silently.
+        //
+        // A key the remote does not have comes back for escrowing; push is the
+        // only command that acts on that, because it is the only one that
+        // writes.
+        if let Some(key) =
+            crate::encryption::verify_remote_key_compatible(&repo_root, &client).await?
+        {
+            client.put_encryption_key(&key).await?;
+            if !self.quiet {
+                println!(
+                    "{} Escrowed this repository's encryption key with {}",
+                    style("🔑").cyan(),
+                    style(remote).yellow()
+                );
             }
         }
 
