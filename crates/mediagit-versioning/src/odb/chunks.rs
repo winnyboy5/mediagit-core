@@ -253,11 +253,30 @@ impl ObjectDatabase {
                     }
 
                     if let Err(e) = self.storage.put(&delta_key, &compressed_delta).await {
-                        // Best-effort cleanup: remove the .meta we already committed so the
-                        // chunk is not permanently misrouted. If the delete also fails, gc
-                        // will collect the orphaned sidecar on next run.
-                        let _ = self.storage.delete(&meta_key).await;
-                        rollback_delta_pair(&self.delta_written_pairs, chunk.id, base_id).await;
+                        // Remove the .meta we already committed so the chunk is not
+                        // permanently misrouted. If the delete also fails, gc collects the
+                        // orphaned sidecar on a later run.
+                        // Roll back ONLY if the sidecar is really gone. The in-memory
+                        // graph must stay a superset of the on-disk edges: the depth
+                        // guard reads it, so an edge still on disk but missing from
+                        // memory makes the guard undercount and admit a chain past
+                        // MAX_DELTA_DEPTH. Keeping an edge whose binary never landed is
+                        // the safe direction to be wrong in - it only makes the guard
+                        // refuse a delta it could have taken.
+                        match self.storage.delete(&meta_key).await {
+                            Ok(()) => {
+                                rollback_delta_pair(&self.delta_written_pairs, chunk.id, base_id)
+                                    .await;
+                            }
+                            Err(del_err) => warn!(
+                                chunk_id = %chunk.id,
+                                base_id = %base_id,
+                                error = %del_err,
+                                "failed to remove delta routing sidecar after a failed delta \
+                                 write; keeping the in-memory edge so the depth guard stays \
+                                 conservative"
+                            ),
+                        }
                         return Err(anyhow::anyhow!("Failed to store chunk delta binary: {}", e));
                     }
                     debug!(
@@ -921,13 +940,32 @@ impl ObjectDatabase {
                                             {
                                                 // Remove the routing sidecar so the chunk is
                                                 // not permanently misrouted to a missing binary.
-                                                let _ = storage.delete(&meta_key).await;
-                                                rollback_delta_pair(
-                                                    &delta_pairs,
-                                                    chunk.id,
-                                                    base_id,
-                                                )
-                                                .await;
+                                                // Roll back ONLY if the sidecar is really gone. The in-memory
+                                                // graph must stay a superset of the on-disk edges: the depth
+                                                // guard reads it, so an edge still on disk but missing from
+                                                // memory makes the guard undercount and admit a chain past
+                                                // MAX_DELTA_DEPTH. Keeping an edge whose binary never landed is
+                                                // the safe direction to be wrong in - it only makes the guard
+                                                // refuse a delta it could have taken.
+                                                match storage.delete(&meta_key).await {
+                                                    Ok(()) => {
+                                                        rollback_delta_pair(
+                                                            &delta_pairs,
+                                                            chunk.id,
+                                                            base_id,
+                                                        )
+                                                        .await;
+                                                    }
+                                                    Err(del_err) => warn!(
+                                                        chunk_id = %chunk.id,
+                                                        base_id = %base_id,
+                                                        error = %del_err,
+                                                        "failed to remove delta routing sidecar \
+                                                         after a failed delta write; keeping the \
+                                                         in-memory edge so the depth guard stays \
+                                                         conservative"
+                                                    ),
+                                                }
                                                 return Err(anyhow::anyhow!("Store delta: {}", e));
                                             }
 
@@ -1387,13 +1425,32 @@ impl ObjectDatabase {
                                             {
                                                 // Remove the routing sidecar so the chunk is
                                                 // not permanently misrouted to a missing binary.
-                                                let _ = storage.delete(&meta_key).await;
-                                                rollback_delta_pair(
-                                                    &delta_pairs,
-                                                    chunk.id,
-                                                    base_id,
-                                                )
-                                                .await;
+                                                // Roll back ONLY if the sidecar is really gone. The in-memory
+                                                // graph must stay a superset of the on-disk edges: the depth
+                                                // guard reads it, so an edge still on disk but missing from
+                                                // memory makes the guard undercount and admit a chain past
+                                                // MAX_DELTA_DEPTH. Keeping an edge whose binary never landed is
+                                                // the safe direction to be wrong in - it only makes the guard
+                                                // refuse a delta it could have taken.
+                                                match storage.delete(&meta_key).await {
+                                                    Ok(()) => {
+                                                        rollback_delta_pair(
+                                                            &delta_pairs,
+                                                            chunk.id,
+                                                            base_id,
+                                                        )
+                                                        .await;
+                                                    }
+                                                    Err(del_err) => warn!(
+                                                        chunk_id = %chunk.id,
+                                                        base_id = %base_id,
+                                                        error = %del_err,
+                                                        "failed to remove delta routing sidecar \
+                                                         after a failed delta write; keeping the \
+                                                         in-memory edge so the depth guard stays \
+                                                         conservative"
+                                                    ),
+                                                }
                                                 return Err(anyhow::anyhow!("Store delta: {}", e));
                                             }
 
@@ -3037,8 +3094,25 @@ impl ObjectDatabase {
         {
             // Remove the routing sidecar so the chunk is not permanently
             // misrouted to a missing binary.
-            let _ = self.storage.delete(&meta_key).await;
-            rollback_delta_pair(&self.delta_written_pairs, *chunk_id, *base_id).await;
+            // Roll back ONLY if the sidecar is really gone. The in-memory
+            // graph must stay a superset of the on-disk edges: the depth
+            // guard reads it, so an edge still on disk but missing from
+            // memory makes the guard undercount and admit a chain past
+            // MAX_DELTA_DEPTH. Keeping an edge whose binary never landed is
+            // the safe direction to be wrong in - it only makes the guard
+            // refuse a delta it could have taken.
+            match self.storage.delete(&meta_key).await {
+                Ok(()) => {
+                    rollback_delta_pair(&self.delta_written_pairs, *chunk_id, *base_id).await;
+                }
+                Err(del_err) => warn!(
+                    chunk_id = %chunk_id,
+                    base_id = %base_id,
+                    error = %del_err,
+                    "failed to remove delta routing sidecar after a failed delta write; \
+                     keeping the in-memory edge so the depth guard stays conservative"
+                ),
+            }
             return Err(anyhow::anyhow!("Failed to store chunk delta: {}", e));
         }
 
