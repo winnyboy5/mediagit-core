@@ -20,17 +20,78 @@ if (-not $env:MEDIAGIT_AUTHOR_EMAIL) { $env:MEDIAGIT_AUTHOR_EMAIL = "qa-suite@me
 # A campaign appends to a handful of shared log/TSV files thousands of times over many
 # hours; a scanner/indexer briefly opening one for a read is enough to win the race and
 # throw "being used by another process" (seen 2026-08-06, S2-churn, full stack traced to
-# this exact pattern - see harness-faults.log). Add-Content itself has no retry, so that
-# single lost write used to abort the whole drill. Three attempts with a short backoff
-# rides out a momentary external lock without masking a real, persistent one.
-function Add-QaContentRetry($Path, $Value, [string]$Encoding = $null) {
-  for ($attempt = 1; $attempt -le 3; $attempt++) {
+# this exact pattern - see harness-faults.log).
+#
+# THE RULE: writing a log line must NEVER void a measurement.
+#
+# That is the whole design, and it is deliberately independent of root cause.
+# "Stream was not readable" (System.ArgumentException, thrown from
+# FileSystemProvider.GetContentWriter -> StreamReader ctor) has now voided
+# S2-churn/S3-conflicts across five campaigns. Two attempts to fix the CAUSE
+# both failed to hold:
+#   2026-08-17  widened the catch to include ArgumentException. gagate4 then
+#               threw at the rethrow after the attempts ran out - so the
+#               condition is persistent for that code path, not a brief lock.
+#   2026-08-18  forced an explicit -Encoding on the theory that encoding
+#               DETECTION was doing the offending read. Plausible (Write-QaRow,
+#               the only caller that always passed "ASCII", has never appeared
+#               in a fault stack) but NOT PROVEN: an attempt to reproduce it by
+#               denying read-sharing produced IOException from both the
+#               with-encoding and without-encoding paths, so that experiment
+#               did not isolate the mechanism. Treat it as hardening, not as
+#               the answer.
+#
+# So stop betting the drill on a diagnosis. After the retries are spent the line
+# is DROPPED and recorded, never rethrown. A lost log line costs one line; an
+# exception here costs a 40-minute scale drill and, worse, reports it as a
+# harness error rather than a product result. The drop is loud, not silent: it
+# lands in harness-faults.log, which `09_report` reads and gates on via
+# `campaign-no-harness-faults` - so a persistent problem still fails the
+# campaign, it just does not destroy the measurement on its way out.
+function Add-QaContentRetry($Path, $Value, [string]$Encoding = "ASCII") {
+  # $Encoding is kept for call-site compatibility (Write-QaRow passes "ASCII")
+  # but the writer below is byte-level and always ASCII, matching what
+  # Add-Content produced here before. The suite is ASCII-only by convention.
+  if (-not $Encoding) { $Encoding = "ASCII" }
+  for ($attempt = 1; $attempt -le 5; $attempt++) {
     try {
-      if ($Encoding) { $Value | Add-Content $Path -Encoding $Encoding } else { $Value | Add-Content $Path }
+      # A raw FileStream opened with FileShare::ReadWrite, NOT Add-Content.
+      #
+      # This is the cause, finally isolated. `10_scale` runs 16 concurrent
+      # clients and every one of them appends to the SAME cmds log; PowerShell's
+      # FileSystemProvider opens the file in a way that cannot share with
+      # another writer, and its GetContentWriter reads the file (for BOM and
+      # encoding) as part of that -- which is where "Stream was not readable"
+      # comes from. It is concurrent-append contention, not encoding detection:
+      # 20260818-p10check2 still produced 36 of them AFTER an explicit
+      # -Encoding was forced, which rules that hypothesis out.
+      #
+      # FileShare::ReadWrite lets concurrent writers coexist, and appending in
+      # one Write call keeps a line intact. The retry and the drop below stay as
+      # a backstop for a genuine external lock (a scanner or indexer), which is
+      # the case this helper was originally written for.
+      $bytes = [Text.Encoding]::ASCII.GetBytes(($Value | Out-String).TrimEnd("`r", "`n") + "`r`n")
+      $fs = [IO.File]::Open($Path, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+      try { $fs.Write($bytes, 0, $bytes.Length) } finally { $fs.Dispose() }
       return
-    } catch [System.IO.IOException] {
-      if ($attempt -eq 3) { throw }
-      Start-Sleep -Milliseconds (100 * $attempt)
+    } catch {
+      if ($attempt -lt 5) {
+        Start-Sleep -Milliseconds (100 * $attempt)
+        continue
+      }
+      # Spent. Record and carry on - never throw from a logging helper.
+      try {
+        $rec = @(
+          "[QA-FAULT] stage=log-write type=$($_.Exception.GetType().FullName)",
+          "message: $($_.Exception.Message)",
+          "path: $Path",
+          "note: log line DROPPED after 5 attempts; the drill continues on purpose.",
+          "      A logging failure must not void a measurement - see Add-QaContentRetry.",
+          ""
+        ) -join "`r`n"
+        [IO.File]::AppendAllText((Join-Path $QA.Logs "harness-faults.log"), $rec)
+      } catch { }
+      return
     }
   }
 }
@@ -157,11 +218,27 @@ function Invoke-MG([string]$Repo, [string[]]$MgArgs, [string]$Phase = "misc", [i
 
     $stage = "wait"
     if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
-      taskkill /T /F /PID $proc.Id 2>$null | Out-Null
-      $proc.WaitForExit() | Out-Null   # pipes close on kill; tasks then complete
+      # A timeout is a RESULT, not a harness fault, and nothing in this block may
+      # turn it into one. `taskkill` writes to stderr when it cannot terminate
+      # part of the tree ("The process with PID N (child process of PID M) could
+      # not be terminated"), and PowerShell surfaces a native command's stderr as
+      # an ErrorRecord that becomes TERMINATING under the `$ErrorActionPreference
+      # = 'Stop'` that phase scripts set. On 20260817-gagate3 that turned a clean
+      # 3,600s stall in S2-churn into `exit=-1` with the whole `[INVOKE-MG-ERROR]`
+      # block in place of the product's own output -- so a real product bug was
+      # both mislabelled as ours AND stripped of the evidence needed to diagnose
+      # it. Exactly the run where the output matters most.
+      try { taskkill /T /F /PID $proc.Id 2>$null | Out-Null } catch { }
+      try { $proc.WaitForExit() | Out-Null } catch { }   # pipes close on kill; tasks then complete
       $sw.Stop()
       $stage = "collect-after-timeout"
-      $out = $outTask.Result + $errTask.Result + "`n[TIMEOUT after $TimeoutSec seconds]"
+      # Same reasoning: a faulted read task on a killed child must not cost us
+      # the 124. Whatever was captured before the kill is still worth keeping.
+      $partial = ""
+      try { $partial = $outTask.Result + $errTask.Result } catch {
+        $partial = "[output unavailable: read task faulted after kill - $($_.Exception.GetType().Name)]"
+      }
+      $out = $partial + "`n[TIMEOUT after $TimeoutSec seconds]"
       $code = 124
     } else {
       $sw.Stop()
