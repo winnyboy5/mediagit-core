@@ -171,11 +171,7 @@ fn small_body_routes(state: Arc<AppState>) -> Router {
 }
 
 /// Create the axum router with all endpoints
-/// The shared rate limiter, so a second listener can enforce the *same*
-/// budget rather than being handed its own.
-pub type SharedRateLimiter = Arc<
-    security::GovernorConfig<security::SmartIpKeyExtractor, security::StateInformationMiddleware>,
->;
+pub use security::SharedRateLimiter;
 
 /// Create the router without rate limiting.
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -389,32 +385,13 @@ pub fn create_rate_limited_router(
     state: Arc<AppState>,
     rate_limit_config: RateLimitConfig,
 ) -> (Router, impl FnOnce() + Send + 'static, SharedRateLimiter) {
-    use security::{GovernorConfigBuilder, SmartIpKeyExtractor};
-
-    let governor_config: SharedRateLimiter = Arc::new(
-        GovernorConfigBuilder::default()
-            .per_second(rate_limit_config.requests_per_second)
-            .burst_size(rate_limit_config.burst_size)
-            .use_headers()
-            .key_extractor(SmartIpKeyExtractor)
-            .finish()
-            .expect("Failed to build rate limiter config"),
-    );
-
-    // Cleanup task: the limiter keeps per-key state, so prune it periodically.
-    let limiter = governor_config.limiter().clone();
-    let cleanup_task = move || {
-        use std::time::Duration;
-        let interval = Duration::from_secs(60);
-        loop {
-            std::thread::sleep(interval);
-            let size = limiter.len();
-            if size > 0 {
-                tracing::debug!("Rate limiter storage size: {}, cleaning up...", size);
-                limiter.retain_recent();
-            }
-        }
-    };
+    // One builder, in `security.rs`. This used to inline its own copy --
+    // same shape, but keyed by `SmartIpKeyExtractor` instead of
+    // `IdentityOrIpKeyExtractor`, and with a second cleanup thread. That copy
+    // is why the per-identity keying `RateLimitConfig` documents was never
+    // actually in effect: everyone behind one NAT or one CI runner pool shared
+    // a single budget.
+    let (governor_config, cleanup_task) = rate_limit_config.build_with_cleanup();
 
     let router = build_router(state, Some(Arc::clone(&governor_config)));
     (router, cleanup_task, governor_config)

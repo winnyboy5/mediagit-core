@@ -204,12 +204,19 @@ fn default_presigned_url_ttl() -> u64 {
     43200 // 12 hours
 }
 
-fn default_rate_limit_rps() -> u64 {
-    10 // 10 requests per second
+// Sized for bulk media transfer, not for browsing -- see the rationale on
+// `RateLimitConfig::default`, which delegates here so the two cannot drift
+// apart again. They had: this file said 10/20 while `security.rs` said
+// 1000/2000, and 10/20 is what an operator actually got, because
+// `mediagit-server init` enables rate limiting and these are the serde
+// defaults behind it. A push is roughly one request per chunk, so 10/s turned
+// every real push into a 429 storm.
+pub(crate) fn default_rate_limit_rps() -> u64 {
+    1000
 }
 
-fn default_rate_limit_burst() -> u32 {
-    20 // Allow bursts up to 20 requests
+pub(crate) fn default_rate_limit_burst() -> u32 {
+    2000
 }
 
 fn default_allow_open_registration() -> bool {

@@ -30,8 +30,8 @@ enable_rate_limiting = true
 
 # Adjust based on expected legitimate traffic
 # 100 requests/second = 6,000 requests/minute per IP
-rate_limit_rps = 200
-rate_limit_burst = 300
+rate_limit_rps = 1000
+rate_limit_burst = 2000
 
 # ========================================
 # TLS/HTTPS (REQUIRED for Production)

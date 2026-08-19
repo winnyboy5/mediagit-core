@@ -384,3 +384,168 @@ async fn second_listener_shares_the_rate_limit_budget() {
         resp.status()
     );
 }
+
+/// Two credentials from one IP must not share a budget.
+///
+/// This is the whole point of `IdentityOrIpKeyExtractor`, and until 2026-08-17
+/// it did not hold: `create_rate_limited_router` inlined its own builder keyed
+/// by `SmartIpKeyExtractor`, so the extractor was dead code and every client
+/// behind one NAT, VPN or CI runner pool drew on a single bucket. Nothing
+/// caught it because every other test in this file is single-identity, where
+/// per-IP and per-credential behave identically.
+///
+/// Also pins the claim the wiring rests on: the governor layer runs *before*
+/// the auth middleware, so identity has to come from the raw `Authorization`
+/// header rather than a request extension. If someone "fixes" that ordering,
+/// the second assertion below starts failing.
+#[tokio::test]
+async fn identity_keyed_buckets_are_independent() {
+    // One request, no refill within the test's lifetime.
+    let server = TestServer::new_with_rate_limit(RateLimitConfig::new(1, 1)).await;
+    mediagit_protocol::ensure_crypto_provider();
+    let client = Client::new();
+
+    let get = |token: &'static str| {
+        let client = client.clone();
+        let url = server.url("/test-repo/info/refs");
+        async move {
+            client
+                .get(url)
+                .header("Authorization", format!("Bearer {token}"))
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+
+    assert_ne!(
+        get("alice").await,
+        StatusCode::TOO_MANY_REQUESTS,
+        "alice's first request should be inside her own burst"
+    );
+
+    // Same IP, different credential: a separate bucket, so this must pass even
+    // though alice has already spent the whole burst.
+    assert_ne!(
+        get("bob").await,
+        StatusCode::TOO_MANY_REQUESTS,
+        "bob shares alice's IP but not her credential, so he must have his own budget \
+         -- a 429 here means the limiter is keyed per-IP again"
+    );
+
+    // ...and alice really is exhausted, so this is not just a limiter that
+    // never fires.
+    assert_eq!(
+        get("alice").await,
+        StatusCode::TOO_MANY_REQUESTS,
+        "alice's budget was 1 request; the second must be rejected"
+    );
+}
+
+/// What does the server actually put in `Retry-After`, and is it actionable?
+///
+/// This exists because a 429 is only useful if the number attached to it tells
+/// the client something. If the header says `0`, a client that honours it
+/// literally sleeps for zero and hammers straight back -- burning its whole
+/// retry budget in microseconds and turning a momentary limit into a hard
+/// failure. Captured as a test rather than reasoned about, because the value is
+/// produced by `tower_governor`'s `use_headers()` and is not ours to assume.
+#[tokio::test]
+async fn retry_after_carries_an_actionable_delay() {
+    let server = TestServer::new_with_rate_limit(RateLimitConfig::new(1, 2)).await;
+    mediagit_protocol::ensure_crypto_provider();
+    let client = Client::new();
+
+    let mut limited = None;
+    for _ in 0..10 {
+        let resp = client
+            .get(server.url("/test-repo/info/refs"))
+            .send()
+            .await
+            .unwrap();
+        if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+            limited = Some(resp);
+            break;
+        }
+    }
+    let resp = limited.expect("a 1rps/2burst budget must reject within 10 rapid requests");
+
+    let retry_after = resp
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let x_after = resp
+        .headers()
+        .get("x-ratelimit-after")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+
+    println!("retry-after={retry_after:?} x-ratelimit-after={x_after:?}");
+
+    let retry_after = retry_after.expect("a 429 must carry Retry-After");
+    let secs: u64 = retry_after
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("Retry-After should be integer seconds, got {retry_after:?}"));
+
+    // Characterisation, not a wish: `tower_governor` emits whole seconds and
+    // rounds down, so a bucket refilling in under a second advertises 0. This
+    // is pinned rather than asserted against, because the client is where it
+    // gets handled -- `rate_limit_backoff` in mediagit-protocol floors the
+    // header with its own jittered backoff for exactly this reason.
+    //
+    // If this ever starts returning >= 1 that is fine; the client takes the
+    // larger of the two. What must NOT happen is someone deleting the
+    // client-side floor because "the server sends a real number now" -- it
+    // does not, for any limit that refills quickly, and a client honouring 0
+    // literally spends its whole retry budget in microseconds. That is what
+    // broke a 500-commit churn push on POST /packs/complete in 20260817-gagate3.
+    assert_eq!(
+        secs, 0,
+        "expected 0 for a sub-second refill; if the server now sends a real          delay, keep the client-side floor in rate_limit_backoff regardless"
+    );
+}
+
+/// `requests_per_second` must mean requests per second.
+///
+/// It did not. `tower_governor`'s `per_second(n)` sets the interval at which
+/// ONE cell is replenished -- "replenish one element every n seconds" -- so the
+/// field named `requests_per_second` was configuring its own reciprocal, and
+/// the shipped default of 10 meant one request per TEN SECONDS once the burst
+/// drained. That is what produced 429s on ordinary pushes, and raising the
+/// number made the sustained rate worse while appearing to help, because a
+/// larger burst hides the refill rate until the bucket empties.
+///
+/// The assertion is deliberately about REFILL, not about the burst: burst size
+/// alone passes under either interpretation, which is exactly why this went
+/// unnoticed. Spend the burst, wait a beat, and require the bucket to have
+/// refilled at the configured rate.
+#[tokio::test]
+async fn requests_per_second_is_a_rate_not_an_interval() {
+    // 100/s => one cell every 10ms. Burst of 1 so it is spent immediately.
+    let server = TestServer::new_with_rate_limit(RateLimitConfig::new(100, 1)).await;
+    mediagit_protocol::ensure_crypto_provider();
+    let client = Client::new();
+    let url = server.url("/test-repo/info/refs");
+
+    // Drain the burst.
+    for _ in 0..4 {
+        let _ = client.get(&url).send().await.unwrap();
+    }
+
+    // At 100/s the bucket refills in 10ms; 300ms is ~30 cells of headroom.
+    // Under the old interval reading this was one cell per 100 SECONDS, so the
+    // request below could not possibly succeed.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let status = client.get(&url).send().await.unwrap().status();
+    assert_ne!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "after 300ms a 100/s limiter must have refilled. Still 429 means \
+         `requests_per_second` is being applied as a replenish INTERVAL again \
+         (per_second(100) = one request every 100 seconds)"
+    );
+}

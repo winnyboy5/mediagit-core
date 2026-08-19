@@ -103,12 +103,31 @@ impl Default for RateLimitConfig {
         // `IdentityOrIpKeyExtractor`), this budget applies to one user rather
         // than to everyone sharing a NAT, so it can be sized for what a single
         // real client actually does.
+        //
+        // That last paragraph was aspirational until 2026-08-17: the boot path
+        // (`create_rate_limited_router`) hand-inlined its own builder keyed by
+        // `SmartIpKeyExtractor`, so nothing here was reachable and the key was
+        // per-IP after all. It now goes through `build_with_cleanup` below.
+        //
+        // Delegating to `config.rs` rather than repeating the numbers: these
+        // two disagreed (1000/2000 here, 10/20 there) and the serde defaults
+        // won, which is how a documented, incident-derived budget lost to a
+        // placeholder nobody re-read.
         Self {
-            requests_per_second: 1000,
-            burst_size: 2000,
+            requests_per_second: crate::config::default_rate_limit_rps(),
+            burst_size: crate::config::default_rate_limit_burst(),
         }
     }
 }
+
+/// The shared rate limiter, so a second listener can enforce the *same* budget
+/// rather than being handed its own.
+///
+/// Lives here rather than in `lib.rs` so `build_with_cleanup` can name it, and
+/// so the key extractor in the type cannot silently disagree with the one the
+/// builder installs -- which is exactly what went wrong before.
+pub type SharedRateLimiter =
+    Arc<GovernorConfig<IdentityOrIpKeyExtractor, StateInformationMiddleware>>;
 
 impl RateLimitConfig {
     /// Create new rate limit configuration
@@ -117,26 +136,6 @@ impl RateLimitConfig {
             requests_per_second,
             burst_size,
         }
-    }
-
-    /// Build GovernorConfig from configuration
-    ///
-    /// Keyed by [`IdentityOrIpKeyExtractor`]: authenticated identity when the
-    /// request carries one, otherwise client IP (checking proxy headers
-    /// x-forwarded-for / x-real-ip before falling back to the peer address).
-    ///
-    /// To use this config, create a layer with `GovernorLayer::new(config)` or use
-    /// `build_with_cleanup()` to also get a cleanup task.
-    pub fn build_config(&self) -> Arc<impl Send + Sync + use<>> {
-        Arc::new(
-            GovernorConfigBuilder::default()
-                .per_second(self.requests_per_second)
-                .burst_size(self.burst_size)
-                .use_headers() // Include rate limit headers in responses
-                .key_extractor(IdentityOrIpKeyExtractor)
-                .finish()
-                .expect("Failed to build rate limiter config"),
-        )
     }
 
     /// Build configuration with background cleanup task
@@ -165,13 +164,32 @@ impl RateLimitConfig {
     /// ```
     pub fn build_with_cleanup(
         &self,
-    ) -> (
-        Arc<impl Send + Sync + use<>>,
-        impl FnOnce() + Send + 'static + use<>,
-    ) {
-        let config = Arc::new(
+    ) -> (SharedRateLimiter, impl FnOnce() + Send + 'static + use<>) {
+        let config: SharedRateLimiter = Arc::new(
             GovernorConfigBuilder::default()
-                .per_second(self.requests_per_second)
+                // `.period()`, NOT `.per_second()`.
+                //
+                // tower_governor's `per_second(n)` is "replenish ONE cell every
+                // n SECONDS" -- an interval, not a rate. Its own doc says so:
+                // "Set the interval after which one element of the quota is
+                // replenished in seconds." So `per_second(10)` was 0.1 req/s,
+                // and the field called `requests_per_second` meant its own
+                // reciprocal. That inversion is the actual cause of the 429
+                // storms on ordinary pushes: the shipped default of 10 allowed
+                // one request every ten seconds once the burst drained.
+                //
+                // Raising the number made it exponentially worse while looking
+                // like a fix, because a bigger burst hides it until the bucket
+                // empties -- at 1000 the server started handing out
+                // `Retry-After` values around 900 seconds (observed in
+                // 20260818-p10check: the client honoured one and slept 22
+                // minutes).
+                //
+                // A period of 1s/rps gives the rate the field name promises.
+                // Guarded against zero, which the builder rejects outright.
+                .period(Duration::from_nanos(
+                    1_000_000_000u64 / self.requests_per_second.max(1),
+                ))
                 .burst_size(self.burst_size)
                 .use_headers()
                 .key_extractor(IdentityOrIpKeyExtractor)
