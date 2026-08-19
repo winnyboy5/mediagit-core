@@ -19,6 +19,72 @@ nothing changes how an existing format reads, and with no key configured the
 bytes written are byte-for-byte what they were before, which is asserted by
 test and by the frozen-fixture gate.
 
+### Fixed — rate limiting made usable, and actually tested
+
+**If you generated a config with `mediagit-server init`, ordinary pushes were
+being rejected with HTTP 429.** That path enabled rate limiting and left the
+budget at the serde defaults of 10 requests/second, burst 20 — while a push
+costs roughly one request per chunk. Anyone who started from
+`mediagit-server-production.example.toml` was unaffected.
+
+The budget is now **1000 rps / 2000 burst**, which is the number
+`RateLimitConfig::default()` has documented since the `psds` incident and which
+had simply never been reachable: `config.rs` and `security.rs` each carried
+their own defaults, and the serde pair won.
+
+- **The limiter is keyed per credential again.** `IdentityOrIpKeyExtractor`
+  existed, was documented as the key, and had no callers — the router hand-
+  inlined a second builder keyed by client IP, so every user behind one NAT, VPN
+  or CI runner pool drew on a single shared budget. The duplicate builder is
+  gone; both listeners now go through one.
+- **HTTPS plus rate limiting returned 500 on every request.** The TLS listener
+  was served without `ConnectInfo`, which the IP extractor requires, on the port
+  most likely to face the internet. Invisible until now because rate limiting is
+  off by default and no test had ever switched it on.
+- **Client retry now covers the whole API.** 429 retry was wired into three
+  call sites, all on one upload path; presign, pack, complete, refs, locks,
+  escrow and the pull path had none. All server-bound calls now route through
+  the same chokepoint. Presigned storage requests deliberately do not — those
+  are handled by the storage-error classifier.
+- **Backoff is jittered.** It was `250ms * 2^n` with no spread, so clients that
+  were limited together retried together. Now Full Jitter, and `Retry-After` is
+  honoured on the pull path too, which previously ignored it.
+
+Rate limiting is still **off by default**; this changes what you get when you
+turn it on.
+
+### Fixed — encryption state is checked on every transfer
+
+Two gaps, neither of them the deferred re-seal work:
+
+- **An unencrypted repository could push plaintext into an encrypted one.**
+  `push` checked the remote's key only when the *local* repository had one, so a
+  clone without a key uploaded unsealed objects into a repository the server
+  considered encrypted — silently, because reads pass unsealed bytes through.
+- **`fetch` and `pull` had no encryption handling at all**, so sealed objects
+  failed deep in the compressor with a message about MGEN envelopes that named
+  nothing actionable.
+
+All four transfer commands now share one check, so they cannot drift apart
+again. `mediagit init` and `mediagit key status` also now state that encryption
+is an empty-repository decision, at the point where it can still be acted on.
+
+### Fixed — the QA suite was measuring a rate limiter that was not running
+
+No harness path ever set `enable_rate_limiting`, so roughly 200 gates per
+campaign ran against a disabled limiter. `07_abuse`'s A13 — whose entire
+assertion is that a per-chunk push must *not* trip 429 — could not fail. Rate
+limiting is now on for every QA server, and a new `07_ratelimit` phase proves
+enforcement, the `Retry-After` and `x-ratelimit-*` headers, that the shipped
+defaults carry real pushes and clones, and that the tighter public profile is
+survivable. New `06_encrypted` drills cover both encryption fixes above.
+
+Also fixed: the `Stream was not readable` harness fault that voided the
+`S2-churn` and `S3-conflicts` scale drills across three campaigns. It was
+`Add-Content` losing a race on a log file and raising `ArgumentException`, which
+the retry helper written for exactly that race did not catch — it caught only
+`IOException`.
+
 ### Added — at-rest encryption (DC-7)
 
 Opt-in per repository, at creation time: `mediagit key init` on a fresh repo,
