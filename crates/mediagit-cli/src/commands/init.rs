@@ -128,6 +128,14 @@ impl InitCmd {
                 repo_path.join(".mediagit").display()
             ));
             output::detail("Initial branch", initial_branch);
+            // The one moment this can be said usefully. `key init` refuses on a
+            // repository that already holds objects, so the decision is only
+            // available between here and the first commit -- and until now
+            // nothing told the user that while they could still act on it.
+            output::detail(
+                "At-rest encryption",
+                "off. `mediagit key init` enables it, and only while the repository is empty",
+            );
         }
 
         Ok(())

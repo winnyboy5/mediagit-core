@@ -182,7 +182,12 @@ impl EncryptionKeyCmd {
             KeySubcommand::Status => {
                 if !encryption::has_key(&repo_root) {
                     println!("At-rest encryption: off");
-                    println!("  Run `mediagit key init` to enable it.");
+                    // Say the condition, not just the command. Suggesting
+                    // `key init` to someone whose repository already holds
+                    // objects sends them to a refusal with no warning.
+                    println!("  Run `mediagit key init` to enable it -- possible only while the");
+                    println!("  repository is still empty, since sealing existing objects would");
+                    println!("  mean rewriting every one of them.");
                     return Ok(());
                 }
                 println!("At-rest encryption: on");
