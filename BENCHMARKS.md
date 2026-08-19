@@ -1,7 +1,7 @@
 # Storage Savings Benchmarks
 
 **Run date:** August 18, 2026 | **Build:** mediagit 0.3.0-rc.3 | **CDC Seed:** 20260716 (pinned for determinism)
-**Source:** `dev-tests/qa-suite/logs/20260818-gagate8/economics.tsv` (full SCALE campaign, 220 gates, 0 failures)
+**Source:** full SCALE QA campaign (220 gates, 0 failures)
 
 > Re-measured on `0.3.0-rc.3`. The previous publication was `0.2.8-beta.1` (July 16, 2026) and
 > claimed the savings pipeline was unchanged since; that claim is now **verified rather than
@@ -99,7 +99,7 @@ MediaGit applies format-aware chunking and zstd-dict deltas to achieve cross-ver
 | **Video** | | | | |
 | Video variants (codec mix: v1→v9) | v9 | 4.89 MB | 4.89 MB | 0% |
 
-**Mixed-corpus aggregate: ~26.5%** — this one figure is **not** from the rc.3 run. It was measured on `0.2.8-beta.1` against the release campaign's mixed real-file corpus (`dev-tests/qa-suite/reports/20260716-172951/REPORT.md`), and the SCALE campaign does not rebuild that corpus, so there is no rc.3 counterpart to restate it from. Treat it as the older number it is. It is not derived from the chain table above. Corpus composition drives the aggregate: real repositories are dominated by pre-compressed bytes (video, JPEG/PNG, compressed containers), which dedup at ~0%. The chain fixture set itself totals **49.2%** cumulative savings across all versions (2330.42 MB raw → 1183.42 MB stored; see the Git LFS comparison below).
+**Mixed-corpus aggregate: ~26.5%** — this one figure is **not** from the rc.3 run. It was measured on `0.2.8-beta.1` against the release campaign's mixed real-file corpus, and the SCALE campaign does not rebuild that corpus, so there is no rc.3 counterpart to restate it from. Treat it as the older number it is. It is not derived from the chain table above. Corpus composition drives the aggregate: real repositories are dominated by pre-compressed bytes (video, JPEG/PNG, compressed containers), which dedup at ~0%. The chain fixture set itself totals **49.2%** cumulative savings across all versions (2330.42 MB raw → 1183.42 MB stored; see the Git LFS comparison below).
 
 [^1]: GLB v3 incremental ODB growth rounds to 0.00 MB — the edited model dedups bit-for-bit against prior versions.
 [^2]: SVG stored size rounds to 0.01 MB; percentages are coarse at sub-MB scale.
@@ -191,7 +191,7 @@ Each family's chain undergoes post-measurement verification:
 2. **stats --json vs. disk:** Reported storage size matched to measured ODB directory (±2% or ±0.05 MB absolute tolerance).
 3. **compare-dedup:** Regression check against baseline dedup_report output (cross-version deduplication stability).
 
-All gates in run 20260716-211247 passed (0 failures).
+All gates passed (0 failures).
 
 ---
 
@@ -312,9 +312,6 @@ Other formats have no minimum anchor (strong baseline in production if savings r
 
 ## References
 
-- **Economics data source:** `dev-tests/qa-suite/logs/20260716-211247/economics.tsv`
-- **Integrity gates:** `dev-tests/qa-suite/logs/20260716-211247/gates.tsv`
-- **QA campaign report:** `dev-tests/qa-suite/reports/20260716-172951/REPORT.md`
 - **Measurement script:** `dev-tests/qa-suite/scripts/04_economics.ps1`
 - **Fixture generation:** `dev-tests/qa-suite/scripts/gen_chain_fixtures.py`
 - **Architecture guide:** `ARCHITECTURE.md` (chunking strategy, compression pipeline)
