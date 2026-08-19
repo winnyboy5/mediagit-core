@@ -1,7 +1,8 @@
 # Phase 10 - scale & aggression suite. ASCII-only, PS 5.1 compatible.
 # Opt-in: runs under `-Phases 10`, and is appended to the default set only when
 # MG_QA_TIER=SCALE (run_all.ps1). Sizes/counts come from the SCALE knobs in config.ps1
-# ($QA.Scale, .FileCount, .Concurrency, .ChurnCommits, .CloudMaxMB, .DiskBudgetGB, .RssCeilMB).
+# ($QA.Scale, .FileCount, .Concurrency, .ChurnCommits, .CloudMaxMB, .DiskBudgetGB,
+#  .RssPrivateCeilMB - S4 gates private bytes; .RssCeilMB bounds the working-set report).
 #
 # Drills (gate = no silent corruption, plus the per-drill gate named below):
 #   S1 sustained concurrency   - $QA.Concurrency clients clone the same remote at once; all
@@ -455,7 +456,7 @@ function Drill-S3-Conflicts {
 # ---------------------------------------------------------------------------
 function Drill-S4-ResourcePressure {
   $drill = "S4-resource"
-  if (-not $diskOk) { Rec $drill "local" "peak-rss-mb" "" "SKIP" "insufficient free disk (${freeGB}GB < $($QA.DiskBudgetGB)GB)"; return }
+  if (-not $diskOk) { Rec $drill "local" "peak-private-mb" "" "SKIP" "insufficient free disk (${freeGB}GB < $($QA.DiskBudgetGB)GB)"; return }
   $srv = $null
   $repo = $null
   try {
@@ -478,19 +479,26 @@ function Drill-S4-ResourcePressure {
     $commit = $m.Result
     $noOom = ($commit.Exit -eq 0)                       # 124=timeout/kill, nonzero=crash
     $fsckOk = Test-QaFsckClean $repo
-    # Client and server peaks are gated separately: a client that streams correctly must
-    # not be excused by a server that does, or vice versa.
-    $clientOk = ($m.ClientPeakMB -le $QA.RssCeilMB) -and ($m.ClientPeakMB -gt 0)
+    # Gated on PRIVATE bytes, not working set. The question this drill asks is "did the
+    # client buffer the blob instead of streaming it", and private bytes is the metric
+    # that answers it: working set on Windows also counts mapped-file and page-cache
+    # pages, so it moved 1223 -> 2931 -> 3697 MB across three identical runs while
+    # private stayed within 689-707. Gating the noisy one meant this drill could fail on
+    # a loaded machine for reasons that have nothing to do with MediaGit. Working set is
+    # still measured and reported - it is useful triage - it just does not decide.
+    # See $QA.RssPrivateCeilMB in config.ps1 for how the ceiling was chosen.
+    $clientPrivOk = ($m.ClientPrivatePeakMB -le $QA.RssPrivateCeilMB) -and ($m.ClientPrivatePeakMB -gt 0)
     # This drill runs no server, so Measure-PeakRSS reports "n/a" rather than 0 - a real
     # not-applicable, not a measurement of zero. Treat n/a as passing; gate any actual
     # number. (It used to record 0 and compare it to the ceiling, which meant a server-side
     # leak on a drill that DID run a server would also have passed silently.)
-    $serverOk = ($m.ServerPeakMB -eq "n/a") -or ([double]$m.ServerPeakMB -le $QA.RssCeilMB)
-    $pass = $clientOk -and $serverOk -and $noOom -and $fsckOk
-    Rec $drill "local" "peak-rss-mb" $m.ClientPeakMB $pass `
-      ("bigMB=$bigMB clientPeak=$($m.ClientPeakMB)MB serverPeak=$($m.ServerPeakMB)MB " +
-       "clientPrivate=$($m.ClientPrivatePeakMB)MB serverPrivate=$($m.ServerPrivatePeakMB)MB " +
-       "ceil=$($QA.RssCeilMB)MB commitExit=$($commit.Exit) fsck=$fsckOk samples=$(Split-Path $m.SamplesTsv -Leaf)")
+    $serverPrivOk = ($m.ServerPrivatePeakMB -eq "n/a") -or ([double]$m.ServerPrivatePeakMB -le $QA.RssPrivateCeilMB)
+    $pass = $clientPrivOk -and $serverPrivOk -and $noOom -and $fsckOk
+    Rec $drill "local" "peak-private-mb" $m.ClientPrivatePeakMB $pass `
+      ("bigMB=$bigMB clientPrivate=$($m.ClientPrivatePeakMB)MB serverPrivate=$($m.ServerPrivatePeakMB)MB " +
+       "privCeil=$($QA.RssPrivateCeilMB)MB clientPeakWS=$($m.ClientPeakMB)MB serverPeakWS=$($m.ServerPeakMB)MB " +
+       "(working set reported, NOT gated - see config.ps1) " +
+       "commitExit=$($commit.Exit) fsck=$fsckOk samples=$(Split-Path $m.SamplesTsv -Leaf)")
     if (-not $noOom) { return }
 
     # The blob must survive a round trip. Peak RSS staying under a ceiling proves the
@@ -517,7 +525,7 @@ function Drill-S4-ResourcePressure {
     Remove-Item -Recurse -Force $back -ErrorAction SilentlyContinue
   } catch {
     $fault = Write-QaFault $drill $_
-    Rec $drill "local" "peak-rss-mb" "" "ERROR" $fault
+    Rec $drill "local" "peak-private-mb" "" "ERROR" $fault
   } finally {
     Stop-QaServer $srv
     if ($repo) { Remove-Item -Recurse -Force $repo -ErrorAction SilentlyContinue }  # reclaim the GB now
@@ -570,7 +578,14 @@ function Drill-S5-ThroughputDedup {
   }
 
   $cloudSrc = $null
-  foreach ($backend in $QA.Backends) {
+  # Get-ScaleBackends, not $QA.Backends: the raw list defaults to
+  # "minio,aws,azure,gcs" with no "local", so S5 silently measured no local
+  # throughput at all while S1 (which uses the helper) did. That made the two
+  # SLO floors below -- PUSH_FLOOR_MBS/PULL_FLOOR_MBS, the "fast backends are
+  # held to the SLO" branch -- reachable only through minio, so a local-path
+  # throughput regression had nothing to fail against. Same helper as S1 now,
+  # so "which backends does scale cover" has one answer.
+  foreach ($backend in (Get-ScaleBackends)) {
     $srv = $null
     try {
       try { $srv = Start-QaServer -Backend $backend -Phase "$Phase-S5" } catch {

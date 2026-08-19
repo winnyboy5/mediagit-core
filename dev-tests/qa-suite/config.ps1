@@ -36,7 +36,17 @@ $QA.CloudMaxMB   = [int](_Env "MG_QA_CLOUD_MAX_MB" "2048")   # cap cloud-backend
 # Raise this only with a faster link; never lower it to make a failing run pass.
 $QA.CloudMbsFloor = [double](_Env "MG_QA_CLOUD_MBS_FLOOR" "1.0")
 $QA.DiskBudgetGB = [double](_Env "MG_QA_DISK_BUDGET_GB" "40")# scratch footprint ceiling
-$QA.RssCeilMB    = [int](_Env "MG_QA_RSS_CEIL_MB" "4096")    # peak-RSS gate threshold (S4)
+$QA.RssCeilMB    = [int](_Env "MG_QA_RSS_CEIL_MB" "4096")    # peak working-set REPORT bound (S4)
+# S4's actual gate. Private bytes, not working set: on Windows the working set
+# absorbs mapped-file and page-cache pages that are not the process's own memory,
+# so reading a multi-GB blob inflates it by however much RAM happened to be free.
+# Measured across three identical SCALE runs: working set 1223 / 2931 / 3697 MB
+# (3x spread, pure noise) while private held 689 / 704 / 707 MB (2.6% spread).
+# 1536 is ~2.2x the observed private peak -- loose enough to absorb variance,
+# and still far below the 4096MB blob, so a client that buffers instead of
+# streaming blows through it. Do not raise it to 4096: that is the blob size,
+# and a ceiling at the blob size cannot catch buffering at all.
+$QA.RssPrivateCeilMB = [int](_Env "MG_QA_RSS_PRIVATE_CEIL_MB" "1536")
 $QA.KeepScratch  = (_Env "MG_QA_KEEP_SCRATCH" "0") -eq "1"   # skip post-phase teardown for triage
 $QA.PurgeFixtures = (_Env "MG_QA_PURGE_FIXTURES" "0") -eq "1"# also delete generated scale fixtures
 $QA.Backends  = (_Env "MG_QA_BACKENDS" "minio,aws,azure,gcs") -split "," | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ }
