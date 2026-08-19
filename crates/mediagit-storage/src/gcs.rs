@@ -484,36 +484,44 @@ impl GcsBackend {
         let key = crate::prefixed_key(&self.config.prefix, key);
         let key = key.as_str();
         let bucket_path = self.bucket_path();
-        let mut resp = self
-            .storage
-            .read_object(&bucket_path, key)
-            .set_read_range(ReadRange::segment(offset, len))
-            .send()
-            .await
-            .map_err(|e| {
-                if Self::is_not_found(&e) {
-                    anyhow::anyhow!("object not found: {}", key)
-                } else {
-                    anyhow::anyhow!(
-                        "GCS read_object range error for key '{}' [{}+{}]: {}",
-                        key,
-                        offset,
-                        len,
-                        e
-                    )
-                }
-            })?;
+        let io_limit = gcs_io_deadline();
+        let mut resp = with_io_deadline(
+            io_limit,
+            "read_object range request",
+            self.storage
+                .read_object(&bucket_path, key)
+                .set_read_range(ReadRange::segment(offset, len))
+                .send(),
+        )
+        .await?
+        .map_err(|e| {
+            if Self::is_not_found(&e) {
+                anyhow::anyhow!("object not found: {}", key)
+            } else {
+                anyhow::anyhow!(
+                    "GCS read_object range error for key '{}' [{}+{}]: {}",
+                    key,
+                    offset,
+                    len,
+                    e
+                )
+            }
+        })?;
 
         let mut buf = Vec::with_capacity(len as usize);
-        while let Some(chunk) = resp.next().await.transpose().map_err(|e| {
-            anyhow::anyhow!(
-                "GCS range stream error for key '{}' [{}+{}]: {}",
-                key,
-                offset,
-                len,
-                e
-            )
-        })? {
+        while let Some(chunk) = with_io_deadline(io_limit, "read_object range stream", resp.next())
+            .await?
+            .transpose()
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "GCS range stream error for key '{}' [{}+{}]: {}",
+                    key,
+                    offset,
+                    len,
+                    e
+                )
+            })?
+        {
             buf.extend_from_slice(&chunk);
         }
         Ok(buf)
@@ -561,11 +569,10 @@ impl StorageBackend for GcsBackend {
         let bucket_path = self.bucket_path();
         debug!(key = %key, bucket = %bucket_path, "Downloading object from GCS");
 
-        let mut resp = self
-            .storage
-            .read_object(&bucket_path, key)
-            .send()
-            .await
+        let req = self.storage.read_object(&bucket_path, key);
+        let io_limit = gcs_io_deadline();
+        let mut resp = with_io_deadline(io_limit, "read_object request", req.send())
+            .await?
             .map_err(|e| {
                 if Self::is_not_found(&e) {
                     anyhow::anyhow!("object not found: {}", key)
@@ -575,10 +582,10 @@ impl StorageBackend for GcsBackend {
             })?;
 
         let mut buf = Vec::new();
-        while let Some(chunk) =
-            resp.next().await.transpose().map_err(|e| {
-                anyhow::anyhow!("GCS read_object stream error for key '{}': {}", key, e)
-            })?
+        while let Some(chunk) = with_io_deadline(io_limit, "read_object stream", resp.next())
+            .await?
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("GCS read_object stream error for key '{}': {}", key, e))?
         {
             buf.extend_from_slice(&chunk);
         }
@@ -604,39 +611,47 @@ impl StorageBackend for GcsBackend {
         let storage = self.storage.clone();
         let len = range.end - range.start;
 
-        let resp = storage
-            .read_object(&bucket_path, &prefixed)
-            .set_read_range(ReadRange::segment(range.start, len))
-            .send()
-            .await
-            .map_err(|e| {
-                if Self::is_not_found(&e) {
-                    anyhow::anyhow!("object not found: {}", key)
-                } else {
-                    anyhow::anyhow!(
-                        "GCS get_streaming_range error for key '{}' [{}+{}]: {}",
-                        key,
-                        range.start,
-                        len,
-                        e
-                    )
-                }
-            })?;
+        let io_limit = gcs_io_deadline();
+        let resp = with_io_deadline(
+            io_limit,
+            "get_streaming_range request",
+            storage
+                .read_object(&bucket_path, &prefixed)
+                .set_read_range(ReadRange::segment(range.start, len))
+                .send(),
+        )
+        .await?
+        .map_err(|e| {
+            if Self::is_not_found(&e) {
+                anyhow::anyhow!("object not found: {}", key)
+            } else {
+                anyhow::anyhow!(
+                    "GCS get_streaming_range error for key '{}' [{}+{}]: {}",
+                    key,
+                    range.start,
+                    len,
+                    e
+                )
+            }
+        })?;
 
-        let stream = futures::stream::unfold(resp, |mut r| async move {
-            match r.next().await {
-                Some(Ok(chunk)) => Some((
-                    Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::copy_from_slice(&chunk)),
-                    r,
-                )),
-                Some(Err(e)) => Some((
-                    Err(anyhow::anyhow!(
-                        "GCS get_streaming_range stream error: {}",
-                        e
+        let stream = futures::stream::unfold(resp, move |mut r| async move {
+            match with_io_deadline(io_limit, "get_streaming_range stream", r.next()).await {
+                Err(e) => Some((Err(e), r)),
+                Ok(step) => match step {
+                    Some(Ok(chunk)) => Some((
+                        Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::copy_from_slice(&chunk)),
+                        r,
                     )),
-                    r,
-                )),
-                None => None,
+                    Some(Err(e)) => Some((
+                        Err(anyhow::anyhow!(
+                            "GCS get_streaming_range stream error: {}",
+                            e
+                        )),
+                        r,
+                    )),
+                    None => None,
+                },
             }
         });
         Ok(Box::pin(stream))
@@ -1005,8 +1020,106 @@ impl StorageBackend for GcsBackend {
     }
 }
 
+/// Per-IO deadline for GCS data-plane transfers, in seconds.
+///
+/// Generous by default because the failure mode it prevents is a hung read of
+/// a whole repository, while the cost of being too generous is a genuine hang
+/// taking longer to surface.
+fn gcs_io_timeout_secs() -> u64 {
+    parse_io_timeout_secs(std::env::var("MEDIAGIT_GCS_IO_TIMEOUT_SECS").ok())
+}
+
+/// Split from the env lookup so it is assertable: `#![forbid(unsafe_code)]` plus
+/// edition 2024 make `set_var` an `unsafe` call, so a test that drove the real
+/// variable could not be written without punching a hole in that. Same shape as
+/// `azure::parse_io_timeout_secs`.
+fn parse_io_timeout_secs(raw: Option<String>) -> u64 {
+    const DEFAULT_IO_TIMEOUT_SECS: u64 = 120;
+    raw.and_then(|v| v.trim().parse::<u64>().ok())
+        // 0 would mean "deadline already passed" and fail every read instantly.
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_IO_TIMEOUT_SECS)
+}
+
+/// Await one GCS network step under the per-IO deadline.
+///
+/// Wraps BOTH the request `send()` and each `next()` on the response body,
+/// because they hang independently: `send()` covers "the response never
+/// starts", the stream covers "the response starts and then stalls mid-body".
+/// The observed failure left an Established socket with zero bytes moving, so
+/// bounding only one of the two would have left the other still able to wedge.
+///
+/// `secs` is a parameter rather than read from the env here so the deadline
+/// behaviour is testable without mutating process environment.
+async fn with_io_deadline<F, T>(limit: std::time::Duration, what: &str, fut: F) -> anyhow::Result<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    tokio::time::timeout(limit, fut).await.map_err(|_| {
+        let secs = limit.as_secs();
+        anyhow::anyhow!(
+            "GCS {what} stalled: no progress for {secs}s \
+             (raise MEDIAGIT_GCS_IO_TIMEOUT_SECS if this link is legitimately slower)"
+        )
+    })
+}
+
+/// The per-IO deadline as a `Duration`, ready to hand to [`with_io_deadline`].
+fn gcs_io_deadline() -> std::time::Duration {
+    std::time::Duration::from_secs(gcs_io_timeout_secs())
+}
+
 #[cfg(test)]
 mod tests {
+
+    // Regression guard for the 20260819-gagate11 hang: a GCS read that never
+    // produces data must fail on a deadline rather than wedge forever. Without
+    // `with_io_deadline` this test hangs instead of failing, which is exactly
+    // what the stuck campaign did.
+    #[tokio::test]
+    async fn a_stalled_gcs_read_fails_on_the_deadline_instead_of_hanging() {
+        let stalled = std::future::pending::<()>();
+        let err =
+            super::with_io_deadline(std::time::Duration::from_millis(10), "test read", stalled)
+                .await
+                .expect_err("a future that never resolves must hit the deadline");
+        let msg = err.to_string();
+        assert!(msg.contains("stalled"), "unhelpful message: {msg}");
+        assert!(
+            msg.contains("MEDIAGIT_GCS_IO_TIMEOUT_SECS"),
+            "the message must name the knob that fixes it: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_read_that_completes_passes_its_value_through_untouched() {
+        let got =
+            super::with_io_deadline(std::time::Duration::from_secs(120), "test read", async {
+                7u32
+            })
+            .await
+            .expect("a ready future must not be timed out");
+        assert_eq!(got, 7);
+    }
+
+    #[test]
+    fn io_timeout_defaults_are_generous_enough_for_a_wan() {
+        assert_eq!(super::parse_io_timeout_secs(None), 120);
+        assert_eq!(
+            super::parse_io_timeout_secs(Some("not-a-number".into())),
+            120
+        );
+        assert!(super::parse_io_timeout_secs(None) > 10);
+    }
+
+    #[test]
+    fn io_timeout_rejects_zero_and_honours_valid_overrides() {
+        // 0 would make every read fail instantly rather than mean "no limit".
+        assert_eq!(super::parse_io_timeout_secs(Some("0".into())), 120);
+        assert_eq!(super::parse_io_timeout_secs(Some("45".into())), 45);
+        assert_eq!(super::parse_io_timeout_secs(Some("  90  ".into())), 90);
+    }
+
     use super::*;
 
     #[test]
