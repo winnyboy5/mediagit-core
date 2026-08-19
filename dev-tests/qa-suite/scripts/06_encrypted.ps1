@@ -196,6 +196,87 @@ try {
       }
     }
   }
+
+  # ---------------------------------------------------------------------------
+  # Encryption-state MISMATCH between a local repository and its remote.
+  #
+  # The round-trip above only ever pairs an encrypted repo with a remote holding
+  # the same key, so it could not see either of the two defects fixed in rc.3:
+  # push checked the remote's key ONLY when the local repo had one (so an
+  # unencrypted repo pushed plaintext into a keyed repository in silence), and
+  # fetch/pull had no encryption handling at all (so a sealed object failed deep
+  # in the compressor talking about MGEN envelopes).
+  #
+  # minio only: this is client-side logic, identical on every backend.
+  # ---------------------------------------------------------------------------
+  $msrv = $null
+  try {
+    $mtag = "enc-mismatch"
+    $mClientKey = Join-Path $QA.Work "$mtag-client-master.key"
+    $mServerKey = Join-Path $QA.Work "$mtag-server-master.key"
+    New-QaKeyfile $mClientKey
+    New-QaKeyfile $mServerKey
+    $msrv = Start-QaServer -Backend "minio" -Phase "$Phase-mismatch" -EncryptionKeyfile $mServerKey
+
+    # An encrypted repository, pushed, so the REMOTE now holds a key.
+    $env:MEDIAGIT_ENCRYPTION_KEYFILE = $mClientKey
+    $encRepo = New-SandboxRepo "$mtag-enc" $Phase
+    $ki = Invoke-MG $encRepo @("key", "init") $Phase
+    if ($ki.Exit -ne 0) { throw "key init failed: $($ki.Out)" }
+    New-QaBinaryFixture (Join-Path $encRepo "sealed.bin") 4 70501
+    Invoke-MG $encRepo @("add", ".") $Phase | Out-Null
+    Invoke-MG $encRepo @("commit", "-m", "sealed") $Phase | Out-Null
+    Invoke-MG $encRepo @("remote", "add", "origin", $msrv.Url) $Phase | Out-Null
+    $encPush = Invoke-MG $encRepo @("push", "origin") $Phase -TimeoutSec 3600
+    if ($encPush.Exit -ne 0) { throw "seed push failed: $($encPush.Out)" }
+
+    # --- EM1: an UNENCRYPTED repo pushing into that keyed remote must refuse.
+    # Before rc.3 this exited 0 and uploaded plaintext.
+    $plainRepo = New-SandboxRepo "$mtag-plain" $Phase
+    New-QaBinaryFixture (Join-Path $plainRepo "plain.bin") 2 70502
+    Invoke-MG $plainRepo @("add", ".") $Phase | Out-Null
+    Invoke-MG $plainRepo @("commit", "-m", "plaintext") $Phase | Out-Null
+    Invoke-MG $plainRepo @("remote", "add", "origin", $msrv.Url) $Phase | Out-Null
+    $plainPush = Invoke-MG $plainRepo @("push", "origin") $Phase -TimeoutSec 1800
+    $refused = ($plainPush.Exit -ne 0)
+    # The refusal must be ABOUT encryption. Any old failure passing here would
+    # make this drill green for the wrong reason.
+    $namedIt = ($plainPush.Out -match "(?i)encryption key")
+    Rec "EM1-plaintext-push-into-keyed-remote-refused" ($refused -and $namedIt) `
+      ("exit=$($plainPush.Exit) refused=$refused message-names-encryption=$namedIt")
+
+    # --- EM2: repeat pull on a properly cloned encrypted repo must keep working.
+    # The obvious implementation of EM3 (reuse clone's adopt path) would bail on
+    # the SECOND pull with "refusing to overwrite this repository's encryption
+    # key", breaking the most ordinary workflow there is.
+    $mclone = Join-Path $QA.Work "$mtag-clone"
+    if (Test-Path $mclone) { Remove-Item -Recurse -Force $mclone }
+    $mcl = Invoke-MG $null @("clone", $msrv.Url, $mclone) $Phase -TimeoutSec 3600
+    if ($mcl.Exit -ne 0) { throw "clone failed: $($mcl.Out)" }
+    $pull1 = Invoke-MG $mclone @("pull", "origin") $Phase -TimeoutSec 1800
+    $pull2 = Invoke-MG $mclone @("pull", "origin") $Phase -TimeoutSec 1800
+    Rec "EM2-repeat-pull-on-encrypted-clone" (($pull1.Exit -eq 0) -and ($pull2.Exit -eq 0)) `
+      ("pull1=$($pull1.Exit) pull2=$($pull2.Exit) (a bail here means adopt_repo_key is on the pull path)")
+
+    # --- EM3: pulling sealed objects into a KEYLESS repo must fail clearly.
+    # It used to fail deep in the compressor with an MGEN envelope message that
+    # named nothing the user could act on.
+    $keyless = New-SandboxRepo "$mtag-keyless" $Phase
+    Invoke-MG $keyless @("remote", "add", "origin", $msrv.Url) $Phase | Out-Null
+    $klPull = Invoke-MG $keyless @("pull", "origin") $Phase -TimeoutSec 1800
+    $klRefused = ($klPull.Exit -ne 0)
+    $klClear = ($klPull.Out -match "(?i)encryption key")
+    $klNotRaw = -not ($klPull.Out -match "(?i)MGEN envelope")
+    Rec "EM3-pull-into-keyless-repo-refused-clearly" ($klRefused -and $klClear -and $klNotRaw) `
+      ("exit=$($klPull.Exit) refused=$klRefused names-encryption=$klClear no-raw-mgen-error=$klNotRaw")
+
+  } catch {
+    if ("$_" -match "^SKIP:") { Rec "EM-mismatch" "SKIP" "$_" }
+    else { Rec "EM-mismatch" $false "unexpected error: $_" }
+  } finally {
+    if ($msrv) { Stop-QaServer $msrv }
+  }
+
 } finally {
   if ($null -eq $prevKeyfile) { Remove-Item Env:MEDIAGIT_ENCRYPTION_KEYFILE -EA SilentlyContinue }
   else { $env:MEDIAGIT_ENCRYPTION_KEYFILE = $prevKeyfile }
