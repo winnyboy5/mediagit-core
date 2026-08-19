@@ -133,7 +133,24 @@ function Start-QaServer {
     # DC-7/D4: serve encrypted repositories. The server needs a master key of
     # its own to wrap each repo key it is handed via `PUT /{repo}/encryption-key`;
     # without one it answers 404 there and an encrypted push refuses.
-    [string]$EncryptionKeyfile
+    [string]$EncryptionKeyfile,
+    # Rate limiting is ON for every QA server, deliberately.
+    #
+    # It ships OFF by default (ServerConfig::enable_rate_limiting) and nothing in
+    # this harness ever turned it on, so every gate this suite has run was
+    # measured against a limiter that was not there. That is how A13 in 07_abuse
+    # -- whose entire assertion is "a per-chunk push must NOT trip 429" -- has
+    # passed without the ability to fail, and how a 10 rps default survived to
+    # reach a user as a 429 storm on ordinary pushes.
+    #
+    # Left at 0/0 the server uses its OWN defaults, which is the point: the full
+    # campaign then doubles as the end-to-end check that those defaults carry
+    # real pushes and clones across five backends. 07_ratelimit passes explicit
+    # values to test enforcement.
+    [int]$RateLimitRps = 0,
+    [int]$RateLimitBurst = 0,
+    # Only for a drill that must prove behaviour with the limiter absent.
+    [switch]$NoRateLimit
   )
   if ($AdminUser) { $EnableAuth = $true }
 
@@ -188,6 +205,12 @@ function Start-QaServer {
   if ($EnableAuth) {
     $authLines = "`nenable_auth = true`njwt_secret = `"qa-suite-jwt-secret-0123456789abcdef0123456789abcdef`""
   }
+  $rlLines = ""
+  if (-not $NoRateLimit) {
+    $rlLines = "`nenable_rate_limiting = true"
+    if ($RateLimitRps   -gt 0) { $rlLines += "`nrate_limit_rps = $RateLimitRps" }
+    if ($RateLimitBurst -gt 0) { $rlLines += "`nrate_limit_burst = $RateLimitBurst" }
+  }
   # `[encryption]` goes LAST: ServerConfig is flat apart from that section, so
   # any table header swallows every top-level key written after it.
   $encLines = ""
@@ -198,7 +221,7 @@ function Start-QaServer {
   @"
 port = $port
 host = "127.0.0.1"
-repos_dir = "$reposDirFwd"$authLines$encLines
+repos_dir = "$reposDirFwd"$authLines$rlLines$encLines
 "@ | Set-Content (Join-Path $srvDir "server.toml") -Encoding Ascii
 
   # Bootstrap the first Admin offline before the process starts: the store is not
