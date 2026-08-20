@@ -1,9 +1,25 @@
-# MinIO-only Docker Compose for MediaGit
+# S3-backend-only Docker Compose for MediaGit.
 # Usage: docker compose -f docker-compose.minio.yml up -d
+#
+# Backed by SILO (https://silo.pgsty.com/), the Pigsty community fork of MinIO,
+# after upstream discontinued its open-source edition. Silo keeps the S3 API and
+# the on-disk format, so this is a drop-in: the image's entrypoint translates a
+# legacy `minio` argv and a bare `server ...` into `silo server ...`, which is
+# why the `command:` below is unchanged from the MinIO original.
+#
+# Tags are PINNED, not :latest. The MinIO images this replaced floated on
+# :latest, so the backend under test could change between two campaign runs
+# without anything in the repo changing -- unacceptable for a suite whose
+# throughput floors are calibrated per-backend (baselines/scale.tsv).
+#
+# Service, container and volume names are deliberately still "minio": the A7
+# outage drill (07_abuse.ps1) stops and starts `mediagit-minio` by name, and
+# MG_QA_MINIO is the documented endpoint knob. Renaming them buys nothing and
+# breaks a drill.
 
 services:
   minio:
-    image: minio/minio:latest
+    image: pgsty/silo:RELEASE.2026-08-06T00-00-00Z
     container_name: mediagit-minio
     ports:
       - "9000:9000"      # S3 API
@@ -24,7 +40,7 @@ services:
       start_period: 10s
 
   minio-init:
-    image: minio/mc:latest
+    image: pgsty/mc:RELEASE.2026-08-06T00-00-00Z
     container_name: mediagit-minio-init
     depends_on:
       minio:
