@@ -105,24 +105,87 @@ function Start-QaWatchdog {
       }
 
       if ($reason) {
-        $txt = @(
-          "WATCHDOG TRIPPED $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
-          $reason,
-          "",
-          "The HOST wedged; this is not a mediagit failure. Any drill result after",
-          "this point is void. See lib/watchdog.ps1 for the 2026-08-19 incident.",
-          "",
-          "Recovery that worked: 'docker desktop stop' (compacts the vhdx too),",
-          "then 'docker desktop start'. Do NOT use 'wsl --shutdown' - on this",
-          "machine it cycles the Hyper-V vSwitch and kills the Wi-Fi Direct",
-          "adapter with an NDIS fatal error, taking the network down with it."
-        ) -join [Environment]::NewLine
-        Set-Content -Path $marker -Value $txt -Encoding UTF8
+        # ---- 1. Snapshot the CLIENT before killing it -----------------------
+        # This is the only moment anyone can observe a hung client: the CLI has
+        # no RUST_LOG/tracing subscriber, so a hung push leaves exactly one line
+        # ("Preparing to push to origin...") and nothing else. 20260820-ga4 was
+        # diagnosed this far and no further for precisely that reason.
+        # Pure Win32 calls, no docker/eventlog here -- this must not delay the
+        # kill, which exists to stop a 41-minute block.
+        $snap = @("", "--- CLIENT STATE AT TRIP (before kill) ---")
+        try {
+          $procs = @(Get-Process mediagit -EA SilentlyContinue)
+          if ($procs.Count -eq 0) { $snap += "no mediagit client process was running" }
+          foreach ($p in $procs) {
+            $snap += ("pid={0} cpu_s={1} ws_mb={2} threads={3} started={4}" -f `
+              $p.Id, [math]::Round($p.CPU, 2), [math]::Round($p.WorkingSet64 / 1MB, 0),
+              $p.Threads.Count, $p.StartTime.ToString('HH:mm:ss'))
+            # All-threads-waiting + ~0 CPU distinguishes a STALL from slow work.
+            $states = $p.Threads | Group-Object ThreadState, WaitReason |
+                      ForEach-Object { "$($_.Name)=$($_.Count)" }
+            $snap += ("  threads: " + ($states -join "; "))
+            try {
+              $conns = Get-NetTCPConnection -OwningProcess $p.Id -EA SilentlyContinue |
+                       ForEach-Object { "$($_.RemoteAddress):$($_.RemotePort)/$($_.State)" }
+              $snap += ("  tcp: " + $(if ($conns) { $conns -join ", " } else { "none" }))
+            } catch { $snap += "  tcp: unavailable" }
+            try {
+              $cl = (Get-CimInstance Win32_Process -Filter "ProcessId=$($p.Id)" -EA SilentlyContinue).CommandLine
+              $snap += ("  cmd: " + $cl)
+            } catch { }
+          }
+        } catch { $snap += "client snapshot failed: $_" }
+
+        Set-Content -Path $marker -Value (@(
+          "WATCHDOG TRIPPED $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')", $reason
+        ) + $snap -join [Environment]::NewLine) -Encoding UTF8
 
         # Kill only the CLIENT. The drill then records a real non-zero exit and
         # the campaign moves on, instead of blocking for 41 minutes. Servers are
         # left alone so their logs stay intact for the post-mortem.
         Get-Process mediagit -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+
+        # ---- 2. Only now gather the slower HOST evidence --------------------
+        # Deliberately AFTER the kill so a wedged docker CLI cannot delay it.
+        # This block exists because the old text asserted "The HOST wedged" as
+        # fact. On 20260820-ga4 that was false -- zero aswStm, no power events,
+        # docker healthy -- and the false claim sent the post-mortem down the
+        # wrong path for an hour. State what was measured; let the reader judge.
+        $ev = @("", "--- HOST EVIDENCE (gathered after kill) ---")
+        try {
+          $storm = @(Get-WinEvent -LogName System -FilterXPath "*[System[Provider[@Name='aswStm']]]" `
+                     -MaxEvents 20000 -EA SilentlyContinue | Where-Object { $_.TimeCreated -ge $armedAt }).Count
+          $ev += "aswStm events since armed : $storm   (thousands => Avast filter-driver storm)"
+        } catch { $ev += "aswStm events since armed : unavailable" }
+        try {
+          $pw = @(Get-WinEvent -FilterHashtable @{LogName='System'; Id=42,107,187,506,507; StartTime=$armedAt} -EA SilentlyContinue)
+          $ev += ("power events since armed  : " + $(if ($pw.Count) {
+                    ($pw | ForEach-Object { "$($_.Id)@$($_.TimeCreated.ToString('HH:mm:ss'))" }) -join ", "
+                  } else { "none   (=> not a sleep/resume)" }))
+        } catch { $ev += "power events since armed  : unavailable" }
+        # docker can hang when the host really is wedged; bound it so this
+        # block cannot outlive the post-mortem it is writing.
+        try {
+          $dj = Start-Job { docker inspect mediagit-minio --format 'status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>&1 }
+          if (Wait-Job $dj -Timeout 20) { $ev += ("minio container           : " + (Receive-Job $dj)) }
+          else { $ev += "minio container           : docker inspect TIMED OUT after 20s (=> docker itself is wedged)" }
+          Remove-Job $dj -Force -EA SilentlyContinue
+        } catch { $ev += "minio container           : unavailable" }
+
+        $ev += @(
+          "",
+          "Any drill result after this point is void.",
+          "If aswStm is in the thousands see project-avast-wedge-2026-08-19;",
+          "if power events are listed see feedback-windows-modern-standby;",
+          "if BOTH are clean the host was fine and the stall is above it --",
+          "read the CLIENT STATE block above before blaming the host.",
+          "",
+          "Recovery that worked: 'docker desktop stop' (compacts the vhdx too),",
+          "then 'docker desktop start'. Do NOT use 'wsl --shutdown' - on this",
+          "machine it cycles the Hyper-V vSwitch and kills the Wi-Fi Direct",
+          "adapter with an NDIS fatal error, taking the network down with it."
+        )
+        Add-Content -Path $marker -Value ($ev -join [Environment]::NewLine) -Encoding UTF8
         return
       }
     }
