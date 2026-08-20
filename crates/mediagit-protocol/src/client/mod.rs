@@ -364,7 +364,9 @@ fn jitter_upto(bound_millis: u64) -> u64 {
 ///
 /// The 16s ceiling on our own backoff is preserved so a push cannot stall
 /// indefinitely behind a misconfigured limiter. A server asking for longer than
-/// that is still honoured: it asked, and it knows.
+/// that is still honoured -- it asked, and it knows -- but only up to
+/// [`rate_limit_max_wait_ms`], because "it knows" stops being true exactly when
+/// the limiter is the thing that is broken.
 pub(crate) fn rate_limit_backoff(
     attempt: u32,
     retry_after: Option<&reqwest::header::HeaderValue>,
@@ -398,7 +400,28 @@ pub(crate) fn rate_limit_backoff(
             base + jitter_upto(base / 2)
         })
         .unwrap_or(0);
-    std::time::Duration::from_millis(own.max(asked))
+    std::time::Duration::from_millis(own.max(asked).min(rate_limit_max_wait_ms()))
+}
+
+/// Hard ceiling on a SINGLE rate-limit wait, however long the server asks for.
+///
+/// Without this the honoured `Retry-After` was unbounded: with
+/// `rate_limit_max_retries()` defaulting to 10, a `Retry-After: 900` measured
+/// at 965,668ms for one attempt and 47,098,138ms (13.08 HOURS) across the
+/// budget. The client sat idle that whole time while the server answered
+/// /health in 3ms -- indistinguishable, from outside, from a hang.
+///
+/// 60s is chosen to be far above any legitimate limiter (a 2 rps bucket refills
+/// in ~500ms; even the pathological 20260818-p10check case wanted 900s only
+/// because the period was miscomputed) while keeping the worst case bounded at
+/// retries x 60s. It also sits above the 45s that a `Retry-After: 30` can reach
+/// through jitter, so a server's reasonable ask is still obeyed exactly.
+pub(crate) fn rate_limit_max_wait_ms() -> u64 {
+    std::env::var("MEDIAGIT_RATE_LIMIT_MAX_WAIT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(60)
+        .saturating_mul(1000)
 }
 
 /// Send a control-plane request, waiting out HTTP 429 instead of failing.
@@ -1412,6 +1435,45 @@ mod backoff_tests {
         assert!(
             (30_000..=45_000).contains(&d),
             "expected ~30-45s, got {d}ms"
+        );
+    }
+
+    /// An absurd `Retry-After` must be CAPPED, not obeyed.
+    ///
+    /// `rate_limit_backoff` used to honour the header without any upper bound,
+    /// which defeated the very invariant its own doc comment claims -- "a push
+    /// cannot stall indefinitely behind a misconfigured limiter". With
+    /// `rate_limit_max_retries()` defaulting to 10, a server sending
+    /// `Retry-After: 900` could park a client for ~3.75 HOURS while the server
+    /// itself stayed healthy.
+    ///
+    /// Not hypothetical: `security.rs` records the server emitting ~900s values
+    /// ("the client honoured one and slept 22 minutes"), and 20260820-ga6's
+    /// RL6-client-recovers-from-429 hung a clone for 30 minutes against a
+    /// server that answered /health in 3ms throughout.
+    #[test]
+    fn an_absurd_retry_after_is_capped() {
+        let h = HeaderValue::from_static("900");
+        for _ in 0..50 {
+            let d = rate_limit_backoff(0, Some(&h)).as_millis() as u64;
+            assert!(
+                d <= 60_000,
+                "a 900s Retry-After must be capped at the 60s ceiling, got {d}ms"
+            );
+        }
+    }
+
+    /// The cap must bound the WHOLE retry budget, not just one attempt.
+    /// Ten attempts at the ceiling is the worst case a caller can face.
+    #[test]
+    fn total_retry_budget_is_bounded() {
+        let h = HeaderValue::from_static("3600");
+        let worst: u64 = (0..super::rate_limit_max_retries())
+            .map(|a| rate_limit_backoff(a, Some(&h)).as_millis() as u64)
+            .sum();
+        assert!(
+            worst <= 10 * 60_000,
+            "worst-case total sleep must stay bounded, got {worst}ms"
         );
     }
 

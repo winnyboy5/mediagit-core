@@ -68,7 +68,8 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 | `MEDIAGIT_PUSH_CHUNK_CONCURRENCY` | Per-object chunk upload concurrency; targets ~64 total in-flight PUTs. | computed |
 | `MEDIAGIT_PUSH_DEADLINE_SECS` | Overall wall-clock deadline for a single push. | `3600` |
 | `MEDIAGIT_PULL_DEADLINE_SECS` | Overall wall-clock deadline for a single pull, fetch or clone, applied to the pack phase and the chunk phase separately. | `3600` |
-| `MEDIAGIT_RATE_LIMIT_RETRIES` | Max HTTP 429 retries for a single control-plane request. Relevant when a large push outruns a server-side rate limiter. | `5` |
+| `MEDIAGIT_RATE_LIMIT_RETRIES` | Max HTTP 429 retries for a single control-plane request. Relevant when a large push outruns a server-side rate limiter. | `10` |
+| `MEDIAGIT_RATE_LIMIT_MAX_WAIT_SECS` | Hard ceiling on a single 429 backoff, however large the server's `Retry-After` is. Bounds the worst case to retries x this value; without it an unbounded `Retry-After` could park a client for hours against a healthy server. | `60` |
 | `MEDIAGIT_STRONG_VERIFY` | `1` runs a full BLAKE3 re-hash verification of pushed chunks after transfer. | `0` (OFF) |
 | `MEDIAGIT_PULL_PIPELINE` | Overlap manifest fetches and chunk downloads. | `1` (ON) |
 | `MEDIAGIT_PULL_MANIFEST_CONCURRENCY` | Max concurrent manifest fetches when `PULL_PIPELINE=1`. | `8` |
