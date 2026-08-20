@@ -54,34 +54,54 @@ impl ProtocolClient {
         }
         url.query_pairs_mut().append_pair("ref", ref_name);
 
-        // `url` is cloned per attempt: the closure is `Fn` and is re-invoked
-        // on a 429, and `reqwest::Url` is not `Copy`.
-        let response =
-            crate::client::send_with_rate_limit_retry(|| self.client.get(url.clone()).send())
-                .await
-                .context("Failed to GET file")?;
+        // Bounded by MEDIAGIT_PULL_DEADLINE_SECS, the same guard the pack and
+        // chunk download paths already use.
+        //
+        // Without it this hung forever against a backend that accepted the
+        // connection, began a response and then stopped sending — the exact
+        // failure `with_pull_deadline` was introduced for (see its note in
+        // `client/mod.rs`: "a backend that accepted the connection and then
+        // stopped sending left `next_object()` awaiting forever"). That fix
+        // reached `download_pack_streaming` and `download_chunked_objects`;
+        // this separate one-off streaming path was missed, leaving
+        // `mediagit download` — which CI and scripts run unattended against a
+        // bare URL — able to hang indefinitely with no output.
+        //
+        // The GET is inside the deadline too, not just the body loop: the
+        // control-plane client is deliberately built with no per-request
+        // timeout, so a peer that stalls before sending headers would
+        // otherwise be just as unbounded as one that stalls mid-body.
+        crate::client::with_pull_deadline("file download", async move {
+            // `url` is cloned per attempt: the closure is `Fn` and is re-invoked
+            // on a 429, and `reqwest::Url` is not `Copy`.
+            let response =
+                crate::client::send_with_rate_limit_retry(|| self.client.get(url.clone()).send())
+                    .await
+                    .context("Failed to GET file")?;
 
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            anyhow::bail!("File '{}' not found at ref '{}'", file_path, ref_name);
-        }
-        if !response.status().is_success() {
-            anyhow::bail!(
-                "GET file '{}' failed with status: {}",
-                file_path,
-                response.status()
-            );
-        }
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                anyhow::bail!("File '{}' not found at ref '{}'", file_path, ref_name);
+            }
+            if !response.status().is_success() {
+                anyhow::bail!(
+                    "GET file '{}' failed with status: {}",
+                    file_path,
+                    response.status()
+                );
+            }
 
-        let mut total: u64 = 0;
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.context("Error while streaming file download")?;
-            out.write_all(&chunk)
-                .await
-                .context("Failed to write downloaded file to disk")?;
-            total += chunk.len() as u64;
-        }
-        out.flush().await.ok();
-        Ok(total)
+            let mut total: u64 = 0;
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.context("Error while streaming file download")?;
+                out.write_all(&chunk)
+                    .await
+                    .context("Failed to write downloaded file to disk")?;
+                total += chunk.len() as u64;
+            }
+            out.flush().await.ok();
+            Ok(total)
+        })
+        .await
     }
 }
