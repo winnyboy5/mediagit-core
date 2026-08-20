@@ -26,6 +26,47 @@
 
 . (Join-Path $PSScriptRoot "common.ps1")
 
+# Readiness budget for a freshly started mediagit-server.
+#
+# MUST stay above the server's OWN startup probe, which is a 30s tokio timeout
+# around backend validation (crates\mediagit-server\src\main.rs: "startup probe
+# timed out after 30s validating N repo(s)"). Waiting less than 30s here turns a
+# merely SLOW backend into "server never became healthy" -- a false product
+# failure the harness cannot tell apart from a real one.
+#
+# Both call sites previously used `for ($i = 0; $i -lt 40; $i++)` with a 500ms
+# sleep and called it 20s. Two defects in that:
+#   1. 20s < the 30s the server is allowed. 20260820-ga5's A11-auth-grants died
+#      exactly here, and 20260820-ga2's server-up-{aws,azure,gcs} rows carry the
+#      same "startup probe timed out after 30s" text.
+#   2. An iteration count is not a timeout. Real elapsed time depended on how
+#      long each failed probe took -- a refused connection returns in ms (~20s
+#      total), a connection that HANGS burns the full -TimeoutSec 2 (~100s
+#      total). The budget silently varied 5x with the failure mode.
+# A wall-clock deadline fixes both and makes the timeout mean what it says.
+$script:QA_SERVER_HEALTH_TIMEOUT_SEC =
+  [int]$(if ($env:MG_QA_SERVER_HEALTH_TIMEOUT_SEC) { $env:MG_QA_SERVER_HEALTH_TIMEOUT_SEC } else { 60 })
+
+# Poll <BaseUrl>/health until 200, the process exits, or the deadline passes.
+# Returns $true only on a real 200. Single implementation on purpose: this loop
+# lived in both Start-QaServer and Restart-QaServer and the two drifted, which
+# is how the restart path ended up with no stderr in its error message.
+function Wait-QaServerHealthy {
+  param($Proc, [string]$BaseUrl, [int]$TimeoutSec = 0)
+  if ($TimeoutSec -le 0) { $TimeoutSec = $script:QA_SERVER_HEALTH_TIMEOUT_SEC }
+  $deadline = (Get-Date).AddSeconds($TimeoutSec)
+  while ((Get-Date) -lt $deadline) {
+    # A process that exited will never answer; stop waiting out the deadline.
+    if ($Proc.HasExited) { return $false }
+    try {
+      $resp = Invoke-WebRequest -Uri "$BaseUrl/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+      if ($resp.StatusCode -eq 200) { return $true }
+    } catch { }
+    Start-Sleep -Milliseconds 500
+  }
+  return $false
+}
+
 function Get-QaFreePort {
   $l = New-Object System.Net.Sockets.TcpListener ([System.Net.IPAddress]::Loopback, 0)
   $l.Start()
@@ -250,15 +291,7 @@ repos_dir = "$reposDirFwd"$authLines$rlLines$encLines
     -PassThru -NoNewWindow -RedirectStandardOutput $outLog -RedirectStandardError $errLog
 
   $url = "http://127.0.0.1:$port"
-  $healthy = $false
-  for ($i = 0; $i -lt 40; $i++) {
-    if ($proc.HasExited) { break }
-    try {
-      $resp = Invoke-WebRequest -Uri "$url/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
-      if ($resp.StatusCode -eq 200) { $healthy = $true; break }
-    } catch {}
-    Start-Sleep -Milliseconds 500
-  }
+  $healthy = Wait-QaServerHealthy -Proc $proc -BaseUrl $url
 
   if (-not $healthy) {
     $errText = if (Test-Path $errLog) { (Get-Content $errLog -Raw -ErrorAction SilentlyContinue) } else { "" }
@@ -296,18 +329,19 @@ function Restart-QaServer($Handle, [string]$Phase = "misc") {
   $proc = Start-Process -FilePath $QA.MGServer `
     -ArgumentList @("--config", $Handle.ConfigPath) `
     -PassThru -NoNewWindow -RedirectStandardOutput $Handle.OutLog -RedirectStandardError $Handle.ErrLog
-  $healthy = $false
-  for ($i = 0; $i -lt 40; $i++) {
-    if ($proc.HasExited) { break }
-    try {
-      $resp = Invoke-WebRequest -Uri "$($Handle.BaseUrl)/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
-      if ($resp.StatusCode -eq 200) { $healthy = $true; break }
-    } catch {}
-    Start-Sleep -Milliseconds 500
-  }
+  $healthy = Wait-QaServerHealthy -Proc $proc -BaseUrl $Handle.BaseUrl
   if (-not $healthy) {
+    # Include the server's OWN stderr, as Start-QaServer already does. Without
+    # it this threw a bare "did not become healthy", which is true but says
+    # nothing -- diagnosing 20260820-ga5 meant going and finding the .err.log by
+    # hand, where the server had plainly written why it quit ("startup probe
+    # timed out after 30s validating 1 repo(s)"). An error that omits the cause
+    # it already has in a file next to it is a diagnostic dead end.
+    $errText = if ($Handle.ErrLog -and (Test-Path $Handle.ErrLog)) {
+      (Get-Content $Handle.ErrLog -Raw -ErrorAction SilentlyContinue)
+    } else { "" }
     if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
-    throw "Restart-QaServer: server did not become healthy again at $($Handle.BaseUrl)"
+    throw "Restart-QaServer: server did not become healthy again at $($Handle.BaseUrl): $errText"
   }
   $Handle.Proc = $proc
   Write-QaLog $Phase "server restarted: $($Handle.Url) (pid $($proc.Id))"
