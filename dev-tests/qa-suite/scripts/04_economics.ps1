@@ -57,7 +57,26 @@ $videoFiles = Get-ChildItem (Join-Path $QA.TestFiles "video-variants") -File -EA
 if ($videoFiles) { $families["video-variants"] = @($videoFiles | ForEach-Object { $_.FullName }) }
 
 # ---- anchor gates: v11 measured floors minus 5pt tolerance, keyed on latest version's savedPct ----
-$anchors = @{ wav = 94.0; glb = 95.0; safetensors = 44.0 }  # safetensors rebased 48->44 on 2026-07-16: prior 48 was calibrated on lucky RANDOM-seed draws (48.9-50.9); under the pinned seed above the deterministic value is 45.5 (I11 RCA). wav pinned-seed value: 95.3.
+$anchors = @{ wav = 94.0; glb = 95.0; safetensors = 44.0; psd = 62.0; npz = 71.0; ai = 21.0 }  # safetensors rebased 48->44 on 2026-07-16: prior 48 was calibrated on lucky RANDOM-seed draws (48.9-50.9); under the pinned seed above the deterministic value is 45.5 (I11 RCA). wav pinned-seed value: 95.3.
+# psd/npz/ai added 2026-08-19. Until then 10 of the 13 families had NO savings
+# anchor: psd, npz and ai could each have collapsed to zero savings and only the
+# accounting-accuracy and fsck gates would have fired - neither of which measures
+# savings at all. Savings is the product's differentiator, so "compression died"
+# was the one regression this phase could not see.
+#
+# Same convention as the three above: measured floor minus a 5pt tolerance, keyed
+# on the LAST version's savedPct. Calibrated on two complete campaigns rather than
+# one, so the tolerance covers observed spread and not just a single draw:
+#   psd  v3 = 67.2 (20260818-gagate8) / 67.1 (20260819-gagate13) -> 62.0
+#   npz  v3 = 76.7 / 76.7                                        -> 71.0
+#   ai   v3 = 26.3 / 26.3                                        -> 21.0
+# npz and ai reproduce exactly; psd is the only one that moves at all (0.1pt on
+# v3, 0.8pt on v2) because it is real-file, not seeded synthetic.
+#
+# flac is deliberately still unanchored: its LAST version measures 0% savings in
+# both runs (savings live in v3/v4), so an anchor keyed on the last version would
+# have to be 0 - a gate that cannot fail. Anchoring it needs a per-version key,
+# which is a bigger change than this one.
 
 # Smallest ODB size, in MB, whose stats-vs-disk comparison may fail the gate.
 #

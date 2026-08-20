@@ -54,6 +54,51 @@ $S5_COOLDOWN_SEC = [int]($env:MG_QA_S5_COOLDOWN_SEC | ForEach-Object { if ($_) {
 # once a link's real capability has been measured.
 $CLOUD_FLOOR_MBS = $QA.CloudMbsFloor
 
+# ---- observed-throughput regression floor (fast backends only) --------------
+#
+# The SLO floors above are PRODUCT requirements, not measurements, and on this
+# machine they sit ~20x below what the code actually does: local pushed
+# 311.86 MB/s against a 14.22 MB/s floor. A regression that made push twenty
+# times slower would still have passed every S5 run. Nothing anywhere else
+# detects a push/clone throughput regression - `baselines\perf.tsv` covers only
+# local `add` and `commit`.
+#
+# So: when baselines\scale.tsv exists, a fast backend must clear BOTH the SLO
+# and half of its own worst observed throughput. Promoted the same way as the
+# perf baseline - an operator copies numbers from a known-good campaign, so the
+# harness can never quietly re-baseline itself onto a regression it just
+# measured. When the file is absent this is a no-op and only the SLO applies,
+# which is the pre-2026-08-20 behaviour.
+#
+# 50% is deliberately loose. These numbers move with page cache, the host's
+# filesystem filter and disk state; the job here is to catch a 2x-and-worse
+# collapse, not to police normal variance. Cloud backends are excluded on
+# purpose - they are WAN-bound single samples (see $CLOUD_FLOOR_MBS), and a
+# link having a bad day is not a product regression.
+#
+# Format (tab-separated, same shape as baselines\perf.tsv):
+#   backend  metric     value
+#   minio    push-mbs   57.2
+$SCALE_BASELINE = Join-Path $QA.Root "baselines\scale.tsv"
+$SCALE_FLOOR_FRACTION = 0.5
+$script:ScaleBaseRows = $null
+if (Test-Path $SCALE_BASELINE) {
+  $script:ScaleBaseRows = @(Import-Csv $SCALE_BASELINE -Delimiter "`t")
+  Write-QaLog $Phase "scale baseline loaded: $SCALE_BASELINE ($($script:ScaleBaseRows.Count) rows, floor=$([int]($SCALE_FLOOR_FRACTION*100))% of observed)"
+} else {
+  Write-QaLog $Phase "no scale baseline at $SCALE_BASELINE - throughput gated on the SLO floor only (promote a green campaign's numbers to enable regression detection)"
+}
+
+# Returns 0 when there is no baseline row, so callers can always Max() it in.
+function Get-ObservedFloor([string]$Backend, [string]$Metric) {
+  if (-not $script:ScaleBaseRows) { return 0.0 }
+  $m = $script:ScaleBaseRows | Where-Object { $_.backend -eq $Backend -and $_.metric -eq $Metric } | Select-Object -First 1
+  if (-not $m) { return 0.0 }
+  $v = 0.0
+  if (-not [double]::TryParse($m.value, [ref]$v)) { return 0.0 }
+  return [math]::Round($v * $SCALE_FLOOR_FRACTION, 2)
+}
+
 # Backends S1 exercises. Fast local-ish backends always; billed ones only when the
 # operator selected them (Start-QaServer SKIPs the rest with the not-selected marker).
 function Get-ScaleBackends {
@@ -635,9 +680,11 @@ function Drill-S5-ThroughputDedup {
       # Fast backends are held to the SLO floor. Cloud backends are WAN-bound, so their
       # floor is the MG_QA_CLOUD_MBS_FLOOR knob: 0 (default) records the number without
       # gating, so a link's real capability can be measured before a threshold is set.
-      $floor = if ($isFast) { $PUSH_FLOOR_MBS } else { $CLOUD_FLOOR_MBS }
+      $obsFloor = Get-ObservedFloor $backend "push-mbs"
+      $floor = if ($isFast) { [math]::Max($PUSH_FLOOR_MBS, $obsFloor) } else { $CLOUD_FLOOR_MBS }
       $pushPass = ($r.Exit -eq 0) -and (($floor -le 0) -or ($pushMbs -ge $floor))
-      $floorTxt = if ($isFast) { "$PUSH_FLOOR_MBS" }
+      $floorTxt = if ($isFast -and $obsFloor -gt $PUSH_FLOOR_MBS) { "$floor (observed-regression floor; SLO is $PUSH_FLOOR_MBS)" }
+                  elseif ($isFast) { "$PUSH_FLOOR_MBS (SLO)" }
                   elseif ($CLOUD_FLOOR_MBS -gt 0) { "$CLOUD_FLOOR_MBS (MG_QA_CLOUD_MBS_FLOOR)" }
                   else { "none (WAN, informational - set MG_QA_CLOUD_MBS_FLOOR to gate)" }
       # Cloud MB/s is a single sample over whatever the operator's uplink was doing at the
@@ -654,9 +701,11 @@ function Drill-S5-ThroughputDedup {
       $cloneMbs = if ($r.Sec -gt 0) { [math]::Round($payloadMB / $r.Sec, 2) } else { 0 }
       $parity = ($r.Exit -eq 0) -and (Test-Path $clone) -and `
         ((Compare-Object (Get-QaTreeHashes $pushSrc) (Get-QaTreeHashes $clone) | Measure-Object).Count -eq 0)
-      $cloneFloor = if ($isFast) { $PULL_FLOOR_MBS } else { $CLOUD_FLOOR_MBS }
+      $obsCloneFloor = Get-ObservedFloor $backend "clone-mbs"
+      $cloneFloor = if ($isFast) { [math]::Max($PULL_FLOOR_MBS, $obsCloneFloor) } else { $CLOUD_FLOOR_MBS }
       $clonePass = $parity -and (($cloneFloor -le 0) -or ($cloneMbs -ge $cloneFloor))
-      $cloneFloorTxt = if ($isFast) { "$PULL_FLOOR_MBS" }
+      $cloneFloorTxt = if ($isFast -and $obsCloneFloor -gt $PULL_FLOOR_MBS) { "$cloneFloor (observed-regression floor; SLO is $PULL_FLOOR_MBS)" }
+                       elseif ($isFast) { "$PULL_FLOOR_MBS (SLO)" }
                        elseif ($CLOUD_FLOOR_MBS -gt 0) { "$CLOUD_FLOOR_MBS (MG_QA_CLOUD_MBS_FLOOR)" }
                        else { "none (WAN, informational)" }
       # parity is the load-bearing assertion here, not cloneMbs: byte-identical clone-back

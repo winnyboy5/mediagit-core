@@ -445,9 +445,29 @@ alone, was **45× faster**:
 
 **So verification no longer blocks the push.** `complete_pack` writes a durable
 `.pending` marker, registers the pack, and returns; a background worker verifies it
-under a serialising semaphore (`MEDIAGIT_PACK_VERIFY_CONCURRENCY`, default 1 —
+under a serialising semaphore (`MEDIAGIT_PACK_VERIFY_PACK_CONCURRENCY`, default 1 —
 queueing for one shared link beats fighting over it). Push cost returns to upload
 speed.
+
+Two separate knobs, easy to confuse because until 2026-08-20 they shared one name:
+
+| Variable | Axis | Default |
+|---|---|---|
+| `MEDIAGIT_PACK_VERIFY_PACK_CONCURRENCY` | how many **packs** verify at once | 1 |
+| `MEDIAGIT_PACK_VERIFY_CONCURRENCY` | range-reads **inside one pack** | 16 |
+| `MEDIAGIT_PACK_VERIFY_BUDGET_SECS` | wall-clock ceiling for one verify attempt | 300 |
+
+Raising the pack axis is the intuitive cure for "my clone is stuck waiting on
+verification" and it is the wrong one: measured 2026-08-20 against live GCS,
+16 permits turned a 512 MB clone from **131 s into 2042 s** (15.5x worse), because
+concurrent whole-pack read-backs thrash the one shared link — the same effect the
+table above shows at 9-in-flight.
+
+The budget is what actually protects a clone. A pack whose read *trickles* rather
+than stops cannot be caught by a no-progress deadline: on 2026-08-20 one pack took
+2628 s for 21 entries (~8 KB/s) while holding the single verify permit, and a clone
+blocked behind it for 44 minutes. On breach the pack is parked (nothing
+quarantined, no URL minted) so the remaining packs are not held hostage.
 
 **Reads are never speculative**, which is what makes that safe:
 

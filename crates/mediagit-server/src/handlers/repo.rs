@@ -1165,6 +1165,11 @@ async fn pack_entries_failing_content_verification(
     //
     // `MEDIAGIT_PACK_VERIFY_CONCURRENCY` is the knob for an operator who does
     // hold large non-chunked objects and wants the peak bounded harder.
+    //
+    // This is the PER-ENTRY axis (range-reads inside one pack) and this name owns
+    // it. How many PACKS verify at once is a separate axis with a separate name,
+    // `MEDIAGIT_PACK_VERIFY_PACK_CONCURRENCY` (see `pack_verify_semaphore`).
+    // Until 2026-08-20 one name drove both, at two different defaults.
     let range_concurrency: usize = std::env::var("MEDIAGIT_PACK_VERIFY_CONCURRENCY")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -1179,7 +1184,8 @@ async fn pack_entries_failing_content_verification(
         .map(|(i, e)| (i, e.offset, e.length as u64, e.chunk_oid.clone()))
         .collect();
 
-    let results: Vec<(usize, EntryVerification)> =
+    // (entry index, verdict, ms to open the range, ms to read+hash it)
+    let results: Vec<(usize, EntryVerification, u64, u64)> =
         futures::stream::iter(owned.into_iter().map(|(idx, offset, length, chunk_oid)| {
             let storage = Arc::clone(storage);
             let compressor = Arc::clone(compressor);
@@ -1190,8 +1196,15 @@ async fn pack_entries_failing_content_verification(
                 // A too-short entry is a manifest-level defect, not a transport
                 // one: the claim itself is impossible, so this IS corruption.
                 if length < 5 {
-                    return (idx, EntryVerification::Corrupt);
+                    return (idx, EntryVerification::Corrupt, 0u64, 0u64);
                 }
+                // Split timing: `open_ms` is how long the backend took to ANSWER,
+                // `read_ms` is how long the bytes took to arrive. Those are two
+                // different faults — a storage service throttling request starts
+                // looks nothing like a transfer that crawls — and without the
+                // split, a slow pack is just one opaque `elapsed_ms`, which is
+                // exactly what made the 2026-08-20 stall cost hours to diagnose.
+                let entry_start = std::time::Instant::now();
                 let stream = match storage
                     .get_streaming_range(&pack_key, (offset + 5)..(offset + length))
                     .await
@@ -1206,9 +1219,15 @@ async fn pack_entries_failing_content_verification(
                             err = %e,
                             "pack verification: range read failed; entry left unverified"
                         );
-                        return (idx, EntryVerification::Unreadable);
+                        return (
+                            idx,
+                            EntryVerification::Unreadable,
+                            entry_start.elapsed().as_millis() as u64,
+                            0u64,
+                        );
                     }
                 };
+                let open_ms = entry_start.elapsed().as_millis() as u64;
                 let async_reader = StreamReader::new(stream.map_err(std::io::Error::other));
                 // Must be constructed here (captures the current Tokio Handle) and
                 // then moved into spawn_blocking — never used directly on an async
@@ -1282,16 +1301,39 @@ async fn pack_entries_failing_content_verification(
                 // A JoinError means the check never produced a verdict — that is
                 // an absence of evidence, not evidence of corruption.
                 .unwrap_or(EntryVerification::Unreadable);
-                (idx, outcome)
+                let read_ms = (entry_start.elapsed().as_millis() as u64).saturating_sub(open_ms);
+                (idx, outcome, open_ms, read_ms)
             }
         }))
         .buffer_unordered(range_concurrency)
-        .collect::<Vec<(usize, EntryVerification)>>()
+        .collect::<Vec<(usize, EntryVerification, u64, u64)>>()
         .await;
+
+    // One summary line per pack. Always emitted, not gated on a threshold: the
+    // healthy numbers are what make an unhealthy one legible, and a pack that is
+    // slow only relative to its peers cannot be spotted from a warning alone.
+    if !results.is_empty() {
+        let worst = results.iter().max_by_key(|(_, _, o, r)| o + r);
+        let total_open: u64 = results.iter().map(|(_, _, o, _)| *o).sum();
+        let total_read: u64 = results.iter().map(|(_, _, _, r)| *r).sum();
+        if let Some((widx, _, wopen, wread)) = worst {
+            tracing::info!(
+                pack = %pack_key,
+                entries = results.len(),
+                concurrency = range_concurrency,
+                sum_open_ms = total_open,
+                sum_read_ms = total_read,
+                worst_entry = widx,
+                worst_open_ms = wopen,
+                worst_read_ms = wread,
+                "pack verification entry timings"
+            );
+        }
+    }
 
     let mut corrupt: Vec<usize> = Vec::new();
     let mut unreadable: Vec<usize> = Vec::new();
-    for (idx, outcome) in results {
+    for (idx, outcome, _open_ms, _read_ms) in results {
         match outcome {
             EntryVerification::Verified => {}
             EntryVerification::Corrupt => corrupt.push(idx),
@@ -1398,17 +1440,66 @@ pub(crate) async fn read_pack_manifest(
 /// aggregate of 0.226 MiB/s, while a pack verified alone hit 1.458 MiB/s — 45x
 /// better per pack. Global, not per-repo, because the constraint is the shared
 /// link, not the repository.
+/// Wall-clock ceiling for ONE attempt at verifying ONE pack.
+///
+/// Sized from measurement, not taste. Healthy per-pack verification against live
+/// GCS on this class of link: mean 12.7s, worst 35.5s over a 512 MB payload; the
+/// slowest pack in a healthy 2 GB run was 103s. The pathological case that
+/// motivated this was 2628s. 300s therefore sits ~3x above the worst healthy
+/// observation and ~9x below the failure, which is the widest gap available —
+/// close enough to normal that a real stall is caught within minutes, far enough
+/// that ordinary slowness never trips it.
+///
+/// Exceeding it is not an error and quarantines nothing: the pack is simply left
+/// unverified for a later attempt, which is the same outcome the pre-existing
+/// "unreadable after retries" path already produces.
+fn pack_verify_budget() -> std::time::Duration {
+    const DEFAULT_BUDGET_SECS: u64 = 300;
+    let secs = std::env::var("MEDIAGIT_PACK_VERIFY_BUDGET_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_BUDGET_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Knob for THIS (pack-level) axis is `MEDIAGIT_PACK_VERIFY_PACK_CONCURRENCY`.
+///
+/// It used to read `MEDIAGIT_PACK_VERIFY_CONCURRENCY` — the same name that
+/// `pack_entries_failing_content_verification` reads for a completely different
+/// axis (how many range-reads run inside ONE pack), with a different default
+/// (16 there, 1 here). One name silently drove both, so an operator tuning
+/// per-entry memory also changed pack-level serialisation, and vice versa.
+///
+/// Keeping the default at 1 is not conservatism, it is measured: raising this
+/// to 16 on 2026-08-20 made per-pack verification **4.5x worse** (mean 12.7s ->
+/// 56.6s over a 512 MB GCS payload), reproducing the link-thrashing described
+/// above. More permits is the intuitive fix for a clone blocked on verification
+/// and it is the wrong one.
 fn pack_verify_semaphore() -> &'static tokio::sync::Semaphore {
     static VERIFY_SEM: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
     VERIFY_SEM.get_or_init(|| {
-        let permits = std::env::var("MEDIAGIT_PACK_VERIFY_CONCURRENCY")
+        // Deliberately NOT falling back to the old name: it would keep honouring
+        // a setting that measurement says makes this worse, and it is what made
+        // the two axes indistinguishable in the first place. An operator who set
+        // the old name gets told, once, rather than silently losing the pack-level
+        // meaning it used to have.
+        if std::env::var_os("MEDIAGIT_PACK_VERIFY_CONCURRENCY").is_some() {
+            tracing::warn!(
+                "MEDIAGIT_PACK_VERIFY_CONCURRENCY now controls only the per-entry range \
+                 concurrency INSIDE one pack. To change how many packs verify at once, set \
+                 MEDIAGIT_PACK_VERIFY_PACK_CONCURRENCY (default 1; raising it measured 4.5x \
+                 slower per pack)"
+            );
+        }
+        let permits = std::env::var("MEDIAGIT_PACK_VERIFY_PACK_CONCURRENCY")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|n| *n > 0)
             .unwrap_or(1);
         tracing::info!(
             permits,
-            "Pack content verification concurrency (MEDIAGIT_PACK_VERIFY_CONCURRENCY)"
+            "Pack content verification concurrency (MEDIAGIT_PACK_VERIFY_PACK_CONCURRENCY)"
         );
         tokio::sync::Semaphore::new(permits)
     })
@@ -1469,6 +1560,34 @@ pub(crate) async fn verify_pack_in_background(
     storage: Arc<dyn StorageBackend>,
     manifest: Vec<ManifestEntry>,
 ) -> bool {
+    verify_pack_with_budget(
+        state,
+        repo_path,
+        repo,
+        pack_oid,
+        storage,
+        manifest,
+        pack_verify_budget(),
+    )
+    .await
+}
+
+/// Budget taken as an argument rather than read from the environment, so the
+/// timeout is testable. `#![forbid(unsafe_code)]` plus edition 2024 make
+/// `set_var` an `unsafe` call, so a test cannot drive the real variable — the
+/// same constraint that shaped `gcs::parse_io_timeout_secs`. A guard nobody has
+/// watched fire is the shape this codebase has been bitten by repeatedly, so the
+/// seam exists to let a test watch it fire.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn verify_pack_with_budget(
+    state: Arc<AppState>,
+    repo_path: std::path::PathBuf,
+    repo: String,
+    pack_oid: String,
+    storage: Arc<dyn StorageBackend>,
+    manifest: Vec<ManifestEntry>,
+    budget: std::time::Duration,
+) -> bool {
     let compressor = match crate::handlers::repo_compressor(&state, &repo_path) {
         Ok(c) => Arc::new(c),
         Err(_) => {
@@ -1495,13 +1614,55 @@ pub(crate) async fn verify_pack_in_background(
     let mut bad: Vec<ManifestEntry> = Vec::new();
     let mut outstanding: Vec<ManifestEntry> = manifest.clone();
     for attempt in 1..=VERIFY_ATTEMPTS {
-        let (corrupt, unreadable_idx) = pack_entries_failing_content_verification(
-            &storage,
-            &compressor,
-            &pack_key,
-            &outstanding,
+        // Bounded by WALL TIME, not by stalling. The storage layer already has a
+        // no-progress deadline (e.g. MEDIAGIT_GCS_IO_TIMEOUT_SECS, 120s), and on
+        // 2026-08-20 it did not fire once while a pack took 2628s for 21 entries
+        // — because the read never stopped, it trickled at ~8 KB/s. A deadline
+        // that only catches a dead connection cannot catch a live-but-useless one.
+        //
+        // Why this matters far beyond one pack: verification holds the single
+        // global permit (`pack_verify_semaphore`), so that one pack blocked every
+        // other pack's verification for 44 minutes, and `presign_pack_downloads`
+        // blocks a clone on exactly that. The clone took 3055s; 2661s of it was
+        // one presign call waiting behind this.
+        //
+        // The fix is to give up the LANE, not to widen it. Widening was measured
+        // on 2026-08-20 and is catastrophic: 16 permits made a 512 MB GCS clone
+        // 131s -> 2042s (15.5x worse), because concurrent whole-pack read-backs
+        // thrash the shared link.
+        let attempt_result = tokio::time::timeout(
+            budget,
+            pack_entries_failing_content_verification(
+                &storage,
+                &compressor,
+                &pack_key,
+                &outstanding,
+            ),
         )
         .await;
+        let (corrupt, unreadable_idx) = match attempt_result {
+            Ok(v) => v,
+            Err(_) => {
+                // Park it exactly like the unreadable-after-retries case below:
+                // still in `unverified_packs`, nothing quarantined, a later sweep
+                // or presign retries it. Correctness is untouched — an unverified
+                // pack still cannot have a URL minted for it, so the client takes
+                // the fallback path rather than receiving unvetted bytes.
+                tracing::warn!(
+                    repo = %repo,
+                    pack = %pack_oid,
+                    attempt,
+                    entries_outstanding = outstanding.len(),
+                    budget_secs = budget.as_secs(),
+                    elapsed_ms = verify_start.elapsed().as_millis() as u64,
+                    "pack verification exceeded its wall-clock budget; releasing the verify \
+                     permit so other packs are not blocked behind it. Pack stays unverified \
+                     (nothing quarantined). Raise MEDIAGIT_PACK_VERIFY_BUDGET_SECS if this \
+                     link is legitimately this slow"
+                );
+                return false;
+            }
+        };
         bad.extend(corrupt.iter().filter_map(|&i| outstanding.get(i).cloned()));
         if unreadable_idx.is_empty() {
             outstanding.clear();
@@ -1546,11 +1707,44 @@ pub(crate) async fn verify_pack_in_background(
     }
 
     if clean {
+        let elapsed = verify_start.elapsed();
+        let bytes: u64 = manifest.iter().map(|e| e.length as u64).sum();
+        // A pack that verifies far slower than its peers is the difference
+        // between a clone taking minutes and taking an hour, because
+        // `ensure_pack_verified_for_presign` blocks URL minting on exactly this
+        // work. On 2026-08-20 one pack took 2628765 ms for 21 entries (~8 KB/s)
+        // while its 31 siblings averaged ~10 s, and the ONLY trace of it was a
+        // single `elapsed_ms` on this line — no rate, no size, and nothing at
+        // all until it finally finished 44 minutes later. Diagnosing it needed
+        // hours of log archaeology that a warning here would have replaced.
+        //
+        // Threshold, not a gate: nothing changes behaviour, it just stops a
+        // pathological read from being invisible while it happens.
+        const SLOW_VERIFY_WARN_SECS: u64 = 60;
+        let mbs = if elapsed.as_secs_f64() > 0.0 {
+            (bytes as f64 / (1024.0 * 1024.0)) / elapsed.as_secs_f64()
+        } else {
+            0.0
+        };
+        if elapsed.as_secs() >= SLOW_VERIFY_WARN_SECS {
+            tracing::warn!(
+                repo = %repo,
+                pack = %pack_oid,
+                entries = manifest.len(),
+                bytes,
+                elapsed_ms = elapsed.as_millis() as u64,
+                mb_per_sec = format!("{mbs:.3}"),
+                "pack verification was pathologically slow; a clone waiting on this pack \
+                 is blocked for the whole duration (see ensure_pack_verified_for_presign)"
+            );
+        }
         tracing::info!(
             repo = %repo,
             pack = %pack_oid,
             entries = manifest.len(),
-            elapsed_ms = verify_start.elapsed().as_millis() as u64,
+            bytes,
+            elapsed_ms = elapsed.as_millis() as u64,
+            mb_per_sec = format!("{mbs:.3}"),
             "background pack verification: pack verified clean"
         );
     } else {
@@ -3055,5 +3249,185 @@ mod complete_pack_content_verification_tests {
                 "the lower-index corrupted entry must be reported every time"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod pack_verify_budget_tests {
+    use super::*;
+
+    /// Delegates everything except the one call verification makes, which it
+    /// delays. Models the failure actually observed on 2026-08-20: the read was
+    /// never dead, so no no-progress deadline could fire — it simply trickled
+    /// (21 entries, 2628s, ~8 KB/s) while holding the only verify permit.
+    #[derive(Debug)]
+    struct TrickleBackend {
+        inner: Arc<dyn StorageBackend>,
+        delay: std::time::Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl StorageBackend for TrickleBackend {
+        async fn get(&self, key: &str) -> anyhow::Result<Vec<u8>> {
+            self.inner.get(key).await
+        }
+        async fn put(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
+            self.inner.put(key, data).await
+        }
+        async fn exists(&self, key: &str) -> anyhow::Result<bool> {
+            self.inner.exists(key).await
+        }
+        async fn delete(&self, key: &str) -> anyhow::Result<()> {
+            self.inner.delete(key).await
+        }
+        async fn list_objects(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+            self.inner.list_objects(prefix).await
+        }
+        async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+            self.inner.head(key).await
+        }
+        async fn get_streaming_range(
+            &self,
+            key: &str,
+            range: std::ops::Range<u64>,
+        ) -> anyhow::Result<
+            std::pin::Pin<
+                Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+            >,
+        > {
+            tokio::time::sleep(self.delay).await;
+            self.inner.get_streaming_range(key, range).await
+        }
+    }
+
+    fn build_pack() -> (Vec<u8>, Vec<ManifestEntry>) {
+        let compressor = SmartCompressor::new();
+        let contents: [&[u8]; 2] = [b"budget chunk one", b"budget chunk two, different"];
+        let mut pack_bytes = Vec::new();
+        let mut manifest = Vec::new();
+        for content in contents {
+            let chunk_id = blake3::hash(content).to_hex().to_string();
+            let compressed = compressor.compress(content).expect("compress");
+            let offset = pack_bytes.len() as u64;
+            pack_bytes.extend_from_slice(&[0u8; 5]);
+            pack_bytes.extend_from_slice(&compressed);
+            manifest.push(ManifestEntry {
+                chunk_oid: chunk_id,
+                offset,
+                length: (5 + compressed.len()) as u32,
+                compressed_hash: None,
+            });
+        }
+        (pack_bytes, manifest)
+    }
+
+    struct Outcome {
+        clean: bool,
+        elapsed: std::time::Duration,
+        pack_still_intact: bool,
+    }
+
+    async fn verify_with(delay: std::time::Duration, budget: std::time::Duration) -> Outcome {
+        let repo = "budget-repo".to_string();
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join(&repo);
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let state =
+            Arc::new(AppState::new(tmp.path().to_path_buf()).with_verify_chunks_on_complete(true));
+        let inner = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+
+        let (pack_bytes, manifest) = build_pack();
+        let pack_oid = "beefcafe01".to_string();
+        let pack_key = format!("packs/{pack_oid}");
+        inner.put(&pack_key, &pack_bytes).await.expect("put pack");
+
+        let slow: Arc<dyn StorageBackend> = Arc::new(TrickleBackend {
+            inner: Arc::clone(&inner),
+            delay,
+        });
+
+        let started = std::time::Instant::now();
+        let clean = verify_pack_with_budget(
+            Arc::clone(&state),
+            repo_path.clone(),
+            repo.clone(),
+            pack_oid.clone(),
+            slow,
+            manifest,
+            budget,
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        // Untouched bytes are the observable proof that a timeout parked the pack
+        // rather than treating it as corrupt: the quarantine path would have
+        // evicted entries via `evict_pack_entries`.
+        let pack_still_intact = inner
+            .get(&pack_key)
+            .await
+            .map(|b| b == pack_bytes)
+            .unwrap_or(false);
+
+        Outcome {
+            clean,
+            elapsed,
+            pack_still_intact,
+        }
+    }
+
+    /// The half that must FIRE.
+    ///
+    /// The backend trickles for 30s; the budget is 150ms. The load-bearing
+    /// assertion is ELAPSED: returning `false` alone would also happen if
+    /// verification failed for some unrelated reason, and a test that cannot
+    /// tell those apart is not testing the timeout. Returning in well under the
+    /// backend's own delay is what proves the budget, and nothing else, ended it.
+    #[tokio::test]
+    async fn trickling_pack_gives_up_its_verify_permit() {
+        let out = verify_with(
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_millis(150),
+        )
+        .await;
+
+        assert!(
+            !out.clean,
+            "a pack that blew its wall-clock budget must not be reported clean"
+        );
+        assert!(
+            out.elapsed < std::time::Duration::from_secs(5),
+            "budget must end the attempt early; took {:?}, but the backend's own delay is 30s              — that means the timeout did not fire and this test would pass for the wrong reason",
+            out.elapsed
+        );
+        assert!(
+            out.pack_still_intact,
+            "a budget breach must park the pack, not quarantine it: the pack bytes must survive"
+        );
+    }
+
+    /// The half that must stay QUIET. Healthy per-pack verification measured
+    /// ~12.7s mean against live GCS and the default budget is 300s, so a guard
+    /// that tripped on normal work would be worse than no guard at all.
+    #[tokio::test]
+    async fn healthy_pack_verifies_well_inside_its_budget() {
+        let out = verify_with(
+            std::time::Duration::from_millis(0),
+            std::time::Duration::from_secs(30),
+        )
+        .await;
+        assert!(
+            out.clean,
+            "a fast, valid pack must verify clean and must NOT be tripped by the budget"
+        );
+        assert!(out.pack_still_intact, "a clean pack must not be evicted");
+    }
+
+    #[test]
+    fn budget_defaults_to_300s() {
+        // 300s is ~3x the worst healthy per-pack verification observed against
+        // live GCS (103s) and ~9x below the 2628s pathological case.
+        assert_eq!(pack_verify_budget().as_secs(), 300);
     }
 }

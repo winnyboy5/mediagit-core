@@ -73,6 +73,48 @@ $GATE_FIELDS = $HIGHER_IS_BETTER + $LOWER_IS_BETTER
 # machine class is well outside run-to-run noise and is worth a human looking.
 $REGRESSION_PCT = 10.0
 
+# Per-op override, for ops whose OWN run-to-run spread exceeds the global bar.
+#
+# 10% is right for the synthetic classes: across three runs on this machine
+# 100/add moved 0.19 -> 0.22 -> 0.20s and 500/add moved 0.89 -> 0.88 -> 0.89s.
+# add-psd is a different animal - 74.91 -> 79.84 -> 88.50s, an 18% spread on
+# identical code (the last two runs are the same HEAD, 77f9199).
+#
+# That spread is not the machine getting slower. In the same three runs the
+# single-threaded stages are flat to within 2% (cdc_ms 295/302/298, hash_ms
+# 86.6/86.3/85.4); all of the movement is in the concurrent delta path, where
+# dedup_ms swings 2.6x (101587 -> 54026 -> 143419 ms of summed thread time) and
+# delta_resolve_ms +/-40%. It is scheduling and contention between delta
+# workers, and it is inherent to the op.
+#
+# So this record gates at 25%, not 10%. That is deliberately weaker, and the
+# alternative is worse: at 10% it fails on ordinary variance, and a gate that
+# cries wolf is one everybody learns to ignore - which is how a real regression
+# gets waved through. The defects this case exists to catch are not 12%
+# affairs; the PSD delta-cost P0 was a 1.14M ms lock stall, orders of magnitude
+# clear of any threshold in this range.
+#
+# Narrow this back toward 10% only with evidence that the spread itself shrank.
+$REGRESSION_PCT_BY_OP = @{ 'add-psd' = 25.0 }
+
+# Absolute floor a regression must ALSO clear, per field, in that field's own
+# unit. Percentage-only gating is meaningless once a measurement approaches the
+# clock's resolution: `commit` wall reads 0.02s at every size class, so a single
+# 10 ms tick is +50%.
+#
+# 0.05s for wall is set from observed spread, not taste: across the two complete
+# campaigns on this machine (20260818-gagate8, 20260819-gagate13) the largest
+# run-to-run move on any gated wall record was 100/add, 0.19s -> 0.22s (0.03s).
+# The floor sits just above that, so ordinary jitter cannot fail a run while the
+# regressions this gate exists for stay far above it - the 341 MB PSD add moves
+# in whole seconds (74.91 -> 79.84), and the 500 MB class in tenths.
+#
+# Fields absent from this map gate on percentage alone, unchanged.
+$MIN_ABS_DELTA = @{
+  wall                       = 0.05   # seconds
+  manifest_to_first_byte_ms  = 50.0   # milliseconds
+}
+
 # Smallest input size, in MB, whose timings may fail the gate.
 #
 # The 1 MB class runs `add` in ~30 ms; a 10% threshold there measures the Windows
@@ -208,11 +250,30 @@ foreach ($case in $cases) {
           # dead gate passed while checking nothing.
           $comparedCount++
           $deltaPct = (($cur - $base) / [Math]::Abs($base)) * 100.0
-          $regressed = ($HIGHER_IS_BETTER -contains $field -and $deltaPct -lt -$REGRESSION_PCT) -or
-                       ($LOWER_IS_BETTER -contains $field -and $deltaPct -gt $REGRESSION_PCT)
+          $thresholdPct = if ($REGRESSION_PCT_BY_OP.ContainsKey($rec['op'])) { $REGRESSION_PCT_BY_OP[$rec['op']] } else { $REGRESSION_PCT }
+          $regressed = ($HIGHER_IS_BETTER -contains $field -and $deltaPct -lt -$thresholdPct) -or
+                       ($LOWER_IS_BETTER -contains $field -and $deltaPct -gt $thresholdPct)
+          # A percentage alone cannot fail a measurement that is at the timer's
+          # resolution. `commit` wall is 0.02s for every size class, so one tick
+          # of jitter (0.02 -> 0.03) is +50% and would fail the gate forever,
+          # while meaning nothing. $MIN_GATED_SIZE_MB does not help here: it keys
+          # on INPUT size, and 341/commit is a 341 MB input whose commit still
+          # takes 20 ms.
+          #
+          # So a regression must clear BOTH bars - relative AND absolute. The
+          # floors are in each field's own unit; a field absent from the map has
+          # no absolute bar and gates on percentage alone, as before.
+          if ($regressed -and $MIN_ABS_DELTA.ContainsKey($field)) {
+            $absDelta = [Math]::Abs($cur - $base)
+            if ($absDelta -lt $MIN_ABS_DELTA[$field]) {
+              $regressed = $false
+              Write-QaLog $Phase ("noise sizeMB={0} op={1} field={2} baseline={3} current={4} delta={5}% but |{6}| < {7} absolute floor - not gated" -f `
+                $sizeMB, $rec['op'], $field, $baseVal, $value, [math]::Round($deltaPct,1), [math]::Round($absDelta,4), $MIN_ABS_DELTA[$field])
+            }
+          }
           if ($regressed) {
             $regressionCount++
-            Write-QaLog $Phase "REGRESSION sizeMB=$sizeMB op=$($rec['op']) field=$field baseline=$baseVal current=$value delta=$([math]::Round($deltaPct,1))%"
+            Write-QaLog $Phase "REGRESSION sizeMB=$sizeMB op=$($rec['op']) field=$field baseline=$baseVal current=$value delta=$([math]::Round($deltaPct,1))% threshold=$thresholdPct%"
           }
         }
       }
@@ -242,7 +303,7 @@ if ($baseRows) {
       "compared 0 of $recordCount records against $Baseline - the gate measured nothing (gatable=$gatedCount, min-size=${MIN_GATED_SIZE_MB}MB)"
   } else {
   Write-QaGate $Phase "baseline-regression" ($regressionCount -eq 0) `
-    "count=$regressionCount compared=$comparedCount gated=$gatedCount/$recordCount threshold=$REGRESSION_PCT% min-size=${MIN_GATED_SIZE_MB}MB baseline=$Baseline"
+    "count=$regressionCount compared=$comparedCount gated=$gatedCount/$recordCount threshold=$REGRESSION_PCT% (per-op: $(($REGRESSION_PCT_BY_OP.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)%" }) -join ',')) min-size=${MIN_GATED_SIZE_MB}MB baseline=$Baseline"
   }
 } else {
   # WARN, not PASS: nothing was compared. Reported as informational so the first
