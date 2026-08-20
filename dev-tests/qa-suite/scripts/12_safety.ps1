@@ -253,11 +253,22 @@ if (ShouldRun "SAFE11") {
 
 # --- summary -----------------------------------------------------------------
 
-if ($script:AllPass) {
-  Write-QaLog $Phase "PHASE PASS - no untracked work destroyed"
-  exit 0
-}
-else {
-  Write-QaLog $Phase "PHASE FAIL - see $TSV"
-  exit 1
-}
+# Exit-QaPhase, not a hand-rolled exit. This was the ONLY phase script in the
+# suite that rolled its own, and it silently dropped the protection every
+# sibling gets: Exit-QaPhase treats "no gates recorded" as NOTHING-VERIFIED
+# (common.ps1:425), whereas `$script:AllPass` only flips on an actual FAIL and
+# so stays at its initial $true when nothing ran at all.
+#
+# Failing input that used to report success: `-Only zzz-matches-nothing`. Every
+# check sits behind ShouldRun, `Rec` never fires, and the phase printed
+# "PHASE PASS - no untracked work destroyed" and exited 0 having verified
+# nothing. In the one phase whose entire purpose is catching silent data loss.
+#
+# Not reachable from a campaign today - run_all.ps1 never threads -Only through
+# to a phase - so this is a latent trap being closed before it becomes one,
+# not an active hole in any past result.
+#
+# $AllPass is still passed as ExtraFail so a recorded FAIL still fails the
+# phase even if the gate rows alone would not say so.
+Write-QaLog $Phase $(if ($script:AllPass) { "no untracked work destroyed" } else { "FAILURES - see $TSV" })
+Exit-QaPhase $Phase (-not $script:AllPass)
