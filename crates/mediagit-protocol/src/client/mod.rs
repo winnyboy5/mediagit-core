@@ -195,6 +195,42 @@ fn build_control_plane_client(creds: &Credentials, op_id: &str) -> reqwest::Clie
     // request ceiling here causes spurious "error sending request"
     // failures on healthy slow uploads. See dev-tests/azure-manual-
     // test for the regression that motivated removing this.
+    //
+    // A READ timeout is a different thing and is safe here. `.timeout()` caps
+    // the TOTAL request; `.read_timeout()` caps the gap BETWEEN bytes. A slow
+    // but progressing upload resets it on every byte and never trips it, so the
+    // Azure regression above stays fixed. What it does catch is the case the
+    // keepalive rationale misses: keepalive proves a peer is ALIVE, not that it
+    // is ANSWERING. A peer that holds the connection open and goes silent keeps
+    // keepalive satisfied while the client waits forever.
+    //
+    // Not hypothetical. Captured live 2026-08-21 (20260821-rl6hunt12): a clone
+    // that normally takes 0.55s sat for 102s with CPU flat across a 10s sample
+    // (0.11s -> 0.14s), all six threads in Wait, holding one Established
+    // connection, having completed encryption-key + info/refs and issued nothing
+    // since. Same shape in 20260820-ga4 (416s) and 20260820-ga8 (1800s). No
+    // deadline covered it: the push deadline wraps only upload_pack /
+    // upload_chunked_objects / update_refs, and everything before those ran
+    // unbounded.
+    //
+    // 300s default is far above any legitimate inter-byte gap (the server
+    // streams block-by-block, so bytes keep arriving during a long upload) and
+    // far below the harness timeouts that were previously the only thing
+    // stopping these hangs. MEDIAGIT_CONTROL_READ_TIMEOUT_SECS tunes it; 0
+    // disables it and restores the old unbounded behaviour.
+    //
+    // NOTE: this bounds the STALL, it does not explain it. The underlying cause
+    // of the block is still unknown — see
+    // [[project-client-prebulk-hang-2026-08-21]]. This turns an indefinite hang
+    // into a bounded, reportable error so the next occurrence is diagnosable
+    // instead of silent.
+    let read_timeout_secs = std::env::var("MEDIAGIT_CONTROL_READ_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(300);
+    if read_timeout_secs > 0 {
+        builder = builder.read_timeout(std::time::Duration::from_secs(read_timeout_secs));
+    }
     let mut headers = reqwest::header::HeaderMap::new();
     if let Some((name, value)) = creds.header()
         && let Ok(header_value) = reqwest::header::HeaderValue::from_str(&value)
