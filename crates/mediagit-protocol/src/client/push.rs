@@ -816,7 +816,9 @@ impl ProtocolClient {
                         // push suddenly took 35 minutes.
                         tracing::warn!(
                             err = ?e,
-                            "pack push FAILED after retries; falling back to the per-chunk                              upload path for the rest of this push. This is materially                              slower (measured ~9x on 20260821-ga11); the error above is why"
+                            "pack push FAILED after retries; falling back to the per-chunk \
+                             upload path for the rest of this push. This is materially \
+                             slower (measured ~9x on 20260821-ga11); the error above is why"
                         );
                         false
                     }
