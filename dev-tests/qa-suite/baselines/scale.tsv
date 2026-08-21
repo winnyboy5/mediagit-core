@@ -1,5 +1,5 @@
 backend	metric	value
 local	push-mbs	311.86
 local	clone-mbs	174.83
-minio	push-mbs	57.2
-minio	clone-mbs	57.47
+minio	push-mbs	283.91
+minio	clone-mbs	188.57

@@ -387,9 +387,45 @@ function Drill-A6-SpacesAndUnicodePaths {
 function Drill-A7-BackendOutage {
   $drill = "A7-backend-outage"
   $container = "mediagit-minio"
-  if (-not (Test-QaDockerAvailable $container)) {
-    Rec $drill "SKIP" "docker container '$container' not reachable (docker not installed/running, or container missing)"
+
+  # How this drill takes the backend down and brings it back.
+  #
+  # It used to `docker stop mediagit-minio` unconditionally. When the S3 backend
+  # moved to a NATIVE Silo process on 2026-08-21 there was no container, so the
+  # capability check below SKIPped - and a SKIP reads as green. The one drill
+  # that proves the product survives a mid-push backend outage silently stopped
+  # testing anything.
+  #
+  # MG_QA_BACKEND_STOP_CMD / _START_CMD make the mechanism explicit, so the
+  # drill works against any topology (native process, container, remote host)
+  # instead of assuming Docker. Docker remains the default when a container is
+  # actually there, so existing setups are unchanged.
+  $stopCmd  = $env:MG_QA_BACKEND_STOP_CMD
+  $startCmd = $env:MG_QA_BACKEND_START_CMD
+  $useCmds  = $stopCmd -and $startCmd
+
+  if (-not $useCmds -and -not (Test-QaDockerAvailable $container)) {
+    Rec $drill "SKIP" ("no way to cycle the backend: docker container '$container' not reachable " +
+                       "AND MG_QA_BACKEND_STOP_CMD/_START_CMD unset. " +
+                       "Set both to a shell command that stops/starts your S3 backend " +
+                       "(native Silo: silo_native.ps1 -Action stop / -Action start).")
     return
+  }
+
+  # One place each, so the retry path below cannot drift from the primary path.
+  $StopBackend = {
+    if ($useCmds) { & powershell -NoProfile -Command $stopCmd *> $null }
+    else          { & docker stop $container *> $null }
+  }
+  $StartBackend = {
+    if ($useCmds) { & powershell -NoProfile -Command $startCmd *> $null }
+    else          { & docker start $container *> $null }
+  }
+  $RestartBackend = {
+    if ($useCmds) {
+      & powershell -NoProfile -Command $stopCmd *> $null
+      & powershell -NoProfile -Command $startCmd *> $null
+    } else { & docker restart $container *> $null }
   }
 
   $srv = $null
@@ -412,7 +448,7 @@ function Drill-A7-BackendOutage {
     $p = Start-Process $QA.MG -ArgumentList @("-C", $repo, "push", "origin") -PassThru -NoNewWindow `
       -RedirectStandardOutput (Join-Path $QA.Logs "a7-push.out") -RedirectStandardError (Join-Path $QA.Logs "a7-push.err")
     Start-Sleep -Milliseconds 2000
-    & docker stop $container *> $null
+    & $StopBackend
     $stoppedContainer = $true
 
     $exited = $p.WaitForExit(120000)
@@ -423,7 +459,7 @@ function Drill-A7-BackendOutage {
     $panic = $outText -match "panicked"
     $cleanFail = $exited -and ($p.ExitCode -ne 0) -and (-not $panic)
 
-    & docker start $container *> $null
+    & $StartBackend
     $stoppedContainer = $false
     $up = Wait-QaMinioUp $QA.MinioEndpoint 30
     if (-not $up) {
@@ -432,7 +468,7 @@ function Drill-A7-BackendOutage {
       # A full `docker restart` rebinds it; one retry keeps A7 from cascading
       # into A9/A10 SKIPs on what is a host-networking hiccup, not a product bug.
       Write-QaLog $Phase "A7: host port not back after docker start; retrying with docker restart $container"
-      & docker restart $container *> $null
+      & $RestartBackend
       $up = Wait-QaMinioUp $QA.MinioEndpoint 60
     }
 

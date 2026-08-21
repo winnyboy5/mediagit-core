@@ -76,9 +76,27 @@ $CLOUD_FLOOR_MBS = $QA.CloudMbsFloor
 # purpose - they are WAN-bound single samples (see $CLOUD_FLOOR_MBS), and a
 # link having a bad day is not a product regression.
 #
+# A BASELINE IS ONLY VALID FOR THE TOPOLOGY IT WAS MEASURED ON. The minio rows
+# were re-derived on 2026-08-21 when the S3 backend moved from a Docker/WSL2
+# container to a NATIVE Windows Silo process writing to NTFS. The old numbers
+# were 57.2 / 57.47 (floors 28.6 / 28.74); native measured 283.91 / 188.57 in
+# 20260821-ga8 — roughly 5x. Left alone, that gate would have accepted an 80%
+# throughput collapse as healthy, which is worse than having no gate at all
+# because it reads as coverage.
+#
+# The local rows are deliberately UNCHANGED: `local` is filesystem storage and
+# never went through the container, and ga8 measured 336.81 / 188.60 — above the
+# recorded worst, so 311.86 / 174.83 remain the worst observed.
+#
+# The minio rows are a SINGLE native sample. That is acceptable only because the
+# 50% fraction is this loose: it catches a 2x collapse, not variance. Promote a
+# lower number here if a later clean campaign observes one — worst-observed is
+# the contract, so the file should only ever move DOWN except on a topology
+# change like this one.
+#
 # Format (tab-separated, same shape as baselines\perf.tsv):
 #   backend  metric     value
-#   minio    push-mbs   57.2
+#   minio    push-mbs   283.91
 $SCALE_BASELINE = Join-Path $QA.Root "baselines\scale.tsv"
 $SCALE_FLOOR_FRACTION = 0.5
 $script:ScaleBaseRows = $null
