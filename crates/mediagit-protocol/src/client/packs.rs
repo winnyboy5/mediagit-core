@@ -68,13 +68,11 @@ impl ProtocolClient {
         let temp_dir = tempfile::TempDir::new().context("create pack temp dir")?;
         let mut builder = PackBuilder::new(temp_dir.path());
 
-        crate::ensure_crypto_provider();
-        let direct_client = reqwest::Client::builder()
-            .pool_idle_timeout(std::time::Duration::from_secs(60))
-            .pool_max_idle_per_host(http_pool_max())
-            .tcp_nodelay(true)
+        // A pack is a bounded body, so the TOTAL ceiling is kept. This site was
+        // also the one missing tcp_keepalive; it now gets it from the shared
+        // builder rather than by remembering to add it here.
+        let direct_client = super::data_plane_client_builder()
             .timeout(std::time::Duration::from_secs(300))
-            .http1_only()
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 

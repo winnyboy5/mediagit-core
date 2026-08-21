@@ -606,13 +606,12 @@ impl ProtocolClient {
         // Data-plane client for presigned GET downloads.
         // HTTP/1.1: parallel TCP sockets beat h2 multiplexing for large bodies.
         // Pool size via MEDIAGIT_HTTP_POOL_MAX (see http_pool_max()).
-        crate::ensure_crypto_provider();
-        let direct_client = reqwest::Client::builder()
-            .pool_idle_timeout(std::time::Duration::from_secs(60))
-            .pool_max_idle_per_host(http_pool_max())
-            .tcp_keepalive(std::time::Duration::from_secs(45))
-            .tcp_nodelay(true)
-            .http1_only()
+        // NO total .timeout() on purpose: a downloaded object has no bounded
+        // size, and a five-minute ceiling would kill legitimate large transfers.
+        // The read timeout in the shared builder is what bounds a stall here —
+        // previously nothing did, leaving one silent GET to hold the clone until
+        // the absolute 3600s MEDIAGIT_PULL_DEADLINE_SECS.
+        let direct_client = super::data_plane_client_builder()
             .build()
             // Fallback must be credential-free: self.client carries auth
             // default_headers, which must never reach presigned URLs.

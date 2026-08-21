@@ -897,14 +897,10 @@ impl ProtocolClient {
                 // better raw throughput for large bodies than h2 multiplexing
                 // on a single TCP connection (parallel cwnd > one congestion
                 // window). Pool size via MEDIAGIT_HTTP_POOL_MAX (see http_pool_max()).
-                crate::ensure_crypto_provider();
-                let direct_client = reqwest::Client::builder()
-                    .pool_idle_timeout(std::time::Duration::from_secs(60))
-                    .pool_max_idle_per_host(http_pool_max())
-                    .tcp_keepalive(std::time::Duration::from_secs(45))
-                    .tcp_nodelay(true)
+                // A bounded chunk body, so a TOTAL request ceiling is safe here and is
+                // kept; the shared builder leaves that call to each site.
+                let direct_client = super::data_plane_client_builder()
                     .timeout(std::time::Duration::from_secs(300))
-                    .http1_only()
                     .build()
                     .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -1811,14 +1807,10 @@ impl ProtocolClient {
                     // better raw throughput for large bodies than h2 multiplexing
                     // on a single TCP connection (parallel cwnd > one congestion
                     // window). Pool size via MEDIAGIT_HTTP_POOL_MAX (see http_pool_max()).
-                    crate::ensure_crypto_provider();
-                    let direct_client = reqwest::Client::builder()
-                        .pool_idle_timeout(std::time::Duration::from_secs(60))
-                        .pool_max_idle_per_host(http_pool_max())
-                        .tcp_keepalive(std::time::Duration::from_secs(45))
-                        .tcp_nodelay(true)
+                    // A bounded chunk body, so a TOTAL request ceiling is safe here and is
+                    // kept; the shared builder leaves that call to each site.
+                    let direct_client = super::data_plane_client_builder()
                         .timeout(std::time::Duration::from_secs(300))
-                        .http1_only()
                         .build()
                         .unwrap_or_else(|_| reqwest::Client::new());
 

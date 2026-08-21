@@ -321,6 +321,59 @@ pub(crate) fn http_pool_max() -> usize {
         .unwrap_or(64)
 }
 
+/// Build the data-plane `reqwest::ClientBuilder` shared by every presigned
+/// transfer: pack PUTs (`packs.rs`), per-chunk PUTs (`push.rs`, two passes) and
+/// presigned GETs (`pull.rs`).
+///
+/// These four sites each rolled their own builder and had drifted apart:
+/// `packs.rs` was missing `tcp_keepalive`, and the download client in `pull.rs`
+/// carried no request bound whatsoever, leaving a stalled GET to sit until the
+/// ABSOLUTE `MEDIAGIT_PULL_DEADLINE_SECS` (3600s) killed the entire phase.
+///
+/// Returns a BUILDER, not a Client, deliberately. The one setting the four sites
+/// genuinely disagree on is `.timeout()`, and they are right to: a total request
+/// ceiling is fine for an upload of a bounded pack/chunk, and wrong for a
+/// download of an arbitrarily large object. Folding a shared `.timeout(300)` in
+/// here would silently cap every download at five minutes. Each call site keeps
+/// that decision; everything else is settled here, once.
+///
+/// HTTP/1.1 on purpose (all four sites already did this): parallel TCP sockets
+/// beat h2 multiplexing for large bodies, since parallel congestion windows
+/// beat one. No credentials are ever set — a presigned URL carries its own
+/// authorization in the query string, and `self.client`'s `x-api-key` default
+/// header must never reach a bucket.
+pub fn data_plane_client_builder() -> reqwest::ClientBuilder {
+    crate::ensure_crypto_provider();
+    let mut builder = reqwest::Client::builder()
+        .pool_idle_timeout(std::time::Duration::from_secs(60))
+        .pool_max_idle_per_host(http_pool_max())
+        .tcp_keepalive(std::time::Duration::from_secs(45))
+        .tcp_nodelay(true)
+        .http1_only();
+
+    // Same distinction as the control plane, one layer over: `.timeout()` caps
+    // the TOTAL request, `.read_timeout()` caps the gap BETWEEN bytes. Only the
+    // second is safe on a data plane that legitimately moves multi-hundred-MB
+    // objects — a slow but progressing transfer resets it on every byte.
+    //
+    // What it catches is what `tcp_keepalive` cannot: keepalive proves a peer is
+    // ALIVE, not that it is ANSWERING. A bucket that accepts the connection and
+    // then goes quiet keeps keepalive satisfied indefinitely.
+    //
+    // 300s is far above any real inter-byte gap on a transfer that is actually
+    // moving, and far below the phase deadlines that were previously the only
+    // backstop. MEDIAGIT_DATA_READ_TIMEOUT_SECS tunes it; 0 restores the old
+    // unbounded behaviour.
+    let read_timeout_secs = std::env::var("MEDIAGIT_DATA_READ_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(300);
+    if read_timeout_secs > 0 {
+        builder = builder.read_timeout(std::time::Duration::from_secs(read_timeout_secs));
+    }
+    builder
+}
+
 /// Maximum 429 retries for a single control-plane request. Default 10,
 /// overridable via `MEDIAGIT_RATE_LIMIT_RETRIES`.
 ///
