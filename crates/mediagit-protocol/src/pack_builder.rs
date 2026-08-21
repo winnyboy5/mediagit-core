@@ -217,7 +217,49 @@ pub async fn upload_and_register(
                     }
                 }
             }
-            let resp = req.send().await.context("presigned PUT of pack")?;
+            // A TRANSPORT failure never produces a response, so it can never
+            // reach the status classifier below. Retried here, or the whole
+            // status-based loop is unreachable on exactly the errors a WAN link
+            // actually produces.
+            //
+            // 20260821-s5check measured this: every pack failure across the AWS
+            // and Azure arms was a transport error and NOT ONE was an HTTP
+            // status — "connection closed before message completed" (x1) and
+            // "operation timed out" (x3). A 503 got five attempts; a dropped
+            // connection got zero, and the push abandoned the fast path.
+            //
+            // I argued the other way when writing the status loop: not retrying
+            // a timeout avoids re-sending a whole pack body five times. That
+            // reasoning ignored which failure is COMMON. Every other uploader
+            // here already retries transport errors — the per-chunk MPU path,
+            // the control plane, and the server's own aws-sdk-s3, which logged
+            // "Failed after 5 retries" in the same run.
+            //
+            // Every send() error is retried, not a hand-picked subset: no
+            // response arrived, so there is nothing to classify as permanent,
+            // and the 5-attempt bound already caps the cost of being wrong.
+            let resp = match req.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    if attempt + 1 == MAX_PACK_PUT_ATTEMPTS {
+                        return Err(anyhow::Error::new(e))
+                            .context("presigned PUT of pack")
+                            .with_context(|| {
+                                format!("after {MAX_PACK_PUT_ATTEMPTS} transport attempts")
+                            });
+                    }
+                    let ceiling = 250u64 * (1u64 << attempt.min(6));
+                    let wait = ceiling / 2 + crate::client::jitter_upto(ceiling / 2);
+                    tracing::debug!(
+                        attempt = attempt + 1,
+                        err = ?e,
+                        wait_ms = wait,
+                        "pack PUT transport failure; retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                    continue;
+                }
+            };
             let status = resp.status();
             if status.is_success() {
                 sent = true;

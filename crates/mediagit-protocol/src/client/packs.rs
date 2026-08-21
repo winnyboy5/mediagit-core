@@ -68,11 +68,24 @@ impl ProtocolClient {
         let temp_dir = tempfile::TempDir::new().context("create pack temp dir")?;
         let mut builder = PackBuilder::new(temp_dir.path());
 
-        // A pack is a bounded body, so the TOTAL ceiling is kept. This site was
-        // also the one missing tcp_keepalive; it now gets it from the shared
-        // builder rather than by remembering to add it here.
+        // NO total .timeout() — this is the same mistake the control plane made
+        // and reverted, one layer over. A pack BODY is bounded, but the time to
+        // upload it is not: it is (pack size / share of the link), and packs
+        // upload concurrently, so each one's share shrinks as fan-out grows.
+        //
+        // Measured in 20260821-s5check. Azure moved 2048 MB in 2072s — ~1 MB/s
+        // aggregate — and a 64 MB pack's wall time blew past the 300s ceiling
+        // while it was still PROGRESSING. Only the 2 packs that got through
+        // early survived; the other 30 were killed mid-flight and the push fell
+        // back to the per-chunk path at 0.99 MB/s:
+        //
+        //   [azure] packsOffered=32 packsCompleted=2 perChunkProxyPUTs=724
+        //   cause: "operation timed out" (x3 across azure+aws, x0 HTTP statuses)
+        //
+        // A total ceiling cannot tell a slow transfer from a dead one. The read
+        // timeout in the shared builder can: it bounds the gap BETWEEN bytes, so
+        // a stalled pack still fails fast while a slow one is left alone.
         let direct_client = super::data_plane_client_builder()
-            .timeout(std::time::Duration::from_secs(300))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
