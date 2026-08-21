@@ -642,3 +642,48 @@ function Invoke-QaTeardown([string]$Phase, [string[]]$Patterns) {
   $after = Get-DirMB $QA.Work
   Write-QaLog $Phase ("teardown reclaimed {0} MB (work/ {1} -> {2} MB)" -f [math]::Round($before - $after, 1), $before, $after)
 }
+
+
+# Did a push actually USE the cloud-pack fast path, or did it silently degrade?
+#
+# 20260821-ga11 pushed to Azure at 0.98 MB/s against 8.69 in ga8 - a 8.9x
+# slowdown - because ONE transient status on ONE pack made the client abandon
+# packs for the ENTIRE push and upload 2,284 chunks one at a time through the
+# server proxy. The push SUCCEEDED. Integrity was perfect. Only the clock moved.
+#
+# The single reason it was ever noticed is that Azure happened to land at 0.98
+# against a 1.0 floor. On a slightly faster link the identical fallback passes
+# silently: the throughput floor measures speed, and speed is only a proxy for
+# the thing actually at stake. This asks the direct question instead, so the
+# answer does not depend on how good the operator's uplink was that afternoon.
+#
+# Three INFO-level server messages, all confirmed present in real campaign logs:
+#   "Presigned pack upload URLs generated" (count=N)  - fast path was OFFERED
+#   "Pack manifest registered"                        - a pack COMPLETED
+#   "PUT chunk"                                       - a per-chunk PROXY upload
+#
+# INFO rather than the tower_http request lines on purpose: those are DEBUG and
+# vanish if a server ever runs at info, which would quietly turn this into a
+# gate that cannot fail.
+#
+# count=N is SUMMED rather than the lines counted: one request may mint URLs for
+# many packs. They were 1:1 across all five backends in ga8, which is exactly
+# the kind of coincidence that becomes a false gate the day the client batches.
+#
+# ANSI is stripped first. tracing writes `count<ESC>[2m=<ESC>[0m32`, so a plain
+# count=(\d+) matches nothing whatsoever against a real log.
+function Get-QaPackFastPathCounts([string]$LogPath) {
+  if (-not $LogPath -or -not (Test-Path $LogPath)) { return $null }
+  $txt = Get-Content $LogPath -Raw -ErrorAction SilentlyContinue
+  if (-not $txt) { return $null }
+  $txt = $txt -replace "\x1b\[[0-9;]*m", ""
+  $offered = 0
+  foreach ($m in [regex]::Matches($txt, "Presigned pack upload URLs generated[^\r\n]*?count=(\d+)")) {
+    $offered += [int]$m.Groups[1].Value
+  }
+  return [pscustomobject]@{
+    Offered   = $offered
+    Completed = ([regex]::Matches($txt, "Pack manifest registered")).Count
+    ChunkPuts = ([regex]::Matches($txt, "PUT chunk")).Count
+  }
+}

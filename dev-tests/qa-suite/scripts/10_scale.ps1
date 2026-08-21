@@ -711,6 +711,34 @@ function Drill-S5-ThroughputDedup {
       # figures require a host co-located with the region.
       $sampleNote = if ($isFast) { "" } else { " [link-bound single sample, not a perf claim]" }
       Rec $drill $backend "push-mbs" $pushMbs $pushPass "payloadMB=$payloadMB sec=$($r.Sec) floor=$floorTxt exit=$($r.Exit)$sampleNote"
+
+      # Did that push actually use the cloud-pack fast path? Asked directly,
+      # because push-mbs above cannot answer it. In ga11 a single transient status
+      # on one pack dropped the whole push to the per-chunk proxy path - 8.9x
+      # slower, still correct, still exit 0 - and the only reason anyone noticed
+      # is that Azure landed at 0.98 against a 1.0 floor. A faster link that day
+      # and the same regression ships unseen.
+      #
+      # Read BEFORE the clone below so clone traffic cannot enter the counts.
+      # ga8 measured all five backends (local included) at offered == completed
+      # with zero proxy PUTs, so this needs no per-backend capability table.
+      $fp = Get-QaPackFastPathCounts $srv.OutLog
+      if ($null -eq $fp) {
+        Rec $drill $backend "packfastpath" "" "SKIP" "server log unreadable at $($srv.OutLog)"
+      } elseif ($fp.Offered -le 0) {
+        # No URLs minted at all: the fast path was never on offer, so there is
+        # nothing to have degraded FROM. SKIP is the honest verdict - passing
+        # here would be a gate that cannot fail.
+        Rec $drill $backend "packfastpath" $fp.ChunkPuts "SKIP" "fast path not offered (no pack upload URLs minted)"
+      } else {
+        # ChunkPuts is the load-bearing half: ga8 = 0, ga11 = 2,284. Completed>0
+        # alone would still pass a PARTIAL degradation where some packs land and
+        # the rest fall back.
+        $fpPass = ($fp.Completed -gt 0) -and ($fp.ChunkPuts -eq 0)
+        Rec $drill $backend "packfastpath" $fp.ChunkPuts $fpPass ("packsOffered={0} packsCompleted={1} perChunkProxyPUTs={2}{3}" -f `
+          $fp.Offered, $fp.Completed, $fp.ChunkPuts, $(if ($fpPass) { "" } else { " - push DEGRADED to the per-chunk path; expect a multi-x slowdown regardless of the MB/s above" }))
+      }
+
       if ($r.Exit -ne 0) { continue }
 
       $clone = Join-Path $QA.Work "scale10-s5-clone-$backend"
