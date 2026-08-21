@@ -803,9 +803,20 @@ impl ProtocolClient {
                     }
                     Err(e) => {
                         pack_had_error = true;
+                        // `?e` not `%e`. `%` renders only the OUTERMOST anyhow
+                        // context, so all eight of these in 20260821-ga11 read
+                        // "upload_and_register pack" and the status code that
+                        // actually explained the failure was discarded — the
+                        // one fact needed to diagnose it. `?` prints the chain.
+                        //
+                        // The consequence is stated too, not just the event: a
+                        // fallback is not a neutral retry, it is the whole push
+                        // dropping to the per-chunk path. In ga11 that was
+                        // 8.69 -> 0.98 MB/s, and nothing told the user why their
+                        // push suddenly took 35 minutes.
                         tracing::warn!(
-                            err = %e,
-                            "pack push failed; falling back to per-chunk path"
+                            err = ?e,
+                            "pack push FAILED after retries; falling back to the per-chunk                              upload path for the rest of this push. This is materially                              slower (measured ~9x on 20260821-ga11); the error above is why"
                         );
                         false
                     }

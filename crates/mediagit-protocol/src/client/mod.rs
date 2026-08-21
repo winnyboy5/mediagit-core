@@ -349,7 +349,7 @@ pub(crate) fn rate_limit_max_retries() -> u32 {
 /// one: retry spreading needs to be unpredictable between peers, not secure.
 /// The crate already hand-rolls a seed for MPU part scheduling; this is the
 /// same trick in one place.
-fn jitter_upto(bound_millis: u64) -> u64 {
+pub(crate) fn jitter_upto(bound_millis: u64) -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 

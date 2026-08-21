@@ -178,24 +178,105 @@ pub async fn upload_and_register(
 
     if let Some(Some(purl)) = presign_map.get(&pack_oid_hex) {
         let put_url = purl["url"].as_str().unwrap_or("").to_string();
-        let mut req = direct_client.put(&put_url).body(pack_data);
-        if let Some(headers) = purl["required_headers"].as_array() {
-            for h in headers {
-                if let (Some(name), Some(val)) = (
-                    h.get(0).and_then(|v| v.as_str()),
-                    h.get(1).and_then(|v| v.as_str()),
-                ) {
-                    req = req.header(name, val);
+        // Presigned direct-to-bucket PUT — not server-bound, so not routed
+        // through send_with_rate_limit_retry: a 429 here comes from the BUCKET,
+        // not the server's limiter, and needs backend-specific classification.
+        //
+        // This comment used to claim the 429 was "handled by the caller's own
+        // retry loop". There is no such loop. The caller
+        // (`client/push.rs:783-812`) only catches the error and abandons the
+        // cloud-pack path for the ENTIRE push, so ONE transient status on ONE
+        // pack dropped everything to per-chunk upload:
+        //
+        //   20260821-ga8   96 upload-urls -> 97 packs/complete,     0 per-chunk,  8.69 MB/s
+        //   20260821-ga11  96 upload-urls ->  0 packs/complete, 2,284 per-chunk,  0.98 MB/s
+        //
+        // Azure and GCS both threw transients in ga11 (4 each; GCS's arrived as
+        // a burst inside one second, the shape of throttling). Neither was
+        // retried even once.
+        //
+        // Reuses `error_class::classify_auto` and the same 5-attempt budget the
+        // per-chunk MPU path already uses (`client/mod.rs:1010`), so pack and
+        // part uploads behave alike. Permanent* still bails immediately —
+        // retrying a 403 five times re-sends the whole pack body and cannot
+        // succeed.
+        const MAX_PACK_PUT_ATTEMPTS: u32 = 5;
+        let mut last_status = String::new();
+        let mut sent = false;
+        for attempt in 0..MAX_PACK_PUT_ATTEMPTS {
+            // Rebuilt per attempt: `send()` consumes the builder, and `body` is
+            // a `Bytes` clone (refcount bump, not a copy of the pack) per B5.
+            let mut req = direct_client.put(&put_url).body(pack_data.clone());
+            if let Some(headers) = purl["required_headers"].as_array() {
+                for h in headers {
+                    if let (Some(name), Some(val)) = (
+                        h.get(0).and_then(|v| v.as_str()),
+                        h.get(1).and_then(|v| v.as_str()),
+                    ) {
+                        req = req.header(name, val);
+                    }
+                }
+            }
+            let resp = req.send().await.context("presigned PUT of pack")?;
+            let status = resp.status();
+            if status.is_success() {
+                sent = true;
+                break;
+            }
+            last_status = status.to_string();
+
+            let ct = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let hdr_code = resp
+                .headers()
+                .get("x-amz-error-code")
+                .or_else(|| resp.headers().get("x-ms-error-code"))
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let body_full = resp.text().await.unwrap_or_default();
+            let body_ref = if body_full.len() > 2048 {
+                &body_full[..2048]
+            } else {
+                &body_full[..]
+            };
+
+            use crate::error_class::{TransferOutcome, classify_auto};
+            match classify_auto(status.as_u16(), &put_url, &ct, &hdr_code, body_ref) {
+                TransferOutcome::Transient | TransferOutcome::RefreshUrl => {
+                    if attempt + 1 == MAX_PACK_PUT_ATTEMPTS {
+                        anyhow::bail!(
+                            "presigned PUT returned {status} after {MAX_PACK_PUT_ATTEMPTS} attempts"
+                        );
+                    }
+                    tracing::debug!(
+                        pack = %pack_oid_hex,
+                        attempt = attempt + 1,
+                        %status,
+                        "pack PUT transient error; retrying"
+                    );
+                    // Equal-jitter backoff, same shape as `rate_limit_backoff`:
+                    // half fixed so the wait actually grows, half random so
+                    // concurrent pack uploads do not retry in lockstep — which
+                    // matters here, since ga11's GCS failures arrived as a
+                    // simultaneous burst.
+                    let ceiling = 250u64 * (1u64 << attempt.min(6));
+                    let wait = ceiling / 2 + crate::client::jitter_upto(ceiling / 2);
+                    tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                }
+                TransferOutcome::PermanentChunk
+                | TransferOutcome::PermanentChunkAfterDelay(_)
+                | TransferOutcome::PermanentConfig => {
+                    anyhow::bail!("presigned PUT returned {status} (permanent)");
                 }
             }
         }
-        // Presigned direct-to-bucket PUT — not server-bound, so not routed
-        // through send_with_rate_limit_retry; a 429 here comes from the
-        // bucket, not the server's limiter, and is handled by the caller's
-        // own retry loop (see push.rs's per-chunk presigned PUT handling).
-        let resp = req.send().await.context("presigned PUT of pack")?;
-        if !resp.status().is_success() {
-            anyhow::bail!("presigned PUT returned {}", resp.status());
+        if !sent {
+            anyhow::bail!("presigned PUT returned {last_status}");
         }
         presigned_direct = true;
         tracing::debug!(pack = %pack_oid_hex, bytes = byte_len, "Pack uploaded via presigned URL");
