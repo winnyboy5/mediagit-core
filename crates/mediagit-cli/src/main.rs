@@ -308,6 +308,107 @@ fn preprocess_args(args: Vec<String>) -> Vec<String> {
     args
 }
 
+/// The filter the CLI should log at, or `None` to stay silent.
+///
+/// `MEDIAGIT_LOG` wins over `RUST_LOG` so a user can turn on MediaGit's own
+/// diagnostics without also lighting up every other crate that reads RUST_LOG.
+/// A blank or whitespace-only value counts as unset - `MEDIAGIT_LOG=` is how a
+/// shell script "clears" a variable, and treating that as a request to log
+/// would spray output into a harness that parses this CLI's stdout.
+fn tracing_filter_from_env() -> Option<String> {
+    ["MEDIAGIT_LOG", "RUST_LOG"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+#[cfg(test)]
+mod tracing_env_tests {
+    use super::tracing_filter_from_env;
+
+    /// Serialised: these mutate process-wide env, and cargo runs tests in
+    /// parallel threads within one process.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_env(pairs: &[(&str, Option<&str>)], f: impl FnOnce()) {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved: Vec<_> = pairs
+            .iter()
+            .map(|(k, _)| (*k, std::env::var(k).ok()))
+            .collect();
+        // mediagit_test_utils wrappers, not raw `unsafe`: this crate forbids
+        // unsafe_code, and the helper exists precisely to contain edition-2024's
+        // now-unsafe env mutators. Its doc requires callers to serialise access,
+        // which ENV_LOCK above does.
+        for (k, v) in pairs {
+            match v {
+                Some(val) => mediagit_test_utils::set_var(k, val),
+                None => mediagit_test_utils::remove_var(k),
+            }
+        }
+        f();
+        for (k, v) in saved {
+            match v {
+                Some(val) => mediagit_test_utils::set_var(k, val),
+                None => mediagit_test_utils::remove_var(k),
+            }
+        }
+    }
+
+    #[test]
+    fn silent_when_neither_var_is_set() {
+        with_env(&[("MEDIAGIT_LOG", None), ("RUST_LOG", None)], || {
+            assert_eq!(
+                tracing_filter_from_env(),
+                None,
+                "the CLI must stay silent by default; the QA harness parses this output"
+            );
+        });
+    }
+
+    /// `FOO=` is how a script clears a variable. Treating it as "log everything"
+    /// would push unexpected output into a harness that parses stdout/stderr.
+    #[test]
+    fn blank_value_counts_as_unset() {
+        with_env(&[("MEDIAGIT_LOG", Some("   ")), ("RUST_LOG", None)], || {
+            assert_eq!(tracing_filter_from_env(), None);
+        });
+    }
+
+    #[test]
+    fn mediagit_log_is_used_when_set() {
+        with_env(
+            &[("MEDIAGIT_LOG", Some("debug")), ("RUST_LOG", None)],
+            || {
+                assert_eq!(tracing_filter_from_env().as_deref(), Some("debug"));
+            },
+        );
+    }
+
+    #[test]
+    fn rust_log_is_the_fallback() {
+        with_env(
+            &[("MEDIAGIT_LOG", None), ("RUST_LOG", Some("info"))],
+            || {
+                assert_eq!(tracing_filter_from_env().as_deref(), Some("info"));
+            },
+        );
+    }
+
+    /// The precedence that matters: turning on MediaGit's diagnostics must not
+    /// require inheriting whatever RUST_LOG some other tool set.
+    #[test]
+    fn mediagit_log_wins_over_rust_log() {
+        with_env(
+            &[("MEDIAGIT_LOG", Some("trace")), ("RUST_LOG", Some("error"))],
+            || {
+                assert_eq!(tracing_filter_from_env().as_deref(), Some("trace"));
+            },
+        );
+    }
+}
+
 fn main() {
     // reqwest is built with `rustls-no-provider`, and google-cloud-auth still
     // links aws-lc-rs, so rustls 0.23 sees two providers and refuses to pick
@@ -403,13 +504,29 @@ async fn async_main(cli: Cli) -> Result<()> {
 
     // Initialize structured logging
     if !cli.quiet && !machine_readable {
-        let level = if cli.verbose { "info" } else { "warn" };
+        // An explicit MEDIAGIT_LOG/RUST_LOG wins over the hardcoded level.
+        //
+        // `LogConfig::get_effective_level()` already falls back to RUST_LOG —
+        // but only when `level` is None, and this call site always passed
+        // `.with_level(...)`, so that fallback was unreachable from the CLI and
+        // there was no way to raise the CLI above `info`.
+        //
+        // That mattered: a client that hangs mid-operation could not be asked
+        // for detail. The pre-bulk hang (see project-client-prebulk-hang) had
+        // to be diagnosed from TCP tables and thread wait-states across four
+        // campaigns because `debug!` in mediagit-protocol was unreachable.
+        // `MEDIAGIT_LOG=debug` now surfaces it.
+        //
+        // Deliberately NOT a second subscriber: installing one here made a
+        // later `init_tracing_with_config` panic with "a global default trace
+        // dispatcher has already been set". One subscriber, one place.
         let format = LogFormat::Pretty; // Pretty format for CLI output
-
-        // Initialize with appropriate log level, explicitly writing to stderr
-        let config = mediagit_observability::LogConfig::new()
-            .with_format(format)
-            .with_level(level);
+        let mut config = mediagit_observability::LogConfig::new().with_format(format);
+        if let Some(filter) = tracing_filter_from_env() {
+            config = config.with_level(&filter);
+        } else {
+            config = config.with_level(if cli.verbose { "info" } else { "warn" });
+        }
         mediagit_observability::init_tracing_with_config(config).ok(); // Ignore errors if already initialized
     }
 

@@ -70,6 +70,8 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 | `MEDIAGIT_PULL_DEADLINE_SECS` | Overall wall-clock deadline for a single pull, fetch or clone, applied to the pack phase and the chunk phase separately. | `3600` |
 | `MEDIAGIT_RATE_LIMIT_RETRIES` | Max HTTP 429 retries for a single control-plane request. Relevant when a large push outruns a server-side rate limiter. | `10` |
 | `MEDIAGIT_RATE_LIMIT_MAX_WAIT_SECS` | Hard ceiling on a single 429 backoff, however large the server's `Retry-After` is. Bounds the worst case to retries x this value; without it an unbounded `Retry-After` could park a client for hours against a healthy server. | `60` |
+| `MEDIAGIT_CONTROL_READ_TIMEOUT_SECS` | Max seconds with no bytes received on a control-plane request before it fails. A READ (inter-byte) timeout, not a total one, so slow-but-progressing transfers are unaffected. Catches a peer that is alive but has stopped answering, which `tcp_keepalive` cannot. `0` disables. | `300` |
+| `MEDIAGIT_LOG` | Tracing filter for the CLI (e.g. `debug`). Unset = silent; logs go to stderr. Takes precedence over `RUST_LOG`. Set this first when a client appears to hang. | unset |
 | `MEDIAGIT_STRONG_VERIFY` | `1` runs a full BLAKE3 re-hash verification of pushed chunks after transfer. | `0` (OFF) |
 | `MEDIAGIT_PULL_PIPELINE` | Overlap manifest fetches and chunk downloads. | `1` (ON) |
 | `MEDIAGIT_PULL_MANIFEST_CONCURRENCY` | Max concurrent manifest fetches when `PULL_PIPELINE=1`. | `8` |
