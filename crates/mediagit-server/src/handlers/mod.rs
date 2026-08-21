@@ -885,19 +885,128 @@ fn is_hex_str(s: &str) -> bool {
 /// `transfer::read_and_verify_chunk` (presigned-completion + strong-verify
 /// paths) so this check exists in exactly one place — a second, divergent
 /// copy is how this codebase got its recurring "ODB bypass" bug class.
-/// Returns `false` on either a decompression failure or a hash mismatch.
 pub(crate) async fn verify_chunk_content(
     compressor: &Arc<SmartCompressor>,
     chunk_id_hex: &str,
     compressed: Bytes,
-) -> bool {
+) -> ChunkVerification {
     let compressor = Arc::clone(compressor);
-    let decompressed =
-        match tokio::task::spawn_blocking(move || compressor.decompress(&compressed)).await {
-            Ok(Ok(data)) => data,
-            _ => return false,
-        };
-    blake3::hash(&decompressed).to_hex().to_string() == chunk_id_hex
+    let joined = tokio::task::spawn_blocking(move || compressor.decompress(&compressed)).await;
+    classify_chunk_verification(joined, chunk_id_hex)
+}
+
+/// Outcome of checking one chunk against its claimed id.
+///
+/// The [`Self::Corrupt`] / [`Self::Unverifiable`] split is a data-safety
+/// boundary, not a nicety — the same one `EntryVerification` already draws for
+/// pack entries in `handlers::repo`, whose doc states the rule outright:
+/// *"'I could not verify this' must never be collapsed into 'this is corrupt'."*
+///
+/// This function used to collapse exactly that, returning a bare `false` for
+/// both. A `JoinError` fires when the blocking task PANICS **or when the tokio
+/// runtime is shutting down**, so an in-flight verification during a server
+/// shutdown reported healthy data as corrupt. Callers then refused to serve it
+/// (HTTP 500) or fed it to the pack-eviction path, and this repo has already
+/// shipped a P0 false-quarantine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChunkVerification {
+    /// Decompressed in full and hashed to its claimed id.
+    Verified,
+    /// Decompressed in full and hashed to something else. The ONLY state that
+    /// justifies evicting or quarantining anything.
+    Corrupt,
+    /// The check could not be completed — the blocking task panicked, or the
+    /// runtime is shutting down. Says NOTHING about the bytes.
+    Unverifiable,
+}
+
+impl ChunkVerification {
+    /// For the call sites that only need "may I serve/accept this?". Both
+    /// `Corrupt` and `Unverifiable` answer no — refusing to serve on a
+    /// transient failure is a failed request, which is recoverable, whereas
+    /// serving unverified bytes is not.
+    pub(crate) fn is_verified(self) -> bool {
+        matches!(self, Self::Verified)
+    }
+}
+
+/// Split out from [`verify_chunk_content`] so the three-way mapping is testable:
+/// a real `JoinError` can be constructed from a panicking blocking task, but a
+/// panic cannot be injected into `SmartCompressor::decompress` from a test.
+pub(crate) fn classify_chunk_verification<E>(
+    joined: Result<Result<Vec<u8>, E>, tokio::task::JoinError>,
+    chunk_id_hex: &str,
+) -> ChunkVerification {
+    match joined {
+        Ok(Ok(data)) => {
+            if blake3::hash(&data).to_hex().to_string() == chunk_id_hex {
+                ChunkVerification::Verified
+            } else {
+                ChunkVerification::Corrupt
+            }
+        }
+        // Read in full, but would not decompress: the bytes really are bad.
+        Ok(Err(_)) => ChunkVerification::Corrupt,
+        // Panic or runtime shutdown — we learned nothing about the bytes.
+        Err(_join_err) => ChunkVerification::Unverifiable,
+    }
+}
+
+#[cfg(test)]
+mod chunk_verification_tests {
+    use super::{ChunkVerification, classify_chunk_verification};
+
+    #[tokio::test]
+    async fn a_join_error_is_unverifiable_not_corrupt() {
+        // A REAL JoinError, not a hand-rolled stand-in: this is the exact value
+        // `spawn_blocking` yields when its closure panics, which is also what a
+        // runtime shutdown produces.
+        let join_err = tokio::task::spawn_blocking(|| panic!("boom"))
+            .await
+            .expect_err("a panicking blocking task must yield a JoinError");
+        let joined: Result<Result<Vec<u8>, ()>, _> = Err(join_err);
+
+        assert_eq!(
+            classify_chunk_verification(joined, "irrelevant"),
+            ChunkVerification::Unverifiable,
+            "a panicked or cancelled verification must never be reported as Corrupt: \
+             callers evict pack entries on Corrupt, which destroys healthy data"
+        );
+    }
+
+    #[test]
+    fn a_hash_mismatch_is_corrupt() {
+        let joined: Result<Result<Vec<u8>, ()>, tokio::task::JoinError> = Ok(Ok(b"hello".to_vec()));
+        assert_eq!(
+            classify_chunk_verification(joined, "0000deadbeef"),
+            ChunkVerification::Corrupt
+        );
+    }
+
+    #[test]
+    fn a_decompression_failure_is_corrupt() {
+        // Read in full and would not decompress — that is a real statement
+        // about the bytes, unlike a JoinError.
+        let joined: Result<Result<Vec<u8>, ()>, tokio::task::JoinError> = Ok(Err(()));
+        assert_eq!(
+            classify_chunk_verification(joined, "whatever"),
+            ChunkVerification::Corrupt
+        );
+    }
+
+    #[test]
+    fn a_matching_hash_is_verified() {
+        let data = b"some chunk bytes".to_vec();
+        let id = blake3::hash(&data).to_hex().to_string();
+        let joined: Result<Result<Vec<u8>, ()>, tokio::task::JoinError> = Ok(Ok(data));
+        assert_eq!(
+            classify_chunk_verification(joined, &id),
+            ChunkVerification::Verified
+        );
+        assert!(ChunkVerification::Verified.is_verified());
+        assert!(!ChunkVerification::Corrupt.is_verified());
+        assert!(!ChunkVerification::Unverifiable.is_verified());
+    }
 }
 
 fn default_ref_head() -> String {

@@ -177,7 +177,9 @@ pub async fn upload_chunk(
         .acquire()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let content_ok = verify_chunk_content(&compressor, &chunk_id, body.clone()).await;
+    let content_ok = verify_chunk_content(&compressor, &chunk_id, body.clone())
+        .await
+        .is_verified();
     drop(verify_permit);
     if !content_ok {
         tracing::warn!(
@@ -403,7 +405,9 @@ pub async fn download_chunk(
                             if is_unverified {
                                 let compressor =
                                     Arc::new(crate::handlers::repo_compressor(&state, &repo_path)?);
-                                if !verify_chunk_content(&compressor, &chunk_id, body.clone()).await
+                                if !verify_chunk_content(&compressor, &chunk_id, body.clone())
+                                    .await
+                                    .is_verified()
                                 {
                                     tracing::error!(
                                         chunk = %chunk_id,
@@ -1013,7 +1017,9 @@ pub async fn batch_get_pack_chunks(
                     match data.get(start..end) {
                         Some(payload) => {
                             if let Some(c) = &compressor
-                                && !verify_chunk_content(c, chunk_oid, Bytes::copy_from_slice(payload)).await
+                                && !verify_chunk_content(c, chunk_oid, Bytes::copy_from_slice(payload))
+                                    .await
+                                    .is_verified()
                             {
                                 tracing::error!(chunk = %chunk_oid, pack = %req.pack_oid, "batch-get: refusing to serve — inline verification failed for unverified pack");
                                 write_batch_frame(&mut w, chunk_oid, &[]).await?;
@@ -1044,7 +1050,9 @@ pub async fn batch_get_pack_chunks(
                         match buf.get(rel..rel_end) {
                             Some(payload) => {
                                 if let Some(c) = &compressor
-                                    && !verify_chunk_content(c, chunk_oid, Bytes::copy_from_slice(payload)).await
+                                    && !verify_chunk_content(c, chunk_oid, Bytes::copy_from_slice(payload))
+                                    .await
+                                    .is_verified()
                                 {
                                     tracing::error!(chunk = %chunk_oid, pack = %req.pack_oid, "batch-get: refusing to serve — inline verification failed for unverified pack");
                                     write_batch_frame(&mut w, chunk_oid, &[]).await?;

@@ -398,10 +398,26 @@ async fn read_and_verify_chunk(
         return Err(pack_loc);
     };
     let len = compressed.len() as u64;
-    if verify_chunk_content(compressor, chunk_id_hex, Bytes::from(compressed)).await {
-        Ok(len)
-    } else {
-        Err(pack_loc)
+    match verify_chunk_content(compressor, chunk_id_hex, Bytes::from(compressed)).await {
+        crate::handlers::ChunkVerification::Verified => Ok(len),
+        crate::handlers::ChunkVerification::Corrupt => Err(pack_loc),
+        // Could not verify: the blocking task panicked, or the runtime is
+        // shutting down. Still reported as failing - the caller must not treat
+        // it as good - but the pack location is DROPPED so it can never reach
+        // `evict_pack_entries`. Eviction rewrites a pack manifest with an
+        // atomic write+fsync, so evicting on a transient failure destroys
+        // healthy data permanently, and the only caller that enables eviction
+        // is `push --repair`, which then reports the chunk "unrepairable" with
+        // no way to tell it apart from genuine corruption.
+        crate::handlers::ChunkVerification::Unverifiable => {
+            tracing::warn!(
+                chunk = %chunk_id_hex,
+                "chunk verification could not be completed (task panicked or runtime \
+                 shutting down); reporting as unverified WITHOUT evicting - this says \
+                 nothing about the bytes"
+            );
+            Err(None)
+        }
     }
 }
 
