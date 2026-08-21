@@ -748,9 +748,28 @@ function Drill-S5-ThroughputDedup {
         # >= not ==: a retried pack can register more than once, and that is not
         # a failure. Verified against every run on record - ga8 (all 5 backends)
         # and s5check local/minio all sit exactly at Offered == Completed.
-        $fpPass = ($fp.Completed -ge $fp.Offered) -and ($fp.ChunkPuts -eq 0)
+        #
+        # ChunkPuts is REPORTED but NOT gated on, after this gate went wrong in
+        # both directions inside one day:
+        #   v1  Completed>0 and ChunkPuts==0  - UNFAILABLE on gcs (s5check: 4 pack
+        #       pushes failed, 18/32 completed, gate said PASS)
+        #   v2  Completed>=Offered and ChunkPuts==0 - FALSE FAILURE on local
+        #       (cloudcheck: 173/173 packs, 391.24 MB/s - the fastest local push
+        #       on record - failed on a SINGLE stray proxy PUT)
+        #
+        # A lone proxy PUT is ordinary traffic, not a fallback. A real fallback
+        # moves every remaining chunk that way - s5check measured 65, 724 and
+        # 2,284 - and it cannot happen without packs failing to register, which
+        # Completed<Offered already catches. Checked against all 12 datasets on
+        # record (ga8 x5, s5check x5, the reconstructed degraded log, and
+        # cloudcheck local): Completed>=Offered alone is correct on every one,
+        # so the second condition earned nothing and cost a false failure.
+        #
+        # A gate that fires on healthy runs gets ignored, which is the same
+        # outcome as one that never fires.
+        $fpPass = ($fp.Completed -ge $fp.Offered)
         Rec $drill $backend "packfastpath" $fp.ChunkPuts $fpPass ("packsOffered={0} packsCompleted={1} perChunkProxyPUTs={2}{3}" -f `
-          $fp.Offered, $fp.Completed, $fp.ChunkPuts, $(if ($fpPass) { "" } else { " - FAST PATH BROKE: " + $(if ($fp.Completed -lt $fp.Offered) { "$($fp.Offered - $fp.Completed) of $($fp.Offered) packs never registered" } else { "packs were abandoned for the proxy route" }) + "; expect a multi-x slowdown regardless of the MB/s above" }))
+          $fp.Offered, $fp.Completed, $fp.ChunkPuts, $(if ($fpPass) { "" } else { " - FAST PATH BROKE: $($fp.Offered - $fp.Completed) of $($fp.Offered) packs never registered; the push fell back to the per-chunk path and will be multi-x slower regardless of the MB/s above" }))
       }
 
       if ($r.Exit -ne 0) { continue }

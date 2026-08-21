@@ -250,11 +250,24 @@ pub async fn upload_and_register(
                     }
                     let ceiling = 250u64 * (1u64 << attempt.min(6));
                     let wait = ceiling / 2 + crate::client::jitter_upto(ceiling / 2);
-                    tracing::debug!(
+                    // INFO, not DEBUG. A retry that FIRES is the interesting
+                    // event: it means the link misbehaved and the client
+                    // absorbed it. At debug level that is invisible in any
+                    // normal run, and 20260821-cloudcheck showed why that
+                    // matters - AWS went from 1-of-32 packs and exit=1 to
+                    // 32-of-32, with zero warnings either way, and the log
+                    // could not distinguish "the link behaved" from "the
+                    // retries silently saved it". Those are different claims
+                    // and only one of them is evidence the fix works.
+                    //
+                    // Bounded by construction: at most 4 of these per pack.
+                    tracing::info!(
                         attempt = attempt + 1,
+                        max_attempts = MAX_PACK_PUT_ATTEMPTS,
                         err = ?e,
                         wait_ms = wait,
-                        "pack PUT transport failure; retrying"
+                        "pack PUT transport failure; retrying (the push is NOT degraded \
+                         unless a later 'pack push FAILED' says so)"
                     );
                     tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
                     continue;
