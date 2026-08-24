@@ -906,7 +906,24 @@ function Drill-A13-PerChunkFallbackNoRateLimit {
     Invoke-MG $repo @("remote", "add", "origin", $srv.Url) $Phase | Out-Null
 
     $push = Invoke-MG $repo @("push", "-u", "origin", "main") $Phase -TimeoutSec 1800
-    $rateLimited = ($push.Out -match "(?i)429|rate.?limit|too many requests")
+    # Rate limiting is read from the SERVER's response statuses, not by grepping
+    # the client's stdout.
+    #
+    # The old check was `$push.Out -match "(?i)429|rate.?limit|too many requests"`.
+    # 20260824-ga13 failed it on this line:
+    #
+    #   Created commit 429fb41bc77390ae2f4206a8aff13c7704e6ab57c0eb2f5e7ec2d9d1...
+    #
+    # The bare `429` matched the first three hex digits of a BLAKE3 commit OID, so
+    # roughly one push in 4096 failed this gate no matter how the code behaved.
+    # Worse, the textual half could never fire either: the client emits no
+    # user-visible "429" or "rate limit" text at all (the only hits in the source
+    # are test assertions), so the whole check was a false-positive-only detector.
+    #
+    # `status=429` on the server's own tower_http response line is the ground
+    # truth for "the server rate limited us", comes from the log this drill
+    # already reads, and cannot collide with a hash.
+    $rateLimited = $false
 
     # Anti-vacuous: prove the fallback was ACTUALLY taken. With packs off there
     # must be ZERO `packs/` endpoint hits. The per-chunk path itself may still
@@ -925,6 +942,8 @@ function Drill-A13-PerChunkFallbackNoRateLimit {
         $packHits = ([regex]::Matches($log, 'packs/upload-urls|packs/presign|Presigned pack')).Count
         $chunkUrlMints = ([regex]::Matches($log, 'chunks/upload-urls')).Count
         $chunkProxyPuts = ([regex]::Matches($log, 'PUT /[^ ]*/chunks/[0-9a-f]')).Count
+        $rl = ([regex]::Matches($log, 'status=429')).Count
+        $rateLimited = ($rl -gt 0)
       }
     }
     $chunkActivity = ($chunkUrlMints + $chunkProxyPuts)
