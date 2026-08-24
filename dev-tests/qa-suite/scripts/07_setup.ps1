@@ -192,8 +192,31 @@ try {
   New-Item -ItemType File -Path (Join-Path $cloneDir "after-logout.txt") -Force | Out-Null
   Invoke-MG $cloneDir @("add", "after-logout.txt") $Phase | Out-Null
   Invoke-MG $cloneDir @("commit", "-m", "post logout") $Phase | Out-Null
+  # A logged-out push must be REJECTED, and rejected PROMPTLY. "exit -ne 0" alone
+  # cannot tell those apart, and 20260825-ga18 is what that costs:
+  #
+  #   02:09:45 SLOW: mediagit push origin took 600.3s (exit=124) - possible stall
+  #   02:09:45 S2b-logout-blocks -> PASS post-logout-push-rejected=True (exit=124)
+  #
+  # exit=124 is the harness TIMEOUT killing a push that hung for ten minutes
+  # against a server that had stopped serving. The drill scored that as a clean
+  # rejection. The same wedge in ga15 (07_auth, push 600.0s) went unnoticed for
+  # the same reason - a gate that treats "did not succeed" as "was refused"
+  # cannot distinguish a 401 from a hang, so the wedge stayed invisible in runs
+  # that reported green.
+  #
+  # A real rejection is fast: the server answers 401/403 before any data moves.
+  # 60s is far above a loopback auth round-trip and far below the 600s timeout,
+  # so it separates the two without being sensitive to a slow box.
+  $swLogout = [Diagnostics.Stopwatch]::StartNew()
   $postLogoutPush = Invoke-MG $cloneDir @("push", "origin") $Phase
-  Rec "S2b-logout-blocks" ($postLogoutPush.Exit -ne 0) "post-logout-push-rejected=$($postLogoutPush.Exit -ne 0) (exit=$($postLogoutPush.Exit))"
+  $swLogout.Stop()
+  $logoutSecs = [math]::Round($swLogout.Elapsed.TotalSeconds, 1)
+  $rejected = ($postLogoutPush.Exit -ne 0)
+  $prompt = ($logoutSecs -lt 60)
+  Rec "S2b-logout-blocks" ($rejected -and $prompt) `
+    ("post-logout-push-rejected=$rejected prompt=$prompt sec=$logoutSecs (exit=$($postLogoutPush.Exit); " +
+     "a hang killed by the harness timeout is NOT a rejection - see 20260825-ga18)")
 
   # ---- S4-jwt-env-override ----
   # Restart the server with a DIFFERENT jwt secret via env; a token minted under
