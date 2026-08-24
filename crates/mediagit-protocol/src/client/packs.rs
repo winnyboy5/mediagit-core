@@ -30,6 +30,85 @@ struct PackUploadOutcome {
     elapsed: std::time::Duration,
 }
 
+/// Decide what the pack phase reports, given how far it got.
+///
+/// Extracted from `push_full_chunks_via_packs` so the one invariant that keeps a
+/// partial pack failure from becoming DATA LOSS can be tested directly.
+///
+/// The caller in `push.rs` runs its per-chunk fallback only when the pack path
+/// did NOT succeed:
+///
+/// ```text
+/// if !full_chunks.is_empty() && !pack_pushed { ...fallback... }
+/// ```
+///
+/// So reporting Ok because "most packs landed" would skip the fallback and leave
+/// the failed pack's chunks uploaded NOWHERE, while the push exits 0. Any pack
+/// failure must therefore surface as Err, no matter how many packs succeeded -
+/// the caller then re-checks what actually exists server-side and uploads only
+/// the genuinely missing chunks.
+fn finish_pack_phase(
+    chunks_done: u32,
+    bytes_done: u64,
+    pack_failure: Option<anyhow::Error>,
+    outcome: Result<()>,
+) -> Result<(u32, u64)> {
+    outcome?;
+    match pack_failure {
+        Some(e) => Err(e),
+        None => Ok((chunks_done, bytes_done)),
+    }
+}
+
+#[cfg(test)]
+mod pack_phase_tests {
+    use super::finish_pack_phase;
+
+    #[test]
+    fn a_partial_pack_failure_is_reported_as_failure_not_partial_success() {
+        // The trap this exists to guard. Before 20260821, one failed pack aborted
+        // every queued pack; now they keep uploading, which makes "lots of packs
+        // succeeded AND one failed" a reachable state for the first time.
+        //
+        // The tempting implementation returns Ok((chunks_done, bytes_done)) here
+        // because real work got done. That sets pack_pushed = true in push.rs,
+        // skips the per-chunk fallback, and silently drops the failed pack's
+        // chunks - a push reporting success with data missing.
+        let out = finish_pack_phase(
+            9_999,
+            8_888,
+            Some(anyhow::anyhow!("pack 7 of 32 exhausted its retry budget")),
+            Ok(()),
+        );
+        assert!(
+            out.is_err(),
+            "a pack failure must surface as Err even when other packs succeeded; \
+             returning Ok skips the caller's fallback and loses that pack's chunks"
+        );
+    }
+
+    #[test]
+    fn a_clean_pack_phase_reports_its_totals() {
+        // The other half: without this, "always Err" would pass the test above
+        // while disabling the fast path entirely.
+        let out = finish_pack_phase(42, 1024, None, Ok(())).expect("clean phase must be Ok");
+        assert_eq!(
+            out,
+            (42, 1024),
+            "a clean phase must report what it uploaded"
+        );
+    }
+
+    #[test]
+    fn a_hard_error_still_wins_over_the_totals() {
+        let out = finish_pack_phase(5, 5, None, Err(anyhow::anyhow!("odb read failed")));
+        assert!(
+            out.is_err(),
+            "an error from the build/upload loop must propagate"
+        );
+    }
+}
+
 impl ProtocolClient {
     // -----------------------------------------------------------------------
     // F4: Pack-mode push — bundle full chunks into cloud packs
@@ -95,6 +174,20 @@ impl ProtocolClient {
         // already added to `bytes_progress`. Tracked so we can roll back on error and
         // let the per-chunk fallback re-credit from a clean slate (no double-count).
         let mut credited: u64 = 0;
+        // A pack that exhausts its retry budget used to `?` straight out of the
+        // loop, abandoning every pack still queued. 20260821-ga12 measured the
+        // cost on the AWS arm: 4 packs failed, 1 landed, and 27 were NEVER
+        // ATTEMPTED - packsOffered=32 packsCompleted=1, 361 chunks proxied.
+        //
+        // The per-pack retry (ee80699) made each pack survive a flaky link; it
+        // did nothing about the all-or-nothing structure above it. One pack's
+        // bad luck still cost the whole push its fast path.
+        //
+        // Now a failure is RECORDED and the remaining packs keep going. The
+        // failed pack's chunks are covered by the caller's existing re-check
+        // fallback - see the note on the return value below, which is the part
+        // that must not be got wrong.
+        let mut pack_failure: Option<anyhow::Error> = None;
         let mut current_hashes: Vec<(String, String)> = Vec::new();
         // Σ manifest size of the chunks accumulated into the currently-open pack.
         let mut pending_manifest_bytes: u64 = 0;
@@ -175,10 +268,17 @@ impl ProtocolClient {
                     while inflight.len() >= pack_upload_concurrency {
                         if let Some(o) = inflight.next().await {
                             note_pack(&o);
-                            o.result.context("upload_and_register pack")?;
-                            bytes_done += o.pack_bytes;
-                            bytes_progress.fetch_add(o.manifest_bytes, Ordering::Relaxed);
-                            credited += o.manifest_bytes;
+                            if let Err(e) = o.result {
+                                // Keep the FIRST error: closest to the root
+                                // cause; later ones are usually knock-on.
+                                if pack_failure.is_none() {
+                                    pack_failure = Some(e.context("upload_and_register pack"));
+                                }
+                            } else {
+                                bytes_done += o.pack_bytes;
+                                bytes_progress.fetch_add(o.manifest_bytes, Ordering::Relaxed);
+                                credited += o.manifest_bytes;
+                            }
                         }
                     }
                 }
@@ -216,10 +316,15 @@ impl ProtocolClient {
             // Drain remaining uploads.
             while let Some(o) = inflight.next().await {
                 note_pack(&o);
-                o.result.context("upload_and_register pack")?;
-                bytes_done += o.pack_bytes;
-                bytes_progress.fetch_add(o.manifest_bytes, Ordering::Relaxed);
-                credited += o.manifest_bytes;
+                if let Err(e) = o.result {
+                    if pack_failure.is_none() {
+                        pack_failure = Some(e.context("upload_and_register pack"));
+                    }
+                } else {
+                    bytes_done += o.pack_bytes;
+                    bytes_progress.fetch_add(o.manifest_bytes, Ordering::Relaxed);
+                    credited += o.manifest_bytes;
+                }
             }
             Ok(())
         }
@@ -227,16 +332,31 @@ impl ProtocolClient {
 
         drop(temp_dir);
 
-        match outcome {
-            Ok(()) => Ok((chunks_done, bytes_done)),
-            Err(e) => {
-                // Roll back our credits so the per-chunk fallback re-credits from zero.
-                if credited > 0 {
-                    bytes_progress.fetch_sub(credited, Ordering::Relaxed);
-                }
-                Err(e)
-            }
+        // A pack failure is reported as Err even though the remaining packs were
+        // uploaded, and that is deliberate - it is the whole safety argument.
+        //
+        // The caller only runs its per-chunk fallback when the pack path did NOT
+        // succeed (`if !full_chunks.is_empty() && !pack_pushed`). Returning Ok
+        // here because "most packs landed" would set pack_pushed = true, skip the
+        // fallback, and leave the FAILED pack's chunks uploaded nowhere - a push
+        // that reports success with chunks missing. That is a data-loss bug, and
+        // a far worse one than the slowdown this change exists to fix.
+        //
+        // Err keeps the existing, proven recovery exactly as it was: the caller
+        // re-checks which chunks actually exist server-side
+        // (`push.rs`: "re-checked existence after partial pack failure"), uploads
+        // only the genuinely missing ones, and re-credits the rest. Chunks in the
+        // packs that DID land are found present and skipped, so the win is real -
+        // the fallback now handles a handful of chunks instead of all of them -
+        // while the correctness path is byte-for-byte the one already in service.
+        //
+        // Credits are rolled back for the same reason: the caller's re-check
+        // re-credits what it finds, so leaving ours in place would double-count.
+        if credited > 0 && (pack_failure.is_some() || outcome.is_err()) {
+            // Roll back our credits so the per-chunk fallback re-credits from zero.
+            bytes_progress.fetch_sub(credited, Ordering::Relaxed);
         }
+        finish_pack_phase(chunks_done, bytes_done, pack_failure, outcome)
     }
 
     // -----------------------------------------------------------------------

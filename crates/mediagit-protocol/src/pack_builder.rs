@@ -250,18 +250,23 @@ pub async fn upload_and_register(
                     }
                     let ceiling = 250u64 * (1u64 << attempt.min(6));
                     let wait = ceiling / 2 + crate::client::jitter_upto(ceiling / 2);
-                    // INFO, not DEBUG. A retry that FIRES is the interesting
-                    // event: it means the link misbehaved and the client
-                    // absorbed it. At debug level that is invisible in any
-                    // normal run, and 20260821-cloudcheck showed why that
-                    // matters - AWS went from 1-of-32 packs and exit=1 to
-                    // 32-of-32, with zero warnings either way, and the log
-                    // could not distinguish "the link behaved" from "the
-                    // retries silently saved it". Those are different claims
-                    // and only one of them is evidence the fix works.
+                    // WARN, and the level is load-bearing: this went
+                    // debug -> info -> warn, and only the last one works.
                     //
-                    // Bounded by construction: at most 4 of these per pack.
-                    tracing::info!(
+                    // main.rs pins the CLI filter to "warn" unless --verbose or
+                    // MEDIAGIT_LOG is set, so an info line is invisible in every
+                    // default run. 20260821-ga12 proved it: the AWS arm retried
+                    // and EXHAUSTED its budget, and the only trace left in a full
+                    // campaign log was the phrase "after 5 transport attempts"
+                    // buried in the final error - the retries themselves logged
+                    // nothing. Moving debug -> info without checking the filter
+                    // floor above it changed precisely nothing.
+                    //
+                    // Being wrong the other way is cheap: this fires at most 4
+                    // times per pack and only when the link is already
+                    // misbehaving. `pack push FAILED` is already warn! on this
+                    // same path and the QA harness parses around it fine.
+                    tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts = MAX_PACK_PUT_ATTEMPTS,
                         err = ?e,
