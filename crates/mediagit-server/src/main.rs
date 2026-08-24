@@ -60,6 +60,58 @@ enum Cmd {
     Admin(setup::AdminArgs),
 }
 
+/// How long the startup probe may spend validating storage backends.
+///
+/// Extracted so the fallback behaviour is pinned by tests rather than inferred
+/// from a chain of combinators. A junk or zero value must land on the default,
+/// not on zero — a 0s budget would time the probe out instantly and refuse to
+/// start every server, turning a typo in an env var into a total outage.
+/// Disabling the probe is `MEDIAGIT_STARTUP_PROBE=0`, a different knob.
+fn startup_probe_timeout_secs(raw: Option<String>) -> u64 {
+    const DEFAULT_SECS: u64 = 90;
+    raw.and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_SECS)
+}
+
+#[cfg(test)]
+mod startup_probe_tests {
+    use super::startup_probe_timeout_secs;
+
+    #[test]
+    fn defaults_above_a_single_slow_backend_attempt() {
+        // 30s was the old value and the bug: minio.rs configures
+        // read_timeout(120s) with 2 attempts and no operation timeout, so the
+        // probe used to give up on calls the SDK was still waiting on.
+        // 20260824-ga16 (minio) and 20260824-ga14 (gcs) both died that way.
+        assert_eq!(startup_probe_timeout_secs(None), 90);
+        assert!(
+            startup_probe_timeout_secs(None) > 30,
+            "the default must exceed the 30s budget that produced the false failures"
+        );
+    }
+
+    #[test]
+    fn an_explicit_value_wins() {
+        assert_eq!(startup_probe_timeout_secs(Some("150".into())), 150);
+        assert_eq!(startup_probe_timeout_secs(Some(" 45 ".into())), 45);
+    }
+
+    #[test]
+    fn junk_and_zero_fall_back_instead_of_disabling_startup() {
+        // The load-bearing half. A 0 or unparseable value must NOT become a 0s
+        // budget: that would time out instantly and refuse to start every
+        // server, so one typo in an env var becomes a total outage.
+        for raw in ["0", "", "abc", "-5", "12x"] {
+            assert_eq!(
+                startup_probe_timeout_secs(Some(raw.into())),
+                90,
+                "{raw:?} must fall back to the default, never to 0"
+            );
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // google-cloud-storage v1 enables aws-lc-rs by default; this crate already
@@ -352,11 +404,24 @@ async fn main() -> Result<()> {
                 stream::iter(repo_dirs.into_iter().map(|repo_path| {
                     let probe_state = Arc::clone(&probe_state);
                     async move {
+                        // Log each repo as it FINISHES. The outer timeout kills
+                        // the whole future at once, so without this a timeout
+                        // says nothing about which repo was stuck - and that is
+                        // the one fact the diagnosis starts from. With it, the
+                        // repos that completed are named and the missing one is
+                        // the suspect.
+                        let started = std::time::Instant::now();
                         let result = mediagit_server::handlers::get_or_init_storage(
                             &probe_state,
                             &repo_path,
                         )
                         .await;
+                        tracing::info!(
+                            repo = ?repo_path,
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            ok = result.is_ok(),
+                            "Startup probe: repo validated"
+                        );
                         (repo_path, result)
                     }
                 }))
@@ -365,15 +430,50 @@ async fn main() -> Result<()> {
                 .await
             };
 
-            let results = tokio::time::timeout(std::time::Duration::from_secs(30), probe)
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "startup probe timed out after 30s validating {} repo(s); \
-                         set MEDIAGIT_STARTUP_PROBE=0 to skip this check",
-                        repo_count
-                    )
-                })?;
+            // 30s was arbitrary, and SHORTER than the patience of the very
+            // backend it probes. `minio.rs` configures read_timeout(120s) with
+            // retry max_attempts=2 and deliberately sets no operation timeout,
+            // so a single head_bucket can legitimately outlast a 30s budget —
+            // the probe then kills a call the SDK was still waiting on and
+            // reports a bare timeout with no cause.
+            //
+            // Measured twice, on two different backends:
+            //   20260824-ga16  minio/Silo  "startup probe timed out after 30s"
+            //                  with SEVEN 07_abuse servers live against the same
+            //                  bucket; Silo answered health in 69ms right after.
+            //   20260824-ga14  gcs         same bare 30s timeout, no error
+            // (ga14's AWS failure was genuinely different - explicit
+            //  "dispatch failure: io error" - i.e. a real outage, not this.)
+            //
+            // 90s is chosen to exceed one full attempt against a slow-but-alive
+            // backend without approaching read_timeout x max_attempts (240s):
+            // the probe's job is to fail fast on a MISCONFIGURED backend (wrong
+            // creds, missing bucket), not to double as a load test.
+            // MEDIAGIT_STARTUP_PROBE_TIMEOUT_SECS tunes it.
+            let probe_timeout_secs = startup_probe_timeout_secs(
+                std::env::var("MEDIAGIT_STARTUP_PROBE_TIMEOUT_SECS").ok(),
+            );
+            let probe_started = std::time::Instant::now();
+            let results =
+                tokio::time::timeout(std::time::Duration::from_secs(probe_timeout_secs), probe)
+                    .await
+                    .map_err(|_| {
+                        // Say what it was waiting on. The old message named neither the
+                        // repo nor the backend, so a timeout left a silent hole exactly
+                        // where the diagnosis needed to start - the same failure that
+                        // made ga14's GCS row look like a network outage when it may
+                        // have been this.
+                        anyhow::anyhow!(
+                            "startup probe timed out after {}s validating {} repo(s) \
+                     (waited {:.1}s; backend read_timeout is 120s with 2 attempts, \
+                     so a slow-but-alive backend can outlast this budget). \
+                     Raise MEDIAGIT_STARTUP_PROBE_TIMEOUT_SECS, or set \
+                     MEDIAGIT_STARTUP_PROBE=0 to skip this check",
+                            probe_timeout_secs,
+                            repo_count,
+                            probe_started.elapsed().as_secs_f64()
+                        )
+                    })?;
 
             let mut failed = 0;
             for (repo_path, result) in results {
