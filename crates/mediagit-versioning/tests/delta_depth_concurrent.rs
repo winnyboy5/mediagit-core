@@ -31,7 +31,15 @@ use std::sync::Arc;
 
 /// Longest `.meta` chain on disk, measured the way the QA drill measures it:
 /// follow `base:` pointers and count hops.
-async fn max_on_disk_depth(storage: &Arc<MockBackend>) -> usize {
+///
+/// Returns the chain as well as its length. This failed once in 2026-08-19 at
+/// depth 13 and has not been reproduced in ~24 loaded runs since, so the ONE
+/// artefact a future failure leaves behind has to be worth reading: a bare
+/// "depth 13" says a chain got too long, while the chain itself says which
+/// chunks were involved and can be matched against the write order. Every
+/// mechanism ruled out so far was ruled out by inspection, because there was
+/// never any evidence to inspect.
+async fn max_on_disk_depth(storage: &Arc<MockBackend>) -> (usize, Vec<String>) {
     let keys = storage.list_objects("chunk-deltas/").await.unwrap();
     let mut bases: HashMap<String, String> = HashMap::new();
     for k in keys.iter().filter(|k| k.ends_with(".meta")) {
@@ -46,20 +54,35 @@ async fn max_on_disk_depth(storage: &Arc<MockBackend>) -> usize {
         }
     }
     let mut worst = 0usize;
+    let mut worst_chain: Vec<String> = Vec::new();
     for start in bases.keys() {
         let mut seen = std::collections::HashSet::new();
         let mut cur = start.clone();
         let mut depth = 0usize;
+        let mut chain = vec![cur.clone()];
         while let Some(next) = bases.get(&cur) {
             if !seen.insert(cur.clone()) {
                 break;
             }
             cur = next.clone();
+            chain.push(cur.clone());
             depth += 1;
         }
-        worst = worst.max(depth);
+        if depth > worst {
+            worst = depth;
+            worst_chain = chain;
+        }
     }
-    worst
+    (worst, worst_chain)
+}
+
+/// Render a chain child -> base -> ... with short oids, for a failure message.
+fn render_chain(chain: &[String]) -> String {
+    chain
+        .iter()
+        .map(|o| o.chars().take(12).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n     -> ")
 }
 
 /// Versions of one asset, each a small edit of the previous.
@@ -135,12 +158,14 @@ async fn concurrent_writes_of_similar_versions_never_exceed_max_delta_depth() {
             "attempt {attempt}: no chunk deltas written — this proves nothing"
         );
 
-        let depth = max_on_disk_depth(&storage).await;
+        let (depth, chain) = max_on_disk_depth(&storage).await;
         assert!(
             depth <= CAP,
             "attempt {attempt}: chunk-delta chain reached depth {depth}, deeper than the \
              {CAP} `get_chunk` will reconstruct — the repository would be unpushable \
-             and unclonable ({delta_count} deltas written)"
+             and unclonable ({delta_count} deltas written)\n\
+             offending chain (child -> base):\n     -> {}",
+            render_chain(&chain)
         );
 
         // Depth alone is not enough: bounding a chain by losing data would
@@ -215,10 +240,12 @@ async fn pull_side_delta_writes_respect_the_depth_cap() {
         accepted > 0,
         "no delta was accepted at all — this test is measuring nothing"
     );
-    let depth = max_on_disk_depth(&storage).await;
+    let (depth, chain) = max_on_disk_depth(&storage).await;
     assert!(
         depth <= 10,
         "pull-side chunk-delta chain reached depth {depth} against a cap of 10 \
-         ({accepted} accepted) — a cloned repository would be unpushable"
+         ({accepted} accepted) — a cloned repository would be unpushable\n\
+         offending chain (child -> base):\n     -> {}",
+        render_chain(&chain)
     );
 }
