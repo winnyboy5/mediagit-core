@@ -161,6 +161,11 @@ function Write-QaFault([string]$Context, $ErrorRecord) {
 # -StdIn: lines fed to the child's stdin in order (one dialoguer Input/Password
 # prompt per line), for driving interactive commands like `mediagit auth login`
 # non-interactively. Omit (default) for every existing non-interactive call.
+# How long to wait for a dead child's pipes to reach EOF before declaring the
+# handles leaked. Generous - this is a backstop against an inherited handle, not
+# a throughput knob - but finite, which is the whole point.
+$script:QaDrainTimeoutMs = 30000
+
 function Invoke-MG([string]$Repo, [string[]]$MgArgs, [string]$Phase = "misc", [int]$TimeoutSec = 600, [string[]]$StdIn = $null) {
   $sw = [Diagnostics.Stopwatch]::StartNew()
   $allArgs = if ($Repo) { @("-C", $Repo) + $MgArgs } else { $MgArgs }
@@ -229,7 +234,12 @@ function Invoke-MG([string]$Repo, [string[]]$MgArgs, [string]$Phase = "misc", [i
       # both mislabelled as ours AND stripped of the evidence needed to diagnose
       # it. Exactly the run where the output matters most.
       try { taskkill /T /F /PID $proc.Id 2>$null | Out-Null } catch { }
-      try { $proc.WaitForExit() | Out-Null } catch { }   # pipes close on kill; tasks then complete
+      # BOUNDED. The parameterless WaitForExit() does not just wait for the
+      # process - it waits for EOF on the redirected pipes as well. "pipes close
+      # on kill" is only true if this child is the sole holder; a daemon that
+      # inherited the handles keeps them open and this call never returns. See
+      # the drain note in the success path below for the measured case.
+      try { $proc.WaitForExit($script:QaDrainTimeoutMs) | Out-Null } catch { }
       $sw.Stop()
       $stage = "collect-after-timeout"
       # Same reasoning: a faulted read task on a killed child must not cost us
@@ -243,7 +253,38 @@ function Invoke-MG([string]$Repo, [string[]]$MgArgs, [string]$Phase = "misc", [i
     } else {
       $sw.Stop()
       $stage = "collect"
-      $out = $outTask.Result + $errTask.Result
+      # BOUNDED DRAIN. `$task.Result` waits for the read to COMPLETE, and a read
+      # on a redirected pipe completes at EOF - which happens when the last
+      # handle to the write end closes, NOT when the child exits. So a daemon
+      # that inherited this child's stdout/stderr keeps the pipe open and
+      # `.Result` blocks forever: WaitForExit already returned true, the child is
+      # gone, there is no timeout and no error, and the phase log simply stops
+      # mid-drill.
+      #
+      # That is not hypothetical. A7-backend-outage hung exactly this way for
+      # 28 minutes (reproduced standalone 2026-08-25): silo, restarted by the
+      # drill, inherited the harness's stdout via `Start-Process
+      # -RedirectStandardOutput` and pinned it. Proven by killing silo - the
+      # harness's own log file, still locked with every powershell and mediagit
+      # process already dead, became deletable the instant silo died.
+      #
+      # The daemon side is fixed where it belongs (start detached, so nothing is
+      # inherited), but this function takes a TimeoutSec and must honour it no
+      # matter what a backend-cycling command supplied from outside the suite
+      # decides to spawn. An unbounded wait inside a timed API is a bug on its
+      # own terms.
+      $drained = $false
+      try {
+        $drained = $outTask.Wait($script:QaDrainTimeoutMs) -and $errTask.Wait($script:QaDrainTimeoutMs)
+      } catch { $drained = $false }
+      if ($drained) {
+        $out = $outTask.Result + $errTask.Result
+      } else {
+        $out = "[INVOKE-MG-DRAIN-TIMEOUT] child exited but its stdout/stderr pipe never reached EOF " +
+               "within $([int]($script:QaDrainTimeoutMs / 1000))s. Some still-running process inherited " +
+               "this child's handles - look for a daemon started with " +
+               "Start-Process -RedirectStandardOutput. Command: $($QA.MG) $argLine"
+      }
       $code = $proc.ExitCode
     }
   } catch {

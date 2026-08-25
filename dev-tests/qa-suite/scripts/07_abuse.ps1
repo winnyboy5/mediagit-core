@@ -447,20 +447,49 @@ function Drill-A7-BackendOutage {
     $env:MEDIAGIT_PUSH_DEADLINE_SECS = "60"
     $p = Start-Process $QA.MG -ArgumentList @("-C", $repo, "push", "origin") -PassThru -NoNewWindow `
       -RedirectStandardOutput (Join-Path $QA.Logs "a7-push.out") -RedirectStandardError (Join-Path $QA.Logs "a7-push.err")
+    # Cache the handle, exactly as A15 does and for the same reason: without it
+    # Start-Process -PassThru hands back an object whose .ExitCode reads $null
+    # after exit. `$null -ne 0` is TRUE in PowerShell, so the clean-fail
+    # assertion below would pass on an exit code that was never read. Observed
+    # here: the drill reported `push-exit=` blank and PASS in the same line.
+    $null = $p.Handle
     Start-Sleep -Milliseconds 2000
     & $StopBackend
     $stoppedContainer = $true
 
+    # Progress markers through the recovery sequence.
+    #
+    # A7 has hung twice inside a campaign (ga10) and once standalone, and every
+    # time the evidence was the same useless shape: a phase log that stops after
+    # "server up" and never says another word. Every step below can block - two
+    # of them shell out to a backend-cycling command supplied from outside the
+    # suite - so "which one" has to be recorded as it happens, not inferred
+    # afterwards from a log that ends mid-drill.
+    Write-QaLog $Phase "A7: push started, backend stopped; waiting for client exit"
     $exited = $p.WaitForExit(120000)
+    # Read the code only once the process has really gone, and record whether it
+    # could be read at all. "we could not read the exit code" must FAIL, not be
+    # silently promoted into evidence of a clean refusal.
+    $exitCode = -1
+    $exitRead = $false
+    if ($exited) {
+      try { $p.WaitForExit(5000) | Out-Null } catch { }
+      try { $exitCode = $p.ExitCode; $exitRead = ($exitCode -is [int]) } catch { $exitRead = $false }
+    }
+    Write-QaLog $Phase "A7: client exited=$exited exit=$exitCode read=$exitRead"
     Remove-Item Env:\MEDIAGIT_PUSH_DEADLINE_SECS -ErrorAction SilentlyContinue
     if (-not $exited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
     $outText = "" + (Get-Content (Join-Path $QA.Logs "a7-push.out") -Raw -ErrorAction SilentlyContinue) `
                    + (Get-Content (Join-Path $QA.Logs "a7-push.err") -Raw -ErrorAction SilentlyContinue)
     $panic = $outText -match "panicked"
-    $cleanFail = $exited -and ($p.ExitCode -ne 0) -and (-not $panic)
+    # $exitRead is load-bearing and separate from the code itself: an unreadable
+    # exit code must fail the drill rather than be read as a clean refusal.
+    $cleanFail = $exited -and $exitRead -and ($exitCode -ne 0) -and (-not $panic)
 
+    Write-QaLog $Phase "A7: restarting backend"
     & $StartBackend
     $stoppedContainer = $false
+    Write-QaLog $Phase "A7: backend start command returned; polling health"
     $up = Wait-QaMinioUp $QA.MinioEndpoint 30
     if (-not $up) {
       # Docker Desktop's host port-proxy can stay wedged after `docker start`
@@ -472,17 +501,21 @@ function Drill-A7-BackendOutage {
       $up = Wait-QaMinioUp $QA.MinioEndpoint 60
     }
 
+    Write-QaLog $Phase "A7: backend up=$up; running local fsck"
     $fsckLocal = Test-QaFsckClean $repo
+    Write-QaLog $Phase "A7: local fsck=$fsckLocal; retrying push"
     $retry = Invoke-MG $repo @("push", "origin") $Phase -TimeoutSec 3600
+    Write-QaLog $Phase "A7: retry push exit=$($retry.Exit); cloning"
     $clone = Join-Path $QA.Work "a7-clone"
     if (Test-Path $clone) { Remove-Item -Recurse -Force $clone }
     $cl = Invoke-MG $null @("clone", $srv.Url, $clone) $Phase -TimeoutSec 3600
+    Write-QaLog $Phase "A7: clone exit=$($cl.Exit); verifying"
     $cloneHashOk = (Test-Path (Join-Path $clone "big.bin")) -and
                    ((Get-QaHash (Join-Path $clone "big.bin")) -eq $origHash)
     $fsckClone = if ($cl.Exit -eq 0) { Test-QaFsckClean $clone } else { $false }
 
     $pass = $up -and $cleanFail -and $fsckLocal -and ($retry.Exit -eq 0) -and ($cl.Exit -eq 0) -and $cloneHashOk -and $fsckClone
-    Rec $drill $pass "minio-restarted=$up push-exited=$exited push-exit=$($p.ExitCode) panic=$panic clean-fail=$cleanFail local-fsck=$fsckLocal retry-push=$($retry.Exit) clone=$($cl.Exit) clone-hash-ok=$cloneHashOk clone-fsck=$fsckClone"
+    Rec $drill $pass "minio-restarted=$up push-exited=$exited push-exit=$exitCode exit-read=$exitRead panic=$panic clean-fail=$cleanFail local-fsck=$fsckLocal retry-push=$($retry.Exit) clone=$($cl.Exit) clone-hash-ok=$cloneHashOk clone-fsck=$fsckClone"
   } catch {
     if ($stoppedContainer) { & docker start $container *> $null }
     if ("$_" -match "^SKIP:") { Rec $drill "SKIP" "$_" } else { Rec $drill $false "unexpected error: $_" }
@@ -964,17 +997,27 @@ function Drill-A13-PerChunkFallbackNoRateLimit {
 # ---------------------------------------------------------------------------
 Write-QaLog $Phase "=== 07_abuse start ==="
 
-Drill-A1-KillMidAdd
-Drill-A2-KillMidPush
-Drill-A3-ConcurrentDoublePush
-Drill-A4-CorruptChunkAtRest
-Drill-A5-ReadOnlyFile
-Drill-A6-SpacesAndUnicodePaths
-Drill-A7-BackendOutage
-Drill-A8-DiskFull
-Drill-A9-LockE2E
-Drill-A10-BatchGetFallback
-Drill-A11-DeltaChainDepth
+# MG_QA_DRILLS runs just the named drills; empty = all. Same shape as 10_scale.
+# Each drill builds its own fixtures and its own server, so any subset is valid.
+#
+# This exists so a single drill can be reproduced standalone instead of only
+# inside a 2-hour campaign. A7 is the case in point: it had to be investigated
+# in isolation before its native-backend cycling could be trusted, and there was
+# no way to run it alone. e.g. MG_QA_DRILLS="A7".
+$only = ($env:MG_QA_DRILLS -split "," | ForEach-Object { $_.Trim().ToUpper() } | Where-Object { $_ })
+function _Want([string]$s) { -not $only -or ($only -contains $s) }
+
+if (_Want "A1")  { Drill-A1-KillMidAdd }
+if (_Want "A2")  { Drill-A2-KillMidPush }
+if (_Want "A3")  { Drill-A3-ConcurrentDoublePush }
+if (_Want "A4")  { Drill-A4-CorruptChunkAtRest }
+if (_Want "A5")  { Drill-A5-ReadOnlyFile }
+if (_Want "A6")  { Drill-A6-SpacesAndUnicodePaths }
+if (_Want "A7")  { Drill-A7-BackendOutage }
+if (_Want "A8")  { Drill-A8-DiskFull }
+if (_Want "A9")  { Drill-A9-LockE2E }
+if (_Want "A10") { Drill-A10-BatchGetFallback }
+if (_Want "A11") { Drill-A11-DeltaChainDepth }
 # ---------------------------------------------------------------------------
 # A14: presigned PUT on the UNBOUND path. The server signs a content-length
 # into the URL whenever the client can tell it one; that signed header is then
@@ -1388,12 +1431,12 @@ function Drill-A17-EncryptionRecovery {
   }
 }
 
-Drill-A12-DeltaChainCycle
-Drill-A13-PerChunkFallbackNoRateLimit
-Drill-A14-UnboundPresignedPut
-Drill-A15-SecondInstanceRefused
-Drill-A16-EncryptionLifecycle
-Drill-A17-EncryptionRecovery
+if (_Want "A12") { Drill-A12-DeltaChainCycle }
+if (_Want "A13") { Drill-A13-PerChunkFallbackNoRateLimit }
+if (_Want "A14") { Drill-A14-UnboundPresignedPut }
+if (_Want "A15") { Drill-A15-SecondInstanceRefused }
+if (_Want "A16") { Drill-A16-EncryptionLifecycle }
+if (_Want "A17") { Drill-A17-EncryptionRecovery }
 
 Write-QaLog $Phase "=== 07_abuse done: overall=$(if ($script:AllPass) { 'PASS' } else { 'FAIL' }) ==="
 # Teardown: reclaim this phase's own work/ scratch so a long campaign cannot run the
