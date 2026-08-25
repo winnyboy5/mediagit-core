@@ -1007,6 +1007,20 @@ Write-QaLog $Phase "=== 07_abuse start ==="
 $only = ($env:MG_QA_DRILLS -split "," | ForEach-Object { $_.Trim().ToUpper() } | Where-Object { $_ })
 function _Want([string]$s) { -not $only -or ($only -contains $s) }
 
+# ANNOUNCE a filtered run, loudly.
+#
+# Honouring MG_QA_DRILLS is what makes a single drill reproducible standalone,
+# but it also creates a way for a campaign to run one drill instead of
+# seventeen and still report the phase green - a stale variable left in the
+# shell (run_a7_native.ps1 sets it, and run_ga.ps1 does not clear it) is all it
+# takes. A skipped drill that says nothing is the defect class this suite keeps
+# hitting, so a filtered run has to be visible in the log rather than inferred
+# afterwards from a suspiciously short gate list.
+if ($only) {
+    Write-QaLog $Phase ("MG_QA_DRILLS is set - running ONLY: " + ($only -join ",") +
+        ". This is a PARTIAL phase; a campaign must run with it unset.")
+}
+
 if (_Want "A1")  { Drill-A1-KillMidAdd }
 if (_Want "A2")  { Drill-A2-KillMidPush }
 if (_Want "A3")  { Drill-A3-ConcurrentDoublePush }
