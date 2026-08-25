@@ -28,10 +28,13 @@ startup** rather than silently starting empty — "no users registered" and
 Beyond the flat `Read`/`Write`/`Admin` role a user account carries, the
 server supports per-repo grants (`{user_id, repo, level}`, levels ordered
 `Read < Write < Admin`) that scope a user's access to specific
-repositories. A zero-grants deployment (or `MEDIAGIT_GRANTS_ENFORCE=0`)
-behaves exactly like the flat role check; once any grant is recorded,
-per-repo enforcement activates for every repo-scoped permission check.
-Admin-role users (`user:manage`) always bypass grant checks.
+repositories. Enforcement is decided **per repository**: a repo with no
+grants recorded behaves exactly like the flat role check, regardless of how
+many grants exist on other repos, so onboarding one tenant cannot change how
+any other repo is authorized. `MEDIAGIT_GRANTS_ENFORCE=0` disables grants
+everywhere; `=strict` enforces on every repo including ungranted ones, which
+then deny rather than falling back. Admin-role users (`user:manage`) always
+bypass grant checks.
 
 ### File Locking
 
@@ -71,8 +74,12 @@ multi-repo server.
 
   Push and clone work through **key escrow** (DC-7 D4). On the first push the
   client hands its repository key to the server over `PUT /{repo}/encryption-key`;
-  the server wraps it under its own master key (`MEDIAGIT_SERVER_ENCRYPTION_KEYFILE`)
-  and keeps it in `<repo>/.mediagit/key.json`. It needs the key because
+  the server wraps it under its own master key — read from the file named by
+  `[encryption] master_key_path` in `mediagit-server.toml`, not from an
+  environment variable — and keeps it in `<repo>/.mediagit/key.json`. A server
+  started with `[encryption] enabled = true` and no readable master key
+  refuses to bind at all, rather than accepting escrow requests it could not
+  honour and letting the operator hear about it from a user. It needs the key because
   presigned uploads go client→bucket directly, leaving the server holding objects
   it must still verify, register and walk. A clone fetches the key back with
   `repo:read` — key access *is* read access — and re-wraps it under a local

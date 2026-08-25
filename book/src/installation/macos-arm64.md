@@ -70,11 +70,8 @@ mediagit completions bash > $(brew --prefix)/etc/bash_completion.d/mediagit
 Add to `~/.zshrc`:
 
 ```bash
-# Optional: Set default backend
-export MEDIAGIT_DEFAULT_BACKEND=local
 
 # Optional: Optimize for Apple Silicon
-export MEDIAGIT_USE_SIMD=1
 
 # Optional: Enable debug logging
 export MEDIAGIT_LOG=info

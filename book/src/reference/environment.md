@@ -149,7 +149,7 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 | `MEDIAGIT_JWT_SECRET` | JWT signing secret. Env wins over config file `jwt_secret` if both set. | none |
 | `MEDIAGIT_STARTUP_PROBE` | Server scans `repos_dir` for repo health at startup. `0` skips it. | `1` (ON) |
 | `MEDIAGIT_AUTH_PERSIST` | Persist auth state (users/grants) to disk. `0` keeps auth in-memory only. | `1` (ON) |
-| `MEDIAGIT_GRANTS_ENFORCE` | Enforce per-repo permission grants (no-op if none configured). | `1` (ON) |
+| `MEDIAGIT_GRANTS_ENFORCE` | Per-repo permission grants. `0` = off everywhere (flat roles only); `strict` = enforce on every repo, so one with no grants denies instead of falling back; unset = per repo (enforced only on repos that have grants). | unset (per repo) |
 | `MEDIAGIT_LOCKS_ENFORCE` | Server rejects pushes that touch paths locked by another user. | `1` (ON) |
 
 > **Removed from this table (DC-5).** `MEDIAGIT_APP_*`, `MEDIAGIT_LOG_LEVEL`,

@@ -43,6 +43,76 @@ authentication, there's no proven pusher identity, so any touched, locked
 path rejects the push outright — an unauthenticated server can't tell one
 client's push from another's.
 
+### Where a lock lives
+
+There is no local lock state. Every subcommand is an HTTP call, and the
+server holds the answer in two places at once: an in-memory map that every
+check reads, and `<repo>/.mediagit/locks.jsonl` that exists only so locks
+survive a restart. Mutations rewrite the whole file (tmp + rename) rather
+than appending, because lock sets are small — they are human-scale "I'm
+working on this asset" claims, not a log.
+
+```mermaid
+sequenceDiagram
+    participant A as alice (CLI)
+    participant S as mediagit-server
+    participant F as .mediagit/locks.jsonl
+    participant B as bob (CLI)
+
+    A->>S: POST /{repo}/locks  {path}
+    S->>S: normalize path, check in-memory map
+    S->>F: rewrite (tmp + rename)
+    S-->>A: 201  lock_id
+
+    B->>S: POST /{repo}/locks  {same path}
+    S-->>B: 409  already locked by alice
+
+    B->>S: push touching that path
+    S-->>B: rejected - 'path' is locked by alice
+
+    A->>S: DELETE /{repo}/locks/{lock_id}
+    S->>F: rewrite without the record
+    S-->>A: 204
+```
+
+Paths are normalized before they are compared — backslashes become forward
+slashes, and a leading `./` or `/` is stripped — so a Windows client locking
+`assets\a.psd` does block a push touching `assets/a.psd`.
+
+### What a push actually checks
+
+Enforcement is not a single yes/no. Three separate conditions let a push
+through *without* consulting the locks, and knowing which one applied is
+usually the difference between "locking is broken" and "locking was switched
+off". Only the last branch rejects:
+
+```mermaid
+flowchart TD
+    P[push arrives] --> E{MEDIAGIT_LOCKS_ENFORCE=0?}
+    E -->|yes| OK1[allow - enforcement disabled]
+    E -->|no| Z{repo has any locks?}
+    Z -->|no| OK2[allow - nothing to check]
+    Z -->|yes| W[walk commits old_oid..new_oid<br/>collecting touched paths]
+    W --> C{range &gt; MEDIAGIT_LOCKS_MAX_COMMITS?}
+    C -->|yes| OK3[allow - FAIL-OPEN, logs a warning]
+    C -->|no| T{a touched path is locked?}
+    T -->|no| OK4[allow]
+    T -->|yes| O{pusher owns that lock?}
+    O -->|yes| OK4
+    O -->|no| REJ[reject - names path, owner, lock id]
+```
+
+The fail-open branch is deliberate and it is loud: a push whose range exceeds
+the cap logs `Lock enforcement fail-open for '<repo>'` and proceeds
+**unchecked**. If lock enforcement matters to you, that warning is the line
+to alert on.
+
+"Pusher owns that lock" needs an identity to compare. With auth enabled it is
+the authenticated user. With auth disabled there is no proven pusher at this
+call site, so the ownership test can never succeed and **any** touched locked
+path rejects the push. That is the safe default, not a bug — but it means an
+unauthenticated server cannot give one client push access past its own locks.
+
 ## Subcommands
 
 ### `create`

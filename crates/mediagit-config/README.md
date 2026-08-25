@@ -5,7 +5,7 @@ A comprehensive configuration management system for MediaGit Core with support f
 ## Features
 
 - **Multi-Format Support**: Load configuration from TOML, YAML, or JSON files
-- **Environment Variable Overrides**: Override any configuration value using environment variables with `MEDIAGIT_` prefix
+- **Environment Variable Overrides**: `load_with_overrides` applies `MEDIAGIT_`-prefixed overrides. Library API only — neither `mediagit` nor `mediagit-server` uses it (see the note under [Environment Variable Overrides](#environment-variable-overrides))
 - **Comprehensive Validation**: Detailed error messages for invalid configurations
 - **Configuration Migration**: Framework for handling schema version updates
 - **Flexible Storage Backends**: Support for filesystem, AWS S3, Azure Blob, Google Cloud Storage, and multi-backend configurations
@@ -105,13 +105,15 @@ backend = "s3"
 bucket = "my-bucket"
 region = "us-east-1"
 prefix = "media/"
-encryption = true
-encryption_algorithm = "AES256"  # or "aws:kms"
+access_key_id = "AKIA..."
+secret_access_key = "..."
 ```
 
-Credentials can be provided via environment variables:
-- `MEDIAGIT_S3_ACCESS_KEY_ID`
-- `MEDIAGIT_S3_SECRET_ACCESS_KEY`
+Credentials come from this file only. There are no `MEDIAGIT_S3_*` variables,
+and no IAM-role fallback: the backend rejects an empty access key. (`S3Storage`
+also has no `encryption` / `encryption_algorithm` fields — earlier revisions of
+this README showed them, but the client config is not `deny_unknown_fields`, so
+they parse silently and do nothing.)
 
 ### Azure Blob Storage
 
@@ -126,8 +128,8 @@ auth = { type = "account_key", account_name = "mystorageaccount", account_key = 
 Credentials are a tagged `auth` block (`config_version` 3+): one of
 `account_key`, `connection_string { value }`, `sas { account_name, token }`,
 or `emulator` (local Azurite). Pre-v3 flat configs are migrated automatically
-on first open. The `account_key` may also come from the `AZURE_STORAGE_KEY`
-environment variable.
+on first open. The credential comes from this block only — no MediaGit code
+path reads `AZURE_STORAGE_KEY` or `AZURE_STORAGE_ACCOUNT`.
 
 ### Google Cloud Storage
 
@@ -139,8 +141,10 @@ project_id = "my-project"
 credentials_path = "/path/to/credentials.json"
 ```
 
-Or use environment variable:
-- `MEDIAGIT_GCS_CREDENTIALS_PATH`
+Leave `credentials_path` unset to use **Application Default Credentials**,
+which resolve `GOOGLE_APPLICATION_CREDENTIALS` from the environment. That is
+the only environment path any backend has. There is no
+`MEDIAGIT_GCS_CREDENTIALS_PATH`.
 
 ## Compression Configuration
 
@@ -415,7 +419,7 @@ match loader.load_file("config.toml").await {
 ## Best Practices
 
 1. **Version Configuration Files**: Keep configuration in version control
-2. **Use Environment Variables in Production**: Override sensitive values via environment
+2. **Keep Secrets Out of Version Control**: credentials live in the repo's own `.mediagit/config.toml`, which is not a file to commit. (Overriding them via environment does not work — see the note above.)
 3. **Validate on Startup**: Always validate configuration after loading
 4. **Provide Example Files**: Include example configurations in documentation
 5. **Document Custom Settings**: Document any custom configuration your application adds

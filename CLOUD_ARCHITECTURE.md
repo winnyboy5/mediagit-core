@@ -531,30 +531,60 @@ base_path = "/fast-storage/mediagit"
 
 ## Server Configuration
 
+The server's own settings — bind address, TLS, repo directory — come from
+`mediagit-server.toml` and a few CLI flags. They are **not** environment
+variables: `MEDIAGIT_PORT`, `MEDIAGIT_HOST`, `MEDIAGIT_TLS_CERT`,
+`MEDIAGIT_TLS_KEY` and `MEDIAGIT_API_KEY_ENABLED` appeared in earlier
+revisions of this document and have never been read by anything. Because
+`ServerConfig` is `deny_unknown_fields`, a mistyped *config key* fails loudly
+at startup — but a mistyped env var just does nothing, which is why the list
+below is worth being exact about.
+
+```toml
+# mediagit-server.toml
+port = 3000
+host = "0.0.0.0"
+repos_dir = "/var/lib/mediagit/repos"
+
+enable_tls = true
+tls_port = 3443
+tls_cert_path = "/certs/server.crt"
+tls_key_path = "/certs/server.key"
+```
+
+`--port`, `--host`, `--data-dir` and `--config PATH` override the file.
+
 ### Environment Variables
 
+These are the server-side variables that are actually read:
+
 ```bash
-# Server
-MEDIAGIT_PORT=3000
-MEDIAGIT_HOST=0.0.0.0
-
-# TLS
-MEDIAGIT_TLS_CERT=/certs/server.crt
-MEDIAGIT_TLS_KEY=/certs/server.key
-
 # Auth
 MEDIAGIT_JWT_SECRET=your-secret-key
-MEDIAGIT_API_KEY_ENABLED=true
+MEDIAGIT_ADMIN_PASSWORD=...            # initial admin, setup only
+MEDIAGIT_GRANTS_ENFORCE=strict         # 0 | strict | unset (per repo)
 
-# Storage (AWS)
-AWS_ACCESS_KEY_ID=AKIA...
-AWS_SECRET_ACCESS_KEY=...
-AWS_REGION=us-east-1
+# Locking
+MEDIAGIT_LOCKS_ENFORCE=1
+MEDIAGIT_LOCKS_MAX_COMMITS=1000
 
 # Metrics
-MEDIAGIT_METRICS_ENABLED=true
-MEDIAGIT_METRICS_PORT=9090
+MEDIAGIT_METRICS_ADDR=0.0.0.0:9091     # binds the Prometheus endpoint
+
+# GCS only - Application Default Credentials
+GOOGLE_APPLICATION_CREDENTIALS=/etc/mediagit/gcs-sa.json
+GCS_PROJECT_ID=my-project
 ```
+
+**Storage credentials are not environment variables.** The server resolves a
+repository's backend by loading that repository's own `.mediagit/config.toml`,
+exactly as the client does, and reads `access_key_id` / `secret_access_key`
+from it. `AWS_ACCESS_KEY_ID` and friends are read by no MediaGit code path on
+either side. GCS is the one exception above, because its SDK resolves
+Application Default Credentials from the environment.
+
+Deployments that keep secrets in the environment must render them into each
+repo's `config.toml` at provisioning time.
 
 ### Docker Compose Example
 
@@ -567,8 +597,7 @@ services:
       - "3000:3000"
       - "9090:9090"
     environment:
-      - AWS_REGION=us-east-1
-      - MEDIAGIT_METRICS_ENABLED=true
+      - MEDIAGIT_METRICS_ADDR=0.0.0.0:9090
     volumes:
       - ./config:/etc/mediagit
 

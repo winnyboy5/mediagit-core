@@ -103,7 +103,8 @@ t=3 p=4). A one-time recovery code is a second, independent way in.
   dependency, and none of it is a pre-release AEAD.
 - **Push and clone work, via key escrow.** On the first push the client hands
   its repository key to `PUT /{repo}/encryption-key` (`repo:write`); the
-  server wraps it under `MEDIAGIT_SERVER_ENCRYPTION_KEYFILE` and keeps it in
+  server wraps it under its own master key (`[encryption] master_key_path` in
+  `mediagit-server.toml`) and keeps it in
   `<repo>/.mediagit/key.json`. It needs the key because presigned uploads go
   client→bucket directly, leaving the server holding objects it must still
   verify, register and walk. A clone fetches it back with `repo:read` — key

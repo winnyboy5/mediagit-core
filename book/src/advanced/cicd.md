@@ -90,17 +90,20 @@ jobs:
           email = "ci@yourorg.com"
           EOF
 
+      # Credentials must be written INTO config.toml. MediaGit reads no
+      # AWS_* environment variables, so exporting them to the step would
+      # leave the backend with an empty key and fail the push. Note the
+      # unquoted heredoc delimiter - 'EOF' would suppress substitution.
       - name: Configure S3 backend
         run: |
-          cat >> .mediagit/config.toml << 'EOF'
+          cat >> .mediagit/config.toml << EOF
           [storage]
           backend = "s3"
           bucket = "${{ vars.MEDIAGIT_S3_BUCKET }}"
           region = "us-east-1"
+          access_key_id = "${{ secrets.AWS_ACCESS_KEY_ID }}"
+          secret_access_key = "${{ secrets.AWS_SECRET_ACCESS_KEY }}"
           EOF
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
       - name: Verify assets
         run: mediagit verify

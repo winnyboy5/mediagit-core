@@ -83,6 +83,66 @@ Objects are stored under a per-repo namespace directory, sharded two levels deep
 
 **Rationale**: Prevents millions of files in single directory (filesystem optimization). The `repo_namespace` prefix lets one storage root or bucket safely host multiple repositories.
 
+### The full key space
+
+`objects/` is one of six key families, and they all shard the same way: on
+the **hash**, never on the key string's own prefix. That distinction is the
+whole point of layout v2 — sharding on the key prefix would put every chunk
+in a single `chunks/` directory and defeat the fanout.
+
+```mermaid
+flowchart TD
+    ROOT["storage root<br/>(local dir, or S3/GCS/Azure bucket)"]
+    ROOT --> NS["&lt;repo_namespace&gt;/<br/>one repo's whole key space"]
+    NS --> L["LAYOUT<br/>'&lt;version&gt; &lt;repo_id&gt;'"]
+    NS --> O["objects/ab/cd/&lt;oid&gt;<br/>commits, trees, blobs"]
+    NS --> C["chunks/de/ad/&lt;hash&gt;<br/>loose content chunks"]
+    NS --> CD["chunk-deltas/de/ad/&lt;hash&gt;[.meta]"]
+    NS --> M["manifests/../&lt;hash&gt;"]
+    NS --> D["deltas/../&lt;hash&gt;[.meta]"]
+    NS --> P["packs/aa/&lt;pack_oid&gt;<br/>single-level shard"]
+```
+
+Two details carry real consequences:
+
+- **`LAYOUT` is a guard, not a note.** It records the version *and* the
+  `repo_id`. A client on a different layout version fails fast rather than
+  writing keys the other side cannot find, and a second repo that resolves to
+  the same namespace is rejected as a collision instead of silently merging
+  its key space into yours.
+- **`repo_namespace` is permanent.** Every key is written under it. Change it
+  after init and every existing object is orphaned — still stored, no longer
+  reachable.
+
+### Where a chunk actually is
+
+A chunk has one identity — `BLAKE3(uncompressed bytes)` — but two possible
+homes, and the reader resolves them in a fixed order. This is the part worth
+internalizing: "the chunk is missing from `chunks/`" is usually not a
+missing chunk, it is a packed one.
+
+```mermaid
+flowchart TD
+    Q["need chunk &lt;hash&gt;"] --> LOOSE{"loose object at<br/>chunks/de/ad/&lt;hash&gt;?"}
+    LOOSE -->|yes| GET["read it directly"]
+    LOOSE -->|no| IDX["ask the server's pack index"]
+    IDX --> R{"resolves to<br/>(pack_oid, offset, length)?"}
+    R -->|no| MISS["genuinely missing - fsck reports it"]
+    R -->|yes| RANGE["Range-GET that byte slice<br/>from packs/aa/&lt;pack_oid&gt;"]
+    RANGE --> V["verify against the compressed hash"]
+    V --> GET
+```
+
+Packing exists because cloud object stores charge and stall per request, not
+per byte: a pack bundles up to 1024 chunks or 64 MiB into one object that
+carries its own index, so a clone fetches a few large objects and Range-GETs
+slices out of them instead of issuing a request per chunk. Nothing about the
+chunk's identity changes when it is packed — the same hash addresses it
+either way.
+
+Packs are built client-side. The server stores them as opaque objects and
+keeps the index that maps a chunk OID to its `(pack, offset, length)`.
+
 ## Collision Resistance
 
 BLAKE3 produces a 256-bit digest, giving 2^256 possible outputs (approximately 10^77):

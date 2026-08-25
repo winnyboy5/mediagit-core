@@ -151,15 +151,15 @@ mediagit completions fish > ~/.config/fish/completions/mediagit.fish
 Add to `~/.bashrc` or `~/.zshrc`:
 
 ```bash
-# Optional: Set default backend
-export MEDIAGIT_DEFAULT_BACKEND=local
 
-# Optional: Set storage path
-export MEDIAGIT_STORAGE_PATH=~/.mediagit/storage
 
 # Optional: Enable debug logging
 export MEDIAGIT_LOG=debug
 ```
+
+Backend and storage location are **per repository**, not global: they are
+set in that repo's `.mediagit/config.toml` (written by `mediagit init`).
+There is no environment variable for either.
 
 ## Verify Installation
 

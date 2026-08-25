@@ -38,6 +38,58 @@ Two pattern styles:
 This is MediaGit's own model, not a port of git's sparse-checkout — there is
 no git interop goal.
 
+### What actually changes
+
+Nothing about history or storage. The object database still holds every file
+at HEAD; sparse checkout only decides which of them exist as bytes in your
+working directory. That is the whole feature, and it is why narrowing the
+cone is safe: no commit, no object, and no other clone is affected.
+
+```mermaid
+flowchart LR
+    subgraph ODB["object database - unchanged by sparse checkout"]
+        O1["assets/textures/*"]
+        O2["assets/audio/*"]
+        O3["assets/video/*"]
+        O4["docs/*"]
+    end
+    subgraph WT["working tree after: set assets/textures assets/audio"]
+        W1["assets/textures/* (on disk)"]
+        W2["assets/audio/* (on disk)"]
+        W3["assets/video/* (absent)"]
+        W4["docs/* (absent)"]
+    end
+    O1 --> W1
+    O2 --> W2
+    O3 -.->|excluded| W3
+    O4 -.->|excluded| W4
+```
+
+`status` reports the absent paths as absent, not as deletions — they never
+show up as `deleted` or porcelain `D`.
+
+### How `set` decides, file by file
+
+`set` compares the old filter against the new one across every file tracked
+at HEAD. Only the two paths that cross the boundary do any work:
+
+```mermaid
+flowchart TD
+    F["each tracked file at HEAD"] --> Q{"in the OLD cone?"}
+    Q -->|yes| A{"in the NEW cone?"}
+    Q -->|no| B{"in the NEW cone?"}
+    A -->|yes| N1["leave alone"]
+    A -->|no| DEL["delete from disk"]
+    B -->|yes| MAT["materialize from ODB"]
+    B -->|no| N2["leave alone - was never on disk"]
+```
+
+**Before any of that runs, and before the patterns are written**, `set`
+checks for locally modified files that the new cone would exclude. If it
+finds any it refuses outright and changes nothing — the pattern file is left
+exactly as it was. Narrowing a cone deletes files, and uncommitted work must
+never be what gets deleted. Commit or stash those files, then re-run.
+
 ## Subcommands
 
 #### `set <PATTERN>... [--patterns]`

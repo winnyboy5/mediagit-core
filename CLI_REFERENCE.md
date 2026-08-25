@@ -1223,8 +1223,6 @@ mediagit completions powershell >> $PROFILE
 
 | Variable | Description |
 |----------|-------------|
-| `MEDIAGIT_DIR` | Repository path |
-| `MEDIAGIT_WORK_TREE` | Working tree path |
 | `MEDIAGIT_REPO` | Repository path (set by `-C` flag) |
 | `MEDIAGIT_AUTHOR_NAME` | Default author name |
 | `MEDIAGIT_AUTHOR_EMAIL` | Default author email |
@@ -1241,7 +1239,7 @@ mediagit completions powershell >> $PROFILE
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEDIAGIT_CONCURRENT_UPLOADS` | `32` | Total upload semaphore slots for push operations |
+| `MEDIAGIT_UPLOAD_CONCURRENCY` | `32` | Total upload semaphore slots for push operations |
 | `MEDIAGIT_PUSH_OBJECT_CONCURRENCY` | `8` | Number of objects uploaded concurrently during push |
 | `MEDIAGIT_PUSH_CHUNK_CONCURRENCY` | `(64 / push_object_concurrency).max(4)` | Per-object chunk upload concurrency. Targets 64 total in-flight PUTs across all concurrent objects. Override when tuning for specific cloud regions or connection profiles. |
 | `MEDIAGIT_DOWNLOAD_CONCURRENCY` | `32` | Total concurrent chunk downloads during pull/clone |

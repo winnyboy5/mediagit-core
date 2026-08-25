@@ -151,9 +151,8 @@ bucket = "my-bucket"
 region = "us-east-1"
 endpoint = "http://localhost:9000"   # MinIO / non-AWS S3-compatible endpoint
 prefix = ""
-encryption = false
-encryption_algorithm = "AES256"
-# access_key_id / secret_access_key from env vars or IAM role — prefer env
+access_key_id = "AKIA..."
+secret_access_key = "..."
 ```
 
 | Key | Type | Default | Description |
@@ -161,12 +160,36 @@ encryption_algorithm = "AES256"
 | `backend` | string | — | Must be `"s3"`. |
 | `bucket` | string | — | **Required.** S3 bucket name. |
 | `region` | string | — | **Required.** AWS region. |
-| `access_key_id` | string \| absent | absent | AWS access key (prefer env var). |
-| `secret_access_key` | string \| absent | absent | AWS secret key (prefer env var). |
+| `access_key_id` | string \| absent | absent | **Required in practice** — see below. |
+| `secret_access_key` | string \| absent | absent | **Required in practice** — see below. |
 | `endpoint` | string \| absent | absent | Custom endpoint — set this to point at MinIO or another S3-compatible service (e.g. `http://localhost:9000`). |
 | `prefix` | string | `""` | Object key prefix. |
-| `encryption` | bool | `false` | Enable server-side encryption. |
-| `encryption_algorithm` | string | `"AES256"` | SSE algorithm: `AES256` or `aws:kms`. |
+
+**Credentials come from this file and nowhere else.** There is no environment-variable
+override and no IAM-role/instance-profile path: `create_storage_backend`
+(`mediagit-cli/src/repo.rs`) passes `access_key_id`/`secret_access_key` straight
+through, and `MinIOBackend::new_with_prefix` rejects an empty key outright
+("access key cannot be empty"). `MinIOBackend::from_env` exists and reads
+`MINIO_*`, but nothing in the shipping binaries calls it. The schema comment
+saying these "can be overridden via env" describes an override that was never
+implemented.
+
+Two consequences worth planning around:
+
+- Secrets live on disk in the repo's own `.mediagit/config.toml`. On Unix,
+  MediaGit warns when that file is world-readable. Treat the file as a secret.
+- Automation that has credentials in the environment must **render** them into
+  `config.toml` rather than exporting them. That is exactly what this project's
+  own QA harness does — it substitutes `AWS_ACCESS_KEY_ID` into a config
+  template; the variable never reaches `mediagit` itself.
+
+> **Not supported, despite appearing in earlier revisions of this document:**
+> `encryption` and `encryption_algorithm` under `[storage]`. There are no such
+> fields on `S3Storage` and no server-side-encryption code on any S3 path. The
+> client config is not `deny_unknown_fields`, so these keys **parse without
+> complaint and do nothing** — the worst shape for a security setting. For
+> encryption that is real, see at-rest encryption (`mediagit key`), which
+> encrypts object contents before they ever reach the bucket.
 
 ### Azure Blob Storage
 

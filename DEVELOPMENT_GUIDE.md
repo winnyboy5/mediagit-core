@@ -652,7 +652,7 @@ MEDIAGIT_BENCH=1 mediagit push origin main   # emits [bench] throughput summary
 
 | Variable | Default | Tunes |
 |----------|---------|-------|
-| `MEDIAGIT_CONCURRENT_UPLOADS` | `32` | Total upload semaphore slots per push |
+| `MEDIAGIT_UPLOAD_CONCURRENCY` | `32` | Total upload semaphore slots per push |
 | `MEDIAGIT_DOWNLOAD_CONCURRENCY` | `32` | Total chunk downloads during pull/clone |
 | `MEDIAGIT_BENCH` | `0` | Set `1` to emit throughput summary after push/pull |
 | `MEDIAGIT_HASH_PARALLEL` | `0` | Set `1` for BLAKE3 tree-parallel hashing (~2.6× faster) |

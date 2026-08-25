@@ -62,8 +62,6 @@ mediagit completions bash > /usr/local/etc/bash_completion.d/mediagit
 Add to `~/.zshrc`:
 
 ```bash
-# Optional: Set default backend
-export MEDIAGIT_DEFAULT_BACKEND=local
 
 # Optional: Enable debug logging
 export MEDIAGIT_LOG=info

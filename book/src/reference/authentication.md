@@ -147,20 +147,67 @@ Enforcement order, per request:
 2. No authenticated user → `401`.
 3. `Role::Admin` (flat `user:manage` permission) → always allowed,
    regardless of grants.
-4. `MEDIAGIT_GRANTS_ENFORCE=0`, or no grant has ever been recorded
-   (`GrantsStore::is_empty()`) → fall back to the flat role permission
-   check (pre-grants behavior).
+4. `MEDIAGIT_GRANTS_ENFORCE=0`, or **no grant recorded for the repo being
+   accessed** → fall back to the flat role permission check (pre-grants
+   behavior).
 5. Otherwise → the user's grant level for the target repo must be at or
    above the level implied by the requested permission
    (`repo:read`/`repo:write`/`repo:admin`). A permission string that
    isn't repo-scoped (e.g. `user:manage`) always falls back to the flat
    check regardless of grants.
 
-In other words: a fresh server with zero grants recorded behaves exactly
-like the pre-grants flat role check. The moment any grant is created,
-per-repo enforcement activates for every repo-scoped permission check —
-including repos with no grant recorded for that user, which then deny
-access even if their role would otherwise allow it.
+```mermaid
+flowchart TD
+    R["request with a required permission"] --> A{"auth enabled?"}
+    A -->|no| OK1["allow"]
+    A -->|yes| U{"authenticated?"}
+    U -->|no| E401["401 Unauthorized"]
+    U -->|yes| AD{"has user:manage<br/>(Role::Admin)?"}
+    AD -->|yes| OK2["allow - bypasses grants entirely"]
+    AD -->|no| M{"MEDIAGIT_GRANTS_ENFORCE"}
+    M -->|"0"| FLAT["flat role check"]
+    M -->|"strict"| GR["grant check"]
+    M -->|"unset (default)"| HAS{"any grant recorded<br/>for THIS repo?"}
+    HAS -->|no| FLAT
+    HAS -->|yes| GR
+    FLAT --> FQ{"role grants the<br/>permission?"}
+    FQ -->|yes| OK3["allow"]
+    FQ -->|no| E403["403 + audit event"]
+    GR --> GQ{"grant level &ge;<br/>required level?"}
+    GQ -->|yes| OK3
+    GQ -->|no| E403
+```
+
+Both denial paths emit an audit event, not just a log line — an audit
+stream that went quiet on exactly the repos an operator configured tenancy
+for would be worse than none.
+
+### Enforcement is decided per repo, not globally
+
+**Step 4 is scoped to the repository under access.** Recording a grant on
+one repo does not change how any other repo is authorized. Repos with no
+grants keep behaving exactly like the pre-grants flat role check, however
+many grants exist elsewhere on the server.
+
+This is worth stating explicitly because it used to work the other way, and
+the old behavior was a live hazard: enforcement keyed on whether the store
+held *any* grant, so the first grant an operator recorded while onboarding
+one tenant flipped **every other repository** to grant-based authorization
+at the same instant — locking out every user who had no explicit grant
+there. A routine onboarding step had server-wide blast radius, and nothing
+in the API hinted at it (AU-4).
+
+`MEDIAGIT_GRANTS_ENFORCE` takes three values:
+
+| Value | Behavior |
+|---|---|
+| `0` | Off everywhere. Flat roles only. |
+| `strict` | On for **every** repo, including those with no grants recorded — an ungranted repo denies instead of falling back. |
+| *unset* (default) | Per repo: enforced on repos that have grants, flat-role fallback on those that don't. |
+
+`strict` is the fail-closed posture the old global behavior produced by
+accident. It is now something an operator opts into deliberately, rather
+than something triggered by recording an unrelated grant.
 
 ## Persistence
 

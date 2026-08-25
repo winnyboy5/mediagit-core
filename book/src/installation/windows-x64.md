@@ -67,15 +67,13 @@ mediagit completions bash > ~/.bash_completion.d/mediagit
 Set via System Properties or PowerShell:
 
 ```powershell
-# Optional: Set default backend
-[Environment]::SetEnvironmentVariable("MEDIAGIT_DEFAULT_BACKEND", "local", "User")
-
-# Optional: Set storage path
-[Environment]::SetEnvironmentVariable("MEDIAGIT_STORAGE_PATH", "$env:USERPROFILE\.mediagit\storage", "User")
-
 # Optional: Enable debug logging
 [Environment]::SetEnvironmentVariable("MEDIAGIT_LOG", "info", "User")
 ```
+
+Backend and storage location are **per repository**, not global: they are
+set in that repo's `.mediagit/config.toml` (written by `mediagit init`).
+There is no environment variable for either.
 
 ## System Requirements
 

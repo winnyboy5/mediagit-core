@@ -570,48 +570,32 @@ MediaGit is **designed for terabyte-scale files**:
 
 ## Configuration
 
-MediaGit supports multiple configuration methods:
-
-### 1. TOML Configuration
+A repository is configured by one file: `.mediagit/config.toml`, written by
+`mediagit init`. Storage backend and credentials both live there.
 
 ```toml
 # .mediagit/config.toml
 [storage]
-backend = "s3"
+backend = "s3"                     # filesystem | s3 | azure | gcs
 bucket = "my-mediagit-bucket"
 region = "us-east-1"
-encryption = true
-encryption_algorithm = "AES256"   # Options: AES256, aws:kms
-
-[compression]
-enabled = true
-algorithm = "zstd"
-level = 3
+access_key_id = "AKIA..."
+secret_access_key = "..."
+# endpoint = "http://localhost:9000"   # for MinIO / S3-compatible services
 ```
 
-### 2. Environment Variables
+**There is no environment-variable path for storage settings**, and no
+IAM-role or `aws configure` auto-detection — the keys above are read from this
+file and passed straight to the backend, which rejects an empty key. Automation
+holding credentials in the environment should render them into `config.toml`;
+exporting them has no effect. Because secrets sit on disk, treat this file as a
+secret (MediaGit warns on Unix if it is world-readable).
 
-```bash
-export MEDIAGIT_S3_BUCKET=my-bucket
-export MEDIAGIT_S3_REGION=us-east-1
-export MEDIAGIT_S3_ACCESS_KEY_ID=...
-export MEDIAGIT_S3_SECRET_ACCESS_KEY=...
-```
+Compression needs no configuration: `SmartCompressor` picks algorithm and level
+from the file type on its own.
 
-### 3. Cloud Provider Credentials
-
-```bash
-# AWS (auto-detected)
-aws configure
-
-# Azure
-az login
-
-# GCP
-gcloud auth login
-```
-
-**See [DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md) for complete configuration examples.**
+**See [CONFIGURATION.md](./CONFIGURATION.md) for every key, per backend, and
+[DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md) for end-to-end setup.**
 
 ---
 
