@@ -460,6 +460,38 @@ mod tests {
         );
     }
 
+    // The three tests below close arms that coverage showed had NEVER executed.
+    // Mutation testing could not have found them: deleting a catch-all arm makes
+    // the match non-exhaustive, so cargo-mutants reports it "unviable" rather
+    // than running it. Coverage and mutation are complementary here.
+
+    #[test]
+    fn azure_unknown_code_falls_back_to_status() {
+        // The code tables cannot enumerate every error a cloud invents, so the
+        // UNKNOWN code is the common real-world case, not the exotic one. If this
+        // fallback breaks, an unrecognised 503 stops being retried.
+        assert_eq!(
+            classify_azure(503, "SomeCodeAzureAddedLastTuesday", ""),
+            TransferOutcome::Transient
+        );
+    }
+
+    #[test]
+    fn gcs_unknown_reason_falls_back_to_status() {
+        assert_eq!(
+            classify_gcs(503, r#"{"error":{"errors":[{"reason":"brandNewReason"}]}}"#),
+            TransferOutcome::Transient
+        );
+    }
+
+    #[test]
+    fn unexpected_status_is_permanent_chunk() {
+        // The catch-all for anything outside 4xx/5xx - e.g. a proxy answering 302.
+        // PermanentChunk means "fall back to proxy for this chunk only", which is
+        // the right conservative move for a status we do not understand.
+        assert_eq!(classify_s3(302, "", ""), TransferOutcome::PermanentChunk);
+    }
+
     #[test]
     fn unknown_403_is_refresh_url_not_permanent() {
         // 403 must be its own arm ahead of the 400..=499 sweep: a presigned URL
