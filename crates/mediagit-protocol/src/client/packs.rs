@@ -485,15 +485,28 @@ impl ProtocolClient {
         // `pull.rs::pull_streaming` (per-chunk downloads). Setting the env var
         // makes both agree; leaving it unset does not.
         //
-        // Deliberately NOT unified: these are different request shapes against
-        // different endpoints, and changing either default is a performance
-        // change that needs measurement, not a tidy-up. Recorded here so the
-        // next reader sees the split as a decision rather than an oversight,
-        // and so nobody "fixes" one side in isolation.
+        // MEASURED 2026-08-25, and the answer is leave it alone. 384MB / 302
+        // chunks over loopback, `MEDIAGIT_BENCH=1`:
         //
-        // Relevant if you are chasing the clone-vs-push asymmetry: BOTH of these
-        // already exceed the pack UPLOAD concurrency (8, above), so "clone is
-        // less parallel than push" is not the explanation.
+        //   conc=1        wall=4.42s  87 MB/s   util_pct=54%
+        //   conc=default  wall=3.67s 105 MB/s   util_pct=2%
+        //   conc=32       wall=3.57s 107 MB/s   util_pct=2%
+        //
+        // The knob is LIVE - conc=1 is measurably slower and util_pct moves
+        // 54% -> 2%, so the value really does reach the download loop. But 24 vs
+        // 32 is 3.67s vs 3.57s, inside run-to-run noise. Unifying the defaults
+        // would be churn with no measurable benefit, so the split stays.
+        //
+        // The load-bearing number is util_pct=2%: at the default the pipeline is
+        // nowhere near saturating even 24 slots, so this path is NOT
+        // concurrency-limited. Anyone chasing the clone-vs-push asymmetry should
+        // read that as "raising download concurrency will not help" - and note
+        // both defaults already exceed the pack UPLOAD concurrency (8, above),
+        // so "clone is less parallel than push" is not the explanation either.
+        //
+        // Caveat on scope: measured over loopback against the filesystem backend.
+        // A WAN/cloud backend has entirely different latency, so re-measure there
+        // before drawing conclusions about cloud clone throughput.
         let download_concurrency: usize = std::env::var("MEDIAGIT_DOWNLOAD_CONCURRENCY")
             .ok()
             .and_then(|s| s.parse().ok())
