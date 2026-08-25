@@ -88,8 +88,8 @@ mediagit --version
 
 # Should output: mediagit-core 0.3.0-rc.3
 
-# Run self-test
-mediagit fsck --self-test
+# Verify a repository's integrity (run inside a repo)
+mediagit fsck --full
 
 # Should output: All checks passed ✓
 ```

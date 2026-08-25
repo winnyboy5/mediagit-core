@@ -134,8 +134,8 @@ threads = 4  # Use performance cores
 mediagit --version
 file $(which mediagit)
 
-# Run self-test
-mediagit fsck --self-test
+# Verify a repository's integrity (run inside a repo)
+mediagit fsck --full
 
 # Create test repo
 mkdir ~/test-mediagit

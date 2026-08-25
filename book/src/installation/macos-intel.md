@@ -87,8 +87,8 @@ xcode-select --install
 # Check version
 mediagit --version
 
-# Run self-test
-mediagit fsck --self-test
+# Verify a repository's integrity (run inside a repo)
+mediagit fsck --full
 
 # Create test repo
 mkdir ~/test-mediagit

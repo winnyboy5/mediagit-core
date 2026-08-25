@@ -153,7 +153,7 @@ Pre-load frequently accessed objects:
 
 ### Cache Invalidation
 - Object modification (rare due to immutability)
-- Explicit cache clear (`mediagit gc --clear-cache`)
+- Process exit (the cache is in-memory and per-process; there is no cache-clear command)
 - Repository verification failures
 
 ## Compression Integration

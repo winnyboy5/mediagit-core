@@ -450,7 +450,7 @@ mediagit merge <BRANCH>
 | `-X, --strategy-option <OPT>` | Strategy option |
 | `--no-commit` | Don't commit |
 | `--abort` | Abort merge |
-| `--continue-merge` | Continue merge after resolving conflicts |
+| `--continue` | (alias `--continue-merge`) Continue merge after resolving conflicts |
 | `-q, --quiet` | Suppress output |
 | `-v, --verbose` | Detailed output |
 
@@ -459,7 +459,7 @@ mediagit merge <BRANCH>
 mediagit merge feature/complete
 mediagit merge develop --no-ff -m "Merge develop into main"
 mediagit merge --squash hotfix
-mediagit merge --continue-merge
+mediagit merge --continue
 ```
 
 ---
@@ -476,7 +476,7 @@ mediagit rebase <UPSTREAM> [BRANCH]
 |------|-------------|
 | `--keep-empty` | Keep empty commits |
 | `--abort` | Abort rebase |
-| `--continue-rebase` | Continue rebase after resolving conflicts |
+| `--continue` | (alias `--continue-rebase`) Continue rebase after resolving conflicts |
 | `--skip` | Skip current commit |
 | `-q, --quiet` | Suppress output |
 | `-v, --verbose` | Detailed output |
@@ -486,7 +486,7 @@ mediagit rebase <UPSTREAM> [BRANCH]
 **Examples:**
 ```bash
 mediagit rebase main
-mediagit rebase --continue-rebase
+mediagit rebase --continue
 mediagit rebase --abort
 ```
 
@@ -502,7 +502,7 @@ mediagit cherry-pick <COMMITS>...
 
 | Flag | Description |
 |------|-------------|
-| `--continue-pick` | Continue operation after resolving conflicts |
+| `--continue` | (alias `--continue-pick`) Continue operation after resolving conflicts |
 | `--abort` | Abort operation |
 | `--skip` | Skip current commit |
 | `-n, --no-commit` | Don't commit |
@@ -514,7 +514,7 @@ mediagit cherry-pick <COMMITS>...
 ```bash
 mediagit cherry-pick abc123
 mediagit cherry-pick abc123 def456 ghi789
-mediagit cherry-pick --continue-pick
+mediagit cherry-pick --continue
 ```
 
 ---
@@ -614,7 +614,9 @@ mediagit pull [REMOTE] [BRANCH]
 mediagit pull
 mediagit pull origin develop
 mediagit pull --rebase
-mediagit pull --continue-pull
+# NOTE: `pull --continue` is accepted but not implemented - it is never read,
+# so it silently performs an ordinary pull. To resume after conflicts, resolve
+# them and use `mediagit merge --continue`.
 ```
 
 ---
@@ -1041,7 +1043,7 @@ mediagit gc
 **Examples:**
 ```bash
 mediagit gc                       # Standard garbage collection
-mediagit gc --aggressive --yes    # Aggressive pass, skip confirmation
+mediagit gc --repack --yes       # Repack loose objects into packs, skip confirmation
 mediagit gc --dry-run             # Preview what would be deleted
 mediagit gc --verbose             # Show each deleted object/chunk/manifest
 ```

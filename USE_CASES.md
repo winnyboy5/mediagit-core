@@ -163,7 +163,7 @@ flowchart TD
     D --> E["merge exp-2 into main<br/>tag create model-v1"]
     E --> F["push -u origin main --tags"]
     F --> G["clone (reproduce elsewhere)<br/>clone-parity check"]
-    G --> H["gc --repack -y<br/>gc --aggressive -y<br/>fsck --full"]
+    G --> H["gc --repack -y<br/>fsck --full"]
 ```
 
 ### Command sequence
@@ -198,7 +198,7 @@ mediagit clone http://host:3000/training training-clone
 
 # maintenance: repack, aggressive gc, full integrity check
 mediagit gc --repack -y
-mediagit gc --aggressive -y
+mediagit gc --repack -y
 mediagit fsck --full
 mediagit stats --json
 ```

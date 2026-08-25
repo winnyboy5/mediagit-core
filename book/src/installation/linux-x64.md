@@ -167,8 +167,8 @@ There is no environment variable for either.
 # Check version
 mediagit --version
 
-# Run self-test
-mediagit fsck --self-test
+# Verify a repository's integrity (run inside a repo)
+mediagit fsck --full
 
 # Create test repository
 mkdir test-repo

@@ -271,7 +271,9 @@ Once an admin is logged in, day-to-day user/key management goes through the
 client:
 
 ```bash
-mediagit auth admin create-user bob bob@example.com --role write --password P
+printf "bob@example.com
+hunter2
+" | mediagit auth admin create-user bob --role write
 mediagit auth admin set-role bob admin
 mediagit auth admin list-users
 mediagit auth key create --name ci     # prints the plaintext key once

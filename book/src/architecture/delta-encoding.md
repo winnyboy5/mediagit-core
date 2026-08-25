@@ -214,7 +214,7 @@ let contents = futures::future::join_all(futures).await;
 Choose base to minimize average reconstruction time:
 - Prefer recent versions as bases
 - Avoid deep chains for frequently accessed versions
-- `mediagit gc --optimize-deltas` reoptimizes chains
+- Chains need no reoptimization command: `MAX_DELTA_DEPTH` (10) is enforced on write, so a chain that would exceed it gets a fresh base instead
 
 ## Garbage Collection Integration
 
