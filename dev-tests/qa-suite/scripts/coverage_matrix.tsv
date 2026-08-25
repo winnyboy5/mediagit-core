@@ -116,7 +116,7 @@ merge	--no-ff	no	OK
 merge	--ff-only	no	OK
 merge	--squash	no	OK
 merge	-s,--strategy	yes	ERROR
-merge	-X,--strategy-option	yes	OK
+merge	-X,--strategy-option	yes	ERROR
 merge	--no-commit	no	OK
 merge	--abort	no	ERROR
 merge	--continue-merge	no	ERROR

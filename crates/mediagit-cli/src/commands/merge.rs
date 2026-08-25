@@ -156,6 +156,21 @@ impl MergeCmd {
         let tracked =
             crate::worktree_guard::tracked_paths(&repo_root, &odb, Some(&our_oid)).await?;
 
+        // -X/--strategy-option is accepted by clap for git muscle-memory, but it
+        // has never been implemented: the field was declared, parsed, and then
+        // read nowhere in this function. `merge -X ours` therefore changed
+        // nothing while looking like it had worked.
+        //
+        // A silent no-op is the worst outcome for a CONFLICT-RESOLUTION flag
+        // specifically - the user believes they steered which side won, and
+        // only finds out from the merged content. Refusing is the established
+        // pattern here: `commit -a` does exactly this rather than pretend
+        // (commit.rs:105-114).
+        //
+        // `-s/--strategy` is the real knob and IS honoured (ours/theirs/
+        // recursive, below), so the error points there.
+        reject_strategy_option(self.strategy_option.as_deref())?;
+
         // Parse merge strategy
         let strategy = match self.strategy.as_deref() {
             Some("ours") => MergeStrategy::Ours,
@@ -678,9 +693,51 @@ impl MergeCmd {
     }
 }
 
+/// Refuse `-X/--strategy-option` rather than accepting and ignoring it.
+///
+/// Extracted from `execute` purely so it is assertable: `execute` needs a real
+/// repository, so the one behaviour worth pinning - that the flag REFUSES
+/// rather than silently doing nothing - could not be tested inline. Same reason
+/// `clamp_cap` and `startup_probe_timeout_secs` are separate functions.
+fn reject_strategy_option(opt: Option<&str>) -> anyhow::Result<()> {
+    match opt {
+        None => Ok(()),
+        Some(o) => Err(anyhow::anyhow!(
+            "merge -X/--strategy-option is not supported in MediaGit (got '{o}').
+             It was accepted but never applied, so passing it changed nothing.
+             Use 'mediagit merge -s ours|theirs|recursive' to choose a strategy."
+        )),
+    }
+}
+
 #[cfg(test)]
 #[allow(unsafe_code)] // edition-2024: test-only env::set_var/remove_var requires unsafe
 mod tests {
+    use super::reject_strategy_option;
+
+    /// -X was declared, parsed, and read NOWHERE, so `merge -X ours` silently
+    /// changed nothing while looking like it worked. On a conflict-resolution
+    /// flag that is the worst failure mode: the user believes they chose which
+    /// side won and only finds out from the merged content.
+    #[test]
+    fn strategy_option_is_refused_not_ignored() {
+        let err = reject_strategy_option(Some("ours"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not supported"), "{err}");
+        // The message must name the real knob, or the refusal just blocks the
+        // user without telling them what to do instead.
+        assert!(err.contains("-s ours|theirs|recursive"), "{err}");
+        assert!(err.contains("ours"), "{err}");
+    }
+
+    /// The other half. Without this, "always refuse" would satisfy the test
+    /// above while breaking every merge that does not pass -X.
+    #[test]
+    fn absent_strategy_option_is_accepted() {
+        assert!(reject_strategy_option(None).is_ok());
+    }
+
     use super::*;
     use crate::commands::utils::test_support::{REPO_ENV_LOCK, init_repo_with_commit};
     use clap::Parser;
