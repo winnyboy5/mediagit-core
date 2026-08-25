@@ -1,2 +1,11 @@
 metric	value
-invented_flags	108
+invented_flags	4
+# was 108 until 2026-08-25; the sweep that removed the fabricated CLI flags
+# took it to 4. All 4 remaining are FALSE POSITIVES, verified individually:
+#   bisect/clone/fetch cite `mediagit log --oneline` - real flag on log
+#   reflog cites `mediagit reset --hard`            - real flag on reset
+# The gate is per-page and lexical, so an accurate cross-reference to another
+# command reads as invented. Rewording correct docs to satisfy a metric would
+# make them worse, so these stay. Same reasoning the script already applies to
+# hidden flags: bake a known residue into the baseline, do not special-case.
+# If this number rises, something real was fabricated - investigate, do not relock.

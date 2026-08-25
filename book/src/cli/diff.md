@@ -27,7 +27,6 @@ chunks and sizes) rather than attempting a textual diff.
 | `--cached` | Compare the staging area with the last commit instead of the working tree |
 | `--stat` | Show a diffstat summary (files changed, insertions/deletions/sizes) |
 | `--summary` | Show a condensed summary of changes |
-| `--word-diff` | Show word-level changes for text files |
 | `-U <num>`, `--unified <num>` | Number of context lines for text diffs |
 | `-q`, `--quiet` | Suppress output; exit status indicates whether differences exist |
 | `-- <path>...` | Limit the diff to the given paths |
@@ -71,12 +70,6 @@ $ mediagit diff --stat
 ```bash
 $ mediagit diff -- video.mp4
 $ mediagit diff HEAD -- assets/
-```
-
-### Word-level text diff
-
-```bash
-$ mediagit diff --word-diff config.json
 ```
 
 ## Comparing Specific States

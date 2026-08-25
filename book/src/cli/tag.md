@@ -6,7 +6,7 @@ Create and manage tags.
 
 ```bash
 mediagit tag create <NAME> [<COMMIT>] [-m <MESSAGE>]
-mediagit tag list [--pattern <PATTERN>]
+mediagit tag list
 mediagit tag delete <NAME>
 mediagit tag show <NAME>
 ```
@@ -76,13 +76,12 @@ Options:
 List all tags.
 
 ```bash
-mediagit tag list [--pattern <PATTERN>]
+mediagit tag list
 ```
 
 Aliases: `ls`
 
 Options:
-- `-p`, `--pattern <PATTERN>` — Filter by glob pattern (e.g., `v1.*`)
 - `-v`, `--verbose` — Show tag messages and commit info
 
 ### `delete`
@@ -143,15 +142,6 @@ v1.0
 v1.1
 v2.0
 approved-2025-06
-```
-
-### List tags matching a pattern
-
-```bash
-$ mediagit tag list --pattern "v*"
-v1.0
-v1.1
-v2.0
 ```
 
 ### Show tag details

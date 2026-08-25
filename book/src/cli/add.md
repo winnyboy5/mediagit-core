@@ -163,7 +163,7 @@ $ mediagit status
 On branch main
 
 Changes to be committed:
-  (use "mediagit restore --staged <file>..." to unstage)
+  (use "mediagit reset <file>..." to unstage)
         new file:   video.mp4
         new file:   image.jpg
 ```
