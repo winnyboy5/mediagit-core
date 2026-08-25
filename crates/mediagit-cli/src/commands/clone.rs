@@ -305,15 +305,30 @@ url = "{}"
         // two campaigns - was solved in one run. `debug!` costs nothing when the
         // level is off, so this stays out of normal output.
         //
-        // To arm them for a hang hunt, prefer the targeted filter over blanket
-        // debug - measured on one clone, 8 markers either way:
+        // To arm them for a hang hunt, ALWAYS keep the global level in the
+        // filter - measured on one clone, 8 markers either way:
         //
-        //   MEDIAGIT_LOG=mediagit::commands::clone=debug ...  28 stderr lines
-        //   MEDIAGIT_LOG=debug ............................. 253 stderr lines
+        //   MEDIAGIT_LOG=warn,mediagit::commands::clone=debug ..  28 stderr lines
+        //   MEDIAGIT_LOG=debug ................................. 253 stderr lines
         //
-        // A campaign runs thousands of clones, so that 9x matters. Verified both
-        // directions: all 8 fire in order under the filter, and the default
-        // build emits none of them.
+        // A campaign runs thousands of clones, so that 9x matters.
+        //
+        // The leading `warn,` is NOT optional, and omitting it is not a style
+        // choice - it silently breaks other things. An EnvFilter built from
+        // target-only directives disables every target that does not match, so
+        // `MEDIAGIT_LOG=mediagit::commands::clone=debug` suppresses the whole
+        // rest of the tree, including `mediagit_protocol`'s
+        // "rate limited (429); backing off before retry" warning.
+        //
+        // That is not hypothetical: arming exactly that filter across campaign
+        // ga21 made 07_ratelimit's RL6 drill fail. RL6 greps the client's output
+        // for "429" to prove throttling actually happened before it will credit
+        // recovery - a deliberately anti-vacuous check - so silencing the
+        // warning made a healthy limiter look like it never fired. The
+        // instrument changed what it was measuring.
+        //
+        // Measured, not assumed: RUST_LOG="tower_http=debug" yields 0 WARN lines
+        // from other targets; RUST_LOG="warn,tower_http=debug" yields 3.
         tracing::debug!(phase = "key-armed", "clone: local key/scope resolved");
         crate::encryption::install_armed_key()?;
         mediagit_compression::ensure_key_scope(&target_dir)?;
