@@ -245,6 +245,7 @@ function Invoke-MG([string]$Repo, [string[]]$MgArgs, [string]$Phase = "misc", [i
     # Fires at most once per command, and only past the threshold, so a healthy
     # campaign pays nothing.
     $stage = "wait"
+    $script:QaSnapPending = $null
     $stallSnapSec = [int](_Env "MG_QA_STALL_SNAPSHOT_SEC" "240")
     $snapped = $false
     $waitedMs = 0
@@ -259,22 +260,86 @@ function Invoke-MG([string]$Repo, [string[]]$MgArgs, [string]$Phase = "misc", [i
           $c1 = $proc.TotalProcessorTime.TotalSeconds
           $conns = @(Get-NetTCPConnection -OwningProcess $proc.Id -EA SilentlyContinue)
           $byState = ($conns | Group-Object State | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join " "
-          $remotes = ($conns | Where-Object { $_.State -eq 'Established' } |
-                      ForEach-Object { "$($_.RemoteAddress):$($_.RemotePort)" } |
+          $est = @($conns | Where-Object { $_.State -eq 'Established' })
+          $remotes = ($est | ForEach-Object { "$($_.RemoteAddress):$($_.RemotePort)" } |
                       Sort-Object -Unique | Select-Object -First 4) -join ","
+          # A running thread has no WaitReason, and Group-Object throws on the
+          # null rather than bucketing it - which printed an ErrorRecord over
+          # the top of the very diagnostic being collected. Project to a string
+          # first so "(running)" is just another bucket.
           $waits = ((Get-Process -Id $proc.Id -EA SilentlyContinue).Threads |
-                    Group-Object WaitReason | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join " "
-          Start-Sleep -Seconds 5
-          $c2 = $proc.TotalProcessorTime.TotalSeconds
-          Write-QaLog $Phase ("STALL-SNAPSHOT tcp[{0}] remotes[{1}] threadwaits[{2}] cpu_delta_5s={3:n3}s" -f `
-            $byState, $remotes, $waits, ($c2 - $c1))
-          Write-QaLog $Phase ("STALL-SNAPSHOT reading: cpu_delta ~0 with no Established remote = the request never left; " +
-                              "cpu_delta ~0 WITH an Established remote = sent, awaiting a reply that is not coming")
+                    ForEach-Object { if ($_.WaitReason) { "$($_.WaitReason)" } else { "(running)" } } |
+                    Group-Object | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join " "
+          # The CPU second sample comes from the NEXT wait slice, not from a
+          # Start-Sleep here. A sleep inside this loop stops it calling
+          # WaitForExit, so a command that finished during the sleep is not
+          # noticed until it ends - up to 5s of pure measurement error added to
+          # a drill that is being timed. Deferring costs nothing: the loop was
+          # going to wait anyway.
+          $script:QaSnapC1 = $c1
+          $script:QaSnapWhen = Get-Date
+          $script:QaSnapPending = @{
+            Phase = $Phase; ByState = $byState; Remotes = $remotes
+            Waits = $waits; Established = $est.Count
+          }
         } catch {
           Write-QaLog $Phase "STALL-SNAPSHOT failed: $($_.Exception.GetType().Name)"
         }
       }
+
+      # Second CPU sample, one slice later. STATE THE VERDICT rather than
+      # printing a rubric for a human to apply: on 20260826-ga28 all three
+      # firings were healthy long clones, and a reader skimming the log still
+      # had to do the classification by hand to learn that.
+      if ($script:QaSnapPending -and ((Get-Date) - $script:QaSnapWhen).TotalSeconds -ge 4) {
+        try {
+          $sp = $script:QaSnapPending
+          $script:QaSnapPending = $null
+          $elapsed = ((Get-Date) - $script:QaSnapWhen).TotalSeconds
+          $cpu = 0.0
+          if (-not $proc.HasExited) { $cpu = $proc.TotalProcessorTime.TotalSeconds - $script:QaSnapC1 }
+          $verdict = if ($cpu -gt 0.05) {
+            "PROGRESSING - burning CPU; slow, not hung"
+          } elseif ($sp.Established -eq 0) {
+            "SUSPECT HANG - no CPU and NO established connection: the request never left this box"
+          } else {
+            "SUSPECT HANG - no CPU but connection(s) established: sent, awaiting a reply that is not coming"
+          }
+          Write-QaLog $sp.Phase ("STALL-SNAPSHOT tcp[{0}] remotes[{1}] threadwaits[{2}] cpu_delta={3:n3}s/{4:n1}s -> {5}" -f `
+            $sp.ByState, $sp.Remotes, $sp.Waits, $cpu, $elapsed, $verdict)
+        } catch {
+          Write-QaLog $Phase "STALL-SNAPSHOT second sample failed: $($_.Exception.GetType().Name)"
+        }
+      }
     }
+    # FLUSH. Deferring the second CPU sample to the next wait slice removed the
+    # added latency, but introduced a worse bug: a command that exited between
+    # the two samples emitted the "after Ns" header and then NOTHING - the
+    # diagnostic vanished precisely in the case where a stall resolved itself,
+    # which is a case worth seeing. Caught by the PROGRESSING drill, which went
+    # from FAIL(no verdict) to a real verdict once this was added.
+    if ($script:QaSnapPending) {
+      try {
+        $sp = $script:QaSnapPending
+        $script:QaSnapPending = $null
+        $elapsed = ((Get-Date) - $script:QaSnapWhen).TotalSeconds
+        $cpu = $proc.TotalProcessorTime.TotalSeconds - $script:QaSnapC1
+        $verdict = if ($proc.HasExited) {
+          "COMPLETED during the snapshot window - slow, not hung"
+        } elseif ($cpu -gt 0.05) {
+          "PROGRESSING - burning CPU; slow, not hung"
+        } elseif ($sp.Established -eq 0) {
+          "SUSPECT HANG - no CPU and NO established connection: the request never left this box"
+        } else {
+          "SUSPECT HANG - no CPU but connection(s) established: sent, awaiting a reply that is not coming"
+        }
+        Write-QaLog $sp.Phase ("STALL-SNAPSHOT tcp[{0}] remotes[{1}] threadwaits[{2}] cpu_delta={3:n3}s/{4:n1}s -> {5}" -f `
+          $sp.ByState, $sp.Remotes, $sp.Waits, $cpu, $elapsed, $verdict)
+      } catch {
+        Write-QaLog $Phase "STALL-SNAPSHOT flush failed: $($_.Exception.GetType().Name)"
+      }
+    }
+
     if (-not $proc.HasExited) {
       # A timeout is a RESULT, not a harness fault, and nothing in this block may
       # turn it into one. `taskkill` writes to stderr when it cannot terminate

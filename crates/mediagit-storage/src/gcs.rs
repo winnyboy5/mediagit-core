@@ -38,11 +38,15 @@
 //! `Storage` (data plane: put/get) uses `AlwaysRetry.with_attempt_limit(max_retries)`
 //! so upload/download failures are retried up to `GcsConfig::max_retries` times.
 //!
-//! `StorageControl` (gRPC control plane: exists/delete/list) uses the SDK default
-//! AIP-194 policy.  `AlwaysRetry` is deliberately NOT applied here because it
-//! retries `NOT_FOUND`, which `exists()` uses as a fast "absent" signal.  Applying
-//! `AlwaysRetry` to `StorageControl` causes exponential back-off on every missing
-//! chunk, stalling `chunks/check` on a fresh bucket.
+//! `StorageControl` (gRPC control plane: exists/delete/list) uses
+//! [`ControlPlaneRetry`], a policy written for this exact call pattern.
+//! `AlwaysRetry` must NOT be used here because it retries `NOT_FOUND`, which
+//! `exists()` relies on as a fast "absent" signal - that caused exponential
+//! back-off on every missing chunk and stalled `chunks/check` on a fresh
+//! bucket.  But the SDK default (`Aip194Strict`) over-corrected in the other
+//! direction: it treats anything that is not `Unavailable`, HTTP 503, or an io
+//! error as permanent, so a gRPC `Cancelled` from a dropped connection is
+//! never retried at all.  See [`ControlPlaneRetry`] for what that cost.
 //!
 //! ## Config fields `chunk_size` / `resumable_threshold`
 //!
@@ -57,7 +61,11 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, StreamExt, TryStreamExt};
 use google_cloud_auth::signer::Signer;
-use google_cloud_gax::retry_policy::{AlwaysRetry, RetryPolicyExt};
+use google_cloud_gax::error::Error as GaxError;
+use google_cloud_gax::error::rpc::Code;
+use google_cloud_gax::retry_policy::{AlwaysRetry, RetryPolicy, RetryPolicyExt};
+use google_cloud_gax::retry_result::RetryResult;
+use google_cloud_gax::retry_state::RetryState;
 use google_cloud_storage::builder::storage::SignedUrlBuilder;
 use google_cloud_storage::client::{Storage, StorageControl};
 use google_cloud_storage::model_ext::ReadRange;
@@ -199,12 +207,15 @@ impl GcsBackend {
             .with_resumable_upload_threshold(config.resumable_threshold)
             .with_retry_policy(AlwaysRetry.with_attempt_limit(config.max_retries));
 
-        // StorageControl (gRPC control plane: exists/delete/list) intentionally uses
-        // the SDK default retry policy rather than AlwaysRetry.  AlwaysRetry retries
-        // NOT_FOUND, which exists() relies on as a fast "absent" signal.  Retrying
-        // NOT_FOUND causes exponential backoff for every missing chunk, stalling
-        // chunks/check when the bucket is empty or a fresh push is underway.
-        let mut control_builder = StorageControl::builder();
+        // StorageControl (gRPC control plane: exists/delete/list). NOT AlwaysRetry
+        // - that retries NOT_FOUND, which exists() relies on as a fast "absent"
+        // signal, and caused exponential backoff on every missing chunk. NOT the
+        // SDK default either: Aip194Strict treats Cancelled as permanent, so a
+        // dropped connection failed a 2,800-object push with zero retries on
+        // 20260826-ga28. ControlPlaneRetry is permanent on NOT_FOUND and
+        // transient on transport failures. See its doc comment.
+        let mut control_builder = StorageControl::builder()
+            .with_retry_policy(ControlPlaneRetry.with_attempt_limit(config.max_retries));
 
         if let Some(creds) = creds {
             storage_builder = storage_builder.with_credentials(creds.clone());
@@ -537,6 +548,68 @@ impl GcsBackend {
             return true;
         }
         false
+    }
+}
+
+/// Retry policy for the GCS **control plane** (`exists`/`delete`/`list`).
+///
+/// Neither stock policy fits this call pattern, and both failures are on
+/// record:
+///
+/// * `AlwaysRetry` retries `NOT_FOUND`.  `exists()` uses `NOT_FOUND` as its
+///   fast "absent" answer, so every missing chunk paid a full exponential
+///   back-off and `chunks/check` stalled against a fresh bucket.  That is why
+///   `AlwaysRetry` was removed from this client.
+///
+/// * `Aip194Strict` - the SDK default this then fell back to - retries only
+///   `Unavailable`, HTTP 503, io errors, and pre-RPC transients.  Everything
+///   else is permanent, **including `Cancelled`**.  On 20260826-ga28 a GCS
+///   connection dropped mid-push and surfaced as
+///   `Cancelled / tonic::transport::Error(hyper::Error(Canceled, "connection
+///   closed"))`.  It was classified permanent, retried zero times, and failed
+///   a push that had already written 2,800 objects.  local, minio, aws and
+///   azure all passed the same drill; only GCS has a control plane on this
+///   path.
+///
+/// So: `NOT_FOUND` is permanent (that is an answer, not a failure), and
+/// transport-level failures are retried.  `Cancelled`, `Aborted`,
+/// `DeadlineExceeded` and `Internal` all describe a connection that died
+/// rather than a request that was refused, and a `get_object` is a read - safe
+/// to repeat.  Anything else defers to `Aip194Strict` so this policy stays a
+/// narrow amendment rather than a reimplementation.
+///
+/// Decorate with `.with_attempt_limit(...)` at the call site; this type does
+/// not bound attempts itself.
+#[derive(Clone, Debug)]
+pub(crate) struct ControlPlaneRetry;
+
+impl ControlPlaneRetry {
+    /// Codes that mean "the connection failed", not "the server said no".
+    fn is_transport_failure(code: Code) -> bool {
+        matches!(
+            code,
+            Code::Cancelled | Code::Aborted | Code::DeadlineExceeded | Code::Internal
+        )
+    }
+}
+
+impl RetryPolicy for ControlPlaneRetry {
+    fn on_error(&self, state: &RetryState, error: GaxError) -> RetryResult {
+        if let Some(status) = error.status() {
+            // NOT_FOUND is exists()'s answer. Retrying it is the bug this
+            // policy exists to avoid re-introducing.
+            if status.code == Code::NotFound {
+                return RetryResult::Permanent(error);
+            }
+            if Self::is_transport_failure(status.code) {
+                return RetryResult::Continue(error);
+            }
+        }
+        if error.http_status_code() == Some(404) {
+            return RetryResult::Permanent(error);
+        }
+        use google_cloud_gax::retry_policy::Aip194Strict;
+        Aip194Strict.on_error(state, error)
     }
 }
 
@@ -1146,6 +1219,77 @@ mod tests {
     }
 
     use super::*;
+
+    // ---- ControlPlaneRetry -------------------------------------------------
+    //
+    // BOTH HALVES ARE ASSERTED HERE ON PURPOSE. This policy exists because two
+    // previous policies each got exactly one half right: `AlwaysRetry` retried
+    // NOT_FOUND and stalled chunks/check, and `Aip194Strict` refused to retry a
+    // dropped connection and failed a 2,800-object push. A test that only
+    // proved "Cancelled retries" would have passed for `AlwaysRetry` too, and
+    // would not have caught the regression that motivated removing it.
+    mod control_plane_retry {
+        use super::*;
+        use google_cloud_gax::error::Error as GaxError;
+        use google_cloud_gax::error::rpc::{Code, Status};
+        use google_cloud_gax::retry_policy::RetryPolicy;
+        use google_cloud_gax::retry_state::RetryState;
+
+        fn verdict(code: Code) -> RetryResult {
+            // idempotent = true: every control-plane call this policy guards
+            // (get_object/exists, list) is a read.
+            ControlPlaneRetry.on_error(
+                &RetryState::new(true),
+                GaxError::service(Status::default().set_code(code)),
+            )
+        }
+
+        /// The half that `AlwaysRetry` got wrong. NOT_FOUND is `exists()`
+        /// answering "absent" - retrying it bought exponential back-off on
+        /// every missing chunk.
+        #[test]
+        fn not_found_is_permanent() {
+            assert!(verdict(Code::NotFound).is_permanent());
+        }
+
+        /// The half that `Aip194Strict` got wrong, and the exact code seen on
+        /// 20260826-ga28: a dropped gRPC connection surfaces as `Cancelled`,
+        /// which AIP-194 classifies permanent.
+        #[test]
+        fn cancelled_is_retried() {
+            assert!(matches!(verdict(Code::Cancelled), RetryResult::Continue(_)));
+        }
+
+        /// The other codes that describe a dead connection rather than a
+        /// refused request.
+        #[test]
+        fn transport_failures_are_retried() {
+            for code in [Code::Aborted, Code::DeadlineExceeded, Code::Internal] {
+                assert!(
+                    matches!(verdict(code), RetryResult::Continue(_)),
+                    "{code:?} should be retried"
+                );
+            }
+        }
+
+        /// Unchanged from the SDK default - this policy is an amendment, not a
+        /// replacement, so what AIP-194 already retried must keep retrying.
+        #[test]
+        fn unavailable_still_retried_via_aip194() {
+            assert!(matches!(
+                verdict(Code::Unavailable),
+                RetryResult::Continue(_)
+            ));
+        }
+
+        /// A genuine refusal must NOT be retried, or a misconfigured
+        /// credential turns into `max_retries` rounds of back-off per object.
+        #[test]
+        fn permission_denied_is_permanent() {
+            assert!(verdict(Code::PermissionDenied).is_permanent());
+            assert!(verdict(Code::InvalidArgument).is_permanent());
+        }
+    }
 
     #[test]
     fn test_gcs_config_default() {
