@@ -492,7 +492,34 @@ function Drill-A7-BackendOutage {
     # assertion below would pass on an exit code that was never read. Observed
     # here: the drill reported `push-exit=` blank and PASS in the same line.
     $null = $p.Handle
-    Start-Sleep -Milliseconds 2000
+
+    # Stop the backend while the push is STILL TRANSFERRING.
+    #
+    # This was 2000ms, on the stated assumption that 600MB is "large enough that
+    # the push is still mid-transfer ~2s in". That was calibrated against Docker
+    # MinIO. Native Silo moves 600MB in about 3 SECONDS (~200 MB/s), so a 2s
+    # sleep now lands after the upload has finished: 20260825-ga24 recorded
+    # `600.01 MiB, 3 objects sent, in 3 seconds` with push-exit=0, and the drill
+    # correctly reported clean-fail=False because nothing was ever interrupted.
+    #
+    # A7 SKIPped in every campaign before ga24, so this assumption had never
+    # actually been exercised against the native backend - the capability-probe
+    # fix is what first made it run, and it immediately surfaced this.
+    #
+    # 500ms is safe in BOTH directions, which is why it is preferred over
+    # enlarging the fixture:
+    #   - if the transfer is under way, ~1/6 of the payload is in and the rest
+    #     fails, which is the case the drill exists to test;
+    #   - if the client is still enumerating/packing locally, it has not reached
+    #     the backend yet and fails on its first upload attempt - also a clean
+    #     failure.
+    # The only outcome that breaks the drill is stopping too LATE, so erring
+    # early is strictly safer.
+    #
+    # The durable fix is to trigger on observed progress rather than a clock
+    # (watch the server log for the first chunk PUT, then stop). That is a
+    # bigger change than this run warrants; noted rather than silently skipped.
+    Start-Sleep -Milliseconds 500
     & $StopBackend
     $stoppedContainer = $true
 
