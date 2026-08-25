@@ -480,6 +480,20 @@ impl ProtocolClient {
         // upload time via complete_pack; (b) clone-SHA / fsck tests on the pulled working tree.
         // Per-slice hash verification requires storing compressed hashes in the manifest
         // and is deferred as a future improvement.
+        // NOTE: `MEDIAGIT_DOWNLOAD_CONCURRENCY` is read in TWO places with
+        // DIFFERENT defaults - 24 here (pack range-GETs) and 32 in
+        // `pull.rs::pull_streaming` (per-chunk downloads). Setting the env var
+        // makes both agree; leaving it unset does not.
+        //
+        // Deliberately NOT unified: these are different request shapes against
+        // different endpoints, and changing either default is a performance
+        // change that needs measurement, not a tidy-up. Recorded here so the
+        // next reader sees the split as a decision rather than an oversight,
+        // and so nobody "fixes" one side in isolation.
+        //
+        // Relevant if you are chasing the clone-vs-push asymmetry: BOTH of these
+        // already exceed the pack UPLOAD concurrency (8, above), so "clone is
+        // less parallel than push" is not the explanation.
         let download_concurrency: usize = std::env::var("MEDIAGIT_DOWNLOAD_CONCURRENCY")
             .ok()
             .and_then(|s| s.parse().ok())

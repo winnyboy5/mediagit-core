@@ -590,6 +590,12 @@ impl ProtocolClient {
         // MEDIAGIT_RANGE_PARALLEL=4 gives 96 effective TCP streams — enough
         // headroom without opening more sockets than the pool can keep warm.
         // Env var > builder > internal default.
+        //
+        // The comment above says 24; the code below uses 32, and the pack
+        // range-GET path (`packs.rs`) uses 24 for the same env var. The split is
+        // left as-is on purpose — changing a concurrency default is a
+        // performance change that needs measurement, not a comment tidy-up — but
+        // note the prose and the constant disagree here, so trust the constant.
         let concurrent_downloads: usize = std::env::var("MEDIAGIT_DOWNLOAD_CONCURRENCY")
             .ok()
             .and_then(|s| s.parse().ok())
