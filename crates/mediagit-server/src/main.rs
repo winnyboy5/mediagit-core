@@ -640,6 +640,41 @@ async fn main() -> Result<()> {
     // I4: CORS is off unless `cors_allowed_origins` is set in config.
     let app = mediagit_server::apply_cors_layer(app, config.cors_allowed_origins.as_deref());
 
+    // RUNTIME HEARTBEAT - the discriminator this bug family has never had.
+    //
+    // When a server "wedges", the evidence has always been ambiguous in the same
+    // way: the process is alive and the port is bound, but no request is served.
+    // The only proof of life available was the rate-limiter cleanup line, and
+    // that runs on a `std::thread` (see the `std::thread::spawn(cleanup)` above),
+    // so it says nothing about whether the TOKIO RUNTIME is still scheduling.
+    //
+    // ga20 is the case in point: `push --delete` - two small control-plane calls
+    // with no bulk phase - hung 146s while the server logged no request at all,
+    // and the only entry in the gap was that std::thread cleanup timer. From
+    // those logs it is impossible to tell "the runtime was deadlocked" from "the
+    // client never sent anything", and those need opposite investigations.
+    //
+    // This task runs ON the runtime. If it keeps ticking through a stall, the
+    // runtime is healthy and the block is client-side. If it stops, the runtime
+    // itself is wedged and every worker is blocked. Either way the next
+    // occurrence answers the question instead of posing it.
+    //
+    // DEBUG so it costs nothing in normal use; the QA harness already runs
+    // servers at debug level, which is where these stalls are observed.
+    tokio::spawn(async {
+        let started = std::time::Instant::now();
+        let mut ticks: u64 = 0;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            ticks += 1;
+            tracing::debug!(
+                tick = ticks,
+                uptime_s = started.elapsed().as_secs(),
+                "server runtime heartbeat"
+            );
+        }
+    });
+
     // Start HTTP server (always enabled)
     let http_bind_addr = config.bind_addr();
     tracing::info!("Starting HTTP server on {}", http_bind_addr);
