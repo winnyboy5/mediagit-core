@@ -828,6 +828,14 @@ function Invoke-ScaleTeardown {
 # drill builds its own fixtures, so any subset is valid). Empty = all. e.g. "S4,S5".
 $only = ($env:MG_QA_DRILLS -split "," | ForEach-Object { $_.Trim().ToUpper() } | Where-Object { $_ })
 function _Want([string]$s) { -not $only -or ($only -contains $s) }
+# Announce a filtered run. A stale MG_QA_DRILLS left in the shell would otherwise
+# reduce this phase to one drill and still report it green - the variable is a
+# resume/reproduction knob, and nothing about a shortened phase is visible in the
+# gate list unless it says so. Same guard as 07_abuse.
+if ($only) {
+    Write-QaLog $Phase ("MG_QA_DRILLS is set - running ONLY: " + ($only -join ",") +
+        ". This is a PARTIAL phase; a campaign must run with it unset.")
+}
 try {
   if (_Want "S1") { Drill-S1-Concurrency }
   if (_Want "S2") { Drill-S2-Churn }

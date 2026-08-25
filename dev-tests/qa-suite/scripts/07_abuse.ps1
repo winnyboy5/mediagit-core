@@ -93,6 +93,31 @@ function Test-QaDockerAvailable([string]$Container) {
   } catch { return $false }
 }
 
+# Is the S3 endpoint served by a LOCAL process on this machine?
+#
+# This is what separates "A7 cannot run here" from "A7 was not configured here",
+# and those two must not produce the same result. The S3 backend moved from a
+# Docker container to a native Silo process on 2026-08-21; the docker probe above
+# then answered false, A7 recorded a SKIP, and a SKIP reads as green - so the one
+# drill proving the product survives a mid-push backend outage silently stopped
+# running for two weeks. Both clean GA campaigns show it: `unexpected-skip=2` in
+# 07_abuse, and the phase still reported PASS.
+#
+# A backend this host is holding open is one it could cycle, so an unset
+# MG_QA_BACKEND_STOP_CMD/_START_CMD pair there is a MISCONFIGURATION, not a
+# missing capability. A genuinely remote or absent backend is still a real SKIP.
+function Test-QaBackendIsLocal([string]$Endpoint) {
+  try {
+    $port = 9000
+    if ($Endpoint -and ($Endpoint -match ':(\d+)')) { $port = [int]$matches[1] }
+    $conn = Get-NetTCPConnection -LocalPort $port -State Listen -EA SilentlyContinue | Select-Object -First 1
+    if (-not $conn) { return $null }
+    $p = Get-Process -Id $conn.OwningProcess -EA SilentlyContinue
+    if ($p) { return "$($p.ProcessName) (pid $($p.Id))" }
+    return "pid $($conn.OwningProcess)"
+  } catch { return $null }
+}
+
 # Poll a MinIO endpoint's health-live probe until it responds or times out.
 function Wait-QaMinioUp([string]$Endpoint, [int]$TimeoutSec = 30) {
   $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -405,8 +430,22 @@ function Drill-A7-BackendOutage {
   $useCmds  = $stopCmd -and $startCmd
 
   if (-not $useCmds -and -not (Test-QaDockerAvailable $container)) {
-    Rec $drill "SKIP" ("no way to cycle the backend: docker container '$container' not reachable " +
-                       "AND MG_QA_BACKEND_STOP_CMD/_START_CMD unset. " +
+    # Distinguish "cannot" from "was not told how". A local process holding the
+    # endpoint means this host CAN cycle the backend, so a green SKIP would be
+    # the harness excusing its own misconfiguration - which is exactly how this
+    # drill went missing for two weeks.
+    $holder = Test-QaBackendIsLocal $QA.MinioEndpoint
+    if ($holder) {
+      Rec $drill $false ("backend outage NOT tested: $($QA.MinioEndpoint) is served locally by $holder, " +
+                         "so this host can cycle it, but MG_QA_BACKEND_STOP_CMD/_START_CMD are unset " +
+                         "and docker container '$container' is not present. This is configuration, not " +
+                         "capability - set both to a shell command that stops/starts your S3 backend " +
+                         "(native Silo: silo_native.ps1 -Action stop / -Action start).")
+      return
+    }
+    Rec $drill "SKIP" ("no way to cycle the backend: nothing local is serving $($QA.MinioEndpoint), " +
+                       "docker container '$container' not reachable, and " +
+                       "MG_QA_BACKEND_STOP_CMD/_START_CMD unset. " +
                        "Set both to a shell command that stops/starts your S3 backend " +
                        "(native Silo: silo_native.ps1 -Action stop / -Action start).")
     return
