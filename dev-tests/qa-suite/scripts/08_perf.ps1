@@ -95,7 +95,43 @@ $REGRESSION_PCT = 10.0
 # clear of any threshold in this range.
 #
 # Narrow this back toward 10% only with evidence that the spread itself shrank.
-$REGRESSION_PCT_BY_OP = @{ 'add-psd' = 25.0 }
+#
+# `add` = 20%, added 2026-08-25, for the same reason and with the same
+# reluctance.
+#
+# The note above records 500/add as 0.89 -> 0.88 -> 0.89s, a ~1% spread, and 10%
+# was set from that. It is no longer true on this machine. Sixteen consecutive
+# runs of the SAME release binary on the SAME fixture, on an otherwise idle box:
+#
+#   0.88 0.88 0.93 0.92 0.89 0.88 0.89 0.91
+#   0.90 0.86 0.90 0.88 1.01 0.89 0.99 0.89     -> min 0.858, max 1.01
+#
+# and inside a campaign, where servers, the watchdog job and prior phases' disk
+# churn are all live, it reached 1.03s (ga25) and 1.05s (ga23) - +15.7% and +18%.
+#
+# The code did NOT get slower. The MINIMUM is 0.858-0.877s, at or below the
+# 0.89s baseline, and no commit in this cycle touches the add path (they are
+# server bind ordering, auth timeouts, clone debug markers, a server heartbeat,
+# and doc/QA edits). What changed is the tail, not the centre.
+#
+# Ruled out by measurement, not assumed: MEDIAGIT_LOG, which these campaigns set
+# and the baseline campaigns did not, costs 2.0% across those sixteen runs -
+# indistinguishable from noise.
+#
+# So this row gates at 20%, and that is deliberately weaker. The alternative is
+# worse for exactly the reason the add-psd note gives: at 10% it fails on
+# ordinary variance, and a gate that cries wolf is one everybody learns to
+# ignore. A single-sample wall clock on a sub-second operation cannot support a
+# 10% claim on this machine today.
+#
+# The DURABLE fix is a robust statistic, not a looser bound: measure the gated
+# synthetic classes best-of-N and re-promote the baseline using the same
+# statistic. That is a change to how the phase measures AND to the baseline, so
+# it needs a known-good run to promote from - which is precisely what does not
+# exist right now. Recorded rather than quietly skipped.
+#
+# Narrow this back toward 10% only with evidence that the spread itself shrank.
+$REGRESSION_PCT_BY_OP = @{ 'add-psd' = 25.0; 'add' = 20.0 }
 
 # Absolute floor a regression must ALSO clear, per field, in that field's own
 # unit. Percentage-only gating is meaningless once a measurement approaches the
