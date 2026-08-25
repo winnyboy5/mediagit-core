@@ -163,14 +163,45 @@ function Start-QaWatchdog {
                     ($pw | ForEach-Object { "$($_.Id)@$($_.TimeCreated.ToString('HH:mm:ss'))" }) -join ", "
                   } else { "none   (=> not a sleep/resume)" }))
         } catch { $ev += "power events since armed  : unavailable" }
-        # docker can hang when the host really is wedged; bound it so this
-        # block cannot outlive the post-mortem it is writing.
+        # WHAT IS ACTUALLY SERVING THE S3 ENDPOINT.
+        #
+        # This used to run `docker inspect mediagit-minio` unconditionally. The
+        # S3-compatible backend moved from a Docker container to a NATIVE Silo
+        # process on 2026-08-21, so on this host there is no such container and
+        # frequently no docker daemon at all - the probe then either logs a
+        # connect error or reports "docker itself is wedged", which is a
+        # post-mortem asserting the wrong cause. That is worse than asserting
+        # none, and misdiagnosis is what has cost this suite entire campaigns.
+        #
+        # So: name the process really holding the endpoint port, and consult
+        # docker only if a container is actually there.
+        $s3Port = 9000
+        if ($env:MG_QA_MINIO -and ($env:MG_QA_MINIO -match ':(\d+)')) { $s3Port = [int]$matches[1] }
         try {
-          $dj = Start-Job { docker inspect mediagit-minio --format 'status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>&1 }
-          if (Wait-Job $dj -Timeout 20) { $ev += ("minio container           : " + (Receive-Job $dj)) }
-          else { $ev += "minio container           : docker inspect TIMED OUT after 20s (=> docker itself is wedged)" }
+          $conn = Get-NetTCPConnection -LocalPort $s3Port -State Listen -EA SilentlyContinue | Select-Object -First 1
+          if ($conn) {
+            $owner = Get-Process -Id $conn.OwningProcess -EA SilentlyContinue
+            $ev += ("s3 endpoint :$s3Port        : held by $($owner.ProcessName) (pid $($owner.Id)) $($owner.Path)")
+          } else {
+            $ev += "s3 endpoint :$s3Port        : NOTHING LISTENING (backend is down, not merely slow)"
+          }
+        } catch { $ev += "s3 endpoint :$s3Port        : could not be inspected" }
+        # Only meaningful where the backend really is containerised. Bounded, so
+        # this block cannot outlive the post-mortem it is writing.
+        try {
+          $dj = Start-Job { docker inspect mediagit-minio --format 'status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}}' 2>&1 }
+          if (Wait-Job $dj -Timeout 20) {
+            $out = "" + (Receive-Job $dj)
+            # A docker that is absent or not running is the EXPECTED state on a
+            # native-Silo host; do not dress it up as a finding.
+            if ($out -notmatch 'cannot find|failed to connect|not recognized|No such object') {
+              $ev += ("minio container           : " + $out)
+            }
+          } else {
+            $ev += "minio container           : docker inspect TIMED OUT after 20s (only relevant if this host uses docker)"
+          }
           Remove-Job $dj -Force -EA SilentlyContinue
-        } catch { $ev += "minio container           : unavailable" }
+        } catch { }
 
         $ev += @(
           "",
@@ -180,10 +211,19 @@ function Start-QaWatchdog {
           "if BOTH are clean the host was fine and the stall is above it --",
           "read the CLIENT STATE block above before blaming the host.",
           "",
-          "Recovery that worked: 'docker desktop stop' (compacts the vhdx too),",
-          "then 'docker desktop start'. Do NOT use 'wsl --shutdown' - on this",
-          "machine it cycles the Hyper-V vSwitch and kills the Wi-Fi Direct",
-          "adapter with an NDIS fatal error, taking the network down with it."
+          "Recovery depends on which backend this host actually runs - see the",
+          "'s3 endpoint' line above, which names the owning process.",
+          "",
+          "NATIVE Silo (the default since 2026-08-21, process 'silo'):",
+          "  silo_native.ps1 -Action stop, then -Action start. Note that going",
+          "  native is what FIXED the S5 wedge; a docker-era diagnosis does not",
+          "  transfer - see project-minio-offwsl-options-2026-08-20.",
+          "",
+          "DOCKER (only if the 'minio container' line above reported a status):",
+          "  'docker desktop stop' (compacts the vhdx too), then",
+          "  'docker desktop start'. Do NOT use 'wsl --shutdown' - on this",
+          "  machine it cycles the Hyper-V vSwitch and kills the Wi-Fi Direct",
+          "  adapter with an NDIS fatal error, taking the network down with it."
         )
         Add-Content -Path $marker -Value ($ev -join [Environment]::NewLine) -Encoding UTF8
         return
