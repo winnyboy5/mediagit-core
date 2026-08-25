@@ -288,6 +288,33 @@ url = "{}"
         // the cloned repo's key at construction). Run it here so the refusal
         // still comes before any network call: a guard the user only reaches
         // after a connection error is not a guard.
+        // PHASE MARKERS (`MEDIAGIT_LOG=debug`), from here to the first byte of
+        // bulk transfer.
+        //
+        // Clone has hung four times with the process alive, CPU flat across two
+        // samples, every thread in Wait, and NOTHING in the log after the last
+        // completed request. Twice the server had seen zero requests; twice it
+        // had seen encryption-key + info/refs and nothing since. A single fixed
+        // code location cannot explain both, and there is currently no evidence
+        // that distinguishes them - the log is silent through this entire
+        // stretch, so every investigation so far has had to guess which step
+        // blocked.
+        //
+        // These markers make the next occurrence name the step it died in. That
+        // is precisely how the A7 backend-outage hang - open for two weeks and
+        // two campaigns - was solved in one run. `debug!` costs nothing when the
+        // level is off, so this stays out of normal output.
+        //
+        // To arm them for a hang hunt, prefer the targeted filter over blanket
+        // debug - measured on one clone, 8 markers either way:
+        //
+        //   MEDIAGIT_LOG=mediagit::commands::clone=debug ...  28 stderr lines
+        //   MEDIAGIT_LOG=debug ............................. 253 stderr lines
+        //
+        // A campaign runs thousands of clones, so that 9x matters. Verified both
+        // directions: all 8 fire in order under the filter, and the default
+        // build emits none of them.
+        tracing::debug!(phase = "key-armed", "clone: local key/scope resolved");
         crate::encryption::install_armed_key()?;
         mediagit_compression::ensure_key_scope(&target_dir)?;
 
@@ -302,6 +329,7 @@ url = "{}"
         let clone_config = mediagit_config::Config::load(&target_dir)
             .await
             .unwrap_or_default();
+        tracing::debug!(phase = "resolving-credentials", "clone: resolving credentials");
         let (mut credentials, cred_source) =
             crate::repo::resolve_credentials_tiered(&target_dir, &clone_config, "origin");
         let mut client = mediagit_protocol::ProtocolClient::new(self.url.clone())
@@ -312,6 +340,7 @@ url = "{}"
         // First authenticated call of this command — a cached keychain
         // credential (e.g. from a prior `auth login`) may have expired; on a
         // 401, invalidate it and retry once with the next tier (I11).
+        tracing::debug!(phase = "get-refs", "clone: requesting info/refs");
         let remote_refs = match client.get_refs().await {
             Ok(r) => r,
             Err(e)
@@ -345,6 +374,7 @@ url = "{}"
         //
         // 404 means the remote does not do escrow, which is every remote that
         // is not serving encrypted repositories: nothing to adopt, carry on.
+        tracing::debug!(phase = "get-encryption-key", "clone: refs received; asking for escrowed key");
         if let mediagit_protocol::client::escrow::EscrowedKey::Present(key) =
             client.get_encryption_key().await?
         {
@@ -362,6 +392,7 @@ url = "{}"
             }
         }
 
+        tracing::debug!(phase = "create-storage", "clone: building storage backend");
         let storage = create_storage_backend(&target_dir).await?;
         let odb = Arc::new(ObjectDatabase::with_smart_compression(
             Arc::clone(&storage),
@@ -400,6 +431,7 @@ url = "{}"
             std::fs::write(&config_path, lines.join("\n") + "\n")?;
         }
 
+        tracing::debug!(phase = "cdc-seed-written", "clone: config written; selecting ref");
         let remote_ref_name = format!("refs/heads/{}", branch);
         let remote_ref = remote_refs
             .refs
@@ -419,9 +451,11 @@ url = "{}"
         // Use spinner: total bytes unknown, pull_streaming has no progress callback
         let download_pb = progress.spinner("Receiving objects...");
         // Use streaming pull to avoid OOM with large files
+        tracing::debug!(phase = "pull-streaming", "clone: starting bulk transfer");
         let chunked_oids = client
             .pull_streaming(&odb, &remote_ref_name, vec![])
             .await?;
+        tracing::debug!(phase = "pull-complete", "clone: bulk transfer finished");
         download_pb.finish_with_message("Received objects");
 
         if self.verbose {
