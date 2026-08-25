@@ -207,6 +207,27 @@ fn classify_by_status(status: u16) -> TransferOutcome {
 mod tests {
     use super::*;
 
+    // A NOTE ON THE STATUS CODES BELOW, learned from mutation testing.
+    //
+    // Every one of these tests pairs an error CODE with an HTTP STATUS. When the
+    // code is not in the table, classification falls through to
+    // classify_by_status. So if a test pairs a code with a status that already
+    // yields the same outcome, the assertion holds whether or not the code table
+    // exists at all - deleting the entire table still passes.
+    //
+    // That was literally true here: `classify_azure(503, "ServerBusy", "")` was
+    // asserted to be Transient, and 503 is Transient by status anyway. Mutation
+    // testing deleted the Azure transient arm and no test noticed.
+    //
+    // RULE: pair each code with a status whose fallback DIFFERS from the expected
+    // outcome, so the assertion can only pass via the code table.
+    //   408|429|500|502|503|504 -> Transient
+    //   403                     -> RefreshUrl
+    //   400..=499               -> PermanentConfig
+    //   anything else           -> PermanentChunk
+    // In practice: test a Transient code with 400, and a PermanentConfig code
+    // with 503.
+
     #[test]
     fn s3_request_timeout_is_transient() {
         let body = "<Error><Code>RequestTimeout</Code><Message>socket timed out</Message></Error>";
@@ -224,7 +245,9 @@ mod tests {
     #[test]
     fn s3_slow_down_is_transient() {
         assert_eq!(
-            classify_s3(503, "", "<Error><Code>SlowDown</Code></Error>"),
+            // 400, not 503: 503 is Transient by status, which would make this
+            // pass even with the SlowDown arm deleted.
+            classify_s3(400, "", "<Error><Code>SlowDown</Code></Error>"),
             TransferOutcome::Transient
         );
     }
@@ -263,8 +286,9 @@ mod tests {
 
     #[test]
     fn azure_server_busy_is_transient() {
+        // 400 (PermanentConfig by status) so only the code table can produce Transient.
         assert_eq!(
-            classify_azure(503, "ServerBusy", ""),
+            classify_azure(400, "ServerBusy", ""),
             TransferOutcome::Transient
         );
     }
@@ -272,24 +296,53 @@ mod tests {
     #[test]
     fn azure_operation_timed_out_is_transient() {
         assert_eq!(
-            classify_azure(500, "", "<Error><Code>OperationTimedOut</Code></Error>"),
+            classify_azure(400, "", "<Error><Code>OperationTimedOut</Code></Error>"),
             TransferOutcome::Transient
         );
     }
 
     #[test]
     fn azure_auth_failed_triggers_refresh() {
+        // 400, not 403: 403 is RefreshUrl by status and would mask the arm.
         assert_eq!(
-            classify_azure(403, "AuthenticationFailed", ""),
+            classify_azure(400, "AuthenticationFailed", ""),
             TransferOutcome::RefreshUrl
         );
     }
 
     #[test]
+    fn azure_authorization_failure_is_permanent_config() {
+        // 503 is Transient by status, so PermanentConfig can only come from the
+        // code table. Without this the whole Azure config arm could be deleted
+        // and every test still passed - meaning a bucket-policy failure would be
+        // retried as if transient instead of bailing out.
+        assert_eq!(
+            classify_azure(503, "AuthorizationFailure", ""),
+            TransferOutcome::PermanentConfig
+        );
+    }
+
+    #[test]
+    fn azure_header_code_wins_over_body_xml() {
+        // x-ms-error-code is documented as authoritative; the body is the
+        // fallback. If that priority inverts, this reads AuthorizationFailure
+        // and returns PermanentConfig instead of retrying a busy server.
+        assert_eq!(
+            classify_azure(
+                400,
+                "ServerBusy",
+                "<Error><Code>AuthorizationFailure</Code></Error>"
+            ),
+            TransferOutcome::Transient
+        );
+    }
+
+    #[test]
     fn gcs_rate_limit_is_transient() {
+        // 400, not 429: 429 is Transient by status and would mask the reason table.
         assert_eq!(
             classify_gcs(
-                429,
+                400,
                 r#"{"error":{"errors":[{"reason":"rateLimitExceeded"}]}}"#
             ),
             TransferOutcome::Transient
@@ -299,8 +352,18 @@ mod tests {
     #[test]
     fn gcs_backend_error_is_transient() {
         assert_eq!(
-            classify_gcs(500, r#"{"error":{"errors":[{"reason":"backendError"}]}}"#),
+            classify_gcs(400, r#"{"error":{"errors":[{"reason":"backendError"}]}}"#),
             TransferOutcome::Transient
+        );
+    }
+
+    #[test]
+    fn gcs_auth_error_is_permanent_config() {
+        // 503 is Transient by status; PermanentConfig can only come from the
+        // reason table. Otherwise a bad service account is retried forever.
+        assert_eq!(
+            classify_gcs(503, r#"{"error":{"errors":[{"reason":"authError"}]}}"#),
+            TransferOutcome::PermanentConfig
         );
     }
 
@@ -342,12 +405,90 @@ mod tests {
     }
 
     #[test]
+    fn detect_backend_gcs_json_api_url() {
+        // The second host form: www.googleapis.com/storage/... rather than
+        // storage.googleapis.com. Only this URL shape exercises the second arm
+        // of the `||` chain - the first form short-circuits before reaching it.
+        assert_eq!(
+            detect_backend("https://www.googleapis.com/storage/v1/b/bk/o/obj", ""),
+            "gcs"
+        );
+    }
+
+    #[test]
+    fn detect_backend_json_content_type_alone_is_not_gcs() {
+        // A JSON content-type is only a GCS hint when the URL is also a Google
+        // host. If those two conditions ever become an OR, every S3 endpoint
+        // that answers with JSON gets parsed by the GCS classifier and its S3
+        // error codes stop being recognised.
+        assert_eq!(
+            detect_backend("https://mybucket.s3.amazonaws.com/obj", "application/json"),
+            "s3"
+        );
+    }
+
+    #[test]
+    fn classify_auto_routes_azure_urls_to_the_azure_table() {
+        // CannotVerifyCopySource is Transient only in the Azure table; under the
+        // S3 table it is unknown and 400 makes it PermanentConfig. So this can
+        // only pass if the azure route is intact.
+        assert_eq!(
+            classify_auto(
+                400,
+                "https://account.blob.core.windows.net/c/b?se=x",
+                "",
+                "CannotVerifyCopySource",
+                ""
+            ),
+            TransferOutcome::Transient
+        );
+    }
+
+    #[test]
+    fn classify_auto_routes_gcs_urls_to_the_gcs_table() {
+        // A GCS JSON reason body means nothing to the S3 classifier, which would
+        // fall through to status 400 -> PermanentConfig and bail instead of retry.
+        assert_eq!(
+            classify_auto(
+                400,
+                "https://storage.googleapis.com/bucket/obj",
+                "",
+                "",
+                r#"{"error":{"errors":[{"reason":"backendError"}]}}"#
+            ),
+            TransferOutcome::Transient
+        );
+    }
+
+    #[test]
+    fn unknown_403_is_refresh_url_not_permanent() {
+        // 403 must be its own arm ahead of the 400..=499 sweep: a presigned URL
+        // that has simply expired answers 403, and re-signing recovers it.
+        // Folding it into PermanentConfig turns every expiry into a hard failure.
+        assert_eq!(classify_s3(403, "", ""), TransferOutcome::RefreshUrl);
+    }
+
+    #[test]
+    fn unknown_4xx_is_permanent_config_not_permanent_chunk() {
+        // The 400..=499 sweep. Without it a 404 falls to the catch-all
+        // PermanentChunk, which retries per chunk instead of counting toward the
+        // "3 config failures means a real misconfiguration" signal.
+        assert_eq!(classify_s3(404, "", ""), TransferOutcome::PermanentConfig);
+    }
+
+    #[test]
     fn get_no_such_key_is_delayed_fallback() {
         let body = "<Error><Code>NoSuchKey</Code></Error>";
         let outcome = classify_auto_get(404, "https://bucket.s3.amazonaws.com/key", "", "", body);
+        let TransferOutcome::PermanentChunkAfterDelay(delay) = outcome else {
+            panic!("expected PermanentChunkAfterDelay, got {outcome:?}");
+        };
+        // The delay is the whole point of this variant: the object may still be
+        // replicating. A zero delay makes the proxy fallback fire immediately and
+        // hit the same not-yet-visible object, so assert it is actually a wait.
         assert!(
-            matches!(outcome, TransferOutcome::PermanentChunkAfterDelay(_)),
-            "expected PermanentChunkAfterDelay, got {outcome:?}"
+            delay > std::time::Duration::ZERO,
+            "the replication-lag delay must be non-zero, got {delay:?}"
         );
     }
 
