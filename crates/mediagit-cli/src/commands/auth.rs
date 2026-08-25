@@ -613,10 +613,58 @@ fn read_value(prompt: &str, secret: bool, confirm: Option<(&str, &str)>) -> Resu
     }
 }
 
+/// The one HTTP client every `auth` subcommand uses.
+///
+/// This replaced fourteen bare `reqwest::Client::new()` calls, which carry NO
+/// timeout of any kind - not connect, not read. An `auth` request is a few
+/// hundred bytes of JSON to a control-plane route, so there is no legitimate
+/// reason for one to run long, and nothing else on that path is bounded either.
+///
+/// The concrete failure: `auth key revoke` blocked ~60s and the DELETE never
+/// reached the server (its log has a 65-second gap and no matching request
+/// line). A timeout was considered when that was first seen and rejected on the
+/// grounds that the block might be in the keychain lookup rather than the HTTP
+/// call - a fair objection at the time, and now a measured-false one. Both
+/// shared prelude components were profiled:
+///
+///   keychain read, 24 concurrent readers over 6 processes .. max 1.01ms
+///   reqwest::Client::new(), 8 concurrent threads .......... max  245us
+///
+/// (see `tests/keychain_latency_probe.rs` and
+/// `mediagit-protocol/tests/client_construction_probe.rs`). Neither can produce
+/// a 60-second stall, which leaves `.send()` itself as the only unbounded step
+/// on that path.
+///
+/// HONEST SCOPE: this BOUNDS the stall, it does not explain it. The underlying
+/// cause is still unknown. What it buys is that the next occurrence fails with a
+/// timeout error naming the request instead of hanging until the harness kills
+/// it - the difference between a diagnosable event and a silent one.
+///
+/// Connect and read timeouts rather than a total `.timeout()`, matching the
+/// reasoning in `build_control_plane_client`: a total cap is what broke large
+/// uploads before. Auth bodies are tiny, so this is belt-and-braces, but staying
+/// consistent costs nothing. `MEDIAGIT_AUTH_TIMEOUT_SECS` tunes it; 0 restores
+/// the old unbounded behaviour.
+fn auth_http_client() -> reqwest::Client {
+    mediagit_protocol::ensure_crypto_provider();
+    let secs = std::env::var("MEDIAGIT_AUTH_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(60);
+    let mut builder = reqwest::Client::builder();
+    if secs > 0 {
+        builder = builder
+            .connect_timeout(std::time::Duration::from_secs(secs.min(15)))
+            .read_timeout(std::time::Duration::from_secs(secs));
+    }
+    // Fall back to the old behaviour rather than failing an auth command
+    // outright if the builder ever rejects this configuration.
+    builder.build().unwrap_or_else(|_| reqwest::Client::new())
+}
+
 async fn login(opts: &LoginOpts) -> Result<()> {
     let target = resolve_server_target(&opts.server).await?;
-    mediagit_protocol::ensure_crypto_provider();
-    let client = reqwest::Client::new();
+    let client = auth_http_client();
 
     if let Some(creds) = direct_credentials(opts.token.as_deref(), opts.api_key.as_deref()) {
         target.remember(&creds);
@@ -689,8 +737,7 @@ fn direct_credentials(token: Option<&str>, api_key: Option<&str>) -> Option<Cred
 
 async fn register(opts: &ServerOpts) -> Result<()> {
     let target = resolve_server_target(&opts.server).await?;
-    mediagit_protocol::ensure_crypto_provider();
-    let client = reqwest::Client::new();
+    let client = auth_http_client();
 
     let username = read_value("Username", false, None)?;
     let email = read_value("Email", false, None)?;
@@ -754,8 +801,7 @@ async fn register(opts: &ServerOpts) -> Result<()> {
 async fn status(opts: &ServerOpts) -> Result<()> {
     let target = resolve_server_target(&opts.server).await?;
     let (creds, source) = target.resolve_credentials();
-    mediagit_protocol::ensure_crypto_provider();
-    let client = reqwest::Client::new();
+    let client = auth_http_client();
 
     let url = format!("{}/auth/whoami", target.origin());
     let resp = attach_credentials(client.get(&url), &creds)
@@ -797,8 +843,7 @@ async fn status(opts: &ServerOpts) -> Result<()> {
 async fn whoami(opts: &ServerOpts) -> Result<()> {
     let target = resolve_server_target(&opts.server).await?;
     let (creds, _source) = target.resolve_credentials();
-    mediagit_protocol::ensure_crypto_provider();
-    let client = reqwest::Client::new();
+    let client = auth_http_client();
     fetch_and_print_whoami(&client, target.origin(), &creds).await?;
     Ok(())
 }
@@ -854,8 +899,7 @@ async fn passwd(opts: &ServerOpts) -> Result<()> {
     if creds == Credentials::None {
         anyhow::bail!("not logged in; run `mediagit auth login` first");
     }
-    mediagit_protocol::ensure_crypto_provider();
-    let client = reqwest::Client::new();
+    let client = auth_http_client();
 
     let current_password = read_value("Current password", true, None)?;
     let new_password = read_value(
@@ -912,8 +956,7 @@ async fn key_create(opts: &KeyCreateOpts) -> Result<()> {
     if creds == Credentials::None {
         anyhow::bail!("not logged in; run `mediagit auth login` first");
     }
-    mediagit_protocol::ensure_crypto_provider();
-    let client = reqwest::Client::new();
+    let client = auth_http_client();
 
     #[derive(Serialize)]
     struct Body<'a> {
@@ -962,8 +1005,7 @@ async fn key_create(opts: &KeyCreateOpts) -> Result<()> {
 async fn key_list(opts: &ServerOpts) -> Result<()> {
     let target = resolve_server_target(&opts.server).await?;
     let (creds, _source) = target.resolve_credentials();
-    mediagit_protocol::ensure_crypto_provider();
-    let client = reqwest::Client::new();
+    let client = auth_http_client();
 
     #[derive(Deserialize)]
     struct KeyInfo {
@@ -1001,8 +1043,7 @@ async fn key_list(opts: &ServerOpts) -> Result<()> {
 async fn key_revoke(opts: &KeyRevokeOpts) -> Result<()> {
     let target = resolve_server_target(&opts.server).await?;
     let (creds, _source) = target.resolve_credentials();
-    mediagit_protocol::ensure_crypto_provider();
-    let client = reqwest::Client::new();
+    let client = auth_http_client();
 
     let url = format!("{}/auth/keys/{}", target.origin(), opts.id);
     let resp = attach_credentials(client.delete(&url), &creds)
@@ -1087,8 +1128,7 @@ async fn fetch_users(
 async fn admin_list_users(opts: &ServerOpts) -> Result<()> {
     let target = resolve_server_target(&opts.server).await?;
     let (creds, _source) = target.resolve_credentials();
-    mediagit_protocol::ensure_crypto_provider();
-    let client = reqwest::Client::new();
+    let client = auth_http_client();
 
     let users = fetch_users(&client, target.origin(), &creds).await?;
     for u in &users {
@@ -1101,8 +1141,7 @@ async fn admin_set_role(opts: &SetRoleOpts) -> Result<()> {
     let target = resolve_server_target(&opts.server).await?;
     let (creds, _source) = target.resolve_credentials();
     let role = parse_role(&opts.role)?;
-    mediagit_protocol::ensure_crypto_provider();
-    let client = reqwest::Client::new();
+    let client = auth_http_client();
 
     let id = resolve_user_id(&client, target.origin(), &creds, &opts.user).await?;
 
@@ -1148,8 +1187,7 @@ async fn admin_create_user(opts: &CreateUserOpts) -> Result<()> {
     let target = resolve_server_target(&opts.server).await?;
     let (creds, _source) = target.resolve_credentials();
     let role = parse_role(&opts.role)?;
-    mediagit_protocol::ensure_crypto_provider();
-    let client = reqwest::Client::new();
+    let client = auth_http_client();
 
     let email = read_value("Email", false, None)?;
     let password = read_value(
@@ -1207,8 +1245,7 @@ async fn admin_create_user(opts: &CreateUserOpts) -> Result<()> {
 async fn admin_reset_password(opts: &UserOpts) -> Result<()> {
     let target = resolve_server_target(&opts.server).await?;
     let (creds, _source) = target.resolve_credentials();
-    mediagit_protocol::ensure_crypto_provider();
-    let client = reqwest::Client::new();
+    let client = auth_http_client();
 
     let id = resolve_user_id(&client, target.origin(), &creds, &opts.user).await?;
 
@@ -1256,8 +1293,7 @@ async fn admin_grant(opts: &GrantOpts) -> Result<()> {
     let target = resolve_server_target(&opts.server).await?;
     let (creds, _source) = target.resolve_credentials();
     let level = parse_grant_level(&opts.level)?;
-    mediagit_protocol::ensure_crypto_provider();
-    let client = reqwest::Client::new();
+    let client = auth_http_client();
 
     let id = resolve_user_id(&client, target.origin(), &creds, &opts.user).await?;
 
@@ -1296,8 +1332,7 @@ async fn admin_grant(opts: &GrantOpts) -> Result<()> {
 async fn admin_revoke_grant(opts: &RevokeGrantOpts) -> Result<()> {
     let target = resolve_server_target(&opts.server).await?;
     let (creds, _source) = target.resolve_credentials();
-    mediagit_protocol::ensure_crypto_provider();
-    let client = reqwest::Client::new();
+    let client = auth_http_client();
 
     let id = resolve_user_id(&client, target.origin(), &creds, &opts.user).await?;
 
