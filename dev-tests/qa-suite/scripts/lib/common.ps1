@@ -221,8 +221,61 @@ function Invoke-MG([string]$Repo, [string[]]$MgArgs, [string]$Phase = "misc", [i
     $outTask = $stdout.ReadToEndAsync()
     $errTask = $stderr.ReadToEndAsync()
 
+    # LIVE STALL SNAPSHOT.
+    #
+    # `SLOW: ... possible stall` already reports a slow command, but only AFTER
+    # the process has exited - by which point its threads, sockets and CPU
+    # counters are gone. Every capture of the client-hang family has therefore
+    # been reconstructed from logs after the fact, and the one question that
+    # decides the investigation - did the client's request ever leave the box -
+    # was never answerable.
+    #
+    # 20260826-ga27 is the case in point: `push` spent 600s and died with
+    # "Failed to send GET /info/refs ... operation timed out" against
+    # 127.0.0.1, while the server it was talking to bound correctly, ticked 90
+    # runtime heartbeats, and logged ZERO requests. Server-side is now proven
+    # healthy; the missing half is the client's own socket state at that moment.
+    #
+    # So: wait in slices, and when a command crosses the stall threshold, dump
+    # the child's TCP connections, thread wait-reasons and two CPU samples
+    # BEFORE it dies. Two samples, not one, because a single reading cannot
+    # separate "blocked" from "slow but progressing" - that ambiguity cost a day
+    # on 20260820-ga4.
+    #
+    # Fires at most once per command, and only past the threshold, so a healthy
+    # campaign pays nothing.
     $stage = "wait"
-    if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+    $stallSnapSec = [int](_Env "MG_QA_STALL_SNAPSHOT_SEC" "240")
+    $snapped = $false
+    $waitedMs = 0
+    $sliceMs = 5000
+    while ($waitedMs -lt ($TimeoutSec * 1000) -and -not $proc.HasExited) {
+      $proc.WaitForExit([Math]::Min($sliceMs, ($TimeoutSec * 1000) - $waitedMs)) | Out-Null
+      $waitedMs += $sliceMs
+      if (-not $snapped -and -not $proc.HasExited -and $waitedMs -ge ($stallSnapSec * 1000)) {
+        $snapped = $true
+        try {
+          Write-QaLog $Phase "STALL-SNAPSHOT after $([int]($waitedMs/1000))s: $($QA.MG) $argLine"
+          $c1 = $proc.TotalProcessorTime.TotalSeconds
+          $conns = @(Get-NetTCPConnection -OwningProcess $proc.Id -EA SilentlyContinue)
+          $byState = ($conns | Group-Object State | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join " "
+          $remotes = ($conns | Where-Object { $_.State -eq 'Established' } |
+                      ForEach-Object { "$($_.RemoteAddress):$($_.RemotePort)" } |
+                      Sort-Object -Unique | Select-Object -First 4) -join ","
+          $waits = ((Get-Process -Id $proc.Id -EA SilentlyContinue).Threads |
+                    Group-Object WaitReason | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join " "
+          Start-Sleep -Seconds 5
+          $c2 = $proc.TotalProcessorTime.TotalSeconds
+          Write-QaLog $Phase ("STALL-SNAPSHOT tcp[{0}] remotes[{1}] threadwaits[{2}] cpu_delta_5s={3:n3}s" -f `
+            $byState, $remotes, $waits, ($c2 - $c1))
+          Write-QaLog $Phase ("STALL-SNAPSHOT reading: cpu_delta ~0 with no Established remote = the request never left; " +
+                              "cpu_delta ~0 WITH an Established remote = sent, awaiting a reply that is not coming")
+        } catch {
+          Write-QaLog $Phase "STALL-SNAPSHOT failed: $($_.Exception.GetType().Name)"
+        }
+      }
+    }
+    if (-not $proc.HasExited) {
       # A timeout is a RESULT, not a harness fault, and nothing in this block may
       # turn it into one. `taskkill` writes to stderr when it cannot terminate
       # part of the tree ("The process with PID N (child process of PID M) could
