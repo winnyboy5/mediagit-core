@@ -139,6 +139,31 @@ url = "http://backup-server.example.com/my-project"
 - **0**: Success
 - **1**: Remote not found or URL invalid
 
+
+## Subcommand options
+
+`add`:
+- `-f`, `--fetch` — Fetch immediately after adding the remote
+- `--token <TOKEN>` — Bearer token stored as `remotes.<name>.token` in
+  `config.toml`. Deliberately kept OUT of the OS keychain: an explicit config
+  token is meant to be an auditable, editable override. For the
+  keychain-backed default, use [`mediagit auth login`](./auth.md) instead.
+
+`set-url`:
+- `--push` — Set the push URL instead of the fetch URL
+
+
+## Common options
+
+Accepted by this command in addition to the options above.
+
+| Flag | Description |
+|---|---|
+| `--color <WHEN>` | Colored output: `always`, `auto`, or `never` (default `auto`) |
+| `-C`, `--repository <PATH>` | Run as if invoked in `PATH` |
+| `-q`, `--quiet` | Suppress output |
+| `-h`, `--help` | Print help |
+| `-V`, `--version` | Print version |
 ## See Also
 
 - [mediagit fetch](./fetch.md) - Fetch from a remote

@@ -69,7 +69,11 @@ Arguments:
 - `COMMIT` — Commit to tag (default: `HEAD`)
 
 Options:
-- `-m`, `--message <MESSAGE>` — Annotated tag message
+- `-a`, `--annotated` — Create an annotated tag
+- `-m`, `--message <MESSAGE>` — Create an annotated tag with this message
+- `--tagger <NAME>` — Tagger name (annotated tags only)
+- `--email <EMAIL>` — Tagger email (annotated tags only)
+- `-f`, `--force` — Overwrite an existing tag of the same name
 
 ### `list`
 
@@ -82,6 +86,9 @@ mediagit tag list
 Aliases: `ls`
 
 Options:
+- `-n`, `--info` — Show commit info for each tag (git-style `-n`)
+- `--sort <KEY>` — Sort tags (default `refname`)
+- `--reverse` — Reverse the sort order
 - `-v`, `--verbose` — Show tag messages and commit info
 
 ### `delete`
@@ -94,6 +101,9 @@ mediagit tag delete <NAME>
 
 Aliases: `rm`
 
+Options:
+- `-f`, `--force` — Delete without confirmation
+
 ### `show`
 
 Show tag details.
@@ -101,6 +111,9 @@ Show tag details.
 ```bash
 mediagit tag show <NAME>
 ```
+
+Options:
+- `--full` — Show full commit details
 
 ### `verify`
 
@@ -188,6 +201,18 @@ Tag names may not contain spaces. Use `/` for namespacing.
 - **0**: Success
 - **1**: Tag already exists (create) or tag not found (delete/show)
 
+
+## Common options
+
+Accepted by this command in addition to the options above.
+
+| Flag | Description |
+|---|---|
+| `--color <WHEN>` | Colored output: `always`, `auto`, or `never` (default `auto`) |
+| `-C`, `--repository <PATH>` | Run as if invoked in `PATH` |
+| `-q`, `--quiet` | Suppress output |
+| `-h`, `--help` | Print help |
+| `-V`, `--version` | Print version |
 ## See Also
 
 - [mediagit log](./log.md) - View commit history with tag decorations

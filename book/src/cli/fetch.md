@@ -83,6 +83,17 @@ mediagit merge origin/main
 - **0**: Success
 - **1**: Network error or remote not found
 
+
+## Common options
+
+Accepted by this command in addition to the options above.
+
+| Flag | Description |
+|---|---|
+| `--color <WHEN>` | Colored output: `always`, `auto`, or `never` (default `auto`) |
+| `-C`, `--repository <PATH>` | Run as if invoked in `PATH` |
+| `-h`, `--help` | Print help |
+| `-V`, `--version` | Print version |
 ## See Also
 
 - [mediagit pull](./pull.md) - Fetch and merge in one step

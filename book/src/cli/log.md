@@ -267,6 +267,19 @@ $ mediagit log --since="1 month ago"
 All commit OIDs are BLAKE3 hashes (64 hex characters). `--oneline` displays the
 first 7 characters; `--format=%H` prints the full 64-character OID.
 
+
+## Common options
+
+Accepted by this command in addition to the options above.
+
+| Flag | Description |
+|---|---|
+| `--color <WHEN>` | Colored output: `always`, `auto`, or `never` (default `auto`) |
+| `-C`, `--repository <PATH>` | Run as if invoked in `PATH` |
+| `-q`, `--quiet` | Suppress output |
+| `-v`, `--verbose` | Enable verbose output |
+| `-h`, `--help` | Print help |
+| `-V`, `--version` | Print version |
 ## See Also
 
 - [mediagit show](./show.md) - Show commit details

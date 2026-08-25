@@ -112,6 +112,27 @@ $ mediagit branch create feature/vfx abc1234
 - **0**: Success
 - **1**: Ref not found or reflog is empty
 
+
+## Subcommand options
+
+`show`:
+- `-n`, `--count <COUNT>` — Number of entries to show
+- `--all` — Show reflogs for all refs, not just the current one
+
+`expire`:
+- `--keep <KEEP>` — Number of entries to keep (default `90`)
+
+## Common options
+
+Accepted by this command in addition to the options above.
+
+| Flag | Description |
+|---|---|
+| `--color <WHEN>` | Colored output: `always`, `auto`, or `never` (default `auto`) |
+| `-C`, `--repository <PATH>` | Run as if invoked in `PATH` |
+| `-v`, `--verbose` | Enable verbose output |
+| `-h`, `--help` | Print help |
+| `-V`, `--version` | Print version |
 ## See Also
 
 - [mediagit reset](./reset.md) - Reset branch (use reflog to recover)

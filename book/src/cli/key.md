@@ -97,6 +97,19 @@ If both the master key and the recovery code are lost, the objects cannot be rec
 | `MEDIAGIT_ENCRYPTION_KEYFILE` | Path to a file holding the master key, used instead of the OS keychain |
 | `MEDIAGIT_NO_KEYRING` | Skip the OS keychain entirely |
 
+
+## Common options
+
+Accepted by this command in addition to the options above.
+
+| Flag | Description |
+|---|---|
+| `--color <WHEN>` | Colored output: `always`, `auto`, or `never` (default `auto`) |
+| `-C`, `--repository <PATH>` | Run as if invoked in `PATH` |
+| `-q`, `--quiet` | Suppress output |
+| `-v`, `--verbose` | Enable verbose output |
+| `-h`, `--help` | Print help |
+| `-V`, `--version` | Print version |
 ## See also
 
 - [Security architecture](../architecture/security.md)

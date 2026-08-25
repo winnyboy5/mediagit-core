@@ -171,6 +171,19 @@ Unlocked 7d0e441a
 - **0**: Success
 - **1**: Network error, lock conflict, not found, or permission denied
 
+
+## Common options
+
+Accepted by this command in addition to the options above.
+
+| Flag | Description |
+|---|---|
+| `--color <WHEN>` | Colored output: `always`, `auto`, or `never` (default `auto`) |
+| `-C`, `--repository <PATH>` | Run as if invoked in `PATH` |
+| `-q`, `--quiet` | Suppress output |
+| `-v`, `--verbose` | Enable verbose output |
+| `-h`, `--help` | Print help |
+| `-V`, `--version` | Print version |
 ## See Also
 
 - [mediagit push](./push.md) - Push changes to remote (rejected if it touches a locked path someone else owns)

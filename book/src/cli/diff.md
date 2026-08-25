@@ -86,6 +86,18 @@ $ mediagit diff HEAD -- assets/
 - `0` — no differences (or diff printed successfully)
 - non-zero — error resolving revisions or reading objects
 
+
+## Common options
+
+Accepted by this command in addition to the options above.
+
+| Flag | Description |
+|---|---|
+| `--color <WHEN>` | Colored output: `always`, `auto`, or `never` (default `auto`) |
+| `-C`, `--repository <PATH>` | Run as if invoked in `PATH` |
+| `-v`, `--verbose` | Enable verbose output |
+| `-h`, `--help` | Print help |
+| `-V`, `--version` | Print version |
 ## See Also
 
 - [mediagit status](./status.md)

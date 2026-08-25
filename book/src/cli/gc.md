@@ -177,6 +177,14 @@ $ echo $?
 - **0**: GC completed successfully
 - non-zero: GC failed (errors during deletion, repack failure, or not a repository)
 
+
+## Common options
+
+Accepted by this command in addition to the options above.
+
+| Flag | Description |
+|---|---|
+| `-h`, `--help` | Print help |
 ## See Also
 
 - [mediagit fsck](./fsck.md) - Verify repository integrity
