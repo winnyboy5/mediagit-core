@@ -36,6 +36,37 @@ Transfer is **presigned** wherever the backend can sign:
 - **Upload**: the server mints presigned PUT URLs and the client PUTs packs directly to the backend (presigned multipart upload for large packs on S3/MinIO; proxy-upload fallback when the backend can't sign).
 - **Download/clone**: the server mints presigned GET URLs and the client issues Range-GETs direct from the backend (proxy-GET fallback on 404/null).
 
+### How the fallback is decided
+
+The client never has to know which backends can sign. It always asks, and the
+answer itself selects the path — so a backend that cannot sign (or a signing
+attempt that fails) degrades to proxying through the server instead of failing
+the transfer.
+
+```mermaid
+flowchart TD
+    A["client asks the server<br/>to presign N objects"] --> B["server calls presign_put /<br/>presign_get per object"]
+    B --> C{"result"}
+    C -- "Some(url)" --> D["client transfers DIRECT<br/>to the backend"]
+    C -- "None<br/>(backend cannot sign)" --> P["client proxies<br/>through the server"]
+    C -- "Err<br/>(signing failed)" --> W["server logs a warning<br/>and returns no URL"]
+    W --> P
+    D --> E{"direct transfer<br/>succeeded?"}
+    E -- yes --> F["done"]
+    E -- "no (404, expired,<br/>network error)" --> P
+    P --> F
+```
+
+Two consequences worth knowing:
+
+- **A missing URL is not an error.** The server returns no URL for an object it
+  could not sign, logs it, and the client proxies that object. Only that object
+  is affected; its siblings still go direct.
+- **A 404 on a presigned GET is retried through the proxy after a short delay**,
+  because a just-written object may not be visible yet on an
+  eventually-consistent backend. That delay is
+  `MEDIAGIT_404_FALLBACK_DELAY_MS` (default 500).
+
 ## Configuration
 
 See individual backend documentation:
