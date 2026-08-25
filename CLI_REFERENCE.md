@@ -39,6 +39,7 @@ graph LR
         push
         pull
         fetch
+        auth
     end
     subgraph "Media & Sparse"
         media
@@ -49,6 +50,8 @@ graph LR
         fsck
         verify
         stats
+        config
+        lock
         version
         completions
     end
@@ -61,9 +64,9 @@ graph LR
 | **Setup** | `init`, `clone`, `remote` |
 | **File Ops** | `add`, `commit`, `status`, `diff`, `show` |
 | **Branch & History** | `branch`, `merge`, `rebase`, `cherry-pick`, `log`, `reset`, `revert`, `reflog`, `stash`, `bisect`, `tag` |
-| **Remote** | `push`, `pull`, `fetch`, `download` |
+| **Remote** | `push`, `pull`, `fetch`, `download`, `auth` |
 | **Media & Sparse** | `media`, `sparse-checkout` |
-| **Utility** | `gc`, `fsck`, `verify`, `stats`, `version`, `completions` |
+| **Utility** | `gc`, `fsck`, `verify`, `stats`, `config`, `lock`, `key`, `version`, `completions` |
 
 ### Git-Compatibility Shims
 
@@ -562,6 +565,7 @@ mediagit push [REMOTE] [REFSPEC]...
 | `-d, --delete` | Delete remote ref |
 | `-u, --set-upstream` | Set upstream |
 | `--no-track` | Push without setting upstream tracking |
+| `--repair` | Verify remote chunk integrity and force re-upload of any chunk the server reports as corrupted |
 | `-q, --quiet` | Suppress output |
 | `-v, --verbose` | Detailed output |
 
@@ -597,13 +601,13 @@ mediagit pull [REMOTE] [BRANCH]
 |------|-------------|
 | `-r, --rebase` | Rebase instead of merge |
 | `--dry-run` | Preview pull |
-| `--no-commit` | Don't commit merge |
-| `--abort` | Abort pull |
-| `--continue-pull` | Continue pull after resolving conflicts |
+| `--continue` | Continue after resolving conflicts (hidden; implemented) |
 | `-q, --quiet` | Suppress output |
 | `-v, --verbose` | Detailed output |
 
 > `-s/--strategy` and `-X/--strategy-option` are accepted for git-compatibility but hidden; MediaGit uses binary-aware merge for media files.
+>
+> `--no-commit` and `--abort` are declared but **not implemented** — both exit with an error telling you so. Use `mediagit merge --abort` to abort a conflicted pull.
 
 **Examples:**
 ```bash
@@ -1224,8 +1228,8 @@ mediagit completions powershell >> $PROFILE
 | `MEDIAGIT_REPO` | Repository path (set by `-C` flag) |
 | `MEDIAGIT_AUTHOR_NAME` | Default author name |
 | `MEDIAGIT_AUTHOR_EMAIL` | Default author email |
-| `MEDIAGIT_TOKEN` | Bearer token for remote authentication (client auth). Lowest precedence, below per-remote `token` in `config.toml` |
-| `MEDIAGIT_API_KEY` | API key for remote authentication (client auth). Same precedence as `MEDIAGIT_TOKEN`; `MEDIAGIT_TOKEN` wins if both are set |
+| `MEDIAGIT_TOKEN` | Bearer token for remote authentication (client auth). **Highest** precedence: beats per-remote `token` in `config.toml` and the OS keychain |
+| `MEDIAGIT_API_KEY` | API key for remote authentication (client auth). Same tier as `MEDIAGIT_TOKEN`, and likewise beats config and keychain; `MEDIAGIT_TOKEN` wins if both are set |
 | `MEDIAGIT_SIGN` | Sign annotated tags with your SSH key (`1`/`true`/`on`). Off by default |
 | `MEDIAGIT_SIGN_KEY` | Path to the ed25519 key used to sign/verify tags. Default: `~/.ssh/id_ed25519` |
 | `MEDIAGIT_CHECKOUT_PARALLELISM` | Number of parallel file I/O operations during checkout (branch switch, clone, etc.). Default: number of CPUs capped at 8. Set to `1` for sequential behavior |

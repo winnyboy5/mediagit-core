@@ -31,7 +31,7 @@ Lifecycle: **experimental** → **stable** (2 clean deep-test releases) → **de
 | `MEDIAGIT_CODEC_DETECT` | `1` (ON) | 0.2.8-beta | add/chunking | stable | Detects chunk codec for compression routing. `0` forces all chunks to `CodecHint::Unknown` (pre-detection behavior). |
 | `MEDIAGIT_PHASH` | `1` (ON) | 0.2.8-beta | add | stable | Computes perceptual image hashes for delta candidacy. `0` disables hashing, `phash.idx`, and image delta. |
 | `MEDIAGIT_REPO_NAMESPACE` | repo config `repo_namespace` (else sanitized repo-dir basename) | 0.2.8-beta | all | stable | Per-repo namespace prefix for object-store layout v2. No "off" value — always resolves to a namespace. |
-| `MEDIAGIT_TOKEN` | none | 0.2.8-beta | all | stable | Bearer token for client auth (`Authorization` header). Absent ⇒ no header sent. Lowest precedence after per-remote config. |
+| `MEDIAGIT_TOKEN` | none | 0.2.8-beta | all | stable | Bearer token for client auth (`Authorization` header). Absent ⇒ no header sent. **Highest** precedence tier: env beats per-remote config, which beats the OS keychain (repo.rs `resolve_credentials_tiered`). |
 | `MEDIAGIT_API_KEY` | none | 0.2.8-beta | all | stable | API key for client auth (`X-Api-Key` header). Absent ⇒ no header sent. Mutually exclusive with `MEDIAGIT_TOKEN` (token wins if both set). |
 | `MEDIAGIT_CHECKOUT_PARALLELISM` | `num_cpus` capped at 8 | 0.2.8-beta | checkout | stable | Worker threads for parallel checkout. Set to `1` for the old fully-sequential per-file loop. |
 | `MEDIAGIT_BITMAP` | `1` (ON) | 0.2.8-beta | push/pull | stable | Roaring-bitmap reachability index for `gc`/pack negotiation. `0`/`false`/`off` disables generation and consumption (falls back to BFS walk). |
