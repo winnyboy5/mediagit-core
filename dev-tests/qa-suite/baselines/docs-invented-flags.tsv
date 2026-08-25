@@ -1,21 +1,16 @@
 metric	value
-invented_flags	7
-# was 108 until 2026-08-25; the sweep that removed the fabricated CLI flags
-# took it to 4, then adding the missing auth.md page took it to 7.
-# ALL 7 are FALSE POSITIVES, verified individually against --help:
+invented_flags	4
+# 108 -> 4 over the 2026-08-25 docs truth-up.
+# All 4 remaining are FALSE POSITIVES of a per-page lexical gate, verified
+# individually against --help:
 #   bisect/clone/fetch cite `mediagit log --oneline` - real flag on log
 #   reflog cites `mediagit reset --hard`             - real flag on reset
-#   auth documents --name/--permissions/--role       - real flags, but on
-#     NESTED subcommands (`auth key create`, `auth admin create-user`).
-#     13_docs.ps1 recurses only ONE level (it runs `mediagit auth <sub>
-#     --help` but never `... <sub> <subsub> --help`), so two-level flags are
-#     invisible to it. auth is the first page with that shape and is what
-#     exposed the blind spot.
-# TODO: deepen the recursion to two levels, then re-lock this DOWN. That is a
-# harness change, deliberately not made mid-campaign - editing 13_docs.ps1
-# while a run is in flight would mean the run graded itself against a script
-# that changed underneath it.
-# The first four are lexical limits of a per-page gate: an accurate
-# cross-reference to another command reads as invented. Rewording correct
-# docs to satisfy a metric would make them worse, so they stay.
+# Each is an accurate cross-reference to ANOTHER command. Rewording correct
+# documentation to satisfy a metric would make it worse, so they stay.
+#
+# The earlier value of 7 also covered auth's --name/--permissions/--role,
+# which were never invented: the gate recursed only ONE level into
+# subcommands and could not see `auth key create` / `auth admin create-user`.
+# That blind spot is now fixed (two-level recursion) and those 3 are gone.
+#
 # If this number RISES, something real was fabricated - investigate, do not relock.

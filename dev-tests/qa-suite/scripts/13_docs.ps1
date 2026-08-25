@@ -74,10 +74,29 @@ foreach ($page in $pages) {
 
   $real = @{}
   foreach ($m in [regex]::Matches($help, '--[a-z][a-z0-9-]+')) { $real[$m.Value] = $true }
+  # TWO levels, not one.
+  #
+  # This used to recurse a single level, which made every flag on a
+  # sub-subcommand invisible: `auth key create --name`, `auth admin create-user
+  # --role` and friends read as INVENTED because the walk stopped at
+  # `auth key --help`. Adding the auth page (which is the only two-level command
+  # tree in the CLI) is what exposed it, and it cost 3 phantom entries in the
+  # baseline.
+  #
+  # Worth noting what that blind spot really meant: the gate could not see
+  # fabrications on a sub-subcommand AT ALL, so the auth surface - the
+  # security-relevant one - was the least protected part of the docs.
+  #
+  # Depth is capped at two deliberately. clap trees here are at most two deep,
+  # and each extra level multiplies the `--help` invocations this phase makes.
   foreach ($sub in (Get-Subcommands $help)) {
     $subHelp = Get-HelpText @($cmd, $sub)
-    if ($subHelp) {
-      foreach ($m in [regex]::Matches($subHelp, '--[a-z][a-z0-9-]+')) { $real[$m.Value] = $true }
+    if (-not $subHelp) { continue }
+    foreach ($m in [regex]::Matches($subHelp, '--[a-z][a-z0-9-]+')) { $real[$m.Value] = $true }
+    foreach ($sub2 in (Get-Subcommands $subHelp)) {
+      $sub2Help = Get-HelpText @($cmd, $sub, $sub2)
+      if (-not $sub2Help) { continue }
+      foreach ($m in [regex]::Matches($sub2Help, '--[a-z][a-z0-9-]+')) { $real[$m.Value] = $true }
     }
   }
 
