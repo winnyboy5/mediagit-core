@@ -691,21 +691,29 @@ async fn main() -> Result<()> {
                 config.cors_allowed_origins.as_deref(),
             );
 
-            // Run both servers concurrently
+            // Run both servers concurrently.
+            //
+            // Bind HTTP before announcing it, for the reason spelled out in the
+            // HTTP-only branch below: the announcement must be an observation,
+            // not a promise. HTTPS is bound inside `axum_server::bind_rustls`,
+            // so its bind failure surfaces through the `select!` below instead;
+            // the message says "binding" for that half rather than claiming a
+            // listener that may not exist yet.
+            let http_listener = tokio::net::TcpListener::bind(&http_bind_addr).await?;
+            let http_local = http_listener.local_addr()?;
             tracing::info!(
-                "MediaGit server listening on HTTP: {} and HTTPS: {}",
-                http_bind_addr,
+                "MediaGit server listening on HTTP: {} | HTTPS binding on: {}",
+                http_local,
                 https_bind_addr
             );
             tracing::info!("Press Ctrl+C to stop");
 
             // Spawn HTTP server task
             let http_server = tokio::spawn(async move {
-                let listener = tokio::net::TcpListener::bind(&http_bind_addr).await?;
                 // ConnectInfo must be supplied or SmartIpKeyExtractor (rate limiting)
                 // 500s with "Unable to extract key!" on every request.
                 axum::serve(
-                    listener,
+                    http_listener,
                     app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
                 )
                 .with_graceful_shutdown(shutdown_signal())
@@ -749,10 +757,22 @@ async fn main() -> Result<()> {
         }
     } else {
         // HTTP only mode
-        tracing::info!("MediaGit server listening on {}", http_bind_addr);
+        //
+        // Bind BEFORE announcing readiness. These two lines used to sit above
+        // the bind, which made "MediaGit server listening" a promise rather
+        // than an observation: a bind that failed with EADDRINUSE, or a process
+        // that never reached `accept()`, produced a startup log byte-identical
+        // to a healthy one. That cost real diagnosis time - the ga15/ga18
+        // campaign wedges could not be told apart from "bound but not serving"
+        // after the fact, because the only surviving evidence was a log that
+        // claimed success either way.
+        let listener = tokio::net::TcpListener::bind(&http_bind_addr).await?;
+        // Report the address the kernel actually handed us, not the one we
+        // asked for: they differ whenever the configured port is 0.
+        let local_addr = listener.local_addr()?;
+        tracing::info!("MediaGit server listening on {}", local_addr);
         tracing::info!("Press Ctrl+C to stop");
 
-        let listener = tokio::net::TcpListener::bind(&http_bind_addr).await?;
         // ConnectInfo must be supplied or SmartIpKeyExtractor (rate limiting)
         // 500s with "Unable to extract key!" on every request.
         axum::serve(
