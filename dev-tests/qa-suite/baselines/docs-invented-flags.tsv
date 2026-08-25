@@ -1,11 +1,21 @@
 metric	value
-invented_flags	4
+invented_flags	7
 # was 108 until 2026-08-25; the sweep that removed the fabricated CLI flags
-# took it to 4. All 4 remaining are FALSE POSITIVES, verified individually:
+# took it to 4, then adding the missing auth.md page took it to 7.
+# ALL 7 are FALSE POSITIVES, verified individually against --help:
 #   bisect/clone/fetch cite `mediagit log --oneline` - real flag on log
-#   reflog cites `mediagit reset --hard`            - real flag on reset
-# The gate is per-page and lexical, so an accurate cross-reference to another
-# command reads as invented. Rewording correct docs to satisfy a metric would
-# make them worse, so these stay. Same reasoning the script already applies to
-# hidden flags: bake a known residue into the baseline, do not special-case.
-# If this number rises, something real was fabricated - investigate, do not relock.
+#   reflog cites `mediagit reset --hard`             - real flag on reset
+#   auth documents --name/--permissions/--role       - real flags, but on
+#     NESTED subcommands (`auth key create`, `auth admin create-user`).
+#     13_docs.ps1 recurses only ONE level (it runs `mediagit auth <sub>
+#     --help` but never `... <sub> <subsub> --help`), so two-level flags are
+#     invisible to it. auth is the first page with that shape and is what
+#     exposed the blind spot.
+# TODO: deepen the recursion to two levels, then re-lock this DOWN. That is a
+# harness change, deliberately not made mid-campaign - editing 13_docs.ps1
+# while a run is in flight would mean the run graded itself against a script
+# that changed underneath it.
+# The first four are lexical limits of a per-page gate: an accurate
+# cross-reference to another command reads as invented. Rewording correct
+# docs to satisfy a metric would make them worse, so they stay.
+# If this number RISES, something real was fabricated - investigate, do not relock.
