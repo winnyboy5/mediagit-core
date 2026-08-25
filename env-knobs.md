@@ -58,6 +58,8 @@ Lifecycle: **experimental** → **stable** (2 clean deep-test releases) → **de
 | `MEDIAGIT_MEDIA_META` | `1` (ON) | 0.3.0-rc.3 | status | stable | Show `media: ...` summary lines in `status` for recognized media files. `0` disables. |
 | `MEDIAGIT_CHUNK_CACHE_BYTES` | `268435456` (256 MiB) | 0.3.0-rc.3 | odb | stable | In-process chunk read cache size. |
 | `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` | `num_cpus` (clamped 2–16 at the call site) | 0.3.0-rc.3 | add/odb | stable | Worker threads for parallel chunk writes during `add`. Also settable via repo config `[performance] chunk_write_concurrency`; the direct env read at chunking time wins in practice. |
+| `MEDIAGIT_DELTA_LEVEL` | `19` | 0.3.0-rc.3 | add/commit | stable | zstd dictionary compression level for delta encoding. Valid `1`-`22`; anything outside that range is rejected with a warning and the default used. |
+| `MEDIAGIT_ODB_CACHE_MB` | `512` | 0.3.0-rc.3 | all | stable | Object-database in-memory cache size, in MiB. Unparseable values fall back to the default rather than to zero. |
 
 ## Cloud Packs (Track F)
 
@@ -96,6 +98,8 @@ Lifecycle: **experimental** → **stable** (2 clean deep-test releases) → **de
 | `MEDIAGIT_PUSH_CHUNK_CONCURRENCY` | computed (`64 / PUSH_OBJECT_CONCURRENCY`, min 4) | 0.3.0-rc.3 | push | stable | Per-object chunk upload concurrency when `PUSH_PIPELINE=1`; targets ~64 total in-flight PUTs. |
 | `MEDIAGIT_FETCH_DOWNLOAD_CONCURRENCY` | computed (`DOWNLOAD_CONCURRENCY` split across branches, floor per branch) | 0.3.0-rc.3 | fetch | stable | Per-branch chunk download concurrency when fetching multiple branches in parallel (`fetch --all`). Overrides the computed default. |
 | `MEDIAGIT_STRONG_VERIFY` | `0` (OFF) | 0.3.0-rc.3 | push | stable | `1` runs a full BLAKE3 re-hash verification of pushed chunks after transfer. `push --repair` always runs it regardless of this knob. |
+| `MEDIAGIT_DATA_READ_TIMEOUT_SECS` | `300` | 0.3.0-rc.3 | push/pull/clone | stable | Data-plane INTER-BYTE timeout, not a total-request cap: a slow but progressing transfer resets it on every byte. Catches a peer that holds the connection open and goes silent, which `tcp_keepalive` cannot. `0` disables it. |
+| `MEDIAGIT_UPLOAD_VERIFY_CONCURRENCY` | `32` | 0.3.0-rc.3 | server | stable | Max concurrent chunk read-back verifications when `verify_content_on_complete` is on. |
 
 ## Storage Backends
 
@@ -106,6 +110,8 @@ Lifecycle: **experimental** → **stable** (2 clean deep-test releases) → **de
 | `MEDIAGIT_GCS_DISABLE_PRESIGN` | unset (presigned URLs used when a signer is available) | 0.3.0-rc.3 | storage/gcs | stable | Any value forces all GCS transfers through the server proxy, skipping presigned URLs. |
 | `MEDIAGIT_MPU_PART_SIZE` | auto-computed (~`total_size / 96`, floor 16 MiB, clamped to [5 MiB, 5 GiB]) | 0.3.0-rc.3 | storage/s3 | stable | Override the multipart-upload part size for S3/MinIO. Values outside [5 MiB, 5 GiB] are ignored (auto-compute wins). |
 | `MEDIAGIT_MINIO_OP_CONCURRENCY` | `64` | 0.3.0-rc.3 | storage/minio | stable | Bounds concurrent in-flight MinIO `with_retry` operations (put/get/exists/delete/head) to prevent socket exhaustion during backend outages. |
+| `MEDIAGIT_AZURE_IO_TIMEOUT_SECS` | `120` | 0.3.0-rc.3 | azure | stable | Per-IO deadline for Azure blob operations. Guards against a hang no retry policy can rescue. |
+| `MEDIAGIT_GCS_IO_TIMEOUT_SECS` | `120` | 0.3.0-rc.3 | gcs | stable | Per-IO deadline for GCS operations. Added after gcs.rs was found to be the only backend with no timeout at all. |
 
 ## Server / Auth / Locks
 
@@ -120,6 +126,13 @@ Lifecycle: **experimental** → **stable** (2 clean deep-test releases) → **de
 | `MEDIAGIT_LOCKS_ENFORCE` | `1` (ON) | 0.3.0-rc.3 | server/locks | stable | Server rejects pushes that touch paths locked by another user. `0` disables lock enforcement. |
 | `MEDIAGIT_LOCKS_MAX_COMMITS` | `1000` | 0.3.0-rc.3 | server/locks | stable | Max commits walked when computing touched paths for lock enforcement on a push. |
 | `MEDIAGIT_NO_KEYRING` | unset (OS keychain used) | 0.3.0-rc.3 | auth | stable | Any value disables OS keychain credential storage/lookup on the client. |
+| `MEDIAGIT_ADMIN_PASSWORD` | none | 0.3.0-rc.3 | server setup | stable | Password for the bootstrap admin created by `mediagit-server init`. Supplied via env so it never lands in shell history or a config file; requires `--admin-username` and `--admin-email` too. Empty is treated as unset. |
+| `MEDIAGIT_BCRYPT_COST` | bcrypt `DEFAULT_COST` | 0.3.0-rc.3 | server | stable | bcrypt work factor for password hashing. Clamped to `10`-`31`: lower would be insecure, higher is refused by bcrypt. Lower it ONLY in tests, where the default cost dominates runtime. |
+| `MEDIAGIT_MAX_LOGIN_FAILURES` | `5` | 0.3.0-rc.3 | server | stable | Consecutive failed logins before an account is locked out. |
+| `MEDIAGIT_LOGIN_LOCKOUT_SECS` | `900` | 0.3.0-rc.3 | server | stable | How long a lockout lasts, in seconds (15 minutes). |
+| `MEDIAGIT_APIKEY_LAST_USED_RESOLUTION` | `300` | 0.3.0-rc.3 | server | stable | Coarseness, in seconds, of an API key's `last_used` timestamp. Coarse on purpose: a per-request write would make every authenticated read a write. `0` records exactly; negatives are ignored. |
+| `MEDIAGIT_STARTUP_PROBE_TIMEOUT_SECS` | `90` | 0.3.0-rc.3 | server | stable | Budget for the startup storage-backend probe. Junk or `0` falls back to the default rather than to zero - a 0s budget would time out instantly and refuse to start every server. Disabling the probe is `MEDIAGIT_STARTUP_PROBE=0`, a different knob. |
+| `MEDIAGIT_AUTH_TIMEOUT_SECS` | `60` | 0.3.0-rc.3 | cli auth | stable | Connect and read timeout for `mediagit auth` HTTP calls (connect is capped at 15s). `0` restores the previous unbounded behaviour. Added after `auth key revoke` was seen blocking ~60s with the request never reaching the server. |
 
 ## GC / Housekeeping
 
