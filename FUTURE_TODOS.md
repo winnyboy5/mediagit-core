@@ -4,7 +4,7 @@ Consolidated and **priority-ordered** registry of planned features, code-level T
 known limitations for MediaGit. Items are sourced from documentation, source code, and
 historical claudedocs analyses.
 
-> Last updated: 2026-07-18 | v0.3.0-rc.3 | Completed work is recorded in CHANGELOG.md and git history
+> Last updated: 2026-08-25 (backlog reconciliation pass) | v0.3.0-rc.3 | Completed work is recorded in CHANGELOG.md and git history
 
 **Priority levels:**
 - **P0** — Quick win or active blocker — ≤1 day effort, implement immediately
@@ -12,20 +12,34 @@ historical claudedocs analyses.
 - **P2** — Medium impact or complex — 2-6 weeks, planned but not urgent
 - **P3** — Low priority / long-term — deferred until triggered by demand
 
+> **Two unrelated P0–P3 batches share this file and the same priority labels —
+> don't conflate them.** The section immediately below is a closed, dated
+> incident-response sprint (2026-07-18, leaked secrets) with its own 3-item P0
+> checklist. The **Quick Reference — Priority Matrix** further down is the
+> forward-looking product backlog (21 items, P1–P3, no P0s in it) that a
+> "100% of P0–P3 implemented" claim would actually be about. Both reuse
+> P0/P1/P2/P3 as effort/urgency labels; neither implies the other is done.
+
 ---
 
-## ⚠ P0 — Security Remediation: leaked secrets in git history (2026-07-18)
+## ⚠ P0 — Security Remediation: leaked secrets in git history (2026-07-18, closed incident sprint)
 
 Secrets (`.mcp.json` Morph key, `enc_key`/`enc_key.pub` SSH pair, an Anthropic API key) were
 scrubbed from git history and force-pushed on all branches; a fresh-clone verification
 confirmed the remote is clean. Both API keys were revoked regardless of the cleanup.
 
-- [ ] Close/regenerate dependabot PRs (all branch hashes changed by the history rewrite)
+- [ ] Close/regenerate dependabot PRs (all branch hashes changed by the history rewrite) —
+      **unverified 2026-08-25**: no `gh` CLI / GitHub API access in this environment to check
+      PR state, and no related commits in `git log`. Status unknown, not confirmed done.
 - [ ] Request cached-view purge via GitHub Support — public repo: old commits (e.g. `82295e8`,
-      `7177269`) may remain servable by direct SHA URL until purged
+      `7177269`) may remain servable by direct SHA URL until purged — **unverified 2026-08-25**,
+      same reason (no GitHub API access; this is an external support request, not something
+      `git log` would show either way).
 - [ ] Delete the backup mirror `D:\own\saas\mediagit-core-backup-20260718.git` — it is now the
       **only remaining copy of the secrets on disk**; remote verified clean 2026-07-18 so its
-      rollback purpose is served
+      rollback purpose is served. **CONFIRMED STILL PRESENT 2026-08-25** — the directory still
+      exists on disk (`D:\own\saas\mediagit-core-backup-20260718.git\config` etc., last
+      modified 2026-07-18). Still open, not a false positive.
 
 ---
 
@@ -33,7 +47,7 @@ confirmed the remote is clean. Both API keys were revoked regardless of the clea
 
 | # | Item | Priority | Effort | Blocks / Enables |
 |---|------|----------|--------|-----------------|
-| 1 | Bitmap index (pack negotiation follow-up) | **P2** | 3-4 days | Becomes valuable only at scale (10K+ commits) |
+| 1 | ~~Bitmap index (pack negotiation follow-up)~~ | **DONE** | — | Shipped: `crates/mediagit-versioning/src/bitmap.rs` (roaring-bitmap reachability index), wired into `gc` (`crates/mediagit-cli/src/commands/gc.rs`) and pack negotiation (`crates/mediagit-server/src/handlers/repo.rs`), covered by `crates/mediagit-server/tests/e2e_bitmap_negotiation.rs`, gated behind `MEDIAGIT_BITMAP` (default on) |
 | 2 | HTTP/3 via reqwest feature flag | **P3** | 1 day | When reqwest `http3` stabilizes (~2026 Q4) |
 | 3 | Git migration tooling (re-add filter/install/track) | **P3** | 1-2 wk | When user base requests migration |
 | 4 | `mediagit://` URL scheme | **P3** | 1 day | Post-HTTP/3 adoption |
@@ -53,23 +67,24 @@ confirmed the remote is clean. Both API keys were revoked regardless of the clea
 | 18 | Cross-process chunk-delta write lock | **P3** | 2-3 days | In-process race fixed 2026-07-07; multi-process writers to one local repo could still race (CLI never does this) |
 | 19 | phash.idx compaction | **P3** | 0.5 day | Append-only today; only matters >1M entries (~16 MB) |
 | 20 | PSD spot-color channel parse failure | **P3** | Unscoped (needs upstream fix or crate swap) | `psd` crate 0.3.5 errors "invalid channel id 3" on PSDs with a spot-color channel; found 2026-07-10, M5b |
-| 21 | FSCK integration test coverage | **P3** | — | 4 gated integration tests remain `#[ignore]`d |
+| 21 | ~~FSCK integration test coverage~~ | **DONE** | — | `crates/mediagit-versioning/tests/fsck_integration_test.rs` now has 10 active `#[tokio::test]`s and zero `#[ignore]` markers; the gating FIXME comment cited below is gone from the file |
 
 ---
 
 ## P2 — Medium Priority (Planned, Not Urgent)
 
-### 1. Bitmap Index (Pack Negotiation Follow-up)
+### 1. Bitmap Index (Pack Negotiation Follow-up) — DONE
 
-The current `walk_reachable` does a full BFS traversal — O(objects) per fetch. For repos
-with <1K commits this is fast enough. At 10K+ commits, BFS dominates server latency.
-
-**What's needed:**
-- Roaring bitmap index over refs for fast reachability queries
-- Bitmap generation on push / GC / repack
-- Bitmap-accelerated "what's missing" detection in `download_pack`
-
-Effort: **~3–4 days**. Becomes valuable only at scale (10K+ commits).
+**Shipped.** `crates/mediagit-versioning/src/bitmap.rs` persists a commit's full
+object closure as a roaring-bitmap-backed `ReachabilityBitmap`, so pack negotiation
+can skip the BFS walk when a valid bitmap exists for the client's `have` tip. Per
+the module's own correctness contract, it is derived data only: any miss, staleness,
+or format-version mismatch falls back to `walk_reachable` silently, never errors.
+Generation is wired into `gc` (`crates/mediagit-cli/src/commands/gc.rs`); consumption
+into pack negotiation (`crates/mediagit-server/src/handlers/repo.rs`). Gated behind
+`MEDIAGIT_BITMAP` (default on; `=0` reproduces pre-bitmap BFS-only behavior byte
+for byte — see `docs/next-set/knob-policy.md`, local-only). Covered end-to-end by
+`crates/mediagit-server/tests/e2e_bitmap_negotiation.rs`.
 
 ---
 
@@ -212,14 +227,15 @@ implementation plan yet. Effort: **2-3 weeks** (research + implementation).
 
 ### `mediagit-versioning`
 
-**`crates/mediagit-versioning/tests/fsck_integration_test.rs:37`** *(→ item 21)*
-```
-// FIXME: FSCK functionality is under development - tests may fail due to incomplete implementation
-```
-The `mediagit fsck` integration test suite is gated behind this marker. FSCK is functional
-in the CLI but its test coverage is incomplete. *(Update 2026-07-07: fsck gained
-chunk-delta chain validation — cycles / missing bases / depth — with 3 unit tests in
-`src/fsck.rs`; the 4 gated integration tests remain `#[ignore]`d.)*
+**`crates/mediagit-versioning/tests/fsck_integration_test.rs`** *(→ item 21)* — **DONE,
+verified 2026-08-25.** The FIXME marker quoted here in past revisions of this file
+(`// FIXME: FSCK functionality is under development...`) is no longer present in the
+file. All 10 tests (`test_fsck_clean_repository`, `test_fsck_detect_corrupted_object`,
+`test_fsck_detect_missing_object`, `test_fsck_detect_broken_reference`,
+`test_fsck_quick_mode`, `test_fsck_full_mode`, `test_fsck_repair_broken_reference`,
+`test_fsck_repair_dry_run`, `test_fsck_connectivity_check`,
+`test_fsck_max_objects_limit`) are active `#[tokio::test]`s with zero `#[ignore]`
+attributes in the file.
 
 ---
 
@@ -243,4 +259,4 @@ chunk-delta chain validation — cycles / missing bases / depth — with 3 unit 
 | 17 | P3 | **Video pHash** | No perceptual delta-base nomination for video; no viable crate | R&D 2026-07-07 |
 | 18 | P3 | **Cross-process delta lock** | Chunk-delta cycle guard is per-process; concurrent multi-process writers to one local repo could still race | fix 2026-07-07 |
 | 20 | P3 | **PSD spot-color channels** | `psd` crate 0.3.5 errors `"invalid channel id 3"` on PSDs with a spot-color channel; falls back to generic chunking, no crash/data-loss | found 2026-07-10, M5b |
-| 21 | P3 | **FSCK test coverage** | Integration tests marked as potentially failing (fsck itself gained chunk-delta cycle/missing-base validation 2026-07-07) | `fsck_test.rs:37` |
+| 21 | — | ~~**FSCK test coverage**~~ | **DONE, verified 2026-08-25** — 10 active integration tests, 0 `#[ignore]`d, gating FIXME removed | `fsck_integration_test.rs` |

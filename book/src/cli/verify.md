@@ -54,6 +54,21 @@ Show per-commit verification results.
 #### `-q`, `--quiet`
 Suppress output except errors.
 
+#### `--color <WHEN>`
+Colored output: `always`, `auto`, or `never`. Default: `auto`. Global option, shared by every
+`mediagit` subcommand.
+
+#### `-C`, `--repository <PATH>`
+Run as if `verify` was started in `<PATH>` instead of the current directory. Global option,
+shared by every `mediagit` subcommand. Distinct from `--path` above, which is `verify`'s own
+(pre-existing) repository-path option.
+
+#### `-h`, `--help`
+Print help for `verify` and exit.
+
+#### `-V`, `--version`
+Print the `mediagit` version and exit.
+
 ## Examples
 
 ### Verify specific object
@@ -175,9 +190,10 @@ $ mediagit verify --quick --quiet || exit 1
 ### Verify vs Fsck
 
 - **verify**: Fast integrity check — checksums and reference validation only. Does not check connectivity or dangling objects. Best for CI pipelines and quick health checks.
-- **fsck**: Comprehensive graph analysis — connectivity, dangling objects, repair mode. Use for thorough repository audits.
+- **fsck**: Comprehensive graph analysis — connectivity, dangling objects, and a repair mode
+  (`--repair`, not available on `verify`). Use for thorough repository audits.
 
-Use `verify` for spot-checks; `fsck --full` for complete validation.
+Use `verify` for spot-checks; `fsck` for complete validation.
 
 ## See Also
 

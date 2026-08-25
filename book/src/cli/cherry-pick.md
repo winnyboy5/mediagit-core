@@ -6,7 +6,6 @@ Apply commits from another branch onto the current branch.
 
 ```bash
 mediagit cherry-pick [OPTIONS] <COMMITS>...
-mediagit cherry-pick --continue
 mediagit cherry-pick --abort
 mediagit cherry-pick --skip
 ```
@@ -17,7 +16,7 @@ Applies the changes introduced by the specified commits to the current branch,
 creating new commits. Useful for porting specific fixes or features from one
 branch to another without merging the full branch.
 
-Short commit hashes (e.g., from `mediagit log --oneline`) are supported.
+Short commit hashes (e.g., from `mediagit log`) are supported.
 
 ## Arguments
 
@@ -38,9 +37,6 @@ Open an editor to modify the commit message before committing.
 Append the original commit hash to the commit message for traceability:
 `(cherry picked from commit abc1234...)`.
 
-#### `--continue`
-Continue cherry-pick after resolving conflicts.
-
 #### `--abort`
 Abort the cherry-pick sequence and restore the pre-operation state.
 
@@ -50,13 +46,30 @@ Skip the current commit and continue with the rest of the sequence.
 #### `-q`, `--quiet`
 Suppress output.
 
+#### `-v`, `--verbose`
+Enable verbose output.
+
+#### `--color <WHEN>`
+Colored output: `always`, `auto`, or `never`. Default: `auto`. Global option, shared by every
+`mediagit` subcommand.
+
+#### `-C`, `--repository <PATH>`
+Run as if `cherry-pick` was started in `<PATH>` instead of the current directory. Global option,
+shared by every `mediagit` subcommand.
+
+#### `-h`, `--help`
+Print help for `cherry-pick` and exit.
+
+#### `-V`, `--version`
+Print the `mediagit` version and exit.
+
 ## Examples
 
 ### Cherry-pick a single commit
 
 ```bash
 # Find the commit to pick
-$ mediagit log feature/hotfix --oneline
+$ mediagit log feature/hotfix
 abc1234 Fix audio sync regression
 
 # Apply it to current branch
@@ -91,9 +104,8 @@ $ mediagit cherry-pick abc1234
 CONFLICT: Apply commit abc1234 to current HEAD
 Automatic merge failed in: audio/master.wav
 
-# Resolve the conflict:
-$ mediagit add audio/master.wav
-$ mediagit cherry-pick --continue
+# Resolve the conflict, stage it, then resume as instructed
+# by the error message above
 
 # Or skip this commit:
 $ mediagit cherry-pick --skip

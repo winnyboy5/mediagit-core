@@ -37,6 +37,12 @@ Allow creating a commit with no changes.
 ### `--include <PATHS>...`
 Stage the listed paths before committing. Useful for including files in a single step instead of separate `add` and `commit` commands.
 
+### `-a, --all`
+Present in `--help` (clap describes it as staging modified and deleted files before committing),
+but MediaGit's `commit` always rejects it: `commit -a is not supported in MediaGit`. `add` performs
+chunking, delta encoding, and compression, which is too heavy to trigger silently from `commit`.
+Use `mediagit add .` followed by `mediagit commit -m "..."` instead.
+
 ### `-s, --signoff`
 Add a `Signed-off-by` trailer to the commit message. If the trailer is already present, it will not be duplicated.
 
@@ -56,9 +62,22 @@ Override the author/committer date.
 
 - **Format**: RFC3339 (e.g., `2026-01-15T10:30:00Z` or `2026-01-15T10:30:00+05:30`)
 
-> **Note**: `-a`/`--all` is not supported. MediaGit's `add` performs chunking and
-> delta encoding, so auto-staging from `commit` is intentionally disabled. Use
-> `mediagit add .` followed by `mediagit commit` instead.
+### `-q, --quiet`
+Quiet mode.
+
+### `--color <WHEN>`
+Colored output: `always`, `auto`, or `never`. Default: `auto`. Global option, shared by every
+`mediagit` subcommand.
+
+### `-C, --repository <PATH>`
+Run as if `commit` was started in `<PATH>` instead of the current directory. Global option, shared
+by every `mediagit` subcommand.
+
+### `-h, --help`
+Print help for `commit` and exit.
+
+### `-V, --version`
+Print the `mediagit` version and exit.
 
 ## Examples
 
@@ -164,7 +183,7 @@ $ mediagit commit -m "Trigger CI rebuild" --allow-empty
 View commit history with `mediagit log`:
 
 ```bash
-$ mediagit log --oneline -5
+$ mediagit log -5
 i1k5f8h (HEAD -> main) Trigger CI rebuild
 h0j4e7g Add training video series
 g9i3d6f Apply design changes
@@ -215,7 +234,7 @@ Closes #456"
 1. **Atomic commits**: Each commit should represent one logical change
 2. **Descriptive messages**: Explain why changes were made, not just what changed
 3. **Test before committing**: Ensure files work as expected
-4. **Review staged changes**: Use `mediagit status` and `mediagit diff --staged`
+4. **Review staged changes**: Use `mediagit status` and `mediagit diff` against the index
 
 ### Performance
 

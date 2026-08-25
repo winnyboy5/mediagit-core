@@ -5,7 +5,7 @@ Reset the current branch to a specified commit.
 ## Synopsis
 
 ```bash
-mediagit reset [--soft | --mixed | --hard] [<COMMIT>]
+mediagit reset [--soft | --hard] [<COMMIT>]
 mediagit reset <COMMIT> [--] <PATHS>...
 ```
 
@@ -32,9 +32,9 @@ Specific files to reset. Cannot be combined with `--soft` or `--hard`.
 Move the branch pointer to `<COMMIT>`. Working tree and staging area are
 unchanged — changes from undone commits appear as staged.
 
-#### `--mixed` *(default)*
-Move the branch pointer and reset the staging area to match `<COMMIT>`. Working
-tree files are unchanged — changes appear as unstaged.
+Passing neither `--soft` nor `--hard` moves the branch pointer and resets the staging area to
+match `<COMMIT>` (this is the default mode); the working tree is unchanged and those changes
+appear as unstaged.
 
 #### `--hard`
 Move the branch pointer, reset staging area, and discard all working tree
@@ -42,6 +42,23 @@ changes. **Destructive — cannot be undone without the reflog.**
 
 #### `-q`, `--quiet`
 Suppress output.
+
+#### `-v`, `--verbose`
+Enable verbose output.
+
+#### `--color <WHEN>`
+Colored output: `always`, `auto`, or `never`. Default: `auto`. Global option, shared by every
+`mediagit` subcommand.
+
+#### `-C`, `--repository <PATH>`
+Run as if `reset` was started in `<PATH>` instead of the current directory. Global option, shared
+by every `mediagit` subcommand.
+
+#### `-h`, `--help`
+Print help for `reset` and exit.
+
+#### `-V`, `--version`
+Print the `mediagit` version and exit.
 
 ## Examples
 
@@ -55,8 +72,6 @@ $ mediagit reset --soft HEAD~1
 
 ```bash
 $ mediagit reset HEAD~1
-# same as:
-$ mediagit reset --mixed HEAD~1
 ```
 
 ### Discard last commit and all changes
@@ -79,11 +94,11 @@ $ mediagit reset -- textures/hero.psd
 Unstaged: textures/hero.psd
 ```
 
-### Recover from accidental --hard reset
+### Recover from an accidental hard reset
 
 ```bash
 # Find the lost commit in the reflog
-$ mediagit reflog --count 10
+$ mediagit reflog
 HEAD@{0}: reset: moving to HEAD~1
 HEAD@{1}: commit: Add hero texture
 
@@ -96,7 +111,7 @@ $ mediagit reset --hard HEAD@{1}
 | Mode | Branch pointer | Staging area | Working tree |
 |------|---------------|--------------|--------------|
 | `--soft` | Moved | Unchanged | Unchanged |
-| `--mixed` | Moved | Reset | Unchanged |
+| default (neither flag) | Moved | Reset | Unchanged |
 | `--hard` | Moved | Reset | Reset (destructive) |
 
 ## Exit Status

@@ -60,28 +60,28 @@ flowchart LR
     end
     
     subgraph Features["Features"]
-        MULTI[Multipart Upload<br/>100MB parts]
-        RETRY[Exponential Backoff<br/>3 retries]
-        CONC[8 Concurrent Parts]
+        MULTI[Presigned Multipart Upload]
+        RETRY[Per-chunk Retry]
+        IAM[IAM / Credential Chain]
     end
     
-    subgraph Security["Security"]
-        SSE[SSE-S3 / SSE-KMS]
-        SSEC[SSE-C Optional]
-        IAM[IAM Policies]
-    end
-    
-    Config --> Features --> Security
+    Config --> Features
 ```
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `bucket` | Required | S3 bucket name |
-| `region` | Auto-detect | AWS region |
-| `endpoint` | AWS S3 | Custom endpoint for S3-compatible |
-| `part_size` | 100MB | Multipart upload part size |
-| `max_concurrent_parts` | 8 | Parallel part uploads |
-| `max_retries` | 3 | Retry attempts |
+| `region` | Required | AWS region |
+| `access_key_id` / `secret_access_key` | Optional | Falls back to the AWS credential chain when unset |
+| `endpoint` | AWS S3 | Custom endpoint for S3-compatible services |
+| `prefix` | `""` | Object key prefix |
+
+`part_size`, concurrency, and retry counts are not `[storage]` config
+fields — see [Performance Tuning](#performance-tuning) below for how those
+are actually controlled. Server-side encryption (SSE-S3/SSE-KMS/SSE-C) is
+not implemented by the S3 backend (`crates/mediagit-storage/src/s3.rs`);
+see [Security Architecture](#security-architecture) for what encryption the
+project actually provides.
 
 **Credential Chain:**
 1. Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
@@ -234,20 +234,15 @@ flowchart LR
         TLS[TLS 1.3<br/>rustls]
     end
     
-    subgraph Server["Server-Side"]
-        SSE[SSE-S3 / SSE-KMS<br/>At Rest]
-    end
-    
-    Client --> Transit --> Server
+    Client --> Transit
 ```
 
 ### Security Layers
 
 | Layer | Implementation | Purpose |
 |-------|---------------|---------|
-| **Client Encryption** | AES-256-GCM | End-to-end encryption |
+| **Client Encryption** | AES-256-GCM (DC-7 at-rest encryption) | End-to-end encryption; server holds per-repo escrow keys, never the process key |
 | **Transport** | TLS 1.3 (rustls) | In-transit protection |
-| **Server Encryption** | SSE-S3 / SSE-KMS | At-rest protection |
 | **Authentication** | JWT / API Keys | Access control |
 | **Key Derivation** | Argon2 | Password-based keys |
 | **Rate Limiting** | tower_governor | DDoS protection |
@@ -564,10 +559,10 @@ MEDIAGIT_METRICS_PORT=9090
 ### Docker Compose Example
 
 ```yaml
-version: '3.8'
 services:
   mediagit:
-    image: mediagit/server:latest
+    image: ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.3
+    entrypoint: mediagit-server
     ports:
       - "3000:3000"
       - "9090:9090"
@@ -576,9 +571,7 @@ services:
       - MEDIAGIT_METRICS_ENABLED=true
     volumes:
       - ./config:/etc/mediagit
-    deploy:
-      replicas: 3
-      
+
   prometheus:
     image: prom/prometheus
     volumes:
@@ -594,21 +587,17 @@ services:
 
 ## Performance Tuning
 
-### S3 Backend
+### S3 / Upload Concurrency
 
-| Setting | Recommended | Impact |
-|---------|-------------|--------|
-| `part_size` | 100MB (default) | Larger = fewer API calls |
-| `max_concurrent_parts` | 8-16 | Higher = faster uploads |
-| `max_retries` | 3-5 | More resilience |
+These are env-var knobs, not `[storage]` TOML settings — full reference in
+[env-knobs.md](env-knobs.md):
 
-### Server
-
-| Setting | Recommended | Impact |
-|---------|-------------|--------|
-| Worker threads | CPU cores x 2 | Throughput |
-| Connection pool | 100-500 | Concurrent requests |
-| Request timeout | 300s | Large file handling |
+| Knob | Default | Impact |
+|------|---------|--------|
+| `MEDIAGIT_UPLOAD_CONCURRENCY` | 32 | Max concurrent chunk PUT requests |
+| `MEDIAGIT_PACK_UPLOAD_CONCURRENCY` | 8 | Concurrent pack uploads from the client pack builder |
+| `MEDIAGIT_PACK_WORKERS` | 8 | Concurrent ODB writes while unpacking an incoming push pack server-side |
+| `MEDIAGIT_CONTROL_READ_TIMEOUT_SECS` | 300 | Read (inter-byte) timeout on control-plane requests, not a total-request timeout — a slow-but-progressing transfer keeps resetting it |
 
 ---
 

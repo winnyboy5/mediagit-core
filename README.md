@@ -11,7 +11,7 @@
 
 **Version**: v0.3.0-rc.3
 **Status**: 🚧 **RELEASE CANDIDATE**
-**Features**: 100% complete (all P0–P3 items implemented)
+**Features**: 100% complete (all P0–P3 items from the rc.3 feature-completeness sprint implemented — a closed batch, distinct from the forward-looking backlog in [FUTURE_TODOS.md](FUTURE_TODOS.md), which reuses the same P0–P3 labels as effort/impact tiers for planned work)
 **Last Validated**: August 6, 2026 — SCALE QA campaign (`reports/20260806-scale-full`), 0 failures across MinIO, AWS S3, Azure Blob, GCS and local
 **Not yet in a campaign**: at-rest encryption (DC-7), added in rc.3. Covered by the workspace suite including an end-to-end encrypted push and read-back over a real server, but no cloud-backend campaign has run against it yet.
 **🚨 WARNING 🚨**: This project is under active development. Be aware that large breaking changes may happen before 1.0 is reached.
@@ -366,7 +366,10 @@ mediagit-core/
 │   ├── mediagit-security/     # Auth, encryption, TLS
 │   └── ...
 ├── tests/                     # Integration tests
-├── docker/                    # Docker configurations
+├── Dockerfile                 # Server image build
+├── docker-compose.yml         # Local multi-backend dev services (MinIO/Azurite/fake-GCS)
+├── docker-compose.minio.yml   # Pinned MinIO-only backend (A7 outage drill)
+├── docker-compose.test.yml    # CI integration-test services
 ├── DEVELOPMENT_GUIDE.md       # Complete setup guide
 └── Cargo.toml                 # Workspace configuration
 ```
@@ -624,7 +627,7 @@ gcloud auth login
 
 ### Examples
 - Configuration examples: `crates/mediagit-config/examples/`
-- Docker configs: `docker/`
+- Docker configs: `Dockerfile`, `docker-compose*.yml` (repo root)
 - Test scripts: `tests/`
 
 ---
@@ -964,7 +967,7 @@ Special thanks to:
 ## Statistics
 
 - **Lines of Code**: 85,000+ (Rust, 218 source files across 14 crates)
-- **Features**: 100% complete (all P0–P3 items)
+- **Features**: 100% complete (all P0–P3 items from the rc.3 feature-completeness sprint — see disambiguation note above)
 - **Test Coverage**: 1,765+ unit/integration tests (validated 2026-07-16); **614/614 deep-tests** across MinIO, AWS S3, Azure Blob, GCS (validated 2026-06-02)
 - **Staging Throughput**: 25–240 MB/s for small files; 2.8–5.2 MB/s for chunked large files (WAV/PSD/GLB)
 - **Network Throughput**: 134–267 MB/s push (local server, pack negotiation); WAN-bound on cloud backends

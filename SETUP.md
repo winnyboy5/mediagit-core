@@ -504,8 +504,15 @@ alternate server configs — the server config never has a `[storage]` key).
 ### Local MinIO for backend testing
 
 ```bash
-docker run -p 9000:9000 -p 9001:9001 minio/minio server /data --console-address ":9001"
+docker compose -f docker-compose.minio.yml up -d
 ```
+
+This runs `pgsty/silo` — the Pigsty community fork of MinIO, adopted after
+upstream discontinued its open-source edition. Silo keeps the S3 API and
+on-disk format, so it's a drop-in; the service, container, and volume are
+still named `minio` on purpose, since the QA suite's A7 backend-outage drill
+and the documented `MG_QA_MINIO` endpoint knob depend on that name (see the
+header comment in `docker-compose.minio.yml`).
 
 S3 API on `localhost:9000`, web console on `localhost:9001`, default
 credentials `minioadmin`/`minioadmin`. A ready-made MinIO `[storage]`

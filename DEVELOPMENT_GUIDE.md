@@ -231,7 +231,32 @@ cargo test  -p mediagit-config
 On Windows, `.cargo/config.toml` already sets `/INCREMENTAL:NO`, which halves
 peak link-step RAM.
 
-### 4. Local Dev Server Harness
+### 4. Local Backend Services (Docker Compose)
+
+Three compose files at the repo root cover different jobs — none of them run
+in CI except the third:
+
+- **`docker-compose.yml`** — full local dev stack (MinIO/Silo, Azurite, a
+  fake-GCS server, optionally LocalStack). Driven by
+  `scripts/start-test-services.sh` and `scripts/stop-test-services.sh`.
+  Use this when you want all four cloud backends available locally at once,
+  e.g. to run `cargo test test_s3_backend test_azure_backend
+  test_gcs_backend` against real emulators instead of mocks.
+  ```bash
+  scripts/start-test-services.sh
+  # ...run tests...
+  scripts/stop-test-services.sh --clean   # also drops volumes
+  ```
+- **`docker-compose.minio.yml`** — a single pinned MinIO-compatible backend
+  (see [SETUP.md → Local MinIO for backend testing](SETUP.md)). Exists
+  specifically for the QA suite's A7 backend-outage drill
+  (`dev-tests/qa-suite/scripts/07_abuse.ps1`), which needs a stable,
+  version-pinned MinIO it can stop and restart by container name mid-run.
+- **`docker-compose.test.yml`** — CI's integration-test services; started and
+  torn down by `.github/workflows/ci.yml`. Not meant to be run manually for
+  day-to-day dev work — use `docker-compose.yml` for that instead.
+
+### 5. Local Dev Server Harness
 
 `dev-tests/dev-server/` is a ready-made server working directory for manual
 client-server testing — `mediagit-server.toml` (port `5000`), a `repos/` dir,
@@ -243,7 +268,7 @@ is the matching client-side scratch dir. Start it with:
 ./target/debug/mediagit-server --config dev-tests/dev-server/mediagit-server.toml
 ```
 
-### 5. Pre-Commit Hooks
+### 6. Pre-Commit Hooks
 
 We use **[husky-rs](https://github.com/pplmx/husky-rs)** (pure Rust) for Git
 hooks: `cargo fmt --check`, `cargo clippy`, license header check, a >5MB file

@@ -61,6 +61,20 @@ Add a total size (staged + modified + untracked, `HumanBytes`-formatted) to the 
 Print a single JSON document to stdout instead of human-readable text, and suppress all colors,
 headers, and progress output. See [JSON Output](#json-output) below for the schema.
 
+### `--color <WHEN>`
+Colored output: `always`, `auto`, or `never`. Default: `auto`. Global option, shared by every
+`mediagit` subcommand.
+
+### `-C, --repository <PATH>`
+Run as if `status` was started in `<PATH>` instead of the current directory. Global option, shared
+by every `mediagit` subcommand.
+
+### `-h, --help`
+Print help for `status` and exit.
+
+### `-V, --version`
+Print the `mediagit` version and exit.
+
 ## Long Format Output
 
 ```
@@ -102,7 +116,7 @@ human format does.
 ## Branch Tracking
 
 With `-b`, the branch line reflects upstream state when the current branch has one configured
-(written by `clone` for the default branch, or `branch switch -c --track <remote>/<branch>`):
+(written by `clone` for the default branch, or by setting up a tracking branch via `branch switch`):
 
 ```bash
 # No upstream configured — header unchanged
@@ -131,9 +145,9 @@ HEAD detached at a3c8f9d1...
 ```
 
 Ahead/behind counts are the sizes of the symmetric difference between the local branch's commit
-ancestry and the remote-tracking ref's commit ancestry (`refs/remotes/<remote>/<branch>`) — the same
-semantics as `git rev-list --left-right --count`. They require the relevant commits to already be
-present in the local object database (i.e. `fetch` has run); `status` itself never fetches.
+ancestry and the remote-tracking ref's commit ancestry (`refs/remotes/<remote>/<branch>`). They
+require the relevant commits to already be present in the local object database (i.e. `fetch` has
+run); `status` itself never fetches.
 
 ## JSON Output
 

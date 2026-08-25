@@ -39,6 +39,10 @@ ehthumbs.db
 coverage/
 **/coverage/
 *.lcov
+# `*.lcov` does not match `lcov.info`, which is what cargo-llvm-cov and
+# grcov actually emit by default. Without this an accidental `git add`
+# could commit a multi-MB coverage report.
+lcov.info
 .nyc_output
 *.tar.gz
 *.zip
