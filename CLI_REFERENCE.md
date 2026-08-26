@@ -1,6 +1,6 @@
 # MediaGit CLI Reference
 
-Complete command reference for MediaGit v0.3.0-rc.3 — Git for Media Files.
+Complete command reference for MediaGit v0.3.0-rc.4 — Git for Media Files.
 
 Object IDs (OIDs) throughout MediaGit — commits, blobs, chunks — are **BLAKE3** hashes displayed as 64 lowercase hex characters.
 

@@ -70,6 +70,16 @@ for f in $DOC_FILES; do
 done
 echo "  Updated $count doc files"
 
+# 2b. Intra-workspace path dependencies that also carry a `version = "..."` pin.
+#     crates.io needs the pin, and it must track the workspace version — a stale
+#     one shipped in rc.4 prep because this step did not exist.
+for f in "$ROOT"/crates/*/Cargo.toml; do
+    if grep -q "version = \"$OLD\"" "$f" 2>/dev/null; then
+        sed -i "s/version = \"$OLD_RE\"/version = \"$NEW\"/g" "$f"
+        echo "  ✓ $(realpath --relative-to="$ROOT" "$f") (dependency pin)"
+    fi
+done
+
 # 3. Example config files
 EXAMPLE_CONFIGS=$(find "$ROOT/crates" -name '*.toml' -path '*/examples/*' 2>/dev/null || true)
 for f in $EXAMPLE_CONFIGS; do

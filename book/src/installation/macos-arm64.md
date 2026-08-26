@@ -17,7 +17,7 @@ Homebrew automatically installs the ARM64 version on Apple Silicon Macs.
 
 ```bash
 # Download latest ARM64 binary
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.3/mediagit-0.3.0-rc.3-aarch64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.4/mediagit-0.3.0-rc.4-aarch64-macos.tar.gz \
   | sudo tar xz -C /usr/local/bin
 
 # Verify native ARM64
@@ -145,7 +145,7 @@ mediagit init
 
 Expected output:
 ```
-mediagit-core 0.3.0-rc.3
+mediagit-core 0.3.0-rc.4
 /opt/homebrew/bin/mediagit: Mach-O 64-bit executable arm64
 ✓ All checks passed
 ✓ Initialized empty MediaGit repository in .mediagit/
@@ -221,7 +221,7 @@ brew upgrade mediagit-core
 ### Manual Update
 
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.3/mediagit-0.3.0-rc.3-aarch64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.4/mediagit-0.3.0-rc.4-aarch64-macos.tar.gz \
   | sudo tar xz -C /usr/local/bin
 ```
 

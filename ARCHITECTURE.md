@@ -1,6 +1,6 @@
 # MediaGit Architecture
 
-**Version**: 0.3.0-rc.3
+**Version**: 0.3.0-rc.4
 
 > **Media-first version control** built on Git semantics with intelligent compression,
 > content-defined chunking, delta encoding, and media-aware merging.
@@ -166,7 +166,7 @@ graph TD
 ### Importing from Git or git-lfs — not available
 There is **no supported path** for importing an existing git or git-lfs
 repository into MediaGit. Two crates (`mediagit-git`, `mediagit-migration`)
-claimed to provide one and were deleted in 0.3.0-rc.3; neither had ever been
+claimed to provide one and were deleted in 0.3.0-rc.4; neither had ever been
 wired to the CLI, and `mediagit-git`'s clean filter replaced file content with a
 pointer **without storing the content anywhere**, logging success. Configured as
 a real git filter, it would have destroyed every file it touched.
@@ -1184,5 +1184,5 @@ merge = "refs/heads/main"
 ## Performance Benchmarks
 
 See **[BENCHMARKS.md](BENCHMARKS.md)** for current storage-savings and cross-backend
-throughput measurements, methodology, and reproduction steps — validated against the
-v0.3.0-rc.3 release (614/614 deep-tests, July 2026 QA campaign).
+throughput measurements, methodology, and reproduction steps — measured on the
+v0.3.0-rc.4 tree (SCALE QA campaign, 220 gates, 0 failures, August 18 2026).

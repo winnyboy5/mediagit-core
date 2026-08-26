@@ -90,7 +90,7 @@ The generated `config.toml` contains the full default configuration. Key section
 ```toml
 [app]
 name = "mediagit"
-version = "0.3.0-rc.3"   # matches current binary version
+version = "0.3.0-rc.4"   # matches current binary version
 environment = "development"
 port = 8080
 

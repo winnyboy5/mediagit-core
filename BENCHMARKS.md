@@ -1,6 +1,6 @@
 # Storage Savings Benchmarks
 
-**Run date:** August 18, 2026 | **Build:** mediagit 0.3.0-rc.3 | **CDC Seed:** 20260716 (pinned for determinism)
+**Run date:** August 18, 2026 | **Build:** mediagit 0.3.0-rc.3 (the untagged pre-release that ships as 0.3.0-rc.4) | **CDC Seed:** 20260716 (pinned for determinism)
 **Source:** full SCALE QA campaign (220 gates, 0 failures)
 
 > Re-measured on `0.3.0-rc.3`. The previous publication was `0.2.8-beta.1` (July 16, 2026) and

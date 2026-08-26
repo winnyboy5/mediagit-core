@@ -45,7 +45,7 @@ ignore = "0.4"  # gitignore-style pattern matching, reused for sparse-checkout p
 [dev-dependencies]
 # DC-7: `keyed_odb_seals` needs `EncryptionKey` and `envelope::is_sealed` to
 # prove a plain-constructor ObjectDatabase seals once the process is keyed.
-mediagit-security = { version = "0.3.0-rc.3", path = "../mediagit-security", default-features = false }
+mediagit-security = { version = "0.3.0-rc.4", path = "../mediagit-security", default-features = false }
 proptest.workspace = true
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 uuid = { version = "1.11", features = ["v4"] }

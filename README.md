@@ -9,7 +9,7 @@
 
 ## 🎯 Status
 
-**Version**: v0.3.0-rc.3
+**Version**: v0.3.0-rc.4
 **Status**: 🚧 **RELEASE CANDIDATE**
 **Features**: 100% complete (all P0–P3 items from the rc.3 feature-completeness sprint implemented — a closed batch, distinct from the forward-looking backlog in [FUTURE_TODOS.md](FUTURE_TODOS.md), which reuses the same P0–P3 labels as effort/impact tiers for planned work)
 **Last Validated**: August 6, 2026 — SCALE QA campaign (`reports/20260806-scale-full`), 0 failures across MinIO, AWS S3, Azure Blob, GCS and local
@@ -142,19 +142,19 @@ curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/instal
 
 **Linux x86_64 — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.3/mediagit-0.3.0-rc.3-x86_64-linux.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.4/mediagit-0.3.0-rc.4-x86_64-linux.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **macOS Apple Silicon — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.3/mediagit-0.3.0-rc.3-aarch64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.4/mediagit-0.3.0-rc.4-aarch64-macos.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **Windows x86_64 (PowerShell):**
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.3/mediagit-0.3.0-rc.3-x86_64-windows.zip" -OutFile mediagit.zip
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.4/mediagit-0.3.0-rc.4-x86_64-windows.zip" -OutFile mediagit.zip
 Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 # Add to PATH:
 [Environment]::SetEnvironmentVariable("Path", "$env:Path;$env:LOCALAPPDATA\MediaGit\bin", "User")
@@ -163,8 +163,8 @@ Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 #### Docker
 
 ```bash
-docker pull ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.3
-docker run --rm ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.3 mediagit --version
+docker pull ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.4
+docker run --rm ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.4 mediagit --version
 ```
 
 #### From Source
@@ -184,11 +184,11 @@ cargo build --release
 
 | Platform | Archive |
 |----------|---------|
-| Linux x86_64 | `mediagit-0.3.0-rc.3-x86_64-linux.tar.gz` |
-| Linux ARM64 | `mediagit-0.3.0-rc.3-aarch64-linux.tar.gz` |
-| macOS Intel | `mediagit-0.3.0-rc.3-x86_64-macos.tar.gz` |
-| macOS Apple Silicon | `mediagit-0.3.0-rc.3-aarch64-macos.tar.gz` |
-| Windows x86_64 | `mediagit-0.3.0-rc.3-x86_64-windows.zip` |
+| Linux x86_64 | `mediagit-0.3.0-rc.4-x86_64-linux.tar.gz` |
+| Linux ARM64 | `mediagit-0.3.0-rc.4-aarch64-linux.tar.gz` |
+| macOS Intel | `mediagit-0.3.0-rc.4-x86_64-macos.tar.gz` |
+| macOS Apple Silicon | `mediagit-0.3.0-rc.4-aarch64-macos.tar.gz` |
+| Windows x86_64 | `mediagit-0.3.0-rc.4-x86_64-windows.zip` |
 
 Each archive includes `mediagit` (CLI) and `mediagit-server` binaries, plus a `.sha256` checksum file.
 
@@ -322,7 +322,7 @@ All 32 MediaGit commands, grouped by workflow:
 
 > **Importing from git or git-lfs is not supported.** The migration commands
 > (`filter`, `install`, `track`, `untrack`) were removed in v0.2.4, and the two
-> crates that backed them were deleted in v0.3.0-rc.3 — neither was ever wired
+> crates that backed them were deleted in v0.3.0-rc.4 — neither was ever wired
 > to the CLI, and the clean filter replaced file content with a pointer without
 > storing the content anywhere. MediaGit is a standalone VCS for media, not a
 > git front-end, so an importer must rebuild history through MediaGit's own
@@ -836,7 +836,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] `/health` route alias alongside `/healthz`
 
 
-### v0.3.0-rc.3 — July 2026
+### v0.3.0-rc.4 — July 2026
 *Object-store layout v2, client auth, and reachability tooling, GA hardening: server-enforced locking, durable auth, format freeze*
 
 - [x] Object-store layout v2: per-repo namespace, true two-level hash fanout, `LAYOUT` marker
@@ -897,7 +897,7 @@ aws iam get-user-policy --user-name mediagit-user --policy-name MediaGitS3Policy
 ```bash
 # The /releases/latest API returns 404 when only pre-releases exist.
 # Pass the version explicitly:
-VERSION=0.3.0-rc.3 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
+VERSION=0.3.0-rc.4 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 
 # Or on Windows PowerShell:
 iwr -UseBasicParsing https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.ps1 | iex
@@ -965,4 +965,4 @@ Special thanks to:
 
 **Made with 🦀 and ❤️ by the MediaGit Contributors**
 
-**Status**: Release Candidate | **Version**: v0.3.0-rc.3 | **Updated**: July 16, 2026 | **Cloud-Validated**: QA campaign `20260716-172951` ✅
+**Status**: Release Candidate | **Version**: v0.3.0-rc.4 | **Updated**: July 16, 2026 | **Cloud-Validated**: QA campaign `20260716-172951` ✅
