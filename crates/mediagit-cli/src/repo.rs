@@ -521,13 +521,13 @@ pub fn host_matches_remote(typed_url: &str, remote_url: &str) -> bool {
 fn warn_if_config_world_readable(repo_root: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let config_path = repo_root.join(".mediagit").join("config.toml");
-    if let Ok(meta) = std::fs::metadata(&config_path) {
-        if meta.permissions().mode() & 0o077 != 0 {
-            eprintln!(
-                "warning: {} is readable by group/other and may contain a remote token or API key — consider `chmod 600` on it",
-                config_path.display()
-            );
-        }
+    if let Ok(meta) = std::fs::metadata(&config_path)
+        && meta.permissions().mode() & 0o077 != 0
+    {
+        eprintln!(
+            "warning: {} is readable by group/other and may contain a remote token or API key — consider `chmod 600` on it",
+            config_path.display()
+        );
     }
 }
 
