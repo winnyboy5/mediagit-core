@@ -1,10 +1,10 @@
 # FUTURE_TODOS.md
 
 Consolidated and **priority-ordered** registry of planned features, code-level TODOs, and
-known limitations for MediaGit. Items are sourced from documentation, source code, and
-historical claudedocs analyses.
+known limitations for MediaGit. Items are sourced from documentation and source code;
+each entry cites the file it was verified against.
 
-> Last updated: 2026-08-25 (backlog reconciliation pass) | v0.3.0-rc.4 | Completed work is recorded in CHANGELOG.md and git history
+> Last updated: 2026-08-26 (completed items removed) | v0.3.0-rc.4 | Completed work is recorded in CHANGELOG.md and git history
 
 **Priority levels:**
 - **P0** — Quick win or active blocker — ≤1 day effort, implement immediately
@@ -16,7 +16,7 @@ historical claudedocs analyses.
 > don't conflate them.** The section immediately below is a closed, dated
 > incident-response sprint (2026-07-18, leaked secrets) with its own 3-item P0
 > checklist. The **Quick Reference — Priority Matrix** further down is the
-> forward-looking product backlog (21 items, P1–P3, no P0s in it) that a
+> forward-looking product backlog (19 items, P1–P3, no P0s in it) that a
 > "100% of P0–P3 implemented" claim would actually be about. Both reuse
 > P0/P1/P2/P3 as effort/urgency labels; neither implies the other is done.
 
@@ -47,14 +47,13 @@ confirmed the remote is clean. Both API keys were revoked regardless of the clea
 
 | # | Item | Priority | Effort | Blocks / Enables |
 |---|------|----------|--------|-----------------|
-| 1 | ~~Bitmap index (pack negotiation follow-up)~~ | **DONE** | — | Shipped: `crates/mediagit-versioning/src/bitmap.rs` (roaring-bitmap reachability index), wired into `gc` (`crates/mediagit-cli/src/commands/gc.rs`) and pack negotiation (`crates/mediagit-server/src/handlers/repo.rs`), covered by `crates/mediagit-server/tests/e2e_bitmap_negotiation.rs`, gated behind `MEDIAGIT_BITMAP` (default on) |
 | 2 | HTTP/3 via reqwest feature flag | **P3** | 1 day | When reqwest `http3` stabilizes (~2026 Q4) |
-| 3 | Git migration tooling (re-add filter/install/track) | **P3** | 1-2 wk | When user base requests migration |
+| 3 | Git migration tooling (rewrite filter/install/track) | **P3** | 2-3 wk | Crate deleted in `c5d0a23`; rewrite, not re-integration |
 | 4 | `mediagit://` URL scheme | **P3** | 1 day | Post-HTTP/3 adoption |
 | 5 | Differential checkout (only changed files) | **P3** | 1-2 wk | 70% branch switch latency reduction |
 | 6 | Incremental status scan (inode/mtime cache) | **P3** | 1-2 wk | Repeated `status` performance |
 | 7 | Pack file format documentation | **P3** | 0.5 day | Book completeness |
-| 8 | TOML-configurable similarity thresholds | **P3** | 0.5 day | User tunability |
+| 8 | TOML-configurable similarity thresholds | **P3** | 0.5-3 day | User tunability; ~32 values across 2 tables, not 3 |
 | 9 | Windows ARM64 native binaries | **P3** | — | Blocked on GitHub runner availability |
 | 10 | macOS Metal GPU acceleration | **P3** | 2-3 wk | Apple Silicon image processing |
 | 11 | Security / Audit enhancements (v0.3.0+) | **P3** | — | Compliance, SIEM |
@@ -67,24 +66,6 @@ confirmed the remote is clean. Both API keys were revoked regardless of the clea
 | 18 | Cross-process chunk-delta write lock | **P3** | 2-3 days | In-process race fixed 2026-07-07; multi-process writers to one local repo could still race (CLI never does this) |
 | 19 | phash.idx compaction | **P3** | 0.5 day | Append-only today; only matters >1M entries (~16 MB) |
 | 20 | PSD spot-color channel parse failure | **P3** | Unscoped (needs upstream fix or crate swap) | `psd` crate 0.3.5 errors "invalid channel id 3" on PSDs with a spot-color channel; found 2026-07-10, M5b |
-| 21 | ~~FSCK integration test coverage~~ | **DONE** | — | `crates/mediagit-versioning/tests/fsck_integration_test.rs` now has 10 active `#[tokio::test]`s and zero `#[ignore]` markers; the gating FIXME comment cited below is gone from the file |
-
----
-
-## P2 — Medium Priority (Planned, Not Urgent)
-
-### 1. Bitmap Index (Pack Negotiation Follow-up) — DONE
-
-**Shipped.** `crates/mediagit-versioning/src/bitmap.rs` persists a commit's full
-object closure as a roaring-bitmap-backed `ReachabilityBitmap`, so pack negotiation
-can skip the BFS walk when a valid bitmap exists for the client's `have` tip. Per
-the module's own correctness contract, it is derived data only: any miss, staleness,
-or format-version mismatch falls back to `walk_reachable` silently, never errors.
-Generation is wired into `gc` (`crates/mediagit-cli/src/commands/gc.rs`); consumption
-into pack negotiation (`crates/mediagit-server/src/handlers/repo.rs`). Gated behind
-`MEDIAGIT_BITMAP` (default on; `=0` reproduces pre-bitmap BFS-only behavior byte
-for byte — see `docs/next-set/knob-policy.md`, local-only). Covered end-to-end by
-`crates/mediagit-server/tests/e2e_bitmap_negotiation.rs`.
 
 ---
 
@@ -111,13 +92,29 @@ Native HTTP/3 in the server (using `h3` + `quinn`) should only be pursued if `h3
 
 ---
 
-### 3. Git Migration Tooling (Re-add `filter`/`install`/`track`)
-*Source: `CHANGELOG.md` §Unreleased → Removed*
+### 3. Git Migration Tooling (rewrite `filter`/`install`/`track` from scratch)
+*Source: `c5d0a23` (2026-07-29) — corrected 2026-08-26*
 
-The `mediagit-git` crate remains in the workspace and compiles independently. Re-integration
-as a first-class migration CLI flow is deferred until there is user demand.
+**The `mediagit-git` crate no longer exists.** Earlier revisions of this entry said it
+"remains in the workspace and compiles independently" — it was deleted in `c5d0a23`, and
+not for being merely unused. `FilterDriver::clean` read a file from stdin, hashed it, wrote
+a pointer to stdout and **never stored the content anywhere** (a "NOTE: Object storage
+integration pending" comment sat in the gap), then logged success. Installed as the git
+filter its own README documented, it would have destroyed every file it touched while
+reporting that it had worked.
 
-Trigger: user requests for git/git-LFS → MediaGit migration tooling. Effort: **1-2 weeks**.
+So this is a **from-scratch rewrite, not a re-integration**, and the deleted code must not
+be resurrected as a starting point. Two things also depend on it staying gone: deleting it
+removed `git2` and `openssl-sys` from the dependency graph entirely (it was the only path
+in, via git2's vendored-openssl), which retired RUSTSEC-2026-0183/-0184 from the
+`.cargo/audit.toml` ignore list and made `deny.toml`'s `openssl-sys` ban enforceable
+instead of pre-broken. Re-adding a git2-based importer re-opens all of that.
+
+Git/git-LFS import is currently documented as **unsupported**, which is a decision rather
+than an omission — MediaGit is a standalone VCS for media.
+
+Trigger: user requests for git/git-LFS → MediaGit migration tooling. Effort: **2-3 weeks**
+(rewrite + a dependency path that does not reintroduce openssl).
 
 ---
 
@@ -129,19 +126,29 @@ A native `mediagit://` URL scheme for brand identity, post-HTTP/3 adoption. Maps
 
 ---
 
-### 5. Differential Checkout (Only Changed Files)
-*Source: `claudedocs/` optimization roadmap*
+### 5. Differential Checkout (Tree-Diff, Not Per-File Hashing)
+*Source: `crates/mediagit-versioning/src/checkout.rs` — verified 2026-08-26*
 
-Branch switching currently rewrites all files even if only a subset changed. Diffing the
-source and target trees and only updating changed paths targets **~70% latency reduction**
-(estimated 496ms → ~150ms for medium repos).
+**Partly done already.** Earlier revisions said branch switching "rewrites all files even
+if only a subset changed" — it does not. `checkout_entry_differential`
+(`checkout.rs:161`) stats the on-disk file, compares size against
+`odb.get_object_size`, then compares a full `Oid::from_file` hash, and skips the write when
+they match. `branch.rs:650` reaches it via `checkout_commit` → `checkout_tree_optimized`
+→ `checkout.rs:577`, so an ordinary branch switch already avoids rewriting unchanged files.
 
-Requires tree diff engine in `mediagit-versioning`. Effort: **1-2 weeks**.
+What remains is the cost the skip does **not** avoid: every path in the target tree is still
+visited, stat'd and fully hashed. A real tree diff would compare the source and target trees
+and never visit an unchanged path at all. The **~70% reduction** (496ms → ~150ms, medium
+repos) claimed here was measured against the pre-skip behaviour, so it is **stale as an
+estimate** — re-baseline before scoping.
+
+Requires a tree diff engine in `mediagit-versioning`. Effort: **1-2 weeks**.
 
 ---
 
 ### 6. Incremental Status Scan (inode / mtime Cache)
-*Source: `claudedocs/` optimization roadmap*
+*Source: `crates/mediagit-cli/src/commands/status.rs` (`scan_working_directory`, called at
+`status.rs:383`)*
 
 Full-tree scan on every `status` invocation. An inode cache / mtime-based incremental scan
 (similar to git's index) would reduce repeated-status overhead significantly for repos with
@@ -160,15 +167,28 @@ and on-disk format are not documented in the book. Effort: **0.5 day**.
 ---
 
 ### 8. TOML-Configurable Similarity Thresholds
-*Source: `book/src/guides/performance.md:60-65`*
+*Source: `book/src/guides/performance.md` §Delta Encoding — pointer corrected 2026-08-26*
 
-Similarity thresholds (controlling when delta encoding is triggered) are hardcoded in
-`smart_compressor.rs`. Planned config keys:
-- `[performance] ai_pdf_similarity_threshold = 0.15`
-- `[performance] office_similarity_threshold = 0.20`
-- `[performance] default_similarity_threshold = 0.80`
+**Not in `smart_compressor.rs`** — earlier revisions of this entry (and the book passage it
+cites) named that file; there is no such file, and the `smart_compressor/` module that
+replaced it holds no similarity threshold at all. The thresholds live in **two independent
+tables**:
 
-Effort: **0.5 day** (config schema + read + pass-through).
+- `crates/mediagit-versioning/src/similarity.rs` — `get_similarity_threshold(filename)`,
+  a 27-arm extension match (`ai`/`pdf`/`psd` → 0.15, office → 0.20, text → 0.85, config →
+  0.95, images → 0.70, video → 0.50, `blend` → 0.40, `hip` → 0.35, NLE projects → 0.25, …),
+  defaulting to `MIN_SIMILARITY_THRESHOLD`.
+- `crates/mediagit-versioning/src/odb/mod.rs` — `delta_ratio_threshold(codec, chunk_type)`,
+  keyed on codec rather than extension (ProRes/DNxHR/J2K/raw → 0.60, subtitles/metadata →
+  0.90, default 0.80).
+
+The three config keys previously planned here cover only 3 of those ~32 values, so exposing
+them alone would leave most of the surface still hardcoded and split the source of truth
+across a config file and two match arms. Decide first whether the config surface is
+per-extension, per-codec, or a single global scale factor.
+
+Effort: **0.5 day** for the three-key subset as originally scoped; **2-3 days** to expose
+both tables coherently.
 
 ---
 
@@ -189,7 +209,7 @@ implementation plan yet. Effort: **2-3 weeks** (research + implementation).
 ---
 
 ### 11. Security / Audit Enhancements (v0.3.0+)
-*Source: `claudedocs/2026-02-27/UNIMPLEMENTED_FEATURES.md`*
+*Source: `crates/mediagit-security/src/audit.rs`*
 
 | Enhancement | Description |
 |---|---|
@@ -223,40 +243,23 @@ implementation plan yet. Effort: **2-3 weeks** (research + implementation).
 
 ---
 
-## Code TODOs (from source — grouped by crate)
-
-### `mediagit-versioning`
-
-**`crates/mediagit-versioning/tests/fsck_integration_test.rs`** *(→ item 21)* — **DONE,
-verified 2026-08-25.** The FIXME marker quoted here in past revisions of this file
-(`// FIXME: FSCK functionality is under development...`) is no longer present in the
-file. All 10 tests (`test_fsck_clean_repository`, `test_fsck_detect_corrupted_object`,
-`test_fsck_detect_missing_object`, `test_fsck_detect_broken_reference`,
-`test_fsck_quick_mode`, `test_fsck_full_mode`, `test_fsck_repair_broken_reference`,
-`test_fsck_repair_dry_run`, `test_fsck_connectivity_check`,
-`test_fsck_max_objects_limit`) are active `#[tokio::test]`s with zero `#[ignore]`
-attributes in the file.
-
----
-
 ## Known Limitations
 
 | # | Priority | Area | Description | Source |
 |---|----------|------|-------------|--------|
 | 2 | P3 | **HTTP/3** | reqwest `http3` feature not yet stable | R&D 2026-03 |
-| 3 | P3 | **Git migration CLI** | `mediagit-git` crate exists; `filter/install/track` removed from binary | CHANGELOG |
+| 3 | P3 | **Git migration CLI** | `mediagit-git` deleted in `c5d0a23` (its clean filter destroyed file content); git/git-LFS import documented unsupported | `c5d0a23` |
 | 4 | P3 | **`mediagit://` scheme** | No native URL scheme; uses `http://` | R&D 2026-03 |
-| 5 | P3 | **Differential checkout** | Full tree rewritten on branch switch; ~70% latency reduction possible | claudedocs |
-| 6 | P3 | **Incremental status** | Full-tree scan on every `status` invocation | claudedocs |
+| 5 | P3 | **Differential checkout** | Unchanged files already skipped by hash; every path still visited + hashed, no tree diff | `checkout.rs:161` |
+| 6 | P3 | **Incremental status** | Full-tree scan on every `status` invocation | `status.rs:383` |
 | 7 | P3 | **Pack file docs** | `.mediagit/objects/pack/` format not documented | `file-formats.md` |
-| 8 | P3 | **Similarity thresholds** | Delta thresholds hardcoded, not configurable via `config.toml` | `performance.md` |
+| 8 | P3 | **Similarity thresholds** | Hardcoded in `similarity.rs` (27 arms) + `odb/mod.rs` (`delta_ratio_threshold`), not configurable via `config.toml` | `similarity.rs` |
 | 9 | P3 | **Windows ARM64** | No native pre-built binary; x64 emulation works but slower | `windows-arm64.md` |
 | 10 | P3 | **Metal GPU** | No GPU-accelerated image processing on Apple Silicon | `macos-arm64.md:88` |
-| 11 | P3 | **SIEM / audit** | No Splunk/ELK connectors; SOC 2/GDPR export is v1.0.0 | claudedocs |
+| 11 | P3 | **SIEM / audit** | No Splunk/ELK connectors; SOC 2/GDPR export is v1.0.0 | `audit.rs` |
 | 14 | P3 | **FBX structure chunking** | Top-level EndOffset walker ≈ CDC (Objects node holds ~98% of bytes); beating CDC needs an Objects-descending walker | fair trial 2026-07-07 |
 | 15 | P3 | **EXR chunking** | No structure-aware chunking; blocked on real EXR fixtures | plan 2026-07-07 |
 | 16 | P3 | **.sketch/.fig chunking** | ZIP containers get generic fixed chunking; entry-aware cuts unexplored | plan 2026-07-07 |
 | 17 | P3 | **Video pHash** | No perceptual delta-base nomination for video; no viable crate | R&D 2026-07-07 |
 | 18 | P3 | **Cross-process delta lock** | Chunk-delta cycle guard is per-process; concurrent multi-process writers to one local repo could still race | fix 2026-07-07 |
 | 20 | P3 | **PSD spot-color channels** | `psd` crate 0.3.5 errors `"invalid channel id 3"` on PSDs with a spot-color channel; falls back to generic chunking, no crash/data-loss | found 2026-07-10, M5b |
-| 21 | — | ~~**FSCK test coverage**~~ | **DONE, verified 2026-08-25** — 10 active integration tests, 0 `#[ignore]`d, gating FIXME removed | `fsck_integration_test.rs` |

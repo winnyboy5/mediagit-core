@@ -58,10 +58,11 @@ MediaGit never wastes CPU re-compressing already-compressed formats:
 For versioned files that change incrementally (e.g., evolving PSD files), MediaGit uses delta encoding to store only the differences between versions:
 
 ```toml
-# Similarity thresholds (in smart_compressor.rs — not yet configurable via TOML)
-# AI/PDF files: 15% similarity → try delta encoding
-# Office docs: 20% similarity → try delta encoding
-# General: 80% similarity threshold
+# Similarity thresholds — NOT yet configurable via TOML.
+# Set in crates/mediagit-versioning/src/similarity.rs (by file extension):
+#   AI/PDF/PSD: 0.15   Office docs: 0.20   Images: 0.70   Text: 0.85   Config: 0.95
+# and crates/mediagit-versioning/src/odb/mod.rs (by codec):
+#   ProRes/DNxHR/J2K: 0.60   Subtitles/metadata: 0.90   Default: 0.80
 ```
 
 Delta chains are capped at depth 10 to prevent slow reads on deeply-chained objects.
