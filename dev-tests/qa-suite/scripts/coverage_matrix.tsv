@@ -50,6 +50,8 @@ pull	--dry-run	no	EXPECTED-ERR
 pull	--no-commit	no	EXPECTED-ERR
 pull	--abort	no	EXPECTED-ERR
 pull	--continue-pull	no	EXPECTED-ERR
+pull	-s,--strategy	yes	EXPECTED-ERR
+pull	-X,--strategy-option	yes	EXPECTED-ERR
 fetch	-(bare invocation)	no	EXPECTED-ERR
 fetch	--all	no	EXPECTED-ERR
 fetch	-p,--prune	no	EXPECTED-ERR

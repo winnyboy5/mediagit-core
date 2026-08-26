@@ -69,21 +69,51 @@ Pop-Location
 Write-QaLog $PHASE "MEDIAGIT_* names defined in source/harness/CI: $($known.Count)"
 
 # A doc that says "there is no MEDIAGIT_FOO" is doing the right thing and must
-# not be punished for naming it. Retraction wording is checked per LINE, so an
-# accurate page and a fabricating page can coexist in one file.
-$retraction = 'there (is|are) no|never (existed|been read|done anything)|do(es)? not exist|no such|not implemented|has no effect|have no effect|inert|removed|retracted|appeared in earlier|earlier revisions'
+# not be punished for naming it.
+#
+# Checked over a WINDOW of lines, not one line. Prose wraps: CLOUD_ARCHITECTURE.md
+# names three variables on one line and says "appeared in earlier revisions of
+# this document and have never been read by anything" on the next two. A
+# per-line test reported all three as inventions - the gate's first run was six
+# findings and all six were false positives, which is precisely the shape that
+# gets a gate switched off.
+#
+# +/-2 lines covers a wrapped sentence without swallowing a whole section, so an
+# accurate paragraph and a fabricating one can still coexist in one file.
+$retraction = 'there (is|are) no|never (existed|been read|done anything|read)|do(es)? not exist|no such|not implemented|has no effect|have no effect|no caller|inert|removed|retracted|appeared in earlier|earlier revisions|not supported|REFUSE'
+$RETRACT_WINDOW = 2
+
+function Test-QaRetracted($Lines, $Idx, $Window, $Pattern) {
+  $lo = [Math]::Max(0, $Idx - $Window)
+  $hi = [Math]::Min($Lines.Count - 1, $Idx + $Window)
+  for ($i = $lo; $i -le $hi; $i++) { if ($Lines[$i] -match $Pattern) { return $true } }
+  return $false
+}
 
 $envRows = @()
 foreach ($f in $docs) {
   $full = Join-Path $repo $f
   if (-not (Test-Path $full)) { continue }
-  $lineNo = 0
-  foreach ($line in (Get-Content $full -EA SilentlyContinue)) {
-    $lineNo++
-    if ($line -match $retraction) { continue }
-    foreach ($m in [regex]::Matches($line, 'MEDIAGIT_[A-Z0-9_]+')) {
-      if (-not $known.Contains($m.Value)) {
-        $envRows += [pscustomobject]@{ Kind = "env"; Name = $m.Value; File = $f; Line = $lineNo }
+  $lines = @(Get-Content $full -EA SilentlyContinue)
+  # $li, not $i: the flag scan below nests a `for ($i = ...)` over command
+  # prefixes, and sharing the name let the inner loop drive the outer one back
+  # to zero every iteration - the scan never terminated and burned 611s of CPU
+  # before it was killed. Distinct names in both loops, permanently.
+  for ($li = 0; $li -lt $lines.Count; $li++) {
+    $line = $lines[$li]
+    if (Test-QaRetracted $lines $li $RETRACT_WINDOW $retraction) { continue }
+    # `${{ vars.MEDIAGIT_S3_BUCKET }}` is a GitHub Actions repository variable,
+    # named by the workflow author, not a MediaGit env var. Strip those spans
+    # before matching or every CI example becomes a finding.
+    $scan = [regex]::Replace($line, '\$\{\{[^}]*\}\}', ' ')
+    foreach ($m in [regex]::Matches($scan, 'MEDIAGIT_[A-Z0-9_]+\*?')) {
+      $name = $m.Value
+      # `MEDIAGIT_APP_*` / `MEDIAGIT_COMPRESSION_*` name a FAMILY, not a
+      # variable. The regex otherwise captures the stem without its asterisk
+      # and reports a name nobody wrote.
+      if ($name.EndsWith('*') -or $name.EndsWith('_')) { continue }
+      if (-not $known.Contains($name)) {
+        $envRows += [pscustomobject]@{ Kind = "env"; Name = $name; File = $f; Line = ($li + 1) }
       }
     }
   }
@@ -133,16 +163,24 @@ $flagRows = @()
 foreach ($f in $docs) {
   $full = Join-Path $repo $f
   if (-not (Test-Path $full)) { continue }
-  $lineNo = 0
-  foreach ($line in (Get-Content $full -EA SilentlyContinue)) {
-    $lineNo++
-    if ($line -match $retraction) { continue }
+  $lines = @(Get-Content $full -EA SilentlyContinue)
+  for ($li = 0; $li -lt $lines.Count; $li++) {
+    $line = $lines[$li]
+    $lineNo = $li + 1
+    if (Test-QaRetracted $lines $li $RETRACT_WINDOW $retraction) { continue }
     # One line at a time. A regex allowed to cross newlines attributes a flag
     # from line 3 to the command on line 1, which produced 23 false positives
     # on the first run of this check.
     foreach ($m in [regex]::Matches($line, 'mediagit\s+([a-z][a-z-]*)((?:\s+[a-z][a-z-]*){0,2})([^\n]*)')) {
       $words = @($m.Groups[1].Value) + @($m.Groups[2].Value -split '\s+' | Where-Object { $_ })
       $rest  = $m.Groups[3].Value
+      # A mediagit invocation ENDS at a shell metacharacter. In
+      #   mediagit completions bash > $(brew --prefix)/etc/...
+      # the `--prefix` belongs to brew, and attributing it to `mediagit
+      # completions` reported a flag nobody claimed. Cut at the first pipe,
+      # redirect, command substitution, separator or comment.
+      $cut = [regex]::Match($rest, '\||>|<|\$\(|&&|;|`|#')
+      if ($cut.Success) { $rest = $rest.Substring(0, $cut.Index) }
       foreach ($fm in [regex]::Matches($rest, '(?<![\w-])(--[a-zA-Z][\w-]*)')) {
         $flag = $fm.Groups[1].Value
         $real = $false; $found = $false

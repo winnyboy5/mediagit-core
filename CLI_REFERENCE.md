@@ -614,9 +614,9 @@ mediagit pull [REMOTE] [BRANCH]
 mediagit pull
 mediagit pull origin develop
 mediagit pull --rebase
-# NOTE: `pull --continue` is accepted but not implemented - it is never read,
-# so it silently performs an ordinary pull. To resume after conflicts, resolve
-# them and use `mediagit merge --continue`.
+# NOTE: `pull --continue`, `-s` and `-X` are not implemented and now REFUSE
+# rather than being silently ignored. To resume after conflicts, resolve them
+# and use `mediagit merge --continue`.
 ```
 
 ---

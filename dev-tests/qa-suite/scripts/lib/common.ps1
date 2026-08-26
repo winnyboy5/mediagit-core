@@ -96,6 +96,51 @@ function Add-QaContentRetry($Path, $Value, [string]$Encoding = "ASCII") {
   }
 }
 
+# Verdict for a stall snapshot, from the client's CPU delta, whether it had any
+# connection at all, and - decisively - whether the server it is talking to is
+# doing work on its behalf.
+#
+# Separated from the two call sites (mid-wait sample and post-exit flush) so
+# the rule lives in ONE place. Both sites previously carried their own copy of
+# the if/elseif chain, which is how the two would drift.
+#
+# The server term is what ga29 taught: an idle client whose server is burning
+# CPU is being served, not hung. Without it this reported SUSPECT HANG on three
+# healthy S5 clones, and a detector that cries wolf on healthy runs gets
+# ignored - the same outcome as one that never fires.
+# Second CPU reading for the server(s) identified at snapshot time. Returns
+# $null when there was nothing local to sample (a purely remote backend, or the
+# server exited), which the verdict treats as "cannot tell" rather than as
+# evidence of a hang.
+function _QaServerCpuDelta($Snap) {
+  if ($null -eq $Snap.SrvCpu1 -or @($Snap.SrvPids).Count -eq 0) { return $null }
+  try {
+    $now = 0.0
+    $seen = 0
+    foreach ($sp in $Snap.SrvPids) {
+      $o = Get-Process -Id $sp -EA SilentlyContinue
+      if ($o) { $now += $o.TotalProcessorTime.TotalSeconds; $seen++ }
+    }
+    if ($seen -eq 0) { return $null }
+    return $now - $Snap.SrvCpu1
+  } catch { return $null }
+}
+
+function Get-QaStallVerdict($Exited, $CpuDelta, $Established, $SrvCpuDelta) {
+  if ($Exited) { return "COMPLETED during the snapshot window - slow, not hung" }
+  if ($CpuDelta -gt 0.05) { return "PROGRESSING - client burning CPU; slow, not hung" }
+  if ($null -ne $SrvCpuDelta -and $SrvCpuDelta -gt 0.05) {
+    return ("SERVED - client idle but its server is working ({0:n3}s CPU); waiting on the server, not hung" -f $SrvCpuDelta)
+  }
+  if ($Established -eq 0) {
+    return "SUSPECT HANG - no CPU and NO established connection: the request never left this box"
+  }
+  if ($null -eq $SrvCpuDelta) {
+    return "SUSPECT HANG - client idle with a connection to a remote we cannot sample; sent, awaiting a reply"
+  }
+  return "SUSPECT HANG - client idle AND its server idle: both ends stopped, nothing is driving this forward"
+}
+
 function Write-QaLog([string]$Phase, [string]$Msg) {
   $line = "{0} [{1}] {2}" -f (Get-Date -Format "HH:mm:ss"), $Phase, $Msg
   Add-QaContentRetry (Join-Path $QA.Logs "$Phase.log") $line
@@ -270,6 +315,40 @@ function Invoke-MG([string]$Repo, [string[]]$MgArgs, [string]$Phase = "misc", [i
           $waits = ((Get-Process -Id $proc.Id -EA SilentlyContinue).Threads |
                     ForEach-Object { if ($_.WaitReason) { "$($_.WaitReason)" } else { "(running)" } } |
                     Group-Object | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join " "
+          # THE SERVER IS THE OTHER HALF OF THE ANSWER.
+          #
+          # 20260826-ga29 is why this is here. Three S5 clones were flagged
+          # SUSPECT HANG - no client CPU, one established connection - and all
+          # three finished normally. The verdict was wrong because it was
+          # reached from the client alone: a clone blocked on the local server
+          # while that server pulls 11 GB from a cloud backend looks EXACTLY
+          # like a deadlock from the client's side. Idle client + working
+          # server is healthy; idle client + idle server is not, and only the
+          # second reading separates them.
+          #
+          # Identified by the ports the client is actually connected to, not by
+          # process name: a campaign runs several mediagit-server instances at
+          # once and blaming the wrong one is worse than saying nothing.
+          $srvCpu1 = $null
+          $srvPids = @()
+          try {
+            $localPorts = @($est | Where-Object {
+              $_.RemoteAddress -eq '127.0.0.1' -or $_.RemoteAddress -eq '::1'
+            } | ForEach-Object { $_.RemotePort } | Sort-Object -Unique)
+            foreach ($lp in $localPorts) {
+              $owner = Get-NetTCPConnection -LocalPort $lp -State Listen -EA SilentlyContinue |
+                       Select-Object -First 1 -ExpandProperty OwningProcess
+              if ($owner) { $srvPids += $owner }
+            }
+            $srvPids = @($srvPids | Sort-Object -Unique)
+            if ($srvPids.Count -gt 0) {
+              $srvCpu1 = 0.0
+              foreach ($sp in $srvPids) {
+                $o = Get-Process -Id $sp -EA SilentlyContinue
+                if ($o) { $srvCpu1 += $o.TotalProcessorTime.TotalSeconds }
+              }
+            }
+          } catch { }
           # The CPU second sample comes from the NEXT wait slice, not from a
           # Start-Sleep here. A sleep inside this loop stops it calling
           # WaitForExit, so a command that finished during the sleep is not
@@ -281,6 +360,7 @@ function Invoke-MG([string]$Repo, [string[]]$MgArgs, [string]$Phase = "misc", [i
           $script:QaSnapPending = @{
             Phase = $Phase; ByState = $byState; Remotes = $remotes
             Waits = $waits; Established = $est.Count
+            SrvPids = $srvPids; SrvCpu1 = $srvCpu1
           }
         } catch {
           Write-QaLog $Phase "STALL-SNAPSHOT failed: $($_.Exception.GetType().Name)"
@@ -298,15 +378,11 @@ function Invoke-MG([string]$Repo, [string[]]$MgArgs, [string]$Phase = "misc", [i
           $elapsed = ((Get-Date) - $script:QaSnapWhen).TotalSeconds
           $cpu = 0.0
           if (-not $proc.HasExited) { $cpu = $proc.TotalProcessorTime.TotalSeconds - $script:QaSnapC1 }
-          $verdict = if ($cpu -gt 0.05) {
-            "PROGRESSING - burning CPU; slow, not hung"
-          } elseif ($sp.Established -eq 0) {
-            "SUSPECT HANG - no CPU and NO established connection: the request never left this box"
-          } else {
-            "SUSPECT HANG - no CPU but connection(s) established: sent, awaiting a reply that is not coming"
-          }
-          Write-QaLog $sp.Phase ("STALL-SNAPSHOT tcp[{0}] remotes[{1}] threadwaits[{2}] cpu_delta={3:n3}s/{4:n1}s -> {5}" -f `
-            $sp.ByState, $sp.Remotes, $sp.Waits, $cpu, $elapsed, $verdict)
+          $srvCpu = _QaServerCpuDelta $sp
+          $verdict = Get-QaStallVerdict $false $cpu $sp.Established $srvCpu
+          Write-QaLog $sp.Phase ("STALL-SNAPSHOT tcp[{0}] remotes[{1}] threadwaits[{2}] cpu_delta={3:n3}s/{4:n1}s srv_cpu_delta={5} -> {6}" -f `
+            $sp.ByState, $sp.Remotes, $sp.Waits, $cpu, $elapsed,
+            $(if ($null -eq $srvCpu) { "n/a" } else { "{0:n3}s" -f $srvCpu }), $verdict)
         } catch {
           Write-QaLog $Phase "STALL-SNAPSHOT second sample failed: $($_.Exception.GetType().Name)"
         }
@@ -324,17 +400,11 @@ function Invoke-MG([string]$Repo, [string[]]$MgArgs, [string]$Phase = "misc", [i
         $script:QaSnapPending = $null
         $elapsed = ((Get-Date) - $script:QaSnapWhen).TotalSeconds
         $cpu = $proc.TotalProcessorTime.TotalSeconds - $script:QaSnapC1
-        $verdict = if ($proc.HasExited) {
-          "COMPLETED during the snapshot window - slow, not hung"
-        } elseif ($cpu -gt 0.05) {
-          "PROGRESSING - burning CPU; slow, not hung"
-        } elseif ($sp.Established -eq 0) {
-          "SUSPECT HANG - no CPU and NO established connection: the request never left this box"
-        } else {
-          "SUSPECT HANG - no CPU but connection(s) established: sent, awaiting a reply that is not coming"
-        }
-        Write-QaLog $sp.Phase ("STALL-SNAPSHOT tcp[{0}] remotes[{1}] threadwaits[{2}] cpu_delta={3:n3}s/{4:n1}s -> {5}" -f `
-          $sp.ByState, $sp.Remotes, $sp.Waits, $cpu, $elapsed, $verdict)
+        $srvCpu = _QaServerCpuDelta $sp
+        $verdict = Get-QaStallVerdict $proc.HasExited $cpu $sp.Established $srvCpu
+        Write-QaLog $sp.Phase ("STALL-SNAPSHOT tcp[{0}] remotes[{1}] threadwaits[{2}] cpu_delta={3:n3}s/{4:n1}s srv_cpu_delta={5} -> {6}" -f `
+          $sp.ByState, $sp.Remotes, $sp.Waits, $cpu, $elapsed,
+          $(if ($null -eq $srvCpu) { "n/a" } else { "{0:n3}s" -f $srvCpu }), $verdict)
       } catch {
         Write-QaLog $Phase "STALL-SNAPSHOT flush failed: $($_.Exception.GetType().Name)"
       }

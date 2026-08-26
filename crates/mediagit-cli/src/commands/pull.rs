@@ -101,6 +101,11 @@ impl PullCmd {
         if self.no_commit {
             anyhow::bail!("pull --no-commit is not yet implemented.");
         }
+        reject_dead_pull_flags(
+            self.continue_pull,
+            self.strategy.as_deref(),
+            self.strategy_option.as_deref(),
+        )?;
         let start_time = Instant::now();
         let mut stats = OperationStats::for_operation("pull");
         let progress = ProgressTracker::new(self.quiet);
@@ -716,4 +721,105 @@ async fn fast_forward_to(
     }
 
     Ok(())
+}
+
+/// Refuse `--continue`, `-s` and `-X` rather than accepting and ignoring them.
+///
+/// UX-5 already caught `--abort` and `--no-commit` here: declared, never read,
+/// and bailing now. These three survived that pass because they are `hide =
+/// true` and so appear in no `--help` output anyone reads - `continue_pull`,
+/// `strategy` and `strategy_option` are each read exactly zero times in this
+/// file.
+///
+/// `--continue` is the dangerous one. `--abort` at least did nothing visible;
+/// `pull --continue` after a conflicted pull performed an ordinary *new* pull
+/// and reported success, so the user believes they resumed the operation they
+/// were in the middle of. The failure is silent and the state is wrong.
+///
+/// `-s`/`-X` mirror the same defect already fixed in `merge`: a user who thinks
+/// they chose which side wins finds out from the merged content.
+///
+/// Extracted from `execute` so it is assertable - `execute` needs a real
+/// repository, and the one behaviour worth pinning is that these REFUSE rather
+/// than silently do nothing. Same reason `merge::reject_strategy_option`
+/// exists.
+fn reject_dead_pull_flags(
+    continue_pull: bool,
+    strategy: Option<&str>,
+    strategy_option: Option<&str>,
+) -> anyhow::Result<()> {
+    if continue_pull {
+        anyhow::bail!(
+            "pull --continue is not implemented in MediaGit.
+             It was accepted but never read, so it performed an ordinary pull
+             rather than resuming the one that stopped in conflict.
+             A pull that hit conflicts left a merge in progress: resolve the
+             files, then run 'mediagit merge --continue'."
+        );
+    }
+    if let Some(o) = strategy_option {
+        anyhow::bail!(
+            "pull -X/--strategy-option is not supported in MediaGit (got '{o}').
+             It was accepted but never applied, so passing it changed nothing."
+        );
+    }
+    if let Some(o) = strategy {
+        anyhow::bail!(
+            "pull -s/--strategy is not supported in MediaGit (got '{o}').
+             It was accepted but never applied, so passing it changed nothing.
+             MediaGit uses a binary-aware merge for media files; to choose a
+             strategy explicitly, merge separately with
+             'mediagit merge -s ours|theirs|recursive'."
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod dead_flag_tests {
+    use super::reject_dead_pull_flags;
+
+    /// The whole point: absent flags must not start failing pulls. Asserted
+    /// first because a guard that rejects everything would pass every test
+    /// below and break every real pull.
+    #[test]
+    fn ordinary_pull_is_unaffected() {
+        assert!(reject_dead_pull_flags(false, None, None).is_ok());
+    }
+
+    /// `--continue` silently performed a fresh pull and reported success, which
+    /// on a resume-after-conflict flag means the user believes the operation
+    /// they were in the middle of was completed.
+    #[test]
+    fn continue_is_refused_and_names_the_alternative() {
+        let e = reject_dead_pull_flags(true, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("not implemented"), "{e}");
+        assert!(
+            e.contains("merge --continue"),
+            "must point at what does work: {e}"
+        );
+    }
+
+    #[test]
+    fn strategy_option_is_refused_and_echoes_the_value() {
+        let e = reject_dead_pull_flags(false, None, Some("ours"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("--strategy-option"), "{e}");
+        assert!(
+            e.contains("ours"),
+            "echo the value back so the user sees it was read: {e}"
+        );
+    }
+
+    #[test]
+    fn strategy_is_refused_and_echoes_the_value() {
+        let e = reject_dead_pull_flags(false, Some("recursive"), None)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("--strategy"), "{e}");
+        assert!(e.contains("recursive"), "{e}");
+    }
 }
