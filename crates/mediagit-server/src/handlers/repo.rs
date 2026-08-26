@@ -3327,7 +3327,22 @@ mod pack_verify_budget_tests {
         pack_still_intact: bool,
     }
 
+    /// `verify_pack_with_budget` acquires a PROCESS-GLOBAL, 1-permit semaphore
+    /// (`pack_verify_semaphore`), and the elapsed clock below starts *before*
+    /// that acquire. So when these two tests run concurrently, whichever loses
+    /// the race spends the wait queueing behind the other's verification rather
+    /// than inside its own budget — it measures the wrong thing.
+    ///
+    /// That is exactly what broke CI on macos-latest/aarch64 (2026-08-26):
+    /// 5.89s elapsed against a 150ms budget. The timeout HAD fired — 5.89s is
+    /// far below the backend's own 30s delay — so the product was fine and the
+    /// measurement was not. Serializing here keeps `elapsed` a property of the
+    /// budget alone; raising the threshold instead would have kept the flake
+    /// and blunted the assertion.
+    static VERIFY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     async fn verify_with(delay: std::time::Duration, budget: std::time::Duration) -> Outcome {
+        let _serialize = VERIFY_TEST_LOCK.lock().await;
         let repo = "budget-repo".to_string();
         let tmp = tempfile::tempdir().unwrap();
         let repo_path = tmp.path().join(&repo);
@@ -3384,7 +3399,12 @@ mod pack_verify_budget_tests {
     /// verification failed for some unrelated reason, and a test that cannot
     /// tell those apart is not testing the timeout. Returning in well under the
     /// backend's own delay is what proves the budget, and nothing else, ended it.
-    #[tokio::test]
+    /// multi_thread: the budget is enforced by a `tokio::time::timeout` timer,
+    /// and on the default current-thread runtime that timer cannot fire while
+    /// the verification future is doing CPU-bound decompress/hash work without
+    /// yielding. A second worker means a late timer can never be mistaken for a
+    /// budget that failed to trip.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn trickling_pack_gives_up_its_verify_permit() {
         let out = verify_with(
             std::time::Duration::from_secs(30),
@@ -3410,7 +3430,7 @@ mod pack_verify_budget_tests {
     /// The half that must stay QUIET. Healthy per-pack verification measured
     /// ~12.7s mean against live GCS and the default budget is 300s, so a guard
     /// that tripped on normal work would be worse than no guard at all.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn healthy_pack_verifies_well_inside_its_budget() {
         let out = verify_with(
             std::time::Duration::from_millis(0),
