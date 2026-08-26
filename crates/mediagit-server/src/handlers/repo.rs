@@ -1560,6 +1560,13 @@ pub(crate) async fn verify_pack_in_background(
     storage: Arc<dyn StorageBackend>,
     manifest: Vec<ManifestEntry>,
 ) -> bool {
+    // Lane admission lives HERE, not inside the budgeted work. Queueing for the
+    // permit is unbounded (it is exactly what the budget exists to bound for
+    // *other* packs), so counting it against a budget that has not started yet
+    // would conflate "this pack is slow" with "this pack has not begun". Held
+    // across the whole call, so the lane is given up on return — including the
+    // budget-exceeded return — which is the behaviour the timeout below relies on.
+    let _permit = pack_verify_semaphore().acquire().await.ok();
     verify_pack_with_budget(
         state,
         repo_path,
@@ -1578,6 +1585,12 @@ pub(crate) async fn verify_pack_in_background(
 /// same constraint that shaped `gcs::parse_io_timeout_secs`. A guard nobody has
 /// watched fire is the shape this codebase has been bitten by repeatedly, so the
 /// seam exists to let a test watch it fire.
+///
+/// Assumes the caller already holds the `pack_verify_semaphore` permit
+/// (`verify_pack_in_background` does). Acquiring it in here instead put an
+/// unbounded queue wait inside the region a caller times, which is what made
+/// `trickling_pack_gives_up_its_verify_permit` read 6.18s against a 150ms
+/// budget: it was queued behind another test's 2s+4s retry ladder, not running.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn verify_pack_with_budget(
     state: Arc<AppState>,
@@ -1599,7 +1612,6 @@ pub(crate) async fn verify_pack_with_budget(
             return false;
         }
     };
-    let _permit = pack_verify_semaphore().acquire().await.ok();
 
     let pack_key = format!("packs/{pack_oid}");
     let verify_start = std::time::Instant::now();
@@ -3327,22 +3339,23 @@ mod pack_verify_budget_tests {
         pack_still_intact: bool,
     }
 
-    /// `verify_pack_with_budget` acquires a PROCESS-GLOBAL, 1-permit semaphore
-    /// (`pack_verify_semaphore`), and the elapsed clock below starts *before*
-    /// that acquire. So when these two tests run concurrently, whichever loses
-    /// the race spends the wait queueing behind the other's verification rather
-    /// than inside its own budget — it measures the wrong thing.
+    /// Calls `verify_pack_with_budget` directly, NOT `verify_pack_in_background`,
+    /// so `elapsed` spans the budgeted work and nothing else. The permit for the
+    /// process-global, 1-permit `pack_verify_semaphore` is taken by
+    /// `verify_pack_in_background`, one level up: routing through it would put an
+    /// unbounded queue wait inside this clock, and every other test in this binary
+    /// that verifies a pack is in that queue.
     ///
-    /// That is exactly what broke CI on macos-latest/aarch64 (2026-08-26):
-    /// 5.89s elapsed against a 150ms budget. The timeout HAD fired — 5.89s is
-    /// far below the backend's own 30s delay — so the product was fine and the
-    /// measurement was not. Serializing here keeps `elapsed` a property of the
-    /// budget alone; raising the threshold instead would have kept the flake
-    /// and blunted the assertion.
-    static VERIFY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
+    /// That queue is what broke CI twice. 2026-08-26, macos-latest/aarch64: 5.89s
+    /// against a 150ms budget; then 6.18s on Windows, which is precisely
+    /// `unreadable_pack_is_left_unverified_and_never_quarantined`'s 2s + 4s retry
+    /// ladder holding the permit. Both times the timeout HAD fired — both are far
+    /// below the backend's own 30s delay — so the product was fine and the
+    /// measurement was not. A `tokio::sync::Mutex` around these two tests was the
+    /// first attempt and was too narrow: it serialised this pair against each
+    /// other, not against the rest of the binary. Raising the threshold instead
+    /// would blunt the assertion and leave the flake.
     async fn verify_with(delay: std::time::Duration, budget: std::time::Duration) -> Outcome {
-        let _serialize = VERIFY_TEST_LOCK.lock().await;
         let repo = "budget-repo".to_string();
         let tmp = tempfile::tempdir().unwrap();
         let repo_path = tmp.path().join(&repo);
