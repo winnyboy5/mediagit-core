@@ -2823,22 +2823,35 @@ impl ObjectDatabase {
     /// stored at all. The send fast path (`get_compressed_chunk` above) is
     /// unaffected — this only guards the receive/write boundary.
     pub async fn put_compressed_chunk(&self, chunk_id: &Oid, data: &[u8]) -> anyhow::Result<()> {
-        let decompressed = if let Some(smart_comp) = &self.smart_compressor {
-            decompress_typed_blocking(smart_comp.clone(), data.to_vec())
+        // The decompressed bytes are needed ONLY to compute the id below — what
+        // gets stored is `data`, the original compressed bytes (see
+        // `seal_from_wire` further down). So the SmartCompressor path streams
+        // through a hashing sink and never materialises the uncompressed chunk;
+        // at 24-32 concurrent downloads that buffer was the dominant client
+        // allocation during a clone.
+        //
+        // Only the SmartCompressor arm is streamed. The `else` arm uses the
+        // plain `Compressor`, which has no streaming decoder, and its framing
+        // (the Store 0x00 prefix) has been a source of silent corruption before
+        // — routing it through a different decoder to save memory on a path
+        // clone never takes would be a bad trade. `clone` builds its ODB with
+        // `with_smart_compression` (`clone.rs:149,414` -> `core.rs:165`, which
+        // sets `Some` unconditionally), so the streaming arm is the clone path.
+        let computed = if let Some(smart_comp) = &self.smart_compressor {
+            decompress_typed_hash_blocking(smart_comp.clone(), data.to_vec())
                 .await
                 .map_err(|e| anyhow::anyhow!("Chunk {} failed to decompress: {}", chunk_id, e))?
         } else {
-            match CompressionAlgorithm::detect(data) {
+            let decompressed = match CompressionAlgorithm::detect(data) {
                 CompressionAlgorithm::None => data.to_vec(),
                 _ => decompress_blocking(self.compressor.clone(), data.to_vec())
                     .await
                     .map_err(|e| {
                         anyhow::anyhow!("Chunk {} failed to decompress: {}", chunk_id, e)
                     })?,
-            }
+            };
+            Oid::hash(&decompressed)
         };
-
-        let computed = Oid::hash(&decompressed);
         if computed != *chunk_id {
             anyhow::bail!(
                 "Chunk integrity check failed for chunk {}: expected {}, computed {} — refusing to store",

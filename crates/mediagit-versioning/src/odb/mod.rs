@@ -179,6 +179,72 @@ async fn decompress_blocking(
     }
 }
 
+/// A `std::io::Write` sink that hashes everything written to it and drops the
+/// bytes.
+///
+/// `SmartCompressor::decompress_streaming` documents exactly this use: "Callers
+/// needing an incremental digest (rather than the bytes themselves) pass a
+/// `Write` that hashes and discards."
+struct HashSink(crate::hash::Hasher);
+
+impl std::io::Write for HashSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Streaming counterpart of [`decompress_typed_blocking`] that returns ONLY the
+/// BLAKE3 digest of the decompressed bytes, never materialising them.
+///
+/// `put_compressed_chunk` decompresses solely to verify the chunk id — the
+/// decompressed buffer is dropped immediately afterwards, because the bytes
+/// actually stored are the original compressed ones (`seal_from_wire` takes
+/// `data`, not `decompressed`). Holding a whole uncompressed chunk to compute
+/// one hash was pure waste: at 24-32 concurrent downloads that is the dominant
+/// client allocation during a clone.
+///
+/// Identical digest to `Oid::hash(&decompressed)`: `Oid::hash` is a plain
+/// BLAKE3 `update` + `finalize` with no salt or length prefix (`oid.rs:55-59`),
+/// so feeding the same bytes incrementally cannot diverge.
+///
+/// Encrypted repos do NOT gain constant memory here — `decompress_streaming`
+/// buffers a sealed object deliberately, since AES-GCM's tag is at the END and
+/// emitting an unauthenticated plaintext prefix would be unsafe. Correctness is
+/// identical either way; only the memory win is forfeited.
+async fn decompress_typed_hash_blocking(
+    compressor: std::sync::Arc<SmartCompressor>,
+    data: Vec<u8>,
+) -> mediagit_compression::CompressionResult<Oid> {
+    let enabled = std::env::var("MEDIAGIT_DECOMPRESS_BLOCKING")
+        .as_deref()
+        .unwrap_or("1")
+        != "0";
+    let threshold: usize = std::env::var("MEDIAGIT_DECOMPRESS_BLOCKING_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(262144);
+
+    // Captured before `run` takes ownership of `data`.
+    let len = data.len();
+    let run = move || -> mediagit_compression::CompressionResult<Oid> {
+        let mut sink = HashSink(crate::hash::Hasher::new());
+        compressor.decompress_streaming(std::io::Cursor::new(&data[..]), &mut sink)?;
+        Ok(Oid::from_bytes(sink.0.finalize()))
+    };
+
+    if enabled && len >= threshold {
+        tokio::task::spawn_blocking(run).await.map_err(|e| {
+            mediagit_compression::CompressionError::decompression_failed(e.to_string())
+        })?
+    } else {
+        run()
+    }
+}
+
 /// `decompress_typed` variant of `decompress_blocking` for `SmartCompressor`.
 async fn decompress_typed_blocking(
     compressor: std::sync::Arc<SmartCompressor>,
@@ -2037,5 +2103,127 @@ mod tests {
         // Verify OID can be parsed
         let oid = Oid::from_hex(base_oid_hex).unwrap();
         assert_eq!(oid.to_hex(), test_oid);
+    }
+}
+
+/// C3: the streaming verify-hash must be bit-identical to the one-shot hash it
+/// replaced, on every codec `decompress_streaming` dispatches.
+///
+/// This is the whole risk of the change. `put_compressed_chunk` refuses to store
+/// a chunk whose computed id differs from its declared one, so a digest that
+/// diverges on any codec would not corrupt data — it would reject every affected
+/// chunk and break clone outright. Both halves are asserted: the digest MATCHES
+/// for good data, and a corrupted payload still produces a DIFFERENT digest
+/// (a hash that agreed unconditionally would pass the first half alone).
+#[cfg(test)]
+mod streaming_verify_hash_parity_tests {
+    use super::*;
+    use mediagit_compression::ObjectType;
+    use mediagit_compression::smart_compressor::TypeAwareCompressor;
+
+    /// Payload shapes chosen to reach different codecs: highly compressible
+    /// (Zlib/Zstd/Brotli), incompressible (falls back to Store, the 0x00-prefix
+    /// framing that has caused silent corruption before), and empty.
+    fn payloads() -> Vec<(&'static str, Vec<u8>)> {
+        let mut incompressible = Vec::with_capacity(64 * 1024);
+        let mut x: u32 = 0x1234_5678;
+        for _ in 0..(64 * 1024) {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            incompressible.push((x >> 24) as u8);
+        }
+        vec![
+            ("empty", Vec::new()),
+            ("tiny", b"hello".to_vec()),
+            ("compressible", vec![b'A'; 256 * 1024]),
+            ("incompressible", incompressible),
+        ]
+    }
+
+    #[tokio::test]
+    async fn streaming_hash_matches_one_shot_hash_on_every_codec() {
+        let smart = std::sync::Arc::new(SmartCompressor::new());
+
+        for (name, raw) in payloads() {
+            for obj_type in [ObjectType::Text, ObjectType::Jpeg] {
+                let compressed = smart
+                    .compress_typed_with_size(&raw, obj_type)
+                    .unwrap_or_else(|e| panic!("{name}/{obj_type:?}: compress failed: {e}"));
+
+                // What the code used to do.
+                let one_shot = {
+                    let decompressed = smart
+                        .decompress_typed(&compressed)
+                        .unwrap_or_else(|e| panic!("{name}/{obj_type:?}: decompress failed: {e}"));
+                    assert_eq!(
+                        decompressed, raw,
+                        "{name}/{obj_type:?}: round trip lost data"
+                    );
+                    Oid::hash(&decompressed)
+                };
+
+                // What it does now.
+                let streamed = decompress_typed_hash_blocking(smart.clone(), compressed.clone())
+                    .await
+                    .unwrap_or_else(|e| panic!("{name}/{obj_type:?}: streaming hash failed: {e}"));
+
+                assert_eq!(
+                    streamed, one_shot,
+                    "{name}/{obj_type:?}: streaming digest diverged from one-shot digest"
+                );
+                assert_eq!(
+                    streamed,
+                    Oid::hash(&raw),
+                    "{name}/{obj_type:?}: digest is not the id of the ORIGINAL bytes"
+                );
+            }
+        }
+    }
+
+    /// The other half: the digest must actually depend on the content. A
+    /// constant or always-equal hash would satisfy the test above.
+    #[tokio::test]
+    async fn streaming_hash_differs_when_payload_is_corrupted() {
+        let smart = std::sync::Arc::new(SmartCompressor::new());
+        let raw = vec![b'A'; 256 * 1024];
+        let compressed = smart
+            .compress_typed_with_size(&raw, ObjectType::Text)
+            .expect("compress");
+
+        let good = decompress_typed_hash_blocking(smart.clone(), compressed.clone())
+            .await
+            .expect("hash good payload");
+
+        // Corrupt one byte of the UNDERLYING data by hashing a different payload
+        // through the same path, rather than mangling the compressed stream
+        // (which would fail to decode rather than produce a wrong hash).
+        let mut other = raw.clone();
+        other[0] = b'B';
+        let other_compressed = smart
+            .compress_typed_with_size(&other, ObjectType::Text)
+            .expect("compress other");
+        let bad = decompress_typed_hash_blocking(smart.clone(), other_compressed)
+            .await
+            .expect("hash other payload");
+
+        assert_ne!(
+            good, bad,
+            "digest did not change when the payload changed — the hash is not content-dependent"
+        );
+    }
+
+    /// Threshold knob must not change the answer, only where the work runs.
+    #[tokio::test]
+    async fn streaming_hash_is_identical_on_and_off_the_blocking_threshold() {
+        let smart = std::sync::Arc::new(SmartCompressor::new());
+        let raw = vec![b'Z'; 512 * 1024];
+        let compressed = smart
+            .compress_typed_with_size(&raw, ObjectType::Text)
+            .expect("compress");
+
+        let digest = decompress_typed_hash_blocking(smart.clone(), compressed.clone())
+            .await
+            .expect("hash");
+
+        assert_eq!(digest, Oid::hash(&raw));
     }
 }
