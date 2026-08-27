@@ -8,6 +8,67 @@
 > asserted** — 56 of the 57 per-version rows are byte-identical to the earlier run. The two
 > differences are named in the table's footnotes; neither is a pipeline change.
 
+## Clone-streaming cycle (C1-C5, measured 2026-08-27)
+
+**Build:** release at `7b632c3`, `RUSTFLAGS=-D warnings` | **Backend:** local
+filesystem over a loopback server | **Pinned:** `MEDIAGIT_CDC_SEED=20260716`,
+download/upload workers = 16, `MEDIAGIT_CHECKOUT_PARALLELISM=8`,
+`MEDIAGIT_PACK_UPLOAD_CONCURRENCY=4`
+
+Both results below are **A/B measurements with the arms alternated**, not
+before-and-after readings taken at different times on different machines.
+
+### C1 — metadata pack no longer buffered in RAM
+
+The `before` arm is a release build of `9960466`, the last commit without C1.
+Same fixture, same server binary, fresh remote per arm so neither arm gets a
+dedup head start. 8000 x 8 KB files = 62.5 MB, 2 reps.
+
+| | client private bytes | x payload | push wall |
+|---|---:|---:|---:|
+| before (`9960466`) | 315.2 MB | 5.04x | 34.2 s |
+| after (`7b632c3`) | 77.0 MB | **1.23x** | **8.4 s** |
+
+**-75.6% memory and ~4x faster.** The speedup was not predicted; it falls out of
+the same defect, since growing a 315 MB `Vec` by reallocation and then copying it
+twice costs time as well as memory.
+
+Reproducibility was high: 315.2/315.1 MB and 76.8/77.0 MB across the two reps.
+
+**This is not "bounded memory".** Client memory still scales with payload, now at
+~1.23x instead of ~5x. What went away is the multiple, not the proportionality.
+
+**Why not measured by `11_memprofile`:** that phase pushes one 512 MB file. A
+file that size is chunked media and never enters the metadata pack, so it reports
+a large number that is unchanged by C1 in either direction. The workload that
+exercises this fix is many SMALL files.
+
+### C4 — working tree written while media downloads
+
+Same commit, knob flipped: `MEDIAGIT_CLONE_OVERLAP` 0 vs 1. 240 MB of media (3
+files) plus 400 x 24 KB small files, 3 reps, arm order alternated.
+
+| metric | overlap=off | overlap=on | delta |
+|---|---:|---:|---|
+| `[bench] op=checkout` wall | 0.37 s | 0.22 s | **-40.5%** |
+| total clone wall | 4.04 s | 3.87 s | -4.2% |
+
+**Parity: PASS.** All six clones produced one identical tree hash.
+
+**Read the total as "no change."** -4.2% sits inside this project's recorded
+~4.3% run-to-run noise. On a loopback backend the download finishes too fast to
+hide much behind it; the overlap pays off where transfer is slow relative to the
+working-tree write, which this bench is not. The honest claim from this run is
+the checkout collapse and the parity, not a total-time win.
+
+The residual 0.22 s is the three large files, which genuinely cannot be
+overlapped -- their chunks arrive last by construction. What the overlap removed
+is the 400 small files' write cost.
+
+**Scope caveat:** the size of this effect depends on the small/large mix. A repo
+that is almost all chunked media has little in the `ready` batch and gains
+little.
+
 ## At-rest encryption cost (DC-7, measured 2026-08-12)
 
 **Build:** `0.3.0-rc.3` release | **Corpus:** 824,415,190 B synthetic VFX, 681 chunks |
@@ -146,10 +207,13 @@ xychart-beta
 > chunks are still downloading (C4), and an interrupted clone resumes instead of
 > restarting (C5).
 >
-> Expect the clone column and the client memory figures to move; the **cloud**
-> MB/s figures should NOT, because they are WAN-bound and no code change moves
-> the weather. Re-run phase 06 (see [Reproduction](#reproduction)) before quoting
-> any of this as current.
+> What HAS been measured against the cycle is in
+> [Clone-streaming cycle](#clone-streaming-cycle-c1-c5-measured-2026-08-27)
+> above — but on a **local** backend only, so it does not update this table.
+>
+> The **cloud** MB/s figures here should NOT move: they are WAN-bound and no
+> code change moves the weather. Re-run phase 06 (see
+> [Reproduction](#reproduction)) before quoting any of this as current.
 
 Reading the numbers honestly:
 

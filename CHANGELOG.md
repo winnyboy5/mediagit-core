@@ -21,6 +21,14 @@ changes.
   `MEDIAGIT_CLONE_OVERLAP=0` restores the serial path — it is the revert switch
   and the parity oracle, and both produce an identical tree.
 
+  Measured 2026-08-27 (240 MB media + 400 small files, local backend, 3 reps
+  alternating order): checkout wall **0.37 s → 0.22 s (−40.5%)**, total clone
+  wall 4.04 s → 3.87 s (−4.2%). **Read the second number as "no change":** −4.2%
+  is inside this project's ~4.3% run-to-run noise, and on a loopback backend the
+  download is too fast to hide much behind. The overlap wins where the transfer
+  is slow relative to the working-tree write, which is not this bench. Parity
+  held: all six clones produced one identical tree hash.
+
 - **An interrupted clone now resumes.** Clone used to delete the target
   directory on *any* error, which deleted the very object database a retry
   would have skipped work against — an 11 GB clone dying at 90% re-downloaded
@@ -40,11 +48,27 @@ changes.
   by nothing — the server buffered regardless of the setting. Streamed chunk
   responses use chunked transfer-encoding and so carry no `Content-Length`.
 
-- **Client push memory is bounded.** The *metadata* pack (commits, trees, small
-  blobs) had no size cap at all, unlike the 64 MiB cloud chunk pack — it grew
-  in RAM with history, then was copied twice more on the way to the socket. It
-  is now written to a temp file and streamed from there. One pack, no protocol
-  change.
+- **Client push memory cut ~76%, and a small-file push got ~4× faster.** The
+  *metadata* pack (commits, trees, small blobs) had no size cap at all, unlike
+  the 64 MiB cloud chunk pack — it grew in RAM with history, then was copied
+  twice more on the way to the socket. It is now written to a temp file and
+  streamed from there. One pack, no protocol change.
+
+  Measured 2026-08-27, pushing 8000 × 8 KB files (62.5 MB) to a local backend,
+  same fixture and same server binary on both arms, 2 reps alternating order:
+
+  | | client private bytes | × payload | push wall |
+  |---|---:|---:|---:|
+  | before | 315.2 MB | 5.04× | 34.2 s |
+  | after | 77.0 MB | 1.23× | 8.4 s |
+
+  The 4× speedup was not predicted and is a consequence of the same defect:
+  growing a 315 MB `Vec` by reallocation and then copying it twice is expensive,
+  not just memory-hungry.
+
+  **Not "bounded".** Memory still scales with payload, at ~1.23×. What went away
+  is the ~5× multiple, not the proportionality. A single 512 MB file shows none
+  of this — that is chunked media and never enters the metadata pack.
 
 - **New `[bench] op=checkout` line** (bench schema v4 → v5) with an explicit
   `overlap=on|off` field. Working-tree write time was previously folded into the
@@ -55,8 +79,10 @@ changes.
 streaming the cloud chunk pack upload (already capped at 64 MiB); HTTP/3
 (addresses none of the above, and AWS S3 does not support it).
 
-**Numbers:** `BENCHMARKS.md` has not been re-measured against this cycle and
-says so. Cloud MB/s is WAN-bound and is not expected to move.
+**Numbers:** the two A/Bs above were measured on a release build at `7b632c3`
+against a local backend, and are recorded in `BENCHMARKS.md`. The **cloud**
+throughput table in that file has NOT been re-measured and is flagged as
+pre-cycle; cloud MB/s is WAN-bound and is not expected to move.
 
 
 ## [v0.3.0-rc.4] - 2026-08-26

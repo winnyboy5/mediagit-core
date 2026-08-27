@@ -510,6 +510,35 @@ impl StorageBackend for B2SpacesBackend {
         })
     }
 
+    /// Stream an object, delegating to the inner `S3Backend`.
+    ///
+    /// Without this the wrapper inherits the trait's DEFAULT `get_streaming`,
+    /// which is `self.get(key).await?` wrapped in a one-shot stream — so the
+    /// inner backend's real streaming implementation was unreachable through
+    /// B2/Spaces and every chunk was buffered whole. Same shape as
+    /// `namespaced.rs`, which does delegate.
+    ///
+    /// This completes C2 (server-side chunk streaming) for these providers:
+    /// the server's `download_chunk` calls `get_streaming`, so a wrapper that
+    /// silently falls back to the buffering default cancels the fix for anyone
+    /// on B2 or Spaces.
+    async fn get_streaming(
+        &self,
+        key: &str,
+    ) -> anyhow::Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+        >,
+    > {
+        self.inner.get_streaming(key).await.map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to stream object from {}: {}",
+                self.provider.name(),
+                e
+            )
+        })
+    }
+
     /// Store an object in B2/Spaces
     ///
     /// Delegates to the internal S3Backend which handles multipart upload

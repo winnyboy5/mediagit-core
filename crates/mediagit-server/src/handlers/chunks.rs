@@ -352,10 +352,15 @@ pub async fn download_chunk(
     // i.e. it runs precisely when the server is already degraded and least able
     // to afford the allocation.
     //
-    // `get_streaming` has existed and been overridden by s3.rs and minio.rs
-    // since B7, but NO request-serving code ever called it, so
+    // `get_streaming` has existed and been overridden by s3.rs, minio.rs and
+    // azure.rs since B7, but NO request-serving code ever called it, so
     // `MEDIAGIT_STORAGE_STREAMING` gated a path nothing reached — a dead knob.
     // This call site is what makes that knob mean something.
+    //
+    // Backends WITHOUT a real override (local.rs, gcs.rs — the latter
+    // implements only `get_streaming_range`) take the trait default, which is
+    // `self.get(key).await?` in a one-shot stream. That is correct but buys no
+    // memory, so a local-backend server is the wrong place to test this.
     //
     // Deliberate behaviour change: a streamed body is chunked
     // transfer-encoding, so the response no longer carries Content-Length. Our
