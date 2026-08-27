@@ -484,6 +484,39 @@ function Drill-A7-BackendOutage {
     # clear error instead of hanging on retries. 60s >> a normal localhost push
     # (~seconds) but well inside the 120s WaitForExit window below.
     $env:MEDIAGIT_PUSH_DEADLINE_SECS = "60"
+
+    # THROTTLE THE UPLOAD so the transfer window is WIDE and the stop below
+    # lands inside it deterministically.
+    #
+    # This drill has now been mis-timed twice by tuning a clock against a moving
+    # target. The sleep was 2000ms (calibrated on Docker MinIO), cut to 500ms in
+    # ga24 on the reasoning that "native Silo moves 600MB in about 3 seconds" --
+    # and ga33 STILL recorded push-exit=0 with `600.01 MiB, 3 objects sent, in 3
+    # seconds`. The 3 seconds is wall time; the BYTES go up in well under one,
+    # and the rest is packing, verification and the ref update. There is no sleep
+    # value that reliably lands inside a sub-second window whose width depends on
+    # the host's disk and the backend's speed.
+    #
+    # So stop tuning the clock and widen the target instead. Concurrency 1
+    # serialises the uploads, stretching the backend-I/O phase from
+    # sub-second to many seconds, which makes the 500ms trigger land mid-transfer
+    # on any host -- fast NVMe or slow spinning disk alike.
+    #
+    # This does not weaken what the drill tests. It still stops a REAL backend
+    # during a REAL upload and asserts the client fails cleanly, retries, and
+    # produces a byte-identical clone. Upload concurrency is a supported
+    # configuration, not a test-only hack, and the recovery semantics under test
+    # are independent of how many sockets are in flight.
+    #
+    # Saved and restored: this phase shares one process across seventeen drills,
+    # and leaking a concurrency of 1 into A8+ would quietly slow every drill after
+    # this one and be near-impossible to attribute.
+    $a7SavedUpload = $env:MEDIAGIT_UPLOAD_CONCURRENCY
+    $a7SavedPack   = $env:MEDIAGIT_PACK_UPLOAD_CONCURRENCY
+    $a7SavedObject = $env:MEDIAGIT_PUSH_OBJECT_CONCURRENCY
+    $env:MEDIAGIT_UPLOAD_CONCURRENCY      = "1"
+    $env:MEDIAGIT_PACK_UPLOAD_CONCURRENCY = "1"
+    $env:MEDIAGIT_PUSH_OBJECT_CONCURRENCY = "1"
     $p = Start-Process $QA.MG -ArgumentList @("-C", $repo, "push", "origin") -PassThru -NoNewWindow `
       -RedirectStandardOutput (Join-Path $QA.Logs "a7-push.out") -RedirectStandardError (Join-Path $QA.Logs "a7-push.err")
     # Cache the handle, exactly as A15 does and for the same reason: without it
@@ -533,6 +566,11 @@ function Drill-A7-BackendOutage {
     # afterwards from a log that ends mid-drill.
     Write-QaLog $Phase "A7: push started, backend stopped; waiting for client exit"
     $exited = $p.WaitForExit(120000)
+    # Concurrency restored the moment the throttled push is done. The retry and
+    # clone below assert recovery and must not inherit the throttle.
+    $env:MEDIAGIT_UPLOAD_CONCURRENCY      = $a7SavedUpload
+    $env:MEDIAGIT_PACK_UPLOAD_CONCURRENCY = $a7SavedPack
+    $env:MEDIAGIT_PUSH_OBJECT_CONCURRENCY = $a7SavedObject
     # Read the code only once the process has really gone, and record whether it
     # could be read at all. "we could not read the exit code" must FAIL, not be
     # silently promoted into evidence of a clean refusal.
@@ -581,7 +619,16 @@ function Drill-A7-BackendOutage {
     $fsckClone = if ($cl.Exit -eq 0) { Test-QaFsckClean $clone } else { $false }
 
     $pass = $up -and $cleanFail -and $fsckLocal -and ($retry.Exit -eq 0) -and ($cl.Exit -eq 0) -and $cloneHashOk -and $fsckClone
-    Rec $drill $pass "minio-restarted=$up push-exited=$exited push-exit=$exitCode exit-read=$exitRead panic=$panic clean-fail=$cleanFail local-fsck=$fsckLocal retry-push=$($retry.Exit) clone=$($cl.Exit) clone-hash-ok=$cloneHashOk clone-fsck=$fsckClone"
+    # Name the mis-timing explicitly when it happens. A bare `clean-fail=False`
+    # reads like the product failed to fail cleanly, when in fact the drill never
+    # interrupted anything -- which sent two separate investigations at the
+    # product before anyone read the push output. Same discipline as A18's
+    # `killed=False`: a drill that tested nothing must SAY so.
+    $why = ""
+    if (-not $cleanFail -and $exited -and $exitRead -and $exitCode -eq 0) {
+      $why = " -- push SUCCEEDED despite the backend being stopped: the outage landed AFTER the upload finished, so nothing was interrupted and this drill tested nothing. Widen the transfer window (upload concurrency), do not tune the sleep."
+    }
+    Rec $drill $pass "minio-restarted=$up push-exited=$exited push-exit=$exitCode exit-read=$exitRead panic=$panic clean-fail=$cleanFail local-fsck=$fsckLocal retry-push=$($retry.Exit) clone=$($cl.Exit) clone-hash-ok=$cloneHashOk clone-fsck=$fsckClone$why"
   } catch {
     if ($stoppedContainer) { & docker start $container *> $null }
     if ("$_" -match "^SKIP:") { Rec $drill "SKIP" "$_" } else { Rec $drill $false "unexpected error: $_" }

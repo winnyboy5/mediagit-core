@@ -55,14 +55,19 @@ if (-not $env:MG_QA_BACKEND_STOP_CMD -and -not $env:MG_QA_BACKEND_START_CMD) {
   $siloScript = Join-Path $PSScriptRoot "silo_native.ps1"
   $holder = $null
   try {
-    $conn = Get-NetTCPConnection -LocalPort 9000 -State Listen -ErrorAction SilentlyContinue |
+    # Derive the port from MG_QA_MINIO rather than assuming 9000. A7's
+    # stop/start pair must target the port the campaign actually uses, or the
+    # drill cycles a backend nobody is talking to and still reports a result.
+    $siloPort = 9000
+    if ($env:MG_QA_MINIO -and ($env:MG_QA_MINIO -match ':(\d+)')) { $siloPort = [int]$matches[1] }
+    $conn = Get-NetTCPConnection -LocalPort $siloPort -State Listen -ErrorAction SilentlyContinue |
             Select-Object -First 1
     if ($conn) { $holder = (Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue).ProcessName }
   } catch { }
   if ($holder -eq "silo" -and (Test-Path $siloScript)) {
-    $env:MG_QA_BACKEND_STOP_CMD  = "& '$siloScript' -Action stop"
-    $env:MG_QA_BACKEND_START_CMD = "& '$siloScript' -Action start"
-    Write-Host "campaign_env: native silo on :9000 - A7 backend-cycle commands wired to silo_native.ps1"
+    $env:MG_QA_BACKEND_STOP_CMD  = "& '$siloScript' -Action stop -Port $siloPort"
+    $env:MG_QA_BACKEND_START_CMD = "& '$siloScript' -Action start -Port $siloPort"
+    Write-Host "campaign_env: native silo on :$siloPort - A7 backend-cycle commands wired to silo_native.ps1"
   }
 }
 

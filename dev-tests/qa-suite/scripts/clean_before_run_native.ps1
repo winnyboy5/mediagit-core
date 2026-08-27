@@ -16,6 +16,11 @@
 
 param(
   [switch]$Fixtures,
+  # Port is a parameter, not a constant: on this host a Jupyter kernel holds
+  # :9000 for one of its ZMQ channels, so Silo runs on 9100 instead. Hardcoding
+  # 9000 here would abort at the listener check (exit 91/92) on any host where
+  # something else got the port first.
+  [int]$Port = 9000,
   [string[]]$KeepLogs = @("20260818-gagate8", "20260819-gagate13",
                           "perfguard-a", "perfguard-b", "perfguard-c",
                           "20260820-gate14", "provefloor"),
@@ -74,14 +79,14 @@ if (Test-Path $logs) {
 if (-not (Test-Path $mc)) { Say "FATAL: mcli.exe not found at $mc"; exit 90 }
 
 # The server must be the one we think it is before we delete anything through it.
-$listener = Get-NetTCPConnection -LocalPort 9000 -State Listen -EA SilentlyContinue |
+$listener = Get-NetTCPConnection -LocalPort $Port -State Listen -EA SilentlyContinue |
             Select-Object -First 1
-if (-not $listener) { Say "FATAL: nothing is listening on :9000"; exit 91 }
+if (-not $listener) { Say "FATAL: nothing is listening on :$Port"; exit 91 }
 $owner = (Get-Process -Id $listener.OwningProcess -EA SilentlyContinue).ProcessName
-Say ":9000 owned by '$owner' pid=$($listener.OwningProcess)"
-if ($owner -ne "silo") { Say "FATAL: expected native 'silo' on :9000, found '$owner'"; exit 92 }
+Say ":$Port owned by '$owner' pid=$($listener.OwningProcess)"
+if ($owner -ne "silo") { Say "FATAL: expected native 'silo' on :$Port, found '$owner'"; exit 92 }
 
-& $mc alias set qa http://127.0.0.1:9000 minioadmin minioadmin | Out-Null
+& $mc alias set qa http://127.0.0.1:$Port minioadmin minioadmin | Out-Null
 if ($LASTEXITCODE -ne 0) { Say "FATAL: mcli could not reach Silo"; exit 93 }
 
 $buckets = @("mediagit-qa-suite", "mediagit-repos", "mediagit-test")
