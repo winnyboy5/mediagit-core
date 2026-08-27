@@ -292,7 +292,10 @@ pub trait StorageBackend: Send + Sync + Debug {
     ///
     /// Default impl fetches the full object via `get` and emits it as a single chunk.
     /// Backends may override with a native streaming implementation for better memory
-    /// efficiency on large objects. Gated by `MEDIAGIT_STORAGE_STREAMING=1` (OFF by default).
+    /// efficiency on large objects. Gated by `MEDIAGIT_STORAGE_STREAMING`, which
+    /// defaults to ON (`s3.rs` and `minio.rs` both `unwrap_or("1")`); set it to `0`
+    /// to fall back to a whole-object `get`. This line previously read "OFF by
+    /// default" and contradicted both implementations.
     async fn get_streaming(
         &self,
         key: &str,

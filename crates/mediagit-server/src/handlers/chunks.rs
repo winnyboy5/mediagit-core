@@ -346,13 +346,32 @@ pub async fn download_chunk(
     let storage = get_or_init_storage(&state, &repo_path).await?;
 
     let chunk_key = format!("chunks/{}", chunk_id);
-    match storage.get(&chunk_key).await {
-        Ok(chunk_data) => {
-            tracing::debug!(chunk = %chunk_id, size = chunk_data.len(), "Chunk downloaded");
+    // Streamed, not buffered: this used to be `storage.get(&chunk_key)`, which
+    // pulled an ENTIRE chunk into server RAM before writing a byte to the
+    // socket. Chunks are media-sized and this is the per-chunk fallback path —
+    // i.e. it runs precisely when the server is already degraded and least able
+    // to afford the allocation.
+    //
+    // `get_streaming` has existed and been overridden by s3.rs and minio.rs
+    // since B7, but NO request-serving code ever called it, so
+    // `MEDIAGIT_STORAGE_STREAMING` gated a path nothing reached — a dead knob.
+    // This call site is what makes that knob mean something.
+    //
+    // Deliberate behaviour change: a streamed body is chunked
+    // transfer-encoding, so the response no longer carries Content-Length. Our
+    // own client reads this endpoint with `resp.bytes()`, which handles that;
+    // the alternative (a HEAD/size probe per chunk) would add a round trip to
+    // every download to restore a header nothing reads.
+    //
+    // Errors still surface from the `await` below rather than mid-stream, so
+    // the NoSuchKey -> pack-index -> chunk-delta fallback chain is unchanged.
+    match storage.get_streaming(&chunk_key).await {
+        Ok(stream) => {
+            tracing::debug!(chunk = %chunk_id, "Chunk download started (streaming)");
             Ok((
                 StatusCode::OK,
                 [("Content-Type", "application/octet-stream")],
-                chunk_data,
+                axum::body::Body::from_stream(stream),
             )
                 .into_response())
         }
@@ -1696,5 +1715,122 @@ mod download_chunk_unverified_pack_tests {
             .await
             .unwrap();
         assert!(!body.is_empty(), "corrupted-but-trusted bytes still served");
+    }
+}
+
+/// C2 (streaming path proof): `download_chunk`'s loose-chunk success path
+/// must call `get_streaming`, not the buffering `get()` — that's the whole
+/// point of the change documented above `download_chunk`. Per that comment's
+/// own history, `MEDIAGIT_STORAGE_STREAMING` gated code that no
+/// request-serving caller ever reached; a test that can't tell `get` and
+/// `get_streaming` apart would be equally worthless.
+#[cfg(test)]
+mod download_chunk_streaming_tests {
+    use super::*;
+
+    /// Wraps a real backend and counts calls to `get` and `get_streaming`
+    /// separately. Mirrors `CountingBackend` in `transfer.rs`'s
+    /// `presign_pack_downloads_verification_tests`.
+    #[derive(Debug)]
+    struct CountingBackend {
+        inner: Arc<dyn StorageBackend>,
+        get_calls: Arc<std::sync::atomic::AtomicUsize>,
+        streaming_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl StorageBackend for CountingBackend {
+        async fn get(&self, key: &str) -> anyhow::Result<Vec<u8>> {
+            self.get_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.get(key).await
+        }
+        async fn get_streaming(
+            &self,
+            key: &str,
+        ) -> anyhow::Result<
+            std::pin::Pin<
+                Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+            >,
+        > {
+            self.streaming_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.get_streaming(key).await
+        }
+        async fn put(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
+            self.inner.put(key, data).await
+        }
+        async fn exists(&self, key: &str) -> anyhow::Result<bool> {
+            self.inner.exists(key).await
+        }
+        async fn delete(&self, key: &str) -> anyhow::Result<()> {
+            self.inner.delete(key).await
+        }
+        async fn list_objects(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+            self.inner.list_objects(prefix).await
+        }
+        async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+            self.inner.head(key).await
+        }
+    }
+
+    #[tokio::test]
+    async fn download_chunk_uses_get_streaming_not_get() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = "test-repo".to_string();
+        let repo_path = tmp.path().join(&repo);
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let state = Arc::new(AppState::new(tmp.path().to_path_buf()));
+
+        // Build the real backend first, then wrap it and swap the wrapped
+        // Arc into the cache `get_or_init_storage` reads from, so
+        // `download_chunk`'s own internal lookup resolves to the counting
+        // wrapper instead of the raw backend.
+        let base_storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let get_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let streaming_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counting: Arc<dyn StorageBackend> = Arc::new(CountingBackend {
+            inner: base_storage,
+            get_calls: Arc::clone(&get_calls),
+            streaming_calls: Arc::clone(&streaming_calls),
+        });
+        state
+            .storage_backends
+            .write()
+            .await
+            .insert(repo_path.clone(), Arc::clone(&counting));
+
+        let chunk_id = "a".repeat(64);
+        let content = b"streamed chunk bytes, byte for byte".to_vec();
+        counting
+            .put(&format!("chunks/{}", chunk_id), &content)
+            .await
+            .expect("put chunk");
+
+        let resp = download_chunk(Path((repo, chunk_id)), State(Arc::clone(&state)), None)
+            .await
+            .expect("download must succeed");
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            streaming_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "download_chunk must call get_streaming exactly once"
+        );
+        assert_eq!(
+            get_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "download_chunk must not fall back to the buffering get()"
+        );
+        assert_eq!(
+            body.as_ref(),
+            content.as_slice(),
+            "streamed body must be byte-identical to the stored chunk"
+        );
     }
 }
