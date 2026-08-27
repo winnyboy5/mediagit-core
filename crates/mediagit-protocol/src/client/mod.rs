@@ -13,7 +13,7 @@
 
 use anyhow::{Context, Result};
 use mediagit_versioning::{
-    Commit, FileMode, ObjectDatabase, ObjectType, Oid, PackWriter, Tag, Tree,
+    Commit, FileMode, ObjectDatabase, ObjectType, Oid, PackWriter, StreamingPackWriter, Tag, Tree,
     chunking::ChunkManifest,
 };
 use std::collections::{HashSet, VecDeque};
@@ -622,9 +622,12 @@ impl ProtocolClient {
     }
 
     /// Override the parallel chunk-download fan-out used by
-    /// `download_chunked_objects`. Takes precedence over the internal default
-    /// of 24, but is still overridden by the `MEDIAGIT_DOWNLOAD_CONCURRENCY`
-    /// env var when that is set. Pass a value derived from
+    /// `download_chunked_objects`. Takes precedence over the internal default,
+    /// but is still overridden by the `MEDIAGIT_DOWNLOAD_CONCURRENCY`
+    /// env var when that is set. Note the internal default it displaces is
+    /// **32** on this path (`pull.rs::pull_streaming`) and **24** on the pack
+    /// range-GET path (`packs.rs`) — the split is deliberate and measured; see
+    /// the comment at that `packs.rs` call site. Pass a value derived from
     /// `[performance] download_concurrency` in the repo config.
     pub fn with_concurrent_downloads(mut self, n: usize) -> Self {
         self.concurrent_downloads = if n > 0 { Some(n) } else { None };
@@ -728,7 +731,7 @@ impl ProtocolClient {
         let mut pack_writer = PackWriter::new();
         pack_writer.add_object(oid, obj_type, data);
         let pack_data = pack_writer.finalize();
-        self.upload_pack(&pack_data).await
+        self.upload_pack(pack_data).await
     }
 }
 

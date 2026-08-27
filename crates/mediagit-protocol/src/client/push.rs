@@ -12,6 +12,8 @@
 // GNU Affero General Public License for more details.
 
 use super::*;
+use std::path::{Path, PathBuf};
+use tempfile::TempDir;
 
 /// Does this presigned URL's signed header set already carry `content-length`?
 ///
@@ -38,6 +40,41 @@ fn signs_content_length(required_headers: &[[String; 2]]) -> bool {
     required_headers
         .iter()
         .any(|h| h[0].eq_ignore_ascii_case("content-length"))
+}
+
+/// Shared status handling for both `upload_pack` and `upload_pack_file`.
+fn handle_pack_upload_response(response: reqwest::Response) -> Result<()> {
+    let status = response.status();
+    if !status.is_success() {
+        // A rejection here is almost always authorization, and "403
+        // Forbidden" on its own does not tell the user what to do about it.
+        let hint = match status.as_u16() {
+            401 => "\n  Not authenticated. Run `mediagit auth login <server>`.",
+            403 => {
+                "\n  Authenticated, but this account cannot push to this repository. \
+                 An admin must grant it write access."
+            }
+            _ => "",
+        };
+        anyhow::bail!("POST /objects/pack failed with status: {status}{hint}");
+    }
+
+    Ok(())
+}
+
+/// A metadata pack written to a temp file instead of an in-RAM `Vec<u8>`.
+/// Keeping the `TempDir` here is what keeps the file alive through
+/// `upload_pack_file`'s retries.
+struct GeneratedPack {
+    _temp_dir: TempDir,
+    path: PathBuf,
+    byte_len: u64,
+}
+
+impl GeneratedPack {
+    fn len(&self) -> usize {
+        self.byte_len as usize
+    }
 }
 
 impl ProtocolClient {
@@ -106,9 +143,9 @@ impl ProtocolClient {
             // Only upload if there are new objects
             if !objects.is_empty() {
                 // Generate and upload pack file with new objects only
-                let (pack_data, chunked_oids) = self.generate_pack(odb, objects).await?;
-                stats.bytes_uploaded = pack_data.len();
-                self.upload_pack(&pack_data).await?;
+                let (pack, chunked_oids) = self.generate_pack(odb, objects).await?;
+                stats.bytes_uploaded = pack.len();
+                self.upload_pack_file(&pack.path, pack.byte_len).await?;
 
                 // Upload chunked objects (large files) if any
                 if !chunked_oids.is_empty() {
@@ -243,36 +280,35 @@ impl ProtocolClient {
                 message: "Generating pack...".to_string(),
             });
 
-            let (pack_data, chunked_oids) = self.generate_pack(odb, objects).await?;
-            stats.bytes_uploaded = pack_data.len();
+            let (pack, chunked_oids) = self.generate_pack(odb, objects).await?;
+            stats.bytes_uploaded = pack.len();
 
             on_progress(PushProgress {
                 phase: PushPhase::Packing,
                 current: total_objects,
                 total: total_objects,
-                message: format!(
-                    "Packed {} objects ({} bytes)",
-                    total_objects,
-                    pack_data.len()
-                ),
+                message: format!("Packed {} objects ({} bytes)", total_objects, pack.len()),
             });
 
             // Phase 3: Upload pack with progress
             on_progress(PushProgress {
                 phase: PushPhase::Uploading,
                 current: 0,
-                total: pack_data.len() as u64,
+                total: pack.byte_len,
                 message: "Uploading pack...".to_string(),
             });
 
-            tokio::time::timeout_at(push_deadline, self.upload_pack(&pack_data))
-                .await
-                .map_err(|_| deadline_err())??;
+            tokio::time::timeout_at(
+                push_deadline,
+                self.upload_pack_file(&pack.path, pack.byte_len),
+            )
+            .await
+            .map_err(|_| deadline_err())??;
 
             on_progress(PushProgress {
                 phase: PushPhase::Uploading,
-                current: pack_data.len() as u64,
-                total: pack_data.len() as u64,
+                current: pack.byte_len,
+                total: pack.byte_len,
                 message: "Pack upload complete".to_string(),
             });
 
@@ -312,36 +348,70 @@ impl ProtocolClient {
     }
 
     /// Upload a pack file to the server
-    pub(crate) async fn upload_pack(&self, pack_data: &[u8]) -> Result<()> {
+    ///
+    /// Takes ownership so the caller (a single small object wrapped in a
+    /// pack, e.g. `upload_loose_object`) hands over its buffer instead of
+    /// this function taking its own copy of it.
+    pub(crate) async fn upload_pack(&self, pack_data: Vec<u8>) -> Result<()> {
         let url = format!("{}/objects/pack", self.base_url);
         tracing::debug!("POST {} ({} bytes)", url, pack_data.len());
 
+        // Bytes so the retry closure below clones a refcount bump, not the
+        // buffer, matching the B5 pattern in pack_builder.rs.
+        let pack_data: bytes::Bytes = pack_data.into();
         let response = crate::client::send_with_rate_limit_retry(|| {
             self.client
                 .post(&url)
                 .header("Content-Type", "application/octet-stream")
-                .body(pack_data.to_vec())
+                .body(pack_data.clone())
                 .send()
         })
         .await
         .context("Failed to upload pack file")?;
 
-        let status = response.status();
-        if !status.is_success() {
-            // A rejection here is almost always authorization, and "403
-            // Forbidden" on its own does not tell the user what to do about it.
-            let hint = match status.as_u16() {
-                401 => "\n  Not authenticated. Run `mediagit auth login <server>`.",
-                403 => {
-                    "\n  Authenticated, but this account cannot push to this repository. \
-                     An admin must grant it write access."
-                }
-                _ => "",
-            };
-            anyhow::bail!("POST /objects/pack failed with status: {status}{hint}");
-        }
+        handle_pack_upload_response(response)
+    }
 
-        Ok(())
+    /// Upload a metadata pack straight from disk, as a streaming body.
+    ///
+    /// C1: the metadata pack has no size cap (unlike the cloud chunk pack,
+    /// capped at MEDIAGIT_PACK_BYTES), so a history-heavy push must not hold
+    /// it in RAM. `generate_pack` writes it to `pack_path` via
+    /// `StreamingPackWriter`; this streams it back off disk instead.
+    ///
+    /// A streamed body cannot be replayed, so `send_with_rate_limit_retry`
+    /// re-opening the file inside its closure (called fresh on every 429
+    /// retry) is what makes retries safe here.
+    pub(crate) async fn upload_pack_file(&self, pack_path: &Path, byte_len: u64) -> Result<()> {
+        let url = format!("{}/objects/pack", self.base_url);
+        tracing::debug!("POST {} ({} bytes, streamed)", url, byte_len);
+
+        let response = crate::client::send_with_rate_limit_retry(|| async {
+            use futures::stream::TryStreamExt;
+
+            let path = pack_path.to_path_buf();
+            // File is opened lazily inside the stream so a failed open
+            // surfaces as a body error on `send()` rather than needing its
+            // own `reqwest::Result` conversion here.
+            let stream = futures::stream::once(async move {
+                tokio::fs::File::open(path)
+                    .await
+                    .map(tokio_util::io::ReaderStream::new)
+            })
+            .try_flatten();
+
+            self.client
+                .post(&url)
+                .header("Content-Type", "application/octet-stream")
+                .header("Content-Length", byte_len)
+                .body(reqwest::Body::wrap_stream(stream))
+                .send()
+                .await
+        })
+        .await
+        .context("Failed to upload pack file")?;
+
+        handle_pack_upload_response(response)
     }
 
     /// Collect all NEW objects reachable from given commit OIDs
@@ -523,7 +593,7 @@ impl ProtocolClient {
         &self,
         odb: &ObjectDatabase,
         objects: Vec<(Oid, ObjectType)>,
-    ) -> Result<(Vec<u8>, Vec<Oid>)> {
+    ) -> Result<(GeneratedPack, Vec<Oid>)> {
         // First, filter out chunked objects
         let mut chunked_objects: Vec<Oid> = Vec::new();
         let mut non_chunked: Vec<(Oid, ObjectType)> = Vec::new();
@@ -544,10 +614,18 @@ impl ProtocolClient {
             );
         }
 
-        // Use standard PackWriter but process objects incrementally
-        // Each object is read, added to pack, then data is dropped before next read
-        // This avoids holding all object data in memory simultaneously
-        let mut pack_writer = PackWriter::new();
+        // C1: stream to a temp file via StreamingPackWriter instead of an
+        // in-RAM PackWriter. Unlike the cloud chunk pack (capped at
+        // MEDIAGIT_PACK_BYTES), this metadata pack has no size cap, so a
+        // history-heavy push grew it in RAM without bound.
+        let temp_dir = TempDir::new().context("create metadata pack temp dir")?;
+        let pack_path = temp_dir.path().join("metadata.pack");
+        let file = tokio::fs::File::create(&pack_path)
+            .await
+            .context("create metadata pack temp file")?;
+        let mut writer = StreamingPackWriter::new(file, non_chunked.len() as u32, temp_dir.path())
+            .await
+            .context("init streaming pack writer")?;
 
         for (oid, obj_type) in non_chunked {
             // Read single object
@@ -557,14 +635,29 @@ impl ProtocolClient {
                 .context(format!("Failed to read object {}", oid))?;
 
             // Add to pack (internally compressed/processed)
-            pack_writer.add_object(oid, obj_type, &obj_data);
+            writer
+                .write_object(oid, obj_type, &obj_data)
+                .await
+                .context(format!("Failed to write object {} to pack", oid))?;
 
             // obj_data is dropped here, freeing memory before next iteration
         }
 
-        // Finalize pack
-        let pack_data = pack_writer.finalize();
-        Ok((pack_data, chunked_objects))
+        // Finalize pack (writes index + checksum)
+        writer.finalize().await.context("finalize metadata pack")?;
+        let byte_len = tokio::fs::metadata(&pack_path)
+            .await
+            .context("stat metadata pack")?
+            .len();
+
+        Ok((
+            GeneratedPack {
+                _temp_dir: temp_dir,
+                path: pack_path,
+                byte_len,
+            },
+            chunked_objects,
+        ))
     }
 
     // ========================================================================
@@ -2458,8 +2551,8 @@ impl ProtocolClient {
                 .cloned()
                 .collect();
             let n = to_reupload.len();
-            let (pack_data, _) = self.generate_pack(odb, to_reupload).await?;
-            match self.upload_pack(&pack_data).await {
+            let (pack, _) = self.generate_pack(odb, to_reupload).await?;
+            match self.upload_pack_file(&pack.path, pack.byte_len).await {
                 Ok(()) => repaired += n,
                 Err(_) => unrepairable.extend(invalid_objects.iter().cloned()),
             }

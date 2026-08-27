@@ -747,6 +747,55 @@ mod tests {
         let _ = std::fs::remove_file(&result.temp_path);
     }
 
+    /// C1: `generate_pack` (mediagit-protocol) moved the metadata pack from
+    /// an in-RAM `PackWriter` to a file-backed `StreamingPackWriter` so a
+    /// history-heavy push does not buffer the whole pack. This pins the two
+    /// producing byte-identical output for the same objects in the same
+    /// order — the uploaded bytes must not change, only how they're built.
+    #[tokio::test]
+    async fn streaming_writer_matches_pack_writer_bytes() {
+        let objects: Vec<(Oid, ObjectType, Vec<u8>)> = vec![
+            (
+                Oid::hash(b"commit-1"),
+                ObjectType::Commit,
+                b"commit-1-body".to_vec(),
+            ),
+            (
+                Oid::hash(b"tree-1"),
+                ObjectType::Tree,
+                b"tree-1-contents".to_vec(),
+            ),
+            (
+                Oid::hash(b"blob-1"),
+                ObjectType::Blob,
+                b"blob-1-contents-a-bit-longer-than-the-others".to_vec(),
+            ),
+        ];
+
+        let mut pack_writer = crate::pack::PackWriter::new();
+        for (oid, obj_type, data) in &objects {
+            pack_writer.add_object(*oid, *obj_type, data);
+        }
+        let expected = pack_writer.finalize();
+
+        let temp_dir = TempDir::new().unwrap();
+        let pack_path = temp_dir.path().join("streamed.pack");
+        let file = File::create(&pack_path).await.unwrap();
+        let mut writer = StreamingPackWriter::new(file, objects.len() as u32, temp_dir.path())
+            .await
+            .unwrap();
+        for (oid, obj_type, data) in &objects {
+            writer.write_object(*oid, *obj_type, data).await.unwrap();
+        }
+        writer.finalize().await.unwrap();
+
+        let actual = tokio::fs::read(&pack_path).await.unwrap();
+        assert_eq!(
+            actual, expected,
+            "streamed pack must be byte-identical to PackWriter output"
+        );
+    }
+
     /// VC-7: nothing the writer accepts may overflow the 4-byte size field.
     ///
     /// Asserted on the bound itself rather than by writing a 4 GiB object,
