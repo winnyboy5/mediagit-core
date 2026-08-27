@@ -21,7 +21,10 @@ use std::time::{Duration, Instant};
 ///
 /// 4: `op=add` gained the per-phase breakdown
 /// (`oid_ms`/`cdc_ms`/`hash_ms`/`send_block_ms`/`compress_ms`/`write_ms`/`autogc_ms`).
-const BENCH_SCHEMA_VERSION: u8 = 4;
+/// 5: new `op=checkout` line. Working-tree write time was previously folded into
+/// the caller's wall time with no record of its own, so the cost of the
+/// download->checkout barrier could not be measured at all.
+const BENCH_SCHEMA_VERSION: u8 = 5;
 
 /// Collect all `MEDIAGIT_*` env vars as a sorted `KEY=val,...` string.
 fn collect_knobs() -> String {
@@ -231,6 +234,42 @@ pub fn emit_commit_summary(wall_start: std::time::Instant, files: u64) {
     eprintln!(
         "[bench] bench_schema_version={schema} op=commit files={files} \
          wall={wall:.2}s knobs={knobs}",
+        schema = BENCH_SCHEMA_VERSION,
+        files = files,
+        wall = wall_s,
+        knobs = if knobs.is_empty() {
+            "none".to_string()
+        } else {
+            knobs
+        },
+    );
+}
+
+/// Emit a `[bench] op=checkout` summary line.
+///
+/// Call once at the end of a checkout with the wall-clock start time and the
+/// number of files written. No-op unless `MEDIAGIT_BENCH=1`.
+///
+/// Exists because clone's phase-4 (write the working tree) had no record of its
+/// own: it ran inside the CLI, after the protocol crate's `BenchSession` for the
+/// download had already ended, so its cost was invisible. Clone re-reads and
+/// re-decompresses every chunk here, and nothing measured it.
+///
+/// A separate line rather than a `BenchSession` field because the session is
+/// created and dropped inside `client/pull.rs`, which the CLI has no handle on —
+/// a field would have had no reachable caller.
+///
+/// Deliberately reports no throughput figure, for the same reason `op=commit`
+/// does not: these bytes were already counted by the clone that fetched them, so
+/// a second MB/s here would double-count.
+pub fn emit_checkout_summary(wall_start: std::time::Instant, files: u64) {
+    if !enabled() {
+        return;
+    }
+    let wall_s = wall_start.elapsed().as_secs_f64();
+    let knobs = collect_knobs();
+    eprintln!(
+        "[bench] bench_schema_version={schema} op=checkout files={files}          wall={wall:.2}s knobs={knobs}",
         schema = BENCH_SCHEMA_VERSION,
         files = files,
         wall = wall_s,

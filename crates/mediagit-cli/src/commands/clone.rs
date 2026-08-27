@@ -178,7 +178,9 @@ impl CloneCmd {
             let progress = ProgressTracker::new(self.quiet);
             let checkout_pb = progress.spinner("Checking out files...");
             let checkout_mgr = CheckoutManager::new(&odb, &target_dir);
+            let checkout_start = std::time::Instant::now();
             let files_count = checkout_mgr.checkout_fresh(&oid).await?;
+            mediagit_protocol::bench::emit_checkout_summary(checkout_start, files_count as u64);
             checkout_pb.finish_with_message(format!("Checked out {} files", files_count));
 
             if !self.quiet {
@@ -598,7 +600,9 @@ url = "{}"
         // Use spinner: file count only known after checkout finishes
         let checkout_pb = progress.spinner("Checking out files...");
         let checkout_mgr = CheckoutManager::new(&odb, &target_dir);
+        let checkout_start = std::time::Instant::now();
         let files_count = checkout_mgr.checkout_fresh(&remote_oid).await?;
+        mediagit_protocol::bench::emit_checkout_summary(checkout_start, files_count as u64);
         checkout_pb.finish_with_message(format!("Checked out {} files", files_count));
         stats.files_updated = files_count as u64;
 
