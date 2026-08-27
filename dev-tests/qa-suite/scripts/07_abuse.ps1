@@ -1077,7 +1077,7 @@ function _Want([string]$s) { -not $only -or ($only -contains $s) }
 #
 # Honouring MG_QA_DRILLS is what makes a single drill reproducible standalone,
 # but it also creates a way for a campaign to run one drill instead of
-# seventeen and still report the phase green - a stale variable left in the
+# nineteen and still report the phase green - a stale variable left in the
 # shell (run_a7_native.ps1 sets it, and run_ga.ps1 does not clear it) is all it
 # takes. A skipped drill that says nothing is the defect class this suite keeps
 # hitting, so a filtered run has to be visible in the log rather than inferred
@@ -1511,12 +1511,118 @@ function Drill-A17-EncryptionRecovery {
   }
 }
 
+# ---------------------------------------------------------------------------
+# A18: an interrupted clone must be RESUMABLE, not restart from zero (C5).
+#
+# Before C5, `clone` called remove_dir_all on any error and Ctrl-C exited via
+# std::process::exit(130) with no cleanup at all - so a failed clone deleted the
+# ODB a retry would have skipped work against, and an interrupted one left
+# exactly the state `clone` then refused with "Destination path already exists".
+#
+# CAPABILITY PROBE, and it is the point of this drill rather than decoration:
+# if the clone finishes before the kill fires, nothing was interrupted and there
+# is nothing to resume - so the drill proves NOTHING and must NOT report PASS.
+# 07_abuse has already been burned once by the opposite convention (A7 answered
+# "cannot run here", recorded SKIP, and a SKIP reads as green, so it silently
+# passed every campaign for two weeks). `killed` is therefore a REQUIRED term of
+# $pass, not a field in the detail string.
+# ---------------------------------------------------------------------------
+function Drill-A18-CloneResumeAfterKill {
+  $drill = "A18-clone-resume-after-kill"
+  $srv = $null
+  try {
+    $srv = Start-QaServer -Backend "minio" -Phase "$Phase-A18"
+    $repo = New-SandboxRepo "a18-cloneresume" $Phase
+    # 600MB for the same reason A2 uses it: a small payload clones faster than
+    # the sleep below, the kill lands after completion, and the drill quietly
+    # stops testing the thing it is named after.
+    New-QaBinaryFixture (Join-Path $repo "big.bin") 600 72018
+    $origHash = Get-QaHash (Join-Path $repo "big.bin")
+    Invoke-MG $repo @("add", ".") $Phase -TimeoutSec 1200 | Out-Null
+    Invoke-MG $repo @("commit", "-m", "c1") $Phase | Out-Null
+    Invoke-MG $repo @("remote", "add", "origin", $srv.Url) $Phase | Out-Null
+    $push = Invoke-MG $repo @("push", "origin") $Phase -TimeoutSec 3600
+    if ($push.Exit -ne 0) { throw "SKIP: seed push failed (exit=$($push.Exit)); nothing to clone" }
+
+    $clone = Join-Path $QA.Work "a18-clone"
+    if (Test-Path $clone) { Remove-Item -Recurse -Force $clone }
+
+    $p = Start-Process $QA.MG -ArgumentList @("clone", $srv.Url, $clone) -PassThru -NoNewWindow `
+      -RedirectStandardOutput (Join-Path $QA.Logs "a18-clone1.out") `
+      -RedirectStandardError  (Join-Path $QA.Logs "a18-clone1.err")
+    Start-Sleep -Milliseconds 2500
+    $killed = $false
+    if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force; $killed = $true }
+    Start-Sleep -Milliseconds 500
+
+    # The C5 behaviour change: the directory SURVIVES an interruption, and
+    # carries the marker that makes it adoptable. Before C5 the first of these
+    # was false after a failure and the second did not exist.
+    $dirSurvived = Test-Path $clone
+    $markerPath  = Join-Path $clone ".mediagit\CLONE_IN_PROGRESS"
+    $markerKept  = Test-Path $markerPath
+
+    # Re-running the SAME command is the whole resume interface - there is no
+    # `clone --resume`, deliberately.
+    $resume = Invoke-MG $null @("clone", $srv.Url, $clone) $Phase -TimeoutSec 3600
+    $resumeOk = ($resume.Exit -eq 0)
+    $hashOk = (Test-Path (Join-Path $clone "big.bin")) -and
+              ((Get-QaHash (Join-Path $clone "big.bin")) -eq $origHash)
+    # Success must clear the marker, or a later clone into this path would
+    # adopt a FINISHED repository and check out over the user's working tree.
+    $markerCleared = -not (Test-Path $markerPath)
+
+    $pass = $killed -and $dirSurvived -and $markerKept -and $resumeOk -and $hashOk -and $markerCleared
+    Rec $drill $pass ("killed=$killed dir-survived=$dirSurvived marker-kept=$markerKept " +
+                      "resume-exit=$($resume.Exit) resumed-hash-ok=$hashOk marker-cleared=$markerCleared" +
+                      $(if (-not $killed) { " -- clone finished before the kill fired; NOTHING was interrupted, so this drill tested nothing" } else { "" }))
+  } catch {
+    if ("$_" -match "^SKIP:") { Rec $drill "SKIP" "$_" } else { Rec $drill $false "unexpected error: $_" }
+  } finally { Stop-QaServer $srv }
+}
+
+# ---------------------------------------------------------------------------
+# A19: the OTHER half of C5's split wipe rule - a clone that fails during SETUP
+# must still clean up after itself.
+#
+# A18 alone would pass just as happily against a build that simply never
+# deleted anything, which would be a different bug: every typo'd URL would leave
+# a stub directory that the corrected re-run then refuses. Six recorded
+# instances in this project of a guard proven only in the direction that fires;
+# this is the direction that must stay quiet.
+# ---------------------------------------------------------------------------
+function Drill-A19-CloneSetupFailureStillCleansUp {
+  $drill = "A19-clone-setup-failure-cleans-up"
+  $srv = $null
+  try {
+    $srv = Start-QaServer -Backend "minio" -Phase "$Phase-A19"
+    # A live server, a repository that does not exist on it: the failure lands
+    # in ref discovery, BEFORE any bulk transfer, which is exactly the case the
+    # split rule says to wipe.
+    $badUrl = "$($srv.Url)-does-not-exist-$([guid]::NewGuid().ToString('N').Substring(0,8))"
+    $target = Join-Path $QA.Work "a19-clone"
+    if (Test-Path $target) { Remove-Item -Recurse -Force $target }
+
+    $r = Invoke-MG $null @("clone", $badUrl, $target) $Phase -TimeoutSec 300
+    $failed = ($r.Exit -ne 0)
+    $cleanedUp = -not (Test-Path $target)
+
+    $pass = $failed -and $cleanedUp
+    Rec $drill $pass ("clone-exit=$($r.Exit) failed-as-expected=$failed target-removed=$cleanedUp" +
+                      $(if (-not $cleanedUp) { " -- a setup failure left a stub directory behind; the next attempt will refuse it" } else { "" }))
+  } catch {
+    if ("$_" -match "^SKIP:") { Rec $drill "SKIP" "$_" } else { Rec $drill $false "unexpected error: $_" }
+  } finally { Stop-QaServer $srv }
+}
+
 if (_Want "A12") { Drill-A12-DeltaChainCycle }
 if (_Want "A13") { Drill-A13-PerChunkFallbackNoRateLimit }
 if (_Want "A14") { Drill-A14-UnboundPresignedPut }
 if (_Want "A15") { Drill-A15-SecondInstanceRefused }
 if (_Want "A16") { Drill-A16-EncryptionLifecycle }
 if (_Want "A17") { Drill-A17-EncryptionRecovery }
+if (_Want "A18") { Drill-A18-CloneResumeAfterKill }
+if (_Want "A19") { Drill-A19-CloneSetupFailureStillCleansUp }
 
 Write-QaLog $Phase "=== 07_abuse done: overall=$(if ($script:AllPass) { 'PASS' } else { 'FAIL' }) ==="
 # Teardown: reclaim this phase's own work/ scratch so a long campaign cannot run the

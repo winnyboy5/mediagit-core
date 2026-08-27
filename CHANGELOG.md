@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — clone is faster, and no longer restarts from zero (2026-08-27)
+
+Six commits, each independently revertible. The target is **clone**, not push:
+push already beat clone on every backend and is already pipelined, so the
+buffered path was outrunning the streaming one. No persisted or wire format
+changes.
+
+- **Clone writes your working tree while media is still downloading.** It used
+  to wait for the last byte of the last file before writing anything. Small
+  files are complete as soon as the initial transfer finishes, so they are
+  written immediately; only chunk-backed files wait for their own chunks.
+  `MEDIAGIT_CLONE_OVERLAP=0` restores the serial path — it is the revert switch
+  and the parity oracle, and both produce an identical tree.
+
+- **An interrupted clone now resumes.** Clone used to delete the target
+  directory on *any* error, which deleted the very object database a retry
+  would have skipped work against — an 11 GB clone dying at 90% re-downloaded
+  11 GB. Now: a failure after data has landed keeps the directory, and re-running
+  the same command skips what already arrived. Ctrl-C is covered by the same
+  mechanism. A failure during *setup* (bad URL, bad credentials, no such
+  repository) still cleans up, since there is nothing to resume. Resume is at
+  chunk granularity; a chunk interrupted mid-download is re-fetched whole.
+
+- **Media is decompressed once per clone instead of twice.** Verification on
+  arrival and the working-tree write were two separate full decompression
+  passes over every media byte.
+
+- **The server no longer buffers a whole chunk in RAM per download request.**
+  This also makes `MEDIAGIT_STORAGE_STREAMING` mean something: between B7 and
+  now it was implemented, overridden by the S3 and MinIO backends, and called
+  by nothing — the server buffered regardless of the setting. Streamed chunk
+  responses use chunked transfer-encoding and so carry no `Content-Length`.
+
+- **Client push memory is bounded.** The *metadata* pack (commits, trees, small
+  blobs) had no size cap at all, unlike the 64 MiB cloud chunk pack — it grew
+  in RAM with history, then was copied twice more on the way to the socket. It
+  is now written to a temp file and streamed from there. One pack, no protocol
+  change.
+
+- **New `[bench] op=checkout` line** (bench schema v4 → v5) with an explicit
+  `overlap=on|off` field. Working-tree write time was previously folded into the
+  caller's total with no record of its own, so the cost of the old barrier could
+  not be measured at all. Anything parsing `[bench]` lines needs updating.
+
+**Not done, deliberately:** sub-chunk resume offsets (would need protocol work);
+streaming the cloud chunk pack upload (already capped at 64 MiB); HTTP/3
+(addresses none of the above, and AWS S3 does not support it).
+
+**Numbers:** `BENCHMARKS.md` has not been re-measured against this cycle and
+says so. Cloud MB/s is WAN-bound and is not expected to move.
+
+
 ## [v0.3.0-rc.4] - 2026-08-26
 
 **The first tagged release since `v0.2.8-beta.1` (2026-06-02) — 214 commits.**

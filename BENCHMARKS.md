@@ -135,6 +135,22 @@ xychart-beta
 | Azure Blob | 13.4 | 10.7 | 8.7 | 4.8 | 66.7 |
 | GCS | 14.4 | 10.5 | 4.8 | 3.6 | 100.0 |
 
+> **These numbers predate the clone-streaming cycle (C1–C5, 2026-08-27) and have
+> NOT been re-measured against it.** They are kept because they are what that
+> work was scoped from — in particular the push-vs-clone gap in the MinIO row
+> (146.8 vs 65.3 MB/s) is *why* the cycle targeted clone rather than push.
+>
+> What changed since: the metadata pack no longer buffers in RAM (C1), the
+> server streams chunk downloads instead of buffering each one (C2), media is
+> decompressed once instead of twice (C3), the working tree is written while
+> chunks are still downloading (C4), and an interrupted clone resumes instead of
+> restarting (C5).
+>
+> Expect the clone column and the client memory figures to move; the **cloud**
+> MB/s figures should NOT, because they are WAN-bound and no code change moves
+> the weather. Re-run phase 06 (see [Reproduction](#reproduction)) before quoting
+> any of this as current.
+
 Reading the numbers honestly:
 
 - **MinIO is local** (loopback S3) and shows the *software* ceiling — ~147 MB/s push, ~65 MB/s clone — with no network in the path.

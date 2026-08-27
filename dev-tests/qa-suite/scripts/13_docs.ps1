@@ -152,5 +152,76 @@ if ($null -eq $baselineCount) {
 }
 if ($detail.Count -gt 0) { foreach ($d in $detail) { Write-QaLog $Phase "FINDING: $d" } }
 
-Write-QaLog $Phase "=== 13_docs done: invented=$totalInvented undocumented=$totalUndocumented ==="
+# ---- env-knob drift ------------------------------------------------------
+#
+# Everything above compares documented CLI FLAGS against `--help`. NOTHING has
+# ever checked env knobs - which is how env-knobs.md (129) and
+# book/src/reference/environment.md (101) drifted 28 apart without a single gate
+# noticing, and how MEDIAGIT_STORAGE_STREAMING sat documented-and-dead from B7
+# until C2.
+#
+# Same shape as docs-invented-flag-regression above: count-NOT-GROWING against a
+# baseline, not zero. The debt is real (10 at the time of writing, several of
+# them dynamic prefixes rather than knobs) and a gate demanding zero is a gate
+# somebody switches off.
+#
+# Both halves have to work: this must go RED when a knob is added to the code
+# without a row in env-knobs.md, and stay quiet otherwise. To prove it by hand,
+# add a `MEDIAGIT_ZZZ_PROBE` reference to any .rs file and re-run this phase.
+$KNOB_BASELINE = Join-Path $QA.Root "baselines\docs-undocumented-knobs.tsv"
+$KNOB_TSV      = Join-Path $QA.Logs "docs_knobs.tsv"
+$knobRx        = [regex]'MEDIAGIT_[A-Z0-9_]+'
+
+$codeKnobs = @{}
+Get-ChildItem -Path (Join-Path $QA.RepoRoot "crates") -Filter *.rs -Recurse -File |
+  ForEach-Object {
+    foreach ($m in $knobRx.Matches([IO.File]::ReadAllText($_.FullName))) {
+      $codeKnobs[$m.Value] = $true
+    }
+  }
+
+function Get-KnobsFromDoc([string]$RelPath) {
+  $h = @{}
+  $p = Join-Path $QA.RepoRoot $RelPath
+  if (Test-Path $p) {
+    foreach ($m in $knobRx.Matches([IO.File]::ReadAllText($p))) { $h[$m.Value] = $true }
+  }
+  return $h
+}
+
+$rootDocKnobs = Get-KnobsFromDoc "env-knobs.md"
+$bookDocKnobs = Get-KnobsFromDoc "book\src\reference\environment.md"
+
+$undocumented = @($codeKnobs.Keys | Where-Object { -not $rootDocKnobs.ContainsKey($_) } | Sort-Object)
+# Reported, not gated - the book trailing the canonical list is an omission, not
+# a falsehood, and folding the two counts together would let them move against
+# each other invisibly (same reasoning as undocumented-vs-invented flags above).
+$bookBehind   = @($rootDocKnobs.Keys | Where-Object { -not $bookDocKnobs.ContainsKey($_) } | Sort-Object)
+
+Set-Content -Path $KNOB_TSV -Value "knob`tstate" -Encoding UTF8
+foreach ($k in $undocumented) { Add-Content -Path $KNOB_TSV -Value "$k`tundocumented" }
+foreach ($k in $bookBehind)   { Add-Content -Path $KNOB_TSV -Value "$k`tmissing_from_book" }
+
+$knobBaselineCount = $null
+if (Test-Path $KNOB_BASELINE) {
+  foreach ($line in (Get-Content $KNOB_BASELINE | Select-Object -Skip 1)) {
+    $c = $line -split "`t"
+    if ($c[0] -eq "undocumented_knobs") { $knobBaselineCount = [int]$c[1] }
+  }
+}
+
+$knobMsg = "code=$($codeKnobs.Count) documented=$($rootDocKnobs.Count) undocumented=$($undocumented.Count) book_behind=$($bookBehind.Count)"
+if ($null -eq $knobBaselineCount) {
+  Write-QaGate $Phase "docs-undocumented-knob-regression" $false `
+    "no readable baseline at $KNOB_BASELINE ($knobMsg)"
+} else {
+  if ($undocumented.Count -lt $knobBaselineCount) {
+    $knobMsg += " (DROPPED below baseline $knobBaselineCount - re-lock baselines\docs-undocumented-knobs.tsv to $($undocumented.Count))"
+  }
+  Write-QaGate $Phase "docs-undocumented-knob-regression" ($undocumented.Count -le $knobBaselineCount) `
+    "$knobMsg baseline=$knobBaselineCount"
+}
+foreach ($k in $undocumented) { Write-QaLog $Phase "FINDING: knob in code but not env-knobs.md: $k" }
+
+Write-QaLog $Phase "=== 13_docs done: invented=$totalInvented undocumented=$totalUndocumented undocumented_knobs=$($undocumented.Count) ==="
 Exit-QaPhase $Phase $false

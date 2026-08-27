@@ -62,7 +62,8 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MEDIAGIT_UPLOAD_CONCURRENCY` | Max concurrent chunk PUT requests. | `32` |
-| `MEDIAGIT_DOWNLOAD_CONCURRENCY` | Max concurrent chunk GET requests. | `32` |
+| `MEDIAGIT_DOWNLOAD_CONCURRENCY` | Max concurrent chunk GET requests. Two internal defaults, deliberately: `32` on the per-chunk path, `24` on the pack range-GET path. Setting the variable makes both agree. | `32` / `24` |
+| `MEDIAGIT_CLONE_OVERLAP` | Write the working tree while chunked media is still downloading, instead of waiting for the last byte. `0` restores the serial path. | `1` (ON) |
 | `MEDIAGIT_PUSH_PIPELINE` | Cross-object push pipeline. `0` reverts to the sequential path. | `1` (ON) |
 | `MEDIAGIT_PUSH_OBJECT_CONCURRENCY` | Max concurrent object uploads when `PUSH_PIPELINE=1`. | `8` |
 | `MEDIAGIT_PUSH_CHUNK_CONCURRENCY` | Per-object chunk upload concurrency; targets ~64 total in-flight PUTs. | computed |
@@ -81,7 +82,7 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 | `MEDIAGIT_FETCH_BRANCH_CONCURRENCY` | Max branches fetched in parallel for `fetch --all`. | `4` |
 | `MEDIAGIT_FETCH_DOWNLOAD_CONCURRENCY` | Per-branch chunk download concurrency when fetching multiple branches. | computed |
 | `MEDIAGIT_STREAM_CHUNK_TO_DISK` | Stream chunk bodies directly to the ODB file instead of buffering in RAM. | `1` (ON) |
-| `MEDIAGIT_STORAGE_STREAMING` | Use streaming GET on S3/MinIO instead of a `Vec<u8>` round-trip. | `1` (ON) |
+| `MEDIAGIT_STORAGE_STREAMING` | Use streaming GET on S3/MinIO instead of a `Vec<u8>` round-trip. Applies to the server's chunk-download handler as well as the client. | `1` (ON) |
 | `MEDIAGIT_HTTP_POOL_MAX` | Max idle HTTP connections per host. Keep ≤128 on Windows. | `64` |
 | `MEDIAGIT_DECOMPRESS_BLOCKING` | Offload decompression to `spawn_blocking` for chunks ≥ threshold. | `1` (ON) |
 | `MEDIAGIT_DECOMPRESS_BLOCKING_THRESHOLD` | Byte size above which decompression is offloaded. | `262144` (256 KiB) |
