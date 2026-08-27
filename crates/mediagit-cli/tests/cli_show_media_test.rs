@@ -23,11 +23,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-#[cfg(windows)]
-const DEDUP_PAIRS_DIR: &str = "D:\\own\\saas\\mediagit-core\\dev-tests\\dedup-pairs";
-#[cfg(not(windows))]
-const DEDUP_PAIRS_DIR: &str = "/mnt/d/own/saas/mediagit-core/dev-tests/dedup-pairs";
-
+// Dedup-pair fixtures, resolved from the workspace root at runtime.
+// These were two cfg-gated absolute paths baked to one developer's
+// machine, so everywhere else the lookups missed and the tests skipped.
+fn dedup_pairs_dir() -> std::path::PathBuf {
+    mediagit_test_utils::TestPaths::announce_fixture_root(
+        mediagit_test_utils::TestPaths::project_root()
+            .join("dev-tests")
+            .join("dedup-pairs"),
+        "dev-tests/dedup-pairs/",
+    )
+}
 #[allow(deprecated)]
 fn mediagit() -> Command {
     {
@@ -51,7 +57,7 @@ fn init_repo(dir: &Path) {
 }
 
 fn jpg_fixture() -> Option<PathBuf> {
-    let path = Path::new(DEDUP_PAIRS_DIR).join("jpg_v1.jpg");
+    let path = dedup_pairs_dir().join("jpg_v1.jpg");
     path.exists().then_some(path)
 }
 

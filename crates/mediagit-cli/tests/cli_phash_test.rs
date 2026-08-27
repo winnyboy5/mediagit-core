@@ -24,11 +24,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-#[cfg(windows)]
-const DEDUP_PAIRS_DIR: &str = "D:\\own\\saas\\mediagit-core\\dev-tests\\dedup-pairs";
-#[cfg(not(windows))]
-const DEDUP_PAIRS_DIR: &str = "/mnt/d/own/saas/mediagit-core/dev-tests/dedup-pairs";
-
+// Dedup-pair fixtures, resolved from the workspace root at runtime.
+// These were two cfg-gated absolute paths baked to one developer's
+// machine, so everywhere else the lookups missed and the tests skipped.
+fn dedup_pairs_dir() -> std::path::PathBuf {
+    mediagit_test_utils::TestPaths::announce_fixture_root(
+        mediagit_test_utils::TestPaths::project_root()
+            .join("dev-tests")
+            .join("dedup-pairs"),
+        "dev-tests/dedup-pairs/",
+    )
+}
 /// Mirrors the private `Entry` layout in `mediagit_cli::phash_index` — same
 /// field order/types, so postcard decodes it identically without needing to
 /// expose the type. Used only to verify the index round-tripped real data.
@@ -62,8 +68,8 @@ fn init_repo(dir: &Path) {
 }
 
 fn fixture_paths() -> Option<(PathBuf, PathBuf)> {
-    let v1 = Path::new(DEDUP_PAIRS_DIR).join("jpg_v1.jpg");
-    let v2 = Path::new(DEDUP_PAIRS_DIR).join("jpg_v2.jpg");
+    let v1 = dedup_pairs_dir().join("jpg_v1.jpg");
+    let v2 = dedup_pairs_dir().join("jpg_v2.jpg");
     if v1.exists() && v2.exists() {
         Some((v1, v2))
     } else {
@@ -184,8 +190,8 @@ fn test_phash_nominates_and_records_reexported_jpeg() {
 /// version, the delta passes the 80% gate easily and gets stored.
 #[test]
 fn test_phash_delta_accepted_for_metadata_edit() {
-    let v1_path = Path::new(DEDUP_PAIRS_DIR).join("jpg_v1.jpg");
-    let v2_path = Path::new(DEDUP_PAIRS_DIR).join("jpg_meta_v2.jpg");
+    let v1_path = dedup_pairs_dir().join("jpg_v1.jpg");
+    let v2_path = dedup_pairs_dir().join("jpg_meta_v2.jpg");
     if !v1_path.exists() || !v2_path.exists() {
         println!("SKIP: dev-tests/dedup-pairs metadata-edit fixtures not found");
         return;

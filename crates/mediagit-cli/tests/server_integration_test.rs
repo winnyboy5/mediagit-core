@@ -27,11 +27,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-#[cfg(windows)]
-const TEST_FILES_DIR: &str = "D:\\own\\saas\\mediagit-core\\test-files";
-#[cfg(not(windows))]
-const TEST_FILES_DIR: &str = "/mnt/d/own/saas/mediagit-core/test-files";
-
+// Fixture root. Resolved from the workspace root at runtime by
+// `TestPaths::test_files_dir()` — this used to be two cfg-gated absolute
+// paths baked to one developer's machine (`D:\own\...` /
+// `/mnt/d/own/...`), so on every other machine, CI included, the fixture
+// lookups silently missed and every media assertion below skipped.
+fn test_files_dir() -> std::path::PathBuf {
+    mediagit_test_utils::TestPaths::announce_fixture_root(
+        mediagit_test_utils::TestPaths::test_files_dir(),
+        "test-files/",
+    )
+}
 const SERVER_PORT: u16 = 3000;
 const SERVER_HOST: &str = "127.0.0.1";
 
@@ -80,7 +86,7 @@ fn add_and_commit(dir: &Path, name: &str, content: &str, message: &str) {
 }
 
 fn copy_test_file(test_file: &str, repo_dir: &Path, dest_name: &str) -> PathBuf {
-    let source = Path::new(TEST_FILES_DIR).join(test_file);
+    let source = test_files_dir().join(test_file);
     let dest = repo_dir.join(dest_name);
     if source.exists() {
         fs::copy(&source, &dest).ok();
