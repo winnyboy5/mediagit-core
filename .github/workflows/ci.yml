@@ -157,21 +157,24 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Check AGPL-3.0 headers
+      # Scans `*.rs`, NOT `crates/**/*.rs`. The pre-commit hook has always used the
+      # wider glob, so the two gates disagreed: a .rs file outside crates/ passed
+      # CI and failed locally. Unified on the stricter of the two.
+      - name: Check BUSL-1.1 license headers
         run: |
-          echo "Checking for AGPL-3.0 license headers..."
+          echo "Checking for BUSL-1.1 SPDX headers..."
 
           missing_headers=0
 
           while IFS= read -r file; do
-            if ! grep -q "GNU Affero General Public License" "$file"; then
+            if ! grep -q "SPDX-License-Identifier: BUSL-1.1" "$file"; then
               echo "❌ Missing license header: $file"
               missing_headers=$((missing_headers + 1))
             fi
-          done < <(git ls-files 'crates/**/*.rs')
+          done < <(git ls-files '*.rs')
 
           if [ $missing_headers -gt 0 ]; then
-            echo "❌ $missing_headers file(s) missing AGPL-3.0 license headers"
+            echo "❌ $missing_headers file(s) missing BUSL-1.1 license headers"
             exit 1
           else
             echo "✅ All files have proper license headers"
@@ -192,7 +195,7 @@ jobs:
         uses: actions-rust-lang/audit@v1
 
   # OP-10: cargo-audit answers "is there an advisory". cargo-deny answers the
-  # three questions it cannot: license compatibility (we ship AGPL-3.0),
+  # three questions it cannot: license compatibility (we ship BUSL-1.1),
   # banned/duplicate crates (a transitive rustls 0.21 once shipped alongside
   # 0.23 with three webpki advisories), and dependency provenance.
   # See deny.toml — advisories stay owned by .cargo/audit.toml.

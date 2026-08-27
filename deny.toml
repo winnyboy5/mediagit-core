@@ -19,9 +19,15 @@ all-features = true
 
 [licenses]
 # Every license present in the current graph, verified with `cargo metadata`:
-# no dependency ships without a license field. AGPL-3.0 is our own crates.
+# no dependency ships without a license field.
+#
+# Our OWN crates are no longer listed here. They are `publish = false`, and
+# `private.ignore` below makes cargo-deny skip unpublished workspace members
+# entirely -- so the workspace licence never has to appear in a THIRD-PARTY
+# allowlist again. Before this, `AGPL-3.0` sat in the allow list purely to
+# stop cargo-deny failing on our own code, which made the list lie about what
+# we accept from dependencies.
 allow = [
-    "AGPL-3.0",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-1-Clause",
@@ -40,6 +46,12 @@ allow = [
     "0BSD",
 ]
 confidence-threshold = 0.9
+
+# Skip our own workspace crates. They are BUSL-1.1, which is deliberately NOT in
+# the allow list above -- that list is about what we accept FROM dependencies,
+# and we do not want to accidentally admit a third-party BUSL crate just because
+# we ship one ourselves.
+private = { ignore = true }
 
 [bans]
 # Duplicate major versions are a warning, not an error: a graph this size
