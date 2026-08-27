@@ -349,10 +349,10 @@ impl StrategyCache {
 
     fn insert(&mut self, profile: FileProfile, strategy: CompressionStrategy) {
         // Evict least used if at capacity
-        if self.cache.len() >= self.max_size {
-            if let Some((&least_used, _)) = self.cache.iter().min_by_key(|(_, entry)| entry.hits) {
-                self.cache.remove(&least_used);
-            }
+        if self.cache.len() >= self.max_size
+            && let Some((&least_used, _)) = self.cache.iter().min_by_key(|(_, entry)| entry.hits)
+        {
+            self.cache.remove(&least_used);
         }
 
         self.cache.insert(profile, CacheEntry { strategy, hits: 1 });
@@ -425,13 +425,13 @@ impl AdaptiveCompressor {
         let profile = FileProfile::analyze(data);
 
         // Check cache first
-        if let Ok(mut cache) = self.cache.lock() {
-            if let Some(strategy) = cache.get(&profile) {
-                if let Ok(mut stats) = self.stats.lock() {
-                    stats.cache_hits += 1;
-                }
-                return strategy;
+        if let Ok(mut cache) = self.cache.lock()
+            && let Some(strategy) = cache.get(&profile)
+        {
+            if let Ok(mut stats) = self.stats.lock() {
+                stats.cache_hits += 1;
             }
+            return strategy;
         }
 
         // Compute strategy
@@ -492,12 +492,12 @@ impl Compressor for AdaptiveCompressor {
         };
 
         // Update stats
-        if let Ok(compressed) = &result {
-            if let Ok(mut stats) = self.stats.lock() {
-                stats.total_compressions += 1;
-                stats.total_bytes_processed += data.len();
-                stats.total_bytes_compressed += compressed.len();
-            }
+        if let Ok(compressed) = &result
+            && let Ok(mut stats) = self.stats.lock()
+        {
+            stats.total_compressions += 1;
+            stats.total_bytes_processed += data.len();
+            stats.total_bytes_compressed += compressed.len();
         }
 
         result

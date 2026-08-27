@@ -142,22 +142,22 @@ impl TlsConfig {
         }
 
         // Verify files exist
-        if let Some(cert_path) = &self.cert_path {
-            if !cert_path.exists() {
-                return Err(TlsError::CertificateLoading(format!(
-                    "Certificate file not found: {}",
-                    cert_path.display()
-                )));
-            }
+        if let Some(cert_path) = &self.cert_path
+            && !cert_path.exists()
+        {
+            return Err(TlsError::CertificateLoading(format!(
+                "Certificate file not found: {}",
+                cert_path.display()
+            )));
         }
 
-        if let Some(key_path) = &self.key_path {
-            if !key_path.exists() {
-                return Err(TlsError::CertificateLoading(format!(
-                    "Key file not found: {}",
-                    key_path.display()
-                )));
-            }
+        if let Some(key_path) = &self.key_path
+            && !key_path.exists()
+        {
+            return Err(TlsError::CertificateLoading(format!(
+                "Key file not found: {}",
+                key_path.display()
+            )));
         }
 
         // If mTLS enabled, verify CA certificate exists

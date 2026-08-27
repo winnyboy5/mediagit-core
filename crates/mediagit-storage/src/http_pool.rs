@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use aws_sdk_s3::config::SharedHttpClient;
 use aws_smithy_http_client::tls::rustls_provider::CryptoMode;
-use aws_smithy_http_client::{tls, Builder};
+use aws_smithy_http_client::{Builder, tls};
 
 static SHARED_HTTP: OnceLock<SharedHttpClient> = OnceLock::new();
 
@@ -40,7 +40,7 @@ pub fn shared() -> SharedHttpClient {
 
             Builder::new()
                 .pool_idle_timeout(Duration::from_secs(pool_idle_secs))
-                .tls_provider(tls::Provider::Rustls(CryptoMode::AwsLc))
+                .tls_provider(tls::Provider::Rustls(CryptoMode::Ring))
                 .build_https()
         })
         .clone()

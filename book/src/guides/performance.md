@@ -58,10 +58,11 @@ MediaGit never wastes CPU re-compressing already-compressed formats:
 For versioned files that change incrementally (e.g., evolving PSD files), MediaGit uses delta encoding to store only the differences between versions:
 
 ```toml
-# Similarity thresholds (in smart_compressor.rs — not yet configurable via TOML)
-# AI/PDF files: 15% similarity → try delta encoding
-# Office docs: 20% similarity → try delta encoding
-# General: 80% similarity threshold
+# Similarity thresholds — NOT yet configurable via TOML.
+# Set in crates/mediagit-versioning/src/similarity.rs (by file extension):
+#   AI/PDF/PSD: 0.15   Office docs: 0.20   Images: 0.70   Text: 0.85   Config: 0.95
+# and crates/mediagit-versioning/src/odb/mod.rs (by codec):
+#   ProRes/DNxHR/J2K: 0.60   Subtitles/metadata: 0.90   Default: 0.80
 ```
 
 Delta chains are capped at depth 10 to prevent slow reads on deeply-chained objects.
@@ -122,6 +123,49 @@ For workstations with < 8 GB RAM, reduce to 256 MB:
 ```toml
 max_size = 268435456  # 256 MB
 ```
+
+## Clone Behaviour
+
+Clone downloads repository data and then materializes your working tree. Two
+things about that are worth knowing.
+
+### The working tree is written while media is still downloading
+
+Small files are complete as soon as the initial transfer finishes, so MediaGit
+writes them immediately instead of waiting for large media to finish arriving.
+Only files backed by chunked media wait for their own chunks.
+
+This is on by default. To turn it off — to compare timings, or to rule it out
+while diagnosing something:
+
+```bash
+MEDIAGIT_CLONE_OVERLAP=0 mediagit clone http://server:3000/my-project
+```
+
+Both settings produce an identical working tree; only the order of writes
+differs.
+
+### An interrupted clone resumes
+
+If a clone fails partway through, or you interrupt it with Ctrl-C, the partial
+directory is **kept**. Re-run the same `clone` command against the same URL and
+branch, and it skips everything already downloaded:
+
+```bash
+mediagit clone http://server:3000/my-project    # interrupted at 90%
+mediagit clone http://server:3000/my-project    # resumes; re-downloads only what is missing
+```
+
+Details worth knowing:
+
+- Resume works at chunk granularity. A chunk interrupted mid-download is
+  re-fetched whole, not from a byte offset.
+- A clone that fails during *setup* — bad URL, bad credentials, no such
+  repository — still cleans up after itself. There is nothing to resume, and
+  leaving a stub directory behind would just make the next attempt fail.
+- MediaGit will only resume into a directory it can prove it created, and only
+  for the same URL and branch. Any other existing directory is refused, as
+  before. To start over, delete the directory.
 
 ## Repository Maintenance
 

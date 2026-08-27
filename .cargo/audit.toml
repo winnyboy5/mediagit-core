@@ -17,21 +17,34 @@
 #   postcard 1.1.3 is the latest release. atomic-polyfill is a no-op on
 #   desktop targets (only relevant for embedded/no_std).
 #
-# RUSTSEC-2024-0384: instant 0.1.13 (unmaintained)
-#   azure_core 0.21 → futures-lite 1.x → fastrand 1.x → instant
-#   azure_storage_blobs 0.21 is the latest on crates.io and requires
-#   azure_core 0.21. The azure feature is optional in mediagit-storage.
+# RUSTSEC-2024-0384 (instant), RUSTSEC-2024-0436 (paste),
+# RUSTSEC-2026-0174 (http-types): RESOLVED 2026-07-23. All three entered
+#   solely through azure_core 0.21, which left the tree when the Azure backend
+#   moved to Apache OpenDAL (azure_storage_blobs 0.21 is EOL; Microsoft's GA
+#   line is Entra-ID-only and cannot do shared key -- Azure/azure-sdk-for-rust
+#   #2975). Verified absent from Cargo.lock. The duplicate reqwest 0.12 that
+#   azure_core held alive is gone too. Ignores removed.
 #
-# RUSTSEC-2024-0436: paste 1.0.15 (unmaintained)
-#   azure_core 0.21 → paste. Same root cause as RUSTSEC-2024-0384.
+# RUSTSEC-2026-0194, -0195: quick-xml (DoS - quadratic duplicate-attribute
+#   scan / unbounded namespace allocation). Fix requires >= 0.41.0.
+#   NOT resolved by the OpenDAL migration -- the parent changed, the exposure
+#   did not: was quick-xml 0.31 via azure_core 0.21, is now 0.39.4 via
+#   opendal-service-azblob 0.57, which requires "^0.39.3" and so cannot take
+#   0.41. (opendal 0.58 does move to quick-xml 0.41, but 0.58.0 is YANKED and
+#   its published feature map exposes no services-azblob at all -- unusable on
+#   both counts. Recheck at 0.59.)
+#   Exposure is unchanged from before the migration and remains bounded: XML
+#   parsing happens only on Azure Blob API responses from our own configured
+#   storage account, not on attacker-supplied input, and the azure feature is
+#   optional in mediagit-storage.
 #
-# RUSTSEC-2026-0098, -0099, -0104: rustls-webpki 0.101.7
-#   aws-smithy-http-client 1.x → rustls 0.21 → rustls-webpki 0.101.x
-#   The 0.101.x line has no patch; the fix requires >=0.103.12 which needs
-#   rustls 0.23+. aws-smithy-http-client vendors the old rustls 0.21 stack
-#   alongside the modern 0.23 stack. We updated 0.103.10→0.103.13 (the stack
-#   we actually use); the 0.101.7 copy is the legacy fallback that the AWS SDK
-#   bundles but our code never selects.
+# RUSTSEC-2026-0098, -0099, -0104: rustls-webpki 0.101.7 — RESOLVED 2026-07-23.
+#   The legacy rustls 0.21 stack entered via aws-config's `rustls` feature
+#   (→ aws-smithy-runtime `default-https-client` → `rustls-aws-lc`). We never
+#   used that client — every S3 config and the credentials chain is handed
+#   `http_pool::shared()` — so the feature was dropped. rustls 0.21 and
+#   rustls-webpki 0.101.7 are no longer in the tree; only 0.103.13 remains.
+#   Ignores removed.
 #
 # RUSTSEC-2026-0097: rand 0.7.3 and 0.8.5 (unsound warning)
 #   rand 0.7.3 ← http-types ← azure_core 0.21 (transitive, optional azure feature)
@@ -40,14 +53,16 @@
 #   MediaGit uses tracing (not log) and never calls rand::rng() directly.
 #   Updated rand 0.9→0.9.4 and 0.10→0.10.1 (our direct deps).
 #
-# Review date: 2026-05-25
+# RUSTSEC-2026-0183, -0184: git2 -- RESOLVED 2026-07-29 by deleting the only
+#   crate that used it. git2 entered solely through `mediagit-git`, a workspace
+#   member with zero dependents that was never wired to the CLI; removing it
+#   also removed openssl-sys (git2's vendored-openssl) from the graph.
+#
+# Review date: 2026-07-29
 ignore = [
     "RUSTSEC-2023-0071",
     "RUSTSEC-2023-0089",
-    "RUSTSEC-2024-0384",
-    "RUSTSEC-2024-0436",
-    "RUSTSEC-2026-0098",
-    "RUSTSEC-2026-0099",
-    "RUSTSEC-2026-0104",
     "RUSTSEC-2026-0097",
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]

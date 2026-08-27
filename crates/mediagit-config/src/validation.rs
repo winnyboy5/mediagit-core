@@ -68,7 +68,10 @@ impl Validator for StorageConfig {
             StorageConfig::S3(s3) => s3.validate(),
             StorageConfig::Azure(azure) => azure.validate(),
             StorageConfig::GCS(gcs) => gcs.validate(),
-            StorageConfig::Multi(multi) => multi.validate(),
+            StorageConfig::Multi(_) => Err(ConfigError::invalid_value(
+                "storage.backend",
+                "storage type 'multi' is not supported",
+            )),
         }
     }
 }
@@ -123,28 +126,43 @@ impl Validator for S3Storage {
             ));
         }
 
-        // Validate encryption algorithm (it's a String, not Option<String>)
-        if self.encryption_algorithm != "AES256"
-            && self.encryption_algorithm != "aws:kms"
-            && !self.encryption_algorithm.starts_with("aws:kms:")
-        {
-            return Err(ConfigError::invalid_value(
-                "storage.encryption_algorithm",
-                format!("unsupported algorithm: {}", self.encryption_algorithm),
-            ));
-        }
-
         Ok(())
     }
 }
 
+/// Actionable message for a config still using the pre-v3 flat Azure shape.
+///
+/// Deliberately shows the replacement block verbatim: a user hitting this is
+/// mid-outage with a server that will not start, and "invalid config" without
+/// the fix is not help.
+fn azure_legacy_shape_error(legacy: &LegacyAzureFields) -> ConfigError {
+    let suggested = if legacy.connection_string.is_some() {
+        "auth = { type = \"connection_string\", value = \"<your connection string>\" }"
+    } else {
+        "auth = { type = \"account_key\", account_name = \"<name>\", account_key = \"<key>\" }"
+    };
+    ConfigError::ValidationError(format!(
+        "Azure storage config uses the removed flat format \
+         (account_name/account_key/connection_string at the top level).\n\
+         Replace those keys with an `auth` block:\n\n    {suggested}\n\n\
+         Other variants: {{ type = \"sas\", account_name = \"<name>\", token = \"<sas>\" }} \
+         or {{ type = \"emulator\" }} for local Azurite.\n\
+         Configs carrying `config_version` are migrated automatically; this error means \
+         the version was absent or already current while the keys were still flat."
+    ))
+}
+
 impl Validator for AzureStorage {
     fn validate(&self) -> ConfigResult<()> {
-        if self.account_name.is_empty() {
-            return Err(ConfigError::MissingRequired(
-                "storage.account_name".to_string(),
-            ));
+        // Legacy shape is checked first: it produces a fix, where the generic
+        // "missing auth" below would only produce a complaint.
+        if self.legacy.is_present() {
+            return Err(azure_legacy_shape_error(&self.legacy));
         }
+
+        let Some(auth) = &self.auth else {
+            return Err(ConfigError::MissingRequired("storage.auth".to_string()));
+        };
 
         if self.container.is_empty() {
             return Err(ConfigError::MissingRequired(
@@ -160,11 +178,48 @@ impl Validator for AzureStorage {
             ));
         }
 
-        // Must have either account_key or connection_string
-        if self.account_key.is_none() && self.connection_string.is_none() {
-            return Err(ConfigError::ValidationError(
-                "Azure storage requires either account_key or connection_string".to_string(),
-            ));
+        // Per-variant emptiness. "Which credential" is now the type system's
+        // job — this only catches present-but-blank values.
+        match auth {
+            AzureAuth::AccountKey {
+                account_name,
+                account_key,
+            } => {
+                if account_name.is_empty() {
+                    return Err(ConfigError::MissingRequired(
+                        "storage.auth.account_name".to_string(),
+                    ));
+                }
+                if account_key.is_empty() {
+                    return Err(ConfigError::MissingRequired(
+                        "storage.auth.account_key".to_string(),
+                    ));
+                }
+            }
+            AzureAuth::ConnectionString { value } => {
+                if value.is_empty() {
+                    return Err(ConfigError::MissingRequired(
+                        "storage.auth.value".to_string(),
+                    ));
+                }
+            }
+            AzureAuth::Sas {
+                account_name,
+                token,
+            } => {
+                if account_name.is_empty() {
+                    return Err(ConfigError::MissingRequired(
+                        "storage.auth.account_name".to_string(),
+                    ));
+                }
+                if token.is_empty() {
+                    return Err(ConfigError::MissingRequired(
+                        "storage.auth.token".to_string(),
+                    ));
+                }
+            }
+            // Emulator uses well-known development credentials; nothing to check.
+            AzureAuth::Emulator => {}
         }
 
         Ok(())
@@ -460,30 +515,16 @@ impl Validator for SecurityConfig {
             }
 
             // Validate paths exist
-            if let Some(cert_path) = &self.tls_cert_path {
-                if !Path::new(cert_path).exists() {
-                    return Err(ConfigError::FileNotFound(cert_path.clone().into()));
-                }
+            if let Some(cert_path) = &self.tls_cert_path
+                && !Path::new(cert_path).exists()
+            {
+                return Err(ConfigError::FileNotFound(cert_path.clone().into()));
             }
 
-            if let Some(key_path) = &self.tls_key_path {
-                if !Path::new(key_path).exists() {
-                    return Err(ConfigError::FileNotFound(key_path.clone().into()));
-                }
-            }
-        }
-
-        if self.encryption_at_rest {
-            if self.encryption_key_path.is_none() {
-                return Err(ConfigError::MissingRequired(
-                    "security.encryption_key_path".to_string(),
-                ));
-            }
-
-            if let Some(key_path) = &self.encryption_key_path {
-                if !Path::new(key_path).exists() {
-                    return Err(ConfigError::FileNotFound(key_path.clone().into()));
-                }
+            if let Some(key_path) = &self.tls_key_path
+                && !Path::new(key_path).exists()
+            {
+                return Err(ConfigError::FileNotFound(key_path.clone().into()));
             }
         }
 
@@ -550,7 +591,7 @@ mod tests {
     #[test]
     fn test_invalid_octal_permissions() {
         let mut config = Config::default();
-        if let StorageConfig::FileSystem(ref mut fs) = &mut config.storage {
+        if let StorageConfig::FileSystem(fs) = &mut config.storage {
             fs.file_permissions = "644".to_string();
         }
         assert!(config.validate().is_err());
@@ -575,5 +616,161 @@ mod tests {
         let mut config = Config::default();
         config.observability.log_level = "invalid".to_string();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_multi_backend_storage_rejected() {
+        let config = Config {
+            storage: StorageConfig::Multi(MultiBackendStorage {
+                primary: "s3".to_string(),
+                replicas: vec![],
+                backends: Default::default(),
+            }),
+            ..Config::default()
+        };
+        let err = config
+            .validate()
+            .expect_err("multi backend should be rejected");
+        assert!(
+            err.to_string()
+                .contains("storage type 'multi' is not supported")
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod azure_auth_tests {
+    use crate::schema::{AzureAuth, AzureStorage, LegacyAzureFields};
+    use crate::validation::Validator;
+
+    fn azure(auth: Option<AzureAuth>) -> AzureStorage {
+        AzureStorage {
+            container: "media".to_string(),
+            prefix: String::new(),
+            auth,
+            legacy: LegacyAzureFields::default(),
+        }
+    }
+
+    #[test]
+    fn each_auth_variant_validates() {
+        for auth in [
+            AzureAuth::AccountKey {
+                account_name: "acct".into(),
+                account_key: "key".into(),
+            },
+            AzureAuth::ConnectionString {
+                value: "AccountName=x;AccountKey=y;".into(),
+            },
+            AzureAuth::Sas {
+                account_name: "acct".into(),
+                token: "sv=2022-11-02&sig=x".into(),
+            },
+            // Emulator carries no credentials by design.
+            AzureAuth::Emulator,
+        ] {
+            assert!(azure(Some(auth.clone())).validate().is_ok(), "{auth:?}");
+        }
+    }
+
+    #[test]
+    fn legacy_flat_shape_reports_the_replacement_block() {
+        // A user hitting this has a server that will not start; the message
+        // must contain the fix, not just a complaint.
+        let mut cfg = azure(None);
+        cfg.legacy = LegacyAzureFields {
+            account_name: Some("acct".into()),
+            account_key: Some("key".into()),
+            connection_string: None,
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("removed flat format"), "got: {err}");
+        assert!(
+            err.contains("auth = { type = \"account_key\""),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn legacy_connection_string_suggests_that_variant() {
+        let mut cfg = azure(None);
+        cfg.legacy = LegacyAzureFields {
+            connection_string: Some("AccountName=x;".into()),
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("type = \"connection_string\""), "got: {err}");
+    }
+
+    #[test]
+    fn missing_auth_is_rejected() {
+        assert!(azure(None).validate().is_err());
+    }
+
+    #[test]
+    fn blank_credential_values_are_rejected() {
+        // The enum makes "which credential" unrepresentable; validation only
+        // has to catch present-but-empty.
+        let cases = [
+            AzureAuth::AccountKey {
+                account_name: String::new(),
+                account_key: "k".into(),
+            },
+            AzureAuth::AccountKey {
+                account_name: "a".into(),
+                account_key: String::new(),
+            },
+            AzureAuth::ConnectionString {
+                value: String::new(),
+            },
+            AzureAuth::Sas {
+                account_name: "a".into(),
+                token: String::new(),
+            },
+        ];
+        for auth in cases {
+            assert!(azure(Some(auth.clone())).validate().is_err(), "{auth:?}");
+        }
+    }
+
+    #[test]
+    fn container_name_rules_still_apply() {
+        let mut cfg = azure(Some(AzureAuth::Emulator));
+        cfg.container = "ab".into(); // below Azure's 3-char minimum
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn auth_block_deserialises_from_toml() {
+        // Proves the tag spelling users will actually type.
+        let cfg: AzureStorage = toml::from_str(
+            r#"
+            container = "media"
+            auth = { type = "account_key", account_name = "acct", account_key = "k" }
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(cfg.auth, Some(AzureAuth::AccountKey { .. })));
+        assert!(!cfg.legacy.is_present());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn old_toml_is_recognised_as_legacy_not_a_parse_error() {
+        let cfg: AzureStorage = toml::from_str(
+            r#"
+            container = "media"
+            account_name = "acct"
+            account_key = "k"
+        "#,
+        )
+        .unwrap();
+        assert!(
+            cfg.legacy.is_present(),
+            "flat keys must be captured for diagnosis"
+        );
+        assert!(cfg.auth.is_none());
+        assert!(cfg.validate().is_err());
     }
 }

@@ -32,6 +32,14 @@ impl ContentChunker {
             return self.chunk_fixed(data, 4 * 1024 * 1024).await;
         }
 
+        // Pre-pass: scan hdrl→strl→strh/strf (a few KB of metadata) for the
+        // dominant codec of the movi payload. Never touches movi bytes.
+        let dominant_hint = if codec_detect_enabled() {
+            avi_dominant_codec_hint(data)
+        } else {
+            CodecHint::Unknown
+        };
+
         // Walk at the top-level RIFF-block level.
         // AVI 1.0: one RIFF/AVI  block contains everything.
         // AVI 2.0: RIFF/AVI  (headers + first movi) followed by one or more
@@ -72,6 +80,7 @@ impl ContentChunker {
                     block_end,
                     &mut offset,
                     &mut chunks,
+                    dominant_hint,
                 )
                 .await?;
             } else {
@@ -133,6 +142,7 @@ impl ContentChunker {
         end: usize,
         offset: &mut u64,
         chunks: &mut Vec<ContentChunk>,
+        dominant_hint: CodecHint,
     ) -> Result<()> {
         let mut pos = start;
         while pos + 8 <= end {
@@ -162,7 +172,7 @@ impl ContentChunker {
                         size: list_hdr.len(),
                         chunk_type: ChunkType::Metadata,
                         perceptual_hash: None,
-                        codec_hint: CodecHint::Unknown,
+                        codec_hint: dominant_hint,
                     });
                     *offset += list_hdr.len() as u64;
 
@@ -184,6 +194,7 @@ impl ContentChunker {
                         for mut sub in sub_chunks {
                             sub.offset += movi_offset;
                             sub.chunk_type = ChunkType::VideoStream;
+                            sub.codec_hint = dominant_hint;
                             chunks.push(sub);
                         }
                     } else if !movi_content.is_empty() {
@@ -194,7 +205,7 @@ impl ContentChunker {
                             size: movi_content.len(),
                             chunk_type: ChunkType::VideoStream,
                             perceptual_hash: None,
-                            codec_hint: CodecHint::Unknown,
+                            codec_hint: dominant_hint,
                         });
                     }
                     *offset += movi_content.len() as u64;
@@ -267,6 +278,31 @@ impl ContentChunker {
             debug!("Failed to parse MP4 atoms, using fixed chunking");
             return self.chunk_fixed(data, 4 * 1024 * 1024).await;
         }
+
+        // Pre-pass: scan moov→trak→mdia→minf→stbl→stsd for sample-entry FourCCs
+        // (a few KB of metadata) to determine the dominant codec for the mdat
+        // payload. Never touches mdat itself.
+        let dominant_hint = if codec_detect_enabled() {
+            atoms
+                .iter()
+                .find(|a| &a.atom_type == b"moov")
+                .and_then(|moov| {
+                    let start = (moov.offset as usize).checked_add(8)?;
+                    let end = (moov.offset as usize).checked_add(moov.size as usize)?;
+                    if start <= end && end <= data.len() {
+                        let hints: Vec<CodecHint> = mp4_stsd_fourccs(&data[start..end])
+                            .iter()
+                            .map(mp4_fourcc_to_codec_hint)
+                            .collect();
+                        Some(dominant_codec_hint(&hints))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(CodecHint::Unknown)
+        } else {
+            CodecHint::Unknown
+        };
 
         let mut chunks = Vec::new();
 
@@ -405,7 +441,7 @@ impl ContentChunker {
                             size: header.len(),
                             chunk_type: ChunkType::Metadata,
                             perceptual_hash: None,
-                            codec_hint: CodecHint::Unknown,
+                            codec_hint: dominant_hint,
                         });
 
                         let mdat_content = &atom_data[atom.header_size as usize..];
@@ -424,6 +460,7 @@ impl ContentChunker {
                         for mut sub in sub_chunks {
                             sub.offset += mdat_content_offset;
                             sub.chunk_type = ChunkType::VideoStream;
+                            sub.codec_hint = dominant_hint;
                             chunks.push(sub);
                         }
                         debug!(
@@ -441,7 +478,7 @@ impl ContentChunker {
                             size: atom_data.len(),
                             chunk_type: ChunkType::VideoStream,
                             perceptual_hash: None,
-                            codec_hint: CodecHint::Unknown,
+                            codec_hint: dominant_hint,
                         });
                         debug!(atom_type = %atom_type_str, size = atom.size, "Parsed small mdat atom");
                     }
@@ -530,6 +567,38 @@ impl ContentChunker {
             warn!("EBML header not found, not a valid Matroska file");
             return self.chunk_fixed(data, 4 * 1024 * 1024).await;
         }
+        // Pre-pass: scan the Tracks element (a few KB of metadata) for each
+        // TrackEntry's CodecID to determine the dominant codec for Cluster
+        // payloads. Never touches Cluster bytes.
+        let dominant_hint = if codec_detect_enabled() {
+            elements
+                .iter()
+                .find(|e| e.id == TRACKS_ID)
+                .and_then(|tracks_elem| {
+                    let start = tracks_elem.offset as usize + tracks_elem.header_size as usize;
+                    let end = if tracks_elem.data_size == u64::MAX {
+                        data.len()
+                    } else {
+                        (tracks_elem.offset as usize
+                            + tracks_elem.header_size as usize
+                            + tracks_elem.data_size as usize)
+                            .min(data.len())
+                    };
+                    if start < end {
+                        let hints: Vec<CodecHint> = mkv_track_codec_ids(&data[start..end])
+                            .iter()
+                            .map(|s| mkv_codec_id_to_hint(s))
+                            .collect();
+                        Some(dominant_codec_hint(&hints))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(CodecHint::Unknown)
+        } else {
+            CodecHint::Unknown
+        };
+
         let mut chunks = Vec::new();
 
         for element in &elements {
@@ -563,7 +632,7 @@ impl ContentChunker {
                         size: header.len(),
                         chunk_type: ChunkType::Metadata,
                         perceptual_hash: None,
-                        codec_hint: CodecHint::Unknown,
+                        codec_hint: dominant_hint,
                     });
 
                     if cluster_data.len() <= cluster_content_start {
@@ -588,6 +657,7 @@ impl ContentChunker {
                         for mut sub in sub_chunks {
                             sub.offset += base_offset;
                             sub.chunk_type = ChunkType::VideoStream;
+                            sub.codec_hint = dominant_hint;
                             chunks.push(sub);
                         }
                     } else {
@@ -598,7 +668,7 @@ impl ContentChunker {
                             size: cluster_content.len(),
                             chunk_type: ChunkType::VideoStream,
                             perceptual_hash: None,
-                            codec_hint: CodecHint::Unknown,
+                            codec_hint: dominant_hint,
                         });
                     }
                 }
@@ -770,10 +840,17 @@ impl ContentChunker {
             const GLB_BIN_SUBCHUNK_THRESHOLD: usize = 4 * 1024 * 1024; // 4 MB
             if chunk_type == BIN_CHUNK_TYPE && full_chunk_data.len() > GLB_BIN_SUBCHUNK_THRESHOLD {
                 use fastcdc::v2020::FastCDC;
-                let avg: u32 = 1024 * 1024; // 1 MB
-                let min: u32 = 512 * 1024; // 512 KB
-                let max: u32 = 4 * 1024 * 1024; // 4 MB
-                let cdc = FastCDC::new(full_chunk_data, min, avg, max);
+                let avg: usize = 1024 * 1024; // 1 MB
+                let min: usize = 512 * 1024; // 512 KB
+                let max: usize = 4 * 1024 * 1024; // 4 MB
+                let cdc = FastCDC::with_level_and_seed(
+                    full_chunk_data,
+                    min,
+                    avg,
+                    max,
+                    fastcdc::v2020::Normalization::Level1,
+                    self.seed,
+                );
                 let base_offset = chunk_data_start as u64;
                 for entry in cdc {
                     let sub = &full_chunk_data[entry.offset..entry.offset + entry.length];
@@ -950,57 +1027,606 @@ impl ContentChunker {
 
     /// FBX binary format chunking
     ///
-    /// FBX binary files have a node-based structure that can be parsed
-    /// for structure-aware chunking. Falls back to CDC for ASCII FBX.
+    /// FBX binary files have a node-based structure: a flat list of top-level
+    /// node records, each starting with an `EndOffset` field that points
+    /// directly at the start of the next node. Walking `EndOffset -> EndOffset`
+    /// lets us emit one chunk per top-level node (coalescing small nodes and
+    /// splitting oversized ones) without parsing property lists or names.
+    /// Falls back to CDC for ASCII FBX or any structure that fails sanity
+    /// checks (see [`Self::chunk_fbx_legacy`] for the `MEDIAGIT_CHUNK_FBX=0`
+    /// path, which reproduces the pre-P3a header+CDC behavior exactly).
     pub(super) async fn chunk_fbx(&self, data: &[u8]) -> Result<Vec<ContentChunk>> {
         // FBX binary magic: "Kaydara FBX Binary  \x00"
         const FBX_MAGIC: &[u8] = b"Kaydara FBX Binary  \x00";
+        const HEADER_LEN: usize = 27;
 
-        if data.len() < 27 || &data[0..21] != FBX_MAGIC {
+        if data.len() < HEADER_LEN || &data[0..21] != FBX_MAGIC {
             // ASCII FBX or invalid - use rolling CDC
             debug!("FBX file is ASCII or invalid, using rolling CDC");
             let (avg, min, max) = get_chunk_params(data.len() as u64);
             return self.chunk_fastcdc(data, avg, min, max).await;
         }
 
-        // Parse FBX version (bytes 23-26, little-endian)
-        let _version = u32::from_le_bytes([data[23], data[24], data[25], data[26]]);
+        if !chunk_fbx_enabled() {
+            return self.chunk_fbx_legacy(data, HEADER_LEN).await;
+        }
+
+        self.chunk_fbx_walker(data).await
+    }
+
+    /// EndOffset node walker for binary FBX. Default-off (opt in with
+    /// `MEDIAGIT_CHUNK_FBX=1`, see `chunk_fbx_enabled`); kept fully tested so
+    /// it can be re-enabled by default once it shows a harness gain. Callers
+    /// must have already validated the binary-FBX magic and minimum length.
+    pub(super) async fn chunk_fbx_walker(&self, data: &[u8]) -> Result<Vec<ContentChunk>> {
+        const HEADER_LEN: usize = 27;
+
+        if data.len() < HEADER_LEN {
+            let (avg, min, max) = get_chunk_params(data.len() as u64);
+            return self.chunk_fastcdc(data, avg, min, max).await;
+        }
+
+        // Parse FBX version (bytes 23-26, little-endian). Versions >= 7500
+        // (FBX 7.5+) widen EndOffset/NumProperties/PropertyListLen to u64.
+        let version = u32::from_le_bytes([data[23], data[24], data[25], data[26]]);
+        let off_width: usize = if version >= 7500 { 8 } else { 4 };
+
+        // Walk top-level node records by jumping EndOffset -> EndOffset.
+        // EndOffset == 0 is the NULL record that terminates the node list;
+        // everything from there on (including trailing footer bytes) is
+        // treated as a single trailing chunk.
+        let mut node_ranges: Vec<(usize, usize)> = Vec::new();
+        let mut pos = HEADER_LEN;
+        let mut footer_start = data.len();
+        let mut parse_ok = true;
+
+        loop {
+            if pos + off_width > data.len() {
+                footer_start = pos;
+                break;
+            }
+            let end_offset = if off_width == 8 {
+                u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()) as usize
+            } else {
+                u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize
+            };
+
+            if end_offset == 0 {
+                footer_start = pos;
+                break;
+            }
+
+            // Offsets must be monotonically increasing and stay in-bounds.
+            if end_offset <= pos || end_offset > data.len() {
+                parse_ok = false;
+                break;
+            }
+
+            node_ranges.push((pos, end_offset));
+            pos = end_offset;
+        }
+
+        if !parse_ok {
+            // Malformed node structure under a valid magic — fall back to the
+            // same header+CDC treatment the pre-P3a implementation always used.
+            debug!("FBX node offsets failed sanity check, using legacy header+CDC");
+            return self.chunk_fbx_legacy(data, HEADER_LEN).await;
+        }
 
         let mut chunks = Vec::new();
-
-        // Header chunk (first 27 bytes)
-        let header = &data[0..27];
+        let header = &data[0..HEADER_LEN];
         chunks.push(ContentChunk {
             id: Oid::hash(header),
             data: header.to_vec(),
             offset: 0,
-            size: 27,
+            size: HEADER_LEN,
             chunk_type: ChunkType::Metadata,
             perceptual_hash: None,
             codec_hint: CodecHint::Unknown,
         });
 
-        // For FBX, use adaptive rolling CDC on the rest of the data
-        // Full FBX node parsing is complex; CDC provides good dedup
-        if data.len() > 27 {
-            let content = &data[27..];
+        chunks.extend(
+            self.emit_coalesced_node_chunks(data, &node_ranges, 256 * 1024)
+                .await?,
+        );
+
+        if footer_start < data.len() {
+            let footer = &data[footer_start..];
+            chunks.push(ContentChunk {
+                id: Oid::hash(footer),
+                data: footer.to_vec(),
+                offset: footer_start as u64,
+                size: footer.len(),
+                chunk_type: ChunkType::Metadata,
+                perceptual_hash: None,
+                codec_hint: CodecHint::Unknown,
+            });
+        }
+
+        info!(
+            chunks = chunks.len(),
+            nodes = node_ranges.len(),
+            total_size = data.len(),
+            "FBX EndOffset chunking complete"
+        );
+
+        Ok(chunks)
+    }
+
+    /// Pre-P3a FBX chunking: 27-byte header as a single Metadata chunk,
+    /// followed by rolling CDC over the remainder. Preserved verbatim so
+    /// `MEDIAGIT_CHUNK_FBX=0` restores the exact legacy chunk boundaries.
+    pub(super) async fn chunk_fbx_legacy(
+        &self,
+        data: &[u8],
+        header_len: usize,
+    ) -> Result<Vec<ContentChunk>> {
+        let mut chunks = Vec::new();
+        let header = &data[0..header_len];
+        chunks.push(ContentChunk {
+            id: Oid::hash(header),
+            data: header.to_vec(),
+            offset: 0,
+            size: header_len,
+            chunk_type: ChunkType::Metadata,
+            perceptual_hash: None,
+            codec_hint: CodecHint::Unknown,
+        });
+
+        if data.len() > header_len {
+            let content = &data[header_len..];
             let (avg, min, max) = get_chunk_params(content.len() as u64);
             let sub_chunks = self.chunk_fastcdc(content, avg, min, max).await?;
 
             for mut chunk in sub_chunks {
-                chunk.offset += 27;
+                chunk.offset += header_len as u64;
                 chunks.push(chunk);
+            }
+        }
+
+        Ok(chunks)
+    }
+
+    /// Coalesce leading small structural node/block ranges (each under
+    /// `coalesce_threshold`) into one metadata group, then treat the first
+    /// node/block that stands alone (i.e. already at or past the threshold)
+    /// *and everything after it* as a single continuous span. Seeded FastCDC
+    /// (1 MB avg / 512 KB min / 4 MB max) then runs once per emitted group.
+    /// Shared by the FBX EndOffset walker and the Blender BHEAD walker,
+    /// which both walk a flat list of contiguous `(start, end)` byte ranges.
+    ///
+    /// Two earlier revisions were tried and measured against the
+    /// `dedup_report` corpus (which includes v1/v2 pairs edited by inserting
+    /// bytes mid-file — the common case for a real content edit):
+    ///  - CDC only when a group exceeded 4 MB, else one opaque chunk: let a
+    ///    single content-bearing node in the 256 KB-4 MB range (e.g. FBX's
+    ///    `Objects` on a several-MB model) become one monolithic chunk — a
+    ///    single edit anywhere inside invalidated the whole chunk.
+    ///  - Always CDC each coalesced group independently (forcing a boundary
+    ///    reset at every node start): regressed FBX dedup below baseline.
+    ///    FBX's `EndOffset` chain is absolute, not self-relative, so any
+    ///    size-changing edit inside a non-final node stales every
+    ///    downstream `EndOffset` — the edited file then fails the walk
+    ///    entirely and falls back to one continuous legacy CDC scan, while
+    ///    the unedited file still used the new per-node multi-scan. Forcing
+    ///    a reset at each node boundary in one but not the other misaligns
+    ///    chunk boundaries for the whole content region, even though the
+    ///    underlying bytes are otherwise unchanged.
+    ///
+    /// Treating everything from the first large node onward as one
+    /// continuous scan matches what the legacy fallback does for that same
+    /// region, so both sides of a pair align the same way regardless of
+    /// which one succeeds the structural walk — while still separating out
+    /// the (edit-immune, since it's always before any real content) leading
+    /// metadata run as its own chunk.
+    async fn emit_coalesced_node_chunks(
+        &self,
+        data: &[u8],
+        ranges: &[(usize, usize)],
+        coalesce_threshold: usize,
+    ) -> Result<Vec<ContentChunk>> {
+        let mut chunks = Vec::new();
+        let mut i = 0;
+        while i < ranges.len() {
+            let start = ranges[i].0;
+            let mut end = ranges[i].1;
+            i += 1;
+            while end - start < coalesce_threshold && i < ranges.len() {
+                end = ranges[i].1;
+                i += 1;
+            }
+            if i < ranges.len() {
+                // This group reached the threshold on its own with more
+                // ranges remaining: swallow everything else into one final
+                // continuous span rather than resetting the CDC scan at
+                // every subsequent node/block boundary.
+                end = ranges[ranges.len() - 1].1;
+                i = ranges.len();
+            }
+
+            let seg = &data[start..end];
+            if !seg.is_empty() {
+                let sub_chunks = self
+                    .chunk_fastcdc(seg, 1024 * 1024, 512 * 1024, 4 * 1024 * 1024)
+                    .await?;
+                for mut sub in sub_chunks {
+                    sub.offset += start as u64;
+                    chunks.push(sub);
+                }
+            }
+        }
+        Ok(chunks)
+    }
+
+    /// Blender `.blend` scene file chunking — BHEAD block walker.
+    ///
+    /// Uncompressed `.blend` files start with a 12-byte header (`BLENDER` +
+    /// pointer-size char + endianness char + 3-digit version), followed by a
+    /// flat sequence of BHEAD file-blocks: `code[4] + len(u32) + old-ptr(4 or
+    /// 8 bytes) + SDNAnr(u32) + nr(u32)`, then `len` bytes of payload. Walking
+    /// block-to-block (using each block's declared `len`) lets us emit one
+    /// chunk per block, coalescing small ones and splitting oversized ones.
+    /// `ENDB` terminates the block list.
+    ///
+    /// Blender >= 3.0 default-saves `.blend` files zstd-compressed (older
+    /// versions used gzip); a missing `BLENDER` magic — including either
+    /// compressed form — falls back to generic CDC rather than decompressing.
+    /// Big-endian files and any structure that fails sanity checks also fall
+    /// back to CDC.
+    pub(super) async fn chunk_blend(&self, data: &[u8]) -> Result<Vec<ContentChunk>> {
+        const MAGIC: &[u8] = b"BLENDER";
+        const HEADER_LEN: usize = 12;
+
+        if !chunk_blend_enabled() || data.len() < HEADER_LEN || &data[0..7] != MAGIC {
+            debug!("Not an uncompressed .blend (or disabled), using rolling CDC");
+            let (avg, min, max) = get_chunk_params(data.len() as u64);
+            return self.chunk_fastcdc(data, avg, min, max).await;
+        }
+
+        let ptr_size: usize = match data[7] {
+            b'_' => 4,
+            b'-' => 8,
+            _ => {
+                debug!("Unrecognized .blend pointer-size marker, using rolling CDC");
+                let (avg, min, max) = get_chunk_params(data.len() as u64);
+                return self.chunk_fastcdc(data, avg, min, max).await;
+            }
+        };
+        if data[8] != b'v' {
+            // Big-endian .blend - fall back rather than byte-swapping.
+            debug!("Big-endian .blend, using rolling CDC");
+            let (avg, min, max) = get_chunk_params(data.len() as u64);
+            return self.chunk_fastcdc(data, avg, min, max).await;
+        }
+
+        let bhead_len = 4 + 4 + ptr_size + 4 + 4; // code + len + old + SDNAnr + nr
+
+        let mut block_ranges: Vec<(usize, usize)> = Vec::new();
+        let mut pos = HEADER_LEN;
+        let mut parse_ok = true;
+
+        while pos + bhead_len <= data.len() {
+            let code = &data[pos..pos + 4];
+            let body_len = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as usize;
+            let block_end = pos.saturating_add(bhead_len).saturating_add(body_len);
+
+            if block_end > data.len() || block_end <= pos {
+                parse_ok = false;
+                break;
+            }
+
+            block_ranges.push((pos, block_end));
+            let is_endb = code == b"ENDB";
+            pos = block_end;
+            if is_endb {
+                break;
+            }
+        }
+
+        if !parse_ok {
+            debug!("Blend BHEAD structure failed sanity check, using rolling CDC");
+            let (avg, min, max) = get_chunk_params(data.len() as u64);
+            return self.chunk_fastcdc(data, avg, min, max).await;
+        }
+
+        let mut chunks = Vec::new();
+        let header = &data[0..HEADER_LEN];
+        chunks.push(ContentChunk {
+            id: Oid::hash(header),
+            data: header.to_vec(),
+            offset: 0,
+            size: HEADER_LEN,
+            chunk_type: ChunkType::Metadata,
+            perceptual_hash: None,
+            codec_hint: CodecHint::Unknown,
+        });
+
+        chunks.extend(
+            self.emit_coalesced_node_chunks(data, &block_ranges, 256 * 1024)
+                .await?,
+        );
+
+        if pos < data.len() {
+            let footer = &data[pos..];
+            chunks.push(ContentChunk {
+                id: Oid::hash(footer),
+                data: footer.to_vec(),
+                offset: pos as u64,
+                size: footer.len(),
+                chunk_type: ChunkType::Metadata,
+                perceptual_hash: None,
+                codec_hint: CodecHint::Unknown,
+            });
+        }
+
+        info!(
+            chunks = chunks.len(),
+            blocks = block_ranges.len(),
+            total_size = data.len(),
+            "Blend BHEAD chunking complete"
+        );
+
+        Ok(chunks)
+    }
+
+    /// Binary STL chunking — content-defined cuts over the triangle array.
+    ///
+    /// Binary STL is `80-byte header + u32 triangle count + count * 50-byte
+    /// records` with no other structure. Validates `84 + count*50 ==
+    /// file_len`; anything else (ASCII STL, truncated/malformed binary STL)
+    /// falls back to [`Self::chunk_3d_text`] — the pre-P3a routing for
+    /// `.stl`, which itself CDC-falls-back for non-text data.
+    /// `MEDIAGIT_CHUNK_STL=0` takes the same fallback.
+    ///
+    /// The triangle array is CDC-subdivided (seeded FastCDC, 1 MB avg / 512
+    /// KB min / 4 MB max) rather than cut at fixed 1 MB/triangle-count
+    /// boundaries: fixed-position cuts do not re-sync after a mid-file
+    /// insertion (every chunk after the edit shifts and stops matching), so
+    /// they cannot recover any dedup on the unedited remainder — exactly the
+    /// scenario a byte-inserted STL edit exercises. FastCDC re-syncs, at the
+    /// cost of no longer guaranteeing a cut never splits a 50-byte record.
+    /// The header is folded into the first emitted chunk.
+    pub(super) async fn chunk_stl(&self, data: &[u8]) -> Result<Vec<ContentChunk>> {
+        const STL_HEADER_LEN: usize = 80;
+        const COUNT_LEN: usize = 4;
+        const TRIANGLE_STRIDE: usize = 50;
+
+        if !chunk_stl_enabled() || data.len() < STL_HEADER_LEN + COUNT_LEN {
+            return self.chunk_3d_text(data).await;
+        }
+
+        let count = u32::from_le_bytes(
+            data[STL_HEADER_LEN..STL_HEADER_LEN + COUNT_LEN]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let header_len = STL_HEADER_LEN + COUNT_LEN; // 84
+        let expected_len = header_len + count * TRIANGLE_STRIDE;
+
+        if expected_len != data.len() {
+            // ASCII STL (starts "solid ...") or malformed binary STL.
+            debug!("Not a valid binary STL (size mismatch), using pre-P3a text/CDC routing");
+            return self.chunk_3d_text(data).await;
+        }
+
+        let triangle_data = &data[header_len..];
+        let mut chunks = self
+            .chunk_fastcdc(triangle_data, 1024 * 1024, 512 * 1024, 4 * 1024 * 1024)
+            .await?;
+        for c in &mut chunks {
+            c.offset += header_len as u64;
+        }
+
+        match chunks.first_mut() {
+            Some(first) => {
+                let mut merged = Vec::with_capacity(header_len + first.data.len());
+                merged.extend_from_slice(&data[0..header_len]);
+                merged.extend_from_slice(&first.data);
+                first.id = Oid::hash(&merged);
+                first.size = merged.len();
+                first.data = merged;
+                first.offset = 0;
+            }
+            None => {
+                // count == 0: no triangle data, just the header.
+                let header = &data[0..header_len];
+                chunks.push(ContentChunk {
+                    id: Oid::hash(header),
+                    data: header.to_vec(),
+                    offset: 0,
+                    size: header.len(),
+                    chunk_type: ChunkType::Generic,
+                    perceptual_hash: None,
+                    codec_hint: CodecHint::Unknown,
+                });
             }
         }
 
         info!(
             chunks = chunks.len(),
+            triangles = count,
             total_size = data.len(),
-            "FBX chunking complete"
+            "STL content-defined chunking complete"
         );
 
         Ok(chunks)
     }
+
+    /// PLY chunking — header parse + element-aligned content-defined cuts.
+    ///
+    /// Only `format binary_little_endian` PLY files with a fixed-size (no
+    /// `list` property) `vertex` element as the first element get
+    /// structure-aware treatment: the vertex block and everything after it
+    /// (face/edge blocks, which typically use variable-length `list`
+    /// properties) are each separately CDC-subdivided (seeded FastCDC, 1 MB
+    /// avg / 512 KB min / 4 MB max) — separated so an edit in one block
+    /// can't shift boundaries in the other. ASCII PLY, big-endian PLY, or
+    /// any parse doubt falls back to [`Self::chunk_3d_text`] — the pre-P3a
+    /// routing for `.ply`, which itself CDC-falls-back for non-text data.
+    /// `MEDIAGIT_CHUNK_PLY=0` takes the same fallback.
+    pub(super) async fn chunk_ply(&self, data: &[u8]) -> Result<Vec<ContentChunk>> {
+        if chunk_ply_enabled()
+            && let Some(info) = parse_ply_binary_header(data)
+        {
+            let vertex_block_len = info.vertex_count * info.vertex_stride;
+            let vertex_block_end = info.header_end + vertex_block_len;
+            if vertex_block_end <= data.len() {
+                return self.chunk_ply_binary(data, &info).await;
+            }
+        }
+
+        debug!("Not a fixed-stride binary_little_endian PLY, using pre-P3a text/CDC routing");
+        self.chunk_3d_text(data).await
+    }
+
+    async fn chunk_ply_binary(
+        &self,
+        data: &[u8],
+        info: &PlyHeaderInfo,
+    ) -> Result<Vec<ContentChunk>> {
+        let mut chunks = Vec::new();
+        let header = &data[0..info.header_end];
+        chunks.push(ContentChunk {
+            id: Oid::hash(header),
+            data: header.to_vec(),
+            offset: 0,
+            size: header.len(),
+            chunk_type: ChunkType::Metadata,
+            perceptual_hash: None,
+            codec_hint: CodecHint::Unknown,
+        });
+
+        let vertex_start = info.header_end;
+        let vertex_block_len = info.vertex_count * info.vertex_stride;
+        let vertex_end = vertex_start + vertex_block_len;
+
+        // Content-defined (FastCDC) rather than fixed-position cuts: fixed
+        // cuts don't re-sync after a mid-block insertion/edit, losing dedup
+        // on the entire unedited remainder (see chunk_stl for the measured
+        // regression this caused when first implemented with fixed cuts).
+        if vertex_block_len > 0 {
+            let vertex_block = &data[vertex_start..vertex_end];
+            let sub_chunks = self
+                .chunk_fastcdc(vertex_block, 1024 * 1024, 512 * 1024, 4 * 1024 * 1024)
+                .await?;
+            for mut sub in sub_chunks {
+                sub.offset += vertex_start as u64;
+                chunks.push(sub);
+            }
+        }
+
+        let rest = &data[vertex_end..];
+        if !rest.is_empty() {
+            let sub_chunks = self
+                .chunk_fastcdc(rest, 1024 * 1024, 512 * 1024, 4 * 1024 * 1024)
+                .await?;
+            for mut sub in sub_chunks {
+                sub.offset += vertex_end as u64;
+                chunks.push(sub);
+            }
+        }
+
+        info!(
+            chunks = chunks.len(),
+            vertices = info.vertex_count,
+            total_size = data.len(),
+            "PLY element-aligned chunking complete"
+        );
+
+        Ok(chunks)
+    }
+}
+
+/// Parsed subset of a binary PLY header needed for element-aligned chunking.
+pub(super) struct PlyHeaderInfo {
+    /// Byte offset right after the `end_header\n` line.
+    pub(super) header_end: usize,
+    /// `element vertex <N>` count.
+    pub(super) vertex_count: usize,
+    /// Sum of the fixed-size vertex properties' byte widths.
+    pub(super) vertex_stride: usize,
+}
+
+/// Parse a PLY header looking for `format binary_little_endian` with a
+/// `vertex` element (as the first element) whose properties are all
+/// fixed-size (no `list` property — variable-stride vertex blocks aren't
+/// supported). Returns `None` on ASCII/big-endian format, a missing/absent
+/// `end_header` marker within the scan window, or any other parse doubt —
+/// callers must fall back to generic CDC in that case.
+///
+/// Only the header bytes (guaranteed ASCII by the PLY spec) are decoded as
+/// UTF-8; the binary payload after `end_header` is never touched.
+pub(super) fn parse_ply_binary_header(data: &[u8]) -> Option<PlyHeaderInfo> {
+    const MAX_HEADER_SCAN: usize = 64 * 1024;
+    let scan_limit = data.len().min(MAX_HEADER_SCAN);
+    let marker = b"end_header\n";
+    let end_idx = data[..scan_limit]
+        .windows(marker.len())
+        .position(|w| w == marker)?;
+    let header_end = end_idx + marker.len();
+    let header_text = std::str::from_utf8(&data[..header_end]).ok()?;
+    if !header_text.starts_with("ply") {
+        return None;
+    }
+
+    let mut format_binary_le = false;
+    let mut in_vertex = false;
+    let mut saw_vertex_element = false;
+    let mut vertex_count: Option<usize> = None;
+    let mut stride = 0usize;
+
+    for line in header_text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("format ") {
+            format_binary_le = rest.trim_start().starts_with("binary_little_endian");
+        } else if let Some(rest) = line.strip_prefix("element ") {
+            let mut parts = rest.split_whitespace();
+            let name = parts.next().unwrap_or("");
+            let count: usize = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            if name == "vertex" && !saw_vertex_element {
+                in_vertex = true;
+                saw_vertex_element = true;
+                vertex_count = Some(count);
+            } else {
+                in_vertex = false;
+            }
+        } else if let Some(rest) = line.strip_prefix("property ")
+            && in_vertex
+        {
+            let rest = rest.trim_start();
+            if rest.starts_with("list") {
+                return None; // variable-stride vertex block not supported
+            }
+            let type_name = rest.split_whitespace().next().unwrap_or("");
+            stride += ply_type_size(type_name)?;
+        }
+    }
+
+    if !format_binary_le {
+        return None;
+    }
+    let vertex_count = vertex_count?;
+    if vertex_count > 0 && stride == 0 {
+        return None;
+    }
+
+    Some(PlyHeaderInfo {
+        header_end,
+        vertex_count,
+        vertex_stride: stride,
+    })
+}
+
+/// Byte width of a PLY scalar property type name. `None` for anything
+/// unrecognized (caller treats this as a parse failure -> fallback).
+fn ply_type_size(type_name: &str) -> Option<usize> {
+    Some(match type_name {
+        "char" | "uchar" | "int8" | "uint8" => 1,
+        "short" | "ushort" | "int16" | "uint16" => 2,
+        "int" | "uint" | "int32" | "uint32" | "float" | "float32" => 4,
+        "double" | "float64" => 8,
+        _ => return None,
+    })
 }
 
 /// Patch any uncovered byte ranges with Generic chunks.
@@ -1148,6 +1774,268 @@ pub(super) fn parse_mp4_atoms(data: &[u8]) -> Vec<Mp4Atom> {
     atoms
 }
 
+/// Return the content (body, after the atom header) of every immediate child
+/// atom of `container_body` matching `atom_type`. Bounds-checked; a
+/// malformed/truncated child atom is skipped rather than causing a panic.
+fn child_atom_bodies<'a>(container_body: &'a [u8], atom_type: &[u8; 4]) -> Vec<&'a [u8]> {
+    parse_mp4_atoms(container_body)
+        .into_iter()
+        .filter(|a| &a.atom_type == atom_type)
+        .filter_map(|a| {
+            let start = (a.offset as usize).checked_add(a.header_size as usize)?;
+            let end = (a.offset as usize).checked_add(a.size as usize)?;
+            if start <= end && end <= container_body.len() {
+                Some(&container_body[start..end])
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Walk `moov → trak → mdia → minf → stbl → stsd` to collect every
+/// sample-entry FourCC in the file. `moov_body` is the moov atom's content
+/// *after* its own 8-byte atom header (matching the slicing `chunk_mp4`
+/// already uses for nested-atom parsing). Never touches mdat; malformed or
+/// truncated boxes are skipped, never panicked on.
+fn mp4_stsd_fourccs(moov_body: &[u8]) -> Vec<[u8; 4]> {
+    let mut out = Vec::new();
+    for trak in child_atom_bodies(moov_body, b"trak") {
+        for mdia in child_atom_bodies(trak, b"mdia") {
+            for minf in child_atom_bodies(mdia, b"minf") {
+                for stbl in child_atom_bodies(minf, b"stbl") {
+                    for stsd in child_atom_bodies(stbl, b"stsd") {
+                        out.extend(parse_stsd_sample_entries(stsd));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Parse an `stsd` box body (version+flags(4) + entry_count(4) + entries)
+/// and return each sample entry's format FourCC. Stops without panicking on
+/// any malformed/truncated entry.
+fn parse_stsd_sample_entries(stsd_body: &[u8]) -> Vec<[u8; 4]> {
+    let mut out = Vec::new();
+    if stsd_body.len() < 8 {
+        return out;
+    }
+    let entry_count = u32::from_be_bytes([stsd_body[4], stsd_body[5], stsd_body[6], stsd_body[7]]);
+    let mut pos = 8usize;
+    for _ in 0..entry_count {
+        if pos + 8 > stsd_body.len() {
+            break;
+        }
+        let entry_size = u32::from_be_bytes([
+            stsd_body[pos],
+            stsd_body[pos + 1],
+            stsd_body[pos + 2],
+            stsd_body[pos + 3],
+        ]) as usize;
+        let mut fourcc = [0u8; 4];
+        fourcc.copy_from_slice(&stsd_body[pos + 4..pos + 8]);
+        out.push(fourcc);
+        if entry_size < 8 || pos + entry_size > stsd_body.len() {
+            break;
+        }
+        pos += entry_size;
+    }
+    out
+}
+
+/// Map an MP4/MOV sample-entry FourCC (from `stsd`) to a `CodecHint`.
+fn mp4_fourcc_to_codec_hint(fourcc: &[u8; 4]) -> CodecHint {
+    match fourcc {
+        b"avc1" | b"avc3" => CodecHint::H264,
+        b"hvc1" | b"hev1" | b"dvh1" | b"dvhe" => CodecHint::H265,
+        b"vp09" => CodecHint::VP9,
+        b"av01" => CodecHint::AV1,
+        b"apch" | b"apcn" | b"apcs" | b"apco" | b"ap4h" | b"ap4x" => CodecHint::ProRes,
+        b"AVdn" | b"AVdh" => CodecHint::DNxHR,
+        b"mjp2" => CodecHint::Jpeg2000,
+        b"v210" | b"2vuy" | b"yuv2" | b"raw " => CodecHint::RawVideo,
+        b"mp4a" => CodecHint::AAC,
+        b"Opus" => CodecHint::Opus,
+        b"fLaC" => CodecHint::FLAC,
+        b"alac" => CodecHint::ALAC,
+        b"tx3g" | b"wvtt" => CodecHint::TextSub,
+        _ => CodecHint::Unknown,
+    }
+}
+
+/// Scan an AVI/RIFF file's `hdrl → strl → strh/strf` metadata (a few KB) for
+/// the dominant video (else audio) codec hint. Never reads `movi` payload
+/// bytes — their size is used only to skip past them.
+fn avi_dominant_codec_hint(data: &[u8]) -> CodecHint {
+    let mut hints = Vec::new();
+    if data.len() < 12 || &data[0..4] != b"RIFF" {
+        return CodecHint::Unknown;
+    }
+
+    let mut file_pos = 0usize;
+    while file_pos + 12 <= data.len() {
+        let block_size = u32::from_le_bytes([
+            data[file_pos + 4],
+            data[file_pos + 5],
+            data[file_pos + 6],
+            data[file_pos + 7],
+        ]) as usize;
+        let form_type = &data[file_pos + 8..file_pos + 12];
+        let block_end = file_pos
+            .saturating_add(8)
+            .saturating_add(block_size)
+            .min(data.len());
+
+        if &data[file_pos..file_pos + 4] == b"RIFF"
+            && (form_type == b"AVI " || form_type == b"AVIX")
+        {
+            collect_avi_strl_hints(data, file_pos + 12, block_end, &mut hints);
+        }
+
+        if block_end <= file_pos {
+            break; // malformed size — avoid an infinite loop
+        }
+        file_pos = block_end;
+    }
+
+    dominant_codec_hint(&hints)
+}
+
+/// Recursively walk RIFF sub-chunks looking for `LIST/strl` blocks, skipping
+/// `LIST/movi` payload entirely (only its size is used to advance past it).
+fn collect_avi_strl_hints(data: &[u8], start: usize, end: usize, hints: &mut Vec<CodecHint>) {
+    let mut pos = start;
+    while pos + 8 <= end {
+        let fourcc = &data[pos..pos + 4];
+        let chunk_size =
+            u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+                as usize;
+        let data_end = pos.saturating_add(8).saturating_add(chunk_size).min(end);
+        let needs_padding = !chunk_size.is_multiple_of(2) && data_end < end;
+        let chunk_end = if needs_padding {
+            data_end + 1
+        } else {
+            data_end
+        }
+        .min(end);
+
+        if fourcc == b"LIST" && pos + 12 <= end {
+            let list_type = &data[pos + 8..pos + 12];
+            if list_type == b"strl" {
+                if let Some(h) = strl_codec_hint(&data[pos + 12..chunk_end]) {
+                    hints.push(h);
+                }
+            } else if list_type != b"movi" {
+                // hdrl and similar containers — descend for nested strl.
+                collect_avi_strl_hints(data, pos + 12, chunk_end, hints);
+            }
+            // movi: skip — its payload is never scanned here.
+        }
+
+        if chunk_end <= pos {
+            break; // malformed size — avoid an infinite loop
+        }
+        pos = chunk_end;
+    }
+}
+
+/// Parse a `strl` block's `strh`/`strf` sub-chunks and classify the stream.
+/// Returns `None` if `fccType` is neither `vids` nor `auds` (e.g. subtitle
+/// streams) or the block is too short to read.
+fn strl_codec_hint(strl_body: &[u8]) -> Option<CodecHint> {
+    let mut fcc_type: Option<[u8; 4]> = None;
+    let mut fcc_handler: Option<[u8; 4]> = None;
+    let mut strf_body: Option<&[u8]> = None;
+
+    let mut pos = 0usize;
+    while pos + 8 <= strl_body.len() {
+        let fourcc = &strl_body[pos..pos + 4];
+        let size = u32::from_le_bytes([
+            strl_body[pos + 4],
+            strl_body[pos + 5],
+            strl_body[pos + 6],
+            strl_body[pos + 7],
+        ]) as usize;
+        let data_start = pos + 8;
+        let data_end = data_start.saturating_add(size).min(strl_body.len());
+
+        if fourcc == b"strh" && data_end.saturating_sub(data_start) >= 8 {
+            let mut t = [0u8; 4];
+            t.copy_from_slice(&strl_body[data_start..data_start + 4]);
+            let mut h = [0u8; 4];
+            h.copy_from_slice(&strl_body[data_start + 4..data_start + 8]);
+            fcc_type = Some(t);
+            fcc_handler = Some(h);
+        } else if fourcc == b"strf" {
+            strf_body = Some(&strl_body[data_start..data_end]);
+        }
+
+        let padded_end = if !size.is_multiple_of(2) {
+            (data_end + 1).min(strl_body.len())
+        } else {
+            data_end
+        };
+        if padded_end <= pos {
+            break; // malformed size — avoid an infinite loop
+        }
+        pos = padded_end;
+    }
+
+    match fcc_type {
+        Some(t) if &t == b"vids" => Some(avi_video_codec_hint(fcc_handler, strf_body)),
+        Some(t) if &t == b"auds" => Some(avi_audio_codec_hint(strf_body)),
+        _ => None,
+    }
+}
+
+/// Classify a `vids` stream from `strh`'s `fccHandler` or `strf`'s
+/// `biCompression` (BITMAPINFOHEADER offset 16..20).
+fn avi_video_codec_hint(fcc_handler: Option<[u8; 4]>, strf: Option<&[u8]>) -> CodecHint {
+    let is_h264 = |f: &[u8; 4]| matches!(f, b"H264" | b"h264" | b"X264" | b"x264" | b"avc1");
+    let is_raw = |f: &[u8; 4]| f == b"DIB " || *f == [0u8; 4];
+
+    if let Some(h) = fcc_handler {
+        if is_h264(&h) {
+            return CodecHint::H264;
+        }
+        if is_raw(&h) {
+            return CodecHint::RawVideo;
+        }
+    }
+    if let Some(strf) = strf
+        && strf.len() >= 20
+    {
+        let mut comp = [0u8; 4];
+        comp.copy_from_slice(&strf[16..20]);
+        if is_h264(&comp) {
+            return CodecHint::H264;
+        }
+        if is_raw(&comp) {
+            return CodecHint::RawVideo;
+        }
+    }
+    CodecHint::Unknown
+}
+
+/// Classify an `auds` stream from `strf`'s `wFormatTag` (WAVEFORMATEX offset 0..2, LE).
+fn avi_audio_codec_hint(strf: Option<&[u8]>) -> CodecHint {
+    let Some(strf) = strf else {
+        return CodecHint::Unknown;
+    };
+    if strf.len() < 2 {
+        return CodecHint::Unknown;
+    }
+    match u16::from_le_bytes([strf[0], strf[1]]) {
+        0x0001 => CodecHint::PCM,
+        0x0055 => CodecHint::MP3,
+        0x00FF => CodecHint::AAC,
+        0x674F | 0x6771 => CodecHint::Vorbis,
+        _ => CodecHint::Unknown,
+    }
+}
+
 /// Read EBML VINT for Element ID (marker bit KEPT in value)
 ///
 /// Returns (id, bytes_consumed) or None if invalid.
@@ -1275,4 +2163,85 @@ pub(super) fn parse_ebml_elements(data: &[u8]) -> Vec<EbmlElement> {
     }
 
     elements
+}
+
+/// Walk a Matroska `Tracks` element body for each `TrackEntry`'s `CodecID`
+/// string. `tracks_body` is the Tracks element's content *after* its own
+/// EBML header (offset + header_size), matching the slicing `chunk_matroska`
+/// already uses for other elements. Malformed/truncated entries are skipped,
+/// never panicked on.
+fn mkv_track_codec_ids(tracks_body: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in parse_ebml_elements(tracks_body)
+        .iter()
+        .filter(|e| e.id == TRACK_ENTRY_ID)
+    {
+        let entry_start = entry.offset as usize + entry.header_size as usize;
+        let entry_end = if entry.data_size == u64::MAX {
+            tracks_body.len()
+        } else {
+            (entry.offset as usize + entry.header_size as usize + entry.data_size as usize)
+                .min(tracks_body.len())
+        };
+        if entry_start >= entry_end || entry_end > tracks_body.len() {
+            continue;
+        }
+        let entry_body = &tracks_body[entry_start..entry_end];
+
+        for codec in parse_ebml_elements(entry_body)
+            .iter()
+            .filter(|e| e.id == CODEC_ID_ID)
+        {
+            let cs = codec.offset as usize + codec.header_size as usize;
+            let ce = if codec.data_size == u64::MAX {
+                entry_body.len()
+            } else {
+                (codec.offset as usize + codec.header_size as usize + codec.data_size as usize)
+                    .min(entry_body.len())
+            };
+            if cs < ce
+                && let Ok(s) = std::str::from_utf8(&entry_body[cs..ce])
+            {
+                out.push(s.trim_end_matches('\0').to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Map a Matroska `CodecID` string to a `CodecHint`.
+pub(super) fn mkv_codec_id_to_hint(codec_id: &str) -> CodecHint {
+    if codec_id.starts_with("V_MPEG4/ISO/AVC") {
+        CodecHint::H264
+    } else if codec_id.starts_with("V_MPEGH/ISO/HEVC") {
+        CodecHint::H265
+    } else if codec_id == "V_VP9" {
+        CodecHint::VP9
+    } else if codec_id == "V_AV1" {
+        CodecHint::AV1
+    } else if codec_id.starts_with("V_PRORES") {
+        CodecHint::ProRes
+    } else if codec_id == "V_UNCOMPRESSED" {
+        CodecHint::RawVideo
+    } else if codec_id.starts_with("A_AAC") {
+        CodecHint::AAC
+    } else if codec_id == "A_OPUS" {
+        CodecHint::Opus
+    } else if codec_id == "A_VORBIS" {
+        CodecHint::Vorbis
+    } else if codec_id == "A_FLAC" {
+        CodecHint::FLAC
+    } else if codec_id.starts_with("A_PCM") {
+        CodecHint::PCM
+    } else if codec_id == "A_MPEG/L3" {
+        CodecHint::MP3
+    } else if codec_id == "A_ALAC" {
+        CodecHint::ALAC
+    } else if codec_id.starts_with("S_TEXT") {
+        CodecHint::TextSub
+    } else if codec_id == "S_HDMV/PGS" || codec_id == "S_VOBSUB" {
+        CodecHint::BitmapSub
+    } else {
+        CodecHint::Unknown
+    }
 }

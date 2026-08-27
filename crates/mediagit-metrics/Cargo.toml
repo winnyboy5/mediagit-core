@@ -9,6 +9,12 @@ repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
 description = "Prometheus metrics and performance monitoring for MediaGit"
+# Not published to crates.io: distribution is cargo-dist binaries, Docker
+# images and GitHub releases. This also makes deny.toml's
+# `allow-wildcard-paths` apply to our own path deps (cargo-deny exempts
+# them only for non-public crates). Flip to `true` and add `version = ...`
+# beside every internal `path = ...` if crates.io publishing is turned on.
+publish = false
 
 [dependencies]
 # Workspace dependencies
@@ -26,6 +32,11 @@ axum = { workspace = true }
 [dev-dependencies]
 criterion.workspace = true
 reqwest = { workspace = true }
+# reqwest is built with `rustls-no-provider`, so anything constructing a Client
+# must install a process-level provider first. The binaries do it in main();
+# test binaries have no main() of ours, so they install it themselves.
+# default-features = false keeps aws-lc-rs out of the tree.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 
 [[bench]]
 name = "metrics_overhead"

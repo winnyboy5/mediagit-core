@@ -17,8 +17,8 @@
 //! Tests the public API of the security module including encryption,
 //! key derivation, and audit logging.
 
-use mediagit_security::encryption::{decrypt, encrypt, EncryptionKey};
-use mediagit_security::kdf::{derive_key, Argon2Params, Salt};
+use mediagit_security::encryption::{EncryptionKey, decrypt, encrypt};
+use mediagit_security::kdf::{Argon2Params, Salt, derive_key};
 use secrecy::SecretString;
 
 #[test]

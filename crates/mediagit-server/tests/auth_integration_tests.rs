@@ -21,13 +21,16 @@ use axum::{
     http::{Request, StatusCode},
 };
 use mediagit_security::auth::{ApiKeyAuth, JwtAuth};
-use mediagit_server::{create_router, AppState};
+use mediagit_server::{AppState, create_router};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tower::util::ServiceExt;
 
 /// Helper to create test app state with authentication enabled
-fn create_test_state_with_auth() -> (Arc<AppState>, String, String) {
+/// AU-2: permissions are re-derived from the live user store per request, so
+/// the accounts these tokens name must actually exist — a token for an
+/// unregistered user is now rejected, exactly as one for a deleted user is.
+async fn create_test_state_with_auth() -> (Arc<AppState>, String, String) {
     let temp_dir = TempDir::new().unwrap();
     let repos_dir = temp_dir.path().to_path_buf();
 
@@ -43,6 +46,28 @@ fn create_test_state_with_auth() -> (Arc<AppState>, String, String) {
         jwt_secret,
         api_key_auth.clone(),
     ));
+
+    for (id, role) in [
+        ("test-user-read", mediagit_security::auth::user::Role::Read),
+        (
+            "test-user-write",
+            mediagit_security::auth::user::Role::Write,
+        ),
+    ] {
+        let user = mediagit_security::auth::User::new(
+            id.to_string(),
+            id.to_string(),
+            format!("{id}@example.com"),
+            role,
+        );
+        state
+            .auth_service()
+            .unwrap()
+            .credentials_store
+            .register_user(user, "render farm quiet hum")
+            .await
+            .unwrap();
+    }
 
     // Generate a test JWT token for user with read permissions
     let jwt_auth = JwtAuth::new(jwt_secret);
@@ -70,7 +95,7 @@ fn create_test_state_without_auth() -> Arc<AppState> {
 
 #[tokio::test]
 async fn test_unauthenticated_request_fails_when_auth_enabled() {
-    let (state, _read_token, _write_token) = create_test_state_with_auth();
+    let (state, _read_token, _write_token) = create_test_state_with_auth().await;
     let app = create_router(state);
 
     // Request without authentication header
@@ -87,7 +112,7 @@ async fn test_unauthenticated_request_fails_when_auth_enabled() {
 
 #[tokio::test]
 async fn test_authenticated_request_with_jwt_succeeds() {
-    let (state, read_token, _write_token) = create_test_state_with_auth();
+    let (state, read_token, _write_token) = create_test_state_with_auth().await;
 
     // Create test repository directory
     let repo_path = state.repos_dir.join("test-repo");
@@ -110,7 +135,7 @@ async fn test_authenticated_request_with_jwt_succeeds() {
 
 #[tokio::test]
 async fn test_authenticated_request_with_api_key_succeeds() {
-    let (state, _read_token, _write_token) = create_test_state_with_auth();
+    let (state, _read_token, _write_token) = create_test_state_with_auth().await;
 
     // Generate API key
     let api_key_auth = state.auth().unwrap();
@@ -120,6 +145,23 @@ async fn test_authenticated_request_with_api_key_succeeds() {
             "test-user".to_string(),
             "test-key".to_string(),
             vec!["repo:read".to_string()],
+        )
+        .await
+        .unwrap();
+
+    // AU-2: an API key is only honoured while its owner exists.
+    state
+        .auth_service()
+        .unwrap()
+        .credentials_store
+        .register_user(
+            mediagit_security::auth::User::new(
+                "test-user".to_string(),
+                "test-user".to_string(),
+                "test-user@example.com".to_string(),
+                mediagit_security::auth::user::Role::Read,
+            ),
+            "render farm quiet hum",
         )
         .await
         .unwrap();
@@ -145,7 +187,7 @@ async fn test_authenticated_request_with_api_key_succeeds() {
 
 #[tokio::test]
 async fn test_insufficient_permissions_returns_forbidden() {
-    let (state, read_token, _write_token) = create_test_state_with_auth();
+    let (state, read_token, _write_token) = create_test_state_with_auth().await;
 
     // Create test repository directory
     let repo_path = state.repos_dir.join("test-repo");
@@ -170,7 +212,7 @@ async fn test_insufficient_permissions_returns_forbidden() {
 
 #[tokio::test]
 async fn test_write_permission_allows_write_operations() {
-    let (state, _read_token, write_token) = create_test_state_with_auth();
+    let (state, _read_token, write_token) = create_test_state_with_auth().await;
 
     // Create test repository directory
     let repo_path = state.repos_dir.join("test-repo");
@@ -217,7 +259,7 @@ async fn test_no_auth_mode_allows_all_requests() {
 
 #[tokio::test]
 async fn test_invalid_jwt_token_returns_unauthorized() {
-    let (state, _read_token, _write_token) = create_test_state_with_auth();
+    let (state, _read_token, _write_token) = create_test_state_with_auth().await;
 
     // Create test repository directory
     let repo_path = state.repos_dir.join("test-repo");
@@ -240,7 +282,7 @@ async fn test_invalid_jwt_token_returns_unauthorized() {
 
 #[tokio::test]
 async fn test_invalid_api_key_returns_unauthorized() {
-    let (state, _read_token, _write_token) = create_test_state_with_auth();
+    let (state, _read_token, _write_token) = create_test_state_with_auth().await;
 
     // Create test repository directory
     let repo_path = state.repos_dir.join("test-repo");
@@ -263,7 +305,7 @@ async fn test_invalid_api_key_returns_unauthorized() {
 
 #[tokio::test]
 async fn test_read_permission_allows_get_refs() {
-    let (state, read_token, _write_token) = create_test_state_with_auth();
+    let (state, read_token, _write_token) = create_test_state_with_auth().await;
 
     // Create test repository directory
     let repo_path = state.repos_dir.join("test-repo");
@@ -285,7 +327,7 @@ async fn test_read_permission_allows_get_refs() {
 
 #[tokio::test]
 async fn test_read_permission_allows_download_pack() {
-    let (state, read_token, _write_token) = create_test_state_with_auth();
+    let (state, read_token, _write_token) = create_test_state_with_auth().await;
 
     // Create test repository directory
     let repo_path = state.repos_dir.join("test-repo");
@@ -321,7 +363,7 @@ async fn test_read_permission_allows_download_pack() {
 
 #[tokio::test]
 async fn test_read_permission_denies_upload_pack() {
-    let (state, read_token, _write_token) = create_test_state_with_auth();
+    let (state, read_token, _write_token) = create_test_state_with_auth().await;
 
     // Create test repository directory
     let repo_path = state.repos_dir.join("test-repo");
@@ -345,7 +387,7 @@ async fn test_read_permission_denies_upload_pack() {
 
 #[tokio::test]
 async fn test_write_permission_allows_upload_pack() {
-    let (state, _read_token, write_token) = create_test_state_with_auth();
+    let (state, _read_token, write_token) = create_test_state_with_auth().await;
 
     // Create test repository directory
     let repo_path = state.repos_dir.join("test-repo");
@@ -371,7 +413,7 @@ async fn test_write_permission_allows_upload_pack() {
 
 #[tokio::test]
 async fn test_mixed_auth_methods_jwt_preferred() {
-    let (state, read_token, _write_token) = create_test_state_with_auth();
+    let (state, read_token, _write_token) = create_test_state_with_auth().await;
 
     // Generate API key with different permissions
     let api_key_auth = state.auth().unwrap();
@@ -381,6 +423,23 @@ async fn test_mixed_auth_methods_jwt_preferred() {
             "test-user-2".to_string(),
             "test-key-2".to_string(),
             vec!["repo:admin".to_string()],
+        )
+        .await
+        .unwrap();
+
+    // AU-2: an API key is only honoured while its owner exists.
+    state
+        .auth_service()
+        .unwrap()
+        .credentials_store
+        .register_user(
+            mediagit_security::auth::User::new(
+                "test-user-2".to_string(),
+                "test-user-2".to_string(),
+                "test-user-2@example.com".to_string(),
+                mediagit_security::auth::user::Role::Admin,
+            ),
+            "render farm quiet hum",
         )
         .await
         .unwrap();
@@ -403,4 +462,70 @@ async fn test_mixed_auth_methods_jwt_preferred() {
 
     // Should succeed (JWT is valid)
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// AU-4: grant enforcement must be per-repo, not global.
+///
+/// `check_permission` gated per-repo authorization on `!grants.is_empty()` —
+/// *any* grant anywhere flipped enforcement on for *every* repository. So the
+/// first grant an operator recorded to onboard one tenant silently revoked
+/// flat-role access for every other user on every other repo. The blast radius
+/// was the whole server, triggered by a routine onboarding step.
+#[tokio::test]
+async fn grant_on_one_repo_does_not_lock_users_out_of_others() {
+    let (state, _read_token, write_token) = create_test_state_with_auth().await;
+
+    // Two repos; a grant will be recorded on `granted-repo` only.
+    for name in ["granted-repo", "ungranted-repo"] {
+        std::fs::create_dir_all(state.repos_dir.join(name)).unwrap();
+    }
+
+    // Someone else is granted access to one repo. This is the routine
+    // onboarding action that used to break everyone.
+    state
+        .grants
+        .grant(
+            "some-other-user",
+            "granted-repo",
+            mediagit_security::auth::GrantLevel::Read,
+        )
+        .await
+        .unwrap();
+
+    // `test-user-write` holds a flat Write role and no grants at all.
+    // The repo with NO grants must still honour the flat role.
+    let app = create_router(Arc::clone(&state));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/ungranted-repo/info/refs")
+                .header("Authorization", format!("Bearer {}", write_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a grant recorded on an unrelated repo revoked flat-role access here"
+    );
+
+    // The repo that DOES have grants is enforced: no grant, no access.
+    let app = create_router(Arc::clone(&state));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/granted-repo/info/refs")
+                .header("Authorization", format!("Bearer {}", write_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a repo with grants recorded must enforce them"
+    );
 }

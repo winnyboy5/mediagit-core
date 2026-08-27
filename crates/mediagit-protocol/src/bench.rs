@@ -11,14 +11,20 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
 
+use std::sync::Arc;
 /// Lightweight throughput instrumentation for push/pull operations.
 /// Gated by `MEDIAGIT_BENCH=1`; zero overhead when disabled.
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Schema version for the `[bench]` summary line. Increment when fields change.
-const BENCH_SCHEMA_VERSION: u8 = 3;
+///
+/// 4: `op=add` gained the per-phase breakdown
+/// (`oid_ms`/`cdc_ms`/`hash_ms`/`send_block_ms`/`compress_ms`/`write_ms`/`autogc_ms`).
+/// 5: new `op=checkout` line. Working-tree write time was previously folded into
+/// the caller's wall time with no record of its own, so the cost of the
+/// download->checkout barrier could not be measured at all.
+const BENCH_SCHEMA_VERSION: u8 = 5;
 
 /// Collect all `MEDIAGIT_*` env vars as a sorted `KEY=val,...` string.
 fn collect_knobs() -> String {
@@ -204,6 +210,84 @@ pub fn maybe_start(op: &'static str, concurrency: usize) -> Option<Arc<BenchSess
     }
 }
 
+/// Emit a `[bench] op=commit` summary line.
+///
+/// Call once at the end of a successful `commit` with the wall-clock start time
+/// and the number of tree entries written. No-op unless `MEDIAGIT_BENCH=1`.
+///
+/// Deliberately does NOT report a throughput figure. `commit` writes tree and
+/// commit objects, not the blob bytes `add` already stored, so a bytes/second
+/// number here would describe nothing real — and this file's own history is that
+/// gating a derived metric alongside its source double-counts every regression
+/// (`hash_mbs` was dropped from `08_perf`'s gate set for exactly that).
+///
+/// Added 2026-07-30: `08_perf` had measured and written commit timings since it
+/// was created, but `commit` emitted no `[bench]` line, so the harness had no
+/// record to compare and silently skipped every one of them. Half that phase's
+/// workload was gated against nothing.
+pub fn emit_commit_summary(wall_start: std::time::Instant, files: u64) {
+    if !enabled() {
+        return;
+    }
+    let wall_s = wall_start.elapsed().as_secs_f64();
+    let knobs = collect_knobs();
+    eprintln!(
+        "[bench] bench_schema_version={schema} op=commit files={files} \
+         wall={wall:.2}s knobs={knobs}",
+        schema = BENCH_SCHEMA_VERSION,
+        files = files,
+        wall = wall_s,
+        knobs = if knobs.is_empty() {
+            "none".to_string()
+        } else {
+            knobs
+        },
+    );
+}
+
+/// Emit a `[bench] op=checkout` summary line.
+///
+/// Call once at the end of a checkout with the wall-clock start time and the
+/// number of files written. No-op unless `MEDIAGIT_BENCH=1`.
+///
+/// Exists because clone's phase-4 (write the working tree) had no record of its
+/// own: it ran inside the CLI, after the protocol crate's `BenchSession` for the
+/// download had already ended, so its cost was invisible. Clone re-reads and
+/// re-decompresses every chunk here, and nothing measured it.
+///
+/// A separate line rather than a `BenchSession` field because the session is
+/// created and dropped inside `client/pull.rs`, which the CLI has no handle on —
+/// a field would have had no reachable caller.
+///
+/// Deliberately reports no throughput figure, for the same reason `op=commit`
+/// does not: these bytes were already counted by the clone that fetched them, so
+/// a second MB/s here would double-count.
+/// `overlap` records whether the C4 download/checkout overlap was on. It is
+/// reported explicitly rather than left to `knobs=`, because the knob defaults
+/// ON and so is ABSENT from the environment in the interesting case — an A/B
+/// that has to read "on" from a missing variable is one transcription slip away
+/// from being backwards.
+pub fn emit_checkout_summary(wall_start: std::time::Instant, files: u64, overlap: bool) {
+    if !enabled() {
+        return;
+    }
+    let wall_s = wall_start.elapsed().as_secs_f64();
+    let knobs = collect_knobs();
+    eprintln!(
+        "[bench] bench_schema_version={schema} op=checkout files={files} \
+         overlap={overlap} wall={wall:.2}s knobs={knobs}",
+        schema = BENCH_SCHEMA_VERSION,
+        files = files,
+        overlap = if overlap { "on" } else { "off" },
+        wall = wall_s,
+        knobs = if knobs.is_empty() {
+            "none".to_string()
+        } else {
+            knobs
+        },
+    );
+}
+
 /// Emit a `[bench] op=add` summary line (A9).
 ///
 /// Call once at the end of the `add` command with the wall-clock start time,
@@ -220,14 +304,31 @@ pub fn emit_add_summary(wall_start: std::time::Instant, total_bytes: u64, files:
         0.0
     };
     let knobs = collect_knobs();
+    // PERF-V10-PSD: the per-phase breakdown. `wall` alone cannot say whether
+    // `add` is bound by the whole-file OID, by serial CDC, by hashing, by the
+    // workers, or by auto-gc — which `wall` also silently included. Every phase
+    // is printed even at zero, so "this phase costs nothing" stays
+    // distinguishable from "this phase was never instrumented".
+    //
+    // These do NOT sum to `wall`: the producer and the worker pool overlap by
+    // design, so compress_ms + write_ms are wall-clock across N workers while
+    // cdc_ms/hash_ms are one serial thread. Read them as attribution, not as a
+    // partition — a breakdown that appeared to add up would be the misleading
+    // version.
+    let phases = mediagit_versioning::add_phases::snapshot()
+        .into_iter()
+        .map(|(k, ms)| format!("{k}={ms:.1}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     eprintln!(
         "[bench] bench_schema_version={schema} op=add files={files} \
-         total_bytes={bytes} wall={wall:.2}s hash_mbs={mbs:.2} knobs={knobs}",
+         total_bytes={bytes} wall={wall:.2}s hash_mbs={mbs:.2} {phases} knobs={knobs}",
         schema = BENCH_SCHEMA_VERSION,
         files = files,
         bytes = total_bytes,
         wall = wall_s,
         mbs = mbs,
+        phases = phases,
         knobs = if knobs.is_empty() {
             "none".to_string()
         } else {

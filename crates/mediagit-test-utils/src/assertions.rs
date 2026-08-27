@@ -104,7 +104,7 @@ pub fn assert_on_branch(repo_path: &Path, branch_name: &str) {
 /// Assert that a mediagit command succeeds.
 #[macro_export]
 macro_rules! assert_mediagit_success {
-    ($repo:expr, $($arg:expr),+ $(,)?) => {
+    ($repo:expr_2021, $($arg:expr_2021),+ $(,)?) => {
         $crate::mediagit()
             $(.arg($arg))+
             .current_dir($repo.path())
@@ -116,7 +116,7 @@ macro_rules! assert_mediagit_success {
 /// Assert that a mediagit command fails.
 #[macro_export]
 macro_rules! assert_mediagit_failure {
-    ($repo:expr, $($arg:expr),+ $(,)?) => {
+    ($repo:expr_2021, $($arg:expr_2021),+ $(,)?) => {
         $crate::mediagit()
             $(.arg($arg))+
             .current_dir($repo.path())
@@ -128,7 +128,7 @@ macro_rules! assert_mediagit_failure {
 /// Assert that a mediagit command output contains a specific string.
 #[macro_export]
 macro_rules! assert_mediagit_output_contains {
-    ($repo:expr, $expected:expr, $($arg:expr),+ $(,)?) => {
+    ($repo:expr_2021, $expected:expr_2021, $($arg:expr_2021),+ $(,)?) => {
         $crate::mediagit()
             $(.arg($arg))+
             .current_dir($repo.path())

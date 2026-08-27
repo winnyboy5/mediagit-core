@@ -50,7 +50,7 @@ pub struct RevertCmd {
     pub message: Option<String>,
 
     /// Continue after conflicts
-    #[arg(id = "continue", long = "continue", conflicts_with_all = ["abort", "skip", "commits"])]
+    #[arg(id = "continue", long = "continue", alias = "continue-revert", hide = true, conflicts_with_all = ["abort", "skip", "commits"])]
     pub continue_revert: bool,
 
     /// Abort current revert
@@ -111,7 +111,7 @@ impl RevertCmd {
             return self.do_continue(&repo_root, &storage_path).await;
         }
         if self.abort {
-            return self.do_abort(&storage_path).await;
+            return self.do_abort(&repo_root, &storage_path).await;
         }
         if self.skip {
             return self.do_skip(&storage_path).await;
@@ -165,7 +165,9 @@ impl RevertCmd {
                         style("⚠").yellow().bold()
                     );
                     println!("  Resolve conflicts and run 'mediagit revert --continue'");
-                    return Ok(());
+                    // Non-zero exit so CI can detect a conflict-stop instead of
+                    // silently reporting success (AUD-1).
+                    anyhow::bail!("Revert stopped due to conflicts");
                 }
                 return Err(e);
             }
@@ -202,6 +204,17 @@ impl RevertCmd {
         let head_oid = refs.resolve("HEAD").await?;
         let head_commit = Commit::read(odb, &head_oid).await?;
 
+        // WT-3: revert had no pre-flight dirty check at all. The merge result
+        // can only materialize paths from ours (all tracked) or from the
+        // reverted commit's parent, so checking collisions against the parent
+        // is exact.
+        crate::worktree_guard::AtRisk::check(repo_root, odb, Some(&head_oid), Some(parent_oid))
+            .await?
+            .ensure_clean("revert")?;
+
+        // WT-1: bound what the checkouts below may delete.
+        let tracked = crate::worktree_guard::tracked_paths(repo_root, odb, Some(&head_oid)).await?;
+
         if !self.quiet {
             output::progress(&format!(
                 "Reverting {} \"{}\"",
@@ -229,9 +242,49 @@ impl RevertCmd {
             .await?;
 
         if merge_result.has_conflicts() {
-            // Conflicts - save the HEAD tree to index for resolution
-            let head_tree = Tree::read(odb, &head_commit.tree).await?;
-            self.save_tree_to_index(repo_root, &head_tree)?;
+            // WT-5: materialise the conflict instead of staging HEAD unchanged.
+            //
+            // This used to write the *unmodified HEAD tree* into the index and
+            // bail, with nothing written to the working tree. The user had no
+            // marker to resolve, so running `--continue` immediately was the
+            // natural next step — and `do_continue` then built a tree from that
+            // index (HEAD's own tree) and committed it as "the revert". The
+            // command reported success and reverted nothing.
+            let ours_tree = Tree::read(odb, &head_commit.tree).await?;
+            let theirs_tree = Tree::read(odb, &parent_commit.tree).await?;
+            let mut index = Index::load(repo_root)?;
+
+            mediagit_versioning::apply_merge_to_workdir(
+                &merge_result,
+                &ours_tree,
+                &theirs_tree,
+                odb,
+                repo_root,
+                &mut index,
+                *parent_oid,
+                head_oid,
+            )
+            .await
+            .context("Failed to write revert conflict to the working directory")?;
+
+            index.save(repo_root)?;
+
+            if !self.quiet {
+                println!(
+                    "{} Revert stopped: conflict in {} file(s):",
+                    console::style("⚠").yellow().bold(),
+                    merge_result.conflicts.len()
+                );
+                for conflict in &merge_result.conflicts {
+                    println!("  {} {}", console::style("conflict:").red(), conflict.path);
+                }
+                println!(
+                    "  Resolve the file(s), {}, then run {}",
+                    console::style("mediagit add <file>").cyan(),
+                    console::style("mediagit revert --continue").cyan()
+                );
+            }
+
             anyhow::bail!("Revert resulted in conflict - resolve and continue");
         }
 
@@ -285,7 +338,7 @@ impl RevertCmd {
 
             // Update working tree to match the reverted state.
             // Without this, the working directory stays out-of-sync with HEAD.
-            let checkout_mgr = CheckoutManager::new(odb, repo_root);
+            let checkout_mgr = CheckoutManager::new(odb, repo_root).with_tracked_paths(tracked);
             checkout_mgr
                 .checkout_commit(&new_commit_oid)
                 .await
@@ -313,7 +366,7 @@ impl RevertCmd {
                 "revert (no-commit)".to_string(),
             );
             let temp_oid = temp_commit.write(odb).await?;
-            let checkout_mgr = CheckoutManager::new(odb, repo_root);
+            let checkout_mgr = CheckoutManager::new(odb, repo_root).with_tracked_paths(tracked);
             checkout_mgr
                 .checkout_commit(&temp_oid)
                 .await
@@ -357,6 +410,33 @@ impl RevertCmd {
 
         let state_content = fs::read_to_string(&state_file).await?;
         let state = RevertState::from_string(&state_content)?;
+
+        // WT-5/WT-9: refuse while any path is still unacknowledged.
+        //
+        // Asks the index rather than scanning file contents for `<<<<<<<`.
+        // Binary files never receive markers — the resolver checks out one
+        // side provisionally instead — so a content scan reported "resolved"
+        // for precisely the media files this system versions, and let
+        // `--continue` commit a side the user never reviewed.
+        //
+        // The state file is deliberately NOT removed until after this check:
+        // bailing must leave the revert resumable.
+        let unresolved = Index::load(repo_root)?.unresolved_paths();
+        if !unresolved.is_empty() {
+            anyhow::bail!(
+                "Cannot continue: {} path(s) still unresolved:\n  {}\n\
+                 Review each, then `mediagit add <path>` to accept it \
+                 (binary files included — staging is the acknowledgement), \
+                 or `mediagit revert --abort`.",
+                unresolved.len(),
+                unresolved
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n  ")
+            );
+        }
+
         fs::remove_file(&state_file).await?;
 
         let storage = create_storage_backend(repo_root).await?;
@@ -409,7 +489,7 @@ impl RevertCmd {
         Ok(())
     }
 
-    async fn do_abort(&self, storage_path: &Path) -> Result<()> {
+    async fn do_abort(&self, repo_root: &Path, storage_path: &Path) -> Result<()> {
         let state_file = storage_path.join(REVERT_STATE_FILE);
         if !state_file.exists() {
             anyhow::bail!("No revert in progress");
@@ -426,6 +506,27 @@ impl RevertCmd {
         } else {
             refs.update("HEAD", state.original_head, true).await?;
         }
+
+        // Restore the working tree to the pre-revert commit and clear the
+        // index. An empty index means "clean" (a normal commit clears it
+        // too); do_revert_single_commit's save_tree_to_index left the index
+        // fully populated on conflict, so without this `status` would show
+        // everything staged after an abort.
+        let storage = create_storage_backend(repo_root).await?;
+        let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 10000));
+        // WT-1: an abort must not take untracked files with it.
+        let tracked =
+            crate::worktree_guard::tracked_paths(repo_root, &odb, Some(&state.original_head))
+                .await?;
+        let checkout_mgr = CheckoutManager::new(&odb, repo_root).with_tracked_paths(tracked);
+        checkout_mgr
+            .checkout_commit(&state.original_head)
+            .await
+            .context("Failed to restore working directory on revert abort")?;
+
+        let mut index = Index::load(repo_root)?;
+        index.clear();
+        index.save(repo_root)?;
 
         fs::remove_file(&state_file).await?;
 
@@ -489,10 +590,10 @@ impl RevertCmd {
         let content = fs::read_to_string(&head_path).await?;
         let content = content.trim();
 
-        if let Some(target) = content.strip_prefix("ref: ") {
-            if let Some(branch) = target.strip_prefix("refs/heads/") {
-                return Ok(Some(branch.to_string()));
-            }
+        if let Some(target) = content.strip_prefix("ref: ")
+            && let Some(branch) = target.strip_prefix("refs/heads/")
+        {
+            return Ok(Some(branch.to_string()));
         }
 
         Ok(None)
@@ -537,10 +638,12 @@ impl RevertCmd {
         }
 
         // Try abbreviated OID (prefix scan)
-        if spec.len() >= 4 && spec.len() < 64 && spec.chars().all(|c| c.is_ascii_hexdigit()) {
-            if let Ok(oid) = odb.resolve_abbreviated_oid(spec).await {
-                return Ok(oid);
-            }
+        if spec.len() >= 4
+            && spec.len() < 64
+            && spec.chars().all(|c| c.is_ascii_hexdigit())
+            && let Ok(oid) = odb.resolve_abbreviated_oid(spec).await
+        {
+            return Ok(oid);
         }
 
         anyhow::bail!("Unknown revision: {}", spec)

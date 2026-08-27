@@ -24,7 +24,15 @@ use tempfile::TempDir;
 
 #[allow(deprecated)]
 fn mediagit() -> Command {
-    Command::cargo_bin("mediagit").unwrap()
+    {
+        // `commit` refuses an unconfigured identity (UX-6) instead of
+        // authoring as `Unknown <unknown@localhost>`, so tests declare one
+        // the way a real user would.
+        let mut c = Command::cargo_bin("mediagit").unwrap();
+        c.env("MEDIAGIT_AUTHOR_NAME", "Test User")
+            .env("MEDIAGIT_AUTHOR_EMAIL", "test@example.com");
+        c
+    }
 }
 
 fn init_repo(dir: &Path) {
@@ -400,4 +408,103 @@ fn test_commit_signoff() {
         .current_dir(temp_dir.path())
         .assert()
         .success();
+}
+
+/// UX-6 + UX-7: `commit` refuses an unconfigured identity, and `mediagit
+/// config` is how a user resolves that. Before this command existed the error
+/// told them to hand-edit TOML, which is not an answer.
+///
+/// Uses a raw command with the identity env deliberately cleared — the shared
+/// helper sets it, which is exactly what this test must not have.
+#[test]
+fn config_set_author_unblocks_commit() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let bare = || {
+        let mut c = Command::cargo_bin("mediagit").unwrap();
+        c.env_remove("MEDIAGIT_AUTHOR_NAME")
+            .env_remove("MEDIAGIT_AUTHOR_EMAIL");
+        c
+    };
+
+    bare()
+        .arg("init")
+        .arg("-q")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    fs::write(temp_dir.path().join("file.txt"), "content").unwrap();
+    bare()
+        .arg("add")
+        .arg("file.txt")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+
+    // No identity anywhere: the commit must refuse, and must say how to fix it.
+    bare()
+        .arg("commit")
+        .arg("-m")
+        .arg("Attempt")
+        .current_dir(temp_dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("mediagit config set author.name"));
+
+    bare()
+        .arg("config")
+        .arg("set")
+        .arg("author.name")
+        .arg("Ada Lovelace")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    bare()
+        .arg("config")
+        .arg("set")
+        .arg("author.email")
+        .arg("ada@example.com")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+
+    // Same command, now configured.
+    bare()
+        .arg("commit")
+        .arg("-m")
+        .arg("Attempt")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+
+    // And the identity actually reached the commit, rather than the commit
+    // merely succeeding.
+    bare()
+        .arg("log")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Ada Lovelace"));
+}
+
+/// A typo'd key must not look like it worked.
+#[test]
+fn config_rejects_an_unknown_key() {
+    let temp_dir = TempDir::new().unwrap();
+    mediagit()
+        .arg("init")
+        .arg("-q")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+
+    mediagit()
+        .arg("config")
+        .arg("set")
+        .arg("auther.name")
+        .arg("Ada")
+        .current_dir(temp_dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown config key"));
 }

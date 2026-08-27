@@ -165,7 +165,7 @@ If objects become dangling (unreferenced) after a failed operation:
 
 ```bash
 # Find dangling objects
-mediagit fsck --dangling
+mediagit fsck --lost-found
 
 # Save them to lost-found
 mediagit fsck --lost-found

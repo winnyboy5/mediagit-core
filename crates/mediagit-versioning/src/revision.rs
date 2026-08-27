@@ -37,54 +37,62 @@ pub async fn resolve_revision(
         let base_oid = if base == "HEAD" {
             refdb.resolve("HEAD").await.context("Cannot resolve HEAD")?
         } else {
-            // Try direct OID first
-            if let Ok(oid) = Oid::from_hex(&base) {
-                oid
-            } else {
-                // Try as reference
-                match refdb.resolve(&base).await {
-                    Ok(oid) => oid,
-                    Err(_) => {
-                        // Try with refs/heads prefix
-                        let with_prefix = format!("refs/heads/{}", base);
-                        refdb
-                            .resolve(&with_prefix)
-                            .await
-                            .context(format!("Cannot resolve base revision: {}", base))?
-                    }
-                }
-            }
+            resolve_name(&base, refdb, odb)
+                .await
+                .context(format!("Cannot resolve base revision: {}", base))?
         };
 
         // Walk parent chain
         return walk_parents(base_oid, count, odb).await;
     }
 
+    resolve_name(revision, refdb, odb).await
+}
+
+/// Resolve a name to an OID via the shared ladder:
+/// OID -> abbreviated OID -> refdb literal -> refs/heads -> refs/tags -> refs/remotes
+async fn resolve_name(name: &str, refdb: &RefDatabase, odb: &ObjectDatabase) -> Result<Oid> {
     // Try as direct OID (full 64-char hex)
-    if let Ok(oid) = Oid::from_hex(revision) {
+    if let Ok(oid) = Oid::from_hex(name) {
         return Ok(oid);
     }
 
     // Try as abbreviated OID (4-63 hex chars)
-    if revision.len() >= 4 && revision.len() < 64 && revision.chars().all(|c| c.is_ascii_hexdigit())
+    if name.len() >= 4
+        && name.len() < 64
+        && name.chars().all(|c| c.is_ascii_hexdigit())
+        && let Ok(oid) = odb.resolve_abbreviated_oid(name).await
     {
-        if let Ok(oid) = odb.resolve_abbreviated_oid(revision).await {
-            return Ok(oid);
-        }
+        return Ok(oid);
     }
 
     // Try to resolve as reference (handles symbolic refs like HEAD)
-    if let Ok(oid) = refdb.resolve(revision).await {
+    if let Ok(oid) = refdb.resolve(name).await {
         return Ok(oid);
     }
 
     // Try with refs/heads prefix
-    let with_prefix = format!("refs/heads/{}", revision);
+    let with_prefix = format!("refs/heads/{}", name);
     if let Ok(oid) = refdb.resolve(&with_prefix).await {
         return Ok(oid);
     }
 
-    anyhow::bail!("Cannot resolve revision: {}", revision)
+    // Try with refs/tags prefix (branches take precedence, matching git).
+    // Makes tags usable as revisions in show/diff/log/download/branch/reset.
+    let tag_ref = format!("refs/tags/{}", name);
+    if let Ok(oid) = refdb.resolve(&tag_ref).await {
+        return Ok(oid);
+    }
+
+    // Try with refs/remotes prefix (e.g. "origin/main" tracking refs written
+    // by clone/pull/fetch). Local heads and tags take precedence, matching
+    // the ladder order above.
+    let remote_ref = format!("refs/remotes/{}", name);
+    if let Ok(oid) = refdb.resolve(&remote_ref).await {
+        return Ok(oid);
+    }
+
+    anyhow::bail!("Cannot resolve revision: {}", name)
 }
 
 /// Parse parent notation like HEAD~N or branch~N
@@ -130,7 +138,9 @@ async fn walk_parents(start_oid: Oid, count: usize, odb: &ObjectDatabase) -> Res
         if commit.parents.is_empty() {
             anyhow::bail!(
                 "Cannot go back {} generation(s): commit {} has no parents (reached root at generation {})",
-                count, current_oid, i
+                count,
+                current_oid,
+                i
             );
         }
 
@@ -143,6 +153,7 @@ async fn walk_parents(start_oid: Oid, count: usize, odb: &ObjectDatabase) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Ref;
 
     #[test]
     fn test_parse_parent_notation() {
@@ -171,5 +182,61 @@ mod tests {
         // Invalid count
         assert!(parse_parent_notation("HEAD~abc").is_err());
         assert!(parse_parent_notation("HEAD~0").is_err());
+    }
+
+    fn test_odb() -> ObjectDatabase {
+        let storage = std::sync::Arc::new(mediagit_storage::mock::MockBackend::new());
+        ObjectDatabase::new(storage, 100)
+    }
+
+    #[tokio::test]
+    async fn test_resolve_revision_remote_tracking_ref() {
+        // QA-004: pull/clone write refs/remotes/<remote>/<branch>; resolve_revision
+        // must find them (previously only refs/heads and refs/tags were tried).
+        let temp_dir = tempfile::tempdir().unwrap();
+        let refdb = RefDatabase::new(temp_dir.path());
+        let odb = test_odb();
+
+        let oid = Oid::hash(b"remote-commit");
+        refdb
+            .write(&Ref::new_direct(
+                "refs/remotes/origin/main".to_string(),
+                oid,
+            ))
+            .await
+            .unwrap();
+
+        let resolved = resolve_revision("origin/main", &refdb, &odb).await.unwrap();
+        assert_eq!(resolved, oid);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_revision_local_branch_wins_over_remote_name_collision() {
+        // Ladder order is test-pinned: refs/heads must be tried before
+        // refs/remotes, so a local branch literally named "origin/main" wins.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let refdb = RefDatabase::new(temp_dir.path());
+        let odb = test_odb();
+
+        let local_oid = Oid::hash(b"local-commit");
+        let remote_oid = Oid::hash(b"remote-commit");
+
+        refdb
+            .write(&Ref::new_direct(
+                "refs/heads/origin/main".to_string(),
+                local_oid,
+            ))
+            .await
+            .unwrap();
+        refdb
+            .write(&Ref::new_direct(
+                "refs/remotes/origin/main".to_string(),
+                remote_oid,
+            ))
+            .await
+            .unwrap();
+
+        let resolved = resolve_revision("origin/main", &refdb, &odb).await.unwrap();
+        assert_eq!(resolved, local_oid);
     }
 }

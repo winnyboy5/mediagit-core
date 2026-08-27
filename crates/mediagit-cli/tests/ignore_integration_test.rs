@@ -37,10 +37,10 @@ fn setup_repo(ignore_content: &str, files: &[(&str, &str)]) -> TempDir {
 
     // create test files
     for (path, content) in files {
-        if let Some(parent) = std::path::Path::new(path).parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(root.join(parent)).expect("create parent dir");
-            }
+        if let Some(parent) = std::path::Path::new(path).parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(root.join(parent)).expect("create parent dir");
         }
         fs::write(root.join(path), content).expect("write test file");
     }

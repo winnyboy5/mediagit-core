@@ -5,29 +5,46 @@ MediaGit-Core is designed as a modular, extensible version control system optimi
 ## System Architecture
 
 ```mermaid
-graph TB
-    CLI[CLI Layer<br/>clap commands] --> Core[Core Logic Layer]
-    Core --> ODB[Object Database<br/>ODB]
-    Core --> Versioning[Versioning Engine<br/>Merge/LCA]
-    Core --> Media[Media Intelligence<br/>PSD/Video/Audio]
+graph TD
+    subgraph CLI["mediagit-cli (32 commands)"]
+        ADD["add"]
+        COMMIT["commit"]
+        PUSH["push"]
+        PULL["pull"]
+        CLONE["clone"]
+        OTHER["23+ more..."]
+    end
 
-    ODB --> Storage[Storage Abstraction<br/>trait Backend]
-    Versioning --> Storage
+    subgraph Core["Core Libraries"]
+        VER["mediagit-versioning<br/>ODB · Index · Refs<br/>Chunks · Delta · Cloud Packs"]
+        COMP["mediagit-compression<br/>Zstd · Brotli · Zlib<br/>SmartCompressor"]
+        MEDIA["mediagit-media<br/>Image · PSD · Video<br/>Audio · 3D · VFX"]
+    end
 
-    Storage --> Compression[Compression Layer<br/>zstd/brotli/delta]
+    subgraph Infra["Infrastructure"]
+        STORE["mediagit-storage<br/>Local · S3 · Azure<br/>GCS · B2 · MinIO"]
+        SEC["mediagit-security<br/>AES-256-GCM · JWT<br/>TLS · Audit · KDF"]
+        PROTO["mediagit-protocol<br/>Client · Packs<br/>Chunk Transfer"]
+    end
 
-    Compression --> Local[Local Storage]
-    Compression --> S3[Amazon S3]
-    Compression --> Azure[Azure Blob]
-    Compression --> GCS[Google Cloud Storage]
-    Compression --> B2[Backblaze B2]
-    Compression --> MinIO[MinIO]
-    Compression --> Spaces[DigitalOcean Spaces]
+    subgraph Support["Support"]
+        CFG["mediagit-config"]
+        OBS["mediagit-observability"]
+        MET["mediagit-metrics"]
+        TEST["mediagit-test-utils"]
+    end
 
-    style CLI fill:#e1f5ff
-    style Core fill:#fff4e1
-    style Storage fill:#e8f5e9
-    style Compression fill:#f3e5f5
+    subgraph Server["mediagit-server"]
+        AXUM["Axum REST API<br/>Auth · Rate Limit<br/>Security Middleware"]
+    end
+
+    CLI --> Core
+    Core --> Infra
+    Server --> Core
+    Server --> Infra
+    CLI --> Support
+    Server --> Support
+    VER -.->|"cloud packs<br/>(few large objects)"| STORE
 ```
 
 ## Core Components
@@ -44,7 +61,7 @@ graph TB
 - **Location**: `crates/mediagit-versioning/`, `crates/mediagit-media/`
 
 ### 3. Storage Abstraction
-- **Design**: Trait-based abstraction (`Backend` trait)
+- **Design**: Trait-based abstraction (`StorageBackend` trait)
 - **Implementations**: 7 storage backends (local, S3, Azure, GCS, B2, MinIO, Spaces)
 - **Benefits**: Easy backend switching, testability, cloud-agnostic design
 - **Location**: `crates/mediagit-storage/`
@@ -98,7 +115,7 @@ sequenceDiagram
 
 ### Trait-Based Abstraction
 - **Why**: Decouple logic from storage implementation
-- **How**: `Backend` trait with 7 implementations
+- **How**: `StorageBackend` trait with 7 implementations
 - **Benefit**: Easy testing (mock backends), cloud provider flexibility
 
 ## Performance Characteristics
@@ -123,9 +140,18 @@ sequenceDiagram
 - `mediagit verify` for repository health checks
 
 ### Encryption
-- At-rest: AES-256-GCM client-side encryption + cloud provider encryption (SSE-S3, Azure SSE)
-- In-transit: TLS 1.3 for all network operations
-- Client-side encryption: Fully implemented with Argon2id key derivation
+- At-rest, MediaGit's own: **implemented and enabled per repository.** The `MGEN` v2
+  object envelope (XAES-256-GCM) is wired into `SmartCompressor`, and `mediagit key init`
+  turns it on -- on an *empty* repository only, since sealing what is already there would
+  mean rewriting every object. Key escrow delivers the key to the client on the
+  presigned-upload path, so encrypted `push` and `clone` both work. With no key
+  configured, output is byte-for-byte identical to a build without the feature.
+  Encrypting an *existing* repository is not supported. See [Security](security.md).
+- At-rest, cloud SSE: **not wired either.** `[storage] encryption` /
+  `encryption_algorithm` are parsed and validated but read by no storage backend — no
+  request sets an SSE header. Setting them has no effect. (Bucket-level encryption
+  configured outside MediaGit still applies; it just isn't these keys.)
+- In-transit: TLS 1.3 by default when the server's TLS listener is enabled; `tls_min_version = "1.2"` in `mediagit-server.toml` is an escape hatch for TLS 1.2-only clients/proxies. mTLS is not wired.
 
 ## Scalability
 
@@ -169,8 +195,8 @@ sequenceDiagram
 - Example: Custom video frame merging
 
 ### Storage Backend Development
-- Implement `Backend` trait
-- Provide `get`, `put`, `exists`, `delete`, `list` operations
+- Implement `StorageBackend` trait
+- Provide `get`, `put`, `exists`, `delete`, `list_objects` operations
 - Example: IPFS backend, SFTP backend
 
 ### Media Format Support
@@ -180,7 +206,7 @@ sequenceDiagram
 
 ## Technology Stack
 
-- **Language**: Rust 1.92.0
+- **Language**: Rust 1.97.1
 - **Async Runtime**: Tokio 1.40+
 - **CLI Framework**: Clap 4.5+
 - **Compression**: zstd, brotli, delta (zstd dictionary)

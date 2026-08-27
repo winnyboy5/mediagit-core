@@ -88,12 +88,18 @@ mc mb local/my-media-bucket
 ```toml
 [storage]
 backend = "azure"
-account_name = "mystorageaccount"
 container = "media-container"
 prefix = ""
+auth = { type = "account_key", account_name = "mystorageaccount", account_key = "..." }
 ```
 
-Authentication via environment variable (full connection string):
+Credentials live in a tagged `auth` block -- exactly one credential, chosen by
+`type`: `account_key`, `connection_string { value }`, `sas { account_name,
+token }`, or `emulator` (local Azurite). The pre-`config_version` 3 flat form
+(`account_name`/`account_key` directly under `[storage]`) is migrated
+automatically the first time a repo is opened.
+
+The `account_key` may instead be supplied out of band via the environment:
 
 ```bash
 export AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=https;AccountName=mystorageaccount;AccountKey=base64key==;EndpointSuffix=core.windows.net"

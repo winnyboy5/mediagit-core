@@ -196,6 +196,10 @@ impl PsdParser {
     pub async fn parse(&self, data: &[u8]) -> Result<PsdInfo> {
         info!("Parsing PSD file");
 
+        // Known limitation (see FUTURE_TODOS.md #30): the upstream `psd` crate
+        // rejects some real-world PSDs with "invalid channel id 3" — layers
+        // carrying a spot-color channel, which its `ChannelKind` enum doesn't
+        // model. Not fixed here; affected files fall back to generic chunking.
         let psd = Psd::from_bytes(data)
             .map_err(|e| MediaError::PsdError(format!("Failed to parse PSD: {}", e)))?;
 
@@ -450,16 +454,15 @@ impl PsdParser {
             let ours_layer = ours.layers.iter().find(|l| l.name == base_layer.name);
             let theirs_layer = theirs.layers.iter().find(|l| l.name == base_layer.name);
 
-            if let (Some(ours), Some(theirs)) = (ours_layer, theirs_layer) {
-                if ours.parent_group != theirs.parent_group
-                    && (ours.parent_group != base_layer.parent_group
-                        || theirs.parent_group != base_layer.parent_group)
-                {
-                    conflicts.push(format!(
-                        "Layer '{}' moved to different groups: {:?} vs {:?}",
-                        base_layer.name, ours.parent_group, theirs.parent_group
-                    ));
-                }
+            if let (Some(ours), Some(theirs)) = (ours_layer, theirs_layer)
+                && ours.parent_group != theirs.parent_group
+                && (ours.parent_group != base_layer.parent_group
+                    || theirs.parent_group != base_layer.parent_group)
+            {
+                conflicts.push(format!(
+                    "Layer '{}' moved to different groups: {:?} vs {:?}",
+                    base_layer.name, ours.parent_group, theirs.parent_group
+                ));
             }
         }
 

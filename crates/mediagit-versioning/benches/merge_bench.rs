@@ -16,7 +16,7 @@
 //! Performance targets:
 //! - Merge operations: <200ms for 50-file trees
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use mediagit_storage::LocalBackend;
 use mediagit_versioning::{
     Commit, FileMode, MergeEngine, MergeStrategy, ObjectDatabase, ObjectType, Oid, Signature, Tree,

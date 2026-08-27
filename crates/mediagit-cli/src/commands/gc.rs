@@ -19,7 +19,8 @@ use console::style;
 use dialoguer::Confirm;
 use mediagit_storage::StorageBackend;
 use mediagit_versioning::{
-    BranchManager, ChunkManifest, Commit, FileMode, Index, Oid, RefDatabase, RefType, Tree,
+    BranchManager, Commit, FileMode, Index, ObjectType, Oid, RefDatabase, RefType, Reflog, Tag,
+    Tree,
 };
 use std::collections::HashSet;
 use std::path::Path;
@@ -27,11 +28,33 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
+/// Default horizon (in days) for protecting reflog-referenced commits from
+/// gc. Entries older than this are no longer roots, matching git's
+/// `gc.reflogExpire` behavior. `0` disables reflog roots entirely (old
+/// behavior). Override via `MEDIAGIT_GC_REFLOG_HORIZON_DAYS`.
+const DEFAULT_GC_REFLOG_HORIZON_DAYS: i64 = 90;
+
+fn gc_reflog_horizon_days() -> i64 {
+    std::env::var("MEDIAGIT_GC_REFLOG_HORIZON_DAYS")
+        .ok()
+        .and_then(|v| {
+            v.parse::<i64>().ok().or_else(|| {
+                tracing::warn!(
+                    "MEDIAGIT_GC_REFLOG_HORIZON_DAYS='{}' is not a valid i64, using default {}",
+                    v,
+                    DEFAULT_GC_REFLOG_HORIZON_DAYS
+                );
+                None
+            })
+        })
+        .unwrap_or(DEFAULT_GC_REFLOG_HORIZON_DAYS)
+}
+
 /// Clean up repository and optimize storage
 #[derive(Parser, Debug)]
 pub struct GcCmd {
-    /// Aggressive optimization (includes protected branches)
-    #[arg(long)]
+    /// Aggressive optimization (not yet implemented)
+    #[arg(long, hide = true)]
     pub aggressive: bool,
 
     /// Skip pruning unreachable objects (by default, gc prunes)
@@ -279,6 +302,7 @@ struct GarbageCollector {
     odb: mediagit_versioning::ObjectDatabase,
     refdb: RefDatabase,
     branch_mgr: BranchManager,
+    reflog: Reflog,
 }
 
 impl GarbageCollector {
@@ -292,6 +316,7 @@ impl GarbageCollector {
             odb,
             refdb: RefDatabase::new(root_path),
             branch_mgr: BranchManager::new(root_path),
+            reflog: Reflog::new(root_path),
         }
     }
 
@@ -327,11 +352,143 @@ impl GarbageCollector {
         debug!("Found {} tags to traverse", tags.len());
 
         for tag_name in tags {
-            if let Ok(tag_ref) = self.refdb.read(&format!("refs/tags/{}", tag_name)).await {
-                if let Some(oid) = tag_ref.oid {
-                    self.traverse_commit_chain(&oid, &mut reachable).await?;
+            if let Ok(tag_ref) = self.refdb.read(&format!("refs/tags/{}", tag_name)).await
+                && let Some(oid) = tag_ref.oid
+            {
+                // `oid` is either a lightweight tag (points straight at a
+                // commit) or an annotated tag (points at a Tag object).
+                // Protect the ref target itself either way, then walk
+                // THROUGH a Tag object to its target — otherwise a
+                // commit reachable only via an annotated tag would be
+                // collected as garbage.
+                reachable.insert(oid);
+                let tag_obj = match self.odb.read(&oid).await {
+                    Ok(data) => Tag::deserialize(&data).ok(),
+                    Err(_) => None,
+                };
+                match tag_obj {
+                    Some(tag) => match tag.target_type {
+                        ObjectType::Commit => {
+                            self.traverse_commit_chain(&tag.target, &mut reachable)
+                                .await?;
+                        }
+                        ObjectType::Tree => {
+                            self.traverse_tree(&tag.target, &mut reachable).await?;
+                        }
+                        ObjectType::Blob | ObjectType::Tag => {
+                            // Leaf or tag-of-a-tag target: existence is
+                            // all gc protects for non-commit targets.
+                            reachable.insert(tag.target);
+                        }
+                    },
+                    None => {
+                        // Lightweight tag: oid IS the commit directly.
+                        self.traverse_commit_chain(&oid, &mut reachable).await?;
+                    }
                 }
             }
+        }
+
+        // Protect reflog-referenced commits from gc, so `reflog`-based
+        // recovery of a branch reset/rebase/etc. keeps working. Only
+        // entries newer than the horizon are roots (matches git's
+        // gc.reflogExpire); a horizon of 0 disables this entirely.
+        let horizon_days = gc_reflog_horizon_days();
+        if horizon_days != 0 {
+            let cutoff = (horizon_days > 0)
+                .then(|| chrono::Utc::now() - chrono::Duration::days(horizon_days));
+            let zero_oid = Oid::from_bytes([0u8; 32]);
+
+            let reflog_refs = self.reflog.list_refs().await.unwrap_or_default();
+            let mut reflog_roots = 0usize;
+            for ref_name in reflog_refs {
+                let entries = match self.reflog.read(&ref_name, None).await {
+                    Ok(entries) => entries,
+                    Err(_) => continue,
+                };
+                for entry in entries {
+                    // Entries with no parseable timestamp already never
+                    // reach here (Reflog::read drops unparseable lines) —
+                    // treat any entry we do get as in-horizon by default.
+                    let in_horizon = cutoff.is_none_or(|c| entry.committer.timestamp >= c);
+                    if !in_horizon {
+                        continue;
+                    }
+                    for oid in [entry.old_oid, entry.new_oid] {
+                        if oid == zero_oid {
+                            continue;
+                        }
+                        // Skip oids the ODB no longer has (pruned by a
+                        // prior gc) without erroring.
+                        if self.odb.read(&oid).await.is_err() {
+                            continue;
+                        }
+                        if !reachable.contains(&oid) {
+                            reflog_roots += 1;
+                        }
+                        self.traverse_commit_chain(&oid, &mut reachable).await?;
+                    }
+                }
+            }
+            if reflog_roots > 0 {
+                debug!(
+                    "Protected {} reflog-referenced commits from gc",
+                    reflog_roots
+                );
+            }
+        }
+
+        // Remote-tracking branches (VC-1). `branch_mgr.list()` only walks
+        // `refs/heads`, so a commit fetched but not yet merged into any local
+        // branch had no root at all and was collected — silently undoing the
+        // fetch and breaking the next `merge origin/<branch>`.
+        match self.refdb.list("remotes").await {
+            Ok(remote_refs) => {
+                let mut rooted = 0usize;
+                for name in &remote_refs {
+                    // `list` yields ref names; resolve each to its commit.
+                    if let Ok(oid) = self.refdb.resolve(name).await {
+                        self.traverse_commit_chain(&oid, &mut reachable).await?;
+                        rooted += 1;
+                    }
+                }
+                if rooted > 0 {
+                    debug!("Protected {} remote-tracking ref(s) from gc", rooted);
+                }
+            }
+            Err(e) => debug!("No remote-tracking refs to protect: {}", e),
+        }
+
+        // Stashes (WT-6). Stash entries live only in `.mediagit/STASH_LIST`
+        // and are never refs, so nothing rooted them — `gc` after a
+        // `stash push` deleted the stashed tree and blobs, and the later
+        // `stash pop` failed with "object not found".
+        let stash_roots = self.stash_roots(repo_root);
+        for oid in &stash_roots {
+            self.traverse_commit_chain(oid, &mut reachable).await?;
+        }
+        if !stash_roots.is_empty() {
+            debug!(
+                "Protected {} stash entry/entries from gc",
+                stash_roots.len()
+            );
+        }
+
+        // In-progress operation state. auto-gc fires after `add` and `commit`
+        // (add.rs / commit.rs), and a rebase commits on every applied step —
+        // so a gc could land mid-rebase and collect `commits_remaining`, i.e.
+        // the user's own not-yet-replayed commits, which no ref points at
+        // once the branch has moved. Same exposure for cherry-pick, revert,
+        // merge and bisect state.
+        let op_roots = self.in_progress_roots(repo_root);
+        for oid in &op_roots {
+            self.traverse_commit_chain(oid, &mut reachable).await?;
+        }
+        if !op_roots.is_empty() {
+            debug!(
+                "Protected {} in-progress operation commit(s) from gc",
+                op_roots.len()
+            );
         }
 
         // Protect currently-staged index entries from gc.
@@ -352,6 +509,95 @@ impl GarbageCollector {
             reachable.len()
         );
         Ok(reachable)
+    }
+
+    /// Commit OIDs referenced by stash entries (`.mediagit/STASH_LIST`).
+    ///
+    /// Parsed leniently on purpose: an unreadable or malformed stash list must
+    /// never cause gc to protect *less*, but it also must not abort gc. Any
+    /// hex-looking `commit_oid` is taken as a root.
+    fn stash_roots(&self, repo_root: &Path) -> Vec<Oid> {
+        let path = repo_root.join(".mediagit").join("STASH_LIST");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Vec::new();
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            warn!("STASH_LIST is unparseable; stashed objects cannot be protected from gc");
+            return Vec::new();
+        };
+        value
+            .as_array()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|e| e.get("commit_oid")?.as_str())
+                    .filter_map(|s| Oid::from_hex(s).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Commit OIDs held by in-progress operation state files.
+    ///
+    /// Covers rebase (`rebase-apply/state.json`), cherry-pick, revert, merge
+    /// (`MERGE_HEAD`/`ORIG_HEAD`) and bisect. These reference commits that a
+    /// user can still `--continue` or `--abort` back to, but which no ref
+    /// points at while the operation is mid-flight.
+    ///
+    /// Deliberately format-agnostic: every value that parses as a 64-char hex
+    /// OID is treated as a root. A state file whose schema changes must not
+    /// silently stop protecting the operation it describes.
+    fn in_progress_roots(&self, repo_root: &Path) -> Vec<Oid> {
+        let dir = repo_root.join(".mediagit");
+        let candidates = [
+            dir.join("rebase-apply").join("state.json"),
+            dir.join("CHERRY_PICK_STATE"),
+            dir.join("REVERT_STATE"),
+            dir.join("BISECT_STATE"),
+            dir.join("MERGE_HEAD"),
+            dir.join("ORIG_HEAD"),
+        ];
+
+        let mut oids = Vec::new();
+        for path in candidates {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            oids.extend(Self::scan_hex_oids(&text));
+        }
+        oids.sort_by_key(|o| o.to_hex());
+        oids.dedup();
+        oids
+    }
+
+    /// Every 64-char hex run in `text`, parsed as an OID. Handles JSON, the
+    /// newline-delimited REVERT_STATE format, and bare-OID files uniformly.
+    fn scan_hex_oids(text: &str) -> Vec<Oid> {
+        let bytes = text.as_bytes();
+        let mut out = Vec::new();
+        let mut start = 0usize;
+        let mut run = 0usize;
+        for (i, b) in bytes.iter().enumerate() {
+            if b.is_ascii_hexdigit() {
+                if run == 0 {
+                    start = i;
+                }
+                run += 1;
+            } else {
+                if run == 64
+                    && let Ok(oid) = Oid::from_hex(&text[start..i])
+                {
+                    out.push(oid);
+                }
+                run = 0;
+            }
+        }
+        if run == 64
+            && let Ok(oid) = Oid::from_hex(&text[start..])
+        {
+            out.push(oid);
+        }
+        out
     }
 
     /// Traverse commit → tree → blob chains
@@ -454,15 +700,16 @@ impl GarbageCollector {
             if true {
                 let path_part = &key;
                 let hex = path_part.replace('/', "");
-                if hex.len() == 64 {
-                    if let Ok(oid) = Oid::from_hex(&hex) {
-                        // Get object size
-                        let size = match self.storage.get(&key).await {
-                            Ok(data) => data.len() as u64,
-                            Err(_) => 0,
-                        };
-                        objects.push((oid, size));
-                    }
+                if hex.len() == 64
+                    && let Ok(oid) = Oid::from_hex(&hex)
+                {
+                    // Size only — `head()` stats, `get()` would read and decompress
+                    // the whole object just to call `.len()`. This scan runs on
+                    // EVERY add and commit via auto-gc, so reading the full corpus
+                    // here is what pegged the CPU as history grew (measured
+                    // 2026-08-03: 500-commit churn went 125s -> 1620s per 100).
+                    let size = self.storage.head(&key).await.ok().flatten().unwrap_or(0);
+                    objects.push((oid, size));
                 }
             }
         }
@@ -479,6 +726,17 @@ impl GarbageCollector {
             .into_iter()
             .filter(|(oid, _)| !reachable.contains(oid))
             .collect();
+
+        // NOTE (VC-2): a prune grace period — refusing to delete objects
+        // written in the last few minutes — would be real defence in depth
+        // here, because rooting is inherently racy against a concurrent
+        // writer mid-`add`/`push`/rebase. It is NOT implemented, because
+        // `StorageBackend` exposes no modification time: `head` returns size
+        // only, and loose-object paths are namespaced by the backend, so gc
+        // cannot derive an object's age without duplicating storage-layer
+        // layout logic. Implementing it requires an mtime accessor on the
+        // backend trait. Until then the ordering fix in `commit` (ref written
+        // before the index is cleared) is what closes the widest window.
 
         info!("Found {} unreachable objects", unreachable.len());
         Ok(unreachable)
@@ -552,12 +810,11 @@ impl GarbageCollector {
         let mut manifests = Vec::new();
 
         for key in all_keys {
-            if let Some(hex) = key.strip_prefix("manifests/") {
-                if hex.len() == 64 {
-                    if let Ok(oid) = Oid::from_hex(hex) {
-                        manifests.push((oid, key));
-                    }
-                }
+            if let Some(hex) = key.strip_prefix("manifests/")
+                && hex.len() == 64
+                && let Ok(oid) = Oid::from_hex(hex)
+            {
+                manifests.push((oid, key));
             }
         }
 
@@ -575,10 +832,8 @@ impl GarbageCollector {
 
         for key in all_keys {
             if key.starts_with("chunks/") {
-                let size = match self.storage.get(&key).await {
-                    Ok(data) => data.len() as u64,
-                    Err(_) => 0,
-                };
+                // Size only — see `list_all_objects`: stat, don't read.
+                let size = self.storage.head(&key).await.ok().flatten().unwrap_or(0);
                 chunks.push((key, size));
             }
         }
@@ -622,20 +877,18 @@ impl GarbageCollector {
         let mut reachable_chunk_keys: HashSet<String> = HashSet::new();
 
         for oid in &reachable_manifest_oids {
-            let manifest_key = format!("manifests/{}", oid.to_hex());
-            match self.storage.get(&manifest_key).await {
-                Ok(data) => {
-                    match mediagit_versioning::format::deserialize::<ChunkManifest>(&data) {
-                        Ok(manifest) => {
-                            for chunk_ref in &manifest.chunks {
-                                let chunk_key = format!("chunks/{}", chunk_ref.id.to_hex());
-                                reachable_chunk_keys.insert(chunk_key);
-                            }
-                        }
-                        Err(e) => {
-                            debug!("Failed to deserialize manifest {}: {}", oid, e);
-                        }
+            // Through the ODB, never `storage.get`: on a keyed repo the manifest
+            // is sealed, and a raw read would fail to parse — leaving every
+            // chunk it references looking unreachable, i.e. deletable.
+            match self.odb.get_chunk_manifest(oid).await {
+                Ok(Some(manifest)) => {
+                    for chunk_ref in &manifest.chunks {
+                        let chunk_key = format!("chunks/{}", chunk_ref.id.to_hex());
+                        reachable_chunk_keys.insert(chunk_key);
                     }
+                }
+                Ok(None) => {
+                    debug!("Manifest {} vanished between listing and read", oid);
                 }
                 Err(e) => {
                     debug!("Failed to read manifest {}: {}", oid, e);
@@ -670,21 +923,22 @@ impl GarbageCollector {
 
         for key in &all_keys {
             // Match `deltas/{64-char hex}` but not `.meta` files
-            if let Some(hex) = key.strip_prefix("deltas/") {
-                if hex.len() == 64 && !hex.contains('.') {
-                    if let Ok(oid) = Oid::from_hex(hex) {
-                        let meta_key = format!("deltas/{}.meta", hex);
-                        let delta_size = match self.storage.get(key).await {
-                            Ok(data) => data.len() as u64,
-                            Err(_) => 0,
-                        };
-                        let meta_size = match self.storage.get(&meta_key).await {
-                            Ok(data) => data.len() as u64,
-                            Err(_) => 0,
-                        };
-                        deltas.push((oid, key.clone(), meta_key, delta_size + meta_size));
-                    }
-                }
+            if let Some(hex) = key.strip_prefix("deltas/")
+                && hex.len() == 64
+                && !hex.contains('.')
+                && let Ok(oid) = Oid::from_hex(hex)
+            {
+                let meta_key = format!("deltas/{}.meta", hex);
+                // Size only — see `list_all_objects`: stat, don't read.
+                let delta_size = self.storage.head(key).await.ok().flatten().unwrap_or(0);
+                let meta_size = self
+                    .storage
+                    .head(&meta_key)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0);
+                deltas.push((oid, key.clone(), meta_key, delta_size + meta_size));
             }
         }
 
@@ -702,19 +956,21 @@ impl GarbageCollector {
         let mut chunk_deltas = Vec::new();
 
         for key in &all_keys {
-            if let Some(hex) = key.strip_prefix("chunk-deltas/") {
-                if hex.len() == 64 && !hex.contains('.') {
-                    let meta_key = format!("chunk-deltas/{}.meta", hex);
-                    let delta_size = match self.storage.get(key).await {
-                        Ok(data) => data.len() as u64,
-                        Err(_) => 0,
-                    };
-                    let meta_size = match self.storage.get(&meta_key).await {
-                        Ok(data) => data.len() as u64,
-                        Err(_) => 0,
-                    };
-                    chunk_deltas.push((key.clone(), meta_key, delta_size + meta_size));
-                }
+            if let Some(hex) = key.strip_prefix("chunk-deltas/")
+                && hex.len() == 64
+                && !hex.contains('.')
+            {
+                let meta_key = format!("chunk-deltas/{}.meta", hex);
+                // Size only — see `list_all_objects`: stat, don't read.
+                let delta_size = self.storage.head(key).await.ok().flatten().unwrap_or(0);
+                let meta_size = self
+                    .storage
+                    .head(&meta_key)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0);
+                chunk_deltas.push((key.clone(), meta_key, delta_size + meta_size));
             }
         }
 
@@ -754,16 +1010,11 @@ impl GarbageCollector {
         let mut reachable_chunk_ids: HashSet<String> = HashSet::new();
 
         for (oid, _) in &all_manifests {
-            if reachable.contains(oid) {
-                let manifest_key = format!("manifests/{}", oid.to_hex());
-                if let Ok(data) = self.storage.get(&manifest_key).await {
-                    if let Ok(manifest) =
-                        mediagit_versioning::format::deserialize::<ChunkManifest>(&data)
-                    {
-                        for chunk_ref in &manifest.chunks {
-                            reachable_chunk_ids.insert(chunk_ref.id.to_hex());
-                        }
-                    }
+            if reachable.contains(oid)
+                && let Ok(Some(manifest)) = self.odb.get_chunk_manifest(oid).await
+            {
+                for chunk_ref in &manifest.chunks {
+                    reachable_chunk_ids.insert(chunk_ref.id.to_hex());
                 }
             }
         }
@@ -825,6 +1076,81 @@ impl GarbageCollector {
         }
 
         Ok((deleted, bytes_reclaimed))
+    }
+
+    /// Bitmap maintenance (M3, #2b): regenerate the reachability bitmap for
+    /// every current branch tip, and prune bitmaps belonging to commits no
+    /// longer in `reachable`.
+    ///
+    /// Bitmaps are derived data (see `mediagit_versioning::bitmap`) — a
+    /// regeneration or prune failure here is never fatal to `gc`; callers
+    /// log and continue. The `bitmaps/` namespace is never touched by the
+    /// orphan sweeps above (they only match `chunks/`, `manifests/`,
+    /// `deltas/`, `chunk-deltas/` prefixes), so this is the one place gc
+    /// actively manages it.
+    ///
+    /// Returns (regenerated_count, pruned_count).
+    async fn regenerate_and_prune_bitmaps(
+        &self,
+        reachable: &HashSet<Oid>,
+    ) -> Result<(usize, usize)> {
+        let mut regenerated = 0usize;
+
+        let branches = self.branch_mgr.list().await?;
+        for branch in &branches {
+            match mediagit_versioning::ReachabilityBitmap::generate(&self.odb, branch.oid).await {
+                Ok(bitmap) => match bitmap.serialize() {
+                    Ok(bytes) => {
+                        let key = mediagit_versioning::bitmap_key(&branch.oid);
+                        match self.storage.put(&key, &bytes).await {
+                            Err(e) => {
+                                warn!(
+                                    "Failed to persist bitmap for branch '{}': {}",
+                                    branch.name, e
+                                );
+                            }
+                            _ => {
+                                regenerated += 1;
+                            }
+                        }
+                    }
+                    Err(e) => warn!(
+                        "Failed to serialize bitmap for branch '{}': {}",
+                        branch.name, e
+                    ),
+                },
+                Err(e) => warn!(
+                    "Failed to regenerate bitmap for branch '{}': {}",
+                    branch.name, e
+                ),
+            }
+        }
+
+        let mut pruned = 0usize;
+        let all_bitmap_keys = self.storage.list_objects("bitmaps").await?;
+        for key in all_bitmap_keys {
+            let Some(hex) = key
+                .strip_prefix("bitmaps/")
+                .and_then(|s| s.strip_suffix(".bitmap"))
+            else {
+                continue;
+            };
+            let Ok(oid) = Oid::from_hex(hex) else {
+                continue;
+            };
+            if !reachable.contains(&oid) {
+                match self.storage.delete(&key).await {
+                    Err(e) => {
+                        warn!("Failed to prune orphaned bitmap {}: {}", key, e);
+                    }
+                    _ => {
+                        pruned += 1;
+                    }
+                }
+            }
+        }
+
+        Ok((regenerated, pruned))
     }
 
     /// Delete orphaned manifests and chunks
@@ -917,6 +1243,11 @@ impl GarbageCollector {
 
 impl GcCmd {
     pub async fn execute(&self) -> Result<()> {
+        // UX-5: declared but never read; the struct comment already admitted
+        // it was "a no-op CLI flag".
+        if self.aggressive {
+            anyhow::bail!("gc --aggressive is not yet implemented.");
+        }
         run_gc(&GcOptions::from(self)).await
     }
 }
@@ -1236,9 +1567,13 @@ pub async fn run_gc(opts: &GcOptions) -> Result<()> {
             println!("\n{} Repacking loose objects...", style("→").cyan());
         }
 
-        // Create ODB for repack operation
+        // Create ODB for repack operation. Loose objects are written via
+        // `with_smart_compression` (zstd/brotli/zlib) by add/commit, so the
+        // repack reader must use the same compressor — `ObjectDatabase::new`
+        // is plain-zlib-only and fails to decompress every zstd/brotli loose
+        // object, silently packing 0 objects.
         use mediagit_versioning::ObjectDatabase;
-        let odb = ObjectDatabase::new(storage.clone(), 1000);
+        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
 
         match odb.repack(opts.max_pack_size, !opts.dry_run).await {
             Ok(repack_stats) => {
@@ -1267,6 +1602,31 @@ pub async fn run_gc(opts: &GcOptions) -> Result<()> {
                     println!("{} Repack failed: {}", style("✗").red(), e);
                 }
                 stats.errors.push(format!("Repack error: {}", e));
+            }
+        }
+    }
+
+    // Step 8: Bitmap maintenance (M3, #2b) — regenerate branch-tip bitmaps,
+    // prune bitmaps for commits no longer reachable. Derived data: skipped
+    // entirely under --dry-run (writes nothing) or when MEDIAGIT_BITMAP
+    // disables it. A failure here never fails the gc run.
+    if !opts.dry_run && mediagit_versioning::bitmap_enabled() {
+        if !opts.quiet {
+            println!("\n{} Updating reachability bitmaps...", style("→").cyan());
+        }
+        match gc.regenerate_and_prune_bitmaps(&reachable).await {
+            Ok((regenerated, pruned)) => {
+                if !opts.quiet && (regenerated > 0 || pruned > 0) {
+                    println!(
+                        "{} Regenerated {} bitmap(s), pruned {} orphaned bitmap(s)",
+                        style("✓").green(),
+                        regenerated,
+                        pruned
+                    );
+                }
+            }
+            Err(e) => {
+                warn!("Bitmap maintenance failed: {}", e);
             }
         }
     }

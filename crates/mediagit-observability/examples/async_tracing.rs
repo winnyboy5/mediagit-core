@@ -18,7 +18,7 @@
 //!
 //! Run with: RUST_LOG=debug cargo run --example async_tracing
 
-use mediagit_observability::{init_tracing, LogFormat};
+use mediagit_observability::{LogFormat, init_tracing};
 use std::time::Duration;
 use tracing::Instrument;
 

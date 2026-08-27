@@ -14,28 +14,251 @@
 //! Checkout operations for restoring working directory from commits
 //!
 //! This module provides functionality to update the working directory
-//! to match a specific commit's tree structure.
+//! to match a specific commit's tree structure. Per-file ODB I/O is
+//! parallelized (env knob `MEDIAGIT_CHECKOUT_PARALLELISM`, default = CPUs
+//! capped at 8).
 
-use crate::{Commit, FileMode, ObjectDatabase, Oid, Tree};
+use crate::sparse::SparseFilter;
+use crate::{Commit, FileMode, ObjectDatabase, Oid, Tree, is_stage_debris_key};
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use tracing::{debug, info};
+use std::sync::Arc;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
+use tracing::{debug, info, warn};
+
+/// Bounded parallelism for checkout I/O (ODB reads/writes per file).
+///
+/// `MEDIAGIT_CHECKOUT_PARALLELISM` overrides the default (number of CPUs,
+/// capped at 8) — copies the knob pattern used by `add.rs`'s parallel file
+/// processing.
+fn checkout_parallelism() -> usize {
+    std::env::var("MEDIAGIT_CHECKOUT_PARALLELISM")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| num_cpus::get().min(8))
+}
+
+/// Write one file/symlink entry from the ODB to disk. Standalone (not `&self`)
+/// so it can run inside a spawned tokio task.
+///
+/// VC-6: non-Unix symlink handling is one behaviour, not two.
+///
+/// This used to take a `symlink_write_as_file_on_non_unix` flag because the
+/// module genuinely had two: `checkout_tree` skipped symlinks entirely (at
+/// `debug!`, so invisibly), while `checkout_tree_optimized` wrote the target
+/// as a regular file. The same repository therefore checked out differently
+/// depending on which path ran — and both outcomes were silent. Skipping
+/// loses the entry; writing it as a file turns a link into a text file whose
+/// contents are a path, which a later `commit` then stores as the file's real
+/// content.
+///
+/// Now: try a real symlink first (Windows supports them with Developer Mode
+/// or the privilege granted), and only fall back to the file representation
+/// with a **warning** the user can actually see.
+async fn write_entry_to_disk(
+    odb: &ObjectDatabase,
+    full_path: &Path,
+    oid: &Oid,
+    mode: FileMode,
+) -> Result<()> {
+    if let Some(parent) = full_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+    }
+
+    match mode {
+        FileMode::Regular | FileMode::Executable => {
+            odb.read_to_file(oid, full_path)
+                .await
+                .with_context(|| format!("Failed to checkout file: {}", full_path.display()))?;
+
+            #[cfg(unix)]
+            if mode == FileMode::Executable {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(full_path)?.permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(full_path, perms)?;
+            }
+
+            debug!("Checked out file: {}", full_path.display());
+        }
+        FileMode::Symlink => {
+            let target_data = odb
+                .read(oid)
+                .await
+                .with_context(|| format!("Failed to read symlink blob: {}", oid))?;
+            let target =
+                String::from_utf8(target_data).context("Symlink target is not valid UTF-8")?;
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::symlink;
+                let _ = fs::remove_file(full_path);
+                symlink(&target, full_path).with_context(|| {
+                    format!("Failed to create symlink: {}", full_path.display())
+                })?;
+            }
+
+            #[cfg(not(unix))]
+            {
+                let _ = fs::remove_file(full_path);
+                // Resolve relative to the link's own directory to choose the
+                // right Windows call — the two are not interchangeable, and a
+                // directory link created as a file link is broken.
+                let resolved = full_path.parent().map(|p| p.join(&target));
+                let target_is_dir = resolved.as_deref().is_some_and(|p| p.is_dir());
+
+                #[cfg(windows)]
+                let created = {
+                    use std::os::windows::fs::{symlink_dir, symlink_file};
+                    if target_is_dir {
+                        symlink_dir(&target, full_path)
+                    } else {
+                        symlink_file(&target, full_path)
+                    }
+                };
+                #[cfg(not(windows))]
+                let created: std::io::Result<()> = Err(std::io::Error::other(
+                    "symlinks unsupported on this platform",
+                ));
+
+                if let Err(e) = created {
+                    // Loud, not `debug!`: the working tree no longer matches
+                    // the commit, and the user needs to know before they
+                    // commit the substitute back.
+                    warn!(
+                        path = %full_path.display(),
+                        target = %target,
+                        error = %e,
+                        "could not create a symlink; writing the target as a regular file \
+                            instead. This file's contents are a path, not the linked data — \
+                            committing it will store it that way. Enable Developer Mode on \
+                            Windows to get real symlinks."
+                    );
+                    fs::write(full_path, target.as_bytes()).with_context(|| {
+                        format!("Failed to write symlink file: {}", full_path.display())
+                    })?;
+                }
+            }
+        }
+        FileMode::Directory => {
+            // Directories are flattened away before this point.
+        }
+    }
+
+    Ok(())
+}
+
+/// Differential write: skip if the on-disk file already matches `oid` (size
+/// and streaming hash). Only applies to Regular/Executable — mirrors the
+/// original `checkout_tree_optimized` skip-check exactly.
+///
+/// Returns `Ok(true)` if a write happened, `Ok(false)` if skipped unchanged.
+async fn checkout_entry_differential(
+    odb: &ObjectDatabase,
+    full_path: &Path,
+    oid: &Oid,
+    mode: FileMode,
+) -> Result<bool> {
+    if matches!(mode, FileMode::Regular | FileMode::Executable)
+        && full_path.exists()
+        && let Ok(metadata) = fs::metadata(full_path)
+        && let Ok(expected_size) = odb.get_object_size(oid).await
+        && metadata.len() == expected_size as u64
+        && let Ok(file_oid) = Oid::from_file(full_path)
+        && file_oid == *oid
+    {
+        debug!("Skipped unchanged file: {}", full_path.display());
+        return Ok(false);
+    }
+
+    write_entry_to_disk(odb, full_path, oid, mode).await?;
+    Ok(true)
+}
 
 /// Checkout manager for working directory operations
 pub struct CheckoutManager<'a> {
     odb: &'a ObjectDatabase,
     repo_root: PathBuf,
+    sparse: SparseFilter,
+    /// WT-1: paths [`Self::clean_working_directory`] is allowed to delete,
+    /// normalized to forward slashes. `None` = the legacy "delete anything
+    /// not in the target tree" behaviour.
+    deletable: Option<HashSet<String>>,
 }
 
 impl<'a> CheckoutManager<'a> {
     /// Create a new checkout manager
     pub fn new(odb: &'a ObjectDatabase, repo_root: impl Into<PathBuf>) -> Self {
+        let repo_root = repo_root.into();
+        let sparse = SparseFilter::load(&repo_root).unwrap_or_else(|e| {
+            warn!("Failed to load sparse-checkout filter, treating as disabled: {e}");
+            SparseFilter::disabled()
+        });
         Self {
             odb,
-            repo_root: repo_root.into(),
+            repo_root,
+            sparse,
+            deletable: None,
         }
+    }
+
+    /// WT-1: bound which working-tree files [`Self::checkout_commit`] may
+    /// delete to the set of *tracked* paths (HEAD tree ∪ index) at the point
+    /// the working tree was last in sync.
+    ///
+    /// Without this, `clean_working_directory` removes every file absent from
+    /// the target tree — including untracked work, which exists nowhere else
+    /// and is unrecoverable. Callers that rewrite the working tree
+    /// (`reset --hard`, `merge`, `rebase`, `cherry-pick`, `revert`) must set
+    /// it; `mediagit_cli::worktree_guard::tracked_paths` computes the set.
+    ///
+    /// Left unset, behaviour is unchanged — a checkout into a directory with
+    /// no untracked files (clone, fresh checkout) needs no bound.
+    pub fn with_tracked_paths(mut self, tracked: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.deletable = Some(
+            tracked
+                .into_iter()
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .collect(),
+        );
+        self
+    }
+
+    /// Drop entries excluded by the active sparse-checkout filter from a flat
+    /// tree map. Applied once per flattening call site (checkout_tree,
+    /// checkout_tree_optimized, checkout_diff) rather than per-hook, since M3
+    /// rewrote all three into a flatten-then-parallel shape.
+    fn filter_sparse<V>(&self, mut flat: HashMap<PathBuf, V>) -> HashMap<PathBuf, V> {
+        if self.sparse.is_enabled() {
+            flat.retain(|path, _| self.sparse.is_included(path));
+        }
+        flat
+    }
+
+    /// List all tracked files (path -> (oid, mode)) at `commit_oid`,
+    /// **ignoring** the sparse filter — used by the `sparse-checkout`
+    /// command to compute which files to materialize/remove when patterns
+    /// change (it needs the full tree, not the currently-filtered view).
+    pub async fn tracked_files_at(
+        &self,
+        commit_oid: &Oid,
+    ) -> Result<HashMap<PathBuf, (Oid, FileMode)>> {
+        let commit = Commit::read(self.odb, commit_oid).await?;
+        self.get_tree_files_with_oid(&commit.tree, Path::new(""))
+            .await
+    }
+
+    /// Write a single tracked file to disk directly, bypassing the sparse
+    /// filter — used by the `sparse-checkout set`/`disable` commands to
+    /// explicitly materialize a newly-included file.
+    pub async fn materialize_file(&self, rel_path: &Path, oid: &Oid, mode: FileMode) -> Result<()> {
+        let full_path = self.repo_root.join(rel_path);
+        write_entry_to_disk(self.odb, &full_path, oid, mode).await
     }
 
     /// Checkout a commit, updating the working directory to match its tree
@@ -124,6 +347,18 @@ impl<'a> CheckoutManager<'a> {
             let file_normalized = file.to_string_lossy().replace('\\', "/");
 
             if !normalized_target.contains(&file_normalized) {
+                if let Some(deletable) = &self.deletable
+                    && !deletable.contains(&file_normalized)
+                {
+                    // WT-1: untracked — it was never ours to delete.
+                    debug!("Preserving untracked file: {}", file.display());
+                    continue;
+                }
+                if !self.sparse.is_included(&file) {
+                    // Outside the sparse cone: absence is the expected state,
+                    // presence is simply untouched — never deleted by checkout.
+                    continue;
+                }
                 let file_path = self.repo_root.join(&file);
                 debug!("Removing file not in target: {}", file.display());
 
@@ -282,229 +517,153 @@ impl<'a> CheckoutManager<'a> {
         }
     }
 
-    /// Checkout a tree recursively, writing all files to working directory
-    fn checkout_tree<'b>(
-        &'b self,
-        tree_oid: &'b Oid,
-        prefix: &'b Path,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<usize>> + 'b>> {
-        Box::pin(async move {
-            let tree = Tree::read(self.odb, tree_oid).await?;
-
-            let mut files_updated = 0;
-
-            for entry in tree.iter() {
-                let entry_path = prefix.join(&entry.name);
-                let full_path = self.repo_root.join(&entry_path);
-
-                match entry.mode {
-                    FileMode::Regular | FileMode::Executable => {
-                        // Ensure parent directory exists
-                        if let Some(parent) = full_path.parent() {
-                            fs::create_dir_all(parent).with_context(|| {
-                                format!("Failed to create directory: {}", parent.display())
-                            })?;
-                        }
-
-                        // Use streaming write for checkout (constant memory)
-                        // This method handles both chunked and non-chunked objects
-                        self.odb
-                            .read_to_file(&entry.oid, &full_path)
-                            .await
-                            .with_context(|| {
-                                format!("Failed to checkout file: {}", full_path.display())
-                            })?;
-
-                        // Set executable permission if needed
-                        #[cfg(unix)]
-                        if entry.mode == FileMode::Executable {
-                            use std::os::unix::fs::PermissionsExt;
-                            let mut perms = fs::metadata(&full_path)?.permissions();
-                            perms.set_mode(0o755);
-                            fs::set_permissions(&full_path, perms)?;
-                        }
-
-                        debug!("Checked out file: {}", entry_path.display());
-                        files_updated += 1;
-                    }
-                    FileMode::Symlink => {
-                        // Read symlink target
-                        let target_data = self.odb.read(&entry.oid).await?;
-                        #[allow(unused_variables)]
-                        let target = String::from_utf8(target_data)
-                            .context("Symlink target is not valid UTF-8")?;
-
-                        // Ensure parent directory exists
-                        if let Some(parent) = full_path.parent() {
-                            fs::create_dir_all(parent)?;
-                        }
-
-                        // Create symlink
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::symlink;
-                            // Remove existing file/link if present
-                            let _ = fs::remove_file(&full_path);
-                            symlink(&target, &full_path).with_context(|| {
-                                format!("Failed to create symlink: {}", full_path.display())
-                            })?;
-                        }
-
-                        #[cfg(not(unix))]
-                        {
-                            debug!(
-                                "Symlinks not supported on this platform, skipping: {}",
-                                entry_path.display()
-                            );
-                        }
-
-                        files_updated += 1;
-                    }
-                    FileMode::Directory => {
-                        // Recursively checkout subdirectory
-                        let subdir_count = self.checkout_tree(&entry.oid, &entry_path).await?;
-                        files_updated += subdir_count;
-                    }
-                }
-            }
-
-            Ok(files_updated)
-        })
+    /// Checkout a tree, writing all files to the working directory.
+    ///
+    /// Flattens the tree (via [`Self::get_tree_files_with_oid`]) then writes
+    /// every entry with bounded parallelism (`MEDIAGIT_CHECKOUT_PARALLELISM`).
+    /// Always writes (no differential skip) — matches the original semantics.
+    async fn checkout_tree(&self, tree_oid: &Oid, prefix: &Path) -> Result<usize> {
+        let flat = self.get_tree_files_with_oid(tree_oid, prefix).await?;
+        let flat = self.filter_sparse(flat);
+        let entries: Vec<(PathBuf, Oid, FileMode)> =
+            flat.into_iter().map(|(p, (o, m))| (p, o, m)).collect();
+        self.run_parallel_writes(entries, false).await
     }
 
-    /// Optimized checkout: Single-pass tree traversal that both collects files and writes them
+    /// Run a batch of entry writes with bounded parallelism (JoinSet +
+    /// Semaphore, gated by `MEDIAGIT_CHECKOUT_PARALLELISM`). First error
+    /// aborts all remaining tasks and fails the whole batch — no
+    /// partial-silent success.
     ///
-    /// This eliminates the redundant tree traversal (get_tree_files + checkout_tree).
-    /// Returns (file_paths, files_updated) for cleanup and counting.
-    #[allow(clippy::type_complexity)]
-    fn checkout_tree_optimized<'b>(
-        &'b self,
-        tree_oid: &'b Oid,
-        prefix: &'b Path,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(HashSet<PathBuf>, usize)>> + 'b>>
-    {
-        Box::pin(async move {
-            let tree = Tree::read(self.odb, tree_oid).await?;
+    /// `differential` enables the skip-if-unchanged check (Regular/Executable
+    /// only). Returns the number of files actually written.
+    ///
+    /// # Invariant (F1+F2)
+    ///
+    /// A failed checkout returns only after all spawned I/O has stopped —
+    /// on error we `abort_all()` and then drain the `JoinSet` to completion
+    /// before returning, so no aborted task's `write_all` can land after
+    /// this function has already reported failure. Combined with
+    /// [`ObjectDatabase::read_to_file`]'s tmp-file-then-rename writes, no
+    /// partial file can exist at a final path — at worst a stale `.mgtmp`
+    /// sibling, which the next checkout of that file overwrites.
+    async fn run_parallel_writes(
+        &self,
+        entries: Vec<(PathBuf, Oid, FileMode)>,
+        differential: bool,
+    ) -> Result<usize> {
+        if entries.is_empty() {
+            return Ok(0);
+        }
 
-            let mut file_paths = HashSet::new();
-            let mut files_updated = 0;
+        // VC-5: refuse to check out paths that differ only by case onto a
+        // filesystem that cannot tell them apart. Every write path funnels
+        // through here, so this is the one place that has to know.
+        detect_case_collisions(&self.repo_root, entries.iter().map(|(p, _, _)| p))?;
 
-            for entry in tree.iter() {
-                let entry_path = prefix.join(&entry.name);
-                let full_path = self.repo_root.join(&entry_path);
+        let semaphore = Arc::new(Semaphore::new(checkout_parallelism()));
+        let mut tasks: JoinSet<Result<bool>> = JoinSet::new();
 
-                match entry.mode {
-                    FileMode::Regular | FileMode::Executable => {
-                        // Collect path for cleanup
-                        file_paths.insert(entry_path.clone());
+        for (path, oid, mode) in entries {
+            let sem = semaphore.clone();
+            let odb = self.odb.clone();
+            let full_path = self.repo_root.join(&path);
+            tasks.spawn(async move {
+                let _permit = sem
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| anyhow::anyhow!("checkout semaphore closed"))?;
+                if differential {
+                    checkout_entry_differential(&odb, &full_path, &oid, mode).await
+                } else {
+                    write_entry_to_disk(&odb, &full_path, &oid, mode).await?;
+                    Ok(true)
+                }
+            });
+        }
 
-                        // OPTIMIZATION: Differential checkout - skip unchanged files
-                        // Check if file exists and matches the expected OID
-                        let mut skip_write = false;
-                        if full_path.exists() {
-                            // Quick check: Compare file size first (cheap operation)
-                            if let Ok(metadata) = fs::metadata(&full_path) {
-                                if let Ok(expected_size) =
-                                    self.odb.get_object_size(&entry.oid).await
-                                {
-                                    if metadata.len() == expected_size as u64 {
-                                        // Size matches - perform full hash comparison
-                                        // Uses streaming hash (constant 64KB memory)
-                                        if let Ok(file_oid) = Oid::from_file(&full_path) {
-                                            if file_oid == entry.oid {
-                                                // File is unchanged - skip write operation
-                                                skip_write = true;
-                                                debug!(
-                                                    "Skipped unchanged file: {}",
-                                                    entry_path.display()
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        if !skip_write {
-                            // Ensure parent directory exists
-                            if let Some(parent) = full_path.parent() {
-                                fs::create_dir_all(parent).with_context(|| {
-                                    format!("Failed to create directory: {}", parent.display())
-                                })?;
-                            }
-
-                            // Use streaming write for checkout (constant memory)
-                            self.odb
-                                .read_to_file(&entry.oid, &full_path)
-                                .await
-                                .with_context(|| {
-                                    format!("Failed to checkout file: {}", full_path.display())
-                                })?;
-
-                            // Set executable permission if needed
-                            #[cfg(unix)]
-                            if entry.mode == FileMode::Executable {
-                                use std::os::unix::fs::PermissionsExt;
-                                let mut perms = fs::metadata(&full_path)?.permissions();
-                                perms.set_mode(0o755);
-                                fs::set_permissions(&full_path, perms)?;
-                            }
-
-                            debug!("Checked out file: {}", entry_path.display());
-                            files_updated += 1;
-                        }
-                    }
-                    FileMode::Symlink => {
-                        // Collect path for cleanup
-                        file_paths.insert(entry_path.clone());
-
-                        // Read symlink target
-                        let target_data = self.odb.read(&entry.oid).await?;
-                        let target = String::from_utf8(target_data)
-                            .context("Symlink target is not valid UTF-8")?;
-
-                        // Ensure parent directory exists
-                        if let Some(parent) = full_path.parent() {
-                            fs::create_dir_all(parent)?;
-                        }
-
-                        // Create symlink
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::symlink;
-                            // Remove existing file/link if present
-                            if full_path.exists() || full_path.symlink_metadata().is_ok() {
-                                let _ = fs::remove_file(&full_path);
-                            }
-                            symlink(&target, &full_path).with_context(|| {
-                                format!("Failed to create symlink: {}", full_path.display())
-                            })?;
-                        }
-
-                        #[cfg(not(unix))]
-                        {
-                            // On non-Unix, write symlink target as a regular file
-                            fs::write(&full_path, target.as_bytes()).with_context(|| {
-                                format!("Failed to write symlink file: {}", full_path.display())
-                            })?;
-                        }
-
-                        debug!("Checked out symlink: {}", entry_path.display());
-                        files_updated += 1;
-                    }
-                    FileMode::Directory => {
-                        // Recursively checkout subdirectory
-                        let (subdir_paths, subdir_count) = self
-                            .checkout_tree_optimized(&entry.oid, &entry_path)
-                            .await?;
-                        file_paths.extend(subdir_paths);
-                        files_updated += subdir_count;
+        let mut updated = 0usize;
+        while let Some(res) = tasks.join_next().await {
+            match res {
+                Ok(Ok(wrote)) => {
+                    if wrote {
+                        updated += 1;
                     }
                 }
+                Ok(Err(e)) => {
+                    tasks.abort_all();
+                    while tasks.join_next().await.is_some() {}
+                    return Err(e);
+                }
+                Err(join_err) => {
+                    tasks.abort_all();
+                    while tasks.join_next().await.is_some() {}
+                    return Err(anyhow::anyhow!("checkout task failed: {join_err}"));
+                }
             }
+        }
 
-            Ok((file_paths, files_updated))
-        })
+        Ok(updated)
+    }
+
+    /// Delete a batch of files with bounded parallelism. First error aborts
+    /// remaining deletes. Returns the number of files actually deleted.
+    async fn run_parallel_deletes(&self, paths: Vec<PathBuf>) -> Result<usize> {
+        if paths.is_empty() {
+            return Ok(0);
+        }
+
+        let semaphore = Arc::new(Semaphore::new(checkout_parallelism()));
+        let mut tasks: JoinSet<Result<()>> = JoinSet::new();
+
+        for full_path in paths {
+            let sem = semaphore.clone();
+            tasks.spawn(async move {
+                let _permit = sem
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| anyhow::anyhow!("checkout semaphore closed"))?;
+                fs::remove_file(&full_path)
+                    .with_context(|| format!("Failed to delete: {}", full_path.display()))
+            });
+        }
+
+        let mut deleted = 0usize;
+        while let Some(res) = tasks.join_next().await {
+            match res {
+                Ok(Ok(())) => deleted += 1,
+                Ok(Err(e)) => {
+                    tasks.abort_all();
+                    while tasks.join_next().await.is_some() {}
+                    return Err(e);
+                }
+                Err(join_err) => {
+                    tasks.abort_all();
+                    while tasks.join_next().await.is_some() {}
+                    return Err(anyhow::anyhow!("checkout delete task failed: {join_err}"));
+                }
+            }
+        }
+
+        Ok(deleted)
+    }
+
+    /// Optimized checkout: flattens the tree, then writes every entry with
+    /// bounded parallelism, skipping files already on disk that match the
+    /// target OID (differential fast path). Returns (file_paths,
+    /// files_updated) for cleanup and counting.
+    async fn checkout_tree_optimized(
+        &self,
+        tree_oid: &Oid,
+        prefix: &Path,
+    ) -> Result<(HashSet<PathBuf>, usize)> {
+        let flat = self.get_tree_files_with_oid(tree_oid, prefix).await?;
+        let flat = self.filter_sparse(flat);
+        let file_paths: HashSet<PathBuf> = flat.keys().cloned().collect();
+        let entries: Vec<(PathBuf, Oid, FileMode)> =
+            flat.into_iter().map(|(p, (o, m))| (p, o, m)).collect();
+        let files_updated = self.run_parallel_writes(entries, true).await?;
+        Ok((file_paths, files_updated))
     }
 
     /// Apply a commit's tree on top of the current working directory without cleaning.
@@ -528,6 +687,60 @@ impl<'a> CheckoutManager<'a> {
 
         // Checkout tree without cleaning (assume empty directory)
         self.checkout_tree(&commit.tree, Path::new("")).await
+    }
+
+    /// Split a fresh checkout into what can be written now and what must wait
+    /// for its chunks to finish downloading (C4).
+    ///
+    /// Clone used to wait for the LAST byte of the LAST file before writing
+    /// anything, because [`Self::checkout_fresh`] is all-or-nothing. But small
+    /// blobs are already fully in the ODB the moment `pull_streaming` returns —
+    /// only chunked media is still in flight. Splitting on that lets the two
+    /// overlap.
+    ///
+    /// `deferred_oids` is the chunked-object set the caller got back from
+    /// `pull_streaming`. Anything else is `ready`.
+    ///
+    /// # Invariant (VC-5)
+    ///
+    /// Case-collision detection runs HERE, over the full path list, before any
+    /// write. [`Self::run_parallel_writes`] repeats it per batch, but a batch
+    /// can only see collisions *within itself* — a `ready` path colliding with
+    /// a `deferred` one would slip past both batches. Losing that guard would
+    /// be silent on a case-insensitive filesystem, so it is deliberately not
+    /// left to the batches.
+    pub async fn plan_fresh(
+        &self,
+        commit_oid: &Oid,
+        deferred_oids: &HashSet<Oid>,
+    ) -> Result<FreshCheckoutPlan> {
+        let commit = Commit::read(self.odb, commit_oid).await?;
+        let flat = self
+            .get_tree_files_with_oid(&commit.tree, Path::new(""))
+            .await?;
+        let flat = self.filter_sparse(flat);
+        let entries: Vec<(PathBuf, Oid, FileMode)> =
+            flat.into_iter().map(|(p, (o, m))| (p, o, m)).collect();
+
+        detect_case_collisions(&self.repo_root, entries.iter().map(|(p, _, _)| p))?;
+
+        let (deferred, ready) = entries
+            .into_iter()
+            .partition(|(_, oid, _)| deferred_oids.contains(oid));
+
+        Ok(FreshCheckoutPlan { ready, deferred })
+    }
+
+    /// Write one batch from a [`FreshCheckoutPlan`]. Same semantics as
+    /// [`Self::checkout_fresh`]'s writes: always-write, bounded parallelism,
+    /// abort-all on first error.
+    ///
+    /// Note the F1+F2 abort scope narrows from whole-tree to per-batch: a
+    /// failure while writing `deferred` leaves the already-written `ready`
+    /// files on disk. Clone's cleanup handles that today by deleting the
+    /// target directory.
+    pub async fn write_entries(&self, entries: Vec<(PathBuf, Oid, FileMode)>) -> Result<usize> {
+        self.run_parallel_writes(entries, false).await
     }
 
     /// Differential checkout - only update changed files
@@ -578,71 +791,109 @@ impl<'a> CheckoutManager<'a> {
         let from_commit = Commit::read(self.odb, from_commit_oid).await?;
         let to_commit = Commit::read(self.odb, to_commit_oid).await?;
 
-        // Early exit if same tree
+        // Fast path if same tree: still need to verify each file exists on disk,
+        // since a manually deleted file must be re-materialized (bug #23).
+        // Classification (including the exists() check) stays sequential —
+        // it's cheap (stat only); only the actual restores run in parallel.
         if from_commit.tree == to_commit.tree {
-            info!("Same tree, nothing to do");
-            return Ok(CheckoutStats {
-                files_added: 0,
+            let to_files = self
+                .get_tree_files_with_oid(&to_commit.tree, Path::new(""))
+                .await?;
+            let to_files = self.filter_sparse(to_files);
+
+            let mut to_restore = Vec::new();
+            let mut files_unchanged = 0usize;
+            for (path, (oid, mode)) in &to_files {
+                let full_path = self.repo_root.join(path);
+                if full_path.exists() {
+                    files_unchanged += 1;
+                } else {
+                    to_restore.push((path.clone(), *oid, *mode));
+                }
+            }
+
+            let files_added = self.run_parallel_writes(to_restore, false).await?;
+
+            let mut stats = CheckoutStats {
+                files_added,
                 files_modified: 0,
                 files_deleted: 0,
-                files_unchanged: 0,
-                elapsed_ms: start.elapsed().as_millis() as u64,
-            });
+                files_unchanged,
+                elapsed_ms: 0,
+            };
+
+            info!("Same tree, {} file(s) restored", stats.files_added);
+            stats.elapsed_ms = start.elapsed().as_millis() as u64;
+            return Ok(stats);
         }
 
-        // Get file mappings from both trees
+        // Get file mappings from both trees. Both sides are sparse-filtered
+        // consistently so an excluded path never enters the add/modify/delete
+        // classification below, whether or not it happens to exist on disk.
         let from_files = self
             .get_tree_files_with_oid(&from_commit.tree, Path::new(""))
             .await?;
+        let from_files = self.filter_sparse(from_files);
         let to_files = self
             .get_tree_files_with_oid(&to_commit.tree, Path::new(""))
             .await?;
+        let to_files = self.filter_sparse(to_files);
 
-        let mut stats = CheckoutStats {
-            files_added: 0,
-            files_modified: 0,
-            files_deleted: 0,
-            files_unchanged: 0,
-            elapsed_ms: 0,
-        };
+        // Classify every target-tree file (cheap, sequential, includes the
+        // #23 exists() checks) before doing any parallel I/O.
+        let mut to_add = Vec::new();
+        let mut to_modify = Vec::new();
+        let mut files_unchanged = 0usize;
 
-        // Process files in target tree
         for (path, (to_oid, mode)) in &to_files {
             let full_path = self.repo_root.join(path);
 
             match from_files.get(path) {
                 Some((from_oid, _)) if from_oid == to_oid => {
-                    // File unchanged - skip
-                    stats.files_unchanged += 1;
-                    debug!("Unchanged: {}", path.display());
+                    if full_path.exists() {
+                        // File unchanged - skip
+                        files_unchanged += 1;
+                    } else {
+                        // OID unchanged but manually deleted from disk - restore it
+                        to_add.push((path.clone(), *to_oid, *mode));
+                    }
                 }
                 Some(_) => {
                     // File modified - update it
-                    self.checkout_single_file(&full_path, to_oid, *mode).await?;
-                    stats.files_modified += 1;
-                    debug!("Modified: {}", path.display());
+                    to_modify.push((path.clone(), *to_oid, *mode));
                 }
                 None => {
                     // File added - create it
-                    self.checkout_single_file(&full_path, to_oid, *mode).await?;
-                    stats.files_added += 1;
-                    debug!("Added: {}", path.display());
+                    to_add.push((path.clone(), *to_oid, *mode));
                 }
             }
         }
 
-        // Delete files not in target tree
+        // Files not in target tree - delete.
+        let mut to_delete = Vec::new();
         for path in from_files.keys() {
             if !to_files.contains_key(path) {
                 let full_path = self.repo_root.join(path);
                 if full_path.exists() {
-                    fs::remove_file(&full_path)
-                        .with_context(|| format!("Failed to delete: {}", full_path.display()))?;
-                    stats.files_deleted += 1;
-                    debug!("Deleted: {}", path.display());
+                    to_delete.push(full_path);
                 }
             }
         }
+
+        // Parallel I/O phases (bounded by MEDIAGIT_CHECKOUT_PARALLELISM).
+        // First error in any phase aborts that phase's remaining tasks and
+        // fails the whole checkout.
+        let files_added = self.run_parallel_writes(to_add, false).await?;
+        let files_modified = self.run_parallel_writes(to_modify, false).await?;
+        let files_deleted = self.run_parallel_deletes(to_delete).await?;
+
+        let mut stats = CheckoutStats {
+            files_added,
+            files_modified,
+            files_deleted,
+            files_unchanged,
+            elapsed_ms: 0,
+        };
 
         // Clean up empty directories
         self.remove_empty_directories()?;
@@ -677,6 +928,17 @@ impl<'a> CheckoutManager<'a> {
             let mut files = HashMap::new();
 
             for entry in tree.iter() {
+                if is_stage_debris_key(&entry.name) {
+                    // Legacy poisoned tree from before the merge-conflict
+                    // ::stageN debris was fixed at the source: skip rather
+                    // than materialize an illegal colon path (breaks on
+                    // Windows, os error 123).
+                    warn!(
+                        "Skipping stage-debris tree entry (not materialized): {}",
+                        prefix.join(&entry.name).display()
+                    );
+                    continue;
+                }
                 let entry_path = prefix.join(&entry.name);
 
                 match entry.mode {
@@ -696,75 +958,18 @@ impl<'a> CheckoutManager<'a> {
             Ok(files)
         })
     }
+}
 
-    /// Checkout a single file from the object database
-    async fn checkout_single_file(
-        &self,
-        full_path: &Path,
-        oid: &Oid,
-        mode: FileMode,
-    ) -> Result<()> {
-        // Ensure parent directory exists
-        if let Some(parent) = full_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-        }
-
-        match mode {
-            FileMode::Regular | FileMode::Executable => {
-                // Stream object directly to file (constant memory for any file size)
-                self.odb
-                    .read_to_file(oid, full_path)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "Failed to checkout file {}: blob {}",
-                            full_path.display(),
-                            oid
-                        )
-                    })?;
-
-                // Set executable permission if needed
-                #[cfg(unix)]
-                if mode == FileMode::Executable {
-                    use std::os::unix::fs::PermissionsExt;
-                    let mut perms = fs::metadata(full_path)?.permissions();
-                    perms.set_mode(0o755);
-                    fs::set_permissions(full_path, perms)?;
-                }
-            }
-            FileMode::Symlink => {
-                // Symlinks are small text — safe to read into memory
-                let blob_data = self
-                    .odb
-                    .read(oid)
-                    .await
-                    .with_context(|| format!("Failed to read symlink blob: {}", oid))?;
-                let target =
-                    String::from_utf8(blob_data).context("Symlink target is not valid UTF-8")?;
-
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::symlink;
-                    let _ = fs::remove_file(full_path);
-                    symlink(&target, full_path).with_context(|| {
-                        format!("Failed to create symlink: {}", full_path.display())
-                    })?;
-                }
-
-                #[cfg(not(unix))]
-                {
-                    // On Windows, write symlink target as regular file
-                    fs::write(full_path, target)?;
-                }
-            }
-            FileMode::Directory => {
-                // Directories are handled by recursion, not here
-            }
-        }
-
-        Ok(())
-    }
+/// A fresh checkout split by [`CheckoutManager::plan_fresh`] into the entries
+/// that can be written immediately and the ones still waiting on chunk
+/// downloads (C4).
+#[derive(Debug, Default)]
+pub struct FreshCheckoutPlan {
+    /// Entries whose object is already fully in the ODB — small blobs written
+    /// by the metadata pack. Safe to write while chunks are still downloading.
+    pub ready: Vec<(PathBuf, Oid, FileMode)>,
+    /// Entries backed by a chunked object that is still being downloaded.
+    pub deferred: Vec<(PathBuf, Oid, FileMode)>,
 }
 
 /// Statistics from a differential checkout operation
@@ -794,12 +999,212 @@ impl CheckoutStats {
     }
 }
 
+/// Is `dir` on a filesystem that treats `A.psd` and `a.psd` as one name?
+///
+/// Probed rather than inferred from the platform: Windows is case-insensitive
+/// and Linux is not, but macOS ships case-insensitive by default while
+/// supporting case-sensitive volumes, and Linux can mount either. Guessing
+/// from `cfg!(windows)` would both miss real collisions and reject legitimate
+/// repositories.
+///
+/// Falls back to `false` (permit the checkout) when the probe cannot run — a
+/// failed probe is not evidence of a collision, and refusing a valid checkout
+/// because a temp file could not be created would be its own defect.
+fn fs_is_case_insensitive(dir: &Path) -> bool {
+    use std::fs;
+    let probe = dir.join(".mediagit-case-probe-tmp");
+    if fs::write(&probe, b"").is_err() {
+        return false;
+    }
+    let upper = dir.join(".MEDIAGIT-CASE-PROBE-TMP");
+    let insensitive = upper.exists();
+    let _ = fs::remove_file(&probe);
+    insensitive
+}
+
+/// VC-5: fail loudly when two tracked paths collide case-insensitively.
+///
+/// `Tree` keys entries in a case-sensitive `BTreeMap`, so `Logo.psd` and
+/// `logo.psd` are distinct objects and a commit made on Linux can legitimately
+/// contain both. Checking that out on Windows or default macOS wrote one file
+/// over the other and reported both as written — the working tree silently
+/// lost a file that `status` then considered clean.
+///
+/// Erroring is the right outcome rather than renaming or picking a winner:
+/// either choice silently discards content the commit says is there, which is
+/// the failure this guards against.
+fn detect_case_collisions<'a, I>(repo_root: &Path, paths: I) -> Result<()>
+where
+    I: Iterator<Item = &'a PathBuf>,
+{
+    let collisions = case_only_collisions(paths);
+
+    if collisions.is_empty() || !fs_is_case_insensitive(repo_root) {
+        return Ok(());
+    }
+
+    let detail = collisions
+        .iter()
+        .map(|(a, b)| format!("  {} and {}", a.display(), b.display()))
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        );
+    anyhow::bail!(
+        "checkout would lose data: this commit contains paths that differ only 
+         by case, and this filesystem cannot hold both:
+{detail}
+
+         Writing them would silently overwrite one with the other. Rename one 
+         side in a commit made on a case-sensitive filesystem, or check this 
+         commit out on one."
+    );
+}
+
+/// Pairs of paths that differ only by case. Pure, so it is testable on a
+/// case-sensitive filesystem where the collision could never be observed.
+fn case_only_collisions<'a, I>(paths: I) -> Vec<(PathBuf, PathBuf)>
+where
+    I: Iterator<Item = &'a PathBuf>,
+{
+    let mut seen: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
+    let mut collisions = Vec::new();
+    for path in paths {
+        let key = path.to_string_lossy().to_lowercase();
+        match seen.get(&key) {
+            Some(existing) if existing != path => collisions.push((existing.clone(), path.clone())),
+            Some(_) => {}
+            None => {
+                seen.insert(key, path.clone());
+            }
+        }
+    }
+    collisions
+}
+
 #[cfg(test)]
+#[allow(unsafe_code)] // edition-2024: test-only env::set_var/remove_var requires unsafe
 mod tests {
     use super::*;
     use crate::{ObjectType, Signature, TreeEntry};
     use mediagit_storage::LocalBackend;
     use std::sync::Arc;
+
+    /// VC-6: a symlink entry must produce *something* at its path, and the
+    /// same something on every checkout path.
+    ///
+    /// Previously `checkout_tree` skipped symlinks on non-Unix (at `debug!`,
+    /// so invisibly) while `checkout_tree_optimized` wrote the target as a
+    /// file — the same commit checked out differently depending on which
+    /// function ran. A missing entry is the worse of the two: `status` then
+    /// reports the file deleted and a commit can drop it from the tree.
+    #[tokio::test]
+    async fn symlink_entry_is_materialised_on_every_platform() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage: Arc<dyn mediagit_storage::StorageBackend> =
+            Arc::new(LocalBackend::new(tmp.path()).await.unwrap());
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let target = "assets/logo.psd";
+        let link_oid = odb
+            .write(ObjectType::Blob, target.as_bytes())
+            .await
+            .unwrap();
+
+        let link_path = tmp.path().join("link-to-logo");
+        write_entry_to_disk(&odb, &link_path, &link_oid, FileMode::Symlink)
+            .await
+            .expect("a symlink entry must be written, not silently skipped");
+
+        // `exists()` follows links and the target does not exist, so probe the
+        // link itself.
+        let meta = std::fs::symlink_metadata(&link_path)
+            .expect("symlink entry must leave something at its path");
+
+        if meta.file_type().is_symlink() {
+            let read_back = std::fs::read_link(&link_path).unwrap();
+            assert_eq!(
+                read_back.to_string_lossy().replace('\\', "/"),
+                target,
+                "a real symlink must point at the recorded target"
+            );
+        } else {
+            // Documented fallback: the target as file content, which the user
+            // was warned about. It must at least be exactly the target.
+            let content = std::fs::read_to_string(&link_path).unwrap();
+            assert_eq!(
+                content, target,
+                "the fallback file must contain exactly the link target"
+            );
+        }
+    }
+
+    /// VC-5: `Tree` keys entries case-sensitively, so a commit made on Linux
+    /// can legitimately hold both `Logo.psd` and `logo.psd`. Detection is pure
+    /// so it can be asserted on any platform, including the case-sensitive
+    /// filesystems where the loss could never be reproduced.
+    #[test]
+    fn case_only_collisions_are_detected() {
+        let paths = [
+            PathBuf::from("art/Logo.psd"),
+            PathBuf::from("art/logo.psd"),
+            PathBuf::from("art/scene.blend"),
+        ];
+        let found = case_only_collisions(paths.iter());
+        assert_eq!(
+            found.len(),
+            1,
+            "expected exactly one collision, got {found:?}"
+        );
+        let (a, b) = &found[0];
+        assert_ne!(a, b);
+        assert_eq!(
+            a.to_string_lossy().to_lowercase(),
+            b.to_string_lossy().to_lowercase()
+        );
+    }
+
+    /// Distinct names, and the same name repeated, must not be flagged — a
+    /// false positive here refuses a valid checkout.
+    #[test]
+    fn distinct_and_duplicate_paths_are_not_collisions() {
+        let paths = [
+            PathBuf::from("a/one.psd"),
+            PathBuf::from("a/two.psd"),
+            PathBuf::from("b/one.psd"),
+        ];
+        assert!(case_only_collisions(paths.iter()).is_empty());
+
+        let repeated = [PathBuf::from("a/one.psd"), PathBuf::from("a/one.psd")];
+        assert!(
+            case_only_collisions(repeated.iter()).is_empty(),
+            "the same path twice is not a case collision"
+        );
+    }
+
+    /// The guard must only fire where the loss can actually happen, so it is
+    /// gated on a probe of the real filesystem rather than on `cfg!(windows)`.
+    #[test]
+    fn collision_guard_matches_the_filesystem() {
+        let tmp = tempfile::tempdir().unwrap();
+        let colliding = [PathBuf::from("Logo.psd"), PathBuf::from("logo.psd")];
+        let result = detect_case_collisions(tmp.path(), colliding.iter());
+
+        if fs_is_case_insensitive(tmp.path()) {
+            let err = result.expect_err("must refuse on a case-insensitive filesystem");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("Logo.psd") && msg.contains("logo.psd"),
+                "{msg}"
+            );
+        } else {
+            assert!(
+                result.is_ok(),
+                "both files can coexist here, so the checkout must proceed"
+            );
+        }
+    }
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -1056,6 +1461,940 @@ mod tests {
         assert_eq!(stats.files_changed(), 6);
         assert_eq!(stats.total_files(), 16);
 
+        Ok(())
+    }
+
+    /// Bug #23 repro: branch switch between two commits sharing the same tree
+    /// must not skip a manually-deleted working-tree file. `checkout_diff` has a
+    /// same-tree early-return (from_commit.tree == to_commit.tree) that must still
+    /// verify the file exists on disk before treating it as unchanged.
+    #[tokio::test]
+    async fn test_checkout_diff_restores_deleted_file_same_tree() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let repo_root = temp_dir.path();
+        let storage_path = repo_root.join(".mediagit");
+        fs::create_dir_all(&storage_path)?;
+
+        let storage = Arc::new(LocalBackend::new(&storage_path).await?);
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let blob_oid = odb.write(ObjectType::Blob, b"content").await?;
+        let mut tree = Tree::new();
+        tree.add_entry(TreeEntry::new(
+            "file.txt".to_string(),
+            FileMode::Regular,
+            blob_oid,
+        ));
+        let tree_oid = tree.write(&odb).await?;
+
+        // Commit A
+        let commit_a = Commit::new(
+            tree_oid,
+            Signature::now("Test".to_string(), "test@example.com".to_string()),
+            Signature::now("Test".to_string(), "test@example.com".to_string()),
+            "commit A".to_string(),
+        );
+        let commit_a_oid = commit_a.write(&odb).await?;
+
+        // Commit B: same tree as A (e.g. an empty commit / metadata-only change)
+        let mut commit_b = Commit::new(
+            tree_oid,
+            Signature::now("Test".to_string(), "test@example.com".to_string()),
+            Signature::now("Test".to_string(), "test@example.com".to_string()),
+            "commit B".to_string(),
+        );
+        commit_b.add_parent(commit_a_oid);
+        let commit_b_oid = commit_b.write(&odb).await?;
+
+        let checkout_mgr = CheckoutManager::new(&odb, repo_root);
+        checkout_mgr.checkout_commit(&commit_a_oid).await?;
+        assert!(repo_root.join("file.txt").exists());
+
+        // Manually delete the working-tree file (simulating accidental deletion)
+        fs::remove_file(repo_root.join("file.txt"))?;
+        assert!(!repo_root.join("file.txt").exists());
+
+        // Switch to commit B, which has the identical tree
+        checkout_mgr
+            .checkout_diff(&commit_a_oid, &commit_b_oid)
+            .await?;
+
+        // The file must be re-materialized, not silently left missing
+        assert!(
+            repo_root.join("file.txt").exists(),
+            "manually deleted file must be restored on checkout even when tree is unchanged"
+        );
+        assert_eq!(fs::read(repo_root.join("file.txt"))?, b"content");
+
+        Ok(())
+    }
+
+    /// Bug #23 repro (differing trees variant): when the target tree differs from
+    /// the source tree but a specific file has an identical OID in both, the
+    /// OID-equality fast path must not skip re-materializing it if it was
+    /// manually deleted from the working tree.
+    #[tokio::test]
+    async fn test_checkout_diff_restores_deleted_file_identical_oid() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let repo_root = temp_dir.path();
+        let storage_path = repo_root.join(".mediagit");
+        fs::create_dir_all(&storage_path)?;
+
+        let storage = Arc::new(LocalBackend::new(&storage_path).await?);
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let blob_unchanged = odb.write(ObjectType::Blob, b"unchanged content").await?;
+        let blob1 = odb.write(ObjectType::Blob, b"v1").await?;
+
+        let mut tree1 = Tree::new();
+        tree1.add_entry(TreeEntry::new(
+            "unchanged.txt".to_string(),
+            FileMode::Regular,
+            blob_unchanged,
+        ));
+        tree1.add_entry(TreeEntry::new(
+            "changed.txt".to_string(),
+            FileMode::Regular,
+            blob1,
+        ));
+        let tree1_oid = tree1.write(&odb).await?;
+
+        let commit1 = Commit::new(
+            tree1_oid,
+            Signature::now("Test".to_string(), "test@example.com".to_string()),
+            Signature::now("Test".to_string(), "test@example.com".to_string()),
+            "commit 1".to_string(),
+        );
+        let commit1_oid = commit1.write(&odb).await?;
+
+        // Second tree differs (changed.txt gets a new OID) but unchanged.txt keeps
+        // the same OID as tree1 — this is the per-file OID-equality skip path.
+        let blob2 = odb.write(ObjectType::Blob, b"v2").await?;
+        let mut tree2 = Tree::new();
+        tree2.add_entry(TreeEntry::new(
+            "unchanged.txt".to_string(),
+            FileMode::Regular,
+            blob_unchanged,
+        ));
+        tree2.add_entry(TreeEntry::new(
+            "changed.txt".to_string(),
+            FileMode::Regular,
+            blob2,
+        ));
+        let tree2_oid = tree2.write(&odb).await?;
+
+        let mut commit2 = Commit::new(
+            tree2_oid,
+            Signature::now("Test".to_string(), "test@example.com".to_string()),
+            Signature::now("Test".to_string(), "test@example.com".to_string()),
+            "commit 2".to_string(),
+        );
+        commit2.add_parent(commit1_oid);
+        let commit2_oid = commit2.write(&odb).await?;
+
+        let checkout_mgr = CheckoutManager::new(&odb, repo_root);
+        checkout_mgr.checkout_commit(&commit1_oid).await?;
+        assert!(repo_root.join("unchanged.txt").exists());
+
+        // Manually delete the file whose OID won't change between trees
+        fs::remove_file(repo_root.join("unchanged.txt"))?;
+        assert!(!repo_root.join("unchanged.txt").exists());
+
+        checkout_mgr
+            .checkout_diff(&commit1_oid, &commit2_oid)
+            .await?;
+
+        assert!(
+            repo_root.join("unchanged.txt").exists(),
+            "manually deleted file with identical OID across trees must be restored"
+        );
+        assert_eq!(
+            fs::read(repo_root.join("unchanged.txt"))?,
+            b"unchanged content"
+        );
+        assert_eq!(fs::read(repo_root.join("changed.txt"))?, b"v2");
+
+        Ok(())
+    }
+
+    /// M3: parallel checkout equivalence — a 200-file fixture checked out
+    /// with the default (parallel) `MEDIAGIT_CHECKOUT_PARALLELISM` must
+    /// produce a byte-identical worktree and identical `CheckoutStats`
+    /// compared to `MEDIAGIT_CHECKOUT_PARALLELISM=1` (fully serial).
+    /// Exercises `checkout_tree_optimized` (fresh checkout) and
+    /// `checkout_diff` (added/modified/deleted/unchanged) under real
+    /// concurrency.
+    #[tokio::test]
+    async fn test_parallel_checkout_equivalence_200_files() -> Result<()> {
+        let storage_dir = TempDir::new()?;
+        let storage = Arc::new(LocalBackend::new(storage_dir.path()).await?);
+        let odb = ObjectDatabase::new(storage, 1000);
+
+        fn author() -> Signature {
+            Signature::now("Test".to_string(), "test@example.com".to_string())
+        }
+
+        // Tree A: 200 flat files.
+        let mut tree_a = Tree::new();
+        for i in 0..200 {
+            let content = format!("content-{i}");
+            let oid = odb.write(ObjectType::Blob, content.as_bytes()).await?;
+            tree_a.add_entry(TreeEntry::new(
+                format!("file_{i:03}.txt"),
+                FileMode::Regular,
+                oid,
+            ));
+        }
+        let tree_a_oid = tree_a.write(&odb).await?;
+        let commit_a = Commit::new(tree_a_oid, author(), author(), "commit A".to_string());
+        let commit_a_oid = commit_a.write(&odb).await?;
+
+        // Tree B: modify every 5th file, delete files 150..170, add 10 new files.
+        let mut tree_b = Tree::new();
+        for i in 0..200 {
+            if (150..170).contains(&i) {
+                continue; // deleted in B
+            }
+            let content = if i % 5 == 0 {
+                format!("MODIFIED-{i}")
+            } else {
+                format!("content-{i}")
+            };
+            let oid = odb.write(ObjectType::Blob, content.as_bytes()).await?;
+            tree_b.add_entry(TreeEntry::new(
+                format!("file_{i:03}.txt"),
+                FileMode::Regular,
+                oid,
+            ));
+        }
+        for i in 0..10 {
+            let content = format!("new-{i}");
+            let oid = odb.write(ObjectType::Blob, content.as_bytes()).await?;
+            tree_b.add_entry(TreeEntry::new(
+                format!("extra_{i:03}.txt"),
+                FileMode::Regular,
+                oid,
+            ));
+        }
+        let tree_b_oid = tree_b.write(&odb).await?;
+        let mut commit_b = Commit::new(tree_b_oid, author(), author(), "commit B".to_string());
+        commit_b.add_parent(commit_a_oid);
+        let commit_b_oid = commit_b.write(&odb).await?;
+
+        // Run 1: default (parallel) parallelism.
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_CHECKOUT_PARALLELISM") };
+        let repo_parallel = TempDir::new()?;
+        let mgr_parallel = CheckoutManager::new(&odb, repo_parallel.path());
+        mgr_parallel.checkout_commit(&commit_a_oid).await?;
+        let stats_parallel = mgr_parallel
+            .checkout_diff(&commit_a_oid, &commit_b_oid)
+            .await?;
+
+        // Run 2: forced serial (SAFETY: test-only env var scoping; no other
+        // test in this process reads MEDIAGIT_CHECKOUT_PARALLELISM concurrently).
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MEDIAGIT_CHECKOUT_PARALLELISM", "1") };
+        let repo_serial = TempDir::new()?;
+        let mgr_serial = CheckoutManager::new(&odb, repo_serial.path());
+        mgr_serial.checkout_commit(&commit_a_oid).await?;
+        let stats_serial = mgr_serial
+            .checkout_diff(&commit_a_oid, &commit_b_oid)
+            .await?;
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_CHECKOUT_PARALLELISM") };
+
+        // Stats must match exactly (elapsed_ms excluded — timing, not content).
+        assert_eq!(stats_parallel.files_added, stats_serial.files_added);
+        assert_eq!(stats_parallel.files_modified, stats_serial.files_modified);
+        assert_eq!(stats_parallel.files_deleted, stats_serial.files_deleted);
+        assert_eq!(stats_parallel.files_unchanged, stats_serial.files_unchanged);
+        // Multiples of 5 in 0..200 = 40, minus the 4 that fall inside the
+        // deleted 150..170 range (150,155,160,165) = 36 actually modified.
+        assert_eq!(stats_parallel.files_added, 10, "10 new files");
+        assert_eq!(
+            stats_parallel.files_modified, 36,
+            "40 multiples of 5, minus 4 deleted"
+        );
+        assert_eq!(stats_parallel.files_deleted, 20, "files 150..170");
+        assert_eq!(stats_parallel.files_unchanged, 200 - 20 - 36);
+
+        // Worktrees must be byte-identical: same file set, same content.
+        fn list_files(root: &Path) -> Result<std::collections::BTreeMap<String, Vec<u8>>> {
+            let mut out = std::collections::BTreeMap::new();
+            for entry in fs::read_dir(root)? {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name == ".mediagit" {
+                    continue;
+                }
+                out.insert(name, fs::read(entry.path())?);
+            }
+            Ok(out)
+        }
+        let files_parallel = list_files(repo_parallel.path())?;
+        let files_serial = list_files(repo_serial.path())?;
+        assert_eq!(
+            files_parallel, files_serial,
+            "parallel and serial checkout must produce byte-identical worktrees"
+        );
+
+        Ok(())
+    }
+
+    /// M3: error propagation — a single bad (unwritten) OID must fail the
+    /// whole parallel checkout, not silently succeed with a partial worktree.
+    ///
+    /// F2 extension: the bad OID is planted among many good entries (so the
+    /// batch has plenty of in-flight tasks when `abort_all()` fires), and
+    /// after failure every good entry's final path is checked: it must be
+    /// either absent or hold its full, correct content — never a partial
+    /// write. This exercises the F1 (tmp-file-then-rename) + F2 (drain
+    /// JoinSet after abort) invariant together.
+    #[tokio::test]
+    async fn test_parallel_checkout_fails_on_bad_oid() -> Result<()> {
+        let storage_dir = TempDir::new()?;
+        let storage = Arc::new(LocalBackend::new(storage_dir.path()).await?);
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let author = Signature::now("Test".to_string(), "test@example.com".to_string());
+
+        const NUM_GOOD: usize = 50;
+        let mut tree = Tree::new();
+        let mut expected: Vec<(String, String)> = Vec::with_capacity(NUM_GOOD);
+        for i in 0..NUM_GOOD {
+            let content = format!("content-{i}");
+            let oid = odb.write(ObjectType::Blob, content.as_bytes()).await?;
+            let name = format!("file_{i:03}.txt");
+            tree.add_entry(TreeEntry::new(name.clone(), FileMode::Regular, oid));
+            expected.push((name, content));
+        }
+        // One entry points at an OID that was never written to the ODB.
+        let bad_oid = Oid::hash(b"this blob was never written");
+        tree.add_entry(TreeEntry::new(
+            "bad.txt".to_string(),
+            FileMode::Regular,
+            bad_oid,
+        ));
+
+        let tree_oid = tree.write(&odb).await?;
+        let commit = Commit::new(tree_oid, author.clone(), author, "bad commit".to_string());
+        let commit_oid = commit.write(&odb).await?;
+
+        let temp_dir = TempDir::new()?;
+        let checkout_mgr = CheckoutManager::new(&odb, temp_dir.path());
+
+        let result = checkout_mgr.checkout_commit(&commit_oid).await;
+        assert!(
+            result.is_err(),
+            "checkout with an unreadable OID must fail, not silently succeed"
+        );
+
+        // No good entry's final path may hold partial content: it's either
+        // absent (task never ran or was aborted before rename) or fully
+        // correct (read_to_file's tmp+rename is atomic).
+        for (name, content) in &expected {
+            let full_path = temp_dir.path().join(name);
+            if full_path.exists() {
+                let on_disk = std::fs::read_to_string(&full_path)
+                    .with_context(|| format!("failed to read {}", full_path.display()))?;
+                assert_eq!(
+                    &on_disk,
+                    content,
+                    "file {} present but content is not the full expected value",
+                    full_path.display()
+                );
+            }
+        }
+
+        // Note: a stale `.mgtmp` sibling *can* remain here — `abort_all()`
+        // drops an in-flight task's future mid-`.await`, which skips any
+        // Rust-level cleanup code in `read_to_file`. That's the accepted
+        // residual per the F1+F2 invariant (see `run_parallel_writes` doc
+        // comment): never a partial file at a *final* path, at worst a
+        // stale tmp sibling that the next checkout of that file overwrites.
+
+        Ok(())
+    }
+
+    // ---- M5: sparse checkout ------------------------------------------
+
+    fn author() -> Signature {
+        Signature::now("Test".to_string(), "test@example.com".to_string())
+    }
+
+    #[tokio::test]
+    async fn test_sparse_cone_mode_excludes_on_fresh_checkout() -> Result<()> {
+        let storage_dir = TempDir::new()?;
+        let storage = Arc::new(LocalBackend::new(storage_dir.path()).await?);
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let blob_in = odb.write(ObjectType::Blob, b"included").await?;
+        let blob_out = odb.write(ObjectType::Blob, b"excluded").await?;
+        let mut tree = Tree::new();
+        tree.add_entry(TreeEntry::new(
+            "assets/textures/wood.png".to_string(),
+            FileMode::Regular,
+            blob_in,
+        ));
+        tree.add_entry(TreeEntry::new(
+            "assets/audio/track.wav".to_string(),
+            FileMode::Regular,
+            blob_out,
+        ));
+        let tree_oid = tree.write(&odb).await?;
+        let commit = Commit::new(tree_oid, author(), author(), "commit".to_string());
+        let commit_oid = commit.write(&odb).await?;
+
+        let repo = TempDir::new()?;
+        crate::sparse::SparseFilter::write(
+            repo.path(),
+            crate::SparseMode::Cone,
+            &["assets/textures".to_string()],
+        )?;
+
+        let checkout_mgr = CheckoutManager::new(&odb, repo.path());
+        checkout_mgr.checkout_commit(&commit_oid).await?;
+
+        assert!(repo.path().join("assets/textures/wood.png").exists());
+        assert!(
+            !repo.path().join("assets/audio/track.wav").exists(),
+            "sparse-excluded file must not be materialized"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_sparse_pattern_mode_excludes_on_fresh_checkout() -> Result<()> {
+        let storage_dir = TempDir::new()?;
+        let storage = Arc::new(LocalBackend::new(storage_dir.path()).await?);
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let blob_png = odb.write(ObjectType::Blob, b"png data").await?;
+        let blob_wav = odb.write(ObjectType::Blob, b"wav data").await?;
+        let mut tree = Tree::new();
+        tree.add_entry(TreeEntry::new(
+            "wood.png".to_string(),
+            FileMode::Regular,
+            blob_png,
+        ));
+        tree.add_entry(TreeEntry::new(
+            "track.wav".to_string(),
+            FileMode::Regular,
+            blob_wav,
+        ));
+        let tree_oid = tree.write(&odb).await?;
+        let commit = Commit::new(tree_oid, author(), author(), "commit".to_string());
+        let commit_oid = commit.write(&odb).await?;
+
+        let repo = TempDir::new()?;
+        crate::sparse::SparseFilter::write(
+            repo.path(),
+            crate::SparseMode::Pattern,
+            &["*.png".to_string()],
+        )?;
+
+        let checkout_mgr = CheckoutManager::new(&odb, repo.path());
+        checkout_mgr.checkout_commit(&commit_oid).await?;
+
+        assert!(repo.path().join("wood.png").exists());
+        assert!(!repo.path().join("track.wav").exists());
+
+        Ok(())
+    }
+
+    /// A file outside the sparse cone that already exists on disk (e.g. a
+    /// leftover from before sparse was enabled) must never be deleted by
+    /// ordinary checkout — only `sparse-checkout set/disable` may remove it.
+    #[tokio::test]
+    async fn test_sparse_excluded_existing_file_not_deleted_by_checkout() -> Result<()> {
+        let storage_dir = TempDir::new()?;
+        let storage = Arc::new(LocalBackend::new(storage_dir.path()).await?);
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let blob_in = odb.write(ObjectType::Blob, b"included").await?;
+        let mut tree = Tree::new();
+        tree.add_entry(TreeEntry::new(
+            "assets/textures/wood.png".to_string(),
+            FileMode::Regular,
+            blob_in,
+        ));
+        let tree_oid = tree.write(&odb).await?;
+        let commit = Commit::new(tree_oid, author(), author(), "commit".to_string());
+        let commit_oid = commit.write(&odb).await?;
+
+        let repo = TempDir::new()?;
+        crate::sparse::SparseFilter::write(
+            repo.path(),
+            crate::SparseMode::Cone,
+            &["assets/textures".to_string()],
+        )?;
+
+        // Simulate a leftover excluded file already present on disk.
+        let leftover = repo.path().join("assets/audio/track.wav");
+        fs::create_dir_all(leftover.parent().unwrap())?;
+        fs::write(&leftover, b"leftover")?;
+
+        let checkout_mgr = CheckoutManager::new(&odb, repo.path());
+        checkout_mgr.checkout_commit(&commit_oid).await?;
+
+        assert!(
+            leftover.exists(),
+            "sparse-excluded file present on disk must survive checkout_commit's cleanup pass"
+        );
+        assert_eq!(fs::read(&leftover)?, b"leftover");
+
+        Ok(())
+    }
+
+    /// Branch switch (`checkout_diff`) between two commits must keep
+    /// applying the same sparse filter throughout: excluded paths never
+    /// appear as adds/modifies/deletes even when they differ between trees.
+    #[tokio::test]
+    async fn test_sparse_branch_switch_keeps_filter() -> Result<()> {
+        let storage_dir = TempDir::new()?;
+        let storage = Arc::new(LocalBackend::new(storage_dir.path()).await?);
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let blob_in_a = odb.write(ObjectType::Blob, b"in-a").await?;
+        let blob_out_a = odb.write(ObjectType::Blob, b"out-a").await?;
+        let mut tree_a = Tree::new();
+        tree_a.add_entry(TreeEntry::new(
+            "assets/textures/wood.png".to_string(),
+            FileMode::Regular,
+            blob_in_a,
+        ));
+        tree_a.add_entry(TreeEntry::new(
+            "assets/audio/track.wav".to_string(),
+            FileMode::Regular,
+            blob_out_a,
+        ));
+        let tree_a_oid = tree_a.write(&odb).await?;
+        let commit_a = Commit::new(tree_a_oid, author(), author(), "commit A".to_string());
+        let commit_a_oid = commit_a.write(&odb).await?;
+
+        // Commit B changes both the included and the excluded file.
+        let blob_in_b = odb.write(ObjectType::Blob, b"in-b").await?;
+        let blob_out_b = odb.write(ObjectType::Blob, b"out-b").await?;
+        let mut tree_b = Tree::new();
+        tree_b.add_entry(TreeEntry::new(
+            "assets/textures/wood.png".to_string(),
+            FileMode::Regular,
+            blob_in_b,
+        ));
+        tree_b.add_entry(TreeEntry::new(
+            "assets/audio/track.wav".to_string(),
+            FileMode::Regular,
+            blob_out_b,
+        ));
+        let tree_b_oid = tree_b.write(&odb).await?;
+        let mut commit_b = Commit::new(tree_b_oid, author(), author(), "commit B".to_string());
+        commit_b.add_parent(commit_a_oid);
+        let commit_b_oid = commit_b.write(&odb).await?;
+
+        let repo = TempDir::new()?;
+        crate::sparse::SparseFilter::write(
+            repo.path(),
+            crate::SparseMode::Cone,
+            &["assets/textures".to_string()],
+        )?;
+
+        let checkout_mgr = CheckoutManager::new(&odb, repo.path());
+        checkout_mgr.checkout_commit(&commit_a_oid).await?;
+        assert!(repo.path().join("assets/textures/wood.png").exists());
+        assert!(!repo.path().join("assets/audio/track.wav").exists());
+
+        let stats = checkout_mgr
+            .checkout_diff(&commit_a_oid, &commit_b_oid)
+            .await?;
+
+        // Only the included file's change is visible to the diff.
+        assert_eq!(stats.files_modified, 1);
+        assert_eq!(stats.files_added, 0);
+        assert_eq!(stats.files_deleted, 0);
+        assert_eq!(
+            fs::read(repo.path().join("assets/textures/wood.png"))?,
+            b"in-b"
+        );
+        assert!(
+            !repo.path().join("assets/audio/track.wav").exists(),
+            "excluded file must stay absent across branch switch"
+        );
+
+        Ok(())
+    }
+
+    /// Sparse + parallel checkout equivalence: `PARALLELISM=1` vs the
+    /// default must agree on which files land on disk under an active
+    /// sparse cone (not just on stats, as the plain M3 test already covers).
+    #[tokio::test]
+    async fn test_sparse_parallel_equivalence() -> Result<()> {
+        let storage_dir = TempDir::new()?;
+        let storage = Arc::new(LocalBackend::new(storage_dir.path()).await?);
+        let odb = ObjectDatabase::new(storage, 1000);
+
+        let mut tree = Tree::new();
+        for i in 0..50 {
+            let oid = odb
+                .write(ObjectType::Blob, format!("included-{i}").as_bytes())
+                .await?;
+            tree.add_entry(TreeEntry::new(
+                format!("included/file_{i:03}.txt"),
+                FileMode::Regular,
+                oid,
+            ));
+        }
+        for i in 0..50 {
+            let oid = odb
+                .write(ObjectType::Blob, format!("excluded-{i}").as_bytes())
+                .await?;
+            tree.add_entry(TreeEntry::new(
+                format!("excluded/file_{i:03}.txt"),
+                FileMode::Regular,
+                oid,
+            ));
+        }
+        let tree_oid = tree.write(&odb).await?;
+        let commit = Commit::new(tree_oid, author(), author(), "commit".to_string());
+        let commit_oid = commit.write(&odb).await?;
+
+        fn list_files(root: &Path) -> Result<std::collections::BTreeMap<String, Vec<u8>>> {
+            let mut out = std::collections::BTreeMap::new();
+            fn walk(
+                dir: &Path,
+                root: &Path,
+                out: &mut std::collections::BTreeMap<String, Vec<u8>>,
+            ) -> Result<()> {
+                for entry in fs::read_dir(dir)? {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if path.file_name().and_then(|n| n.to_str()) == Some(".mediagit") {
+                        continue;
+                    }
+                    if path.is_dir() {
+                        walk(&path, root, out)?;
+                    } else {
+                        let rel = path
+                            .strip_prefix(root)
+                            .unwrap()
+                            .to_string_lossy()
+                            .replace('\\', "/");
+                        out.insert(rel, fs::read(&path)?);
+                    }
+                }
+                Ok(())
+            }
+            walk(root, root, &mut out)?;
+            Ok(out)
+        }
+
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_CHECKOUT_PARALLELISM") };
+        let repo_parallel = TempDir::new()?;
+        crate::sparse::SparseFilter::write(
+            repo_parallel.path(),
+            crate::SparseMode::Cone,
+            &["included".to_string()],
+        )?;
+        let mgr_parallel = CheckoutManager::new(&odb, repo_parallel.path());
+        mgr_parallel.checkout_commit(&commit_oid).await?;
+
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MEDIAGIT_CHECKOUT_PARALLELISM", "1") };
+        let repo_serial = TempDir::new()?;
+        crate::sparse::SparseFilter::write(
+            repo_serial.path(),
+            crate::SparseMode::Cone,
+            &["included".to_string()],
+        )?;
+        let mgr_serial = CheckoutManager::new(&odb, repo_serial.path());
+        mgr_serial.checkout_commit(&commit_oid).await?;
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_CHECKOUT_PARALLELISM") };
+
+        let files_parallel = list_files(repo_parallel.path())?;
+        let files_serial = list_files(repo_serial.path())?;
+        assert_eq!(
+            files_parallel.len(),
+            50,
+            "only the included/ cone materializes"
+        );
+        assert_eq!(
+            files_parallel, files_serial,
+            "sparse-filtered parallel and serial checkout must produce identical worktrees"
+        );
+
+        Ok(())
+    }
+
+    /// QA-002: a hand-crafted (legacy-poisoned) tree with a `::stageN`
+    /// debris entry must be skipped during checkout rather than
+    /// materialized as an illegal colon path (os error 123 on Windows).
+    /// The rest of the tree still checks out normally.
+    #[tokio::test]
+    async fn test_checkout_skips_stage_debris_tree_entry() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let repo_root = temp_dir.path();
+        let storage_path = repo_root.join(".mediagit");
+        fs::create_dir_all(&storage_path)?;
+
+        let storage = Arc::new(LocalBackend::new(&storage_path).await?);
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let good_blob = odb.write(ObjectType::Blob, b"good content").await?;
+        let debris_blob = odb.write(ObjectType::Blob, b"debris content").await?;
+
+        let mut tree = Tree::new();
+        tree.add_entry(TreeEntry::new(
+            "good.bin".to_string(),
+            FileMode::Regular,
+            good_blob,
+        ));
+        tree.add_entry(TreeEntry::new(
+            "x.bin::stage1".to_string(),
+            FileMode::Regular,
+            debris_blob,
+        ));
+        let tree_oid = tree.write(&odb).await?;
+
+        let commit = Commit::new(
+            tree_oid,
+            Signature::now("Test".to_string(), "test@example.com".to_string()),
+            Signature::now("Test".to_string(), "test@example.com".to_string()),
+            "poisoned tree".to_string(),
+        );
+        let commit_oid = commit.write(&odb).await?;
+
+        let checkout_mgr = CheckoutManager::new(&odb, repo_root);
+        let files_updated = checkout_mgr.checkout_commit(&commit_oid).await?;
+
+        assert_eq!(files_updated, 1, "only the non-debris entry is written");
+        assert!(repo_root.join("good.bin").exists());
+        assert!(!repo_root.join("x.bin::stage1").exists());
+
+        Ok(())
+    }
+}
+
+/// C4 (overlap parity): clone now writes small blobs to the working tree WHILE
+/// chunked media is still downloading, instead of waiting for the last byte of
+/// the last file. The split that makes that safe is
+/// [`CheckoutManager::plan_fresh`], and these pin the two properties it has to
+/// have: it loses nothing, and it still refuses a case-collision.
+///
+/// The parity assertion is the primary safety net named in the plan — the
+/// overlapped tree must be indistinguishable from the staged one, or the
+/// commit is wrong.
+#[cfg(test)]
+mod overlap_split_parity_tests {
+    use super::*;
+    use crate::{ObjectType, Signature, TreeEntry};
+    use anyhow::Result;
+    use mediagit_storage::LocalBackend;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    fn sig() -> Signature {
+        Signature::now("Test".to_string(), "test@example.com".to_string())
+    }
+
+    /// Nested tree: a subdirectory plus root files, so the recursive walk and
+    /// the path prefixes are exercised, not just a flat list.
+    async fn build_commit(odb: &ObjectDatabase) -> Result<(Oid, Vec<(String, String)>)> {
+        let mut expected: Vec<(String, String)> = Vec::new();
+
+        let mut sub = Tree::new();
+        for i in 0..4 {
+            let content = format!("nested-content-{i}");
+            let oid = odb.write(ObjectType::Blob, content.as_bytes()).await?;
+            sub.add_entry(TreeEntry::new(
+                format!("nested_{i}.bin"),
+                FileMode::Regular,
+                oid,
+            ));
+            expected.push((format!("assets/nested_{i}.bin"), content));
+        }
+        let sub_oid = sub.write(odb).await?;
+
+        let mut root = Tree::new();
+        root.add_entry(TreeEntry::new(
+            "assets".to_string(),
+            FileMode::Directory,
+            sub_oid,
+        ));
+        for i in 0..6 {
+            let content = format!("root-content-{i}");
+            let oid = odb.write(ObjectType::Blob, content.as_bytes()).await?;
+            root.add_entry(TreeEntry::new(
+                format!("root_{i}.txt"),
+                FileMode::Regular,
+                oid,
+            ));
+            expected.push((format!("root_{i}.txt"), content));
+        }
+        let root_oid = root.write(odb).await?;
+
+        let commit = Commit::new(root_oid, sig(), sig(), "overlap parity".to_string());
+        Ok((commit.write(odb).await?, expected))
+    }
+
+    fn read_tree_on_disk(root: &Path) -> Vec<(String, String)> {
+        fn walk(dir: &Path, base: &Path, out: &mut Vec<(String, String)>) {
+            for entry in fs::read_dir(dir).unwrap().flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    walk(&p, base, out);
+                } else {
+                    let rel = p
+                        .strip_prefix(base)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    out.push((rel, fs::read_to_string(&p).unwrap()));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out.sort();
+        out
+    }
+
+    /// The overlapped tree must be byte-identical to the staged one.
+    ///
+    /// `deferred_oids` here stands in for the chunked-object set clone gets
+    /// back from `pull_streaming`; the point is that WHICH oids are deferred
+    /// must not change the result, only when each file is written.
+    #[tokio::test]
+    async fn split_checkout_matches_whole_tree_checkout() -> Result<()> {
+        let storage_dir = TempDir::new()?;
+        let storage = Arc::new(LocalBackend::new(storage_dir.path()).await?);
+        let odb = ObjectDatabase::new(storage, 100);
+        let (commit_oid, expected) = build_commit(&odb).await?;
+
+        // Baseline: the path MEDIAGIT_CLONE_OVERLAP=0 still takes.
+        let staged = TempDir::new()?;
+        let staged_mgr = CheckoutManager::new(&odb, staged.path());
+        let staged_count = staged_mgr.checkout_fresh(&commit_oid).await?;
+
+        // Overlapped: defer a non-trivial subset spanning both the root and
+        // the subdirectory, then write in two batches like clone does.
+        let overlapped = TempDir::new()?;
+        let mgr = CheckoutManager::new(&odb, overlapped.path());
+        let tree_oid = Commit::read(&odb, &commit_oid).await?.tree;
+        let all = mgr
+            .get_tree_files_with_oid(&tree_oid, Path::new(""))
+            .await?;
+        let deferred_oids: HashSet<Oid> = all
+            .iter()
+            .filter(|(p, _)| {
+                let s = p.to_string_lossy().replace('\\', "/");
+                s.contains("nested_1") || s.contains("nested_3") || s.contains("root_0")
+            })
+            .map(|(_, (oid, _))| *oid)
+            .collect();
+        assert_eq!(deferred_oids.len(), 3, "test fixture must defer 3 objects");
+
+        let plan = mgr.plan_fresh(&commit_oid, &deferred_oids).await?;
+        assert_eq!(
+            plan.ready.len() + plan.deferred.len(),
+            expected.len(),
+            "the split must partition the tree, not sample it"
+        );
+        assert_eq!(plan.deferred.len(), 3);
+
+        // Ready first (clone writes these under the download), deferred after.
+        let wrote = mgr.write_entries(plan.ready).await? + mgr.write_entries(plan.deferred).await?;
+
+        assert_eq!(wrote, staged_count, "same number of files written");
+        let mut want = expected.clone();
+        want.sort();
+        assert_eq!(read_tree_on_disk(overlapped.path()), want);
+        assert_eq!(
+            read_tree_on_disk(overlapped.path()),
+            read_tree_on_disk(staged.path()),
+            "overlapped tree must be identical to the staged tree"
+        );
+        Ok(())
+    }
+
+    /// Deferring nothing (a repo with no chunked media) must still produce the
+    /// whole tree — the case where `deferred` is empty and Step 9 writes zero.
+    #[tokio::test]
+    async fn split_with_nothing_deferred_still_writes_everything() -> Result<()> {
+        let storage_dir = TempDir::new()?;
+        let storage = Arc::new(LocalBackend::new(storage_dir.path()).await?);
+        let odb = ObjectDatabase::new(storage, 100);
+        let (commit_oid, expected) = build_commit(&odb).await?;
+
+        let repo = TempDir::new()?;
+        let mgr = CheckoutManager::new(&odb, repo.path());
+        let plan = mgr.plan_fresh(&commit_oid, &HashSet::new()).await?;
+        assert!(plan.deferred.is_empty());
+
+        let wrote = mgr.write_entries(plan.ready).await? + mgr.write_entries(plan.deferred).await?;
+        assert_eq!(wrote, expected.len());
+        let mut want = expected;
+        want.sort();
+        assert_eq!(read_tree_on_disk(repo.path()), want);
+        Ok(())
+    }
+
+    /// VC-5 must still fire, and it must fire from `plan_fresh` — a collision
+    /// between a READY path and a DEFERRED one is invisible to the per-batch
+    /// check inside `run_parallel_writes`, because neither batch contains both
+    /// halves. This is the guard the C4 split could most easily have dropped
+    /// silently, so it is asserted across the split, not within one side.
+    #[tokio::test]
+    async fn case_collision_across_the_split_is_still_refused() -> Result<()> {
+        let storage_dir = TempDir::new()?;
+        let storage = Arc::new(LocalBackend::new(storage_dir.path()).await?);
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let a_oid = odb.write(ObjectType::Blob, b"lower").await?;
+        let b_oid = odb.write(ObjectType::Blob, b"UPPER").await?;
+
+        let mut root = Tree::new();
+        root.add_entry(TreeEntry::new(
+            "readme.md".to_string(),
+            FileMode::Regular,
+            a_oid,
+        ));
+        root.add_entry(TreeEntry::new(
+            "README.md".to_string(),
+            FileMode::Regular,
+            b_oid,
+        ));
+        let root_oid = root.write(&odb).await?;
+        let commit = Commit::new(root_oid, sig(), sig(), "collision".to_string());
+        let commit_oid = commit.write(&odb).await?;
+
+        let repo = TempDir::new()?;
+        let mgr = CheckoutManager::new(&odb, repo.path());
+
+        // Defer exactly one of the colliding pair, so the two land in
+        // different batches.
+        let deferred: HashSet<Oid> = [b_oid].into_iter().collect();
+        let err = mgr.plan_fresh(&commit_oid, &deferred).await;
+
+        // Only meaningful where the filesystem actually conflates the two;
+        // detect_case_collisions probes for that itself, so ask it directly
+        // rather than guessing from the platform.
+        let fs_is_case_insensitive = detect_case_collisions(
+            repo.path(),
+            [PathBuf::from("readme.md"), PathBuf::from("README.md")].iter(),
+        )
+        .is_err();
+
+        if fs_is_case_insensitive {
+            assert!(
+                err.is_err(),
+                "plan_fresh must refuse a case-collision that spans the split"
+            );
+        } else {
+            assert!(err.is_ok(), "case-sensitive fs: both paths are distinct");
+        }
         Ok(())
     }
 }

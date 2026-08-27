@@ -13,8 +13,8 @@
 
 //! Tests for compression functionality in ObjectDatabase.
 
-use mediagit_storage::mock::MockBackend;
 use mediagit_storage::StorageBackend;
+use mediagit_storage::mock::MockBackend;
 use mediagit_versioning::{ObjectDatabase, ObjectType};
 use std::sync::Arc;
 

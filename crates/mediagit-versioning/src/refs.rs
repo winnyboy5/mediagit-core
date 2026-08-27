@@ -411,14 +411,23 @@ impl RefDatabase {
             fs::create_dir_all(parent).await?;
         }
 
-        // Write atomically using temp file + rename
-        let temp_path = path.with_extension("tmp");
+        // Write atomically using a *unique* temp file + rename.
+        //
+        // VC-3: this used `path.with_extension("tmp")`, a name derived purely
+        // from the target — so two processes writing the same ref opened the
+        // same temp path. The second `File::create` truncated the first's
+        // in-flight temp file, and whichever `rename` landed last won,
+        // silently discarding the other update.
+        let temp_path = crate::atomic_write::tmp_path_for(&path)?;
         let mut file = fs::File::create(&temp_path).await?;
         file.write_all(&data).await?;
         file.sync_all().await?;
         drop(file);
 
-        fs::rename(&temp_path, &path).await?;
+        if let Err(e) = fs::rename(&temp_path, &path).await {
+            let _ = fs::remove_file(&temp_path).await;
+            return Err(e.into());
+        }
 
         debug!(ref_name = %r.name, "Reference written successfully");
         Ok(())

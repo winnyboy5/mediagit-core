@@ -16,7 +16,7 @@
 //! Tests all edge cases, error conditions, and concurrent operations
 //! to achieve 90%+ coverage on the MockBackend implementation.
 
-use mediagit_storage::{mock::MockBackend, StorageBackend};
+use mediagit_storage::{StorageBackend, mock::MockBackend};
 use std::collections::HashMap;
 
 /// Test MockBackend creation and initialization

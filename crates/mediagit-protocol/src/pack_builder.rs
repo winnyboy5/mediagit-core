@@ -19,30 +19,11 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-const DEFAULT_PACK_BYTES: u64 = 64 * 1024 * 1024;
-const DEFAULT_PACK_CHUNKS: u32 = 1024;
-const DEFAULT_PACK_MIN_CHUNKS: u32 = 8;
-
-fn pack_bytes_cap() -> u64 {
-    std::env::var("MEDIAGIT_PACK_BYTES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_PACK_BYTES)
-}
-
-fn pack_chunks_cap() -> u32 {
-    std::env::var("MEDIAGIT_PACK_CHUNKS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_PACK_CHUNKS)
-}
-
-fn pack_min_chunks() -> u32 {
-    std::env::var("MEDIAGIT_PACK_MIN_CHUNKS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_PACK_MIN_CHUNKS)
-}
+// ST-4: caps come from `mediagit_versioning::pack` so this path and
+// `gc --repack` cannot disagree about them, and so an out-of-range value is
+// clamped in exactly one place. They were previously parsed here and again in
+// the ODB, unclamped in both.
+use mediagit_versioning::{pack_bytes_cap, pack_chunks_cap};
 
 /// Client-side cloud pack assembler.
 ///
@@ -50,8 +31,7 @@ fn pack_min_chunks() -> u32 {
 /// (`MEDIAGIT_PACK_BYTES`, default 64 MiB) or chunk cap
 /// (`MEDIAGIT_PACK_CHUNKS`, default 1024) is reached.
 ///
-/// Call `finish()` after all chunks are added to flush any remainder (even
-/// below `MEDIAGIT_PACK_MIN_CHUNKS`).
+/// Call `finish()` after all chunks are added to flush any remainder.
 pub struct PackBuilder {
     temp_dir: PathBuf,
     writer: Option<StreamingPackWriter<tokio::fs::File>>,
@@ -112,18 +92,6 @@ impl PackBuilder {
         }
     }
 
-    /// Flush at a file boundary if the chunk count meets the minimum
-    /// fragmentation threshold (`MEDIAGIT_PACK_MIN_CHUNKS`, default 8).
-    ///
-    /// Returns `Some` if the pack was sealed, `None` if too few chunks.
-    pub async fn flush_at_boundary(&mut self) -> Result<Option<CloudPackResult>> {
-        if self.current_chunks >= pack_min_chunks() {
-            Ok(Some(self.seal().await?))
-        } else {
-            Ok(None)
-        }
-    }
-
     /// Force-flush all remaining chunks regardless of count. Returns `None` if
     /// the pack is empty.
     pub async fn finish(&mut self) -> Result<Option<CloudPackResult>> {
@@ -162,15 +130,22 @@ impl PackBuilder {
 /// This is the network-side of F4: the PackBuilder handles disk assembly,
 /// `upload_and_register` handles transport and server registration.
 /// `base_url` must already include the repo segment (e.g. `http://server/my-repo`).
+///
+/// Returns `true` when the pack bytes went out over a presigned PUT straight
+/// to the bucket, `false` when they were proxied through the server. Callers
+/// use this to distinguish the two in `[bench]` output — a presign request
+/// that silently degraded to the proxy otherwise looks identical to a
+/// successful direct upload.
 pub async fn upload_and_register(
     result: CloudPackResult,
     base_url: &str,
     http_client: &reqwest::Client,
     direct_client: &reqwest::Client,
     compressed_hashes: &[(String, String)],
-) -> Result<()> {
+) -> Result<bool> {
     let pack_oid_hex = bytes_to_hex(&result.pack_oid);
     let byte_len = result.byte_len;
+    let mut presigned_direct = false;
 
     // 1. Request presigned PUT URL for packs/<pack_oid>
     let presign_url = format!("{}/packs/upload-urls", base_url);
@@ -178,12 +153,11 @@ pub async fn upload_and_register(
         "pack_ids": [pack_oid_hex],
         "sizes": [byte_len],
     });
-    let presign_resp = http_client
-        .post(&presign_url)
-        .json(&presign_body)
-        .send()
-        .await
-        .context("POST /packs/upload-urls")?;
+    let presign_resp = crate::client::send_with_rate_limit_retry(|| {
+        http_client.post(&presign_url).json(&presign_body).send()
+    })
+    .await
+    .context("POST /packs/upload-urls")?;
 
     if !presign_resp.status().is_success() {
         anyhow::bail!("POST /packs/upload-urls returned {}", presign_resp.status());
@@ -195,37 +169,185 @@ pub async fn upload_and_register(
         .context("parse /packs/upload-urls response")?;
 
     // 2. Upload pack bytes
-    let pack_data = tokio::fs::read(&result.temp_path)
+    // B5: Bytes so the proxy-fallback retry closure below clones a refcount
+    // bump, not the whole pack.
+    let pack_data: bytes::Bytes = tokio::fs::read(&result.temp_path)
         .await
-        .context("read pack temp file")?;
+        .context("read pack temp file")?
+        .into();
 
     if let Some(Some(purl)) = presign_map.get(&pack_oid_hex) {
         let put_url = purl["url"].as_str().unwrap_or("").to_string();
-        let mut req = direct_client.put(&put_url).body(pack_data);
-        if let Some(headers) = purl["required_headers"].as_array() {
-            for h in headers {
-                if let (Some(name), Some(val)) = (
-                    h.get(0).and_then(|v| v.as_str()),
-                    h.get(1).and_then(|v| v.as_str()),
-                ) {
-                    req = req.header(name, val);
+        // Presigned direct-to-bucket PUT — not server-bound, so not routed
+        // through send_with_rate_limit_retry: a 429 here comes from the BUCKET,
+        // not the server's limiter, and needs backend-specific classification.
+        //
+        // This comment used to claim the 429 was "handled by the caller's own
+        // retry loop". There is no such loop. The caller
+        // (`client/push.rs:783-812`) only catches the error and abandons the
+        // cloud-pack path for the ENTIRE push, so ONE transient status on ONE
+        // pack dropped everything to per-chunk upload:
+        //
+        //   20260821-ga8   96 upload-urls -> 97 packs/complete,     0 per-chunk,  8.69 MB/s
+        //   20260821-ga11  96 upload-urls ->  0 packs/complete, 2,284 per-chunk,  0.98 MB/s
+        //
+        // Azure and GCS both threw transients in ga11 (4 each; GCS's arrived as
+        // a burst inside one second, the shape of throttling). Neither was
+        // retried even once.
+        //
+        // Reuses `error_class::classify_auto` and the same 5-attempt budget the
+        // per-chunk MPU path already uses (`client/mod.rs:1010`), so pack and
+        // part uploads behave alike. Permanent* still bails immediately —
+        // retrying a 403 five times re-sends the whole pack body and cannot
+        // succeed.
+        const MAX_PACK_PUT_ATTEMPTS: u32 = 5;
+        let mut last_status = String::new();
+        let mut sent = false;
+        for attempt in 0..MAX_PACK_PUT_ATTEMPTS {
+            // Rebuilt per attempt: `send()` consumes the builder, and `body` is
+            // a `Bytes` clone (refcount bump, not a copy of the pack) per B5.
+            let mut req = direct_client.put(&put_url).body(pack_data.clone());
+            if let Some(headers) = purl["required_headers"].as_array() {
+                for h in headers {
+                    if let (Some(name), Some(val)) = (
+                        h.get(0).and_then(|v| v.as_str()),
+                        h.get(1).and_then(|v| v.as_str()),
+                    ) {
+                        req = req.header(name, val);
+                    }
+                }
+            }
+            // A TRANSPORT failure never produces a response, so it can never
+            // reach the status classifier below. Retried here, or the whole
+            // status-based loop is unreachable on exactly the errors a WAN link
+            // actually produces.
+            //
+            // 20260821-s5check measured this: every pack failure across the AWS
+            // and Azure arms was a transport error and NOT ONE was an HTTP
+            // status — "connection closed before message completed" (x1) and
+            // "operation timed out" (x3). A 503 got five attempts; a dropped
+            // connection got zero, and the push abandoned the fast path.
+            //
+            // I argued the other way when writing the status loop: not retrying
+            // a timeout avoids re-sending a whole pack body five times. That
+            // reasoning ignored which failure is COMMON. Every other uploader
+            // here already retries transport errors — the per-chunk MPU path,
+            // the control plane, and the server's own aws-sdk-s3, which logged
+            // "Failed after 5 retries" in the same run.
+            //
+            // Every send() error is retried, not a hand-picked subset: no
+            // response arrived, so there is nothing to classify as permanent,
+            // and the 5-attempt bound already caps the cost of being wrong.
+            let resp = match req.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    if attempt + 1 == MAX_PACK_PUT_ATTEMPTS {
+                        return Err(anyhow::Error::new(e))
+                            .context("presigned PUT of pack")
+                            .with_context(|| {
+                                format!("after {MAX_PACK_PUT_ATTEMPTS} transport attempts")
+                            });
+                    }
+                    let ceiling = 250u64 * (1u64 << attempt.min(6));
+                    let wait = ceiling / 2 + crate::client::jitter_upto(ceiling / 2);
+                    // WARN, and the level is load-bearing: this went
+                    // debug -> info -> warn, and only the last one works.
+                    //
+                    // main.rs pins the CLI filter to "warn" unless --verbose or
+                    // MEDIAGIT_LOG is set, so an info line is invisible in every
+                    // default run. 20260821-ga12 proved it: the AWS arm retried
+                    // and EXHAUSTED its budget, and the only trace left in a full
+                    // campaign log was the phrase "after 5 transport attempts"
+                    // buried in the final error - the retries themselves logged
+                    // nothing. Moving debug -> info without checking the filter
+                    // floor above it changed precisely nothing.
+                    //
+                    // Being wrong the other way is cheap: this fires at most 4
+                    // times per pack and only when the link is already
+                    // misbehaving. `pack push FAILED` is already warn! on this
+                    // same path and the QA harness parses around it fine.
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max_attempts = MAX_PACK_PUT_ATTEMPTS,
+                        err = ?e,
+                        wait_ms = wait,
+                        "pack PUT transport failure; retrying (the push is NOT degraded \
+                         unless a later 'pack push FAILED' says so)"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                    continue;
+                }
+            };
+            let status = resp.status();
+            if status.is_success() {
+                sent = true;
+                break;
+            }
+            last_status = status.to_string();
+
+            let ct = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let hdr_code = resp
+                .headers()
+                .get("x-amz-error-code")
+                .or_else(|| resp.headers().get("x-ms-error-code"))
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let body_full = resp.text().await.unwrap_or_default();
+            let body_ref = if body_full.len() > 2048 {
+                &body_full[..2048]
+            } else {
+                &body_full[..]
+            };
+
+            use crate::error_class::{TransferOutcome, classify_auto};
+            match classify_auto(status.as_u16(), &put_url, &ct, &hdr_code, body_ref) {
+                TransferOutcome::Transient | TransferOutcome::RefreshUrl => {
+                    if attempt + 1 == MAX_PACK_PUT_ATTEMPTS {
+                        anyhow::bail!(
+                            "presigned PUT returned {status} after {MAX_PACK_PUT_ATTEMPTS} attempts"
+                        );
+                    }
+                    tracing::debug!(
+                        pack = %pack_oid_hex,
+                        attempt = attempt + 1,
+                        %status,
+                        "pack PUT transient error; retrying"
+                    );
+                    // Equal-jitter backoff, same shape as `rate_limit_backoff`:
+                    // half fixed so the wait actually grows, half random so
+                    // concurrent pack uploads do not retry in lockstep — which
+                    // matters here, since ga11's GCS failures arrived as a
+                    // simultaneous burst.
+                    let ceiling = 250u64 * (1u64 << attempt.min(6));
+                    let wait = ceiling / 2 + crate::client::jitter_upto(ceiling / 2);
+                    tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                }
+                TransferOutcome::PermanentChunk
+                | TransferOutcome::PermanentChunkAfterDelay(_)
+                | TransferOutcome::PermanentConfig => {
+                    anyhow::bail!("presigned PUT returned {status} (permanent)");
                 }
             }
         }
-        let resp = req.send().await.context("presigned PUT of pack")?;
-        if !resp.status().is_success() {
-            anyhow::bail!("presigned PUT returned {}", resp.status());
+        if !sent {
+            anyhow::bail!("presigned PUT returned {last_status}");
         }
+        presigned_direct = true;
         tracing::debug!(pack = %pack_oid_hex, bytes = byte_len, "Pack uploaded via presigned URL");
     } else {
         // Proxy fallback: PUT to /packs/<oid> so complete_pack's head("packs/<oid>") succeeds
         let proxy_url = format!("{}/packs/{}", base_url, pack_oid_hex);
-        let resp = http_client
-            .put(&proxy_url)
-            .body(pack_data)
-            .send()
-            .await
-            .context("proxy PUT of pack")?;
+        let resp = crate::client::send_with_rate_limit_retry(|| {
+            http_client.put(&proxy_url).body(pack_data.clone()).send()
+        })
+        .await
+        .context("proxy PUT of pack")?;
         if !resp.status().is_success() {
             anyhow::bail!("proxy PUT returned {}", resp.status());
         }
@@ -256,12 +378,11 @@ pub async fn upload_and_register(
         "pack_oid": pack_oid_hex,
         "manifest": manifest,
     });
-    let complete_resp = http_client
-        .post(&complete_url)
-        .json(&complete_body)
-        .send()
-        .await
-        .context("POST /packs/complete")?;
+    let complete_resp = crate::client::send_with_rate_limit_retry(|| {
+        http_client.post(&complete_url).json(&complete_body).send()
+    })
+    .await
+    .context("POST /packs/complete")?;
 
     if !complete_resp.status().is_success() {
         anyhow::bail!("POST /packs/complete returned {}", complete_resp.status());
@@ -274,7 +395,8 @@ pub async fn upload_and_register(
         pack = %pack_oid_hex,
         bytes = byte_len,
         chunks = manifest.len(),
+        presigned_direct,
         "Pack registered with server"
     );
-    Ok(())
+    Ok(presigned_direct)
 }

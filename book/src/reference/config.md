@@ -68,6 +68,40 @@ min_approvals = 1
 
 ---
 
+## Top-Level — Repository Identity & Layout
+
+Written once at `mediagit init`/`clone`; not meant to be edited by hand.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `cdc_seed` | u64 | `0` | Per-repo content-defined chunking seed. Generated at `init`, propagated to clones via protocol capabilities. `0` reproduces legacy unseeded chunk boundaries (pre-existing repos). |
+| `repo_namespace` | string | *(derived)* | Per-repo storage namespace (layout v2): every object key is prefixed `<repo_namespace>/` so one bucket/root can host multiple repos. Absent on pre-v2 repos (falls back to sanitized repo-dir basename). Never change it after init — existing keys would be orphaned. |
+| `layout_version` | u32 | `2` | Physical storage layout version (`1` = flat pre-namespace, `2` = namespaced + hash fanout). Mirrored in the storage root's `LAYOUT` marker; a mismatched client fails fast. |
+| `repo_id` | string | *(generated)* | Unique repo identifier recorded in the `LAYOUT` marker so a namespace collision between independent repos is a hard error instead of a silent key-space merge. |
+| `config_version` | u32 | `0` | config.toml schema version, migrated automatically (distinct from `layout_version`). |
+
+---
+
+## `[security]` — Schema-Only (not read at runtime)
+
+This section exists in the config schema but is **not read by the CLI or by
+`mediagit-server`** — actual server security settings live in
+`mediagit-server.toml` (see `CONFIGURATION.md` Part 2 at the repo root, and
+[Authentication](./authentication.md) for the auth model). The keys below are
+documented for schema completeness only.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `auth_enabled` | bool | `false` | Enable JWT/API-key authentication. The JWT secret comes from `MEDIAGIT_JWT_SECRET` (required when enabled). |
+| `https_enabled` | bool | `false` | Serve TLS (enables HTTP/2) |
+| `tls_cert_path` / `tls_key_path` | string | — | Certificate/key files for TLS |
+| `api_key` | string | — | Static API key (legacy single-key mode) |
+| `cors_origins` | array | `[]` | Allowed CORS origins |
+| `encryption_at_rest` | bool | `false` | Encrypt objects at rest (`encryption_key_path` for the key file) |
+| `rate_limiting` | table | — | Rate-limit configuration for auth and data routes |
+
+---
+
 ## `[author]` — Author Identity
 
 Used when creating commits. Override with `MEDIAGIT_AUTHOR_NAME` / `MEDIAGIT_AUTHOR_EMAIL` env vars or `--author` CLI flag.
@@ -132,11 +166,16 @@ encryption_algorithm = "AES256"
 ```toml
 [storage]
 backend = "azure"
-account_name = "mystorageaccount"
 container = "media-container"
 prefix = ""
-# account_key from env AZURE_STORAGE_KEY or use connection_string
+auth = { type = "account_key", account_name = "mystorageaccount", account_key = "..." }
 ```
+
+Credentials are a tagged `auth` block (`config_version` 3+), exactly one of:
+`account_key` (`account_name` + `account_key`), `connection_string` (`value`),
+`sas` (`account_name` + `token`), or `emulator` (no fields). A pre-v3 flat
+config is migrated on first open; if migration cannot decide (both credentials
+present, or neither) it fails with the exact `auth` block to write.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|

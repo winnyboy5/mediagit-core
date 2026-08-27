@@ -17,12 +17,12 @@ use crate::repo::create_storage_backend;
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
-use mediagit_versioning::{FsckChecker, FsckOptions, FsckRepair, IssueSeverity};
+use mediagit_versioning::{FsckChecker, FsckOptions, FsckRepair, IssueSeverity, RefDatabase};
 
 /// Check repository integrity with comprehensive verification
 ///
 /// The fsck command performs a comprehensive integrity check of your MediaGit repository:
-/// - Verifies SHA-256 checksums of all objects
+/// - Verifies BLAKE3 checksums of all objects
 /// - Validates references point to existing commits
 /// - Checks commit graph connectivity
 /// - Detects missing or corrupted objects
@@ -122,8 +122,11 @@ impl FsckCmd {
             .await
             .context("Failed to open repository. Is this a MediaGit repository?")?;
 
-        // Create FSCK checker
-        let checker = FsckChecker::new(storage.clone());
+        // Create RefDatabase for accurate ref listing
+        let refdb = RefDatabase::new(&mediagit_dir);
+
+        // Create FSCK checker with RefDatabase
+        let checker = FsckChecker::new_with_refdb(storage.clone(), Some(refdb));
 
         // Configure options
         let options = self.build_options();
@@ -160,18 +163,44 @@ impl FsckCmd {
                 );
             }
 
-            let repair = FsckRepair::new(storage);
+            // Reuse the checker's ODB: flattening an over-deep chunk-delta
+            // chain re-stores content, so it must compress exactly the way the
+            // reader expects.
+            let repair = FsckRepair::new(storage).with_odb(checker.odb());
             let repaired = repair
                 .repair(&report, self.dry_run)
                 .await
                 .context("Repair failed")?;
 
+            // FS-2: never show a green check for work that did not happen.
+            // `repaired` counts repairs that actually succeeded, so it can be
+            // less than the number attempted — most often 0, when every issue
+            // was a packed object no targeted delete can touch. The old
+            // unconditional "✅ Successfully repaired 0 issue(s)" read as
+            // success and sent operators away believing the repo was fixed.
+            let attempted = report.repairable_issues().len();
             if !self.quiet {
                 if self.dry_run {
                     println!(
-                        "{} [DRY RUN] Would repair {} issue(s)",
+                        "{} [DRY RUN] Would repair {} of {} issue(s)",
                         style("ℹ").blue().bold(),
-                        repaired
+                        repaired,
+                        attempted
+                    );
+                } else if repaired == 0 && attempted > 0 {
+                    println!(
+                        "{} Repaired 0 of {} issue(s) — no repair succeeded. \
+                         See the warnings above for why each was skipped.",
+                        style("✖").red().bold(),
+                        attempted
+                    );
+                } else if (repaired as usize) < attempted {
+                    println!(
+                        "{} Repaired {} of {} issue(s); {} could not be repaired",
+                        style("⚠").yellow().bold(),
+                        repaired,
+                        attempted,
+                        attempted - repaired as usize
                     );
                 } else {
                     println!(
@@ -277,10 +306,11 @@ impl FsckCmd {
             println!("{} Information:", style("ℹ").blue().bold());
             for issue in &info {
                 println!("  • {}", style(&issue.message).dim());
-                if self.all && self.verbose {
-                    if let Some(oid) = issue.oid {
-                        println!("    OID: {}", style(oid.to_string()).dim());
-                    }
+                if self.all
+                    && self.verbose
+                    && let Some(oid) = issue.oid
+                {
+                    println!("    OID: {}", style(oid.to_string()).dim());
                 }
             }
             println!();

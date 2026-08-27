@@ -11,7 +11,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use mediagit_versioning::{DeltaDecoder, DeltaEncoder, ObjectType, Oid, PackReader, PackWriter};
 use std::hint::black_box;
 

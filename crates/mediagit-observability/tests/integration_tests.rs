@@ -53,14 +53,16 @@ fn test_default_config() {
 
 #[test]
 fn test_environment_variable_fallback() {
-    std::env::set_var("RUST_LOG", "trace");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("RUST_LOG", "trace") };
     let config = LogConfig::new().with_format(LogFormat::Compact);
     assert_eq!(config.get_effective_level(), "trace");
 }
 
 #[test]
 fn test_explicit_level_overrides_env() {
-    std::env::set_var("RUST_LOG", "trace");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("RUST_LOG", "trace") };
     let config = LogConfig::new()
         .with_format(LogFormat::Compact)
         .with_level("warn");

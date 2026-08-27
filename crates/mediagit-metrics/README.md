@@ -182,9 +182,12 @@ mediagit_backend_throughput_bytes_per_second
 
 ## Environment Variables
 
-- `MEDIAGIT_METRICS_PORT` - Override default metrics port (default: 9090)
-- `MEDIAGIT_METRICS_BIND` - Override bind address (default: 127.0.0.1)
-- `MEDIAGIT_METRICS_ENABLED` - Enable/disable metrics (default: false)
+- `MEDIAGIT_METRICS_ADDR` - `host:port` to bind the Prometheus endpoint on.
+  Unset means the metrics server is not started, so this doubles as the
+  on/off switch.
+
+There is no `MEDIAGIT_METRICS_PORT`, `_BIND` or `_ENABLED`; earlier revisions
+listed them and nothing has ever read them.
 
 ## Testing
 

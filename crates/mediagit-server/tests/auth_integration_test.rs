@@ -35,8 +35,7 @@ async fn test_complete_auth_flow() {
     let register_body = json!({
         "username": "testuser",
         "email": "test@example.com",
-        "password": "securepassword123",
-        "role": "Write"
+        "password": "securerender farm quiet hum"
     });
 
     let response = app
@@ -57,7 +56,7 @@ async fn test_complete_auth_flow() {
     // 2. Login with the registered user
     let login_body = json!({
         "identifier": "test@example.com",
-        "password": "securepassword123"
+        "password": "securerender farm quiet hum"
     });
 
     let response = app
@@ -195,8 +194,7 @@ async fn test_duplicate_registration() {
     let register_body = json!({
         "username": "duplicate",
         "email": "duplicate@example.com",
-        "password": "password123",
-        "role": "Write"
+        "password": "render farm quiet hum"
     });
 
     let response = app
@@ -239,8 +237,7 @@ async fn test_weak_password_rejected() {
     let register_body = json!({
         "username": "weakpass",
         "email": "weak@example.com",
-        "password": "short",
-        "role": "Write"
+        "password": "short"
     });
 
     let response = app

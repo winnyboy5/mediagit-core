@@ -21,24 +21,62 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// An ETA this large is not an estimate, it is an artefact — a stall, or a
+/// rate sampled before enough progress landed to mean anything. Reporting
+/// "eta 231y" is worse than admitting the number is unknown.
+const MAX_MEANINGFUL_ETA: Duration = Duration::from_secs(48 * 60 * 60);
+
+/// RP-6: `--` until an ETA can honestly be computed.
+///
+/// Nothing has been transferred at position 0, so any ETA is invented; the
+/// familiar symptom is "eta 0s" displayed at 0%, which reads as "about to
+/// finish" at the exact moment nothing has happened.
+fn format_eta(state: &indicatif::ProgressState) -> String {
+    eta_display(state.pos(), state.len(), state.eta())
+}
+
+/// Split from `format_eta` so the rules are testable: `ProgressState` has no
+/// public constructor, so a test cannot reach them through the closure.
+fn eta_display(pos: u64, len: Option<u64>, eta: Duration) -> String {
+    if pos == 0 || len.is_none_or(|len| len == 0) || eta > MAX_MEANINGFUL_ETA {
+        return "--".to_string();
+    }
+    format!("{}", HumanDuration(eta))
+}
+
+/// RP-4: `--` until a rate can honestly be computed.
+///
+/// Averaged over the whole operation rather than a decaying window: transfer
+/// is credited in pack-sized steps, and a decaying window samples the gaps
+/// between steps as though they were idle, which is what produced "33 B/s"
+/// during an otherwise healthy transfer.
+fn format_rate(state: &indicatif::ProgressState) -> String {
+    rate_display(state.pos(), state.elapsed())
+}
+
+/// See `eta_display` for why this is split out.
+fn rate_display(pos: u64, elapsed: Duration) -> String {
+    let secs = elapsed.as_secs_f64();
+    if pos == 0 || secs < 0.5 {
+        return "--".to_string();
+    }
+    format!("{}/s", HumanBytes((pos as f64 / secs) as u64))
+}
+
 /// Standard progress bar templates used across all CLI commands.
 /// All bars use 40-char width, "█▓░" characters, 100ms tick, stderr output.
 mod templates {
     /// Bytes-based progress for staging (`add`) operations.
-    pub const ADD: &str =
-        "{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, eta {eta}) {msg}";
+    pub const ADD: &str = "{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, eta {eta}) {msg}";
 
     /// Item-count progress for object processing (pack, delta, chunk transfer).
-    pub const OBJECTS: &str =
-        "{spinner:.yellow} {msg} [{bar:40.yellow/blue}] {pos}/{len} chunks ({percent}%, {elapsed}) eta {eta}";
+    pub const OBJECTS: &str = "{spinner:.yellow} {msg} [{bar:40.yellow/blue}] {pos}/{len} chunks ({percent}%, {elapsed}) eta {eta}";
 
     /// Bytes-based progress for push uploads with throughput and ETA.
-    pub const PUSH: &str =
-        "{spinner:.cyan} [{bar:40.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} (elapsed {elapsed}, eta {eta})";
+    pub const PUSH: &str = "{spinner:.cyan} [{bar:40.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} (elapsed {elapsed}, eta {eta})";
 
     /// Bytes-based progress for chunk downloads — mirrors PUSH format.
-    pub const DOWNLOAD_BYTES: &str =
-        "{spinner:.cyan} [{bar:40.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} (elapsed {elapsed}, eta {eta}) {msg}";
+    pub const DOWNLOAD_BYTES: &str = "{spinner:.cyan} [{bar:40.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} (elapsed {elapsed}, eta {eta}) {msg}";
 
     /// Indeterminate spinner for operations without a known total.
     pub const SPINNER: &str = "{spinner:.cyan} {msg} [{elapsed}]";
@@ -65,12 +103,37 @@ impl ProgressTracker {
     }
 
     /// Shared implementation for determinate progress bars.
+    ///
+    /// RP-4/RP-6: `eta` and `bytes_per_sec` render `--` when they are not yet
+    /// knowable, instead of printing a confident wrong number.
+    ///
+    /// Transfer progress is credited in lumps — a cloud pack's bytes land only
+    /// when its upload is confirmed, because that is the first moment the
+    /// bytes are known to have arrived. Crediting earlier would mean inventing
+    /// progress, and crediting incrementally would require a streaming request
+    /// body, which cannot be replayed on retry. So the estimators must cope
+    /// with a stream of large steps rather than the lumps being smoothed away:
+    /// before the first step lands there is genuinely no rate to report, and
+    /// "eta 0s" at 0% or "33 B/s" mid-transfer are both that absence rendered
+    /// as fact.
     fn make_bar_impl(&self, total: u64, msg: &str, template: &str) -> ProgressBar {
         let pb = self.multi.add(ProgressBar::new(total));
         pb.set_style(
             ProgressStyle::default_bar()
                 .template(template)
                 .expect("valid progress template")
+                .with_key(
+                    "eta",
+                    |state: &indicatif::ProgressState, w: &mut dyn std::fmt::Write| {
+                        let _ = write!(w, "{}", format_eta(state));
+                    },
+                )
+                .with_key(
+                    "bytes_per_sec",
+                    |state: &indicatif::ProgressState, w: &mut dyn std::fmt::Write| {
+                        let _ = write!(w, "{}", format_rate(state));
+                    },
+                )
                 .progress_chars("█▓░"),
         );
         pb.set_message(msg.to_string());
@@ -251,10 +314,10 @@ impl OperationStats {
 
         let mut stats = Vec::new();
         for entry in entries.into_iter().take(limit) {
-            if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                if let Ok(stat) = serde_json::from_str::<OperationStats>(&content) {
-                    stats.push(stat);
-                }
+            if let Ok(content) = std::fs::read_to_string(entry.path())
+                && let Ok(stat) = serde_json::from_str::<OperationStats>(&content)
+            {
+                stats.push(stat);
             }
         }
 
@@ -303,6 +366,46 @@ impl OperationStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RP-6: "eta 0s" at 0% told operators a transfer was about to finish at
+    /// the exact moment nothing had happened.
+    #[test]
+    fn eta_is_unknown_until_there_is_progress() {
+        assert_eq!(eta_display(0, Some(1000), Duration::from_secs(0)), "--");
+        assert_eq!(eta_display(0, Some(1000), Duration::from_secs(5)), "--");
+        assert_eq!(eta_display(500, None, Duration::from_secs(5)), "--");
+        assert_eq!(eta_display(500, Some(0), Duration::from_secs(5)), "--");
+    }
+
+    /// An ETA of years is an artefact of a stall, not an estimate.
+    #[test]
+    fn implausible_eta_renders_as_unknown() {
+        let years = Duration::from_secs(231 * 365 * 24 * 60 * 60);
+        assert_eq!(eta_display(500, Some(1000), years), "--");
+        assert_ne!(
+            eta_display(500, Some(1000), Duration::from_secs(90)),
+            "--",
+            "a plausible ETA must still be shown"
+        );
+    }
+
+    /// RP-4: no rate exists before the first credit lands, and transfer is
+    /// credited in pack-sized steps — so an early sample is noise, not speed.
+    #[test]
+    fn rate_is_unknown_until_measurable() {
+        assert_eq!(rate_display(0, Duration::from_secs(10)), "--");
+        assert_eq!(rate_display(1024, Duration::from_millis(100)), "--");
+    }
+
+    /// The rate is a whole-run average, so a 64 MiB pack credited in one step
+    /// cannot report more than the link actually carried.
+    #[test]
+    fn rate_averages_over_the_run_not_the_last_step() {
+        // 64 MiB credited at once, 8 s into the transfer => 8 MiB/s, not the
+        // "instant" rate of a 64 MiB jump over ~0 s that read as 747 MiB/s.
+        let rendered = rate_display(64 * 1024 * 1024, Duration::from_secs(8));
+        assert_eq!(rendered, "8.00 MiB/s", "got {rendered}");
+    }
 
     #[test]
     fn test_operation_stats_format_bytes() {

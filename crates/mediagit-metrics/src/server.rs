@@ -17,18 +17,18 @@
 //! in Prometheus text exposition format.
 
 use axum::{
+    Router,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
-    Router,
 };
 use prometheus::{Encoder, TextEncoder};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{debug, error, info};
 
-use crate::{types::MetricsConfig, MetricsRegistry};
+use crate::{MetricsRegistry, types::MetricsConfig};
 
 /// HTTP server for Prometheus metrics
 ///
@@ -157,6 +157,24 @@ mod tests {
     use std::time::Duration;
     use tokio::time::sleep;
 
+    /// Install ring as the process-level rustls provider.
+    ///
+    /// reqwest is built with `rustls-no-provider` (the workspace standardises
+    /// on ring; reqwest 0.13's plain `rustls` feature hard-wires aws-lc-rs), so
+    /// `reqwest::Client::new()` panics unless a provider is already installed.
+    /// The shipped binaries do this in `main()`; a test binary has no such
+    /// entry point, so every test that builds a Client must call this.
+    ///
+    /// Idempotent, and deliberately not order-dependent: relying on some other
+    /// test in the binary having installed it first is exactly how this
+    /// surfaced as a flaky failure rather than a deterministic one.
+    fn ensure_crypto_provider() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+    }
+
     #[tokio::test]
     async fn test_server_creation() {
         let registry = MetricsRegistry::new().unwrap();
@@ -201,6 +219,7 @@ mod tests {
         sleep(Duration::from_millis(100)).await;
 
         // Make request to metrics endpoint
+        ensure_crypto_provider();
         let client = reqwest::Client::new();
         let url = format!("http://{}/metrics", addr);
 
@@ -238,6 +257,7 @@ mod tests {
         sleep(Duration::from_millis(100)).await;
 
         // Make request to health endpoint
+        ensure_crypto_provider();
         let client = reqwest::Client::new();
         let url = format!("http://{}/health", addr);
 

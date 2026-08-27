@@ -66,9 +66,9 @@ Routing every call through `hash.rs` guarantees that the OID definition stays co
 
 > **Note on `sha2`**: SHA-256/SHA-512 are still present in `mediagit-security`, used only for key derivation and API-key handling. They are **not** used for object hashing.
 
-## Beta Migration Note
+## Migration Note
 
-MediaGit is in beta and makes **no backward-compatibility guarantee** before GA. The SHA-256 → BLAKE3 switch is a breaking change to the object format: repositories created under the old hash are not compatible and must be re-initialized. This window for format-breaking changes closes at launch.
+The SHA-256 → BLAKE3 switch happened during the beta cycle, before any compatibility guarantee was in effect: repositories created under the old hash are not compatible and must be re-initialized. As of `v0.3.0-rc.4` the persisted and wire formats are **frozen under the compatibility promise** (see `FORMATS.md` §11) — from this release on, a breaking format change requires a version bump and a hard-error reader, never a silent misparse.
 
 ## Related Documentation
 

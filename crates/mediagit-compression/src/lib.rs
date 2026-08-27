@@ -94,6 +94,7 @@ pub mod brotli_compressor;
 pub mod error;
 pub mod metrics;
 pub mod per_type_compressor;
+pub mod process_key;
 pub mod smart_compressor;
 pub mod zlib_compressor;
 pub mod zstd_compressor;
@@ -101,13 +102,25 @@ pub mod zstd_compressor;
 use std::fmt::Debug;
 
 pub use adaptive::{
-    calculate_entropy, AdaptiveCompressor, CompressionStrategy as AdaptiveStrategy, EntropyClass,
-    FileProfile, PatternClass, PerformanceStats, SizeClass,
+    AdaptiveCompressor, CompressionStrategy as AdaptiveStrategy, EntropyClass, FileProfile,
+    PatternClass, PerformanceStats, SizeClass, calculate_entropy,
 };
 pub use brotli_compressor::BrotliCompressor;
 pub use error::{CompressionError, CompressionResult};
-pub use metrics::{AggregatedStats, CompressionMetrics, MetricsAggregator};
+/// The at-rest key type `SmartCompressor::with_key` takes.
+///
+/// Re-exported because that constructor is public but its parameter type was
+/// not reachable from this crate, so no caller outside `mediagit-security`
+/// could name it.
+pub use mediagit_security::encryption::EncryptionKey;
+/// Does `data` carry the MGEN envelope? Re-exported so callers can ask without
+/// depending on `mediagit-security` directly.
+pub use mediagit_security::envelope::is_sealed;
+pub use metrics::CompressionMetrics;
 pub use per_type_compressor::{CompressionProfile, PerObjectTypeCompressor, PerTypeStats};
+pub use process_key::{
+    ProcessKeyError, ensure_key_scope, open_at_rest, process_key, seal_at_rest, set_process_key,
+};
 pub use smart_compressor::{
     ChunkCodecHint, CompressionStrategy, ObjectCategory, ObjectType, SmartCompressor,
     TypeAwareCompressor,
@@ -124,17 +137,21 @@ pub enum CompressionLevel {
     Fast,
     /// Default balance (level 3 for zstd, 9 for brotli)
     Default,
-    /// Best compression, slower (level 22 for zstd, 11 for brotli)
+    /// Best compression, slower (level 19 for zstd, 11 for brotli).
+    /// zstd 20-22 ("ultra") need ~1 GB per compression context and OOM under
+    /// parallel adds on 16 GB machines, for <0.5% extra ratio on media data
+    /// (measured 2026-07-07: deep-test FLAC add hard-failed on the ultra
+    /// path). Level 19 is the highest normal level (~128 MB per context).
     Best,
 }
 
 impl CompressionLevel {
-    /// Convert to zstd compression level (1-22)
+    /// Convert to zstd compression level (1-19; ultra levels excluded, see `Best`)
     pub fn to_zstd_level(self) -> i32 {
         match self {
             CompressionLevel::Fast => 1,
             CompressionLevel::Default => 3,
-            CompressionLevel::Best => 22,
+            CompressionLevel::Best => 19,
         }
     }
 
@@ -281,7 +298,7 @@ mod tests {
     fn compression_level_conversions() {
         assert_eq!(CompressionLevel::Fast.to_zstd_level(), 1);
         assert_eq!(CompressionLevel::Default.to_zstd_level(), 3);
-        assert_eq!(CompressionLevel::Best.to_zstd_level(), 22);
+        assert_eq!(CompressionLevel::Best.to_zstd_level(), 19); // ultra (20-22) excluded: OOM class
 
         assert_eq!(CompressionLevel::Fast.to_brotli_level(), 4);
         assert_eq!(CompressionLevel::Default.to_brotli_level(), 9);

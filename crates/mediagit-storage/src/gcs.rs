@@ -24,21 +24,29 @@
 //!
 //! ## Auth
 //!
-//! By default both clients use Application Default Credentials (ADC).
-//! When `GOOGLE_APPLICATION_CREDENTIALS` is set it is picked up automatically.
-//! The `new(…, service_account_path)` constructor sets the env var before building
-//! so the SDK finds it. Prefer `with_default_credentials` in production.
+//! By default both clients use Application Default Credentials (ADC), which
+//! honours `GOOGLE_APPLICATION_CREDENTIALS` if it is already set in the
+//! process environment. The `new(…, service_account_path)` constructor does
+//! NOT mutate the environment (mutating `std::env` in a multi-threaded async
+//! server is a process-wide data race); instead it parses the service
+//! account JSON directly and passes `Credentials` explicitly to both client
+//! builders via `with_credentials`. Prefer `with_default_credentials` in
+//! production.
 //!
 //! ## Retry
 //!
 //! `Storage` (data plane: put/get) uses `AlwaysRetry.with_attempt_limit(max_retries)`
 //! so upload/download failures are retried up to `GcsConfig::max_retries` times.
 //!
-//! `StorageControl` (gRPC control plane: exists/delete/list) uses the SDK default
-//! AIP-194 policy.  `AlwaysRetry` is deliberately NOT applied here because it
-//! retries `NOT_FOUND`, which `exists()` uses as a fast "absent" signal.  Applying
-//! `AlwaysRetry` to `StorageControl` causes exponential back-off on every missing
-//! chunk, stalling `chunks/check` on a fresh bucket.
+//! `StorageControl` (gRPC control plane: exists/delete/list) uses
+//! [`ControlPlaneRetry`], a policy written for this exact call pattern.
+//! `AlwaysRetry` must NOT be used here because it retries `NOT_FOUND`, which
+//! `exists()` relies on as a fast "absent" signal - that caused exponential
+//! back-off on every missing chunk and stalled `chunks/check` on a fresh
+//! bucket.  But the SDK default (`Aip194Strict`) over-corrected in the other
+//! direction: it treats anything that is not `Unavailable`, HTTP 503, or an io
+//! error as permanent, so a gRPC `Cancelled` from a dropped connection is
+//! never retried at all.  See [`ControlPlaneRetry`] for what that cost.
 //!
 //! ## Config fields `chunk_size` / `resumable_threshold`
 //!
@@ -53,7 +61,11 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, StreamExt, TryStreamExt};
 use google_cloud_auth::signer::Signer;
-use google_cloud_gax::retry_policy::{AlwaysRetry, RetryPolicyExt};
+use google_cloud_gax::error::Error as GaxError;
+use google_cloud_gax::error::rpc::Code;
+use google_cloud_gax::retry_policy::{AlwaysRetry, RetryPolicy, RetryPolicyExt};
+use google_cloud_gax::retry_result::RetryResult;
+use google_cloud_gax::retry_state::RetryState;
 use google_cloud_storage::builder::storage::SignedUrlBuilder;
 use google_cloud_storage::client::{Storage, StorageControl};
 use google_cloud_storage::model_ext::ReadRange;
@@ -183,22 +195,39 @@ impl GcsBackend {
 
     /// Build both clients with the current `GcsConfig` retry / threshold settings.
     ///
-    /// Caller must ensure ADC is resolvable before calling (i.e. set
-    /// `GOOGLE_APPLICATION_CREDENTIALS` if needed).
-    async fn build_clients(config: &GcsConfig) -> anyhow::Result<(Storage, StorageControl)> {
-        let storage = Storage::builder()
+    /// When `creds` is `Some`, it is passed explicitly to both builders via
+    /// `with_credentials` (used by the explicit-service-account-file
+    /// constructors). When `None`, the SDK falls back to its default
+    /// Application Default Credentials resolution.
+    async fn build_clients(
+        config: &GcsConfig,
+        creds: Option<google_cloud_auth::credentials::Credentials>,
+    ) -> anyhow::Result<(Storage, StorageControl)> {
+        let mut storage_builder = Storage::builder()
             .with_resumable_upload_threshold(config.resumable_threshold)
-            .with_retry_policy(AlwaysRetry.with_attempt_limit(config.max_retries))
+            .with_retry_policy(AlwaysRetry.with_attempt_limit(config.max_retries));
+
+        // StorageControl (gRPC control plane: exists/delete/list). NOT AlwaysRetry
+        // - that retries NOT_FOUND, which exists() relies on as a fast "absent"
+        // signal, and caused exponential backoff on every missing chunk. NOT the
+        // SDK default either: Aip194Strict treats Cancelled as permanent, so a
+        // dropped connection failed a 2,800-object push with zero retries on
+        // 20260826-ga28. ControlPlaneRetry is permanent on NOT_FOUND and
+        // transient on transport failures. See its doc comment.
+        let mut control_builder = StorageControl::builder()
+            .with_retry_policy(ControlPlaneRetry.with_attempt_limit(config.max_retries));
+
+        if let Some(creds) = creds {
+            storage_builder = storage_builder.with_credentials(creds.clone());
+            control_builder = control_builder.with_credentials(creds);
+        }
+
+        let storage = storage_builder
             .build()
             .await
             .map_err(|e| anyhow::anyhow!("GCS Storage client build failed: {}", e))?;
 
-        // StorageControl (gRPC control plane: exists/delete/list) intentionally uses
-        // the SDK default retry policy rather than AlwaysRetry.  AlwaysRetry retries
-        // NOT_FOUND, which exists() relies on as a fast "absent" signal.  Retrying
-        // NOT_FOUND causes exponential backoff for every missing chunk, stalling
-        // chunks/check when the bucket is empty or a fresh push is underway.
-        let control = StorageControl::builder()
+        let control = control_builder
             .build()
             .await
             .map_err(|e| anyhow::anyhow!("GCS StorageControl client build failed: {}", e))?;
@@ -208,8 +237,9 @@ impl GcsBackend {
 
     /// Create a new GCS backend from a service account JSON file.
     ///
-    /// Sets `GOOGLE_APPLICATION_CREDENTIALS` to `service_account_path` then
-    /// builds both clients using ADC (which reads that env var).
+    /// Reads and parses `service_account_path` and passes the resulting
+    /// `Credentials` explicitly to both client builders. Does not mutate the
+    /// process environment.
     ///
     /// # Arguments
     ///
@@ -239,17 +269,29 @@ impl GcsBackend {
             ));
         }
 
-        // Point ADC at the explicit credentials file.
-        let path_str = path
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("service account path is not valid UTF-8"))?;
-        std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", path_str);
+        let sa_json_str = std::fs::read_to_string(path).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to read service account file '{}': {}",
+                path.display(),
+                e
+            )
+        })?;
+        let sa_json: serde_json::Value = serde_json::from_str(&sa_json_str).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to parse service account JSON '{}': {}",
+                path.display(),
+                e
+            )
+        })?;
+
+        let creds = google_cloud_auth::credentials::service_account::Builder::new(sa_json.clone())
+            .build()
+            .map_err(|e| anyhow::anyhow!("GCS credentials build failed: {}", e))?;
 
         let gcs_config = GcsConfig::new(project_id.clone(), bucket_name.clone());
-        let (storage, control) = Self::build_clients(&gcs_config).await?;
+        let (storage, control) = Self::build_clients(&gcs_config, Some(creds)).await?;
 
-        // GOOGLE_APPLICATION_CREDENTIALS is now set; ADC picks it up.
-        let signer = google_cloud_auth::credentials::Builder::default()
+        let signer = google_cloud_auth::credentials::service_account::Builder::new(sa_json)
             .build_signer()
             .map_err(|e| anyhow::anyhow!("GCS signer build failed: {}", e))?;
 
@@ -288,14 +330,28 @@ impl GcsBackend {
             ));
         }
 
-        let path_str = path
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("service account path is not valid UTF-8"))?;
-        std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", path_str);
+        let sa_json_str = std::fs::read_to_string(path).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to read service account file '{}': {}",
+                path.display(),
+                e
+            )
+        })?;
+        let sa_json: serde_json::Value = serde_json::from_str(&sa_json_str).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to parse service account JSON '{}': {}",
+                path.display(),
+                e
+            )
+        })?;
 
-        let (storage, control) = Self::build_clients(&config).await?;
+        let creds = google_cloud_auth::credentials::service_account::Builder::new(sa_json.clone())
+            .build()
+            .map_err(|e| anyhow::anyhow!("GCS credentials build failed: {}", e))?;
 
-        let signer = google_cloud_auth::credentials::Builder::default()
+        let (storage, control) = Self::build_clients(&config, Some(creds)).await?;
+
+        let signer = google_cloud_auth::credentials::service_account::Builder::new(sa_json)
             .build_signer()
             .map_err(|e| anyhow::anyhow!("GCS signer build failed: {}", e))?;
 
@@ -361,8 +417,16 @@ impl GcsBackend {
         project_id: impl Into<String>,
         bucket_name: impl Into<String>,
     ) -> anyhow::Result<Self> {
-        let project_id = project_id.into();
-        let bucket_name = bucket_name.into();
+        Self::with_default_credentials_and_config(GcsConfig::new(project_id, bucket_name)).await
+    }
+
+    /// Same as [`Self::with_default_credentials`] but takes a full
+    /// [`GcsConfig`] (e.g. to set `prefix`) instead of just project/bucket.
+    pub async fn with_default_credentials_and_config(
+        gcs_config: GcsConfig,
+    ) -> anyhow::Result<Self> {
+        let project_id = gcs_config.project_id.clone();
+        let bucket_name = gcs_config.bucket_name.clone();
 
         if project_id.is_empty() {
             return Err(anyhow::anyhow!("project_id cannot be empty"));
@@ -387,8 +451,7 @@ impl GcsBackend {
             );
         }
 
-        let gcs_config = GcsConfig::new(project_id.clone(), bucket_name.clone());
-        let (storage, control) = Self::build_clients(&gcs_config).await?;
+        let (storage, control) = Self::build_clients(&gcs_config, None).await?;
 
         let signer = match google_cloud_auth::credentials::Builder::default().build_signer() {
             Ok(s) => Some(s),
@@ -429,37 +492,47 @@ impl GcsBackend {
     /// stream returns however much exists (validated by the caller against the
     /// size hint).
     async fn get_range(&self, key: &str, offset: u64, len: u64) -> anyhow::Result<Vec<u8>> {
+        let key = crate::prefixed_key(&self.config.prefix, key);
+        let key = key.as_str();
         let bucket_path = self.bucket_path();
-        let mut resp = self
-            .storage
-            .read_object(&bucket_path, key)
-            .set_read_range(ReadRange::segment(offset, len))
-            .send()
-            .await
-            .map_err(|e| {
-                if Self::is_not_found(&e) {
-                    anyhow::anyhow!("object not found: {}", key)
-                } else {
-                    anyhow::anyhow!(
-                        "GCS read_object range error for key '{}' [{}+{}]: {}",
-                        key,
-                        offset,
-                        len,
-                        e
-                    )
-                }
-            })?;
+        let io_limit = gcs_io_deadline();
+        let mut resp = with_io_deadline(
+            io_limit,
+            "read_object range request",
+            self.storage
+                .read_object(&bucket_path, key)
+                .set_read_range(ReadRange::segment(offset, len))
+                .send(),
+        )
+        .await?
+        .map_err(|e| {
+            if Self::is_not_found(&e) {
+                anyhow::anyhow!("object not found: {}", key)
+            } else {
+                anyhow::anyhow!(
+                    "GCS read_object range error for key '{}' [{}+{}]: {}",
+                    key,
+                    offset,
+                    len,
+                    e
+                )
+            }
+        })?;
 
         let mut buf = Vec::with_capacity(len as usize);
-        while let Some(chunk) = resp.next().await.transpose().map_err(|e| {
-            anyhow::anyhow!(
-                "GCS range stream error for key '{}' [{}+{}]: {}",
-                key,
-                offset,
-                len,
-                e
-            )
-        })? {
+        while let Some(chunk) = with_io_deadline(io_limit, "read_object range stream", resp.next())
+            .await?
+            .transpose()
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "GCS range stream error for key '{}' [{}+{}]: {}",
+                    key,
+                    offset,
+                    len,
+                    e
+                )
+            })?
+        {
             buf.extend_from_slice(&chunk);
         }
         Ok(buf)
@@ -469,12 +542,74 @@ impl GcsBackend {
         if e.http_status_code() == Some(404) {
             return true;
         }
-        if let Some(status) = e.status() {
-            if status.code == google_cloud_gax::error::rpc::Code::NotFound {
-                return true;
-            }
+        if let Some(status) = e.status()
+            && status.code == google_cloud_gax::error::rpc::Code::NotFound
+        {
+            return true;
         }
         false
+    }
+}
+
+/// Retry policy for the GCS **control plane** (`exists`/`delete`/`list`).
+///
+/// Neither stock policy fits this call pattern, and both failures are on
+/// record:
+///
+/// * `AlwaysRetry` retries `NOT_FOUND`.  `exists()` uses `NOT_FOUND` as its
+///   fast "absent" answer, so every missing chunk paid a full exponential
+///   back-off and `chunks/check` stalled against a fresh bucket.  That is why
+///   `AlwaysRetry` was removed from this client.
+///
+/// * `Aip194Strict` - the SDK default this then fell back to - retries only
+///   `Unavailable`, HTTP 503, io errors, and pre-RPC transients.  Everything
+///   else is permanent, **including `Cancelled`**.  On 20260826-ga28 a GCS
+///   connection dropped mid-push and surfaced as
+///   `Cancelled / tonic::transport::Error(hyper::Error(Canceled, "connection
+///   closed"))`.  It was classified permanent, retried zero times, and failed
+///   a push that had already written 2,800 objects.  local, minio, aws and
+///   azure all passed the same drill; only GCS has a control plane on this
+///   path.
+///
+/// So: `NOT_FOUND` is permanent (that is an answer, not a failure), and
+/// transport-level failures are retried.  `Cancelled`, `Aborted`,
+/// `DeadlineExceeded` and `Internal` all describe a connection that died
+/// rather than a request that was refused, and a `get_object` is a read - safe
+/// to repeat.  Anything else defers to `Aip194Strict` so this policy stays a
+/// narrow amendment rather than a reimplementation.
+///
+/// Decorate with `.with_attempt_limit(...)` at the call site; this type does
+/// not bound attempts itself.
+#[derive(Clone, Debug)]
+pub(crate) struct ControlPlaneRetry;
+
+impl ControlPlaneRetry {
+    /// Codes that mean "the connection failed", not "the server said no".
+    fn is_transport_failure(code: Code) -> bool {
+        matches!(
+            code,
+            Code::Cancelled | Code::Aborted | Code::DeadlineExceeded | Code::Internal
+        )
+    }
+}
+
+impl RetryPolicy for ControlPlaneRetry {
+    fn on_error(&self, state: &RetryState, error: GaxError) -> RetryResult {
+        if let Some(status) = error.status() {
+            // NOT_FOUND is exists()'s answer. Retrying it is the bug this
+            // policy exists to avoid re-introducing.
+            if status.code == Code::NotFound {
+                return RetryResult::Permanent(error);
+            }
+            if Self::is_transport_failure(status.code) {
+                return RetryResult::Continue(error);
+            }
+        }
+        if error.http_status_code() == Some(404) {
+            return RetryResult::Permanent(error);
+        }
+        use google_cloud_gax::retry_policy::Aip194Strict;
+        Aip194Strict.on_error(state, error)
     }
 }
 
@@ -507,11 +642,10 @@ impl StorageBackend for GcsBackend {
         let bucket_path = self.bucket_path();
         debug!(key = %key, bucket = %bucket_path, "Downloading object from GCS");
 
-        let mut resp = self
-            .storage
-            .read_object(&bucket_path, key)
-            .send()
-            .await
+        let req = self.storage.read_object(&bucket_path, key);
+        let io_limit = gcs_io_deadline();
+        let mut resp = with_io_deadline(io_limit, "read_object request", req.send())
+            .await?
             .map_err(|e| {
                 if Self::is_not_found(&e) {
                     anyhow::anyhow!("object not found: {}", key)
@@ -521,10 +655,10 @@ impl StorageBackend for GcsBackend {
             })?;
 
         let mut buf = Vec::new();
-        while let Some(chunk) =
-            resp.next().await.transpose().map_err(|e| {
-                anyhow::anyhow!("GCS read_object stream error for key '{}': {}", key, e)
-            })?
+        while let Some(chunk) = with_io_deadline(io_limit, "read_object stream", resp.next())
+            .await?
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("GCS read_object stream error for key '{}': {}", key, e))?
         {
             buf.extend_from_slice(&chunk);
         }
@@ -550,39 +684,47 @@ impl StorageBackend for GcsBackend {
         let storage = self.storage.clone();
         let len = range.end - range.start;
 
-        let resp = storage
-            .read_object(&bucket_path, &prefixed)
-            .set_read_range(ReadRange::segment(range.start, len))
-            .send()
-            .await
-            .map_err(|e| {
-                if Self::is_not_found(&e) {
-                    anyhow::anyhow!("object not found: {}", key)
-                } else {
-                    anyhow::anyhow!(
-                        "GCS get_streaming_range error for key '{}' [{}+{}]: {}",
-                        key,
-                        range.start,
-                        len,
-                        e
-                    )
-                }
-            })?;
+        let io_limit = gcs_io_deadline();
+        let resp = with_io_deadline(
+            io_limit,
+            "get_streaming_range request",
+            storage
+                .read_object(&bucket_path, &prefixed)
+                .set_read_range(ReadRange::segment(range.start, len))
+                .send(),
+        )
+        .await?
+        .map_err(|e| {
+            if Self::is_not_found(&e) {
+                anyhow::anyhow!("object not found: {}", key)
+            } else {
+                anyhow::anyhow!(
+                    "GCS get_streaming_range error for key '{}' [{}+{}]: {}",
+                    key,
+                    range.start,
+                    len,
+                    e
+                )
+            }
+        })?;
 
-        let stream = futures::stream::unfold(resp, |mut r| async move {
-            match r.next().await {
-                Some(Ok(chunk)) => Some((
-                    Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::copy_from_slice(&chunk)),
-                    r,
-                )),
-                Some(Err(e)) => Some((
-                    Err(anyhow::anyhow!(
-                        "GCS get_streaming_range stream error: {}",
-                        e
+        let stream = futures::stream::unfold(resp, move |mut r| async move {
+            match with_io_deadline(io_limit, "get_streaming_range stream", r.next()).await {
+                Err(e) => Some((Err(e), r)),
+                Ok(step) => match step {
+                    Some(Ok(chunk)) => Some((
+                        Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::copy_from_slice(&chunk)),
+                        r,
                     )),
-                    r,
-                )),
-                None => None,
+                    Some(Err(e)) => Some((
+                        Err(anyhow::anyhow!(
+                            "GCS get_streaming_range stream error: {}",
+                            e
+                        )),
+                        r,
+                    )),
+                    None => None,
+                },
             }
         });
         Ok(Box::pin(stream))
@@ -645,13 +787,16 @@ impl StorageBackend for GcsBackend {
         let key = key.as_str();
         let bucket_path = self.bucket_path();
 
-        match self
-            .control
-            .get_object()
-            .set_bucket(&bucket_path)
-            .set_object(key)
-            .send()
-            .await
+        match with_io_deadline(
+            gcs_control_deadline(),
+            "get_object (exists)",
+            self.control
+                .get_object()
+                .set_bucket(&bucket_path)
+                .set_object(key)
+                .send(),
+        )
+        .await?
         {
             Ok(_) => Ok(true),
             Err(e) if Self::is_not_found(&e) => Ok(false),
@@ -673,13 +818,16 @@ impl StorageBackend for GcsBackend {
         let key = key.as_str();
         let bucket_path = self.bucket_path();
 
-        match self
-            .control
-            .get_object()
-            .set_bucket(&bucket_path)
-            .set_object(key)
-            .send()
-            .await
+        match with_io_deadline(
+            gcs_control_deadline(),
+            "get_object (size)",
+            self.control
+                .get_object()
+                .set_bucket(&bucket_path)
+                .set_object(key)
+                .send(),
+        )
+        .await?
         {
             Ok(obj) => Ok(Some(obj.size as u64)),
             Err(e) if Self::is_not_found(&e) => Ok(None),
@@ -701,13 +849,16 @@ impl StorageBackend for GcsBackend {
         let key = key.as_str();
         let bucket_path = self.bucket_path();
 
-        match self
-            .control
-            .delete_object()
-            .set_bucket(&bucket_path)
-            .set_object(key)
-            .send()
-            .await
+        match with_io_deadline(
+            gcs_control_deadline(),
+            "delete_object",
+            self.control
+                .delete_object()
+                .set_bucket(&bucket_path)
+                .set_object(key)
+                .send(),
+        )
+        .await?
         {
             Ok(_) => {
                 debug!(key = %key, "Successfully deleted object from GCS");
@@ -760,9 +911,8 @@ impl StorageBackend for GcsBackend {
                 builder = builder.set_page_token(&page_token);
             }
 
-            let response = builder
-                .send()
-                .await
+            let response = with_io_deadline(gcs_control_deadline(), "list_objects", builder.send())
+                .await?
                 .map_err(|e| anyhow::anyhow!("GCS list_objects error: {}", e))?;
 
             for obj in &response.objects {
@@ -901,7 +1051,8 @@ impl StorageBackend for GcsBackend {
         let Some(signer) = self.signer.as_ref() else {
             return Ok(None);
         };
-        let url = SignedUrlBuilder::for_object(self.bucket_path(), key)
+        let key = crate::prefixed_key(&self.config.prefix, key);
+        let url = SignedUrlBuilder::for_object(self.bucket_path(), &key)
             .with_method(http::Method::PUT)
             .with_expiration(ttl)
             .sign_with(signer)
@@ -935,7 +1086,8 @@ impl StorageBackend for GcsBackend {
         let Some(signer) = self.signer.as_ref() else {
             return Ok(None);
         };
-        let url = SignedUrlBuilder::for_object(self.bucket_path(), key)
+        let key = crate::prefixed_key(&self.config.prefix, key);
+        let url = SignedUrlBuilder::for_object(self.bucket_path(), &key)
             .with_method(http::Method::GET)
             .with_expiration(ttl)
             .sign_with(signer)
@@ -949,9 +1101,195 @@ impl StorageBackend for GcsBackend {
     }
 }
 
+/// Per-IO deadline for GCS data-plane transfers, in seconds.
+///
+/// Generous by default because the failure mode it prevents is a hung read of
+/// a whole repository, while the cost of being too generous is a genuine hang
+/// taking longer to surface.
+fn gcs_io_timeout_secs() -> u64 {
+    parse_io_timeout_secs(std::env::var("MEDIAGIT_GCS_IO_TIMEOUT_SECS").ok())
+}
+
+/// Split from the env lookup so it is assertable: `#![forbid(unsafe_code)]` plus
+/// edition 2024 make `set_var` an `unsafe` call, so a test that drove the real
+/// variable could not be written without punching a hole in that. Same shape as
+/// `azure::parse_io_timeout_secs`.
+fn parse_io_timeout_secs(raw: Option<String>) -> u64 {
+    const DEFAULT_IO_TIMEOUT_SECS: u64 = 120;
+    raw.and_then(|v| v.trim().parse::<u64>().ok())
+        // 0 would mean "deadline already passed" and fail every read instantly.
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_IO_TIMEOUT_SECS)
+}
+
+/// Await one GCS network step under the per-IO deadline.
+///
+/// Wraps BOTH the request `send()` and each `next()` on the response body,
+/// because they hang independently: `send()` covers "the response never
+/// starts", the stream covers "the response starts and then stalls mid-body".
+/// The observed failure left an Established socket with zero bytes moving, so
+/// bounding only one of the two would have left the other still able to wedge.
+///
+/// `secs` is a parameter rather than read from the env here so the deadline
+/// behaviour is testable without mutating process environment.
+async fn with_io_deadline<F, T>(limit: std::time::Duration, what: &str, fut: F) -> anyhow::Result<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    tokio::time::timeout(limit, fut).await.map_err(|_| {
+        let secs = limit.as_secs();
+        anyhow::anyhow!(
+            "GCS {what} stalled: no progress for {secs}s \
+             (raise MEDIAGIT_GCS_IO_TIMEOUT_SECS if this link is legitimately slower)"
+        )
+    })
+}
+
+/// Deadline for GCS *control-plane* calls (`get_object`, `delete_object`,
+/// `list_objects`), as distinct from the data-plane transfer deadline.
+///
+/// These are metadata round-trips that normally finish in well under a second,
+/// so they get a tighter bound than a multi-GB transfer does: waiting the full
+/// transfer deadline to discover one is wedged is dead time, and `exists` runs
+/// once per chunk on the push path.
+///
+/// Not tighter than this, though — see the note at `upload_semaphore` about
+/// concurrent uploads exhausting GCS TCP connections and producing ~20-25s
+/// transport timeouts. A bound near that band would convert congested-but-
+/// recoverable calls into hard errors. Fixed rather than env-tunable until
+/// something demonstrates it needs to move.
+fn gcs_control_deadline() -> std::time::Duration {
+    std::time::Duration::from_secs(60)
+}
+
+/// The per-IO deadline as a `Duration`, ready to hand to [`with_io_deadline`].
+fn gcs_io_deadline() -> std::time::Duration {
+    std::time::Duration::from_secs(gcs_io_timeout_secs())
+}
+
 #[cfg(test)]
 mod tests {
+
+    // Regression guard for the 20260819-gagate11 hang: a GCS read that never
+    // produces data must fail on a deadline rather than wedge forever. Without
+    // `with_io_deadline` this test hangs instead of failing, which is exactly
+    // what the stuck campaign did.
+    #[tokio::test]
+    async fn a_stalled_gcs_read_fails_on_the_deadline_instead_of_hanging() {
+        let stalled = std::future::pending::<()>();
+        let err =
+            super::with_io_deadline(std::time::Duration::from_millis(10), "test read", stalled)
+                .await
+                .expect_err("a future that never resolves must hit the deadline");
+        let msg = err.to_string();
+        assert!(msg.contains("stalled"), "unhelpful message: {msg}");
+        assert!(
+            msg.contains("MEDIAGIT_GCS_IO_TIMEOUT_SECS"),
+            "the message must name the knob that fixes it: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_read_that_completes_passes_its_value_through_untouched() {
+        let got =
+            super::with_io_deadline(std::time::Duration::from_secs(120), "test read", async {
+                7u32
+            })
+            .await
+            .expect("a ready future must not be timed out");
+        assert_eq!(got, 7);
+    }
+
+    #[test]
+    fn io_timeout_defaults_are_generous_enough_for_a_wan() {
+        assert_eq!(super::parse_io_timeout_secs(None), 120);
+        assert_eq!(
+            super::parse_io_timeout_secs(Some("not-a-number".into())),
+            120
+        );
+        assert!(super::parse_io_timeout_secs(None) > 10);
+    }
+
+    #[test]
+    fn io_timeout_rejects_zero_and_honours_valid_overrides() {
+        // 0 would make every read fail instantly rather than mean "no limit".
+        assert_eq!(super::parse_io_timeout_secs(Some("0".into())), 120);
+        assert_eq!(super::parse_io_timeout_secs(Some("45".into())), 45);
+        assert_eq!(super::parse_io_timeout_secs(Some("  90  ".into())), 90);
+    }
+
     use super::*;
+
+    // ---- ControlPlaneRetry -------------------------------------------------
+    //
+    // BOTH HALVES ARE ASSERTED HERE ON PURPOSE. This policy exists because two
+    // previous policies each got exactly one half right: `AlwaysRetry` retried
+    // NOT_FOUND and stalled chunks/check, and `Aip194Strict` refused to retry a
+    // dropped connection and failed a 2,800-object push. A test that only
+    // proved "Cancelled retries" would have passed for `AlwaysRetry` too, and
+    // would not have caught the regression that motivated removing it.
+    mod control_plane_retry {
+        use super::*;
+        use google_cloud_gax::error::Error as GaxError;
+        use google_cloud_gax::error::rpc::{Code, Status};
+        use google_cloud_gax::retry_policy::RetryPolicy;
+        use google_cloud_gax::retry_state::RetryState;
+
+        fn verdict(code: Code) -> RetryResult {
+            // idempotent = true: every control-plane call this policy guards
+            // (get_object/exists, list) is a read.
+            ControlPlaneRetry.on_error(
+                &RetryState::new(true),
+                GaxError::service(Status::default().set_code(code)),
+            )
+        }
+
+        /// The half that `AlwaysRetry` got wrong. NOT_FOUND is `exists()`
+        /// answering "absent" - retrying it bought exponential back-off on
+        /// every missing chunk.
+        #[test]
+        fn not_found_is_permanent() {
+            assert!(verdict(Code::NotFound).is_permanent());
+        }
+
+        /// The half that `Aip194Strict` got wrong, and the exact code seen on
+        /// 20260826-ga28: a dropped gRPC connection surfaces as `Cancelled`,
+        /// which AIP-194 classifies permanent.
+        #[test]
+        fn cancelled_is_retried() {
+            assert!(matches!(verdict(Code::Cancelled), RetryResult::Continue(_)));
+        }
+
+        /// The other codes that describe a dead connection rather than a
+        /// refused request.
+        #[test]
+        fn transport_failures_are_retried() {
+            for code in [Code::Aborted, Code::DeadlineExceeded, Code::Internal] {
+                assert!(
+                    matches!(verdict(code), RetryResult::Continue(_)),
+                    "{code:?} should be retried"
+                );
+            }
+        }
+
+        /// Unchanged from the SDK default - this policy is an amendment, not a
+        /// replacement, so what AIP-194 already retried must keep retrying.
+        #[test]
+        fn unavailable_still_retried_via_aip194() {
+            assert!(matches!(
+                verdict(Code::Unavailable),
+                RetryResult::Continue(_)
+            ));
+        }
+
+        /// A genuine refusal must NOT be retried, or a misconfigured
+        /// credential turns into `max_retries` rounds of back-off per object.
+        #[test]
+        fn permission_denied_is_permanent() {
+            assert!(verdict(Code::PermissionDenied).is_permanent());
+            assert!(verdict(Code::InvalidArgument).is_permanent());
+        }
+    }
 
     #[test]
     fn test_gcs_config_default() {
@@ -998,10 +1336,40 @@ mod tests {
     async fn test_gcs_backend_new_missing_file() {
         let result = GcsBackend::new("project", "bucket", "nonexistent.json").await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("service account file not found"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("service account file not found")
+        );
+    }
+
+    /// Name-composition regression test for the GCS-prefix bug (layout v2,
+    /// M1 Step 5): the wire object name must compose exactly
+    /// `<gcs_prefix>/<ns>/<key>` — prefix applied once, no double-prefix
+    /// with the `NamespacedBackend` wrapper. This exercises the same
+    /// `crate::prefixed_key` helper every GCS method calls, at the pure
+    /// function level (no live GCS connection needed); live verification is
+    /// deferred to the cloud matrix phase.
+    #[test]
+    fn test_prefix_and_namespace_compose_exactly_once() {
+        let gcs_prefix = Some("backups".to_string());
+        // Key as it arrives at GcsBackend AFTER NamespacedBackend has
+        // already prepended "<ns>/".
+        let namespaced_key = "myrepo/chunks/deadbeef";
+
+        let wire_key = crate::prefixed_key(&gcs_prefix, namespaced_key);
+        assert_eq!(wire_key, "backups/myrepo/chunks/deadbeef");
+
+        // No backend prefix configured: namespace is the only prefix.
+        let wire_key_no_gcs_prefix = crate::prefixed_key(&None, namespaced_key);
+        assert_eq!(wire_key_no_gcs_prefix, "myrepo/chunks/deadbeef");
+
+        // list_objects's strip must exactly reverse the composition.
+        let backend_prefix = gcs_prefix.as_deref().unwrap_or("");
+        let strip_prefix = format!("{}/", backend_prefix.trim_end_matches('/'));
+        let logical = wire_key.strip_prefix(&strip_prefix).unwrap();
+        assert_eq!(logical, namespaced_key);
     }
 
     #[test]

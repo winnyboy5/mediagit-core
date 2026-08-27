@@ -4,19 +4,20 @@
 
 [![CI](https://github.com/winnyboy5/mediagit-core/workflows/CI/badge.svg)](https://github.com/winnyboy5/mediagit-core/actions)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
-[![Rust Version](https://img.shields.io/badge/rust-1.92+-orange.svg)](https://www.rust-lang.org)
-[![Features](https://img.shields.io/badge/features-100%25%20complete-success.svg)](claudedocs/2026-02-27/UNIMPLEMENTED_FEATURES.md)
+[![Rust Version](https://img.shields.io/badge/rust-1.97+-orange.svg)](https://www.rust-lang.org)
+[![Features](https://img.shields.io/badge/features-100%25%20complete-success.svg)](FUTURE_TODOS.md)
 
 ## 🎯 Status
 
-**Version**: v0.2.8-beta.1
-**Status**: 🚧 **BETA**
-**Features**: 100% complete (all P0–P3 items implemented)
-**Last Validated**: June 2, 2026 — 614/614 deep tests on MinIO, AWS S3, Azure Blob, GCS (release build, Windows 11)
+**Version**: v0.3.0-rc.4
+**Status**: 🚧 **RELEASE CANDIDATE**
+**Features**: 100% complete (all P0–P3 items from the rc.3 feature-completeness sprint implemented — a closed batch, distinct from the forward-looking backlog in [FUTURE_TODOS.md](FUTURE_TODOS.md), which reuses the same P0–P3 labels as effort/impact tiers for planned work)
+**Last Validated**: August 6, 2026 — SCALE QA campaign (`reports/20260806-scale-full`), 0 failures across MinIO, AWS S3, Azure Blob, GCS and local
+**Not yet in a campaign**: at-rest encryption (DC-7), added in rc.3. Covered by the workspace suite including an end-to-end encrypted push and read-back over a real server, but no cloud-backend campaign has run against it yet.
 **🚨 WARNING 🚨**: This project is under active development. Be aware that large breaking changes may happen before 1.0 is reached.
 
 ✅ **614/614 deep-tests passing** across MinIO, AWS S3 (ap-south-1), Azure Blob (South India), Google Cloud Storage
-✅ **28 CLI commands validated end-to-end** — 0 crashes, 0 data corruption across all 4 cloud backends
+✅ **32 CLI commands validated end-to-end** — 0 crashes, 0 data corruption across all 4 cloud backends
 ✅ **27+ file types tested** (58 GB dataset) across video, audio, 3D, image, design, ML
 ✅ **26.3–26.5% storage savings** measured on cloud backends (compression + dedup + delta, validated June 2026)
 ✅ **Files up to 398 MB** staged and transferred; single-file scalability to 6 GB tested
@@ -45,6 +46,19 @@
 ## Overview
 
 MediaGit is a Git-like version control system optimized for large media files. Built in Rust for maximum performance, security, and reliability.
+
+```mermaid
+flowchart LR
+    CLI["mediagit (client)"] -->|"push / pull / clone / fetch"| SRV["mediagit-server (Axum)"]
+    SRV --> LOCAL["Local filesystem"]
+    SRV --> S3["AWS S3"]
+    SRV --> AZURE["Azure Blob"]
+    SRV --> GCS["Google Cloud Storage"]
+    SRV --> MINIO["MinIO"]
+    CLI -.->|"presigned PUT/GET<br/>(bypasses server)"| S3
+    CLI -.->|"presigned PUT/GET"| AZURE
+    CLI -.->|"presigned PUT/GET"| MINIO
+```
 
 ### Why MediaGit?
 
@@ -86,16 +100,18 @@ Traditional Git struggles with large binary files. MediaGit solves this with:
 Instead of uploading thousands of individual chunk objects, MediaGit bundles chunks into **pack objects** (≤ 64 MiB / ≤ 1,024 chunks each) with an embedded index. This collapses ~10,000 small objects into hundreds of packs per repo, cutting API request count and storage costs. Clone uses pack-locate + Range-GET so only needed slices are fetched. F8 integrity verifies every slice's compressed hash on pull.
 
 - Deep tests: 463–467 chunked + 35 delta objects per backend — all fsck/F8 clean
-- 614/614 tests passing across MinIO, AWS, Azure, GCS (June 2, 2026)
+- Release-build QA campaign (`reports/20260716-172951`): STANDARD suite green across MinIO, AWS, Azure, GCS, zero findings (July 16, 2026)
 
 🔗 **Presigned-URL Transfer**
 
 Uploads and downloads bypass the server entirely when the backend supports signing. The server mints presigned PUT/GET URLs; the client communicates directly with cloud storage. On unsigned backends (GCS with ADC) or 404, the client automatically falls back to server-proxy transfer. Large chunks use presigned multipart upload (MPU) on S3/MinIO.
 
 🔒 **Security**
-- AES-256-GCM encryption at rest
-- JWT + API key authentication
-- TLS 1.3 with certificate management
+- At-rest encryption (XAES-256-GCM + Argon2id), opt-in per repository at creation time via `mediagit key init`. Push and clone work: the client escrows the repository key with the server, which holds it wrapped under a server master key and uses it to verify what it stores. Encrypting an *existing* repository is not supported yet
+- JWT + API key authentication, persisted to disk (`users.jsonl`/`api_keys.jsonl`/`grants.jsonl`, atomic writes; `MEDIAGIT_AUTH_PERSIST`)
+- Per-repo authorization grants (Read < Write < Admin; `MEDIAGIT_GRANTS_ENFORCE`) plus admin endpoints for user/key management
+- OS-keychain credential storage for CLI remote credentials (Windows Credential Manager; env → config.toml → keychain)
+- TLS 1.3 with certificate management (server TLS listener; mTLS not wired)
 - Rate limiting and DoS protection
 
 📁 **Supported File Formats (70+ extensions)**
@@ -126,19 +142,19 @@ curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/instal
 
 **Linux x86_64 — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-x86_64-linux.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.4/mediagit-0.3.0-rc.4-x86_64-linux.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **macOS Apple Silicon — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-aarch64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.4/mediagit-0.3.0-rc.4-aarch64-macos.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **Windows x86_64 (PowerShell):**
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-x86_64-windows.zip" -OutFile mediagit.zip
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.4/mediagit-0.3.0-rc.4-x86_64-windows.zip" -OutFile mediagit.zip
 Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 # Add to PATH:
 [Environment]::SetEnvironmentVariable("Path", "$env:Path;$env:LOCALAPPDATA\MediaGit\bin", "User")
@@ -147,14 +163,14 @@ Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 #### Docker
 
 ```bash
-docker pull ghcr.io/winnyboy5/mediagit-core:0.2.8-beta.1
-docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.8-beta.1 mediagit --version
+docker pull ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.4
+docker run --rm ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.4 mediagit --version
 ```
 
 #### From Source
 
 ```bash
-# Requires Rust 1.92+
+# Requires Rust 1.97+
 git clone https://github.com/winnyboy5/mediagit-core.git
 cd mediagit-core
 cargo build --release
@@ -168,51 +184,67 @@ cargo build --release
 
 | Platform | Archive |
 |----------|---------|
-| Linux x86_64 | `mediagit-0.2.8-beta.1-x86_64-linux.tar.gz` |
-| Linux ARM64 | `mediagit-0.2.8-beta.1-aarch64-linux.tar.gz` |
-| macOS Intel | `mediagit-0.2.8-beta.1-x86_64-macos.tar.gz` |
-| macOS Apple Silicon | `mediagit-0.2.8-beta.1-aarch64-macos.tar.gz` |
-| Windows x86_64 | `mediagit-0.2.8-beta.1-x86_64-windows.zip` |
+| Linux x86_64 | `mediagit-0.3.0-rc.4-x86_64-linux.tar.gz` |
+| Linux ARM64 | `mediagit-0.3.0-rc.4-aarch64-linux.tar.gz` |
+| macOS Intel | `mediagit-0.3.0-rc.4-x86_64-macos.tar.gz` |
+| macOS Apple Silicon | `mediagit-0.3.0-rc.4-aarch64-macos.tar.gz` |
+| Windows x86_64 | `mediagit-0.3.0-rc.4-x86_64-windows.zip` |
 
 Each archive includes `mediagit` (CLI) and `mediagit-server` binaries, plus a `.sha256` checksum file.
 
-### Basic Usage
+### Choose your setup path
 
-```bash
-# Initialize repository
-mediagit init
-
-# Add files
-mediagit add *.psd
-mediagit add large-video.mp4
-
-# Commit
-mediagit commit -m "Initial commit"
-
-# Check status
-mediagit status
-
-# View log
-mediagit log
+```mermaid
+flowchart TD
+    A["Start"] --> B{"Multi-user, CI,<br/>or public network?"}
+    B -->|"No — solo / local"| C["mediagit-server init<br/>--non-interactive"]
+    C --> D["init / add / commit / push"]
+    B -->|"Yes — team / CI"| E["mediagit-server init<br/>--enable-auth"]
+    E --> F["mediagit auth login"]
+    F --> G["clone / push"]
+    E --> H["mediagit auth key create<br/>--name ci (for CI)"]
 ```
 
-### Server Setup
+### Auth-off (local, default)
+
+No login needed — `enable_auth` defaults to off. Content must be pushed
+before the first clone (cloning an empty repo isn't supported):
 
 ```bash
-# Run server (default: http://localhost:3000)
-mediagit-server
+mediagit-server init --non-interactive --data-dir ./repos   # auth off, loopback
+mediagit-server --config mediagit-server.toml               # serve
 
-# Or with custom config
-mediagit-server --config server.toml
+mediagit init myrepo && cd myrepo
+echo hi > f.txt && mediagit add f.txt && mediagit commit -m first
+mediagit remote add origin http://127.0.0.1:3000/myrepo && mediagit push origin
 ```
 
-**See [DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md) for complete setup instructions.**
+### Auth-on (multi-user)
+
+```bash
+mediagit-server init --enable-auth      # wizard: config + JWT secret + first admin
+mediagit-server --config mediagit-server.toml
+
+# user, anywhere:
+mediagit auth login --server https://host        # stores credential by origin
+mediagit clone https://host/myrepo               # credential found by origin
+cd myrepo && mediagit push
+
+# CI:
+mediagit auth key create --name ci               # prints key once
+MEDIAGIT_API_KEY=... mediagit push
+
+# admin:
+mediagit auth admin set-role bob admin
+```
+
+**See [SETUP.md](SETUP.md) for the full operator guide, or [DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md) for building from source.**
 
 ---
 
 ## CLI Reference
 
-All 28 MediaGit commands, grouped by workflow:
+All 32 MediaGit commands, grouped by workflow:
 
 ### Repository Setup
 | Command | Description |
@@ -250,6 +282,13 @@ All 28 MediaGit commands, grouped by workflow:
 |---------|-------------|
 | `mediagit tag <name>` | Create, list, or delete tags |
 
+### File Locking
+| Command | Description |
+|---------|-------------|
+| `mediagit lock create <path>` | Acquire a server-enforced lock on a file (e.g. a non-mergeable binary asset) |
+| `mediagit lock unlock <path>` | Release a lock (`--force` to release someone else's, requires `repo:admin`) |
+| `mediagit lock list` | List active locks |
+
 ### Remote Operations
 | Command | Description |
 |---------|-------------|
@@ -257,6 +296,15 @@ All 28 MediaGit commands, grouped by workflow:
 | `mediagit fetch [remote]` | Download remote changes without merging |
 | `mediagit pull [remote]` | Fetch and integrate remote changes into current branch |
 | `mediagit push [remote]` | Upload local commits to the remote repository |
+| `mediagit download <path>` | Download a single file from a remote repository by path, without a full clone |
+
+**Push Semantics**: By default, `mediagit push` uploads only the current branch, matching Git behavior. Use `--all` to push all local branches, `--tags` to push all tags, or `--follow-tags` to include tags reachable from pushed commits. On first push to a remote without a configured upstream, use `mediagit push -u [remote] [branch]` to set upstream tracking.
+
+### Media & Sparse Checkout
+| Command | Description |
+|---------|-------------|
+| `mediagit media info <path>` | Inspect media file metadata (image, video, audio, PSD, 3D formats) |
+| `mediagit sparse-checkout <set\|list\|disable>` | Materialize only part of the working tree |
 
 ### Undoing Changes
 | Command | Description |
@@ -272,8 +320,13 @@ All 28 MediaGit commands, grouped by workflow:
 | `mediagit fsck` | Check repository integrity — detect corruption or missing objects |
 | `mediagit verify <commit>` | Verify commit signatures and data integrity |
 
-> **Git Interop**: Migration commands (`filter`, `install`, `track`, `untrack`) were removed in v0.2.4.
-> The `mediagit-git` crate remains in the workspace for a future migration milestone.
+> **Importing from git or git-lfs is not supported.** The migration commands
+> (`filter`, `install`, `track`, `untrack`) were removed in v0.2.4, and the two
+> crates that backed them were deleted in v0.3.0-rc.4 — neither was ever wired
+> to the CLI, and the clean filter replaced file content with a pointer without
+> storing the content anywhere. MediaGit is a standalone VCS for media, not a
+> git front-end, so an importer must rebuild history through MediaGit's own
+> object model. See ARCHITECTURE.md.
 
 ### Utility
 | Command | Description |
@@ -313,7 +366,10 @@ mediagit-core/
 │   ├── mediagit-security/     # Auth, encryption, TLS
 │   └── ...
 ├── tests/                     # Integration tests
-├── docker/                    # Docker configurations
+├── Dockerfile                 # Server image build
+├── docker-compose.yml         # Local multi-backend dev services (MinIO/Azurite/fake-GCS)
+├── docker-compose.minio.yml   # Pinned MinIO-only backend (A7 outage drill)
+├── docker-compose.test.yml    # CI integration-test services
 ├── DEVELOPMENT_GUIDE.md       # Complete setup guide
 └── Cargo.toml                 # Workspace configuration
 ```
@@ -334,40 +390,23 @@ mediagit-core/
 
 ## Industry Use Cases
 
-MediaGit is designed for **enterprise-scale media workflows**:
-
-### VFX Studio: 50TB Shot Library
-| Feature | Capability |
-|---------|------------|
-| **Deduplication** | CDC + Delta = typically 25–50% savings |
-| **Fast Clone** | Differential checkout (<1s for unchanged) |
-| **Branching** | Instant branch creation |
-| **Cost** | $0 (AGPL) vs $50k/year Perforce |
-
-### Game Dev: 10TB Texture Library
-| Feature | Capability |
-|---------|------------|
-| **Cross-platform dedup** | Same source art deduped |
-| **Smart compression** | Skip GPU formats, compress PSD |
-| **Platform checkout** | Pull only needed assets |
-
-### Virtual Production: 20TB HDRI Library
-| Feature | Capability |
-|---------|------------|
-| **Multi-backend** | Local NAS + S3 cloud sync |
-| **Differential** | Pull only changed environments |
-| **Offline** | Full DVCS, work without internet |
-
-### ML/Datasets: 100TB Training Data
-| Feature | Capability |
-|---------|------------|
-| **Chunking** | CDC finds duplicates across versions |
-| **Differential** | Pull only new chunks (incremental) |
-| **Storage** | S3 + Glacier lifecycle support |
+MediaGit is built for enterprise-scale media workflows — VFX shot libraries, game dev texture pipelines, virtual production HDRI sync, and ML/dataset versioning. See **[USE_CASES.md](USE_CASES.md)** for concrete command sequences and measured payoffs per industry.
 
 ---
 
 ## Performance
+
+### Cross-Cloud Throughput (condensed)
+
+| Backend | Push MB/s | Clone MB/s |
+|---------|----------:|-----------:|
+| MinIO (local) | 146.8 | 65.3 |
+| AWS S3 | 11.8 | 7.3 |
+| Azure Blob | 13.4 | 10.7 |
+| GCS | 14.4 | 10.5 |
+
+MinIO is the loopback software ceiling; AWS/Azure/GCS are real cloud over WAN
+(bandwidth-bound). Full table, chart, and methodology: [BENCHMARKS.md](BENCHMARKS.md).
 
 ### Validated Staging Throughput (release build)
 
@@ -440,7 +479,7 @@ Compression strategy is selected automatically per file type. Pre-compressed for
 | **Cloud Backends** | S3, Azure, GCS, MinIO, B2 | Any LFS server | None native | HF Hub only | Proprietary |
 | **Offline Commits** | ✅ | ✅ (Git) | ❌ | ❌ | Not documented |
 | **Branching Cost** | ✅ Instant ref-based | ✅ (Git) | ⚠️ Copy-based | N/A | N/A |
-| **File Locking** | ❌ Roadmap | ✅ | ✅ | ❌ | Not documented |
+| **File Locking** | ✅ Server-enforced (`lock create/unlock/list`, push-time enforcement) | ✅ | ✅ | ❌ | Not documented |
 | **Max File Size** | No limit (u64) | 5 GB (GitHub.com) | No limit | No limit | No limit |
 | **Price** | **Free (AGPL-3.0)** | Free + server | Free ≤5; $39/user/mo | Free tier + Enterprise | Beta TBD |
 
@@ -456,6 +495,16 @@ Compression strategy is selected automatically per file type. Pre-compressed for
 ### Storage Reduction: Two Complementary Mechanisms
 
 MediaGit achieves storage savings through two distinct layers that work together on every chunk:
+
+```mermaid
+flowchart TD
+    A["New chunk"] --> B{"BLAKE3 CAS hit?"}
+    B -->|"Yes"| C["Free dedup — 0 bytes stored"]
+    B -->|"No"| D["SimilarityDetector"]
+    D --> E{"Similar chunk found?<br/>(type-aware threshold)"}
+    E -->|"Yes"| F["Delta encode<br/>(base + zstd-dict diff)"]
+    E -->|"No"| G["Compress + store full"]
+```
 
 #### Layer 1 — Exact Deduplication (CAS)
 
@@ -521,54 +570,40 @@ MediaGit is **designed for terabyte-scale files**:
 
 ## Configuration
 
-MediaGit supports multiple configuration methods:
-
-### 1. TOML Configuration
+A repository is configured by one file: `.mediagit/config.toml`, written by
+`mediagit init`. Storage backend and credentials both live there.
 
 ```toml
 # .mediagit/config.toml
 [storage]
-backend = "s3"
+backend = "s3"                     # filesystem | s3 | azure | gcs
 bucket = "my-mediagit-bucket"
 region = "us-east-1"
-encryption = true
-encryption_algorithm = "AES256"   # Options: AES256, aws:kms
-
-[compression]
-enabled = true
-algorithm = "zstd"
-level = 3
+access_key_id = "AKIA..."
+secret_access_key = "..."
+# endpoint = "http://localhost:9000"   # for MinIO / S3-compatible services
 ```
 
-### 2. Environment Variables
+**There is no environment-variable path for storage settings**, and no
+IAM-role or `aws configure` auto-detection — the keys above are read from this
+file and passed straight to the backend, which rejects an empty key. Automation
+holding credentials in the environment should render them into `config.toml`;
+exporting them has no effect. Because secrets sit on disk, treat this file as a
+secret (MediaGit warns on Unix if it is world-readable).
 
-```bash
-export MEDIAGIT_S3_BUCKET=my-bucket
-export MEDIAGIT_S3_REGION=us-east-1
-export MEDIAGIT_S3_ACCESS_KEY_ID=...
-export MEDIAGIT_S3_SECRET_ACCESS_KEY=...
-```
+Compression needs no configuration: `SmartCompressor` picks algorithm and level
+from the file type on its own.
 
-### 3. Cloud Provider Credentials
-
-```bash
-# AWS (auto-detected)
-aws configure
-
-# Azure
-az login
-
-# GCP
-gcloud auth login
-```
-
-**See [DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md) for complete configuration examples.**
+**See [CONFIGURATION.md](./CONFIGURATION.md) for every key, per backend, and
+[DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md) for end-to-end setup.**
 
 ---
 
 ## Documentation
 
 ### Guides
+- **[SETUP.md](./SETUP.md)** - Setup guide for client + server
+- **[CONFIGURATION.md](./CONFIGURATION.md)** - Complete client + server configuration reference
 - **[DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md)** - Complete setup for local, MinIO, AWS, Azure, GCS
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Project Architecture
 - **[comparison.md](comparison.md)** - Evidence-based comparison with Git LFS, Perforce, HF Xet, DVC, Diversion, and 6 other tools
@@ -576,7 +611,7 @@ gcloud auth login
 
 ### Examples
 - Configuration examples: `crates/mediagit-config/examples/`
-- Docker configs: `docker/`
+- Docker configs: `Dockerfile`, `docker-compose*.yml` (repo root)
 - Test scripts: `tests/`
 
 ---
@@ -585,7 +620,7 @@ gcloud auth login
 
 ### Prerequisites
 
-- **Rust**: 1.92+ (MSRV — check with `rustc --version`)
+- **Rust**: 1.97+ (MSRV — check with `rustc --version`)
 - **OS**: Linux, macOS, or WSL2 (Windows)
 - **Tools**: cargo, git
 
@@ -624,7 +659,6 @@ cargo test --workspace -- --ignored
 |-------|-----------|----------|
 | **mediagit-cli** | `tests/*.rs` | 20+ test files: init, add, commit, branch, merge, etc. |
 | **mediagit-metrics** | `tests/metrics_test.rs` | Registry, dedup, compression, cache metrics |
-| **mediagit-migration** | `tests/migration_test.rs` | State, progress, integrity verification |
 | **mediagit-security** | `tests/security_test.rs` | Encryption, KDF, audit logging |
 | **mediagit-compression** | `tests/proptest_compression.rs` | Property-based compression roundtrip |
 | **mediagit-versioning** | `tests/proptest_odb.rs` | Property-based ODB operations |
@@ -649,7 +683,6 @@ cargo test -p mediagit-cli --test performance_benchmark_test -- --ignored
 # Test individual crates
 cargo test -p mediagit-metrics
 cargo test -p mediagit-security
-cargo test -p mediagit-migration
 cargo test -p mediagit-compression
 cargo test -p mediagit-versioning
 cargo test -p mediagit-storage
@@ -680,7 +713,7 @@ cargo check
 | **macOS** | x86_64 | ✅ Supported | Intel Macs |
 | **macOS** | Apple Silicon | ✅ Supported | M1/M2/M3 |
 | **Windows** | x86_64 | ✅ Supported | Via WSL2 recommended |
-| **Windows** | ARM64 | ✅ Supported | Surface Pro X, etc. |
+| **Windows** | ARM64 | ⬜ Build from source | No release binary; `cross-rs` has no Windows target. See `book/src/installation/windows-arm64.md` |
 
 ---
 
@@ -746,12 +779,12 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] Core CLI: `init`, `add`, `commit`, `status`, `log`, `branch`, `merge`, `push`, `pull`
 - [x] Content-addressed object database (BLAKE3, CDC chunking)
 - [x] Intelligent compression — Zstd, Brotli, per-type strategy (70+ file types)
-- [x] PSD layer-aware merge intelligence
+- [ ] PSD layer-aware merge intelligence — layer *analysis* works; writing a merged PSD does not (the parser is read-only), so `merge` reports a conflict and checks out one side
 - [x] Multi-cloud storage: AWS S3, Azure Blob, GCS, MinIO, Backblaze B2, DO Spaces
-- [x] Security: AES-256-GCM encryption at rest, Argon2id key derivation
+- [x] Security: backend-provided encryption at rest (S3 SSE); AES-256-GCM + Argon2id implemented in `mediagit-security`, not yet wired into the CLI
 - [x] Observability: structured logging, Prometheus metrics
 - [x] 960 unit tests, 80%+ coverage
-- [x] Multi-platform binaries: Linux, macOS, Windows (x86_64 + ARM64)
+- [x] Multi-platform binaries: Linux (x86_64 + ARM64), macOS (Intel + Apple Silicon), Windows (x86_64)
 
 ### v0.2.0 ✅ — March 5, 2026
 *Major features — storage efficiency and security*
@@ -760,8 +793,8 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] Delta chain depth cap (MAX_DELTA_DEPTH=10) — prevents read-amplification
 - [x] Adaptive chunk sizes (1–8 MB) — replaces fixed 64 MB chunks
 - [x] Per-type similarity thresholds for delta compression
-- [x] AES-256-GCM client-side encryption with Argon2id KDF
-- [x] TLS 1.3 for all network operations
+- [ ] AES-256-GCM client-side encryption with Argon2id KDF — module implemented and tested, no CLI call sites yet
+- [x] TLS 1.3 on the server's TLS listener (`tls_min_version`, default `"1.3"`; set `"1.2"` as an escape hatch)
 - [x] JWT + API key authentication (server mode)
 - [x] Video timeline and audio track-based merging
 - [x] Automated multi-platform release CI (Linux, macOS, Windows, Docker, crates.io)
@@ -802,9 +835,30 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] Raw file serving endpoints (`GET /{repo}/files/{*path}`, `GET /{repo}/tree`)
 - [x] `/health` route alias alongside `/healthz`
 
-### v0.3.0 and beyond
 
-See [FUTURE_TODOS.md](./FUTURE_TODOS.md) for planned features.
+### v0.3.0-rc.4 — July 2026
+*Object-store layout v2, client auth, and reachability tooling, GA hardening: server-enforced locking, durable auth, format freeze*
+
+- [x] Object-store layout v2: per-repo namespace, true two-level hash fanout, `LAYOUT` marker
+- [x] Client authentication: env → config → keychain → none precedence (`MEDIAGIT_TOKEN`, `MEDIAGIT_API_KEY`)
+- [x] `download` command — single-file fetch from a remote without a full clone
+- [x] Parallel checkout across multiple worker threads
+- [x] Roaring-bitmap reachability index for faster `gc`/`fsck` (`MEDIAGIT_BITMAP`)
+- [x] `ObjectType::Tag` with SSH/ed25519 tag signing (`MEDIAGIT_SIGN`, `MEDIAGIT_SIGN_KEY`)
+- [x] Sparse checkout — cone mode and pattern mode (`sparse-checkout set|list|disable`)
+- [x] `media info` — inspect image/video/audio/PSD/3D metadata without touching the ODB
+- [x] `status` ahead/behind tracking-branch counters and `--json` output
+- [x] Server-enforced file locking — `lock create|unlock|list`, push-time enforcement (`MEDIAGIT_LOCKS_ENFORCE`)
+- [x] Auth persistence — `users.jsonl` / `api_keys.jsonl` / `grants.jsonl` survive server restarts (`MEDIAGIT_AUTH_PERSIST`)
+- [x] Per-repo authorization grants (Read < Write < Admin) + admin endpoints (`/auth/users`, `/auth/keys`, grants)
+- [x] OS-keychain credential storage on the client (`MEDIAGIT_NO_KEYRING` to opt out)
+- [x] Path-traversal hardening — object-key validation at the storage boundary + server hex-id guards
+- [x] `push --repair` — pack-aware re-upload of corrupted remote chunks and objects
+- [x] Server-side integrity verification endpoints (chunks + objects, strong BLAKE3 re-hash)
+- [x] `gc --repack` chunk consolidation into cloud packs
+- [x] Format freeze + compatibility promise — persisted/wire formats frozen as of this release (see `FORMATS.md` §11)
+
+
 
 ---
 
@@ -843,7 +897,7 @@ aws iam get-user-policy --user-name mediagit-user --policy-name MediaGitS3Policy
 ```bash
 # The /releases/latest API returns 404 when only pre-releases exist.
 # Pass the version explicitly:
-VERSION=0.2.8-beta.1 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
+VERSION=0.3.0-rc.4 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 
 # Or on Windows PowerShell:
 iwr -UseBasicParsing https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.ps1 | iex
@@ -897,18 +951,18 @@ Special thanks to:
 ## Statistics
 
 - **Lines of Code**: 85,000+ (Rust, 218 source files across 14 crates)
-- **Features**: 100% complete (all P0–P3 items)
-- **Test Coverage**: 1,529 unit/integration tests; **614/614 deep-tests** across MinIO, AWS S3, Azure Blob, GCS (validated 2026-06-02)
+- **Features**: 100% complete (all P0–P3 items from the rc.3 feature-completeness sprint — see disambiguation note above)
+- **Test Coverage**: 1,765+ unit/integration tests (validated 2026-07-16); **614/614 deep-tests** across MinIO, AWS S3, Azure Blob, GCS (validated 2026-06-02)
 - **Staging Throughput**: 25–240 MB/s for small files; 2.8–5.2 MB/s for chunked large files (WAV/PSD/GLB)
 - **Network Throughput**: 134–267 MB/s push (local server, pack negotiation); WAN-bound on cloud backends
 - **Storage Savings**: **26.3–26.5%** validated on 4 cloud backends (June 2026); ~30% average across mixed media projects
 - **Stability**: 0 crashes, 0 data corruption across all validated test runs
 - **File Formats**: 70+ extensions (video, audio, image, 3D, DCC, ML, game engines, office)
 - **Server Endpoints**: 20 handler routes + auth
-- **Platforms**: Linux, macOS, Windows — x86_64 + ARM64
+- **Platforms**: Linux (x86_64 + ARM64), macOS (Intel + Apple Silicon), Windows (x86_64)
 
 ---
 
 **Made with 🦀 and ❤️ by the MediaGit Contributors**
 
-**Status**: Beta | **Version**: v0.2.8-beta.1 | **Updated**: June 2, 2026 | **Cloud-Validated**: 614/614 tests ✅
+**Status**: Release Candidate | **Version**: v0.3.0-rc.4 | **Updated**: July 16, 2026 | **Cloud-Validated**: QA campaign `20260716-172951` ✅

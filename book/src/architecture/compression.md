@@ -14,35 +14,38 @@ MediaGit employs intelligent compression based on file type and size to minimize
 - **Ratio**: 3-5x for binaries, 10-20x for text
 - **Use**: Text and code files when size matters more than speed
 
+### zlib
+- **Use**: Git-compatible object encoding (internal git-format compat objects only)
+
 ### delta (Zstd Dictionary Delta Encoding)
-- **Algorithm**: Zstd dictionary compression (chunk-level delta via `mediagit-versioning`)
+- **Algorithm**: Zstd dictionary compression (chunk-level delta via `mediagit-versioning`), applied by the ODB on top of the base algorithm above — not a member of the `CompressionAlgorithm` enum itself
 - **How**: Base chunk serves as a raw zstd dictionary (level 19) to compress target chunk
 - **Ratio**: 33–83% reduction for updated files (type-dependent; validated March 2026)
 - **Use**: Large files with incremental changes
 
 ## Algorithm Selection
 
+Selection is driven by detected object type (`CompressionStrategy::for_object_type` in `mediagit-compression`), not by file extension directly:
+
 ```rust
-fn select_algorithm(path: &Path, size: u64) -> CompressionAlgorithm {
-    match path.extension().and_then(|s| s.to_str()) {
+fn select_strategy(obj_type: ObjectType) -> CompressionStrategy {
+    match obj_type {
         // Already compressed (store as-is)
-        Some("mp4" | "mov" | "mkv" | "avi") => None,
-        Some("jpg" | "jpeg" | "png" | "webp") => None,
-        Some("mp3" | "aac" | "m4a") => None,
+        ObjectType::Mp4 | ObjectType::Mov | ObjectType::Mkv | ObjectType::Avi => Store,
+        ObjectType::Jpeg | ObjectType::Png | ObjectType::Webp => Store,
+        ObjectType::Mp3 | ObjectType::Aac => Store,
 
         // Lossless audio (zstd Best — uncompressed, good ratio)
-        Some("flac" | "wav" | "aiff") => Zstd,
+        ObjectType::Flac | ObjectType::Wav | ObjectType::Aiff => Zstd(Best),
 
         // Text and code (brotli for better ratio)
-        Some("txt" | "md" | "rs" | "py" | "js" | "ts") => Brotli,
+        ObjectType::Text | ObjectType::Json | ObjectType::Xml => Brotli(Default),
 
-        // Large binaries (zstd + delta)
-        Some("psd" | "psb") if size > 10_MB => ZstdWithDelta,
-        Some("blend") if size > 10_MB => ZstdWithDelta,
-        Some("fbx" | "obj") if size > 10_MB => ZstdWithDelta,
+        // Creative project files (zstd + chunk-level delta applied separately by the ODB)
+        ObjectType::AdobePhotoshop | ObjectType::Blender => Zstd(Default),
 
         // Default
-        _ => Zstd,
+        _ => Zstd(Default),
     }
 }
 ```
@@ -52,17 +55,17 @@ fn select_algorithm(path: &Path, size: u64) -> CompressionAlgorithm {
 ### Fast (Level 1)
 - **zstd**: ~150 MB/s, 2x ratio
 - **Use**: Quick commits, local repos
-- **Command**: `mediagit config compression.level fast`
+- **Set via**: `level = 1` under `[compression]` in `.mediagit/config.toml`
 
 ### Default (Level 3)
 - **zstd**: ~100 MB/s, 2.5x ratio
 - **Use**: Balanced performance
-- **Command**: `mediagit config compression.level default`
+- **Set via**: `level = 3` under `[compression]` in `.mediagit/config.toml`
 
 ### Best (Level 19)
 - **zstd**: ~10 MB/s, 3.5x ratio
 - **Use**: Archival, cloud storage (bandwidth limited)
-- **Command**: `mediagit config compression.level best`
+- **Set via**: `level = 19` under `[compression]` in `.mediagit/config.toml`
 
 ## Performance Benchmarks
 
@@ -91,13 +94,12 @@ level = 3        # zstd: 1 (fastest) – 22 (best compression)
 min_size = 1024  # bytes; files smaller than this skip compression
 ```
 
-### Per-File Override
+### Per-Algorithm Override
 ```toml
-[compression.overrides]
-"*.psd" = { algorithm = "zstd", level = 22 }
-"*.txt" = { algorithm = "brotli", level = 6 }
-"*.mp4" = { algorithm = "none" }
+[compression.algorithms.zstd]
+level = 19
 ```
+`CompressionConfig` supports one override map keyed by algorithm name (`algorithms: HashMap<String, AlgorithmConfig>`) for tuning a given algorithm's level; it does not support per-file-glob overrides. File-type-specific algorithm selection is automatic (see [Algorithm Selection](#algorithm-selection) above) and not user-configurable per extension. Note: zstd levels above 19 ("ultra") are not used — they need ~1 GB per compression context and have caused OOM under parallel adds, for <0.5% extra ratio on media data.
 
 ## Related Documentation
 

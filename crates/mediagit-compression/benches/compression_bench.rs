@@ -14,10 +14,10 @@
 #![allow(clippy::unwrap_used)]
 //! Compression benchmarks comparing Zstd vs Brotli vs Adaptive
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use mediagit_compression::{
-    adaptive::AdaptiveCompressor, BrotliCompressor, CompressionLevel, CompressionProfile,
-    Compressor, ObjectType, PerObjectTypeCompressor, TypeAwareCompressor, ZstdCompressor,
+    BrotliCompressor, CompressionLevel, CompressionProfile, Compressor, ObjectType,
+    PerObjectTypeCompressor, TypeAwareCompressor, ZstdCompressor, adaptive::AdaptiveCompressor,
 };
 use std::hint::black_box;
 

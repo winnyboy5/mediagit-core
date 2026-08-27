@@ -16,8 +16,8 @@
 
 use mediagit_storage::mock::MockBackend;
 use mediagit_versioning::{
-    apply_merge_to_workdir, Conflict, ConflictSide, ConflictType, FileMode, Index, MergeResult,
-    MergeStrategy, ObjectDatabase, ObjectType, Oid, Tree, TreeEntry,
+    Conflict, ConflictSide, ConflictType, FileMode, Index, MergeResult, MergeStrategy,
+    ObjectDatabase, ObjectType, Oid, Tree, TreeEntry, apply_merge_to_workdir,
 };
 use std::sync::Arc;
 use tempfile::TempDir;

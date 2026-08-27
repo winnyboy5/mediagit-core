@@ -9,6 +9,19 @@ repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
 description = "Version control CLI purpose-built for media files"
+# Not published to crates.io: distribution is cargo-dist binaries, Docker
+# images and GitHub releases. This also makes deny.toml's
+# `allow-wildcard-paths` apply to our own path deps (cargo-deny exempts
+# them only for non-public crates). Flip to `true` and add `version = ...`
+# beside every internal `path = ...` if crates.io publishing is turned on.
+publish = false
+# cargo-dist ships these two binaries. Marked explicitly because dist's default
+# for a package is tied to whether it is publishable, and this crate just became
+# `publish = false` — without this the release pipeline could silently stop
+# building the binary. Being explicit costs one line and removes the coupling.
+[package.metadata.dist]
+dist = true
+
 
 [dependencies]
 # Workspace crates
@@ -17,6 +30,9 @@ mediagit-storage = { path = "../mediagit-storage", features = ["all"] }
 mediagit-versioning = { path = "../mediagit-versioning" }
 mediagit-observability = { path = "../mediagit-observability" }
 mediagit-protocol = { path = "../mediagit-protocol" }
+mediagit-media = { path = "../mediagit-media" }
+mediagit-security = { path = "../mediagit-security", features = ["auth", "middleware"] }
+mediagit-compression = { path = "../mediagit-compression" }  # DC-7: installs the process-global at-rest key at startup
 
 # Workspace dependencies
 tokio.workspace = true
@@ -24,6 +40,7 @@ clap.workspace = true
 clap_complete.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+postcard.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 indicatif.workspace = true
@@ -31,16 +48,24 @@ console.workspace = true
 toml.workspace = true
 chrono.workspace = true
 rayon.workspace = true
+blake3.workspace = true
+hex.workspace = true  # DC-7: wrapped-key and salt encoding in .mediagit/encryption-key
 
 # Additional dependencies
 dialoguer = "0.12"
 futures = "0.3"
 glob = "0.3"
-walkdir = "2.5"
 dunce = "1.0"  # Cross-platform path canonicalization (handles Windows \\?\ prefix)
 num_cpus = "1.16"
 husky-rs = "0.3.2"
 ignore = "0.4"  # .gitignore-compatible pattern matching for .mediagitignore
+getrandom = "0.4"  # OS RNG for per-repo CDC seed generation at `mediagit init`
+url = "2.5"  # scheme/host/port parsing for full-URL download credential gating (F4)
+keyring = "4.1.5"  # OS-keychain credential storage (I10); default "v1" feature covers Windows Credential Manager natively
+reqwest.workspace = true  # `mediagit auth *` talks to server-root /auth/* endpoints directly (not repo-scoped, so ProtocolClient doesn't cover them)
+# reqwest uses `rustls-no-provider`, so the binary must install the process-level
+# provider itself (see main.rs). default-features = false keeps aws-lc-rs out.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 
 [lib]
 name = "mediagit_cli"
@@ -52,6 +77,12 @@ path = "src/main.rs"
 
 [dev-dependencies]
 mediagit-test-utils = { path = "../mediagit-test-utils" }
+mediagit-server = { path = "../mediagit-server" }
 assert_cmd = "2.1"
 predicates = "3.1"
 tempfile.workspace = true
+axum.workspace = true
+ssh-key = { version = "0.6.7", features = ["ed25519"] }
+
+[lints.rust]
+unsafe_code = "deny"

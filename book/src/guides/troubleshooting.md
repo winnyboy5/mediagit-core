@@ -20,7 +20,7 @@ The fast path lets the client upload chunk bytes directly to the storage bucket,
 | Bucket has a VPC-only policy (production default) | Expected on prod — proxy path is correct. No action needed. |
 | Corporate / ISP firewall blocks outbound S3 HTTPS | Use the proxy path (already the fallback). Or open egress to `*.s3.<region>.amazonaws.com:443`. |
 | S3 bucket policy restricts by IP | Add your machine's public IP: `aws s3api put-bucket-policy` with `aws:SourceIp` condition. |
-| MinIO behind private network | Ensure `MEDIAGIT_STORAGE_ENDPOINT` points to a publicly reachable MinIO host, or use proxy path. |
+| MinIO behind private network | Ensure the repo's `[storage] endpoint` in `.mediagit/config.toml` points to a host the client can reach, or use the proxy path. (There is no `MEDIAGIT_STORAGE_ENDPOINT` env var — storage settings are config-file only.) |
 
 **To verify connectivity from your machine:**
 ```bash

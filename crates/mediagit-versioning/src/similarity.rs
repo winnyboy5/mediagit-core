@@ -371,7 +371,26 @@ impl SimilarityDetector {
                 continue;
             }
 
-            // Skip delta chunks to prevent delta chains (no I/O needed)
+            // DEAD BRANCH — it never fires, and it does NOT bound chunk-delta
+            // chain depth despite what it looks like.
+            //
+            // `is_delta` is never set to `true` anywhere in the workspace: it
+            // defaults false and the two chunk-write paths explicitly assign
+            // false (odb/chunks.rs), deliberately, to keep the candidate pool
+            // large. Nothing else touches it. Relying on this to prevent deep
+            // chains is exactly the mistake that shipped the unbounded-chain
+            // defect fixed on 2026-07-23.
+            //
+            // Depth is bounded where it can be done without shrinking the
+            // pool: `odb::resolve_delta_base` re-targets to the chain root at
+            // `MAX_DELTA_DEPTH` rather than excluding candidates here. That
+            // keeps the delta (and the savings) instead of dropping it — and
+            // the dedup gate measures byte-identical savings with it in place,
+            // which is why this branch has not been replaced with a
+            // depth-aware ranking: there is no measured benefit to buy.
+            //
+            // Kept rather than deleted so the field's intent stays documented;
+            // if a future caller does set it, the exclusion still works.
             if candidate.is_delta {
                 continue;
             }

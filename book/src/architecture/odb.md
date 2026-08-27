@@ -128,13 +128,14 @@ For files exceeding type-specific thresholds (5-10MB), MediaGit automatically ch
 - **Example**: `5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03`
 
 ### Path Mapping
-Objects stored with 2-character prefix for directory sharding:
+Objects are stored under a per-repo namespace directory with a two-level hash
+fanout on the OID itself (storage layout v2):
 ```
 OID: 5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03
-Path: objects/58/91b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03
+Path: <repo_namespace>/objects/58/91/5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03
 ```
 
-**Benefit**: Prevents single directory with millions of files (filesystem optimization)
+**Benefit**: Prevents single directory with millions of files (filesystem optimization). The `repo_namespace` prefix also lets one storage root or bucket safely host multiple repositories.
 
 ## Caching Strategy
 
@@ -152,34 +153,33 @@ Pre-load frequently accessed objects:
 
 ### Cache Invalidation
 - Object modification (rare due to immutability)
-- Explicit cache clear (`mediagit gc --clear-cache`)
+- Process exit (the cache is in-memory and per-process; there is no cache-clear command)
 - Repository verification failures
 
 ## Compression Integration
 
 ### Algorithm Selection
+The `CompressionAlgorithm` enum itself has four members — `None`, `Zlib` (Git-compatible), `Zstd`, `Brotli` — and selection is driven by detected `ObjectType` (`CompressionStrategy::for_object_type` in `mediagit-compression`), not by file extension directly:
 ```rust
-fn select_compression(path: &Path, size: u64) -> CompressionAlgorithm {
-    match path.extension() {
-        // Already compressed media
-        Some("mp4" | "mov" | "jpg" | "png") => CompressionAlgorithm::None,
-
-        // Lossless audio (uncompressed — good zstd ratio)
-        Some("wav" | "flac" | "aiff") => CompressionAlgorithm::Zstd,
-
-        // Text and code
-        Some("txt" | "md" | "rs" | "py") => CompressionAlgorithm::Brotli,
-
-        // Large binaries
-        Some("psd" | "blend" | "fbx") if size > 10_MB => {
-            CompressionAlgorithm::ZstdWithDelta
+fn select_compression(obj_type: ObjectType) -> CompressionStrategy {
+    match obj_type {
+        // Already compressed media: store as-is
+        ObjectType::Mp4 | ObjectType::Mov | ObjectType::Jpeg | ObjectType::Png => {
+            CompressionStrategy::Store
         }
 
+        // Lossless audio (uncompressed — good zstd ratio)
+        ObjectType::Wav | ObjectType::Aiff => CompressionStrategy::Zstd(CompressionLevel::Best),
+
+        // Text and code
+        ObjectType::Text => CompressionStrategy::Brotli(CompressionLevel::Default),
+
         // Default
-        _ => CompressionAlgorithm::Zstd,
+        _ => CompressionStrategy::Zstd(CompressionLevel::Default),
     }
 }
 ```
+Chunk-level delta (base chunk as a zstd dictionary) is a separate mechanism applied by the ODB on top of this compression choice — see [Delta Encoding](./delta-encoding.md).
 
 ### Compression Levels
 - **Fast**: zstd level 1 (150 MB/s compression)
@@ -209,8 +209,15 @@ Chain depth: 3
 
 ### Chain Breaking
 - Maximum depth: 10 (`MAX_DELTA_DEPTH`)
-- After depth exceeded, new base created
-- `mediagit gc` optimizes chains
+- On reaching the limit, the next delta is re-targeted at the chain's **root**
+  (a full chunk) rather than the nominated base, so the chunk stays
+  delta-compressed while the chain restarts at depth 1
+- Enforced on write for every chunk-delta path, and on read: `get_chunk`
+  refuses to reconstruct a deeper chain
+- `mediagit fsck` reports an over-deep chain; `mediagit fsck --repair`
+  flattens it by re-storing the chunk in full
+- `mediagit gc` does **not** optimize chains — it only reclaims orphaned
+  delta objects
 
 ## Integrity Verification
 
@@ -232,18 +239,19 @@ if actual_oid != oid {
 - Read every object
 - Verify BLAKE3 hash
 - Report corrupted objects
-- Optionally repair from remote
+
+`mediagit fsck` additionally checks connectivity and finds dangling/unreachable objects, and supports `--repair` to fix repairable issues locally.
 
 ### Repair Operations
 ```bash
-# Verify repository
+# Verify repository (fast checksum + ref check)
 mediagit verify
 
-# Fetch missing/corrupted objects from remote
-mediagit verify --fetch-missing
+# Comprehensive integrity check with repair
+mediagit fsck --repair
 
-# Aggressive repair (expensive)
-mediagit verify --repair --fetch-missing
+# Re-verify every chunk reachable from pushed refs and repair from remote
+mediagit push --repair
 ```
 
 ## Performance Optimization
@@ -363,11 +371,12 @@ Storage: 7 GB instead of 10 GB (30% savings)
 ### Backend Requirements
 ```rust
 #[async_trait]
-pub trait Backend {
+pub trait StorageBackend: Send + Sync + Debug {
     async fn get(&self, key: &str) -> Result<Vec<u8>>;
     async fn put(&self, key: &str, data: &[u8]) -> Result<()>;
     async fn exists(&self, key: &str) -> Result<bool>;
     async fn delete(&self, key: &str) -> Result<()>;
+    async fn list_objects(&self, prefix: &str) -> Result<Vec<String>>;
 }
 ```
 

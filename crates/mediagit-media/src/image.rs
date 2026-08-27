@@ -307,10 +307,10 @@ impl ImageMetadataParser {
     /// Detect image format from data
     fn detect_format(data: &[u8], filename: &str) -> Result<SupportedImageFormat> {
         // Try extension first
-        if let Some(ext) = Path::new(filename).extension() {
-            if let Some(format) = SupportedImageFormat::from_extension(ext.to_str().unwrap_or("")) {
-                return Ok(format);
-            }
+        if let Some(ext) = Path::new(filename).extension()
+            && let Some(format) = SupportedImageFormat::from_extension(ext.to_str().unwrap_or(""))
+        {
+            return Ok(format);
         }
 
         // Detect from magic bytes
@@ -565,22 +565,20 @@ impl ImageMetadataParser {
     fn extract_xmp_field(xmp: &str, field: &str) -> Option<String> {
         // Try attribute format: field="value"
         let attr_pattern = format!(r#"{}="([^"]+)""#, field);
-        if let Ok(re) = regex_lite::Regex::new(&attr_pattern) {
-            if let Some(cap) = re.captures(xmp) {
-                if let Some(m) = cap.get(1) {
-                    return Some(m.as_str().to_string());
-                }
-            }
+        if let Ok(re) = regex_lite::Regex::new(&attr_pattern)
+            && let Some(cap) = re.captures(xmp)
+            && let Some(m) = cap.get(1)
+        {
+            return Some(m.as_str().to_string());
         }
 
         // Try element format: <field>value</field>
         let elem_pattern = format!(r#"<{}[^>]*>([^<]+)</{}>"#, field, field);
-        if let Ok(re) = regex_lite::Regex::new(&elem_pattern) {
-            if let Some(cap) = re.captures(xmp) {
-                if let Some(m) = cap.get(1) {
-                    return Some(m.as_str().to_string());
-                }
-            }
+        if let Ok(re) = regex_lite::Regex::new(&elem_pattern)
+            && let Some(cap) = re.captures(xmp)
+            && let Some(m) = cap.get(1)
+        {
+            return Some(m.as_str().to_string());
         }
 
         None

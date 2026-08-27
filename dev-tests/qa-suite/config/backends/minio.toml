@@ -1,0 +1,10 @@
+# QA-suite template - MinIO (S3-compatible, local dev). Tokens substituted by scripts\lib\remote.ps1.
+# Source: dev-tests\dev-server config pattern + dev-tests\standalone-deep-v11\scripts\run_remote.ps1.
+[storage]
+backend = "s3"
+bucket = "{{BUCKET}}"
+region = "{{REGION}}"
+access_key_id = "{{ACCESS_KEY}}"
+secret_access_key = "{{SECRET_KEY}}"
+endpoint = "{{ENDPOINT}}"
+force_path_style = true

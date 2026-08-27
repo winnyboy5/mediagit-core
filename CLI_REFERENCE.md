@@ -1,6 +1,6 @@
 # MediaGit CLI Reference
 
-Complete command reference for MediaGit v0.2.8-beta.1 — Git for Media Files.
+Complete command reference for MediaGit v0.3.0-rc.4 — Git for Media Files.
 
 Object IDs (OIDs) throughout MediaGit — commits, blobs, chunks — are **BLAKE3** hashes displayed as 64 lowercase hex characters.
 
@@ -39,12 +39,19 @@ graph LR
         push
         pull
         fetch
+        auth
+    end
+    subgraph "Media & Sparse"
+        media
+        sparse-checkout
     end
     subgraph Utility
         gc
         fsck
         verify
         stats
+        config
+        lock
         version
         completions
     end
@@ -57,8 +64,9 @@ graph LR
 | **Setup** | `init`, `clone`, `remote` |
 | **File Ops** | `add`, `commit`, `status`, `diff`, `show` |
 | **Branch & History** | `branch`, `merge`, `rebase`, `cherry-pick`, `log`, `reset`, `revert`, `reflog`, `stash`, `bisect`, `tag` |
-| **Remote** | `push`, `pull`, `fetch` |
-| **Utility** | `gc`, `fsck`, `verify`, `stats`, `version`, `completions` |
+| **Remote** | `push`, `pull`, `fetch`, `download`, `auth` |
+| **Media & Sparse** | `media`, `sparse-checkout` |
+| **Utility** | `gc`, `fsck`, `verify`, `stats`, `config`, `lock`, `key`, `version`, `completions` |
 
 ### Git-Compatibility Shims
 
@@ -250,16 +258,18 @@ mediagit status
 | `--ignored` | Show ignored files |
 | `-s, --short` | Short format output |
 | `--porcelain` | Machine-readable output |
-| `-b, --branch` | Show branch info |
-| `--ahead-behind` | Show ahead/behind counts |
+| `-b, --branch` | Show branch info, including upstream ahead/behind when configured |
 | `-q, --quiet` | Suppress output |
-| `-v, --verbose` | Detailed output |
+| `-v, --verbose` | Detailed output (adds total size to the summary line) |
+| `--json` | Single JSON document on stdout (implies no colors/progress) |
 
 **Examples:**
 ```bash
 mediagit status
 mediagit status -s              # Short format
 mediagit status --porcelain     # For scripting
+mediagit status -b              # Branch + ahead/behind vs. upstream
+mediagit status --json          # Machine-readable structured output
 ```
 
 ---
@@ -368,7 +378,6 @@ mediagit branch <SUBCOMMAND>
 | `rename` | `branch rename <OLD> <NEW>` | Rename specific branch |
 | `rename` | `branch rename <NEW>` | Rename current branch to NEW |
 | `show` | `branch show [BRANCH]` | Show info |
-| `merge` | `branch merge <BRANCH>` | Merge branch |
 | `protect` | `branch protect <BRANCH>` | Protect branch |
 
 **Flags for `branch list`:**
@@ -417,7 +426,6 @@ mediagit branch create feature/new-asset
 mediagit branch switch develop
 mediagit branch delete -D old-branch
 mediagit branch delete -r origin/stale-branch   # Delete local remote-tracking ref
-mediagit branch merge feature/complete --no-ff
 mediagit branch rename feature/old-name feature/new-name   # Rename specific branch
 mediagit branch rename new-name                            # Rename current branch
 ```
@@ -442,7 +450,7 @@ mediagit merge <BRANCH>
 | `-X, --strategy-option <OPT>` | Strategy option |
 | `--no-commit` | Don't commit |
 | `--abort` | Abort merge |
-| `--continue-merge` | Continue merge after resolving conflicts |
+| `--continue` | (alias `--continue-merge`) Continue merge after resolving conflicts |
 | `-q, --quiet` | Suppress output |
 | `-v, --verbose` | Detailed output |
 
@@ -451,7 +459,7 @@ mediagit merge <BRANCH>
 mediagit merge feature/complete
 mediagit merge develop --no-ff -m "Merge develop into main"
 mediagit merge --squash hotfix
-mediagit merge --continue-merge
+mediagit merge --continue
 ```
 
 ---
@@ -468,7 +476,7 @@ mediagit rebase <UPSTREAM> [BRANCH]
 |------|-------------|
 | `--keep-empty` | Keep empty commits |
 | `--abort` | Abort rebase |
-| `--continue-rebase` | Continue rebase after resolving conflicts |
+| `--continue` | (alias `--continue-rebase`) Continue rebase after resolving conflicts |
 | `--skip` | Skip current commit |
 | `-q, --quiet` | Suppress output |
 | `-v, --verbose` | Detailed output |
@@ -478,7 +486,7 @@ mediagit rebase <UPSTREAM> [BRANCH]
 **Examples:**
 ```bash
 mediagit rebase main
-mediagit rebase --continue-rebase
+mediagit rebase --continue
 mediagit rebase --abort
 ```
 
@@ -494,7 +502,7 @@ mediagit cherry-pick <COMMITS>...
 
 | Flag | Description |
 |------|-------------|
-| `--continue-pick` | Continue operation after resolving conflicts |
+| `--continue` | (alias `--continue-pick`) Continue operation after resolving conflicts |
 | `--abort` | Abort operation |
 | `--skip` | Skip current commit |
 | `-n, --no-commit` | Don't commit |
@@ -506,7 +514,7 @@ mediagit cherry-pick <COMMITS>...
 ```bash
 mediagit cherry-pick abc123
 mediagit cherry-pick abc123 def456 ghi789
-mediagit cherry-pick --continue-pick
+mediagit cherry-pick --continue
 ```
 
 ---
@@ -557,6 +565,7 @@ mediagit push [REMOTE] [REFSPEC]...
 | `-d, --delete` | Delete remote ref |
 | `-u, --set-upstream` | Set upstream |
 | `--no-track` | Push without setting upstream tracking |
+| `--repair` | Verify remote chunk integrity and force re-upload of any chunk the server reports as corrupted |
 | `-q, --quiet` | Suppress output |
 | `-v, --verbose` | Detailed output |
 
@@ -592,20 +601,22 @@ mediagit pull [REMOTE] [BRANCH]
 |------|-------------|
 | `-r, --rebase` | Rebase instead of merge |
 | `--dry-run` | Preview pull |
-| `--no-commit` | Don't commit merge |
-| `--abort` | Abort pull |
-| `--continue-pull` | Continue pull after resolving conflicts |
+| `--continue` | Continue after resolving conflicts (hidden; implemented) |
 | `-q, --quiet` | Suppress output |
 | `-v, --verbose` | Detailed output |
 
 > `-s/--strategy` and `-X/--strategy-option` are accepted for git-compatibility but hidden; MediaGit uses binary-aware merge for media files.
+>
+> `--no-commit` and `--abort` are declared but **not implemented** — both exit with an error telling you so. Use `mediagit merge --abort` to abort a conflicted pull.
 
 **Examples:**
 ```bash
 mediagit pull
 mediagit pull origin develop
 mediagit pull --rebase
-mediagit pull --continue-pull
+# NOTE: `pull --continue`, `-s` and `-X` are not implemented and now REFUSE
+# rather than being silently ignored. To resume after conflicts, resolve them
+# and use `mediagit merge --continue`.
 ```
 
 ---
@@ -634,11 +645,56 @@ mediagit fetch --all --prune
 
 ---
 
+### `mediagit download`
+
+Download a single file from a remote repository by path — a plain streaming
+GET against the server's file-browse endpoint, not a full clone. Works
+**without a local repository** when given a full URL (the point: CI/scripting
+can pull one asset without cloning). When run inside a repository with a
+non-URL path, resolves against the `origin` remote.
+
+```bash
+mediagit download <REMOTE_PATH> [--ref <REF>] [-o <PATH>]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--ref <REF>` | Branch, tag, or commit OID to download from (default: server's `main`, else `master`, else first branch) |
+| `-o, --output <PATH>` | Output file path (default: the file's base name in the current directory) |
+| `-q, --quiet` | Suppress output |
+
+**Examples:**
+```bash
+# No local repository needed — first path segment after the host is the repo name
+mediagit download http://server:3000/my-project/assets/logo.png
+
+mediagit download http://server:3000/my-project/assets/logo.png --ref v1.0
+mediagit download http://server:3000/my-project/assets/logo.png -o logo.png
+
+# Inside a repo, resolves against the 'origin' remote
+mediagit download assets/logo.png
+```
+
+Rejects `..` path-traversal components client-side (in addition to server-side
+validation). Attaches client credentials (`MEDIAGIT_TOKEN`/`MEDIAGIT_API_KEY`
+or per-remote config) exactly like `push`/`pull`/`fetch`/`clone` when run
+inside a repository with a non-URL path. In full-URL mode, credentials are
+attached only if the typed URL's host matches one of the current
+repository's configured remotes (scheme + host + effective port); with no
+local repository, or no matching remote, no credentials are sent — this
+keeps `MEDIAGIT_TOKEN`/`MEDIAGIT_API_KEY` from being sent to an arbitrary
+host.
+
+---
+
 ## Tags
 
 ### `mediagit tag`
 
-Manage tags.
+Manage tags. Annotated tags (`-a`/`-m`) are real objects in the object
+database (`ObjectType::Tag`) — a tag name, tagger, message, and a target
+OID, just like a commit. Lightweight tags are still just a ref pointing
+directly at a commit.
 
 ```bash
 mediagit tag <SUBCOMMAND>
@@ -652,7 +708,25 @@ mediagit tag <SUBCOMMAND>
 | `list` | `tag list [PATTERN]` | List tags |
 | `delete` | `tag delete <NAME>...` | Delete tags |
 | `show` | `tag show <NAME>` | Show tag info |
-| `verify` | `tag verify <NAME>` | Verify tag |
+| `verify` | `tag verify <NAME>` | Verify tag ref, and signature if annotated |
+
+#### Signing (`MEDIAGIT_SIGN`)
+
+Annotated tags can be signed with your **existing OpenSSH ed25519 key**
+(`~/.ssh/id_ed25519` by default — override with `MEDIAGIT_SIGN_KEY`), so
+signing reuses key management you already have. The signature format is
+**MediaGit-native** (an OpenSSH-armored `SshSig` blob stored inside the Tag
+object) — this is not git's tag-signing format, and git interop is not a
+goal; MediaGit is a standalone VCS.
+
+```bash
+MEDIAGIT_SIGN=1 mediagit tag create v1.0.0 -m "Release 1.0.0"
+mediagit tag verify v1.0.0    # valid signature, signed by <fingerprint> / INVALID (exits non-zero) / unsigned
+                              # verifies against the key embedded in the signature (TOFU) — no local key needed
+```
+
+Off by default (opt-in). Passphrase-protected keys are detected and
+rejected with a clear error — passphrase prompting isn't implemented yet.
 
 **Flags for `tag create`:**
 
@@ -685,6 +759,71 @@ mediagit tag create v1.0.0
 mediagit tag create v1.0.0 -m "Release version 1.0.0"
 mediagit tag list
 mediagit tag delete v0.9.0
+```
+
+---
+
+## Media & Sparse Checkout
+
+### `mediagit media`
+
+Inspect media file metadata — image, video, audio, PSD, and 3D-model formats.
+Reads a working-tree file directly (never touches the ODB) and reports every
+top-level field the corresponding `mediagit-media` parser produces.
+
+```bash
+mediagit media info <PATH> [--json]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output the full parsed metadata struct as JSON instead of `label: value` lines |
+
+Supported extensions: `jpg/jpeg/png/tif/tiff/webp` (image), `mp4/mov/m4v`
+(video), `wav/mp3/flac/aac/ogg/m4a` (audio), `psd` (PSD), `obj/fbx/blend/
+gltf/glb/stl/usd/usda/usdc/usdz/ply` (3D). Files over 256 MB are skipped
+(same cap as the `status`/`show` `media: ...` summary line, gated by
+`MEDIAGIT_MEDIA_META`). An unsupported extension prints a one-line message
+and exits `0`.
+
+**Examples:**
+```bash
+mediagit media info assets/hero.png
+mediagit media info assets/clip.mp4 --json
+```
+
+### `mediagit sparse-checkout`
+
+Materialize only part of the working tree. Two pattern styles: **cone mode**
+(default) takes directory prefixes, included recursively; **pattern mode**
+(`--patterns`) takes gitignore-style globs, where a match means *include*
+(the inverse of `.mediagitignore`).
+
+```bash
+mediagit sparse-checkout <SUBCOMMAND>
+```
+
+**Subcommands:**
+
+| Subcommand | Usage | Description |
+|------------|-------|-------------|
+| `set` | `sparse-checkout set <PATTERN>... [--patterns]` | Write patterns and apply: remove newly-excluded tracked files, materialize newly-included ones |
+| `list` (alias `ls`) | `sparse-checkout list` | Show the active mode and patterns |
+| `disable` | `sparse-checkout disable` | Remove the pattern file and restore the full working tree |
+
+**Semantics:** excluded files are never written by ordinary checkout
+operations (branch switch, clone, reset, etc.), and an excluded file that
+already exists on disk is never deleted by them either — it's simply outside
+the cone. Only `sparse-checkout set`/`disable` materialize or remove files in
+response to a pattern change. `status` treats sparse-excluded paths as
+absent, not deleted.
+
+**Examples:**
+```bash
+mediagit sparse-checkout set assets/textures assets/audio
+mediagit sparse-checkout set --patterns '*.png' '*.wav'
+mediagit sparse-checkout list
+mediagit sparse-checkout disable
 ```
 
 ---
@@ -904,7 +1043,7 @@ mediagit gc
 **Examples:**
 ```bash
 mediagit gc                       # Standard garbage collection
-mediagit gc --aggressive --yes    # Aggressive pass, skip confirmation
+mediagit gc --repack --yes       # Repack loose objects into packs, skip confirmation
 mediagit gc --dry-run             # Preview what would be deleted
 mediagit gc --verbose             # Show each deleted object/chunk/manifest
 ```
@@ -998,6 +1137,41 @@ mediagit stats --json > stats.json
 
 ---
 
+## Encryption
+
+### `mediagit key`
+
+Manage this repository's at-rest encryption key. Encryption is per repository
+and is **enabled at creation or not at all** — `key init` refuses on a
+repository that already holds objects, because sealing them would mean
+rewriting every one.
+
+```bash
+mediagit key init            # enable encryption (empty repository only)
+mediagit key status          # is this repository encrypted, and how does it unlock
+mediagit key recover         # unlock with the one-time recovery code
+mediagit key rotate-master   # re-lock the key under a new master key
+```
+
+`rotate-master` accepts `--new-keyfile <PATH>`, needed when rotating from one
+key file to another. It changes only what protects the repository key, not the
+key itself, so no object is rewritten and the recovery code keeps working.
+
+There is no way to encrypt an existing repository, to remove encryption, or to
+replace the repository key — all three would have to rewrite every object.
+
+`key init` prints a one-time recovery code. If both it and the master key are
+lost, the objects cannot be recovered.
+
+| Variable | Effect |
+| --- | --- |
+| `MEDIAGIT_ENCRYPTION_KEYFILE` | File holding the master key, used instead of the OS keychain |
+| `MEDIAGIT_NO_KEYRING` | Skip the OS keychain entirely |
+
+See [book/src/cli/key.md](book/src/cli/key.md) for the long form.
+
+---
+
 ## Meta
 
 ### `mediagit version`
@@ -1051,17 +1225,23 @@ mediagit completions powershell >> $PROFILE
 
 | Variable | Description |
 |----------|-------------|
-| `MEDIAGIT_DIR` | Repository path |
-| `MEDIAGIT_WORK_TREE` | Working tree path |
 | `MEDIAGIT_REPO` | Repository path (set by `-C` flag) |
 | `MEDIAGIT_AUTHOR_NAME` | Default author name |
 | `MEDIAGIT_AUTHOR_EMAIL` | Default author email |
+| `MEDIAGIT_TOKEN` | Bearer token for remote authentication (client auth). **Highest** precedence: beats per-remote `token` in `config.toml` and the OS keychain |
+| `MEDIAGIT_API_KEY` | API key for remote authentication (client auth). Same tier as `MEDIAGIT_TOKEN`, and likewise beats config and keychain; `MEDIAGIT_TOKEN` wins if both are set |
+| `MEDIAGIT_SIGN` | Sign annotated tags with your SSH key (`1`/`true`/`on`). Off by default |
+| `MEDIAGIT_SIGN_KEY` | Path to the ed25519 key used to sign/verify tags. Default: `~/.ssh/id_ed25519` |
+| `MEDIAGIT_CHECKOUT_PARALLELISM` | Number of parallel file I/O operations during checkout (branch switch, clone, etc.). Default: number of CPUs capped at 8. Set to `1` for sequential behavior |
+| `MEDIAGIT_BITMAP` | Enable reachability bitmap generation on push/gc and consumption on fetch/pull (`0`/`1`, `off`/`on`, `false`/`true`). Default: on. Set to `0` to disable (falls back to BFS walk) |
+| `MEDIAGIT_REPO_NAMESPACE` | Override the default repository namespace prefix used by multi-repo storage backends. Default: sanitized repository directory basename |
+| `MEDIAGIT_REFLOG_MAX` | Maximum number of reflog entries to keep per ref. Default: `1000`. Older entries are pruned during `git` operations |
 
 ### Performance & Concurrency
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEDIAGIT_CONCURRENT_UPLOADS` | `32` | Total upload semaphore slots for push operations |
+| `MEDIAGIT_UPLOAD_CONCURRENCY` | `32` | Total upload semaphore slots for push operations |
 | `MEDIAGIT_PUSH_OBJECT_CONCURRENCY` | `8` | Number of objects uploaded concurrently during push |
 | `MEDIAGIT_PUSH_CHUNK_CONCURRENCY` | `(64 / push_object_concurrency).max(4)` | Per-object chunk upload concurrency. Targets 64 total in-flight PUTs across all concurrent objects. Override when tuning for specific cloud regions or connection profiles. |
 | `MEDIAGIT_DOWNLOAD_CONCURRENCY` | `32` | Total concurrent chunk downloads during pull/clone |

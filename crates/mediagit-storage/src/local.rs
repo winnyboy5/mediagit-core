@@ -19,19 +19,26 @@
 //! - Proper file permissions (0644 for files, 0755 for directories)
 //! - Async I/O using tokio::fs
 //!
-//! # Directory Structure
+//! # Directory Structure (layout v2)
 //!
-//! Objects are stored in a sharded directory layout:
+//! Each key's own directory component determines its physical top-level
+//! folder, so `chunks/`, `chunk-deltas/`, `manifests/`, `deltas/`, `packs/`,
+//! `bitmaps/` (and any per-repo `<ns>/` prefix added by
+//! [`crate::NamespacedBackend`]) each get **true hash fanout** — sharded on
+//! the hash/OID itself, not on the key string's own prefix. See
+//! [`LocalBackend::object_path`] for the exact placement rule.
+//!
 //! ```text
 //! root/
-//!   objects/
-//!     ab/
-//!       cd/
-//!         abcd1234567890...
+//!   <ns>/
+//!     LAYOUT                    = "2"
+//!     objects/ab/cd/<oid>         (bare OIDs — no dir component in the key)
+//!     chunks/de/ad/<hash>
+//!     chunk-deltas/de/ad/<hash>[.meta]
+//!     manifests/../<hash>
+//!     deltas/../<hash>[.meta]
+//!     packs/aa/<pack_oid>          (single-level shard)
 //! ```
-//!
-//! For a key like "abcd1234567890", the path becomes:
-//! `root/objects/ab/cd/abcd1234567890`
 //!
 //! This prevents too many files in a single directory, improving filesystem performance.
 //!
@@ -207,66 +214,124 @@ impl LocalBackend {
         &self.root
     }
 
-    /// Get the path for a given key with sharding
+    /// Layout-v2 top-level namespace directories that co-locate directly
+    /// with their hash-sharded contents (no synthetic `objects/` wrapper
+    /// layer). Any key whose *immediate parent directory component* is one
+    /// of these names shards straight under that directory:
+    /// `<dir(key)>/<base[0:2]>/<base[2:4]>/<base>`.
     ///
-    /// Sharding layout for objects: `root/objects/AB/CD/key` where:
-    /// - AB is the first 2 characters of the key
-    /// - CD is the next 2 characters (if key is 4+ chars)
-    /// - key is the full key (with "/" encoded as "::")
+    /// Any other key (most commonly a bare OID with no directory component
+    /// at all, or a namespaced bare OID like `<ns>/<oid>`) is routed through
+    /// a synthetic `objects/` shard layer instead:
+    /// `<dir(key)>/objects/<base[0:2]>/<base[2:4]>/<base>`.
     ///
-    /// Special handling for pack files:
-    /// - Keys starting with "packs/" are stored directly without sharding
-    /// - Example: "packs/pack-123.pack" → `root/packs/pack-123.pack`
+    /// `bitmaps/` (M3) is included pre-emptively: it needs no code change
+    /// when that milestone starts writing `bitmaps/<commit_oid>.bitmap`.
     ///
-    /// This allows keys with "/" in them (like "images/photo1.jpg").
-    /// Since "/" cannot appear in filenames, we encode it as "::".
+    /// Deliberately does NOT include `"objects"` itself — that name is
+    /// reserved as the synthetic wrapper folder. If it were also treated as
+    /// a "known" category, a repo namespace that happened to sanitize to
+    /// literally `objects` could collide with the unnamespaced bare-OID
+    /// path used by direct (non-namespaced) `LocalBackend` callers (tests).
+    const KNOWN_CATEGORIES: [&'static str; 5] =
+        ["chunks", "chunk-deltas", "manifests", "deltas", "bitmaps"];
+
+    /// Split `src` into a fixed 2-char/2-char shard pair, padding with `_`
+    /// (not a valid lowercase-hex character, so it can't collide with a real
+    /// hash shard) when `src` is shorter than 4 chars. This keeps every key
+    /// — regardless of length — at the same shard depth, which is what
+    /// makes `list_objects`'s reverse mapping a simple fixed-offset strip
+    /// instead of needing to re-derive variable shard depth per key.
+    fn shard_pair(src: &str) -> (String, String) {
+        let mut c: Vec<char> = src.chars().take(4).collect();
+        while c.len() < 4 {
+            c.push('_');
+        }
+        (c[0..2].iter().collect(), c[2..4].iter().collect())
+    }
+
+    /// Get the physical path for a given (possibly namespace-prefixed)
+    /// logical key.
     ///
-    /// # Arguments
+    /// # Layout v2
     ///
-    /// * `key` - The object key (can contain "/" for hierarchical keys)
+    /// The physical path is derived structurally from the key's own
+    /// directory component, so `chunks/`, `chunk-deltas/`, `manifests/`,
+    /// `deltas/`, `packs/`, `bitmaps/` — and any per-repo `<ns>/` prefix
+    /// added by [`crate::NamespacedBackend`] — get **true hash fanout**
+    /// instead of every key colliding into one `objects/ch/un/` directory
+    /// (the v1 fanout-collapse bug: sharding was on the *key string's*
+    /// first 4 chars, not the hash).
     ///
-    /// # Returns
+    /// - `chunks/<hash>` → `chunks/<h0:2>/<h2:4>/<hash>`
+    /// - `chunk-deltas/<hash>.meta` shards on the hash part (`.meta`
+    ///   stripped only for computing the shard, kept in the filename) so it
+    ///   co-locates with its binary sibling `chunk-deltas/<h0:2>/<h2:4>/<hash>`.
+    /// - `packs/<pack_oid>` → `packs/<p0:2>/<pack_oid>` (single-level shard).
+    /// - A bare OID with no directory component (or a namespaced bare OID,
+    ///   e.g. `<ns>/<oid>`) → `[<ns>/]objects/<o0:2>/<o2:4>/<oid>`.
     ///
-    /// Full path for the object
-    ///
-    /// # Examples
-    ///
-    /// For key "abcd1234567890":
-    /// - Returns: `root/objects/ab/cd/abcd1234567890`
-    ///
-    /// For key "images/photo1.jpg":
-    /// - Returns: `root/objects/im/ag/images__photo1.jpg`
-    ///
-    /// For key "packs/pack-123.pack":
-    /// - Returns: `root/packs/pack-123.pack`
+    /// Keys whose basename is shorter than 4 chars are padded (see
+    /// [`Self::shard_pair`]) rather than panicking or skipping sharding.
     fn object_path(&self, key: &str) -> PathBuf {
-        // Special case: pack files should not be sharded
-        // They are stored directly under root/packs/
-        if key.starts_with("packs/") {
-            return self.root.join(key);
+        let key_path = Path::new(key);
+        let base = key_path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or(key)
+            .to_string();
+        let dir_components: Vec<String> = key_path
+            .parent()
+            .map(|p| p.iter().map(|c| c.to_string_lossy().into_owned()).collect())
+            .unwrap_or_default();
+
+        // Shard on the hash part only; `.meta` companions co-locate with
+        // their binary sibling by stripping the suffix before sharding
+        // while keeping it in the final filename.
+        let shard_src = base.strip_suffix(".meta").unwrap_or(&base);
+
+        let mut p = self.root.clone();
+        for c in &dir_components {
+            p = p.join(c);
         }
 
-        // Encode "/" as "__" to allow keys with "/" in filenames
-        // Note: We use "__" instead of "::" for Windows compatibility (":" is reserved)
-        let encoded_key = key.replace('/', "__");
-
-        if key.len() >= 4 {
-            // For keys with 4+ chars: use shard1/shard2/key layout
-            let shard1 = &key[0..2];
-            let shard2 = &key[2..4];
-            self.root
-                .join("objects")
-                .join(shard1)
-                .join(shard2)
-                .join(&encoded_key)
-        } else if key.len() >= 2 {
-            // For keys with 2-3 chars: use shard1/key layout
-            let shard1 = &key[0..2];
-            self.root.join("objects").join(shard1).join(&encoded_key)
-        } else {
-            // For single-char keys: just store directly under objects
-            self.root.join("objects").join(&encoded_key)
+        // The `LAYOUT` marker (v2) is control-plane metadata, not object
+        // data: it's placed unsharded directly under its directory
+        // (`[<ns>/]LAYOUT`) instead of through the objects/category shard
+        // rules. This also keeps it structurally shallower than anything
+        // `walk_dir_iterative` reconstructs as a logical key, so it never
+        // shows up in `list_objects` results.
+        if base == "LAYOUT" {
+            return p.join(&base);
         }
+
+        if dir_components.last().map(|s| s.as_str()) == Some("packs") {
+            let (s1, _s2) = Self::shard_pair(shard_src);
+            return p.join(s1).join(&base);
+        }
+
+        let is_known_category = dir_components
+            .last()
+            .map(|s| Self::KNOWN_CATEGORIES.contains(&s.as_str()))
+            .unwrap_or(false);
+        if !is_known_category {
+            p = p.join("objects");
+        }
+
+        let (s1, s2) = Self::shard_pair(shard_src);
+        p.join(s1).join(s2).join(&base)
+    }
+
+    /// Validate `key` (J6: reject path traversal / absolute / drive-rooted
+    /// keys) before computing its physical path. Every production entry
+    /// point that turns a caller-supplied key into a filesystem path must
+    /// go through this instead of calling [`Self::object_path`] directly —
+    /// that raw method has no validation and is only safe to call with keys
+    /// already known-good (as the unit tests below do, to pin the mapping
+    /// table itself).
+    fn object_path_checked(&self, key: &str) -> anyhow::Result<PathBuf> {
+        crate::validate_object_key(key)?;
+        Ok(self.object_path(key))
     }
 
     /// Ensure parent directory exists, creating it if necessary
@@ -317,12 +382,13 @@ impl LocalBackend {
     ///
     /// * `Ok(Mmap)` - Memory-mapped view of the file
     /// * `Err` - If the key doesn't exist or an I/O error occurs
+    #[allow(unsafe_code)] // audited: read-only mmap, file not modified while mapped
     pub fn get_mmap(&self, key: &str) -> anyhow::Result<memmap2::Mmap> {
         if key.is_empty() {
             return Err(anyhow::anyhow!("key cannot be empty"));
         }
 
-        let path = self.object_path(key);
+        let path = self.object_path_checked(key)?;
         let file = std::fs::File::open(&path)?;
 
         // SAFETY: The file is opened read-only and we assume it won't be modified
@@ -349,7 +415,7 @@ impl LocalBackend {
             return Err(anyhow::anyhow!("key cannot be empty"));
         }
 
-        let path = self.object_path(key);
+        let path = self.object_path_checked(key)?;
         let metadata = fs::metadata(&path).await?;
         Ok(metadata.len())
     }
@@ -376,7 +442,9 @@ impl LocalBackend {
             tracing::debug!(key = %key, size = size, "Using mmap for large file");
             Ok(MmapOrVec::Mmap(self.get_mmap(key)?))
         } else {
-            Ok(MmapOrVec::Vec(fs::read(self.object_path(key)).await?))
+            Ok(MmapOrVec::Vec(
+                fs::read(self.object_path_checked(key)?).await?,
+            ))
         }
     }
 }
@@ -408,7 +476,7 @@ impl StorageBackend for LocalBackend {
             return Err(anyhow::anyhow!("key cannot be empty"));
         }
 
-        let path = self.object_path(key);
+        let path = self.object_path_checked(key)?;
 
         match fs::read(&path).await {
             Ok(data) => Ok(data),
@@ -429,7 +497,7 @@ impl StorageBackend for LocalBackend {
         >,
     > {
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
-        let path = self.object_path(key);
+        let path = self.object_path_checked(key)?;
         let mut file = tokio::fs::File::open(&path).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 anyhow::anyhow!("object not found: {}", key)
@@ -455,9 +523,11 @@ impl StorageBackend for LocalBackend {
                         (f, left),
                     ))
                 }
+                // Fuse: yield the error once, then end. Resuming after a failed
+                // read would splice a gap into the byte sequence.
                 Err(e) => Some((
                     Err(anyhow::anyhow!("get_streaming_range read: {}", e)),
-                    (f, left),
+                    (f, 0),
                 )),
             }
         });
@@ -483,7 +553,7 @@ impl StorageBackend for LocalBackend {
             return Err(anyhow::anyhow!("key cannot be empty"));
         }
 
-        let path = self.object_path(key);
+        let path = self.object_path_checked(key)?;
 
         // Windows-specific transient errors require retry with backoff:
         //
@@ -591,7 +661,7 @@ impl StorageBackend for LocalBackend {
         if key.is_empty() {
             return Err(anyhow::anyhow!("key cannot be empty"));
         }
-        let dest = self.object_path(key);
+        let dest = self.object_path_checked(key)?;
         self.ensure_parent_dir(&dest).await?;
         match fs::rename(src, &dest).await {
             Ok(()) => Ok(()),
@@ -622,7 +692,7 @@ impl StorageBackend for LocalBackend {
             return Err(anyhow::anyhow!("key cannot be empty"));
         }
 
-        let path = self.object_path(key);
+        let path = self.object_path_checked(key)?;
         match fs::try_exists(&path).await {
             Ok(exists) => Ok(exists),
             Err(e) => Err(e.into()),
@@ -634,7 +704,7 @@ impl StorageBackend for LocalBackend {
             return Err(anyhow::anyhow!("key cannot be empty"));
         }
 
-        let path = self.object_path(key);
+        let path = self.object_path_checked(key)?;
         match tokio::fs::metadata(&path).await {
             Ok(m) => Ok(Some(m.len())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -659,7 +729,7 @@ impl StorageBackend for LocalBackend {
             return Err(anyhow::anyhow!("key cannot be empty"));
         }
 
-        let path = self.object_path(key);
+        let path = self.object_path_checked(key)?;
 
         match fs::remove_file(&path).await {
             Ok(()) => Ok(()),
@@ -674,9 +744,13 @@ impl StorageBackend for LocalBackend {
     /// List objects with a given prefix
     ///
     /// Returns a sorted list of all keys that start with the given prefix.
-    /// Recursively walks the appropriate directory structure:
-    /// - For "packs/" prefix: searches root/packs/ directly
-    /// - For other prefixes: searches root/objects/ with sharding
+    /// Walks the whole storage root and reconstructs each file's logical key
+    /// by reversing [`Self::object_path`]'s placement rule (see
+    /// [`Self::walk_dir_iterative`] for the exact reverse mapping), then
+    /// filters by prefix. Layout v2's physical tree mirrors the logical
+    /// hierarchy closely enough that no per-prefix subtree shortcut is
+    /// needed — unlike v1, which required a hardcoded "packs/ is a flat
+    /// dir, everything else lives under objects/" special case.
     ///
     /// # Arguments
     ///
@@ -689,28 +763,11 @@ impl StorageBackend for LocalBackend {
     async fn list_objects(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
         let mut results = Vec::new();
 
-        // Special case: pack files are stored directly under root/packs/
-        if prefix.starts_with("packs/") {
-            let packs_dir = self.root.join("packs");
-
-            // If packs directory doesn't exist, return empty list
-            if !packs_dir.exists() {
-                return Ok(Vec::new());
-            }
-
-            // List files directly in packs/ directory
-            Self::walk_dir_flat(&packs_dir, prefix, &mut results).await?;
-        } else {
-            // Regular objects: search in sharded objects/ directory
-            let objects_dir = self.root.join("objects");
-
-            // If objects directory doesn't exist, return empty list
-            if !objects_dir.exists() {
-                return Ok(Vec::new());
-            }
-
-            Self::walk_dir_iterative(&objects_dir, &objects_dir, prefix, &mut results).await?;
+        if !self.root.exists() {
+            return Ok(results);
         }
+
+        Self::walk_dir_iterative(&self.root, &self.root, prefix, &mut results).await?;
 
         results.sort();
         Ok(results)
@@ -719,57 +776,31 @@ impl StorageBackend for LocalBackend {
 
 // Helper function for iterative directory traversal
 impl LocalBackend {
-    /// Walk a flat directory (like packs/) and collect matching keys
+    /// Iteratively walk the storage root and collect matching keys.
+    /// Uses a work queue to avoid recursive async function issues.
     ///
-    /// For directories that don't use sharding (like packs/), list files directly
-    /// and reconstruct keys by prepending the directory name.
+    /// Reverses [`Self::object_path`]'s placement rule using fixed offsets
+    /// from the end of each file's path (relative to `root`), since every
+    /// key is sharded to a uniform depth (see [`Self::shard_pair`]):
     ///
-    /// # Arguments
-    ///
-    /// * `dir` - The directory to walk (e.g., root/packs/)
-    /// * `prefix` - The key prefix to filter by (e.g., "packs/")
-    /// * `results` - Vector to collect matching keys
-    async fn walk_dir_flat(
-        dir: &Path,
-        prefix: &str,
-        results: &mut Vec<String>,
-    ) -> anyhow::Result<()> {
-        let mut entries = match fs::read_dir(dir).await {
-            Ok(entries) => entries,
-            Err(_) => return Ok(()), // Directory doesn't exist or can't be read
-        };
-
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-
-            if path.is_file() {
-                // For packs directory: reconstruct key as "packs/filename"
-                if let Some(filename) = path.file_name() {
-                    if let Some(filename_str) = filename.to_str() {
-                        let key = format!("packs/{}", filename_str);
-                        if key.starts_with(prefix) {
-                            results.push(key);
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Iteratively walk directory tree and collect matching keys
-    /// Uses a work queue to avoid recursive async function issues
-    ///
-    /// Reconstructs keys by removing the shard directories (first 2-4 path components)
-    /// that were added during storage.
+    /// - `[...dir, "packs", shard1, base]` (3 from the end) → key =
+    ///   `dir/packs/base` (drop `shard1`).
+    /// - `[...dir, category, shard1, shard2, base]` (4 from the end), where
+    ///   `category` is one of [`Self::KNOWN_CATEGORIES`] → key =
+    ///   `dir/category/base` (drop `shard1`/`shard2`).
+    /// - `[...dir, "objects", shard1, shard2, base]` (4 from the end) → key
+    ///   = `dir/base` (the `objects` layer is synthetic — dropped entirely,
+    ///   along with the shard).
+    /// - Anything shallower or unrecognized is a stray/foreign file (e.g. a
+    ///   `LAYOUT` marker sitting directly under a namespace dir) and is
+    ///   skipped — it was never written through `object_path`.
     async fn walk_dir_iterative(
-        objects_dir: &Path,
-        objects_base: &Path,
+        dir: &Path,
+        root: &Path,
         prefix: &str,
         results: &mut Vec<String>,
     ) -> anyhow::Result<()> {
-        let mut work_queue = vec![objects_dir.to_path_buf()];
+        let mut work_queue = vec![dir.to_path_buf()];
 
         while let Some(current_path) = work_queue.pop() {
             let mut entries = match fs::read_dir(&current_path).await {
@@ -781,44 +812,57 @@ impl LocalBackend {
                 let path = entry.path();
 
                 if path.is_dir() {
-                    // Add to work queue for processing
                     work_queue.push(path);
+                    continue;
+                }
+
+                let Ok(relative_path) = path.strip_prefix(root) else {
+                    continue;
+                };
+                let components: Vec<String> = relative_path
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().to_string())
+                    .collect();
+                let n = components.len();
+                if n == 0 {
+                    continue;
+                }
+                let base = components[n - 1].clone();
+
+                // Defensively skip `put()`'s crash-recovery artifacts
+                // (`<key>.tmp<write_id>`, left behind if the process died
+                // between the temp write and the atomic rename): these are
+                // never part of the logical key space and must never be
+                // exposed by list_objects, even transiently.
+                if let Some((_, suffix)) = base.rsplit_once(".tmp")
+                    && !suffix.is_empty()
+                    && suffix.chars().all(|c| c.is_ascii_digit())
+                {
+                    continue;
+                }
+
+                let key = if n >= 3 && components[n - 3] == "packs" {
+                    let mut k = components[..n - 3].to_vec();
+                    k.push("packs".to_string());
+                    k.push(base);
+                    k.join("/")
+                } else if n >= 4 && Self::KNOWN_CATEGORIES.contains(&components[n - 4].as_str()) {
+                    let mut k = components[..n - 4].to_vec();
+                    k.push(components[n - 4].clone());
+                    k.push(base);
+                    k.join("/")
+                } else if n >= 4 && components[n - 4] == "objects" {
+                    let mut k = components[..n - 4].to_vec();
+                    k.push(base);
+                    k.join("/")
                 } else {
-                    // Reconstruct the key by removing shard directories
-                    // Path structure: objects/AB/CD/key or objects/AB/key or objects/key
-                    // The key is the last component (or components after the shard dirs)
+                    // Not a shape object_path() produces (e.g. LAYOUT marker,
+                    // stray temp file) — not part of the logical key space.
+                    continue;
+                };
 
-                    if let Ok(relative_path) = path.strip_prefix(objects_base) {
-                        let components: Vec<_> = relative_path
-                            .components()
-                            .map(|c| c.as_os_str().to_string_lossy().to_string())
-                            .collect();
-
-                        // Reconstruct the original key by analyzing the path structure
-                        // Path structures:
-                        // - 1-char key: objects/X -> key is "X"
-                        // - 2-3 char key: objects/AB/encoded_key -> key is the filename
-                        // - 4+ char key: objects/AB/CD/encoded_key -> key is the filename
-                        // Filenames have "/" encoded as "::" which needs to be decoded
-                        let mut key = if components.is_empty() {
-                            continue;
-                        } else if components.len() == 1 {
-                            // Single-char key stored at objects/X
-                            components[0].clone()
-                        } else {
-                            // For 2+ components, the key is always in the last component (the filename)
-                            // The shard dirs (1st and maybe 2nd component) are just organizational
-                            components.last().unwrap().clone()
-                        };
-
-                        // Decode "__" back to "/"
-                        key = key.replace("__", "/");
-
-                        // Filter by prefix
-                        if key.starts_with(prefix) {
-                            results.push(key);
-                        }
-                    }
+                if key.starts_with(prefix) {
+                    results.push(key);
                 }
             }
         }
@@ -932,6 +976,25 @@ mod tests {
         backend.delete("nonexistent").await.unwrap();
         // Deleting again should also succeed
         backend.delete("nonexistent").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_traversal_key_rejected_and_never_written_outside_root() {
+        // J6: a `..`-bearing key must error instead of joining onto a path
+        // outside `root`.
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path()).await.unwrap();
+        let outside_marker = temp_dir.path().parent().unwrap().join("pwned.txt");
+        let _ = fs::remove_file(&outside_marker);
+
+        let traversal_key = "../pwned.txt";
+        assert!(backend.put(traversal_key, b"pwned").await.is_err());
+        assert!(backend.get(traversal_key).await.is_err());
+        assert!(backend.exists(traversal_key).await.is_err());
+        assert!(backend.delete(traversal_key).await.is_err());
+        assert!(backend.head(traversal_key).await.is_err());
+
+        assert!(!outside_marker.exists());
     }
 
     #[tokio::test]
@@ -1264,5 +1327,202 @@ mod tests {
         let result = backend.get_adaptive("asref_test").await.unwrap();
         let slice: &[u8] = result.as_ref();
         assert_eq!(slice, data);
+    }
+
+    // -- Layout v2: object_path shard-mapping table test -------------------
+
+    #[test]
+    fn test_object_path_v2_mapping_table() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new_sync(temp_dir.path()).unwrap();
+        let root = temp_dir.path();
+        let hash = "deadbeef00112233445566778899aabbccddeeff00112233445566778899aa";
+
+        let cases: Vec<(String, PathBuf)> = vec![
+            // Bare OID (no namespace, no dir component) -> objects/<h0:2>/<h2:4>/<hash>
+            (
+                hash.to_string(),
+                root.join("objects").join("de").join("ad").join(hash),
+            ),
+            // Namespaced bare OID -> <ns>/objects/<h0:2>/<h2:4>/<hash>
+            (
+                format!("myrepo/{hash}"),
+                root.join("myrepo")
+                    .join("objects")
+                    .join("de")
+                    .join("ad")
+                    .join(hash),
+            ),
+            // chunks/<hash> -> chunks/<h0:2>/<h2:4>/<hash>
+            (
+                format!("chunks/{hash}"),
+                root.join("chunks").join("de").join("ad").join(hash),
+            ),
+            // chunk-deltas/<hash>.meta co-locates with its binary sibling
+            (
+                format!("chunk-deltas/{hash}.meta"),
+                root.join("chunk-deltas")
+                    .join("de")
+                    .join("ad")
+                    .join(format!("{hash}.meta")),
+            ),
+            (
+                format!("chunk-deltas/{hash}"),
+                root.join("chunk-deltas").join("de").join("ad").join(hash),
+            ),
+            // manifests/<hash>
+            (
+                format!("manifests/{hash}"),
+                root.join("manifests").join("de").join("ad").join(hash),
+            ),
+            // deltas/<hash>.meta
+            (
+                format!("deltas/{hash}.meta"),
+                root.join("deltas")
+                    .join("de")
+                    .join("ad")
+                    .join(format!("{hash}.meta")),
+            ),
+            // packs/<pack_oid> -> packs/<p0:2>/<pack_oid> (single-level shard)
+            (
+                format!("packs/{hash}"),
+                root.join("packs").join("de").join(hash),
+            ),
+            // Namespaced packs
+            (
+                format!("myrepo/packs/{hash}"),
+                root.join("myrepo").join("packs").join("de").join(hash),
+            ),
+            // Short basenames: padded, never panics
+            (
+                "ab".to_string(),
+                root.join("objects").join("ab").join("__").join("ab"),
+            ),
+            (
+                "a".to_string(),
+                root.join("objects").join("a_").join("__").join("a"),
+            ),
+        ];
+
+        for (key, expected) in cases {
+            assert_eq!(
+                backend.object_path(&key),
+                expected,
+                "mismatch for key {key:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_objects_v2_round_trip_all_namespaces() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path()).await.unwrap();
+        let h1 = "1111111111111111111111111111111111111111111111111111111111111111";
+        let h2 = "2222222222222222222222222222222222222222222222222222222222222222";
+        let h3 = "3333333333333333333333333333333333333333333333333333333333333333";
+
+        let mut keys = vec![
+            format!("myrepo/{}", &h1[..64]),
+            format!("myrepo/chunks/{}", &h2[..64]),
+            format!("myrepo/chunk-deltas/{}", &h3[..64]),
+            format!("myrepo/chunk-deltas/{}.meta", &h3[..64]),
+            format!("myrepo/manifests/{}", &h2[..64]),
+            format!("myrepo/deltas/{}", &h1[..64]),
+            format!("myrepo/deltas/{}.meta", &h1[..64]),
+            format!("myrepo/packs/{}", &h3[..64]),
+        ];
+        keys.sort();
+
+        for k in &keys {
+            backend.put(k, b"payload").await.unwrap();
+        }
+
+        let mut listed = backend.list_objects("").await.unwrap();
+        listed.sort();
+        assert_eq!(
+            listed, keys,
+            "round-trip logical key set must match exactly"
+        );
+
+        // Prefix filtering still works post-rewrite.
+        let chunk_keys = backend.list_objects("myrepo/chunks/").await.unwrap();
+        assert_eq!(chunk_keys.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_layout_marker_unsharded_and_excluded_from_listing() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path()).await.unwrap();
+
+        backend.put("myrepo/LAYOUT", b"2").await.unwrap();
+        backend.put("myrepo/chunks/abc", b"data").await.unwrap();
+
+        assert_eq!(
+            backend.object_path("myrepo/LAYOUT"),
+            temp_dir.path().join("myrepo").join("LAYOUT")
+        );
+        assert_eq!(backend.get("myrepo/LAYOUT").await.unwrap(), b"2");
+
+        // LAYOUT must never appear as a logical object key.
+        let listed = backend.list_objects("").await.unwrap();
+        assert_eq!(listed, vec!["myrepo/chunks/abc".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_crash_mid_put_recovers_under_layout_v2_paths() {
+        // Simulates a crash between the temp-file write and the atomic
+        // rename: a stale ".tmpN" file is left sitting next to where a
+        // layout-v2 (nested, namespaced) key's final path would be. A
+        // subsequent `put()` for the same key must still succeed and
+        // produce the correct final content — the atomic tmp+rename
+        // pattern must survive object_path()'s deeper v2 paths (previously
+        // `root/objects/ab/cd/key`, now e.g. `root/ns/chunks/ab/cd/key`).
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path()).await.unwrap();
+        let key = "myrepo/chunks/deadbeef00112233445566778899aabbccddeeff00112233445566778899aa";
+
+        let final_path = backend.object_path(key);
+        fs::create_dir_all(final_path.parent().unwrap()).unwrap();
+        let stale_temp = final_path.with_extension("tmp999");
+        fs::write(&stale_temp, b"leftover from a crashed writer").unwrap();
+
+        backend.put(key, b"recovered content").await.unwrap();
+
+        assert_eq!(backend.get(key).await.unwrap(), b"recovered content");
+        // The crashed writer's stale temp file must not resurface as data.
+        let listed = backend.list_objects("").await.unwrap();
+        assert_eq!(listed, vec![key.to_string()]);
+    }
+
+    #[test]
+    fn test_layout_v2_doc_examples_from_roadmap() {
+        // Pin the exact examples from docs/ROADMAP-2026-07-07-layoutv2-p1p2.md
+        // ("New shard rule") so a future edit to object_path() that silently
+        // changes these breaks a test, not just a diagram.
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new_sync(temp_dir.path()).unwrap();
+        let hash = "deadbeef00112233445566778899aabbccddeeff00112233445566778899aa";
+        assert_eq!(
+            backend.object_path(&format!("chunks/{hash}")),
+            temp_dir
+                .path()
+                .join("chunks")
+                .join("de")
+                .join("ad")
+                .join(hash)
+        );
+        assert_eq!(
+            backend.object_path(&format!("chunk-deltas/{hash}.meta")),
+            temp_dir
+                .path()
+                .join("chunk-deltas")
+                .join("de")
+                .join("ad")
+                .join(format!("{hash}.meta"))
+        );
+        assert_eq!(
+            backend.object_path(&format!("packs/{hash}")),
+            temp_dir.path().join("packs").join("de").join(hash)
+        );
     }
 }

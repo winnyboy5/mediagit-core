@@ -19,7 +19,7 @@ winget install MediaGit.MediaGitCore
 
 ### Direct Download
 
-1. Download the latest ZIP from [GitHub Releases](https://github.com/winnyboy5/mediagit-core/releases): `mediagit-0.2.8-beta.1-x86_64-windows.zip`
+1. Download the latest ZIP from [GitHub Releases](https://github.com/winnyboy5/mediagit-core/releases): `mediagit-0.3.0-rc.4-x86_64-windows.zip`
 2. Extract the archive
 3. Move `mediagit.exe` and `mediagit-server.exe` to a directory on your PATH
 
@@ -27,7 +27,7 @@ winget install MediaGit.MediaGitCore
 
 ```powershell
 # Download ZIP archive
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-x86_64-windows.zip" -OutFile "mediagit.zip"
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.4/mediagit-0.3.0-rc.4-x86_64-windows.zip" -OutFile "mediagit.zip"
 
 # Extract (contains mediagit.exe + mediagit-server.exe)
 $dest = "$env:LOCALAPPDATA\MediaGit\bin"
@@ -67,15 +67,13 @@ mediagit completions bash > ~/.bash_completion.d/mediagit
 Set via System Properties or PowerShell:
 
 ```powershell
-# Optional: Set default backend
-[Environment]::SetEnvironmentVariable("MEDIAGIT_DEFAULT_BACKEND", "local", "User")
-
-# Optional: Set storage path
-[Environment]::SetEnvironmentVariable("MEDIAGIT_STORAGE_PATH", "$env:USERPROFILE\.mediagit\storage", "User")
-
 # Optional: Enable debug logging
 [Environment]::SetEnvironmentVariable("MEDIAGIT_LOG", "info", "User")
 ```
+
+Backend and storage location are **per repository**, not global: they are
+set in that repo's `.mediagit/config.toml` (written by `mediagit init`).
+There is no environment variable for either.
 
 ## System Requirements
 
@@ -101,8 +99,8 @@ Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile
 # Check version
 mediagit --version
 
-# Run self-test
-mediagit fsck --self-test
+# Verify a repository's integrity (run inside a repo)
+mediagit fsck --full
 
 # Create test repository
 mkdir C:\test-mediagit
@@ -112,7 +110,7 @@ mediagit init
 
 Expected output:
 ```
-mediagit-core 0.2.8-beta.1
+mediagit-core 0.3.0-rc.4
 ✓ All checks passed
 ✓ Initialized empty MediaGit repository in .mediagit/
 ```

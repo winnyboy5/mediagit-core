@@ -78,15 +78,15 @@
 //! - Enable encryption at rest for sensitive data
 
 use crate::StorageBackend;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
+use aws_sdk_s3::Client;
 use aws_sdk_s3::config::retry::RetryConfig;
 use aws_sdk_s3::config::timeout::TimeoutConfig;
-use aws_sdk_s3::Client;
 use bytes::Bytes;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use tracing::{debug, warn};
@@ -219,6 +219,14 @@ pub struct MinIOBackend {
     // Limits concurrent create_multipart_upload calls to prevent overwhelming MinIO.
     // Env: MEDIAGIT_MINIO_MPU_CONCURRENCY (default 16). Set to 0 to disable.
     mpu_sem: Arc<Semaphore>,
+    // Bounds concurrent in-flight `with_retry` operations (put/get/exists/delete/head)
+    // against this backend. Without this, a backend outage lets every concurrent
+    // chunk request retry independently and unboundedly: each retry chain holds a
+    // socket/connection while sleeping through exponential backoff, and thousands of
+    // concurrent chains piling up over a multi-minute outage can exhaust process
+    // socket handles, which starves the server's own accept loop (A7 abuse drill).
+    // Env: MEDIAGIT_MINIO_OP_CONCURRENCY (default 64). Set to 0 to disable.
+    op_sem: Arc<Semaphore>,
     // Keep these for backward compatibility
     endpoint: String,
     bucket: String,
@@ -542,11 +550,17 @@ impl MinIOBackend {
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(16)
             .max(1);
+        let op_concurrency = std::env::var("MEDIAGIT_MINIO_OP_CONCURRENCY")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(64)
+            .max(1);
         Ok(MinIOBackend {
             client,
             config: Arc::new(config.clone()),
             stats: Arc::new(MinIOStats::new()),
             mpu_sem: Arc::new(Semaphore::new(mpu_concurrency)),
+            op_sem: Arc::new(Semaphore::new(op_concurrency)),
             endpoint: config.endpoint,
             bucket: config.bucket,
             _access_key: config.access_key,
@@ -603,6 +617,13 @@ impl MinIOBackend {
     where
         F: FnMut() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send>>,
     {
+        // Acquire before the retry loop (not per-attempt) so a single slow/retrying
+        // operation holds exactly one permit for its whole lifetime, capping how many
+        // concurrent chains can be mid-backoff against a down backend at once. Waiting
+        // for a permit is a plain async yield — it never blocks a tokio worker thread,
+        // so it can't itself starve the accept loop the way unbounded retry chains do.
+        let _permit = self.op_sem.acquire().await.expect("op_sem is never closed");
+
         let mut retry_count = 0;
         let mut delay_ms = self.config.initial_retry_delay_ms;
 
@@ -768,6 +789,9 @@ impl MinIOBackend {
         let part_size = self.config.part_size as usize;
         let mut part_number = 1;
 
+        // part_number feeds the S3 PartNumber (1-indexed); kept as an explicit
+        // counter for clarity in this multipart-upload hot path.
+        #[allow(clippy::explicit_counter_loop)]
         for chunk in data.chunks(part_size) {
             let client = client.clone();
             let bucket = bucket.clone();
@@ -837,11 +861,11 @@ impl MinIOBackend {
             part_handles.push(handle);
 
             // Limit concurrent uploads
-            if part_handles.len() >= self.config.max_concurrent_parts {
-                if let Some(handle) = part_handles.pop() {
-                    let (part_num, etag) = handle.await??;
-                    parts.push((part_num, etag));
-                }
+            if part_handles.len() >= self.config.max_concurrent_parts
+                && let Some(handle) = part_handles.pop()
+            {
+                let (part_num, etag) = handle.await??;
+                parts.push((part_num, etag));
             }
 
             part_number += 1;
@@ -1002,24 +1026,34 @@ impl StorageBackend for MinIOBackend {
         // ByteStream does not implement futures::Stream directly; convert to
         // tokio::io::AsyncRead and drive with unfold to yield 64 KiB Bytes chunks.
         let reader = response.body.into_async_read();
-        let stream = futures::stream::unfold((reader, stats), |(mut rdr, stats)| async move {
-            use tokio::io::AsyncReadExt;
-            let mut buf = vec![0u8; 65536];
-            match rdr.read(&mut buf).await {
-                Ok(0) => None,
-                Ok(n) => {
-                    buf.truncate(n);
-                    stats
-                        .total_bytes_downloaded
-                        .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
-                    Some((
-                        Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(buf)),
-                        (rdr, stats),
-                    ))
+        // Fuse on error — see the same note in s3.rs::get_streaming.
+        let stream = futures::stream::unfold(
+            (reader, stats, false),
+            |(mut rdr, stats, failed)| async move {
+                use tokio::io::AsyncReadExt;
+                if failed {
+                    return None;
                 }
-                Err(e) => Some((Err(anyhow!("get_streaming chunk: {}", e)), (rdr, stats))),
-            }
-        });
+                let mut buf = vec![0u8; 65536];
+                match rdr.read(&mut buf).await {
+                    Ok(0) => None,
+                    Ok(n) => {
+                        buf.truncate(n);
+                        stats
+                            .total_bytes_downloaded
+                            .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                        Some((
+                            Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(buf)),
+                            (rdr, stats, false),
+                        ))
+                    }
+                    Err(e) => Some((
+                        Err(anyhow!("get_streaming chunk: {}", e)),
+                        (rdr, stats, true),
+                    )),
+                }
+            },
+        );
 
         Ok(Box::pin(stream))
     }
@@ -1049,27 +1083,34 @@ impl StorageBackend for MinIOBackend {
             .map_err(|e| anyhow::anyhow!("get_streaming_range {}: {}", key_wire, e))?;
 
         let reader = response.body.into_async_read();
-        let stream = futures::stream::unfold((reader, stats), |(mut rdr, stats)| async move {
-            use tokio::io::AsyncReadExt;
-            let mut buf = vec![0u8; 65536];
-            match rdr.read(&mut buf).await {
-                Ok(0) => None,
-                Ok(n) => {
-                    buf.truncate(n);
-                    stats
-                        .total_bytes_downloaded
-                        .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
-                    Some((
-                        Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(buf)),
-                        (rdr, stats),
-                    ))
+        // Fuse on error — see the same note in s3.rs::get_streaming.
+        let stream = futures::stream::unfold(
+            (reader, stats, false),
+            |(mut rdr, stats, failed)| async move {
+                use tokio::io::AsyncReadExt;
+                if failed {
+                    return None;
                 }
-                Err(e) => Some((
-                    Err(anyhow::anyhow!("get_streaming_range chunk: {}", e)),
-                    (rdr, stats),
-                )),
-            }
-        });
+                let mut buf = vec![0u8; 65536];
+                match rdr.read(&mut buf).await {
+                    Ok(0) => None,
+                    Ok(n) => {
+                        buf.truncate(n);
+                        stats
+                            .total_bytes_downloaded
+                            .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                        Some((
+                            Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(buf)),
+                            (rdr, stats, false),
+                        ))
+                    }
+                    Err(e) => Some((
+                        Err(anyhow::anyhow!("get_streaming_range chunk: {}", e)),
+                        (rdr, stats, true),
+                    )),
+                }
+            },
+        );
         Ok(Box::pin(stream))
     }
 
@@ -1437,6 +1478,7 @@ impl StorageBackend for MinIOBackend {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)] // edition-2024: test-only env::set_var/remove_var requires unsafe
 mod tests {
     use super::*;
 
@@ -1503,11 +1545,170 @@ mod tests {
             config: Arc::new(cfg.clone()),
             stats: Arc::new(MinIOStats::new()),
             mpu_sem: Arc::new(Semaphore::new(16)),
+            op_sem: Arc::new(Semaphore::new(64)),
             endpoint: cfg.endpoint,
             bucket: cfg.bucket,
             _access_key: cfg.access_key,
             _secret_key: cfg.secret_key,
         }
+    }
+
+    /// `with_retry`'s exhaustion message ends "last error follows" — which is
+    /// only true if the caller renders the whole chain. Campaign
+    /// 20260804-scale-verify2 logged 1,082 of these with `{}`, so nothing
+    /// followed and every retry exhaustion was undiagnosable.
+    ///
+    /// Pins both halves: the cause must be absent from `{}` (the trap that
+    /// makes `{:#}` mandatory at call sites) and present in `{:#}`. Swapping
+    /// `.context()` for a message-replacing `map_err` fails the second.
+    #[tokio::test]
+    async fn with_retry_exhaustion_preserves_cause_in_chain() {
+        let creds = aws_sdk_s3::config::Credentials::new(
+            "ak".to_string(),
+            "sk".to_string(),
+            None,
+            None,
+            "synthetic",
+        );
+        let s3_config = aws_sdk_s3::config::Builder::new()
+            .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+            .endpoint_url("http://127.0.0.1:1")
+            .credentials_provider(creds)
+            .force_path_style(true)
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .build();
+        let cfg = MinIOConfig {
+            endpoint: "http://127.0.0.1:1".to_string(),
+            bucket: "b".to_string(),
+            access_key: "ak".to_string(),
+            secret_key: "sk".to_string(),
+            max_retries: 2,
+            initial_retry_delay_ms: 1,
+            ..Default::default()
+        };
+        let backend = MinIOBackend {
+            client: Client::from_conf(s3_config),
+            config: Arc::new(cfg.clone()),
+            stats: Arc::new(MinIOStats::new()),
+            mpu_sem: Arc::new(Semaphore::new(16)),
+            op_sem: Arc::new(Semaphore::new(4)),
+            endpoint: cfg.endpoint,
+            bucket: cfg.bucket,
+            _access_key: cfg.access_key,
+            _secret_key: cfg.secret_key,
+        };
+
+        const CAUSE: &str = "connection reset by peer at layer 7";
+        let result: Result<()> = backend
+            .with_retry(|| Box::pin(async move { Err(anyhow!(CAUSE)) }))
+            .await;
+        let err = result.expect_err("synthetic operation always errors");
+
+        assert!(
+            !format!("{err}").contains(CAUSE),
+            "plain Display is expected to hide the cause — if this starts passing, \
+             the `{{:#}}` requirement at call sites may have changed: {err}"
+        );
+        assert!(
+            format!("{err:#}").contains(CAUSE),
+            "alternate Display must carry the underlying cause, got: {err:#}"
+        );
+    }
+
+    /// Regression test for the A7 abuse-drill finding: during a sustained
+    /// backend outage, concurrent chunk uploads must not spin up unbounded
+    /// concurrent retry chains against the dead backend (each chain holds a
+    /// connection through several seconds of exponential backoff; thousands
+    /// of them piling up over a multi-minute outage exhausted process socket
+    /// handles and starved the server's own accept loop).
+    ///
+    /// `with_retry` now acquires one `op_sem` permit for its entire
+    /// (possibly-retrying) lifetime, so no more than `op_concurrency`
+    /// operations can be mid-backoff at once. This drives `with_retry`
+    /// directly with a synthetic always-fails operation (no real network),
+    /// so it's fast and deterministic: the assertion is an exact peak count,
+    /// not a timing heuristic.
+    #[tokio::test]
+    async fn with_retry_bounds_concurrent_operations() {
+        let op_concurrency = 3usize;
+        let backend = {
+            let creds = aws_sdk_s3::config::Credentials::new(
+                "ak".to_string(),
+                "sk".to_string(),
+                None,
+                None,
+                "synthetic",
+            );
+            let s3_config = aws_sdk_s3::config::Builder::new()
+                .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+                .endpoint_url("http://127.0.0.1:1")
+                .credentials_provider(creds)
+                .force_path_style(true)
+                .region(aws_sdk_s3::config::Region::new("us-east-1"))
+                .build();
+            let cfg = MinIOConfig {
+                endpoint: "http://127.0.0.1:1".to_string(),
+                bucket: "b".to_string(),
+                access_key: "ak".to_string(),
+                secret_key: "sk".to_string(),
+                max_retries: 2,
+                initial_retry_delay_ms: 100,
+                ..Default::default()
+            };
+            MinIOBackend {
+                client: Client::from_conf(s3_config),
+                config: Arc::new(cfg.clone()),
+                stats: Arc::new(MinIOStats::new()),
+                mpu_sem: Arc::new(Semaphore::new(16)),
+                op_sem: Arc::new(Semaphore::new(op_concurrency)),
+                endpoint: cfg.endpoint,
+                bucket: cfg.bucket,
+                _access_key: cfg.access_key,
+                _secret_key: cfg.secret_key,
+            }
+        };
+
+        let current = Arc::new(AtomicU64::new(0));
+        let peak = Arc::new(AtomicU64::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..9 {
+            let backend = backend.clone();
+            let current = current.clone();
+            let peak = peak.clone();
+            handles.push(tokio::spawn(async move {
+                let result: Result<()> = backend
+                    .with_retry(|| {
+                        let current = current.clone();
+                        let peak = peak.clone();
+                        Box::pin(async move {
+                            let now = current.fetch_add(1, Ordering::SeqCst) + 1;
+                            peak.fetch_max(now, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(30)).await;
+                            current.fetch_sub(1, Ordering::SeqCst);
+                            Err(anyhow!("simulated transient backend outage"))
+                        })
+                    })
+                    .await;
+                assert!(result.is_err(), "synthetic operation always errors");
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let observed_peak = peak.load(Ordering::SeqCst);
+        assert!(
+            observed_peak <= op_concurrency as u64,
+            "op_sem failed to bound concurrency: observed {observed_peak} concurrent \
+             retry chains against a {op_concurrency}-permit semaphore"
+        );
+        assert_eq!(
+            observed_peak, op_concurrency as u64,
+            "expected contention to actually reach the concurrency cap with 9 tasks \
+             racing for {op_concurrency} permits; got {observed_peak} — test may not be \
+             exercising real contention"
+        );
     }
 
     #[test]
@@ -1610,10 +1811,12 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("must start with http"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must start with http")
+        );
     }
 
     #[tokio::test]
@@ -1651,10 +1854,12 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("lowercase letters"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("lowercase letters")
+        );
     }
 
     #[tokio::test]
@@ -1772,26 +1977,34 @@ mod tests {
         let secret_key = std::env::var("MINIO_SECRET_KEY").ok();
 
         // Clear env vars
-        std::env::remove_var("MINIO_ENDPOINT");
-        std::env::remove_var("MINIO_BUCKET");
-        std::env::remove_var("MINIO_ACCESS_KEY");
-        std::env::remove_var("MINIO_SECRET_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MINIO_ENDPOINT") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MINIO_BUCKET") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MINIO_ACCESS_KEY") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MINIO_SECRET_KEY") };
 
         let result = MinIOBackend::from_env().await;
         assert!(result.is_err());
 
         // Restore env vars
         if let Some(v) = endpoint {
-            std::env::set_var("MINIO_ENDPOINT", v);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MINIO_ENDPOINT", v) };
         }
         if let Some(v) = bucket {
-            std::env::set_var("MINIO_BUCKET", v);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MINIO_BUCKET", v) };
         }
         if let Some(v) = access_key {
-            std::env::set_var("MINIO_ACCESS_KEY", v);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MINIO_ACCESS_KEY", v) };
         }
         if let Some(v) = secret_key {
-            std::env::set_var("MINIO_SECRET_KEY", v);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MINIO_SECRET_KEY", v) };
         }
     }
 
@@ -1805,10 +2018,14 @@ mod tests {
         let secret_key = std::env::var("MINIO_SECRET_KEY").ok();
 
         // Set test values matching docker-compose.test.yml
-        std::env::set_var("MINIO_ENDPOINT", "http://localhost:9000");
-        std::env::set_var("MINIO_BUCKET", "mediagit-test");
-        std::env::set_var("MINIO_ACCESS_KEY", "minioadmin");
-        std::env::set_var("MINIO_SECRET_KEY", "minioadmin");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MINIO_ENDPOINT", "http://localhost:9000") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MINIO_BUCKET", "mediagit-test") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MINIO_ACCESS_KEY", "minioadmin") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MINIO_SECRET_KEY", "minioadmin") };
 
         let result = MinIOBackend::from_env().await;
         if let Err(ref e) = result {
@@ -1822,24 +2039,32 @@ mod tests {
 
         // Restore env vars
         if let Some(v) = endpoint {
-            std::env::set_var("MINIO_ENDPOINT", v);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MINIO_ENDPOINT", v) };
         } else {
-            std::env::remove_var("MINIO_ENDPOINT");
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::remove_var("MINIO_ENDPOINT") };
         }
         if let Some(v) = bucket {
-            std::env::set_var("MINIO_BUCKET", v);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MINIO_BUCKET", v) };
         } else {
-            std::env::remove_var("MINIO_BUCKET");
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::remove_var("MINIO_BUCKET") };
         }
         if let Some(v) = access_key {
-            std::env::set_var("MINIO_ACCESS_KEY", v);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MINIO_ACCESS_KEY", v) };
         } else {
-            std::env::remove_var("MINIO_ACCESS_KEY");
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::remove_var("MINIO_ACCESS_KEY") };
         }
         if let Some(v) = secret_key {
-            std::env::set_var("MINIO_SECRET_KEY", v);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MINIO_SECRET_KEY", v) };
         } else {
-            std::env::remove_var("MINIO_SECRET_KEY");
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::remove_var("MINIO_SECRET_KEY") };
         }
     }
 }

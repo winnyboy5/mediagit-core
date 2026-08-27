@@ -23,14 +23,28 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tempfile::TempDir;
 
-#[cfg(windows)]
-const TEST_FILES_DIR: &str = "D:\\own\\saas\\mediagit-core\\test-files";
-#[cfg(not(windows))]
-const TEST_FILES_DIR: &str = "/mnt/d/own/saas/mediagit-core/test-files";
-
+// Fixture root. Resolved from the workspace root at runtime by
+// `TestPaths::test_files_dir()` — this used to be two cfg-gated absolute
+// paths baked to one developer's machine (`D:\own\...` /
+// `/mnt/d/own/...`), so on every other machine, CI included, the fixture
+// lookups silently missed and every media assertion below skipped.
+fn test_files_dir() -> std::path::PathBuf {
+    mediagit_test_utils::TestPaths::announce_fixture_root(
+        mediagit_test_utils::TestPaths::test_files_dir(),
+        "test-files/",
+    )
+}
 #[allow(deprecated)]
 fn mediagit() -> Command {
-    Command::cargo_bin("mediagit").unwrap()
+    {
+        // `commit` refuses an unconfigured identity (UX-6) instead of
+        // authoring as `Unknown <unknown@localhost>`, so tests declare one
+        // the way a real user would.
+        let mut c = Command::cargo_bin("mediagit").unwrap();
+        c.env("MEDIAGIT_AUTHOR_NAME", "Test User")
+            .env("MEDIAGIT_AUTHOR_EMAIL", "test@example.com");
+        c
+    }
 }
 
 fn init_repo(dir: &Path) {
@@ -43,7 +57,7 @@ fn init_repo(dir: &Path) {
 }
 
 fn copy_test_file(test_file: &str, repo_dir: &Path, dest_name: &str) -> PathBuf {
-    let source = Path::new(TEST_FILES_DIR).join(test_file);
+    let source = test_files_dir().join(test_file);
     let dest = repo_dir.join(dest_name);
 
     if source.exists() {
@@ -207,7 +221,7 @@ fn test_large_mov_416mb() {
 fn test_very_large_mkv_2_4gb() {
     test_large_file(
         "www.1TamilMV.LC - Mask (2025) Tamil WEB-DL - 4K SDR - 2160p - HEVC - (DD+5.1 - 192Kbps & AAC 2.0) - 2.3GB - ESub.mkv",
-        "movie.mkv"
+        "movie.mkv",
     );
 }
 
@@ -227,7 +241,7 @@ fn test_extreme_archive_10gb() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
 
-    let source = Path::new(TEST_FILES_DIR).join("archive (1).zip");
+    let source = test_files_dir().join("archive (1).zip");
     if !source.exists() {
         println!("SKIP: 10GB+ archive not found");
         return;

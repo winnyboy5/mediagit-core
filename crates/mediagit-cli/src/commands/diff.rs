@@ -16,11 +16,13 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_versioning::{
-    resolve_revision, Commit, Index, ObjectDatabase, Oid, RefDatabase, Tree, TreeDiffer,
+    Commit, Index, ObjectDatabase, Oid, RefDatabase, Tag, Tree, TreeDiffer, resolve_revision,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use crate::ignore_rules::IgnoreMatcher;
 
 /// Show changes between commits
 ///
@@ -61,8 +63,8 @@ pub struct DiffCmd {
     #[arg(long)]
     pub cached: bool,
 
-    /// Show word-level changes
-    #[arg(long)]
+    /// Show word-level changes (not yet implemented)
+    #[arg(long, hide = true)]
     pub word_diff: bool,
 
     /// Show statistics
@@ -88,6 +90,11 @@ pub struct DiffCmd {
 
 impl DiffCmd {
     pub async fn execute(&self) -> Result<()> {
+        // UX-5: declared but never read, so it silently produced an ordinary
+        // diff. Refuse rather than pretend (see `rebase --rebase-merges`).
+        if self.word_diff {
+            anyhow::bail!("--word-diff is not yet implemented.");
+        }
         if self.quiet {
             return Ok(());
         }
@@ -108,8 +115,11 @@ impl DiffCmd {
             return self.diff_cached(&repo_root, &refdb, &odb).await;
         }
 
-        // Resolve commits using revision parser (supports HEAD~N)
+        // Resolve commits using revision parser (supports HEAD~N). Peel
+        // annotated tags (which resolve to a tag object, not a commit).
         let (from_oid, to_oid) = self.resolve_commits(&refdb, &odb).await?;
+        let from_oid = Self::peel_to_commit(from_oid, &odb).await?;
+        let to_oid = Self::peel_to_commit(to_oid, &odb).await?;
 
         // Read commits
         let from_data = odb.read(&from_oid).await?;
@@ -203,8 +213,11 @@ impl DiffCmd {
             head_files.insert(PathBuf::from(&entry.name), entry.oid);
         }
 
-        // Scan working directory
-        let working_files = self.scan_working_directory(repo_root)?;
+        // Scan working directory, honoring .mediagitignore the same way
+        // `status` does (BUG-DES-5: diff previously listed ignored files as
+        // "added" while status correctly hid them).
+        let matcher = IgnoreMatcher::new(repo_root).ok();
+        let working_files = self.scan_working_directory(repo_root, &matcher)?;
 
         // Detect changes
         let mut modified = Vec::new();
@@ -354,6 +367,25 @@ impl DiffCmd {
         Ok(())
     }
 
+    /// Follow a Tag object to its target, repeating until a Commit is
+    /// reached (branches/OIDs already point at a commit and return
+    /// immediately).
+    async fn peel_to_commit(mut oid: Oid, odb: &ObjectDatabase) -> Result<Oid> {
+        loop {
+            let data = odb
+                .read(&oid)
+                .await
+                .context(format!("Failed to read object {}", oid))?;
+            if Commit::deserialize(&data).is_ok() {
+                return Ok(oid);
+            }
+            match Tag::deserialize(&data) {
+                Ok(tag) => oid = tag.target,
+                Err(_) => anyhow::bail!("Object {} is not a commit or tag", oid),
+            }
+        }
+    }
+
     async fn resolve_commits(
         &self,
         refdb: &RefDatabase,
@@ -384,10 +416,15 @@ impl DiffCmd {
         Ok((from_oid, to_oid))
     }
 
-    /// Scan working directory for files (excluding .mediagit)
-    fn scan_working_directory(&self, repo_root: &Path) -> Result<HashSet<PathBuf>> {
+    /// Scan working directory for files (excluding .mediagit and anything
+    /// matched by .mediagitignore)
+    fn scan_working_directory(
+        &self,
+        repo_root: &Path,
+        matcher: &Option<IgnoreMatcher>,
+    ) -> Result<HashSet<PathBuf>> {
         let mut files = HashSet::new();
-        self.scan_directory_recursive(repo_root, repo_root, &mut files)?;
+        self.scan_directory_recursive(repo_root, repo_root, matcher, &mut files)?;
         Ok(files)
     }
 
@@ -396,6 +433,7 @@ impl DiffCmd {
         &self,
         repo_root: &Path,
         current_dir: &Path,
+        matcher: &Option<IgnoreMatcher>,
         files: &mut HashSet<PathBuf>,
     ) -> Result<()> {
         for entry in std::fs::read_dir(current_dir)? {
@@ -407,13 +445,23 @@ impl DiffCmd {
                 continue;
             }
 
+            // Check .mediagitignore (same rule status uses)
+            if let Some(m) = matcher
+                && let Ok(rel) = path.strip_prefix(repo_root)
+            {
+                let is_dir = path.is_dir();
+                if m.is_ignored(rel, is_dir) {
+                    continue; // skip file OR prune entire directory
+                }
+            }
+
             if path.is_file() {
                 if let Ok(rel_path) = path.strip_prefix(repo_root) {
                     let normalized = PathBuf::from(rel_path.to_string_lossy().replace('\\', "/"));
                     files.insert(normalized);
                 }
             } else if path.is_dir() {
-                self.scan_directory_recursive(repo_root, &path, files)?;
+                self.scan_directory_recursive(repo_root, &path, matcher, files)?;
             }
         }
         Ok(())

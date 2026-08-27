@@ -32,7 +32,6 @@ use super::super::repo::find_repo_root;
 #[derive(Parser, Debug)]
 #[command(after_help = "MODES:
     --soft   Only move HEAD
-    --mixed  Move HEAD and reset index (default)
     --hard   Move HEAD, reset index, and reset working tree
 
 EXAMPLES:
@@ -99,33 +98,34 @@ impl ResetCmd {
         // Heuristic: attempt commit resolution first.  If it fails AND the
         // value corresponds to an existing file (or an index entry), redirect
         // to path-mode reset (unstage) instead of erroring.
-        if let Some(ref spec) = self.commit {
-            if !self.soft && !self.hard {
-                let storage = create_storage_backend(&repo_root).await?;
-                let odb = ObjectDatabase::with_smart_compression(storage.clone(), 10000);
-                let refs = RefDatabase::new(&storage_path);
+        if let Some(ref spec) = self.commit
+            && !self.soft
+            && !self.hard
+        {
+            let storage = create_storage_backend(&repo_root).await?;
+            let odb = ObjectDatabase::with_smart_compression(storage.clone(), 10000);
+            let refs = RefDatabase::new(&storage_path);
 
-                // Try resolving as a commit
-                if self.resolve_target(&odb, &refs, spec).await.is_err() {
-                    // Resolution failed — check if this looks like a file path
-                    let candidate = repo_root.join(spec);
-                    let index = Index::load(&repo_root)?;
-                    let as_path = PathBuf::from(spec.replace('\\', "/"));
+            // Try resolving as a commit
+            if self.resolve_target(&odb, &refs, spec).await.is_err() {
+                // Resolution failed — check if this looks like a file path
+                let candidate = repo_root.join(spec);
+                let index = Index::load(&repo_root)?;
+                let as_path = PathBuf::from(spec.replace('\\', "/"));
 
-                    if candidate.exists() || index.contains(&as_path) {
-                        // Treat as path-mode reset (unstage the file)
-                        let path_reset = ResetCmd {
-                            commit: None,
-                            paths: vec![spec.clone()],
-                            soft: false,
-                            mixed: false,
-                            hard: false,
-                            quiet: self.quiet,
-                        };
-                        return path_reset.reset_paths(&repo_root).await;
-                    }
-                    // Not a file either — fall through to give the original error
+                if candidate.exists() || index.contains(&as_path) {
+                    // Treat as path-mode reset (unstage the file)
+                    let path_reset = ResetCmd {
+                        commit: None,
+                        paths: vec![spec.clone()],
+                        soft: false,
+                        mixed: false,
+                        hard: false,
+                        quiet: self.quiet,
+                    };
+                    return path_reset.reset_paths(&repo_root).await;
                 }
+                // Not a file either — fall through to give the original error
             }
         }
 
@@ -144,7 +144,21 @@ impl ResetCmd {
         let reflog = Reflog::new(storage_path);
 
         // Get current HEAD
-        let old_oid = refs.resolve("HEAD").await?;
+        let old_oid = match refs.resolve("HEAD").await {
+            Ok(oid) => oid,
+            Err(_) => {
+                // HEAD is unborn (no commits yet — refs/heads/<branch>
+                // doesn't exist). There's no tree to reset the index or
+                // working tree to. `reset <rev>` still can't be satisfied
+                // and errors with a clearer message; the no-target form
+                // (`reset` / `reset --hard`) treats the target state as
+                // the empty tree so it can still be used to unstage.
+                if self.commit.is_some() {
+                    anyhow::bail!("No commits yet, cannot reset to a specific revision");
+                }
+                return self.reset_unborn(repo_root, mode);
+            }
+        };
 
         // Resolve target commit
         let target_spec = self.commit.as_deref().unwrap_or("HEAD");
@@ -166,6 +180,24 @@ impl ResetCmd {
                 &target_oid.to_hex()[..7],
                 mode_str
             ));
+        }
+
+        // WT-1: `--hard` is *meant* to discard tracked modifications, so it
+        // does not consult the modified list — but it must not silently
+        // overwrite an untracked file that the target tree materializes, and
+        // (via `with_tracked_paths` below) it must not delete untracked files
+        // at all. Checked before HEAD moves so a refusal leaves nothing half
+        // done.
+        if mode == ResetMode::Hard {
+            let mut at_risk = crate::worktree_guard::AtRisk::check(
+                repo_root,
+                &odb,
+                Some(&old_oid),
+                Some(&target_oid),
+            )
+            .await?;
+            at_risk.modified.clear();
+            at_risk.ensure_clean("reset --hard")?;
         }
 
         // Get current branch from HEAD file
@@ -204,15 +236,20 @@ impl ResetCmd {
             self.reset_index(repo_root, &odb, &old_commit).await?;
         }
 
-        // Step 2: Reset index (mixed and hard)
-        if mode == ResetMode::Mixed || mode == ResetMode::Hard {
+        // Step 2: Reset index (mixed populates it from the target tree)
+        if mode == ResetMode::Mixed {
             self.reset_index(repo_root, &odb, &target_commit).await?;
         }
 
-        // Step 3: Reset working tree (hard only)
+        // Step 3: Reset working tree (hard only), then leave an EMPTY index.
+        // An empty index means "clean" (a normal commit clears it too); a
+        // hard reset lands the working tree exactly at target_oid, so
+        // repopulating the index with the whole tree made `status` show
+        // every file as phantom-staged afterward.
         if mode == ResetMode::Hard {
-            self.reset_working_tree(repo_root, &odb, &target_oid)
+            self.reset_working_tree(repo_root, &odb, &old_oid, &target_oid)
                 .await?;
+            Index::new().save(repo_root)?;
         }
 
         if !self.quiet {
@@ -242,6 +279,29 @@ impl ResetCmd {
             }
             let summary = target_commit.summary();
             println!("  {} {}", style("→").dim(), summary);
+        }
+
+        Ok(())
+    }
+
+    /// Handle `reset` / `reset --hard` with no <rev> when HEAD is unborn
+    /// (no commits yet). There's no tree to move HEAD to, so the target
+    /// state is treated as the empty tree: clear the index and, for
+    /// --hard, leave the working tree untouched (never delete user files
+    /// before the first commit).
+    fn reset_unborn(&self, repo_root: &Path, mode: ResetMode) -> Result<()> {
+        Index::new().save(repo_root)?;
+
+        if !self.quiet {
+            match mode {
+                ResetMode::Hard => println!(
+                    "{} unborn HEAD: index cleared, working tree untouched",
+                    style("ℹ").cyan()
+                ),
+                ResetMode::Soft | ResetMode::Mixed => {
+                    println!("{} No commits yet; index cleared", style("✓").green())
+                }
+            }
         }
 
         Ok(())
@@ -334,9 +394,12 @@ impl ResetCmd {
         &self,
         repo_root: &Path,
         odb: &ObjectDatabase,
+        old_oid: &Oid,
         commit_oid: &Oid,
     ) -> Result<()> {
-        let checkout_manager = CheckoutManager::new(odb, repo_root);
+        // WT-1: only files tracked at the pre-reset HEAD may be deleted.
+        let tracked = crate::worktree_guard::tracked_paths(repo_root, odb, Some(old_oid)).await?;
+        let checkout_manager = CheckoutManager::new(odb, repo_root).with_tracked_paths(tracked);
         checkout_manager
             .checkout_commit(commit_oid)
             .await
@@ -353,10 +416,10 @@ impl ResetCmd {
         let content = fs::read_to_string(&head_path).await?;
         let content = content.trim();
 
-        if let Some(target) = content.strip_prefix("ref: ") {
-            if let Some(branch) = target.strip_prefix("refs/heads/") {
-                return Ok(Some(branch.to_string()));
-            }
+        if let Some(target) = content.strip_prefix("ref: ")
+            && let Some(branch) = target.strip_prefix("refs/heads/")
+        {
+            return Ok(Some(branch.to_string()));
         }
 
         Ok(None)
@@ -423,10 +486,12 @@ impl ResetCmd {
         }
 
         // Try abbreviated OID (prefix scan through ODB)
-        if spec.len() >= 4 && spec.len() < 64 && spec.chars().all(|c| c.is_ascii_hexdigit()) {
-            if let Ok(oid) = odb.resolve_abbreviated_oid(spec).await {
-                return Ok(oid);
-            }
+        if spec.len() >= 4
+            && spec.len() < 64
+            && spec.chars().all(|c| c.is_ascii_hexdigit())
+            && let Ok(oid) = odb.resolve_abbreviated_oid(spec).await
+        {
+            return Ok(oid);
         }
 
         anyhow::bail!("Unknown revision: {}", spec)

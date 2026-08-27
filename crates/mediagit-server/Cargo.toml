@@ -9,6 +9,19 @@ repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
 description = "Axum REST API server for MediaGit repositories"
+# Not published to crates.io: distribution is cargo-dist binaries, Docker
+# images and GitHub releases. This also makes deny.toml's
+# `allow-wildcard-paths` apply to our own path deps (cargo-deny exempts
+# them only for non-public crates). Flip to `true` and add `version = ...`
+# beside every internal `path = ...` if crates.io publishing is turned on.
+publish = false
+# cargo-dist ships these two binaries. Marked explicitly because dist's default
+# for a package is tied to whether it is publishable, and this crate just became
+# `publish = false` — without this the release pipeline could silently stop
+# building the binary. Being explicit costs one line and removes the coupling.
+[package.metadata.dist]
+dist = true
+
 
 [lib]
 name = "mediagit_server"
@@ -25,11 +38,12 @@ tls = ["mediagit-security/tls"]
 [dependencies]
 # Workspace dependencies
 tokio = { workspace = true, features = ["full"] }
-tokio-util = { version = "0.7", features = ["io"] }
+tokio-util = { version = "0.7", features = ["io", "io-util"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 blake3 = { workspace = true }
+hex = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
@@ -41,14 +55,22 @@ bytes = "1.9"
 toml = { workspace = true }
 futures = "0.3"
 clap = { workspace = true }
+uuid = { version = "1.10", features = ["v4"] }
+dialoguer = "0.12"
 
 # Security
 tower_governor = "0.8"
 governor = "0.10"
 
 # HTTPS/TLS
-axum-server = { version = "0.8", features = ["tls-rustls"] }
-rustls = { version = "0.23", features = ["ring"] }
+# `tls-rustls-no-provider`, not `tls-rustls`: the latter enables rustls with
+# aws-lc-rs. We install ring as the process provider in main() instead.
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+# default-features = false is load-bearing: rustls 0.23's default feature set
+# includes `aws-lc-rs`, so asking for `ring` alone still drags aws-lc-sys into
+# the tree (and, on Windows, its cmake/NASM build). Enumerate the defaults we
+# actually want instead.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 
 # Internal dependencies
 mediagit-protocol = { path = "../mediagit-protocol" }
@@ -57,11 +79,15 @@ mediagit-compression = { path = "../mediagit-compression" }
 mediagit-storage = { path = "../mediagit-storage", features = ["all"] }
 mediagit-config = { path = "../mediagit-config" }
 mediagit-security = { path = "../mediagit-security", features = ["all"] }
+mediagit-metrics = { path = "../mediagit-metrics" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 reqwest = { workspace = true }
 futures = "0.3"
 async-trait = { workspace = true }
-postcard = { workspace = true }
 serde_json = { workspace = true }
+mediagit-test-utils = { path = "../mediagit-test-utils" }
+
+[lints.rust]
+unsafe_code = "forbid"

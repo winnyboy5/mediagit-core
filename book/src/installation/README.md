@@ -15,29 +15,29 @@ The install script automatically detects your OS and architecture and downloads 
 ### Linux (x86_64) — manual
 
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-x86_64-linux.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.4/mediagit-0.3.0-rc.4-x86_64-linux.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 ### macOS (Apple Silicon) — manual
 
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-aarch64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.4/mediagit-0.3.0-rc.4-aarch64-macos.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 ### Windows (x86_64 — PowerShell)
 
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-x86_64-windows.zip" -OutFile mediagit.zip
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.4/mediagit-0.3.0-rc.4-x86_64-windows.zip" -OutFile mediagit.zip
 Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 ```
 
 ### Docker
 
 ```bash
-docker pull ghcr.io/winnyboy5/mediagit-core:0.2.8-beta.1
-docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.8-beta.1 mediagit --version
+docker pull ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.4
+docker run --rm ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.4 mediagit --version
 ```
 
 ### All Release Archives
@@ -86,10 +86,10 @@ After installation, verify MediaGit-Core is working:
 # Check version
 mediagit --version
 
-# Should output: mediagit-core 0.2.8-beta.1
+# Should output: mediagit-core 0.3.0-rc.4
 
-# Run self-test
-mediagit fsck --self-test
+# Verify a repository's integrity (run inside a repo)
+mediagit fsck --full
 
 # Should output: All checks passed ✓
 ```
@@ -153,5 +153,5 @@ Remove-Item "$env:LOCALAPPDATA\MediaGit" -Recurse -Force
 
 ### Docker
 ```bash
-docker rmi ghcr.io/winnyboy5/mediagit-core:0.2.8-beta.1
+docker rmi ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.4
 ```

@@ -18,8 +18,8 @@
 
 use crate::error::{CompressionError, CompressionResult};
 use crate::{CompressionLevel, Compressor};
-use flate2::read::{ZlibDecoder, ZlibEncoder};
 use flate2::Compression;
+use flate2::read::{ZlibDecoder, ZlibEncoder};
 use std::fmt;
 use std::io::Read;
 

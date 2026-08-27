@@ -58,7 +58,13 @@ pub async fn download_file_by_path(
 
     crate::security::validate_repo_name(&repo).map_err(|_| StatusCode::BAD_REQUEST)?;
     validate_file_path(&file_path)?;
-    check_permission(auth_user.as_deref(), "repo:read", state.is_auth_enabled())?;
+    check_permission(
+        auth_user.as_deref(),
+        "repo:read",
+        state.is_auth_enabled(),
+        &state.grants,
+        &repo,
+    )?;
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {

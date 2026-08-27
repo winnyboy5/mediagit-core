@@ -21,7 +21,7 @@ use std::io;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{fmt, EnvFilter, Registry};
+use tracing_subscriber::{EnvFilter, Registry, fmt};
 
 /// Initialize tracing with the specified format and optional log level.
 ///

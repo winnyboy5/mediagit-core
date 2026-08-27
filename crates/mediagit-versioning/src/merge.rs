@@ -20,7 +20,7 @@ use crate::{
     Commit, Conflict, ConflictDetector, Index, IndexEntry, LcaFinder, ObjectDatabase, ObjectType,
     Oid, Tree, TreeDiffer,
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, instrument, trace};
@@ -589,86 +589,84 @@ pub async fn apply_merge_to_workdir(
         let path_str = &conflict.path;
 
         // Read each side's blob content (may be absent for delete conflicts)
-        let base_bytes = read_blob_opt(odb, conflict.base.as_ref().map(|s| s.oid)).await?;
         let ours_bytes = read_blob_opt(odb, conflict.ours.as_ref().map(|s| s.oid)).await?;
         let theirs_bytes = read_blob_opt(odb, conflict.theirs.as_ref().map(|s| s.oid)).await?;
 
-        // Build conflict marker content
-        let mut marker = Vec::new();
-        marker.extend_from_slice(b"<<<<<<< ours\n");
-        if let Some(ref ob) = ours_bytes {
-            marker.extend_from_slice(ob);
-            if !ob.ends_with(b"\n") {
-                marker.push(b'\n');
-            }
-        }
-        marker.extend_from_slice(b"=======\n");
-        if let Some(ref tb) = theirs_bytes {
-            marker.extend_from_slice(tb);
-            if !tb.ends_with(b"\n") {
-                marker.push(b'\n');
-            }
-        }
-        marker.extend_from_slice(b">>>>>>> theirs\n");
+        // Binary detection: a NUL byte in either side means inline text markers
+        // would corrupt the file (e.g. a 74MB PSD becoming 149MB of "merged" garbage).
+        let is_binary = ours_bytes.as_deref().is_some_and(contains_nul_byte)
+            || theirs_bytes.as_deref().is_some_and(contains_nul_byte);
 
-        // Write marker file to workdir
         let dest = workdir.join(path_str);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create dirs for {}", path_str))?;
         }
-        std::fs::write(&dest, &marker)
-            .with_context(|| format!("Failed to write conflict file {}", path_str))?;
 
-        // Write the conflict blob to ODB so we can reference it
-        let conflict_oid = odb.write(ObjectType::Blob, &marker).await?;
+        // (stage-0 oid, stage-0 content) written to the workdir/index for this path.
+        let (stage0_oid, stage0_len) = if is_binary {
+            // Binary conflict: write ONE side (ours, falling back to theirs)
+            // unmodified. The conflict is still flagged via the stage1/2/3
+            // entries below; the user resolves by picking a side.
+            let (side_oid, side_bytes) = match (&conflict.ours, ours_bytes.as_ref()) {
+                (Some(cs), Some(b)) => (cs.oid, b),
+                _ => match (&conflict.theirs, theirs_bytes.as_ref()) {
+                    (Some(cs), Some(b)) => (cs.oid, b),
+                    _ => anyhow::bail!(
+                        "Binary conflict at {} has neither ours nor theirs content",
+                        path_str
+                    ),
+                },
+            };
+            std::fs::write(&dest, side_bytes)
+                .with_context(|| format!("Failed to write conflict file {}", path_str))?;
+            (side_oid, side_bytes.len())
+        } else {
+            // Text conflict: inline markers as before.
+            let mut marker = Vec::new();
+            marker.extend_from_slice(b"<<<<<<< ours\n");
+            if let Some(ref ob) = ours_bytes {
+                marker.extend_from_slice(ob);
+                if !ob.ends_with(b"\n") {
+                    marker.push(b'\n');
+                }
+            }
+            marker.extend_from_slice(b"=======\n");
+            if let Some(ref tb) = theirs_bytes {
+                marker.extend_from_slice(tb);
+                if !tb.ends_with(b"\n") {
+                    marker.push(b'\n');
+                }
+            }
+            marker.extend_from_slice(b">>>>>>> theirs\n");
 
-        // Stage the conflict blob at stage 0 (the marker file itself)
+            std::fs::write(&dest, &marker)
+                .with_context(|| format!("Failed to write conflict file {}", path_str))?;
+
+            let conflict_oid = odb.write(ObjectType::Blob, &marker).await?;
+            (conflict_oid, marker.len())
+        };
+
+        // Stage the workdir content at stage 0
         let index_entry = IndexEntry::new(
             std::path::PathBuf::from(path_str),
-            conflict_oid,
+            stage0_oid,
             0o100644,
-            marker.len() as u64,
+            stage0_len as u64,
             None,
         );
         index.add_entry(index_entry);
 
-        // Stage base/ours/theirs at stages 1/2/3 by writing each as index entries
-        // (Index currently only supports one entry per path; we model stages 1-3 via
-        //  synthetic paths with a stage suffix for conflict tracking purposes)
-        if let (Some(ref cs), Some(ref ob)) = (&conflict.base, &base_bytes) {
-            let stage_path = format!("{}::stage1", path_str);
-            let e = IndexEntry::new(
-                std::path::PathBuf::from(&stage_path),
-                cs.oid,
-                cs.mode,
-                ob.len() as u64,
-                None,
-            );
-            index.add_entry(e);
-        }
-        if let (Some(ref cs), Some(ref ob)) = (&conflict.ours, &ours_bytes) {
-            let stage_path = format!("{}::stage2", path_str);
-            let e = IndexEntry::new(
-                std::path::PathBuf::from(&stage_path),
-                cs.oid,
-                cs.mode,
-                ob.len() as u64,
-                None,
-            );
-            index.add_entry(e);
-        }
-        if let (Some(ref cs), Some(ref tb)) = (&conflict.theirs, &theirs_bytes) {
-            let stage_path = format!("{}::stage3", path_str);
-            let e = IndexEntry::new(
-                std::path::PathBuf::from(&stage_path),
-                cs.oid,
-                cs.mode,
-                tb.len() as u64,
-                None,
-            );
-            index.add_entry(e);
-        }
+        // WT-9: flag the path as awaiting acknowledgement. Must follow
+        // `add_entry`, which clears the flag — staging is the user's
+        // acknowledgement, and we have just staged provisional content on
+        // their behalf rather than resolved anything.
+        //
+        // This is the only conflict signal that works for binary files. They
+        // never receive `<<<<<<<` markers (inlining would corrupt them), so
+        // any caller inspecting file *content* sees a clean tree and wrongly
+        // concludes the conflict was resolved.
+        index.mark_unresolved(std::path::PathBuf::from(path_str));
     }
 
     // --- Write MERGE_HEAD, MERGE_MSG, ORIG_HEAD ---
@@ -680,6 +678,12 @@ pub async fn apply_merge_to_workdir(
         .context("Failed to write ORIG_HEAD")?;
 
     Ok(())
+}
+
+/// Heuristic binary detector: a NUL byte anywhere in the content means it's
+/// not safe to inline as text (mirrors the common git/diff convention).
+fn contains_nul_byte(bytes: &[u8]) -> bool {
+    bytes.contains(&0)
 }
 
 /// Helper: read a blob from ODB by OID, returning None if the OID is absent.
@@ -1113,5 +1117,66 @@ mod tests {
 
         // file5: they added, we didn't - included
         assert!(merged_tree.entries.contains_key("file5.txt"));
+    }
+
+    /// QA-002: a conflicted merge must stage only the stage-0 path per
+    /// conflicting file — no `::stage1`/`::stage2`/`::stage3` debris keys,
+    /// which have zero readers and previously poisoned the index/tree,
+    /// crashing a later `branch switch` on Windows (colon paths, os error
+    /// 123).
+    #[tokio::test]
+    async fn test_apply_merge_to_workdir_no_stage_debris() {
+        let odb = create_test_odb();
+        let engine = MergeEngine::new(Arc::clone(&odb));
+
+        let base_tree = create_tree(&odb, vec![("file.txt", b"base")]).await;
+        let base_commit = create_commit(&odb, base_tree, vec![], "Base").await;
+
+        // `apply_merge_to_workdir` reads each conflict side's blob content,
+        // so (unlike the tree-only tests above) the blobs must actually be
+        // written to the ODB, not just hashed into the tree entry.
+        odb.write(ObjectType::Blob, b"base").await.unwrap();
+        odb.write(ObjectType::Blob, b"ours").await.unwrap();
+        odb.write(ObjectType::Blob, b"theirs").await.unwrap();
+
+        let ours_tree_oid = create_tree(&odb, vec![("file.txt", b"ours")]).await;
+        let ours_commit = create_commit(&odb, ours_tree_oid, vec![base_commit], "Ours").await;
+
+        let theirs_tree_oid = create_tree(&odb, vec![("file.txt", b"theirs")]).await;
+        let theirs_commit = create_commit(&odb, theirs_tree_oid, vec![base_commit], "Theirs").await;
+
+        let result = engine
+            .merge(&ours_commit, &theirs_commit, MergeStrategy::Recursive)
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert_eq!(result.conflicts.len(), 1);
+
+        let ours_tree = Tree::read(&odb, &ours_tree_oid).await.unwrap();
+        let theirs_tree = Tree::read(&odb, &theirs_tree_oid).await.unwrap();
+
+        let workdir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workdir.path().join(".mediagit")).unwrap();
+        let mut index = Index::new();
+
+        apply_merge_to_workdir(
+            &result,
+            &ours_tree,
+            &theirs_tree,
+            &odb,
+            workdir.path(),
+            &mut index,
+            theirs_commit,
+            ours_commit,
+        )
+        .await
+        .unwrap();
+
+        let paths: Vec<String> = index
+            .entries()
+            .map(|e| e.path.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(paths, vec!["file.txt".to_string()]);
+        assert!(!paths.iter().any(|p| crate::is_stage_debris_key(p)));
     }
 }

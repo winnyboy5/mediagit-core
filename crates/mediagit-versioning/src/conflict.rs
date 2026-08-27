@@ -18,7 +18,7 @@
 //! which changes can be auto-merged.
 
 use crate::{ObjectDatabase, Oid, Tree, TreeEntry};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::{debug, instrument, trace};

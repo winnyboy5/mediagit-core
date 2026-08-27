@@ -42,11 +42,11 @@ enable_auth = false
 enable_rate_limiting = false
 
 # Requests per second per IP address (default: 10)
-rate_limit_rps = 10
+rate_limit_rps = 1000
 
 # Burst size - allows temporary spikes (default: 20)
 # This allows up to 20 requests in a short burst
-rate_limit_burst = 20
+rate_limit_burst = 2000
 
 # ========================================
 # TLS/HTTPS Settings
@@ -84,16 +84,16 @@ tls_self_signed = false
 # enable_auth = true
 # jwt_secret = "staging-secret-key-change-this"
 # enable_rate_limiting = true
-# rate_limit_rps = 10
-# rate_limit_burst = 20
+# rate_limit_rps = 1000
+# rate_limit_burst = 2000
 # enable_tls = false  # or true with self-signed cert
 
 # --- Production Configuration (Full Security) ---
 # enable_auth = true
 # jwt_secret = "production-secret-key-from-secure-storage"
 # enable_rate_limiting = true
-# rate_limit_rps = 100  # Adjust based on expected traffic
-# rate_limit_burst = 200
+# rate_limit_rps = 1000  # per credential, not per server
+# rate_limit_burst = 2000
 # enable_tls = true
 # tls_cert_path = "/etc/mediagit/tls/cert.pem"
 # tls_key_path = "/etc/mediagit/tls/key.pem"

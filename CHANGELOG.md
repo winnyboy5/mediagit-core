@@ -5,6 +5,952 @@ All notable changes to MediaGit will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed — clone is faster, and no longer restarts from zero (2026-08-27)
+
+Six commits, each independently revertible. The target is **clone**, not push:
+push already beat clone on every backend and is already pipelined, so the
+buffered path was outrunning the streaming one. No persisted or wire format
+changes.
+
+- **Clone writes your working tree while media is still downloading.** It used
+  to wait for the last byte of the last file before writing anything. Small
+  files are complete as soon as the initial transfer finishes, so they are
+  written immediately; only chunk-backed files wait for their own chunks.
+  `MEDIAGIT_CLONE_OVERLAP=0` restores the serial path — it is the revert switch
+  and the parity oracle, and both produce an identical tree.
+
+  Measured 2026-08-27 (240 MB media + 400 small files, local backend, 3 reps
+  alternating order): checkout wall **0.37 s → 0.22 s (−40.5%)**, total clone
+  wall 4.04 s → 3.87 s (−4.2%). **Read the second number as "no change":** −4.2%
+  is inside this project's ~4.3% run-to-run noise, and on a loopback backend the
+  download is too fast to hide much behind. The overlap wins where the transfer
+  is slow relative to the working-tree write, which is not this bench. Parity
+  held: all six clones produced one identical tree hash.
+
+- **An interrupted clone now resumes.** Clone used to delete the target
+  directory on *any* error, which deleted the very object database a retry
+  would have skipped work against — an 11 GB clone dying at 90% re-downloaded
+  11 GB. Now: a failure after data has landed keeps the directory, and re-running
+  the same command skips what already arrived. Ctrl-C is covered by the same
+  mechanism. A failure during *setup* (bad URL, bad credentials, no such
+  repository) still cleans up, since there is nothing to resume. Resume is at
+  chunk granularity; a chunk interrupted mid-download is re-fetched whole.
+
+- **Media is decompressed once per clone instead of twice.** Verification on
+  arrival and the working-tree write were two separate full decompression
+  passes over every media byte.
+
+- **The server no longer buffers a whole chunk in RAM per download request.**
+  This also makes `MEDIAGIT_STORAGE_STREAMING` mean something: between B7 and
+  now it was implemented, overridden by the S3 and MinIO backends, and called
+  by nothing — the server buffered regardless of the setting. Streamed chunk
+  responses use chunked transfer-encoding and so carry no `Content-Length`.
+
+- **Client push memory cut ~76%, and a small-file push got ~4× faster.** The
+  *metadata* pack (commits, trees, small blobs) had no size cap at all, unlike
+  the 64 MiB cloud chunk pack — it grew in RAM with history, then was copied
+  twice more on the way to the socket. It is now written to a temp file and
+  streamed from there. One pack, no protocol change.
+
+  Measured 2026-08-27, pushing 8000 × 8 KB files (62.5 MB) to a local backend,
+  same fixture and same server binary on both arms, 2 reps alternating order:
+
+  | | client private bytes | × payload | push wall |
+  |---|---:|---:|---:|
+  | before | 315.2 MB | 5.04× | 34.2 s |
+  | after | 77.0 MB | 1.23× | 8.4 s |
+
+  The 4× speedup was not predicted and is a consequence of the same defect:
+  growing a 315 MB `Vec` by reallocation and then copying it twice is expensive,
+  not just memory-hungry.
+
+  **Not "bounded".** Memory still scales with payload, at ~1.23×. What went away
+  is the ~5× multiple, not the proportionality. A single 512 MB file shows none
+  of this — that is chunked media and never enters the metadata pack.
+
+- **New `[bench] op=checkout` line** (bench schema v4 → v5) with an explicit
+  `overlap=on|off` field. Working-tree write time was previously folded into the
+  caller's total with no record of its own, so the cost of the old barrier could
+  not be measured at all. Anything parsing `[bench]` lines needs updating.
+
+**Not done, deliberately:** sub-chunk resume offsets (would need protocol work);
+streaming the cloud chunk pack upload (already capped at 64 MiB); HTTP/3
+(addresses none of the above, and AWS S3 does not support it).
+
+**Numbers:** the two A/Bs above were measured on a release build at `7b632c3`
+against a local backend, and are recorded in `BENCHMARKS.md`. The **cloud**
+throughput table in that file has NOT been re-measured and is flagged as
+pre-cycle; cloud MB/s is WAN-bound and is not expected to move.
+
+
+## [v0.3.0-rc.4] - 2026-08-26
+
+**The first tagged release since `v0.2.8-beta.1` (2026-06-02) — 214 commits.**
+`v0.3.0-rc.1`, `rc.2` and `rc.3` were each prepared and written up but never
+tagged, so everything they described ships for the first time here. Their notes
+are preserved below, unedited, under dated cycle headings; read them as part of
+these release notes, not as history. What changed since rc.3's notes were last
+extended (2026-08-19) is the 60 commits in *This cycle*, immediately following.
+
+**Compat.** Relative to `v0.2.8-beta.1` the on-disk format did change — the GA
+format freeze and the `docs/FORMATS.md` §11 promise both begin at rc.1, and the
+rc.1 cycle notes below carry the details. From rc.1 onward the promise holds
+unbroken: rc.2 changed no persisted or wire format at all; rc.3 added two
+things that are new rather than changed (the `MGEN` object envelope, written
+only by a repository that opted in, and the key-escrow wire endpoints); and
+this cycle changes not one persisted byte. The frozen-fixture gate (`02_compat`)
+has not been regenerated since rc.1.
+
+**Release status — read this.** The GA campaign cleared at commit `8332c5c`
+with two consecutive clean runs (237/237 gates, 25/25 phases, across all five
+backends). This release is tagged one commit later, at `bf8aa0e`, which that
+campaign did not cover: it makes three hidden `pull` flags refuse instead of
+lying, and changes a QA stall verdict. Its CLI change carries four unit tests
+and was verified end-to-end on a release binary. A third campaign was started
+and voided — seven Wi-Fi drops on the host, no product failure — so it is not
+evidence in either direction. **One server-wedge family remains open and
+unexplained**; see *Added — diagnosability* below, which exists specifically to
+make the next occurrence answerable rather than to fix it.
+
+### This cycle — 2026-08-19 → 2026-08-26
+
+Sixty commits of transfer reliability, timeout hygiene and documentation
+truth-up. No new capability: the two `feat` commits both exist to make a
+failure legible.
+
+#### Fixed — the cloud pack fast path, where large pushes were quietly collapsing
+
+This is the headline. On slow links, pushes were falling off the pack fast path
+onto the per-chunk proxy relay and finishing at roughly a tenth of the
+throughput — or not finishing at all. Four separate defects stacked, and the
+first three each hid the next.
+
+Measured on a 2 GB S5 push against all five backends (`20260821-s5check`),
+before the fixes: `local` and `minio` clean, and **all three cloud backends
+degraded** — AWS 32 packs offered / 1 completed / 65 proxy PUTs / 1.30 MB/s and
+a non-zero exit; Azure 32/2/724 at 0.99 MB/s; GCS 32/18/0 at 3.58 MB/s.
+
+- **A total 300 s timeout was killing pack uploads that were still
+  progressing.** A pack's *body* is bounded; the *time* to upload it is not —
+  it is size over share-of-link, and packs upload concurrently, so each one's
+  share shrinks as fan-out grows. Azure moved 2048 MB in 2072 s (~1 MB/s
+  aggregate) and a 64 MB pack blew past 300 s while still transferring. Only
+  the two that got through early survived. The whole-operation timeout is gone.
+- **A per-socket read timeout replaces it, and the four data-plane clients are
+  now one.** Each call site rolled its own `reqwest` client and they had
+  drifted: pack PUT had a 300 s bound and *no* TCP keepalive; the two chunk PUT
+  passes had both; the presigned GET on the pull path **had no bound at all**.
+  So three uploads were bounded and the download was not — one bucket that
+  accepted a connection and went quiet could hold an entire clone for up to the
+  3600 s `MEDIAGIT_PULL_DEADLINE_SECS` ceiling, and the resulting error named
+  the phase, not the socket. `tcp_keepalive` does not close that gap: it proves
+  a peer is *alive*, not that it is *answering*. All four now build from one
+  `data_plane_client_builder()`, which returns a builder rather than a client
+  precisely so the per-site timeout stays a per-site decision.
+- **A transient status on one pack abandoned the fast path for the entire
+  push.** The presigned pack PUT was a bare `send()` with no retry and no error
+  classification, and bailed on any non-success status. Its own comment claimed
+  a 429 "is handled by the caller's own retry loop" — there was no such loop;
+  the caller only caught the error and fell back. Between two campaign runs
+  this showed as 96 upload-URLs → 97 `packs/complete` and 8.69 MB/s, versus 96
+  → **0** completes, 2,284 per-chunk PUTs and 0.98 MB/s. GCS's four transients
+  arrived inside a single second — the shape of throttling, and precisely what
+  a retry is for. Now reuses `error_class::classify_auto` and the same
+  5-attempt budget the per-chunk MPU path already used, so pack and part
+  uploads behave alike. `Permanent*` still bails immediately: re-sending a
+  whole pack five times against a 403 is pure waste.
+- **One failed pack no longer abandons the packs still queued.** Even with
+  per-pack retry working, `packs.rs` did `o.result.context(...)?` — so the
+  first exhausted pack propagated out of the pack phase and **27 packs were
+  never attempted**. A failure is now recorded (first error kept, closest to
+  the root cause) and the remaining packs keep uploading. The phase still
+  reports `Err`, deliberately: `push.rs` runs its per-chunk fallback only when
+  the pack path did not fully succeed, and swallowing the error there would
+  skip the fallback for chunks that never landed.
+
+Net effect on the same drill: all five backends complete the S5 push on the
+fast path, and a new gate asserts the fast path was actually taken rather than
+inferring it from throughput.
+
+#### Fixed — nothing waits forever any more
+
+Seven unbounded waits, found by four separate campaign hangs. Each is a call
+that could block indefinitely while looking, from outside, exactly like a
+crash.
+
+- **The control plane had no request bound at all.** Its stated safety net was
+  "`tcp_keepalive` (30 s) already detects truly dead peers" — but a peer that
+  holds the connection open and stops replying keeps keepalive satisfied
+  forever. Captured live: a clone that normally takes 0.55 s sat for 102 s with
+  CPU flat across a 10 s sample, all six threads in Wait, one Established
+  connection, having completed `encryption-key` and `info/refs` and issued
+  nothing since. Same shape at 416 s and at 1800 s (harness-killed).
+  `MEDIAGIT_PUSH_DEADLINE_SECS` bounded only the bulk phases, so none of it
+  applied.
+- **`mediagit download` could hang silently forever.** The response body was
+  streamed with no deadline, so a backend that accepted the connection, began a
+  response and then stopped sending left it awaiting indefinitely. This is the
+  CI/scripting entry point, run unattended, so the symptom is a command that
+  produces no output and never exits.
+- **A misconfigured `Retry-After` could idle a client for 13 hours.**
+  `rate_limit_backoff` honoured the server's header with no upper bound while
+  the retry budget defaults to 10 attempts. Measured on the code before the
+  fix: one `Retry-After: 900` waited 965,668 ms, and the worst case across the
+  budget was 47,098,138 ms — **13.08 hours** of silence while the server
+  answered `/health` in 3 ms. The function's own doc comment already promised
+  the 16 s ceiling that the next line then bypassed.
+- **GCS had no timeout of any kind** — the only backend without one. It was
+  built with a retry policy and nothing else, and a retry policy cannot rescue
+  a hang: retries fire on *errors*, and a stalled response is not an error.
+  `google-cloud-gax`'s `attempt_timeout` defaults to `None`, so there was no
+  SDK default underneath either. Grepping `timeout` gave s3 = 15 hits,
+  azure = 20, gcs = 1 — and that one was a comment. Data-plane reads get a
+  120 s per-IO deadline; the control plane (`get_object` behind `exists` and
+  `size`, `delete_object`, `list_objects`) gets 60 s, because those are
+  metadata round-trips where waiting two minutes to learn one is stuck is dead
+  time. Not tighter than 60 s: gcs.rs already records ~20–25 s transport times
+  when concurrent uploads exhaust GCS TCP connections, and a 30 s bound would
+  fire during congested-but-recoverable operation.
+- **A dropped GCS connection failed an entire push.** 56 seconds and 2,800
+  objects into a pack POST, one connection closed and the push died. The call
+  is `exists()`, on `StorageControl` — the one client deliberately denied
+  `AlwaysRetry`, because `AlwaysRetry` retries `NOT_FOUND` and `NOT_FOUND` is
+  precisely how `exists()` answers "absent", so every missing chunk paid a full
+  exponential back-off. Removing it dropped the client onto the SDK default,
+  `Aip194Strict`, which treats `Cancelled` as permanent. This is the second
+  half of that earlier fix: a policy that retries transport cancellation
+  without retrying `NOT_FOUND`.
+- **Fourteen `auth` HTTP calls had no timeout — not connect, not read.** They
+  now route through one bounded client. This closes out the `auth key revoke`
+  hang that once blocked ~60 s with the DELETE never reaching the server. A
+  timeout was considered and rejected at the time as "a guess dressed as a
+  fix", because the block might have been in the keychain lookup instead. That
+  objection is now retired by measurement rather than by argument: keychain
+  reads under 24 concurrent readers across 6 processes max at **1.01 ms**, and
+  `reqwest::Client::new()` at **245 µs** — five orders of magnitude off, which
+  leaves `.send()` as the only unbounded step on the path.
+- **One slow pack could hold the global verify permit for a whole clone.** A
+  single GCS pack held it for 2628 s — 87% of a failing clone — while every
+  other clone queued behind it. The 120 s no-progress deadline could not catch
+  it because the read never stopped; it trickled.
+  `MEDIAGIT_PACK_VERIFY_BUDGET_SECS` (default 300 s) now parks a pack that
+  blows its wall-clock budget: nothing quarantined, no URL minted, retried
+  later. Give up the lane rather than widen it — raising verify concurrency
+  from 1 to 16 was measured at 131 s → 2042 s, **15.5× worse**, so the
+  single-permit default is deliberate. The old knob also drove two axes at two
+  defaults and is now split: `MEDIAGIT_PACK_VERIFY_PACK_CONCURRENCY` for
+  packs-at-once, with the old name keeping the range-reads-within-a-pack axis
+  and warning once.
+
+#### Fixed — two ways to lose data that were still open
+
+- **`push --repair` could durably delete a healthy chunk.**
+  `verify_chunk_content` returned a bare `false` for two very different things:
+  "read it, hashed it, the bytes are wrong" and "the check did not complete". A
+  `JoinError` fires when the blocking task panics *or when the tokio runtime is
+  shutting down*, so an in-flight verification during a server shutdown
+  reported perfectly healthy data as corrupt. Traced through all five callers,
+  the worst path reaches `evict_pack_entries`, reachable only with
+  `evict_invalid=true`, whose sole caller is `push --repair` — and eviction
+  rewrites the pack manifest with an atomic write plus fsync. So a transient
+  panic durably dropped a healthy chunk's manifest entry, and repair then
+  reported it "unrepairable" with no way to distinguish it from real
+  corruption: the repair command doing the damage. A three-state
+  `ChunkVerification { Verified, Corrupt, Unverifiable }` replaces the bool,
+  making the collapse unrepresentable rather than merely guarded against — the
+  same rule `EntryVerification` already spells out for pack entries: *"I could
+  not verify this" must never be collapsed into "this is corrupt".*
+- **A failed sidecar delete could admit a delta chain past the depth cap.**
+  `delta_written_pairs` is a memo that must remain a superset of the on-disk
+  edges — the depth guard reads it to decide how deep a chain already is. Four
+  rollback paths broke that: after the meta sidecar was committed and the delta
+  binary write then failed, they did a best-effort
+  `let _ = storage.delete(&meta_key)` and dropped the in-memory edge regardless
+  of the result. If that delete failed, the sidecar survived on disk while the
+  edge vanished from memory, so the guard undercounted and could admit a chain
+  past `MAX_DELTA_DEPTH` — producing exactly the unpushable, unclonable repo
+  the cap exists to prevent. The edge is now dropped only once the sidecar is
+  confirmed gone.
+
+#### Fixed — CLI flags that accepted input and ignored it
+
+Three commands took a flag, reported success, and did something other than what
+the flag said. On conflict-resolution flags specifically this is the worst
+failure mode: the user believes they chose which side wins, and finds out
+otherwise from the merged content.
+
+- **`merge -X/--strategy-option` was declared, parsed, and read nowhere.**
+  Visible in `--help`, sitting directly beside `-s/--strategy`, which *is*
+  honoured — so the pair looked symmetric and was not. It now refuses, naming
+  `-s ours|theirs|recursive` as the thing that works, following the pattern
+  `commit -a` already set.
+- **`pull --continue`, `-s` and `-X` did the same, and were hidden.** All three
+  are `hide = true`, so they appear in no `--help` anyone reads, which is why
+  the earlier `pull --abort` / `--no-commit` sweep missed them. `--continue` is
+  the damaging one: after a conflicted pull it ran an ordinary *new* pull and
+  reported success, so the user believes they resumed the operation they were
+  mid-way through, and the resulting state is silently wrong. All three now
+  refuse, naming `merge --continue`.
+- **`MEDIAGIT_LOG` / `RUST_LOG` could not raise the log level.** The fallback
+  existed but was unreachable, because the CLI call site always passed an
+  explicit level. Every `debug!` in `mediagit-protocol` was therefore
+  unreachable, so a client that hung mid-operation could not be asked what it
+  was waiting on — the pre-bulk hang had to be diagnosed across four campaigns
+  from TCP tables and thread wait-states instead. `MEDIAGIT_LOG` takes
+  precedence over `RUST_LOG`, so MediaGit diagnostics can be turned on without
+  inheriting another tool's setting.
+- **A recommended log filter silenced everything else.** The guidance shipped
+  with the clone phase markers said to arm them with
+  `MEDIAGIT_LOG=mediagit::commands::clone=debug`. An `EnvFilter` built only
+  from target directives *disables* every target that does not match, so that
+  suppressed the rest of the tree — including the protocol layer's "rate
+  limited (429); backing off before retry" warning. A campaign armed exactly
+  that filter and failed a rate-limit drill on the missing line.
+
+#### Added — diagnosability, so the open wedge is answerable next time
+
+One server-wedge family has been captured repeatedly and remains unexplained.
+Every capture produced the same ambiguous evidence: process alive, port bound,
+not one request served. Nothing here fixes the wedge; all of it makes the next
+occurrence decide between hypotheses that currently demand opposite
+investigations.
+
+- **A runtime heartbeat on the server.** The only proof of life available was
+  the rate-limiter cleanup line — which runs on a `std::thread`, not on tokio,
+  and so says nothing about whether the async runtime is scheduling. The
+  heartbeat runs *on* the runtime. If it keeps ticking through a stall, the
+  runtime is healthy and the block is client-side; if it stops, the runtime is
+  wedged.
+- **Clone phase markers.** The four captures of the client-side hang do not
+  agree on where it stops — two show the server receiving zero requests, two
+  show it receiving `encryption-key` and `info/refs` and nothing after. The
+  markers name the step.
+- **The server binds before announcing readiness.** "MediaGit server listening
+  on {addr}" was logged *before* `TcpListener::bind`, making it a promise
+  rather than an observation. Reproduced by holding a port: the server printed
+  the listening line and "Press Ctrl+C to stop", then died with
+  `os error 10048`. This destroyed the evidence needed for five campaign wedge
+  post-mortems, all of which show a startup log byte-identical to a healthy
+  start followed by nothing — with the line emitted either way, no post-mortem
+  could distinguish "never bound" from "bound but never accepted", which is
+  exactly where every previous investigation stalled. Both branches now log
+  `listener.local_addr()`, the address the kernel actually gave us, which
+  differs from the requested one whenever the port is 0.
+- **The startup probe no longer gives up on a call the SDK is still making.**
+  It capped storage validation at 30 s while configuring that same client with
+  `read_timeout(120s)`, `max_attempts=2` and no operation timeout — so it
+  reported a bare timeout with no cause on calls that were still legitimately
+  in flight. Seen on two different backends with an identical signature; one
+  was originally misattributed to a Wi-Fi outage.
+
+#### Changed
+
+- **The download-concurrency default is measured and kept.** 384 MB / 302
+  chunks over loopback: `conc=1` → 4.42 s / 87 MB/s, default → 3.67 s /
+  105 MB/s, `conc=32` → 3.57 s / 107 MB/s. The default is within 2% of 32, so
+  `MEDIAGIT_DOWNLOAD_CONCURRENCY` stays where it is; the earlier note that
+  changing it "needs measurement" is closed.
+- **The dev/test Docker stack runs Silo instead of MinIO, on pinned tags.**
+  Upstream discontinued MinIO's open-source edition; Silo is the Pigsty
+  community fork, keeping the S3 API and on-disk format with the admin console
+  and security patches restored. Drop-in — the entrypoint translates a legacy
+  `minio` argv, so every `command:` is unchanged. Verified running rather than
+  merely configured: SHA-256 against the published checksums, `Server: Silo` in
+  the response headers, container healthy, both buckets created, full
+  PUT/GET/DELETE round-trip. **Tags are now pinned** — the MinIO images floated
+  on `:latest`, so the backend under test could change between two campaign
+  runs with nothing in the repo changing.
+
+#### Documentation — a truth-up sweep, measured to zero
+
+Nine commits cross-checking every claim in the 121 tracked markdown files
+against a source of truth — clap derives, `env::var` call sites, `schema.rs` —
+rather than against recollection. Two counters, both driven to their floor:
+
+- **Invented CLI flags: 108 → 4** (the four remaining are documented false
+  positives). Among the fabrications: an entire `delta-compression` guide
+  documenting a `[compression.delta.thresholds]` operating model that does not
+  exist; `diff --word-diff` with an options row and a worked example;
+  `show --stat` with its own section, prose reference and sample output block.
+- **Undocumented real flags: 166 → 0.** Roughly 78 of the final 89 were
+  universal options every command accepts (`--color`, `-C/--repository`,
+  `-q/--quiet`, `-v/--verbose`, `-h/--help`, `-V/--version`).
+- **21 fabricated environment variables removed.** The costly ones were the
+  storage credentials: README, `CONFIGURATION.md`, the `mediagit-config` README
+  and the CI/CD workflow example all told readers to export credentials to the
+  environment. Nothing reads them — `create_storage_backend` passes
+  `config.toml`'s `access_key_id`/`secret_access_key` straight through, and
+  `MinIOBackend::new_with_prefix` rejects an empty key outright, so anyone
+  following the CI/CD example got "access key cannot be empty" from a workflow
+  copied verbatim out of the docs. GCS is the one genuine environment path
+  (ADC resolves `GOOGLE_APPLICATION_CREDENTIALS`) and is now the only one
+  documented as such.
+- **A security setting that did nothing is retracted.** `[storage] encryption`
+  and `encryption_algorithm` were documented with a defaults table. There is no
+  such field on `S3Storage` and no SSE code on any S3 path, and because the
+  client config is not `deny_unknown_fields`, those keys parsed silently and
+  were discarded. The docs now point at at-rest encryption, which is real.
+- **Credential precedence was documented backwards.** `CLI_REFERENCE.md` and
+  `env-knobs.md` both stated that `MEDIAGIT_TOKEN` has the *lowest* precedence,
+  "below per-remote token in config.toml". It is the highest —
+  `resolve_credentials_tiered` returns on `MEDIAGIT_TOKEN` before it looks at
+  config or the keychain, and says so in its own doc comment.
+- **A stale authorization claim removed.** `authentication.md` and
+  `security.md` both documented the pre-AU-4 behaviour, where recording one
+  grant flipped *every* other repo to grant-based authz and locked out anyone
+  without an explicit grant there. That was fixed in code long ago, but the
+  docs still described the bug as the design, and
+  `MEDIAGIT_GRANTS_ENFORCE=strict` was documented nowhere.
+- **Two missing CLI pages added** (`auth`, `config`), **13 env vars that
+  existed only in source documented**, and **8 diagrams added** — lock
+  lifecycle and push-time enforcement including its fail-open branch;
+  sparse-checkout as ODB-versus-working-tree; the full CAS key space and where
+  a chunk actually lives when `chunks/` does not have it; the three
+  configuration surfaces that are not layers; the authorization decision from
+  request to 403; and the presigned-versus-proxy decision.
+
+#### Fixed (QA harness — these gate the release, so their defects hide product bugs)
+
+- **The docs gate recursed one level and could not see sub-subcommands at
+  all.** `auth key create --name`, `auth admin create-user --role` and
+  `--permissions` all read as INVENTED because the walk stopped at
+  `auth key --help`. `auth` is the only two-level command tree in this CLI,
+  which makes the blind spot exactly coextensive with the security-relevant
+  surface — the gate could not detect a fabricated flag there at all.
+- **`12_safety` could report PASS having verified nothing.** It was the only
+  phase script in the suite that hand-rolled its exit instead of calling
+  `Exit-QaPhase`, which silently dropped the "no gates recorded means
+  NOTHING-VERIFIED" protection every sibling gets: its `$AllPass` flag only
+  flips on an actual FAIL, so it stayed `$true` when nothing ran. This is the
+  phase whose entire purpose is catching silent data loss.
+- **`08_perf` gated a 500 MB `add` below its own noise floor.** Two campaigns
+  failed the same row at +18% and +15.7%. Sixteen consecutive runs of the same
+  release binary on the same fixture, machine idle, established that the
+  threshold sat inside run-to-run variance. Re-derived, and a minimum absolute
+  delta added so a 0.02 s wall cannot fail on one 10 ms tick.
+- **A stall is now captured while the client is alive.** The `possible stall`
+  verdict fired only once the process had exited, by which point its threads,
+  sockets and CPU counters were gone — so every capture of the client-hang
+  family was reconstructed from logs after the fact, and the one question that
+  decides the investigation (did the request ever leave the box) was never
+  answerable.
+- Also: `A7` no longer stops the backend after the push has already finished,
+  and a cyclable backend it was not told how to cycle is now a FAIL rather than
+  a silent skip; a bounded pipe drain replaces the one that hung `A7` for 28
+  minutes; `A13` no longer fails when a commit hash happens to start with
+  `429`; `S2b` requires a prompt refusal rather than merely a non-zero exit; a
+  filtered `07_abuse` run is announced rather than silently shortened; the
+  watchdog post-mortem no longer names Docker on a native-Silo host; and the
+  scale floors were re-derived natively so fast backends gate on half their
+  worst observed throughput rather than on a distant SLO.
+
+### The rc.3 cycle — 2026-08-04 → 2026-08-19
+
+At-rest encryption, plus a correctness and transfer-reliability cycle.
+
+**Compat.** rc.3 adds two things that are new rather than changed: the `MGEN`
+object envelope (persisted, additive, and written only by a repository that
+opted in) and the key-escrow endpoints (a new wire API). The
+`docs/FORMATS.md` §11 promise, in effect since v0.3.0-rc.1, still holds —
+nothing changes how an existing format reads, and with no key configured the
+bytes written are byte-for-byte what they were before, which is asserted by
+test and by the frozen-fixture gate.
+
+#### Fixed — rate limiting made usable, and actually tested
+
+**If you generated a config with `mediagit-server init`, ordinary pushes were
+being rejected with HTTP 429.** That path enabled rate limiting and left the
+budget at the serde defaults of 10 requests/second, burst 20 — while a push
+costs roughly one request per chunk. Anyone who started from
+`mediagit-server-production.example.toml` was unaffected.
+
+The budget is now **1000 rps / 2000 burst**, which is the number
+`RateLimitConfig::default()` has documented since the `psds` incident and which
+had simply never been reachable: `config.rs` and `security.rs` each carried
+their own defaults, and the serde pair won.
+
+- **The limiter is keyed per credential again.** `IdentityOrIpKeyExtractor`
+  existed, was documented as the key, and had no callers — the router hand-
+  inlined a second builder keyed by client IP, so every user behind one NAT, VPN
+  or CI runner pool drew on a single shared budget. The duplicate builder is
+  gone; both listeners now go through one.
+- **HTTPS plus rate limiting returned 500 on every request.** The TLS listener
+  was served without `ConnectInfo`, which the IP extractor requires, on the port
+  most likely to face the internet. Invisible until now because rate limiting is
+  off by default and no test had ever switched it on.
+- **Client retry now covers the whole API.** 429 retry was wired into three
+  call sites, all on one upload path; presign, pack, complete, refs, locks,
+  escrow and the pull path had none. All server-bound calls now route through
+  the same chokepoint. Presigned storage requests deliberately do not — those
+  are handled by the storage-error classifier.
+- **Backoff is jittered.** It was `250ms * 2^n` with no spread, so clients that
+  were limited together retried together. Now Full Jitter, and `Retry-After` is
+  honoured on the pull path too, which previously ignored it.
+
+Rate limiting is still **off by default**; this changes what you get when you
+turn it on.
+
+#### Fixed — encryption state is checked on every transfer
+
+Two gaps, neither of them the deferred re-seal work:
+
+- **An unencrypted repository could push plaintext into an encrypted one.**
+  `push` checked the remote's key only when the *local* repository had one, so a
+  clone without a key uploaded unsealed objects into a repository the server
+  considered encrypted — silently, because reads pass unsealed bytes through.
+- **`fetch` and `pull` had no encryption handling at all**, so sealed objects
+  failed deep in the compressor with a message about MGEN envelopes that named
+  nothing actionable.
+
+All four transfer commands now share one check, so they cannot drift apart
+again. `mediagit init` and `mediagit key status` also now state that encryption
+is an empty-repository decision, at the point where it can still be acted on.
+
+#### Fixed — the QA suite was measuring a rate limiter that was not running
+
+No harness path ever set `enable_rate_limiting`, so roughly 200 gates per
+campaign ran against a disabled limiter. `07_abuse`'s A13 — whose entire
+assertion is that a per-chunk push must *not* trip 429 — could not fail. Rate
+limiting is now on for every QA server, and a new `07_ratelimit` phase proves
+enforcement, the `Retry-After` and `x-ratelimit-*` headers, that the shipped
+defaults carry real pushes and clones, and that the tighter public profile is
+survivable. New `06_encrypted` drills cover both encryption fixes above.
+
+Also fixed: the `Stream was not readable` harness fault that voided the
+`S2-churn` and `S3-conflicts` scale drills across three campaigns. It was
+`Add-Content` losing a race on a log file and raising `ArgumentException`, which
+the retry helper written for exactly that race did not catch — it caught only
+`IOException`.
+
+#### Added — at-rest encryption (DC-7)
+
+Opt-in per repository, at creation time: `mediagit key init` on a fresh repo,
+then commit as usual. Objects, chunk manifests and reachability bitmaps are
+sealed under a per-repository key; that key is wrapped under a master taken
+from a keyfile/env var, the OS keychain, or a passphrase (Argon2id, m=64 MiB
+t=3 p=4). A one-time recovery code is a second, independent way in.
+
+- **`MGEN` v2 envelope, XAES-256-GCM.** Per-message subkey via the SP 800-108r1
+  KDF and a 192-bit nonce, which lifts NIST SP 800-38D's 2³² messages-per-key
+  cap to roughly 2⁸⁰ — the repository key is permanent and never rotates, so
+  the original cap was reachable. Magic and version are bound as AAD, nonces
+  come from `getrandom`, and a BLAKE3 fingerprint in the key file gives the
+  key commitment AES-GCM does not. Implemented inline against the `aes` crate
+  already present and checked against the published C2SP test vectors: no new
+  dependency, and none of it is a pre-release AEAD.
+- **Push and clone work, via key escrow.** On the first push the client hands
+  its repository key to `PUT /{repo}/encryption-key` (`repo:write`); the
+  server wraps it under its own master key (`[encryption] master_key_path` in
+  `mediagit-server.toml`) and keeps it in
+  `<repo>/.mediagit/key.json`. It needs the key because presigned uploads go
+  client→bucket directly, leaving the server holding objects it must still
+  verify, register and walk. A clone fetches it back with `repo:read` — key
+  access *is* read access — and re-wraps it under a local master without
+  prompting. Escrow never overwrites: a different key is `409 Conflict`,
+  because replacing it would orphan everything already sealed under the first.
+- **`mediagit key rotate-master`** re-wraps the same repository key under a new
+  master, for the stolen-laptop case. The repository key itself does not
+  change, so nothing needs re-sealing and escrow is untouched.
+- **The threat model is a compromised object store**, not a compromised server.
+
+Known limits, deliberate for this release: encryption can only be enabled on an
+**empty** repository (`key init` refuses otherwise — encrypting an existing one
+needs a full re-seal pass, which is not built); there is no full repository-key
+rotation; and `chunk-deltas/*.meta` sidecars stay plaintext, leaking which
+chunk deltas against which base — shape, not content.
+
+#### Fixed — the rest of the cycle
+
+The headline is a cloud-upload defect that had been costing roughly 200
+permanently-failed chunk uploads per large push while remaining invisible: the
+client fell back to a slower path and the affected gate had a floor low enough
+to pass anyway. Fixing it took MinIO's 10 GB push from a failure to comfortably
+inside its SLO, and made an 11 GB clone that had been attributed to MinIO's own
+limits complete with byte parity. All four backends — MinIO, AWS S3, Azure and
+GCS — now push *and* clone with verified byte parity.
+
+#### Fixed
+- **Presigned PUT sent two `Content-Length` headers, so the signature could not
+  verify** (transfer reliability, cloud): the per-chunk upload path set
+  `CONTENT_LENGTH` explicitly *and* replayed the server's signed
+  `required_headers`, which already carry one whenever the server presigns a
+  concrete length. `reqwest::RequestBuilder::header` **appends** rather than
+  inserts, so both reached the wire, and SigV4 signs `content-length` — a
+  duplicated signed header does not canonicalize back to what was signed, and
+  S3/MinIO answer `SignatureDoesNotMatch`. Two QA campaigns logged 976 and 748
+  of them, with a permanent-failure counter reaching 198. It stayed hidden
+  because the failure classifies as permanent, so each chunk silently fell back
+  to the authenticated server-proxy relay and the push still completed. **No
+  data was ever at risk** — `verify_chunk_uploads` re-checks every chunk — but
+  the cost was a wasted direct PUT plus a slower relayed round-trip, roughly 200
+  times per large push. Measured effect on a 10,990 MB MinIO push: **9.87 MB/s
+  and a failed push → 55.14 MB/s and a clean one**, with the 11 GB clone
+  completing at 67 MB/s with byte parity for the first time. The pack upload
+  path never had the defect, because it only ever replays `required_headers`.
+- **Azure transfers timed out on slow links** (transfer reliability): the
+  OpenDAL `TimeoutLayer` was constructed with its default **10 s `io_timeout`**,
+  which is a *per-IO* deadline rather than a whole-operation one. That is
+  reasonable on a LAN and wrong over a WAN — a 2 GB push at ~1.8 MB/s with
+  concurrent block writes exceeded it, the server returned 500, the client's
+  retry hit the same wall, and the push failed outright. Raised to 120 s and
+  made configurable via `MEDIAGIT_AZURE_IO_TIMEOUT_SECS`; `0` falls back to the
+  default rather than being honoured, since OpenDAL reads it as an
+  already-expired deadline. The non-IO timeout keeps OpenDAL's default, because
+  stat/delete/list are small round-trips where a long hang is a real fault worth
+  surfacing quickly.
+- **A single transient chunk download aborted an entire clone** (transfer
+  reliability): the parallel download path had no retry at all, so one `503`
+  discarded a multi-GB clone along with every byte already transferred. Adds a
+  bounded retry (3 attempts, 500 ms doubling) for 5xx, 429 and transport errors.
+  Deliberately does not retry verdicts: `404`/`403` are answers, and `409` is
+  load-bearing — the server returns it when a chunk is delta-only and the client
+  re-routes accordingly. The existing pull deadline still bounds the whole
+  download.
+- **Storage retry exhaustion reported no cause** (diagnosability): the storage
+  layer attaches the underlying error via `.context()` and its message ends
+  "last error follows" — but the chunk handlers rendered it with plain
+  `Display`, which prints only the outermost context. Every exhausted retry
+  therefore ended at "follows" with nothing following it: 4,092 undiagnosable
+  errors across two campaigns, including the one failure that sank a throughput
+  gate. All three sites now render the full chain.
+- **Actionable `503` guidance was unreachable** (diagnosability): the message
+  naming the operator action ("server storage backend unreachable — verify the
+  storage service is running") existed only on the sequential chunk-download
+  path, while clone uses the parallel one. Both now share a single error
+  constructor, so they cannot drift apart again.
+
+#### Fixed (QA harness — these gate the release, so their defects hide product bugs)
+- **A drill that failed to run was indistinguishable from one that measured a
+  failure.** Three scale drills died mid-campaign and reported `FAIL` exactly as
+  a real product defect would, so churn-cost, conflict-data-loss and peak-RSS
+  silently had no result for that build while appearing to be three bugs. Adds a
+  distinct `ERROR` verdict carried through the phase runner, gate table and
+  report, plus a `campaign-no-harness-errors` gate — because separating errors
+  out of the failure count would otherwise have let a campaign that voided three
+  drills report "no gate failures".
+- **The performance gate counted what it *could* have compared, not what it
+  did.** Its coverage number counted size-eligible records rather than records
+  actually held against a baseline; while the baseline lacked `commit` rows,
+  every campaign reported healthy-looking coverage while comparing half as much,
+  and the "measured nothing" guard could not fire. Now counts actual
+  comparisons, fails when none occur, and names any measurement that had no
+  baseline row.
+- **Unquoted phase numbers ran the wrong phases.** PowerShell strips a leading
+  zero from an unquoted numeric argument and phase tokens glob, so `00` became
+  `0` and matched nineteen scripts including the report aggregator, while `1`
+  matched the memory profiler — which must run alone. Single digits are now
+  normalized, and the correction is logged rather than applied silently.
+
+#### Changed
+- The S3 range-read resume path added in the previous cycle is now documented as
+  never having executed: the failures it was introduced for are dispatch
+  failures, which by definition occur before any response exists and therefore
+  cannot reach a loop that runs only after one succeeds. The code is retained —
+  it remains correct for genuine mid-body interruptions — but its original
+  justification was a misattribution and is corrected in place, and a successful
+  resume is now logged at a level the default filter does not discard.
+
+#### Fixed (GA correctness program, earlier in this cycle)
+- **Clone could silently omit objects and still report success** (data integrity,
+  P0): the want-side walk (`collect_objects_bfs`) read each object with
+  `odb.read(..).ok()` and, on `None`, logged a warning and continued — dropping
+  that object from the pack *and* abandoning its entire subtree, then answering
+  `200`. The client streams to the object count declared in the pack header, so a
+  short pack is indistinguishable from a complete one; the damage surfaced much
+  later as `Object <oid> not found: no loose object and no pack files` in a
+  repository whose clone had reported success. The server now refuses to serve an
+  incomplete closure and names the offending object, and the client surfaces that
+  message instead of a bare `500`. Leniency remains correct on the *have* side
+  (`walk_reachable`), where a client may legitimately name objects that do not
+  exist; that asymmetry is now documented at both sites. This was the root cause
+  of the intermittent `tag_object_push_clone_round_trips_*` failure.
+- **Checkout silently overwrote files whose paths differ only by case** (data
+  loss): `Tree` keys entries case-sensitively, so a commit made on Linux can hold
+  both `Logo.psd` and `logo.psd`; checking that out on Windows or default macOS
+  wrote one over the other and reported both written. Checkout now refuses, with
+  case-insensitivity probed from the filesystem rather than inferred from the
+  platform.
+- **`fsck` reported healthy delta chains as too deep**: depth was compared and
+  printed as visited *nodes* rather than hops, so a chain at exactly
+  `MAX_DELTA_DEPTH` — the deepest the writer can build — was flagged
+  "11 hops deep (max 10)". Warnings no repair could ever clear.
+- **`fsck --repair` could not repair a corrupt chunk, and claimed success anyway**:
+  corruption inside a chunked blob was reported under the *manifest's* oid, so
+  repair probed the loose path for an object that lives at `manifests/<oid>`,
+  found nothing and blamed "likely packed". Chunks are now identified from the
+  manifest and repaired directly. Separately, `Successfully repaired 0 issue(s)`
+  no longer prints a green check for work that did not happen.
+- **Transfer byte counts were wrong or absent**: `bytes_uploaded` was assigned the
+  metadata pack's size and the chunk upload's own count was discarded, so a
+  15.53 GiB push summarised as `up 2.71 KiB`; `bytes_downloaded` was never assigned
+  anywhere, so pull/clone/fetch reported no transfer at all.
+- **Progress rate and ETA were fabricated when unknown**: `eta 0s` at 0% and
+  `33 B/s` mid-transfer were an absent measurement rendered as fact, and resetting
+  the ETA on every pack seal produced readings like `747 MiB/s`. Unknown values now
+  render `--`.
+- **HTTPS listener had no rate limiting**: enabling TLS silently disabled it on the
+  port most likely to face the internet, while startup still logged
+  "Rate limiting ENABLED". Both listeners now share one limiter — sharing rather
+  than rebuilding, so splitting traffic across ports cannot double the budget.
+- **`logout` did nothing server-side.** It returned 204 while the token kept
+  authenticating for the rest of its life, so a token captured beforehand still
+  worked. Tokens now carry an id and are revoked on logout — the presented
+  token only, so logging out of one machine does not sign the user out
+  everywhere.
+- **Deleting a user left their file locks held forever** by an account that no
+  longer existed: nobody else could take the lock and the only party entitled
+  to release it was gone. Deletion now releases them.
+- **Grants were accepted for users and repositories that do not exist.** A
+  mistyped id read as "access granted" in every listing while the real user
+  still had none.
+- **The bootstrap admin password is no longer a command-line flag.**
+  `--admin-password` put the credential in `ps` output and shell history; it is
+  now read from `MEDIAGIT_ADMIN_PASSWORD`.
+- **Access and refresh tokens were interchangeable**: an access token could refresh
+  itself indefinitely (so a session never needed re-authentication) and a 30-day
+  refresh token could authenticate requests directly. They now carry a type.
+- **Pack objects at or above 4 GiB silently truncated the pack**: the 4-byte size
+  field was written with an unchecked cast, so the header understated the length
+  and every following object in the pack was read from the wrong offset.
+- **Operator-supplied pack caps were unclamped**: `MEDIAGIT_PACK_BYTES=0` sealed one
+  pack per chunk — back to one cloud object per chunk, the problem cloud packs
+  exist to solve — and an over-large value is an OOM, since peak push memory is
+  `PACK_BYTES x PACK_UPLOAD_CONCURRENCY`. Both knobs, and the concurrency
+  multiplier, are now bounded and correct loudly.
+
+#### Added
+- **`mediagit config`** — `get`/`set`/`unset`/`list` for repository settings.
+  Previously `init` and `commit` help referenced a `mediagit-config(1)` that did
+  not exist, and with `commit` now requiring a configured author the only
+  remedy on offer was hand-editing TOML.
+- **Accounts can be suspended without being deleted** (`PATCH
+  /auth/users/{id}/disabled`). Deletion was the only way to stop someone signing
+  in, forcing a choice between leaving access open and destroying the record of
+  what they did. Takes effect on the account's next request.
+- **API keys record `last_used`**, so a leaked key is distinguishable from an
+  unused one and stale keys can be found. Recorded at coarse granularity
+  (`MEDIAGIT_APIKEY_LAST_USED_RESOLUTION`, default 300s) to keep a disk write
+  off the authentication hot path.
+- **`log --since` / `--until` now filter.** They were declared, demonstrated in
+  `log --help`, and never read, so a date-bounded log returned the entire
+  history. Accepts `YYYY-MM-DD` and RFC 3339; `--until <date>` includes that
+  whole day.
+- **`push --force-with-lease` now does something.** Previously declared and
+  never read, so asking for the safe option performed an ordinary push.
+
+#### Changed
+- **Media-aware merge strategies no longer claim auto-merges they cannot
+  perform** (data integrity). `MergeResult::AutoMerged(Vec<u8>)` means "these
+  bytes are the merged file", and a caller writes them straight to the working
+  tree. The PSD, video, audio and image strategies returned serialized
+  *metadata* there — a successful PSD "auto-merge" produced a JSON document —
+  while logging "auto-merge successful". They were never wired into `merge`, so
+  no user was affected, but wiring them (as was planned) would have replaced a
+  designer's `.psd` with JSON. They now report an informative conflict instead.
+  MediaGit can analyse whether edits overlap; it cannot yet write a merged file
+  back in these formats.
+- **Dead flags now refuse instead of silently doing nothing**: `diff
+  --word-diff`, `show --stat` (use `diff --stat`), `pull --abort` (use `merge
+  --abort`), `pull --no-commit`, `gc --aggressive`. Each is hidden from help and
+  errors when used, following the existing `rebase --rebase-merges` pattern.
+- **`commit` refuses an unconfigured author** rather than recording
+  `Unknown <unknown@localhost>`. Authorship cannot be changed afterwards, and
+  the previous `$USER` fallback was unset on Windows, so most unconfigured
+  commits on that platform were attributed to nobody.
+- **Documentation now matches the code.** The README claimed AES-256-GCM
+  encryption at rest as shipped; the module exists and is tested but has no CLI or
+  server call sites (the real `[storage] encryption` setting is S3 server-side
+  encryption, a different thing — the two are no longer conflated). The book
+  documented PSD layer merge and video timeline merge with worked "Auto-merge"
+  examples; `mediagit_media::MergeStrategy` has no callers, and the section now
+  describes what merge actually does with a binary conflict. Windows ARM64 was
+  listed "Supported" while no such binary is built.
+
+#### Fixed (earlier in this cycle)
+- **Stored objects whose content began with a codec magic were unreadable** (data
+  integrity, P0): `SmartCompressor` writes incompressible data as `0x00 + raw`, but
+  `decompress_typed` stripped that prefix only when the remaining bytes did not look
+  compressed. An object starting `78 F9`/`78 DA` (valid zlib headers), `28 B5 2F FD`
+  (zstd) or `BRT\x01` (brotli) was returned one byte too long, failed its oid check, and
+  could never be read again — `add` and `commit` succeeded, then the repo refused to
+  push. Roughly 1 object in 8000. The prefix is now stripped unconditionally, since no
+  codec we emit can begin with `0x00`. **Existing repositories self-heal on upgrade**:
+  the bytes on disk were always correct, only the read framing was wrong, so no repair,
+  migration, or format change is involved.
+
+#### Removed
+- **`MEDIAGIT_PACK_MIN_CHUNKS`**: removed along with the dead `PackBuilder::flush_at_boundary` it only backed (zero callers, and unguarded `=0` could panic in `seal()`). `finish()` remains the only flush path.
+- **`mediagit branch merge`**: the subcommand was never implemented — it only ever
+  errored, telling the user to run `mediagit merge`, which already performs the merge.
+  Removed rather than shipped as a documented command that cannot succeed. Deferred as
+  future work should branch-scoped merge semantics ever diverge from `mediagit merge`.
+
+### The rc.2 cycle — 2026-07-22
+
+Toolchain and edition modernization — no wire/persisted-format changes, so the
+`docs/FORMATS.md` §11 compat promise (in effect since v0.3.0-rc.1) is preserved
+(verified byte-for-byte by the frozen-fixture fsck).
+
+#### Added
+- **Azure backend migrated to OpenDAL**: `mediagit-storage`'s Azure Blob
+  backend now runs on `opendal`'s `services-azblob`, replacing the EOL
+  `azure_storage`/`azure_storage_blobs` crates.
+- **Pack-mode `[bench]` instrumentation**: `throughput_mbs`, presign, and
+  coalesced-range counters — previously always zero on the default pack
+  path — are now populated.
+- **Range-GET hardening**: reject `200`-status responses to a nonzero-offset
+  range request that would otherwise mis-slice the body; short/truncated
+  bodies fall back to per-chunk GET instead of silently serving bad bytes.
+- **Chunk-delta directory resolution helpers** for locating a chunk's delta
+  directory consistently across callers.
+- **Phase 10 (SCALE) QA tier**: concurrency/churn/conflict/RSS/throughput
+  drills added to `dev-tests/qa-suite`.
+
+#### Changed
+- **Rust toolchain → 1.97.1** (from 1.92.0). Pinned via a new
+  `rust-toolchain.toml`; CI `RUST_VERSION` and the MSRV gate track it. MSRV
+  (`rust-version`) raised `1.92.0` → `1.97`.
+- **Edition 2021 → 2024** across all 14 crates (`cargo fix --edition`), plus
+  `rustfmt` `style_edition = "2024"`. Migration is semantics-preserving:
+  `env::set_var`/`remove_var` (now `unsafe` under edition 2024) are almost all
+  test-only; `expr` macro fragments pinned to `expr_2021`; and `if let … else`
+  scrutinees rewritten to `match` to preserve 2021 temporary-drop order.
+- **GCS backend hardening:** `GcsBackend::new`/`with_config` no longer mutate the
+  process-global `GOOGLE_APPLICATION_CREDENTIALS` env var to load a service
+  account — credentials are now passed explicitly to the storage/control clients
+  and signer. Removes a latent `set_var` data race in the multi-threaded server.
+- **Dependencies:** `Cargo.lock` refreshed within existing semver ranges
+  (`cargo update`; no direct-dependency major bumps); `cargo audit` clean.
+- **`unsafe_code` lint `forbid` → `deny`** (workspace lint table, inherited by
+  `mediagit-security`/`-config`/`-compression`) so audited, test-only
+  `env::set_var` sites can carry a scoped `#[allow(unsafe_code)]`. One production
+  site remains — `mediagit-cli` startup sets `MEDIAGIT_REPO` on its dedicated
+  single-threaded runtime thread (no concurrent env access; audited safe).
+
+### The rc.1 cycle — 2026-07-18
+
+Collaboration primitives, auth persistence, and a GA format freeze. Version
+bumped from `0.2.8-beta.1` — a compat promise is now in effect (see
+`docs/FORMATS.md` §11): breaking a frozen wire/persisted format requires a
+version bump and a hard-error reader, never a silent misparse. Verified by
+the 2026-07-16 release-build QA campaign (`reports/20260716-172951`):
+STANDARD suite green on all 4 backends (MinIO/AWS/Azure/GCS), zero findings.
+
+#### Added
+- **Server-enforced file locking**: new `mediagit lock create|unlock|list`
+  command. Locks are stored server-side (`.mediagit/locks.jsonl`) with three
+  HTTP endpoints; `push` enforces locks by tree-diffing the pushed commit
+  range against active locks (`MEDIAGIT_LOCKS_ENFORCE`, default on;
+  `MEDIAGIT_LOCKS_MAX_COMMITS`, default 1000, fails open on oversized ranges).
+  `lock unlock --force` releases someone else's lock (requires `repo:admin`).
+- **Auth persistence**: users, API keys, and per-repo grants now persist to
+  `users.jsonl` / `api_keys.jsonl` / `grants.jsonl` (versioned `{"v":1}`
+  envelopes, atomic tmp+rename writes) instead of living only in memory.
+  `MEDIAGIT_AUTH_PERSIST` (default on).
+- **Per-repo authorization grants**: `GrantsStore` with a `Read ⊂ Write ⊂
+  Admin` hierarchy, checked per `{repo}` instead of globally
+  (`MEDIAGIT_GRANTS_ENFORCE`). Previously a `Write`-role user could push to
+  any repo name on the server.
+- **Admin endpoints**: `GET`/`DELETE /auth/users` (+ `/{id}/grants`),
+  `GET`/`DELETE /auth/keys` — gated on the `user:manage` permission,
+  metadata-only responses.
+- **OS-keychain credential storage** for CLI remote credentials (`keyring`
+  crate; Windows Credential Manager). Lookup order: env → keychain (service
+  `mediagit`, account = remote URL) → `config.toml`. Written through only
+  after a verified server response; `MEDIAGIT_NO_KEYRING` opts out; keychain
+  failures degrade silently to the existing config-file path.
+- **`gc --repack` chunk consolidation**: loose chunks are now folded into
+  Track-F cloud packs during repack (64 MiB / 1024-chunk caps, per-pack JSONL
+  index), not just loose objects. Abort-safe write order (pack → index →
+  memory → delete-loose). `MEDIAGIT_REPACK_CHUNKS=0` restores the previous
+  (loose-objects-only) behavior.
+- **Object-level and pack-aware repair**: `push --repair` and the server's
+  chunk verify-integrity endpoint (`/{repo}/chunks/verify-integrity`) now
+  detect and evict corrupted entries from Track-F cloud packs, not just loose
+  `chunks/` objects; `ObjectDatabase::delete_object` supports targeted
+  object-level repair.
+- **Startup backend connectivity probe** (`MEDIAGIT_STARTUP_PROBE`, default
+  on): storage backends are probed at boot instead of surfacing bad
+  credentials as a 500 on the first client request.
+- **`/metrics` endpoint** wired into the server binary behind
+  `MEDIAGIT_METRICS_ADDR` (off by default) — the `mediagit-metrics` crate was
+  previously built but never linked into `mediagit-server`.
+- **Graceful shutdown** on all serve paths (HTTP, HTTPS, HTTP+HTTPS
+  concurrent) — `ctrl_c`/SIGTERM now drains in-flight requests instead of
+  hard-stopping mid-upload.
+- **Client-side push deadline** (`MEDIAGIT_PUSH_DEADLINE_SECS`, default
+  3600s) — bounds `upload_pack`/`upload_chunked_objects`/`update_refs` so a
+  mid-push backend outage fails fast with a clear error instead of hanging.
+- **Format freeze + compat promise** (`docs/FORMATS.md`): all 10
+  persisted/wire formats inventoried and frozen — pack v3 header, chunk
+  manifest (`MGCM` envelope), chunk-delta `.meta`, `LAYOUT` v2 marker,
+  auth/locks JSONL, JWT claims, HTTP DTOs, BLAKE3 OID. Every versioned format
+  now hard-errors on an unknown or higher version instead of silently
+  misparsing.
+- New docs: `docs/OPERATIONS.md` (backup/restore), `docs/DEPLOYMENT.md` (TLS
+  direct + reverse proxy), `BENCHMARKS.md`, `docs/PRODUCTION_ROADMAP.md`.
+- **Server setup wizard** (`mediagit-server init`): interactive/flag-driven
+  bootstrap that creates the first admin account
+  (`--admin-username`/`--admin-email`/`--admin-password`), generates a random
+  JWT secret, closes open registration, and enables rate limiting in one flow.
+  Refuses to write a config that binds a non-loopback host with auth off.
+  Offline `mediagit-server admin create-user` provisions users without a
+  running server (for closed-registration deployments).
+- **CLI auth commands** (`mediagit auth …`): `login`, `logout`, `register`,
+  `whoami`, `status`, and `key create|list|revoke`. `login` accepts
+  `--token`/`--api-key`/`--username`+password, stores the credential (env →
+  keychain → config order), and prints the resolved identity, role, and grants.
+- **`auth login` records the commit author**: a successful login writes the
+  authenticated identity into the repo's `[author]` config, so commits are
+  attributed to the logged-in user without a separate `git config`-style step.
+
+#### Changed
+- `enable_auth`/insecure-bind guard: the server now refuses to bind to a
+  non-loopback host with auth disabled (`MEDIAGIT_ALLOW_INSECURE_BIND=1`
+  overrides), instead of silently serving an open port.
+- JWT secret can now be supplied via `MEDIAGIT_JWT_SECRET` (wins over
+  `config.toml`), not TOML-only.
+- Per-route body limits: `/refs/update` and lock routes now cap at 1 MiB
+  (data-plane chunk/pack routes keep the 2 GiB cap).
+- Optional CORS support via `[server] cors_allowed_origins`; absent behaves
+  as before (no layer).
+- TLS: building with `enable_tls=true` on a non-`tls` cargo feature build is
+  now a hard startup error instead of a silent fallback to plain HTTP.
+
+#### Fixed
+- **Path traversal (cross-tenant storage escape)**: layout-v2's
+  `LocalBackend::object_path` dropped the v1 `/`→`::` key encoding, and
+  user-supplied chunk/pack/manifest/OID ids reached storage joins
+  unvalidated — an authenticated write on one repo could read/write into
+  another repo's storage, bypassing `GrantsStore`. Fixed with key validation
+  (rejects `..`, absolute paths, drive prefixes) at both `NamespacedBackend`
+  and `LocalBackend`, plus hex-format guards on the affected handlers.
+- **Self-registration privilege escalation**: `POST /auth/register` accepted
+  a client-supplied `role` field with no restriction, letting an
+  unauthenticated caller mint an Admin account. `role` removed from
+  `RegisterRequest`; self-registration now always creates `Role::Write`.
+- **Clone manifest deserialization**: the parallel per-manifest fetch path in
+  `clone` used raw format-deserialize instead of `ChunkManifest::from_bytes`,
+  so the new `MGCM` envelope broke every clone of a chunked repo. Fixed; all
+  other manifest read sites were already correct.
+- **`create_router_with_rate_limit` never mounted `/auth/*`** — admin and
+  auth endpoints were unreachable whenever rate limiting was enabled. Fixed.
+- **Unbounded retry chains under backend outage**: a mid-push S3/MinIO
+  outage caused ~1.9k independent per-chunk retry chains to exhaust sockets
+  and stop the server from accepting new connections. Bounded by a semaphore
+  (`MEDIAGIT_MINIO_OP_CONCURRENCY`, default 64) held across each retry
+  lifetime.
+- fsck chunk-delta cycle-detection test coverage confirmed (the guard itself
+  was already correct; this closes a stale backlog entry).
+
+#### Security
+- J6 security review: 1 HIGH finding (the path-traversal issue above), fixed
+  and verified. All other new surface (grants ordering, admin gating, JWT
+  default, keychain, API-key hashing) reviewed clean. Zero open P0/P1 at GA
+  go/no-go.
+
 ## [v0.2.8-beta.1] - 2026-06-02
 
 Cloud-pack hardening, the god-file refactor, and a full documentation accuracy
@@ -490,7 +1436,9 @@ throughput improvements, pack negotiation fixes, and several cloud-backend bug f
 - Dependency security audits in CI
 - Encryption at rest with Argon2 key derivation
 
-[Unreleased]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.6-beta.3...HEAD
+[Unreleased]: https://github.com/winnyboy5/mediagit-core/compare/v0.3.0-rc.4...HEAD
+[v0.3.0-rc.4]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.8-beta.1...v0.3.0-rc.4
+[v0.2.8-beta.1]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.7-beta.1...v0.2.8-beta.1
 [v0.2.6-beta.3]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.6-beta.2...v0.2.6-beta.3
 [v0.2.6-beta.2]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.6-beta.1...v0.2.6-beta.2
 [v0.2.6-beta.1]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.5-beta.1...v0.2.6-beta.1

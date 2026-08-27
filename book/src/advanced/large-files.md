@@ -161,7 +161,7 @@ mediagit gc
 For maximum reclamation (slower):
 
 ```bash
-mediagit gc --aggressive
+mediagit gc --repack
 ```
 
 ---

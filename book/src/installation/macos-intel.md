@@ -15,7 +15,7 @@ brew install mediagit-core
 
 ```bash
 # Download latest Intel binary
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-x86_64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.4/mediagit-0.3.0-rc.4-x86_64-macos.tar.gz \
   | sudo tar xz -C /usr/local/bin
 
 # Verify
@@ -62,8 +62,6 @@ mediagit completions bash > /usr/local/etc/bash_completion.d/mediagit
 Add to `~/.zshrc`:
 
 ```bash
-# Optional: Set default backend
-export MEDIAGIT_DEFAULT_BACKEND=local
 
 # Optional: Enable debug logging
 export MEDIAGIT_LOG=info
@@ -89,8 +87,8 @@ xcode-select --install
 # Check version
 mediagit --version
 
-# Run self-test
-mediagit fsck --self-test
+# Verify a repository's integrity (run inside a repo)
+mediagit fsck --full
 
 # Create test repo
 mkdir ~/test-mediagit
@@ -100,7 +98,7 @@ mediagit init
 
 Expected output:
 ```
-mediagit-core 0.2.8-beta.1
+mediagit-core 0.3.0-rc.4
 ✓ All checks passed
 ✓ Initialized empty MediaGit repository in .mediagit/
 ```
@@ -160,7 +158,7 @@ brew upgrade mediagit-core
 ### Manual Update
 
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-x86_64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.4/mediagit-0.3.0-rc.4-x86_64-macos.tar.gz \
   | sudo tar xz -C /usr/local/bin
 ```
 

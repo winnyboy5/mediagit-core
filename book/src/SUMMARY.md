@@ -20,6 +20,7 @@
 - [CLI Overview](./cli/README.md)
 - [Core Commands](./cli/core-commands.md)
   - [init](./cli/init.md)
+  - [config](./cli/config.md)
   - [add](./cli/add.md)
   - [commit](./cli/commit.md)
   - [status](./cli/status.md)
@@ -36,18 +37,25 @@
   - [reset](./cli/reset.md)
   - [revert](./cli/revert.md)
   - [tag](./cli/tag.md)
+  - [lock](./cli/lock.md)
 - [Remote Operations](./cli/remote-operations.md)
   - [clone](./cli/clone.md)
   - [remote](./cli/remote.md)
   - [fetch](./cli/fetch.md)
   - [push](./cli/push.md)
   - [pull](./cli/pull.md)
+  - [download](./cli/download.md)
+  - [auth](./cli/auth.md)
+- [Media & Sparse Checkout](./cli/media-sparse.md)
+  - [media](./cli/media.md)
+  - [sparse-checkout](./cli/sparse-checkout.md)
 - [Maintenance](./cli/maintenance.md)
   - [gc](./cli/gc.md)
   - [fsck](./cli/fsck.md)
   - [verify](./cli/verify.md)
   - [stats](./cli/stats.md)
   - [reflog](./cli/reflog.md)
+  - [key](./cli/key.md)
 
 # Architecture
 
@@ -93,6 +101,7 @@
 # Reference
 
 - [Configuration Reference](./reference/config.md)
+- [Authentication](./reference/authentication.md)
 - [Environment Variables](./reference/environment.md)
 - [File Formats](./reference/file-formats.md)
 - [API Documentation](./reference/api.md)

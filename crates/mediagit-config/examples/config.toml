@@ -37,12 +37,19 @@ file_permissions = "0644"
 # encryption_algorithm = "AES256"          # Options: AES256, aws:kms
 
 # Azure Blob Storage Configuration (replace [storage] block above with this)
+# Credentials go in a tagged `auth` block: exactly one credential, chosen
+# explicitly. The pre-config_version-3 flat form (account_name/account_key at
+# the [storage] level) is migrated automatically on first load.
 # [storage]
 # backend = "azure"
-# account_name = "mediagitaccount"
-# account_key = "YOUR_ACCOUNT_KEY"         # Or use MEDIAGIT_AZURE_ACCOUNT_KEY env var
 # container = "media"
 # prefix = "files/"
+# auth = { type = "account_key", account_name = "mediagitaccount", account_key = "YOUR_ACCOUNT_KEY" }
+#
+# Other auth variants:
+# auth = { type = "connection_string", value = "DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;" }
+# auth = { type = "sas", account_name = "mediagitaccount", token = "sv=2022-11-02&sig=..." }
+# auth = { type = "emulator" }   # local Azurite, uses its published dev credentials
 # connection_string = "..."                # Alternative to account_key
 
 # Google Cloud Storage Configuration (replace [storage] block above with this)
@@ -122,8 +129,8 @@ encryption_at_rest = false
 # Rate Limiting Configuration
 [security.rate_limiting]
 enabled = false
-requests_per_second = 100
-burst_size = 200
+requests_per_second = 1000
+burst_size = 2000
 
 # Custom Settings (application-specific)
 [custom]

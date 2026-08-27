@@ -45,7 +45,7 @@ use super::super::repo::find_repo_root;
     mediagit reflog delete refs/heads/feature
 
     # Expire old reflog entries
-    mediagit reflog expire --expire=30
+    mediagit reflog expire --keep=30
 
 SEE ALSO:
     mediagit-log(1), mediagit-reset(1), mediagit-branch(1)")]

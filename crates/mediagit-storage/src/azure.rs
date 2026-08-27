@@ -11,143 +11,51 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Affero General Public License for more details.
 
-//! Azure Blob Storage backend implementation
+//! Azure Blob Storage backend, built on Apache OpenDAL.
 //!
-//! Implements the `StorageBackend` trait using Azure Blob Storage with:
-//! - Support for both SAS token and account key authentication
-//! - Chunked uploads for large files (streaming multipart uploads)
-//! - Proper error handling with Azure-specific error mapping
-//! - Connection pooling and efficient resource management
+//! # Why OpenDAL and not Microsoft's SDK
 //!
-//! # Authentication Methods
+//! The community `azure_storage_blobs` 0.21 line this backend used to sit on
+//! is EOL (moved to `/tree/legacy`), and carried five RUSTSEC advisories plus
+//! a duplicate `reqwest 0.12` into the tree. Microsoft's GA line
+//! (`azure_storage_blob` 1.x) cannot replace it: `BlobClient::new` accepts
+//! only `Option<Arc<dyn TokenCredential>>` — Entra ID — while MediaGit
+//! authenticates with a shared account key. Upstream
+//! `Azure/azure-sdk-for-rust#2975` tracks that gap and is still open.
 //!
-//! The Azure backend supports three authentication approaches:
+//! OpenDAL supports shared key, SAS, connection strings, and the Azurite
+//! emulator, and mints Service SAS presigned URLs from the account key —
+//! the same model this backend has always used.
 //!
-//! ## 1. SAS Token Authentication (Recommended for temporary access)
+//! # Known limitation: presign against Azurite
 //!
-//! ```rust,no_run
-//! use mediagit_storage::azure::AzureBackend;
+//! OpenDAL hardcodes `sv=2020-12-06` in its Service SAS with no override
+//! (`reqsign-azure-storage`'s `service_sas.rs`; `AzblobBuilder` exposes no
+//! `sas_version()`). Azurite rejects that service version, so presigned URLs
+//! cannot be exercised against the emulator — verified 2026-07-23, and
+//! verified to be an *emulator* gap: real Azure accepts the same SAS
+//! (`201 Created`), and a `sv=2022-11-02` SAS succeeds against the same
+//! Azurite. Presign coverage therefore lives in the live-Azure leg of
+//! `06_remote`, not in the Azurite suite.
 //!
-//! # #[tokio::main]
-//! # async fn main() -> anyhow::Result<()> {
-//! let backend = AzureBackend::with_sas_token(
-//!     "myaccount",
-//!     "mycontainer",
-//!     "sv=2021-06-08&ss=bfqt&srt=sco&sp=rwdlacupitfx&..."
-//! ).await?;
-//! # Ok(())
-//! # }
-//! ```
+//! # Container creation
 //!
-//! ## 2. Account Key Authentication (Default, more flexible)
-//!
-//! ```rust,no_run
-//! use mediagit_storage::azure::AzureBackend;
-//!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
-//!     let backend = AzureBackend::with_account_key(
-//!         "myaccount",
-//!         "mycontainer",
-//!         "DefaultEndpointsProtocol=https;AccountName=myaccount;AccountKey=...;EndpointSuffix=core.windows.net"
-//!     ).await?;
-//!     Ok(())
-//! }
-//! ```
-//!
-//! ## 3. Connection String
-//!
-//! ```rust,no_run
-//! use mediagit_storage::azure::AzureBackend;
-//!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
-//!     let backend = AzureBackend::with_connection_string(
-//!         "mycontainer",
-//!         "DefaultEndpointsProtocol=https;..."
-//!     ).await?;
-//!     Ok(())
-//! }
-//! ```
-//!
-//! # Chunked Upload Support
-//!
-//! Large files are automatically uploaded in chunks (4 MB default) for efficient
-//! memory usage and resumable uploads:
-//!
-//! ```rust,no_run
-//! use mediagit_storage::{StorageBackend, azure::AzureBackend};
-//!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
-//! # let backend = AzureBackend::with_account_key("", "", "").await?;
-//!     // Large file is automatically chunked
-//!     let large_data = vec![0u8; 100_000_000]; // 100 MB
-//!     backend.put("large_file.bin", &large_data).await?;
-//!     Ok(())
-//! }
-//! ```
-//!
-//! # Examples
-//!
-//! ```rust,no_run
-//! use mediagit_storage::{StorageBackend, azure::AzureBackend};
-//!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
-//!     // Create backend with account key
-//!     let storage = AzureBackend::with_account_key(
-//!         "myaccount",
-//!         "mycontainer",
-//!         "DefaultEndpointsProtocol=https;..."
-//!     ).await?;
-//!
-//!     // Store data
-//!     storage.put("documents/resume.pdf", b"PDF content").await?;
-//!
-//!     // Retrieve data
-//!     let data = storage.get("documents/resume.pdf").await?;
-//!     assert_eq!(data, b"PDF content");
-//!
-//!     // Check existence
-//!     if storage.exists("documents/resume.pdf").await? {
-//!         println!("File exists");
-//!     }
-//!
-//!     // List objects with prefix
-//!     let documents = storage.list_objects("documents/").await?;
-//!     println!("Found {} documents", documents.len());
-//!
-//!     // Delete object
-//!     storage.delete("documents/resume.pdf").await?;
-//!
-//!     Ok(())
-//! }
-//! ```
-//!
-//! # Testing with Azurite
-//!
-//! For local development and testing, use [Azurite](https://github.com/Azure/Azurite),
-//! the Azure Storage emulator:
-//!
-//! ```bash
-//! # Install and run Azurite
-//! npm install -g azurite
-//! azurite
-//!
-//! # Connect to local emulator
-//! export AZURE_STORAGE_ACCOUNT_NAME=devstoreaccount1
-//! export AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
-//! ```
+//! OpenDAL is data-plane only and has no container management. Creating the
+//! container is one signed REST call, made with `reqsign-azure-storage` — the
+//! same signer OpenDAL uses internally — so we do not hand-roll Azure's
+//! Shared Key signing. It requires an account key, so backends built from a
+//! SAS token cannot auto-create (a SAS holder generally lacks that right
+//! anyway); those surface a clear error if the container is absent.
 
 use crate::StorageBackend;
+use crate::error::StorageError;
 use async_trait::async_trait;
-use azure_storage::prelude::*;
-use azure_storage::CloudLocation;
-use azure_storage_blobs::prelude::*;
-use futures::TryStreamExt;
+use futures::StreamExt;
+use opendal::Operator;
+use opendal::layers::{RetryLayer, TimeoutLayer};
+use opendal::services::Azblob;
 use std::fmt;
-use std::sync::Arc;
+use std::time::Duration;
 
 /// Chunk size for multipart uploads (4 MB)
 /// This provides a good balance between memory usage and upload efficiency
@@ -158,13 +66,13 @@ const AZURE_BLOCK_SIZE: usize = 4 * 1024 * 1024; // 4 MB, Azure maximum is 4GB
 
 /// Azure Blob Storage backend
 ///
-/// Thread-safe implementation of `StorageBackend` using Azure Blob Storage.
-/// Supports both SAS token and account key authentication.
+/// Thread-safe implementation of `StorageBackend`. Supports SAS token,
+/// account key, and connection-string authentication.
 ///
 /// # Thread Safety
 ///
-/// This implementation is `Send + Sync` and can be safely shared across threads
-/// and async tasks. Connection pooling is handled by the underlying Azure SDK.
+/// `Operator` is `Send + Sync` and internally reference-counted, so this type
+/// is cheap to clone and safe to share across tasks.
 #[derive(Clone)]
 pub struct AzureBackend {
     account_name: String,
@@ -176,8 +84,14 @@ pub struct AzureBackend {
     /// Azure but `get("k")` resolves it transparently, and `list_objects`
     /// strips it before returning.
     prefix: String,
-    /// The actual Azure SDK client for blob operations
-    client: Arc<ContainerClient>,
+    /// OpenDAL operator scoped to the container.
+    op: Operator,
+    /// Blob-service endpoint root (no container segment), used for the
+    /// container-create REST call.
+    endpoint: String,
+    /// Account key, when we have one. `None` for SAS-authenticated backends,
+    /// which cannot sign a container-create request.
+    account_key: Option<String>,
 }
 
 impl fmt::Debug for AzureBackend {
@@ -199,40 +113,123 @@ fn normalize_prefix(p: &str) -> String {
     }
 }
 
+/// Map a logical key to its on-the-wire blob name under `prefix`.
+///
+/// Free function, not a method, so it is testable without constructing an
+/// `Operator`. (Building one outside a tokio runtime panics OpenDAL's
+/// executor `LazyLock` — and the previous implementation had the same shape
+/// of problem, needing a throwaway `ClientBuilder` just to test string logic.)
+fn full_key_with(prefix: &str, key: &str) -> String {
+    if prefix.is_empty() {
+        key.to_string()
+    } else {
+        format!("{prefix}{key}")
+    }
+}
+
+/// Inverse of [`full_key_with`]; returns `full` unchanged if unprefixed.
+fn strip_prefix_with<'a>(prefix: &str, full: &'a str) -> &'a str {
+    if prefix.is_empty() {
+        full
+    } else {
+        full.strip_prefix(prefix).unwrap_or(full)
+    }
+}
+
+/// Wrap an OpenDAL operator with the layers every code path expects.
+///
+/// `TimeoutLayer`'s `io_timeout` defaults to **10 s**, and it is a *per-IO*
+/// deadline, not a whole-operation one. That is reasonable on a LAN and wrong
+/// on a WAN: campaign 20260804-azgcs failed an Azure push outright with
+/// `Unexpected (temporary) at write, context: { timeout: 10 } => io operation
+/// timeout reached`, pushing 2 GB of chunks at ~1.8 MB/s. Under
+/// `MEDIAGIT_AZURE_PUT_BLOCK_CONCURRENCY` (default 8) concurrent block writes,
+/// each write gets a fraction of an already-slow link and a single one
+/// comfortably exceeds 10 s. The server turned that into a 500, the client's
+/// retry hit the same wall, and the whole push exited 1.
+///
+/// Only the IO deadline is raised. The non-IO timeout (stat/delete/list) keeps
+/// OpenDAL's default, because those are small round-trips where a long hang is
+/// a real fault worth surfacing quickly, not a slow transfer.
+///
+/// Layer order is OpenDAL's own documented production order — retry inner,
+/// timeout outer. Do NOT reorder it to match the Go binding's guidance
+/// ("timeout before retry"); the Rust docs specify this order, and the two
+/// bindings differ.
+fn with_layers(op: Operator) -> Operator {
+    op.layer(RetryLayer::new())
+        .layer(TimeoutLayer::new().with_io_timeout(Duration::from_secs(azure_io_timeout_secs())))
+}
+
+/// Per-IO deadline for Azure transfers, in seconds.
+///
+/// Generous by default because the failure mode it prevents is a failed push
+/// of an entire repository, while the cost of being too generous is a slow
+/// operation taking longer to report a genuine hang.
+fn azure_io_timeout_secs() -> u64 {
+    parse_io_timeout_secs(std::env::var("MEDIAGIT_AZURE_IO_TIMEOUT_SECS").ok())
+}
+
+/// Split from the env lookup so it is assertable: `#![forbid(unsafe_code)]` plus
+/// edition 2024 make `set_var` an `unsafe` call, so a test that drove the real
+/// variable could not be written without punching a hole in that. Same reason
+/// `clamp_cap` in mediagit-versioning takes an `Option<String>`.
+fn parse_io_timeout_secs(raw: Option<String>) -> u64 {
+    const DEFAULT_IO_TIMEOUT_SECS: u64 = 120;
+    raw.and_then(|v| v.trim().parse::<u64>().ok())
+        // 0 means "deadline already passed" to OpenDAL, not "no timeout".
+        // Accepting it would fail every transfer instantly, so it falls back.
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_IO_TIMEOUT_SECS)
+}
+
+/// Install ring as the process-level rustls provider, once.
+///
+/// OpenDAL reaches Azure through the workspace `reqwest`, which is built with
+/// `rustls-no-provider` (the workspace standardises on ring; reqwest 0.13's
+/// plain `rustls` feature hard-wires aws-lc-rs). Without an installed
+/// provider, building the HTTP client **panics** — and because OpenDAL holds
+/// its executor behind a `LazyLock`, that first panic poisons the lock and
+/// every later operation in the process fails with a misleading
+/// "previously poisoned" message.
+///
+/// Doing this at backend construction rather than in each binary's `main()`
+/// means test binaries and library consumers cannot forget it. Idempotent.
+fn ensure_crypto_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
+/// Map an OpenDAL error onto the crate's typed [`StorageError`].
+///
+/// This replaces substring-matching on `"404"` / `"BlobNotFound"` / `"403"`,
+/// which meant an SDK message change could silently break not-found
+/// classification — and not-found is load-bearing here: `exists()` and the
+/// dedup paths branch on it.
+fn map_error(err: &opendal::Error, context: &str) -> StorageError {
+    use opendal::ErrorKind;
+    let msg = format!("{context}: {err}");
+    match err.kind() {
+        ErrorKind::NotFound => StorageError::NotFound(msg),
+        ErrorKind::PermissionDenied => StorageError::PermissionDenied(msg),
+        ErrorKind::AlreadyExists => StorageError::Backend(msg),
+        ErrorKind::RateLimited => StorageError::Backend(msg),
+        _ => StorageError::Backend(msg),
+    }
+}
+
+/// Extract a `key=value` field from an Azure connection string.
+fn conn_field(conn: &str, field: &str) -> Option<String> {
+    let needle = format!("{field}=");
+    conn.split(';')
+        .find(|s| s.starts_with(&needle))
+        .and_then(|s| s.strip_prefix(&needle))
+        .map(str::to_owned)
+}
+
 impl AzureBackend {
-    /// Create a new Azure Blob Storage backend using SAS token authentication
-    ///
-    /// SAS (Shared Access Signature) tokens are recommended for temporary access
-    /// or when you want to limit permissions to specific operations.
-    ///
-    /// # Arguments
-    ///
-    /// * `account_name` - The Azure storage account name (e.g., "myaccount")
-    /// * `container_name` - The blob container name (e.g., "mycontainer")
-    /// * `sas_token` - The SAS token for authentication (e.g., "sv=2021-06-08&...")
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the container cannot be accessed or created.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use mediagit_storage::azure::AzureBackend;
-    /// use mediagit_storage::StorageBackend;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> anyhow::Result<()> {
-    ///     let backend = AzureBackend::with_sas_token(
-    ///         "myaccount",
-    ///         "mycontainer",
-    ///         "sv=2021-06-08&ss=bfqt&srt=sco&sp=rwdlacupitfx&..."
-    ///     ).await?;
-    ///
-    ///     backend.put("file.bin", b"content").await?;
-    ///     Ok(())
-    /// }
-    /// ```
     /// Back-compat shim: equivalent to `with_sas_token_and_prefix(..., "")`.
     pub async fn with_sas_token(
         account_name: impl Into<String>,
@@ -242,8 +239,10 @@ impl AzureBackend {
         Self::with_sas_token_and_prefix(account_name, container_name, sas_token, "").await
     }
 
-    /// Create an Azure backend authenticated by SAS token, with all blob keys
-    /// transparently prefixed. See struct-level `prefix` doc.
+    /// Create a backend authenticated with a Shared Access Signature.
+    ///
+    /// Container auto-creation is unavailable on this path — signing that
+    /// request needs the account key.
     pub async fn with_sas_token_and_prefix(
         account_name: impl Into<String>,
         container_name: impl Into<String>,
@@ -255,7 +254,6 @@ impl AzureBackend {
         let sas_token = sas_token.into();
         let prefix = normalize_prefix(&prefix.into());
 
-        // Validate inputs
         if account_name.is_empty() {
             return Err(anyhow::anyhow!("account_name cannot be empty"));
         }
@@ -266,78 +264,29 @@ impl AzureBackend {
             return Err(anyhow::anyhow!("sas_token cannot be empty"));
         }
 
-        // Create the container client with SAS token
-        let storage_credentials = StorageCredentials::sas_token(sas_token)?;
-        let container_client = ClientBuilder::new(account_name.clone(), storage_credentials)
-            .container_client(container_name.clone());
-
-        tracing::info!(
-            "Created Azure Blob Storage backend with SAS token for {}/{}",
-            account_name,
-            container_name
+        ensure_crypto_provider();
+        let endpoint = format!("https://{account_name}.blob.core.windows.net");
+        let builder = Azblob::default()
+            .account_name(&account_name)
+            .container(&container_name)
+            .endpoint(&endpoint)
+            .sas_token(&sas_token);
+        let op = with_layers(
+            Operator::new(builder)
+                .map_err(|e| anyhow::anyhow!("Failed to build Azure operator: {e}"))?
+                .finish(),
         );
 
-        let backend = AzureBackend {
-            account_name: account_name.clone(),
-            container_name: container_name.clone(),
+        Ok(Self {
+            account_name,
+            container_name,
             prefix,
-            client: Arc::new(container_client),
-        };
-
-        // Cap the cloud roundtrip so unreachable accounts fail fast — the bare
-        // call uses Azure-SDK defaults that can hang for tens of seconds. The
-        // backend is cached in AppState (server-side), so this only runs once
-        // per repo per process anyway.  30 s leaves room for cold DNS + TLS +
-        // Azure API on the first connection to high-latency regions.
-        tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            backend.ensure_container_exists(),
-        )
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "Azure container check timed out after 30s for {}/{}",
-                backend.account_name,
-                backend.container_name
-            )
-        })??;
-
-        Ok(backend)
+            op,
+            endpoint,
+            account_key: None,
+        })
     }
 
-    /// Create a new Azure Blob Storage backend using account key authentication
-    ///
-    /// Account key authentication uses the primary or secondary account key and is
-    /// suitable for backend-to-backend communication with full storage permissions.
-    ///
-    /// # Arguments
-    ///
-    /// * `account_name` - The Azure storage account name (e.g., "myaccount")
-    /// * `container_name` - The blob container name (e.g., "mycontainer")
-    /// * `account_key` - The account key (base64-encoded, typically 88 characters)
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the container cannot be accessed.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use mediagit_storage::azure::AzureBackend;
-    /// use mediagit_storage::StorageBackend;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> anyhow::Result<()> {
-    ///     let backend = AzureBackend::with_account_key(
-    ///         "myaccount",
-    ///         "mycontainer",
-    ///         "DefaultEndpointsProtocol=https;AccountName=myaccount;AccountKey=...;EndpointSuffix=core.windows.net"
-    ///     ).await?;
-    ///
-    ///     backend.put("file.bin", b"content").await?;
-    ///     Ok(())
-    /// }
-    /// ```
     /// Back-compat shim: equivalent to `with_account_key_and_prefix(..., "")`.
     pub async fn with_account_key(
         account_name: impl Into<String>,
@@ -347,8 +296,7 @@ impl AzureBackend {
         Self::with_account_key_and_prefix(account_name, container_name, account_key, "").await
     }
 
-    /// Create an Azure backend authenticated by account key, with all blob
-    /// keys transparently prefixed. See struct-level `prefix` doc.
+    /// Create a backend authenticated with a shared account key.
     pub async fn with_account_key_and_prefix(
         account_name: impl Into<String>,
         container_name: impl Into<String>,
@@ -360,7 +308,6 @@ impl AzureBackend {
         let account_key = account_key.into();
         let prefix = normalize_prefix(&prefix.into());
 
-        // Validate inputs
         if account_name.is_empty() {
             return Err(anyhow::anyhow!("account_name cannot be empty"));
         }
@@ -371,78 +318,18 @@ impl AzureBackend {
             return Err(anyhow::anyhow!("account_key cannot be empty"));
         }
 
-        // Create the container client with account key
-        let storage_credentials = StorageCredentials::access_key(account_name.clone(), account_key);
-        let container_client = ClientBuilder::new(account_name.clone(), storage_credentials)
-            .container_client(container_name.clone());
-
-        tracing::info!(
-            "Created Azure Blob Storage backend with account key for {}/{}",
+        let endpoint = format!("https://{account_name}.blob.core.windows.net");
+        Self::build(
             account_name,
-            container_name
-        );
-
-        let backend = AzureBackend {
-            account_name: account_name.clone(),
-            container_name: container_name.clone(),
+            container_name,
             prefix,
-            client: Arc::new(container_client),
-        };
-
-        // Cap the cloud roundtrip so unreachable accounts fail fast — the bare
-        // call uses Azure-SDK defaults that can hang for tens of seconds. The
-        // backend is cached in AppState (server-side), so this only runs once
-        // per repo per process anyway.  30 s leaves room for cold DNS + TLS +
-        // Azure API on the first connection to high-latency regions.
-        tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            backend.ensure_container_exists(),
+            endpoint,
+            Some(account_key),
+            None,
         )
         .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "Azure container check timed out after 30s for {}/{}",
-                backend.account_name,
-                backend.container_name
-            )
-        })??;
-
-        Ok(backend)
     }
 
-    /// Create a new Azure Blob Storage backend using a connection string
-    ///
-    /// Connection strings can include either account keys or SAS tokens.
-    /// This is a convenient way to configure the backend from environment variables.
-    ///
-    /// # Arguments
-    ///
-    /// * `container_name` - The blob container name (e.g., "mycontainer")
-    /// * `connection_string` - The Azure storage connection string
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the connection string is invalid or the container cannot be accessed.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use mediagit_storage::azure::AzureBackend;
-    /// use mediagit_storage::StorageBackend;
-    /// use std::env;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> anyhow::Result<()> {
-    ///     let conn_str = env::var("AZURE_STORAGE_CONNECTION_STRING")?;
-    ///     let backend = AzureBackend::with_connection_string(
-    ///         "mycontainer",
-    ///         &conn_str
-    ///     ).await?;
-    ///
-    ///     backend.put("file.bin", b"content").await?;
-    ///     Ok(())
-    /// }
-    /// ```
     /// Back-compat shim: equivalent to `with_connection_string_and_prefix(..., "")`.
     pub async fn with_connection_string(
         container_name: impl Into<String>,
@@ -451,8 +338,10 @@ impl AzureBackend {
         Self::with_connection_string_and_prefix(container_name, connection_string, "").await
     }
 
-    /// Create an Azure backend from a connection string, with all blob keys
-    /// transparently prefixed. See struct-level `prefix` doc.
+    /// Create a backend from a full Azure connection string.
+    ///
+    /// `BlobEndpoint=` is honoured, which is how Azurite and sovereign-cloud
+    /// endpoints are reached.
     pub async fn with_connection_string_and_prefix(
         container_name: impl Into<String>,
         connection_string: impl Into<String>,
@@ -462,7 +351,6 @@ impl AzureBackend {
         let connection_string = connection_string.into();
         let prefix = normalize_prefix(&prefix.into());
 
-        // Validate inputs
         if container_name.is_empty() {
             return Err(anyhow::anyhow!("container_name cannot be empty"));
         }
@@ -470,90 +358,79 @@ impl AzureBackend {
             return Err(anyhow::anyhow!("connection_string cannot be empty"));
         }
 
-        // Extract account name from connection string
-        // Format: "DefaultEndpointsProtocol=https;AccountName=ACCOUNT_NAME;..."
-        let account_name = connection_string
-            .split(';')
-            .find(|s| s.starts_with("AccountName="))
-            .and_then(|s| s.strip_prefix("AccountName="))
-            .ok_or_else(|| anyhow::anyhow!("Invalid connection string: missing AccountName"))?
-            .to_string();
+        let account_name = conn_field(&connection_string, "AccountName")
+            .ok_or_else(|| anyhow::anyhow!("Invalid connection string: missing AccountName"))?;
+        let account_key = conn_field(&connection_string, "AccountKey")
+            .ok_or_else(|| anyhow::anyhow!("Invalid connection string: missing AccountKey"))?;
 
-        // Parse account key from connection string
-        let account_key = connection_string
-            .split(';')
-            .find(|s| s.starts_with("AccountKey="))
-            .and_then(|s| s.strip_prefix("AccountKey="))
-            .ok_or_else(|| anyhow::anyhow!("Invalid connection string: missing AccountKey"))?
-            .to_string();
+        // BlobEndpoint already includes the account segment for Azurite
+        // (http://host:port/devstoreaccount1); the cloud form does not.
+        let endpoint = conn_field(&connection_string, "BlobEndpoint")
+            .unwrap_or_else(|| format!("https://{account_name}.blob.core.windows.net"));
 
-        let storage_credentials = StorageCredentials::access_key(account_name.clone(), account_key);
-
-        // Check if BlobEndpoint is specified (for Azurite or custom endpoints)
-        let container_client = if let Some(blob_endpoint) = connection_string
-            .split(';')
-            .find(|s| s.starts_with("BlobEndpoint="))
-            .and_then(|s| s.strip_prefix("BlobEndpoint="))
-        {
-            // Extract address and port from blob endpoint
-            // Format: http://address:port/account
-            let url = azure_core::Url::parse(blob_endpoint)
-                .map_err(|e| anyhow::anyhow!("Invalid BlobEndpoint: {}", e))?;
-            let host = url
-                .host_str()
-                .ok_or_else(|| anyhow::anyhow!("Invalid BlobEndpoint: missing host"))?;
-            let port = url.port().unwrap_or(10000); // Default Azurite port
-
-            // Use emulator CloudLocation for custom endpoints
-            let cloud_location = CloudLocation::Emulator {
-                address: host.to_string(),
-                port,
-            };
-
-            tracing::debug!("Using custom blob endpoint: {}:{}", host, port);
-            ClientBuilder::with_location(cloud_location, storage_credentials)
-                .container_client(container_name.clone())
-        } else {
-            // Use default public cloud
-            ClientBuilder::new(account_name.clone(), storage_credentials)
-                .container_client(container_name.clone())
-        };
-
-        tracing::info!(
-            "Created Azure Blob Storage backend with connection string for {}/{}",
+        Self::build(
             account_name,
-            container_name
-        );
-
-        let backend = AzureBackend {
-            account_name: account_name.clone(),
-            container_name: container_name.clone(),
+            container_name,
             prefix,
-            client: Arc::new(container_client),
-        };
-
-        // Cap the cloud roundtrip so unreachable accounts fail fast — the bare
-        // call uses Azure-SDK defaults that can hang for tens of seconds. The
-        // backend is cached in AppState (server-side), so this only runs once
-        // per repo per process anyway.  30 s leaves room for cold DNS + TLS +
-        // Azure API on the first connection to high-latency regions.
-        tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            backend.ensure_container_exists(),
+            endpoint,
+            Some(account_key),
+            None,
         )
         .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "Azure container check timed out after 30s for {}/{}",
-                backend.account_name,
-                backend.container_name
-            )
-        })??;
+    }
+
+    /// Shared constructor for the account-key-bearing paths.
+    async fn build(
+        account_name: String,
+        container_name: String,
+        prefix: String,
+        endpoint: String,
+        account_key: Option<String>,
+        sas_token: Option<String>,
+    ) -> anyhow::Result<Self> {
+        ensure_crypto_provider();
+        let mut builder = Azblob::default()
+            .account_name(&account_name)
+            .container(&container_name)
+            .endpoint(&endpoint);
+        if let Some(key) = &account_key {
+            builder = builder.account_key(key);
+        }
+        if let Some(sas) = &sas_token {
+            builder = builder.sas_token(sas);
+        }
+        let op = with_layers(
+            Operator::new(builder)
+                .map_err(|e| anyhow::anyhow!("Failed to build Azure operator: {e}"))?
+                .finish(),
+        );
+
+        let backend = Self {
+            account_name,
+            container_name,
+            prefix,
+            op,
+            endpoint,
+            account_key,
+        };
+
+        // Bounded: the SDK default can hang for tens of seconds. The backend
+        // is cached in AppState server-side, so this runs once per repo per
+        // process. 30 s leaves room for cold DNS + TLS to high-latency regions.
+        tokio::time::timeout(Duration::from_secs(30), backend.ensure_container_exists())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Azure container check timed out after 30s for {}/{}",
+                    backend.account_name,
+                    backend.container_name
+                )
+            })??;
 
         Ok(backend)
     }
 
-    /// Check if a key is valid (non-empty)
+    /// Validate a logical key.
     fn validate_key(key: &str) -> anyhow::Result<()> {
         if key.is_empty() {
             return Err(anyhow::anyhow!("key cannot be empty"));
@@ -561,105 +438,204 @@ impl AzureBackend {
         Ok(())
     }
 
-    /// Compose the on-wire blob name from a logical key. If `prefix` is empty
-    /// the logical key is used verbatim (legacy behaviour).
+    /// Map a logical key to the on-the-wire blob name.
     fn full_key(&self, key: &str) -> String {
-        if self.prefix.is_empty() {
-            key.to_string()
-        } else {
-            format!("{}{}", self.prefix, key)
-        }
+        full_key_with(&self.prefix, key)
     }
 
-    /// Inverse of `full_key`: strip the prefix from a wire name to return the
-    /// logical key callers expect. If the wire name doesn't start with our
-    /// prefix it is returned unchanged (defensive against external writes).
+    /// Inverse of [`Self::full_key`]; returns `full` unchanged if unprefixed.
     fn strip_prefix<'a>(&self, full: &'a str) -> &'a str {
-        if self.prefix.is_empty() {
-            full
-        } else {
-            full.strip_prefix(self.prefix.as_str()).unwrap_or(full)
-        }
+        strip_prefix_with(&self.prefix, full)
     }
 
-    /// Map Azure errors to more meaningful error messages
-    fn map_error(err: impl Into<anyhow::Error>, context: &str) -> anyhow::Error {
-        let err = err.into();
-        let error_msg = err.to_string();
-
-        if error_msg.contains("404") || error_msg.contains("BlobNotFound") {
-            anyhow::anyhow!("object not found: {}", context)
-        } else if error_msg.contains("403") || error_msg.contains("PermissionDenied") {
-            anyhow::anyhow!("permission denied: {}", context)
-        } else if error_msg.contains("409") || error_msg.contains("ContainerNotFound") {
-            anyhow::anyhow!("container not found: {}", context)
-        } else {
-            err
-        }
-    }
-
-    /// Ensure container exists, create if needed
+    /// Create the container if it is absent.
+    ///
+    /// OpenDAL has no container API, so this is one Shared-Key-signed REST
+    /// call via `reqsign-azure-storage` — the signer OpenDAL itself uses.
+    /// Treats 409 `ContainerAlreadyExists` as success (another process may
+    /// have won the race between our check and our create).
     async fn ensure_container_exists(&self) -> anyhow::Result<()> {
-        match self.client.exists().await {
-            Ok(exists) if !exists => {
-                tracing::info!("Creating container: {}", self.container_name);
-                match self.client.create().await {
-                    Ok(_) => {
-                        tracing::info!("Successfully created container: {}", self.container_name);
-                        Ok(())
-                    }
-                    Err(e) => {
-                        let err_msg = e.to_string();
-                        // Another concurrent caller may have created the container between our
-                        // exists() check and create() call (TOCTOU). Treat 409 as success.
-                        if err_msg.contains("ContainerAlreadyExists") || err_msg.contains("409") {
-                            tracing::debug!(
-                                "Container {} already exists (concurrent creation)",
-                                self.container_name
-                            );
-                            Ok(())
-                        } else {
-                            Err(anyhow::anyhow!(
-                                "Failed to create container {}: {}",
-                                self.container_name,
-                                e
-                            ))
-                        }
-                    }
-                }
-            }
-            Ok(_) => {
-                tracing::debug!("Container {} already exists", self.container_name);
-                Ok(())
-            }
-            Err(e) => {
-                // If we can't check existence, try to create anyway
-                tracing::warn!(
-                    "Could not check container existence: {}, attempting to create",
-                    e
-                );
-                match self.client.create().await {
-                    Ok(_) => {
-                        tracing::info!("Successfully created container: {}", self.container_name);
-                        Ok(())
-                    }
-                    Err(create_err) => {
-                        let err_msg = create_err.to_string();
-                        // Ignore "already exists" errors
-                        if err_msg.contains("ContainerAlreadyExists") || err_msg.contains("409") {
-                            tracing::debug!("Container {} already exists", self.container_name);
-                            Ok(())
-                        } else {
-                            Err(anyhow::anyhow!(
-                                "Failed to create container {}: {}",
-                                self.container_name,
-                                create_err
-                            ))
-                        }
-                    }
-                }
-            }
+        // Check before mutating: a listable container needs no create call at
+        // all, which is the overwhelmingly common case (the container is
+        // provisioned once, then reused for the life of the deployment). This
+        // also keeps the signed-create path — the fragile part — off the hot
+        // path entirely.
+        if self.op.list_with("").limit(1).await.is_ok() {
+            tracing::debug!(container = %self.container_name, "Azure container reachable");
+            return Ok(());
         }
+
+        let Some(account_key) = &self.account_key else {
+            // SAS-authenticated: cannot sign a create, and a SAS holder
+            // generally lacks that right anyway.
+            return Err(anyhow::anyhow!(
+                "Azure container '{}' is not reachable and cannot be created with SAS authentication. Create it first, or configure account-key auth.",
+                self.container_name
+            ));
+        };
+
+        use reqsign_azure_storage::{RequestSigner, StaticCredentialProvider};
+        use reqsign_core::{Context, Signer};
+
+        let url = format!(
+            "{}/{}?restype=container",
+            self.endpoint.trim_end_matches('/'),
+            self.container_name
+        );
+
+        let signer = Signer::new(
+            // Shared Key signing is a local HMAC over the canonicalised
+            // request — no network or filesystem access — so a bare Context
+            // is sufficient.
+            Context::new(),
+            StaticCredentialProvider::new_shared_key(&self.account_name, account_key),
+            RequestSigner::new(),
+        );
+
+        // Real Azure and Azurite disagree about Content-Length on a zero-body
+        // PUT, and the two requirements are mutually exclusive (measured
+        // 2026-07-23):
+        //
+        //   real Azure : header REQUIRED -> 411 Length Required without it,
+        //                and signed as "" per the Shared Key spec.
+        //   Azurite    : canonicalises the header's literal "0" instead of "",
+        //                so sending it yields 403 AuthorizationFailure.
+        //
+        // Send the spec-correct form first and fall back once. Cheap (this
+        // runs at most once per backend, only when the container is absent)
+        // and avoids hardcoding emulator detection, which would misfire on
+        // Azurite behind TLS or a custom endpoint.
+        let mut last: Option<(reqwest::StatusCode, String)> = None;
+        for send_content_length in [true, false] {
+            let mut builder = http::Request::builder()
+                .method(http::Method::PUT)
+                .uri(&url)
+                .header("x-ms-version", "2023-11-03");
+            if send_content_length {
+                builder = builder.header(http::header::CONTENT_LENGTH, "0");
+            }
+            let mut parts = builder
+                .body(())
+                .map_err(|e| anyhow::anyhow!("Failed to build container-create request: {e}"))?
+                .into_parts()
+                .0;
+
+            signer
+                .sign(&mut parts, None)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to sign container-create request: {e}"))?;
+
+            let client = reqwest::Client::new();
+            let mut req = client.request(
+                reqwest::Method::from_bytes(parts.method.as_str().as_bytes())?,
+                parts.uri.to_string(),
+            );
+            for (name, value) in parts.headers.iter() {
+                req = req.header(name.as_str(), value.as_bytes());
+            }
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("Container-create request failed: {e}"))?;
+
+            let status = resp.status();
+            if status.is_success() || status == reqwest::StatusCode::CONFLICT {
+                tracing::info!(
+                    container = %self.container_name,
+                    content_length_sent = send_content_length,
+                    "Azure container ready"
+                );
+                return Ok(());
+            }
+            let body = resp.text().await.unwrap_or_default();
+            tracing::debug!(
+                container = %self.container_name,
+                content_length_sent = send_content_length,
+                %status,
+                "container-create attempt rejected; trying alternate Content-Length form"
+            );
+            last = Some((status, body));
+        }
+
+        let (status, body) = last.unwrap_or((
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "no response".to_string(),
+        ));
+        Err(anyhow::anyhow!(
+            "Azure container '{}' does not exist and could not be created ({} {}). Create it manually and retry.",
+            self.container_name,
+            status,
+            body
+        ))
+    }
+
+    /// Single-shot upload for payloads below the block threshold.
+    async fn put_direct(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
+        let full = self.full_key(key);
+        self.op
+            .write(&full, data.to_vec())
+            .await
+            .map_err(|e| map_error(&e, &format!("put {key}")))?;
+        Ok(())
+    }
+
+    /// Staged block upload for large payloads.
+    ///
+    /// Maps to Azure Put Block / Put Block List. `concurrent` is honoured via
+    /// `MEDIAGIT_AZURE_PUT_BLOCK_CONCURRENCY` (default 8), unchanged from the
+    /// previous implementation.
+    async fn put_chunked(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
+        let full = self.full_key(key);
+        let concurrency: usize = std::env::var("MEDIAGIT_AZURE_PUT_BLOCK_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|n: &usize| *n > 0)
+            .unwrap_or(8);
+
+        let mut writer = self
+            .op
+            .writer_with(&full)
+            .chunk(AZURE_BLOCK_SIZE)
+            .concurrent(concurrency)
+            .await
+            .map_err(|e| map_error(&e, &format!("open chunked writer for {key}")))?;
+        writer
+            .write(data.to_vec())
+            .await
+            .map_err(|e| map_error(&e, &format!("chunked write {key}")))?;
+        writer
+            .close()
+            .await
+            .map_err(|e| map_error(&e, &format!("chunked close {key}")))?;
+        Ok(())
+    }
+
+    /// Open an incremental byte stream over `full` for `range`, via OpenDAL's
+    /// `Reader::into_bytes_stream`. Shared by `get_streaming` (`..`) and
+    /// `get_streaming_range` (a bounded range) so neither materializes the
+    /// full range into memory before streaming — unlike the old
+    /// `read_with(...).await` + `stream::once` shim this replaces.
+    async fn read_stream(
+        &self,
+        full: &str,
+        range: impl std::ops::RangeBounds<u64> + Send + 'static,
+        context: String,
+    ) -> anyhow::Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+        >,
+    > {
+        let reader = self
+            .op
+            .reader(full)
+            .await
+            .map_err(|e| map_error(&e, &context))?;
+        let stream = reader
+            .into_bytes_stream(range)
+            .await
+            .map_err(|e| map_error(&e, &context))?
+            .map(move |r| r.map_err(|e| anyhow::anyhow!("{context} stream error: {e}")));
+        Ok(Box::pin(stream))
     }
 }
 
@@ -667,29 +643,41 @@ impl AzureBackend {
 impl StorageBackend for AzureBackend {
     async fn get(&self, key: &str) -> anyhow::Result<Vec<u8>> {
         Self::validate_key(key)?;
+        let full = self.full_key(key);
+        let buf = self
+            .op
+            .read(&full)
+            .await
+            .map_err(|e| map_error(&e, &format!("get {key}")))?;
+        Ok(buf.to_vec())
+    }
 
-        let wire_key = self.full_key(key);
-        tracing::debug!(
-            "Getting object from Azure Blob Storage: {}/{}",
-            self.container_name,
-            wire_key
-        );
+    /// Efficient ranged read via OpenDAL's HTTP Range-GET, overriding the
+    /// trait default (whole-object `get` + slice).
+    async fn get_range(&self, key: &str, offset: u64, len: u64) -> anyhow::Result<Vec<u8>> {
+        Self::validate_key(key)?;
+        let full = self.full_key(key);
+        let buf = self
+            .op
+            .read_with(&full)
+            .range(offset..offset + len)
+            .await
+            .map_err(|e| map_error(&e, &format!("get_range {key}")))?;
+        Ok(buf.to_vec())
+    }
 
-        let blob_client = self.client.blob_client(&wire_key);
-
-        match blob_client.get_content().await {
-            Ok(data) => {
-                tracing::debug!("Successfully retrieved {} ({} bytes)", key, data.len());
-                Ok(data)
-            }
-            Err(e) => {
-                let azure_error = e.to_string();
-                if azure_error.contains("404") || azure_error.contains("BlobNotFound") {
-                    return Err(anyhow::anyhow!("object not found: {}", key));
-                }
-                Err(Self::map_error(e, key))
-            }
-        }
+    async fn get_streaming(
+        &self,
+        key: &str,
+    ) -> anyhow::Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+        >,
+    > {
+        Self::validate_key(key)?;
+        let full = self.full_key(key);
+        self.read_stream(&full, .., format!("get_streaming {key}"))
+            .await
     }
 
     async fn get_streaming_range(
@@ -702,240 +690,104 @@ impl StorageBackend for AzureBackend {
         >,
     > {
         Self::validate_key(key)?;
-        let wire_key = self.full_key(key);
-        let blob_client = self.client.blob_client(&wire_key);
-        // Request the exact byte range in a single HTTP request (chunk_size = entire range).
-        let range_len = range.end - range.start;
-        let azure_range = azure_core::prelude::Range::new(range.start, range.end);
-        let pageable = blob_client
-            .get()
-            .range(azure_range)
-            .chunk_size(range_len.max(1))
-            .into_stream();
-
-        // Collect all pages (typically just one for a bounded range) into a flat stream.
-        let stream = futures::stream::unfold((pageable, false), |(mut pag, done)| async move {
-            if done {
-                return None;
-            }
-            use futures::StreamExt as _;
-            match pag.next().await {
-                None => None,
-                Some(Err(e)) => Some((
-                    Err(anyhow::anyhow!(
-                        "get_streaming_range Azure page error: {}",
-                        e
-                    )),
-                    (pag, true),
-                )),
-                Some(Ok(page)) => match page.data.collect().await {
-                    Ok(data) => Some((Ok::<bytes::Bytes, anyhow::Error>(data), (pag, false))),
-                    Err(e) => Some((
-                        Err(anyhow::anyhow!(
-                            "get_streaming_range Azure data error: {}",
-                            e
-                        )),
-                        (pag, true),
-                    )),
-                },
-            }
-        });
-        Ok(Box::pin(stream))
+        let full = self.full_key(key);
+        self.read_stream(&full, range, format!("get_streaming_range {key}"))
+            .await
     }
 
     async fn put(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
         Self::validate_key(key)?;
-
-        tracing::debug!(
-            "Putting object to Azure Blob Storage: {} (size: {} bytes)",
-            key,
-            data.len()
-        );
-
-        // For small files, use direct upload
-        // For large files, use chunked/block upload
-        if data.len() > AZURE_BLOCK_SIZE {
-            self.put_chunked(key, data).await?;
+        if data.len() > CHUNK_SIZE {
+            self.put_chunked(key, data).await
         } else {
-            self.put_direct(key, data).await?;
+            self.put_direct(key, data).await
         }
-
-        tracing::debug!("Successfully uploaded {}", key);
-        Ok(())
     }
 
     async fn exists(&self, key: &str) -> anyhow::Result<bool> {
         Self::validate_key(key)?;
-
-        let wire_key = self.full_key(key);
-        tracing::debug!(
-            "Checking existence of object in Azure Blob Storage: {}",
-            wire_key
-        );
-
-        let blob_client = self.client.blob_client(&wire_key);
-
-        match blob_client.exists().await {
-            Ok(exists) => {
-                tracing::debug!("Blob {} exists: {}", key, exists);
-                Ok(exists)
-            }
-            Err(e) => {
-                let error_msg = e.to_string().to_lowercase();
-                // Check for various "not found" patterns from real and emulated Azure services
-                if error_msg.contains("404")
-                    || error_msg.contains("not found")
-                    || error_msg.contains("notfound")
-                    || error_msg.contains("blobnotfound")
-                    || error_msg.contains("does not exist")
-                    || error_msg.contains("containernotfound")
-                {
-                    Ok(false)
-                } else {
-                    Err(Self::map_error(e, key))
-                }
-            }
+        let full = self.full_key(key);
+        match self.op.stat(&full).await {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(map_error(&e, &format!("exists {key}")).into()),
         }
     }
 
     async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
         Self::validate_key(key)?;
-
-        let wire_key = self.full_key(key);
-        let blob_client = self.client.blob_client(&wire_key);
-
-        match blob_client.get_properties().await {
-            Ok(resp) => Ok(Some(resp.blob.properties.content_length)),
-            Err(e) => {
-                let emsg = e.to_string().to_lowercase();
-                if emsg.contains("404")
-                    || emsg.contains("not found")
-                    || emsg.contains("notfound")
-                    || emsg.contains("blobnotfound")
-                    || emsg.contains("does not exist")
-                    || emsg.contains("containernotfound")
-                {
-                    Ok(None)
-                } else {
-                    Err(Self::map_error(e, key))
-                }
-            }
+        let full = self.full_key(key);
+        match self.op.stat(&full).await {
+            Ok(meta) => Ok(Some(meta.content_length())),
+            Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(map_error(&e, &format!("head {key}")).into()),
         }
     }
 
     async fn delete(&self, key: &str) -> anyhow::Result<()> {
         Self::validate_key(key)?;
-
-        let wire_key = self.full_key(key);
-        tracing::debug!("Deleting object from Azure Blob Storage: {}", wire_key);
-
-        let blob_client = self.client.blob_client(&wire_key);
-
-        // Azure delete is idempotent - non-existent blobs return success
-        match blob_client.delete().await {
-            Ok(_) => {
-                tracing::debug!("Successfully deleted {}", key);
-                Ok(())
-            }
-            Err(e) => {
-                let error_msg = e.to_string();
-                // Ignore 404 errors since delete is idempotent
-                if error_msg.contains("404") {
-                    tracing::debug!("Blob {} doesn't exist, delete is idempotent", key);
-                    Ok(())
-                } else {
-                    Err(Self::map_error(e, key))
-                }
-            }
+        let full = self.full_key(key);
+        // Idempotent by contract: deleting an absent key is success.
+        match self.op.delete(&full).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(map_error(&e, &format!("delete {key}")).into()),
         }
     }
 
     async fn list_objects(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
-        // Compose the wire-side prefix: backend prefix + caller's logical
-        // prefix. Then strip the backend prefix off each result so callers see
-        // logical keys (the same ones they wrote via `put`).
-        let wire_prefix = self.full_key(prefix);
-        tracing::debug!(
-            "Listing objects in Azure Blob Storage with logical prefix '{}' (wire '{}')",
-            prefix,
-            wire_prefix
-        );
-
-        // Use streaming API to fetch all blobs
-        let mut stream = if wire_prefix.is_empty() {
-            self.client.list_blobs().into_stream()
-        } else {
-            self.client
-                .list_blobs()
-                .prefix(wire_prefix.clone())
-                .into_stream()
-        };
-
-        let mut results = Vec::new();
-        while let Some(blob_list) = stream
-            .try_next()
+        let full_prefix = self.full_key(prefix);
+        let entries = self
+            .op
+            .list_with(&full_prefix)
+            .recursive(true)
             .await
-            .map_err(|e| Self::map_error(e, &format!("listing with prefix '{}'", prefix)))?
-        {
-            for blob in blob_list.blobs.blobs() {
-                results.push(self.strip_prefix(&blob.name).to_string());
-            }
-        }
+            .map_err(|e| map_error(&e, &format!("list {prefix}")))?;
 
-        // Sort results for consistency
-        results.sort();
-
-        tracing::debug!(
-            "Found {} objects with logical prefix '{}' in container {}",
-            results.len(),
-            prefix,
-            self.container_name
-        );
-
-        Ok(results)
+        let mut keys: Vec<String> = entries
+            .into_iter()
+            // Directory markers are an artefact of the listing model, not
+            // objects callers stored.
+            .filter(|e| e.metadata().is_file())
+            .map(|e| self.strip_prefix(e.path()).to_string())
+            .collect();
+        // Contract: callers rely on sorted output.
+        keys.sort();
+        Ok(keys)
     }
 
     async fn presign_put(
         &self,
         key: &str,
         _content_length: u64,
-        ttl: std::time::Duration,
+        ttl: Duration,
     ) -> anyhow::Result<Option<crate::PresignedPut>> {
-        let wire_key = self.full_key(key);
-        let blob_client = self.client.blob_client(&wire_key);
-
-        let expiry = time::OffsetDateTime::now_utc()
-            + time::Duration::new(ttl.as_secs() as i64, ttl.subsec_nanos() as i32);
-
-        let permissions = BlobSasPermissions {
-            write: true,
-            create: true,
-            ..Default::default()
-        };
-
-        let sas = match blob_client
-            .shared_access_signature(permissions, expiry)
-            .await
-        {
-            Ok(s) => s,
+        Self::validate_key(key)?;
+        let full = self.full_key(key);
+        // Contract: presign failure is not fatal — callers fall back to the
+        // server-proxy PUT, so degrade rather than abort the upload.
+        let req = match self.op.presign_write(&full, ttl).await {
+            Ok(r) => r,
             Err(e) => {
-                tracing::debug!(err = %e, "Azure SAS unavailable; using proxy PUT");
+                tracing::debug!(err = %e, "Azure presign_write unavailable; using proxy PUT");
                 return Ok(None);
             }
         };
-
-        let url = match blob_client.generate_signed_blob_url(&sas) {
-            Ok(u) => u,
-            Err(e) => {
-                tracing::debug!(err = %e, "Azure signed URL failed; using proxy PUT");
-                return Ok(None);
-            }
-        };
-
+        // OpenDAL supplies x-ms-blob-type itself; forward whatever it sets
+        // rather than hardcoding, so a future change stays correct.
+        let required_headers = req
+            .header()
+            .iter()
+            .filter_map(|(n, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|v| (n.as_str().to_string(), v.to_string()))
+            })
+            .collect();
         Ok(Some(crate::PresignedPut {
-            url: url.to_string(),
-            method: "PUT".to_string(),
-            required_headers: vec![("x-ms-blob-type".to_string(), "BlockBlob".to_string())],
+            url: req.uri().to_string(),
+            method: req.method().as_str().to_string(),
+            required_headers,
             expires_at: std::time::SystemTime::now() + ttl,
         }))
     }
@@ -943,170 +795,36 @@ impl StorageBackend for AzureBackend {
     async fn presign_get(
         &self,
         key: &str,
-        ttl: std::time::Duration,
+        ttl: Duration,
     ) -> anyhow::Result<Option<crate::PresignedDownload>> {
-        let wire_key = self.full_key(key);
-        let blob_client = self.client.blob_client(&wire_key);
-
-        let expiry = time::OffsetDateTime::now_utc()
-            + time::Duration::new(ttl.as_secs() as i64, ttl.subsec_nanos() as i32);
-
-        let permissions = BlobSasPermissions {
-            read: true,
-            ..Default::default()
-        };
-
-        let sas = match blob_client
-            .shared_access_signature(permissions, expiry)
-            .await
-        {
-            Ok(s) => s,
+        Self::validate_key(key)?;
+        let full = self.full_key(key);
+        let req = match self.op.presign_read(&full, ttl).await {
+            Ok(r) => r,
             Err(e) => {
-                tracing::debug!(err = %e, "Azure SAS unavailable; using proxy GET");
+                tracing::debug!(err = %e, "Azure presign_read unavailable; using proxy GET");
                 return Ok(None);
             }
         };
-
-        let url = match blob_client.generate_signed_blob_url(&sas) {
-            Ok(u) => u,
-            Err(e) => {
-                tracing::debug!(err = %e, "Azure signed URL failed; using proxy GET");
-                return Ok(None);
-            }
-        };
-
+        let headers = req
+            .header()
+            .iter()
+            .filter_map(|(n, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|v| (n.as_str().to_string(), v.to_string()))
+            })
+            .collect();
         Ok(Some(crate::PresignedDownload {
-            url: url.to_string(),
-            headers: vec![],
+            url: req.uri().to_string(),
+            headers,
             expires_in_secs: ttl.as_secs(),
         }))
     }
 }
 
-impl AzureBackend {
-    /// Internal method for direct (small file) uploads
-    async fn put_direct(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
-        let wire_key = self.full_key(key);
-        tracing::debug!(
-            "Uploading {} bytes directly to {} in container {}",
-            data.len(),
-            wire_key,
-            self.container_name
-        );
-
-        let blob_client = self.client.blob_client(&wire_key);
-        let data_vec = data.to_vec(); // Clone data to satisfy 'static lifetime requirement
-
-        blob_client
-            .put_block_blob(data_vec)
-            .await
-            .map_err(|e| Self::map_error(e, key))?;
-
-        Ok(())
-    }
-
-    /// Internal method for chunked uploads of large files
-    ///
-    /// Uploads large files as block blobs with multiple blocks. Each block
-    /// is shipped via `put_block` in **parallel** (bounded by
-    /// `MEDIAGIT_AZURE_PUT_BLOCK_CONCURRENCY`, default 8) and committed in
-    /// strict order via `put_block_list`. Block IDs are deterministic so the
-    /// final on-blob byte order matches the input regardless of completion
-    /// order. This is the Phase 7 perf path for single-object uploads larger
-    /// than `AZURE_BLOCK_SIZE` (4 MB).
-    async fn put_chunked(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
-        use futures::stream::StreamExt;
-
-        let chunk_count = data.len().div_ceil(CHUNK_SIZE);
-        let parallelism: usize = std::env::var("MEDIAGIT_AZURE_PUT_BLOCK_CONCURRENCY")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .filter(|n: &usize| *n > 0)
-            .unwrap_or(8);
-
-        tracing::debug!(
-            "Uploading {} bytes in {} chunks to {} in container {} (parallelism: {})",
-            data.len(),
-            chunk_count,
-            key,
-            self.container_name,
-            parallelism
-        );
-
-        // Pre-compute block IDs so the final block_list ordering is independent
-        // of the put_block completion order.
-        let blocks: Vec<(usize, String, Vec<u8>)> = data
-            .chunks(CHUNK_SIZE)
-            .enumerate()
-            .map(|(i, chunk)| {
-                let block_id = format!("{:08}", i).into_bytes();
-                let block_id_b64 = azure_core::base64::encode(&block_id);
-                (i, block_id_b64, chunk.to_vec())
-            })
-            .collect();
-
-        // Upload all blocks in parallel; collect block IDs by index to preserve
-        // commit order even when uploads finish out-of-order.
-        let wire_key = self.full_key(key);
-        let blob_client = self.client.blob_client(&wire_key);
-        let key_owned = key.to_string();
-        let mut put_results =
-            futures::stream::iter(blocks.into_iter().map(|(i, block_id_b64, chunk_vec)| {
-                let blob_client = blob_client.clone();
-                let key_for_err = key_owned.clone();
-                async move {
-                    let chunk_len = chunk_vec.len();
-                    blob_client
-                        .put_block(block_id_b64.clone(), chunk_vec)
-                        .await
-                        .map_err(|e| {
-                            Self::map_error(
-                                e,
-                                &format!(
-                                    "uploading chunk {} ({} bytes) of {} for {}",
-                                    i + 1,
-                                    chunk_len,
-                                    chunk_count,
-                                    key_for_err
-                                ),
-                            )
-                        })?;
-                    anyhow::Ok((i, block_id_b64))
-                }
-            }))
-            .buffer_unordered(parallelism);
-
-        let mut indexed_ids: Vec<(usize, String)> = Vec::with_capacity(chunk_count);
-        while let Some(res) = put_results.next().await {
-            indexed_ids.push(res?);
-        }
-        indexed_ids.sort_by_key(|(i, _)| *i);
-
-        // Commit all blocks in input order to create the final blob.
-        let block_list = BlockList {
-            blocks: indexed_ids
-                .into_iter()
-                .map(|(_, id)| BlobBlockType::new_uncommitted(id))
-                .collect(),
-        };
-
-        blob_client
-            .put_block_list(block_list)
-            .await
-            .map_err(|e| Self::map_error(e, &format!("committing {} blocks", chunk_count)))?;
-
-        tracing::debug!(
-            "Successfully uploaded {} bytes in {} chunks to {}",
-            data.len(),
-            chunk_count,
-            key
-        );
-
-        Ok(())
-    }
-}
-
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -1117,12 +835,12 @@ mod tests {
 
     #[test]
     fn test_validate_key_valid() {
-        assert!(AzureBackend::validate_key("valid/key/path").is_ok());
+        assert!(AzureBackend::validate_key("objects/abc123").is_ok());
     }
 
     #[test]
     fn test_validate_key_with_special_chars() {
-        assert!(AzureBackend::validate_key("key-with_special.chars").is_ok());
+        assert!(AzureBackend::validate_key("objects/ab-c_1.2").is_ok());
     }
 
     #[test]
@@ -1132,157 +850,100 @@ mod tests {
 
     #[test]
     fn test_normalize_prefix_no_slash() {
-        assert_eq!(normalize_prefix("repo-objects"), "repo-objects/");
+        assert_eq!(normalize_prefix("repo"), "repo/");
     }
 
     #[test]
     fn test_normalize_prefix_already_slashed() {
-        assert_eq!(normalize_prefix("repo-objects/"), "repo-objects/");
+        assert_eq!(normalize_prefix("repo/"), "repo/");
     }
 
     #[test]
     fn test_normalize_prefix_idempotent() {
-        let once = normalize_prefix("p");
-        let twice = normalize_prefix(&once);
-        assert_eq!(once, twice);
+        let once = normalize_prefix("repo");
+        assert_eq!(normalize_prefix(&once), once);
     }
 
-    /// Build a no-network backend instance directly so we can unit-test the
-    /// prefix helpers without touching Azure. The container_client is a
-    /// throwaway placeholder; we never call methods that hit the wire.
-    fn synthetic_backend(prefix: &str) -> AzureBackend {
-        let creds = StorageCredentials::access_key("acct".to_string(), "AAAA");
-        let client = ClientBuilder::new("acct".to_string(), creds).container_client("c");
-        AzureBackend {
-            account_name: "acct".to_string(),
-            container_name: "c".to_string(),
-            prefix: normalize_prefix(prefix),
-            client: Arc::new(client),
-        }
-    }
+    // The prefix helpers are exercised through the free functions: building an
+    // `Operator` here would panic OpenDAL's executor LazyLock (no tokio runtime
+    // in a plain #[test]) and poison it for every other test in the binary —
+    // which is exactly what happened on the first run of this rewrite.
 
     #[test]
     fn test_full_key_empty_prefix_is_passthrough() {
-        let b = synthetic_backend("");
-        assert_eq!(b.full_key("chunks/abc"), "chunks/abc");
+        assert_eq!(full_key_with("", "chunks/abc"), "chunks/abc");
     }
 
     #[test]
     fn test_full_key_with_prefix_prepends() {
-        let b = synthetic_backend("repo-objects");
-        assert_eq!(b.full_key("chunks/abc"), "repo-objects/chunks/abc");
+        assert_eq!(
+            full_key_with(&normalize_prefix("repo"), "chunks/abc"),
+            "repo/chunks/abc"
+        );
     }
 
     #[test]
     fn test_full_key_handles_already_slashed_prefix() {
-        let b = synthetic_backend("repo-objects/");
-        assert_eq!(b.full_key("chunks/abc"), "repo-objects/chunks/abc");
+        assert_eq!(
+            full_key_with(&normalize_prefix("repo/"), "chunks/abc"),
+            "repo/chunks/abc"
+        );
     }
 
     #[test]
     fn test_strip_prefix_returns_logical_key() {
-        let b = synthetic_backend("repo-objects");
-        assert_eq!(b.strip_prefix("repo-objects/chunks/abc"), "chunks/abc");
+        assert_eq!(
+            strip_prefix_with(&normalize_prefix("repo"), "repo/chunks/abc"),
+            "chunks/abc"
+        );
     }
 
     #[test]
     fn test_strip_prefix_no_match_returns_input() {
-        let b = synthetic_backend("repo-objects");
-        // Foreign keys (e.g. another tenant's data) pass through untouched.
-        assert_eq!(b.strip_prefix("other/key"), "other/key");
+        assert_eq!(
+            strip_prefix_with(&normalize_prefix("repo"), "other/chunks/abc"),
+            "other/chunks/abc"
+        );
     }
 
     #[test]
     fn test_strip_prefix_empty_prefix_is_passthrough() {
-        let b = synthetic_backend("");
-        assert_eq!(b.strip_prefix("chunks/abc"), "chunks/abc");
+        assert_eq!(strip_prefix_with("", "chunks/abc"), "chunks/abc");
     }
 
     #[test]
     fn test_full_key_strip_prefix_roundtrip() {
-        let b = synthetic_backend("multi-tenant/repo-42");
-        let logical = "manifests/deadbeef";
-        let wire = b.full_key(logical);
-        assert_eq!(b.strip_prefix(&wire), logical);
-    }
-
-    #[tokio::test]
-    #[ignore = "requires live Azure credentials - not available in CI"]
-    async fn test_sas_token_backend_creation() {
-        let result = AzureBackend::with_sas_token(
-            "testaccount",
-            "testcontainer",
-            "sv=2021-06-08&ss=bfqt&srt=sco&sp=rwdlacupitfx",
-        )
-        .await;
-
-        assert!(result.is_ok());
-        let backend = result.unwrap();
-        assert_eq!(backend.account_name, "testaccount");
-        assert_eq!(backend.container_name, "testcontainer");
-    }
-
-    #[tokio::test]
-    #[ignore = "requires live Azure credentials - not available in CI"]
-    async fn test_account_key_backend_creation() {
-        let result = AzureBackend::with_account_key(
-            "testaccount",
-            "testcontainer",
-            "DefaultEndpointsProtocol=https;AccountName=testaccount;AccountKey=test==;EndpointSuffix=core.windows.net",
-        )
-        .await;
-
-        assert!(result.is_ok());
-        let backend = result.unwrap();
-        assert_eq!(backend.account_name, "testaccount");
-        assert_eq!(backend.container_name, "testcontainer");
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Azurite emulator"]
-    async fn test_connection_string_backend_creation() {
-        let conn_str = "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://localhost:10000/devstoreaccount1;";
-        let result = AzureBackend::with_connection_string("mediagit-test", conn_str).await;
-
-        assert!(result.is_ok());
-        let backend = result.unwrap();
-        assert_eq!(backend.account_name, "devstoreaccount1");
-        assert_eq!(backend.container_name, "mediagit-test");
+        let prefix = normalize_prefix("repo");
+        let logical = "chunks/deadbeef";
+        assert_eq!(
+            strip_prefix_with(&prefix, &full_key_with(&prefix, logical)),
+            logical
+        );
     }
 
     #[tokio::test]
     async fn test_empty_account_name_fails() {
-        let result = AzureBackend::with_sas_token("", "testcontainer", "token").await;
-
-        assert!(result.is_err());
+        assert!(AzureBackend::with_account_key("", "c", "k").await.is_err());
     }
 
     #[tokio::test]
     async fn test_empty_container_name_fails() {
-        let result = AzureBackend::with_account_key("testaccount", "", "key").await;
-
-        assert!(result.is_err());
+        assert!(AzureBackend::with_account_key("a", "", "k").await.is_err());
     }
 
     #[tokio::test]
     async fn test_empty_sas_token_fails() {
-        let result = AzureBackend::with_sas_token("testaccount", "testcontainer", "").await;
-
-        assert!(result.is_err());
+        assert!(AzureBackend::with_sas_token("a", "c", "").await.is_err());
     }
 
     #[tokio::test]
     async fn test_empty_account_key_fails() {
-        let result = AzureBackend::with_account_key("testaccount", "testcontainer", "").await;
-
-        assert!(result.is_err());
+        assert!(AzureBackend::with_account_key("a", "c", "").await.is_err());
     }
 
     #[tokio::test]
     async fn test_empty_connection_string_fails() {
-        let result = AzureBackend::with_connection_string("testcontainer", "").await;
-
-        assert!(result.is_err());
+        assert!(AzureBackend::with_connection_string("c", "").await.is_err());
     }
 
     #[test]
@@ -1297,8 +958,65 @@ mod tests {
 
     #[test]
     fn test_chunk_size_alignment() {
-        // Verify chunk size is reasonable (between 1MB and 100MB)
-        const { assert!(CHUNK_SIZE >= 1024 * 1024) };
-        const { assert!(CHUNK_SIZE <= 100 * 1024 * 1024) };
+        assert_eq!(CHUNK_SIZE % AZURE_BLOCK_SIZE, 0);
+    }
+
+    #[test]
+    fn conn_field_extracts_named_fields() {
+        let conn = "DefaultEndpointsProtocol=http;AccountName=acct;AccountKey=KEY==;\
+                    BlobEndpoint=http://127.0.0.1:10000/acct;";
+        assert_eq!(conn_field(conn, "AccountName").as_deref(), Some("acct"));
+        assert_eq!(conn_field(conn, "AccountKey").as_deref(), Some("KEY=="));
+        assert_eq!(
+            conn_field(conn, "BlobEndpoint").as_deref(),
+            Some("http://127.0.0.1:10000/acct")
+        );
+        assert_eq!(conn_field(conn, "Missing"), None);
+    }
+
+    /// Not-found classification is load-bearing: `exists()` and the dedup
+    /// paths branch on it, and it used to come from substring-matching the
+    /// SDK's message.
+    #[test]
+    fn map_error_classifies_not_found_and_permission_denied() {
+        let nf = opendal::Error::new(opendal::ErrorKind::NotFound, "blob missing");
+        assert!(matches!(map_error(&nf, "get k"), StorageError::NotFound(_)));
+
+        let pd = opendal::Error::new(opendal::ErrorKind::PermissionDenied, "nope");
+        assert!(matches!(
+            map_error(&pd, "get k"),
+            StorageError::PermissionDenied(_)
+        ));
+
+        let other = opendal::Error::new(opendal::ErrorKind::Unexpected, "boom");
+        assert!(matches!(
+            map_error(&other, "get k"),
+            StorageError::Backend(_)
+        ));
+    }
+
+    /// The 10s OpenDAL default failed a 2 GB Azure push on a WAN link
+    /// (campaign 20260804-azgcs). Absent/garbage input must land on the
+    /// generous default, not on something that reintroduces that failure.
+    #[test]
+    fn io_timeout_defaults_are_generous_enough_for_a_wan() {
+        assert_eq!(super::parse_io_timeout_secs(None), 120);
+        assert_eq!(
+            super::parse_io_timeout_secs(Some("not-a-number".into())),
+            120
+        );
+        assert!(
+            super::parse_io_timeout_secs(None) > 10,
+            "default must exceed the OpenDAL default that caused the failure"
+        );
+    }
+
+    /// 0 means "deadline already passed" to OpenDAL, so honouring it would
+    /// fail every transfer instantly. It must fall back, not be obeyed.
+    #[test]
+    fn io_timeout_rejects_zero_and_honours_valid_overrides() {
+        assert_eq!(super::parse_io_timeout_secs(Some("0".into())), 120);
+        assert_eq!(super::parse_io_timeout_secs(Some("45".into())), 45);
+        assert_eq!(super::parse_io_timeout_secs(Some("  300  ".into())), 300);
     }
 }

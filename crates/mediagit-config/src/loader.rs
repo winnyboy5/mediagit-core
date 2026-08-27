@@ -152,6 +152,22 @@ impl ConfigLoader {
     }
 
     /// Apply environment variable overrides
+    /// DC-5: **this is not wired into anything, and calling it would not help.**
+    ///
+    /// The obvious reading is that `Config::load` forgot to call it, so every
+    /// `MEDIAGIT_APP_*` override is inert. That is true but not the whole
+    /// problem: the fields it writes — `[app]`, `[observability]`,
+    /// `[compression]`, `[performance] max_concurrency` — are read **nowhere
+    /// outside this crate's own tests**. The server's real settings live in
+    /// `ServerConfig` (`mediagit-server.toml`), a different type these
+    /// variables do not reach. Wiring the call in would set fields nobody
+    /// consults and reintroduce the "looks configured, isn't" failure with a
+    /// green checkmark on it.
+    ///
+    /// The documented knobs have been retracted from
+    /// `book/src/reference/environment.md`. Delete this and the dead schema
+    /// sections together, or give those fields real readers — do not just add
+    /// the call.
     pub fn apply_env_overrides(&self, config: &mut Config) -> ConfigResult<()> {
         // App settings
         if let Ok(value) = std::env::var("MEDIAGIT_APP_NAME") {

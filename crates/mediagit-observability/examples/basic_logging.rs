@@ -16,7 +16,7 @@
 //! Run with: RUST_LOG=debug cargo run --example basic_logging -- <format>
 //! Where <format> is one of: pretty, compact, json
 
-use mediagit_observability::{init_tracing, LogFormat};
+use mediagit_observability::{LogFormat, init_tracing};
 use std::env;
 
 #[tokio::main]

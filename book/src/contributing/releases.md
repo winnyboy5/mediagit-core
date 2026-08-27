@@ -6,7 +6,7 @@ The MediaGit release process for maintainers. Releases are driven by GitHub Acti
 
 Semantic versioning: `MAJOR.MINOR.PATCH[-prerelease]`
 
-- `v0.2.8-beta.1` — stable release
+- `v0.3.0-rc.4` — stable release
 - `v0.3.0-alpha.1` — pre-release (alpha/beta/rc in version → `is-prerelease: true`)
 
 ## Pre-Release Checklist
@@ -18,7 +18,7 @@ Before creating a release tag:
 # 2. Update CHANGELOG.md with the new version entry
 # 3. Bump version in workspace Cargo.toml [workspace.package]
 #    (all crates inherit version.workspace = true)
-sed -i 's/^version = ".*"/version = "0.2.8-beta.1"/' Cargo.toml
+sed -i 's/^version = ".*"/version = "0.3.0-rc.4"/' Cargo.toml
 
 # 4. Update Cargo.lock
 cargo generate-lockfile
@@ -30,11 +30,11 @@ cargo build --release --bin mediagit --bin mediagit-server
 cargo test --workspace --all-features
 
 # 7. Check MSRV still passes
-cargo +1.92.0 check --workspace --all-features
+cargo +1.97.1 check --workspace --all-features
 
 # 8. Commit and push
 git add Cargo.toml Cargo.lock CHANGELOG.md
-git commit -m "chore: release v0.2.8-beta.1"
+git commit -m "chore: release v0.3.0-rc.4"
 git push origin main
 ```
 
@@ -42,12 +42,12 @@ git push origin main
 
 ```bash
 # Stable release
-git tag -a v0.2.8-beta.1 -m "Release v0.2.8-beta.1"
-git push origin v0.2.8-beta.1
+git tag -a v0.3.0-rc.4 -m "Release v0.3.0-rc.4"
+git push origin v0.3.0-rc.4
 
 # Pre-release (alpha/beta/rc)
-git tag -a v0.2.8-beta.1-alpha.1 -m "Pre-release v0.2.8-beta.1-alpha.1"
-git push origin v0.2.8-beta.1-alpha.1
+git tag -a v0.3.0-rc.4 -m "Pre-release v0.3.0-rc.4"
+git push origin v0.3.0-rc.4
 ```
 
 Pushing the tag automatically triggers the `release.yml` workflow.
@@ -81,11 +81,11 @@ Creates the GitHub Release with all archives, checksums, and installer scripts.
 Only runs on tag push (not `workflow_dispatch`).
 
 ### 5. publish-crates
-Publishes all 13 crates to crates.io in dependency order. Only runs for stable releases (`is-prerelease == false`).
+Publishes all 11 crates to crates.io in dependency order. Only runs for stable releases (`is-prerelease == false`).
 
 **Publish order** (respects internal dependency tiers):
-1. Tier 0: `mediagit-config`, `mediagit-security`, `mediagit-observability`, `mediagit-compression`, `mediagit-storage`, `mediagit-media`, `mediagit-git`
-2. Tier 1: `mediagit-versioning`, `mediagit-metrics`, `mediagit-migration`
+1. Tier 0: `mediagit-config`, `mediagit-security`, `mediagit-observability`, `mediagit-compression`, `mediagit-storage`, `mediagit-media`
+2. Tier 1: `mediagit-versioning`, `mediagit-metrics`
 3. Tier 2: `mediagit-protocol`
 4. Tier 3: `mediagit-server`, `mediagit-cli`
 
@@ -128,14 +128,14 @@ For critical bug fixes on a stable release:
 
 ```bash
 # Create hotfix branch from the tag
-git checkout -b hotfix/v0.2.2 v0.2.8-beta.1
+git checkout -b hotfix/v0.3.0 v0.3.0-rc.4
 
 # Apply the fix, test, commit
 # ...
 
 # Tag and push
-git tag -a v0.2.2 -m "Hotfix v0.2.2: fix critical bug"
-git push origin v0.2.2
+git tag -a v0.3.1 -m "Hotfix v0.3.1: fix critical bug"
+git push origin v0.3.1
 
 # Merge fix back to main
 git checkout main

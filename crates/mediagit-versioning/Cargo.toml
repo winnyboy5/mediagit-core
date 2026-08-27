@@ -9,6 +9,12 @@ repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
 description = "Core VCS engine: ODB, refs, commits, trees, and packs"
+# Not published to crates.io: distribution is cargo-dist binaries, Docker
+# images and GitHub releases. This also makes deny.toml's
+# `allow-wildcard-paths` apply to our own path deps (cargo-deny exempts
+# them only for non-public crates). Flip to `true` and add `version = ...`
+# beside every internal `path = ...` if crates.io publishing is turned on.
+publish = false
 
 [lib]
 # Doctest compilation OOMs at jobs=2 on ≤16 GB RAM (each doctest binary
@@ -33,17 +39,23 @@ tracing.workspace = true
 toml.workspace = true
 moka = { version = "0.12.14", features = ["future"] }
 uuid = { version = "1.11", features = ["v4"] }
-fastcdc = "3.2"
+fastcdc = "4.0"
 memmap2 = "0.9"
 num_cpus = "1.16"
 async-channel = "2.3"
 zstd.workspace = true
 tempfile = "3.13"
+roaring = "0.11.4"
+ignore = "0.4"  # gitignore-style pattern matching, reused for sparse-checkout pattern mode
 
 [dev-dependencies]
+# DC-7: `keyed_odb_seals` needs `EncryptionKey` and `envelope::is_sealed` to
+# prove a plain-constructor ObjectDatabase seals once the process is keyed.
+mediagit-security = { version = "0.3.0-rc.4", path = "../mediagit-security", default-features = false }
 proptest.workspace = true
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 uuid = { version = "1.11", features = ["v4"] }
+async-trait.workspace = true
 
 [[bench]]
 name = "pack_benchmark"
@@ -60,3 +72,13 @@ harness = false
 [[bench]]
 name = "merge_bench"
 harness = false
+
+[[bench]]
+name = "chunking_bench"
+harness = false
+
+[[example]]
+name = "dedup_report"
+
+[lints.rust]
+unsafe_code = "deny"

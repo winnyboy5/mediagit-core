@@ -88,6 +88,12 @@ pub struct ApplyOpts {
     #[arg(long)]
     pub index: bool,
 
+    /// WT-7: overwrite uncommitted changes that differ from the stash.
+    /// Without this, `apply` refuses rather than destroying work that exists
+    /// nowhere else.
+    #[arg(short, long)]
+    pub force: bool,
+
     /// Quiet mode
     #[arg(short, long)]
     pub quiet: bool,
@@ -131,6 +137,12 @@ pub struct PopOpts {
     /// Reinstate index changes
     #[arg(long)]
     pub index: bool,
+
+    /// WT-7: overwrite uncommitted changes that differ from the stash.
+    /// `pop` is apply-then-drop, so an unguarded clobber loses both the
+    /// working edit and the stash entry that could have restored it.
+    #[arg(short, long)]
+    pub force: bool,
 
     /// Quiet mode
     #[arg(short, long)]
@@ -212,8 +224,24 @@ impl StashCmd {
             }
         }
 
-        // BUG-3 fix: Check BOTH index and working-tree changes
-        if index.is_empty() && working_tree_changes.is_empty() {
+        // Untracked/new files: `checkout_commit` below (restore to HEAD) removes
+        // ANY file not in the target tree, with no concept of "untracked" - so
+        // an untracked WIP file is silently destroyed unless stash captures it
+        // first (DES-3). Captured by default since the reset is destructive
+        // regardless of `-u`; the flag is accepted for git-compatible parsing.
+        let mut untracked_changes: Vec<(PathBuf, Oid)> = Vec::new();
+        for path in &working_files {
+            if head_files.contains_key(path) || index.contains(path) {
+                continue;
+            }
+            let full_path = repo_root.join(path);
+            if let Ok(content) = std::fs::read(&full_path) {
+                untracked_changes.push((path.clone(), Oid::hash(&content)));
+            }
+        }
+
+        // BUG-3 fix: Check index, working-tree changes, AND untracked files
+        if index.is_empty() && working_tree_changes.is_empty() && untracked_changes.is_empty() {
             if !opts.quiet {
                 println!("{} No changes to stash", style("ℹ").blue());
             }
@@ -232,8 +260,9 @@ impl StashCmd {
             ));
         }
 
-        // 2. Override with working-tree modifications (write blobs to ODB)
-        for (path, _working_oid) in &working_tree_changes {
+        // 2. Override with working-tree modifications and untracked files
+        //    (write blobs to ODB)
+        for (path, _oid) in working_tree_changes.iter().chain(untracked_changes.iter()) {
             let full_path = repo_root.join(path);
             if let Ok(content) = std::fs::read(&full_path) {
                 let blob_oid = odb
@@ -325,6 +354,32 @@ impl StashCmd {
 
         let stash_oid = Oid::from_hex(&stash_entry.commit_oid)?;
 
+        // WT-7: refuse to overwrite divergent uncommitted work.
+        //
+        // The overlay below writes every stashed path unconditionally. If you
+        // stashed an edit and then made a *different* edit to the same file,
+        // that second edit was silently destroyed — and unlike the stashed
+        // version, it existed nowhere else. Stash is supposed to be the safe
+        // place to park work, so losing work to it is especially bad.
+        //
+        // A path is at risk when the working copy differs from BOTH the
+        // stashed content (so applying would change it) and from HEAD (so the
+        // difference is unsaved work rather than a clean checkout).
+        let clobbered = Self::paths_at_risk(&repo_root, &odb, &stash_oid).await?;
+        if !clobbered.is_empty() && !opts.force {
+            anyhow::bail!(
+                "Refusing to apply: {} path(s) have uncommitted changes that differ \
+                 from the stash and would be overwritten:\n  {}\n\
+                 Commit or stash them first, or re-run with --force to discard them.",
+                clobbered.len(),
+                clobbered
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n  ")
+            );
+        }
+
         // Apply stash tree on top of current working directory (overlay, not replace).
         // checkout_commit would wipe files not in the stash tree.
         let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
@@ -338,6 +393,59 @@ impl StashCmd {
         }
 
         Ok(())
+    }
+
+    /// WT-7: stashed paths whose working copy holds unsaved work that the
+    /// overlay would destroy.
+    ///
+    /// At risk means the working file differs from BOTH:
+    ///   - the stashed content (so applying would actually change it), and
+    ///   - HEAD (so the difference is unsaved work, not a clean checkout).
+    ///
+    /// Files matching the stash are already applied; files matching HEAD are
+    /// clean and safe to overwrite. Only the third case is unrecoverable —
+    /// that content exists nowhere else in the repository.
+    ///
+    /// Compares content hashes rather than scanning for text markers, so it
+    /// behaves identically for media and binary assets.
+    async fn paths_at_risk(
+        repo_root: &Path,
+        odb: &ObjectDatabase,
+        stash_oid: &Oid,
+    ) -> Result<Vec<PathBuf>> {
+        let stash_commit = Commit::read(odb, stash_oid).await?;
+        let stash_files = CheckoutManager::new(odb, repo_root)
+            .tracked_files_at(stash_oid)
+            .await?;
+
+        // HEAD content for the same paths, to tell "unsaved work" from "clean".
+        let refdb = RefDatabase::new(repo_root.join(".mediagit"));
+        let head_files = match refdb.resolve("HEAD").await {
+            Ok(head_oid) => CheckoutManager::new(odb, repo_root)
+                .tracked_files_at(&head_oid)
+                .await
+                .unwrap_or_default(),
+            Err(_) => Default::default(),
+        };
+        let _ = stash_commit;
+
+        let mut at_risk = Vec::new();
+        for (path, (stash_entry_oid, _)) in &stash_files {
+            let full = repo_root.join(path);
+            let Ok(bytes) = std::fs::read(&full) else {
+                continue; // absent: the overlay creates it, nothing to lose
+            };
+            let working = Oid::hash(&bytes);
+            if working == *stash_entry_oid {
+                continue; // already matches the stash
+            }
+            if head_files.get(path).map(|(o, _)| *o) == Some(working) {
+                continue; // clean checkout of HEAD — safe to overwrite
+            }
+            at_risk.push(path.clone());
+        }
+        at_risk.sort();
+        Ok(at_risk)
     }
 
     async fn list(&self, opts: &ListOpts) -> Result<()> {
@@ -439,6 +547,7 @@ impl StashCmd {
         let apply_opts = ApplyOpts {
             stash: opts.stash,
             index: opts.index,
+            force: opts.force,
             quiet: opts.quiet,
         };
         self.apply(&apply_opts).await?;
@@ -468,10 +577,9 @@ impl StashCmd {
                 Ok(answer) => answer,
                 Err(_) => {
                     // Non-interactive context (pipe, script, CI) — require --force to proceed
-                    eprintln!(
+                    anyhow::bail!(
                         "stdin is not a terminal. Use 'mediagit stash clear --force' to clear without confirmation."
                     );
-                    return Ok(());
                 }
             };
 
@@ -581,4 +689,162 @@ struct StashEntry {
     message: String,
     timestamp: String,
     branch: Option<String>,
+}
+
+#[cfg(test)]
+#[allow(unsafe_code)] // edition-2024: test-only env::set_var/remove_var requires unsafe
+mod tests {
+    use super::*;
+    use crate::commands::utils::test_support::{REPO_ENV_LOCK, init_repo_with_commit};
+    use clap::Parser;
+    use tempfile::TempDir;
+
+    fn parse(args: &[&str]) -> Result<StashCmd, clap::Error> {
+        let mut full = vec!["stash"];
+        full.extend_from_slice(args);
+        StashCmd::try_parse_from(full)
+    }
+
+    #[test]
+    fn parse_save_with_message_flag() {
+        let cmd = parse(&["save", "-m", "WIP"]).unwrap();
+        match cmd.command {
+            StashSubcommand::Save(opts) => {
+                assert_eq!(opts.message_flag.as_deref(), Some("WIP"));
+                assert!(!opts.include_untracked);
+            }
+            _ => panic!("expected Save"),
+        }
+    }
+
+    #[test]
+    fn parse_push_alias_with_positional_message() {
+        let cmd = parse(&["push", "WIP message", "-u"]).unwrap();
+        match cmd.command {
+            StashSubcommand::Push(opts) => {
+                assert_eq!(opts.message_positional.as_deref(), Some("WIP message"));
+                assert!(opts.include_untracked);
+            }
+            _ => panic!("expected Push"),
+        }
+    }
+
+    #[test]
+    fn parse_apply_with_index() {
+        let cmd = parse(&["apply", "1", "--index"]).unwrap();
+        match cmd.command {
+            StashSubcommand::Apply(opts) => {
+                assert_eq!(opts.stash, Some(1));
+                assert!(opts.index);
+            }
+            _ => panic!("expected Apply"),
+        }
+    }
+
+    #[test]
+    fn parse_list_verbose() {
+        let cmd = parse(&["list", "-v"]).unwrap();
+        match cmd.command {
+            StashSubcommand::List(opts) => assert!(opts.verbose),
+            _ => panic!("expected List"),
+        }
+    }
+
+    #[test]
+    fn parse_drop_and_pop_default_to_no_index() {
+        let cmd = parse(&["drop"]).unwrap();
+        match cmd.command {
+            StashSubcommand::Drop(opts) => assert_eq!(opts.stash, None),
+            _ => panic!("expected Drop"),
+        }
+
+        let cmd = parse(&["pop", "2"]).unwrap();
+        match cmd.command {
+            StashSubcommand::Pop(opts) => assert_eq!(opts.stash, Some(2)),
+            _ => panic!("expected Pop"),
+        }
+    }
+
+    #[test]
+    fn parse_clear_force() {
+        let cmd = parse(&["clear", "-f"]).unwrap();
+        match cmd.command {
+            StashSubcommand::Clear(opts) => assert!(opts.force),
+            _ => panic!("expected Clear"),
+        }
+    }
+
+    #[test]
+    fn parse_missing_subcommand_is_error() {
+        assert!(parse(&[]).is_err());
+    }
+
+    /// Guards `MEDIAGIT_REPO` across the `.await` points in `execute()`
+    /// (see `REPO_ENV_LOCK` docs).
+    #[allow(clippy::await_holding_lock)]
+    async fn execute_in(repo_path: &std::path::Path, cmd: &StashCmd) -> Result<()> {
+        let _guard = REPO_ENV_LOCK.lock().unwrap();
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MEDIAGIT_REPO", repo_path) };
+        let result = cmd.execute().await;
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_REPO") };
+        result
+    }
+
+    #[tokio::test]
+    async fn execute_no_repo_is_error() {
+        let temp = TempDir::new().unwrap();
+        let cmd = parse(&["list"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("Not a mediagit repository"));
+    }
+
+    #[tokio::test]
+    async fn list_with_no_stashes_is_ok() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["list"]).unwrap();
+        execute_in(temp.path(), &cmd).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn save_with_no_changes_is_ok() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["save", "-m", "nothing to stash"]).unwrap();
+        execute_in(temp.path(), &cmd).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn drop_out_of_range_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["drop", "0"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("Stash entry 0 not found"));
+    }
+
+    #[tokio::test]
+    async fn apply_out_of_range_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["apply", "0"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("Stash entry 0 not found"));
+    }
+
+    #[tokio::test]
+    async fn show_out_of_range_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["show", "0"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("Stash entry 0 not found"));
+    }
 }

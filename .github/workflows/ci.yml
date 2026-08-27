@@ -8,7 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_VERSION: "1.92.0"
+  RUST_VERSION: "1.97.1"          # keep in sync with rust-toolchain.toml
   CARGO_INCREMENTAL: "0"
   CARGO_BUILD_JOBS: "2"          # Cap parallelism to avoid OOM on 7 GB GitHub runners
 
@@ -59,6 +59,40 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # GNU ld runs out of memory (SIGBUS/core-dump) linking the heaviest test
+      # binary (gcs_integration_tests: aws-sdk + azure + gcs + openssl-sys +
+      # aws-lc-sys + criterion) on the 7 GB x86_64 runner, even with
+      # split-debuginfo=unpacked + jobs=2. mold links the same binary with a
+      # fraction of the peak RAM. Native x86_64 Linux only — the aarch64 entry
+      # builds inside the `cross` docker image, which has its own toolchain.
+      - name: Setup mold linker
+        if: matrix.os == 'ubuntu-latest' && !matrix.cross
+        uses: rui314/setup-mold@v1
+
+      # The GitHub Ubuntu image ships ~25 GB of toolchains this project never
+      # touches (Android SDK/NDK, .NET, GHC, Swift, preloaded Docker images).
+      # That matters here because this workspace builds TWICE on the disk: the
+      # Build step passes `--target`, which puts artifacts in
+      # `target/<triple>/debug`, while the test step below has no `--target` and
+      # so builds the whole graph again into `target/debug`. Add aws-sdk +
+      # azure + gcs + criterion + proptest and the runner runs out of space.
+      #
+      # The Code Coverage job died exactly this way — `rustc-LLVM ERROR: IO
+      # failure on output stream: No space left on device` while compiling
+      # gcs_emulator_tests, then the runner could not even write its own step
+      # summary. Deleting what we never use is cheaper and less fragile than
+      # trying to shrink the build.
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        run: |
+          echo "before:"; df -h / | tail -1
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/share/powershell /usr/share/swift \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          echo "after:"; df -h / | tail -1
+        shell: bash
+
       - name: Install cross (for ARM cross-compilation)
         if: matrix.cross
         run: cargo install cross --git https://github.com/cross-rs/cross
@@ -72,15 +106,27 @@ jobs:
           fi
         shell: bash
 
+      # OP-5: macOS and Windows used to run `-p mediagit-cli` only. Case-only
+      # path collisions (VC-5) and symlink handling (VC-6) live in
+      # mediagit-versioning and are *only* wrong off Linux, so the one matrix
+      # dimension that could have caught them was the one not exercising them.
+      # Every platform now runs the same suite.
+      # `debug = "line-tables-only"` rather than the default full debuginfo:
+      # this graph's debug sections are the bulk of `target/`, and line tables
+      # are all a panic backtrace needs to still name file:line. Full DWARF here
+      # buys variable inspection nobody does on a CI runner, at several GB.
+      #
+      # Deliberately NOT set workspace-wide in the top-level `env:` — the
+      # coverage job needs whatever debuginfo tarpaulin asks for, and quietly
+      # degrading its input from another job's optimisation is how a coverage
+      # number silently becomes wrong.
       - name: Run tests
         if: ${{ !matrix.cross }}
-        run: |
-          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
-            cargo test --workspace --verbose --all-features
-          else
-            cargo test -p mediagit-cli --verbose
-          fi
+        run: cargo test --workspace --verbose --all-features
         shell: bash
+        env:
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+          CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 
   lint:
@@ -145,6 +191,21 @@ jobs:
       - name: Run cargo audit
         uses: actions-rust-lang/audit@v1
 
+  # OP-10: cargo-audit answers "is there an advisory". cargo-deny answers the
+  # three questions it cannot: license compatibility (we ship AGPL-3.0),
+  # banned/duplicate crates (a transitive rustls 0.21 once shipped alongside
+  # 0.23 with three webpki advisories), and dependency provenance.
+  # See deny.toml — advisories stay owned by .cargo/audit.toml.
+  cargo-deny:
+    name: Dependency Policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans sources
+
   # Phase 3: Integration tests (storage backends) — non-required check initially
   integration-tests:
     name: Integration Tests
@@ -158,6 +219,11 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
 
       - uses: Swatinem/rust-cache@v2
+
+      # Same heavy cloud-SDK link as the `test` job — use mold to avoid the
+      # GNU ld OOM/SIGBUS crash when linking gcs_integration_tests et al.
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
 
       - name: Start storage emulators
         run: docker compose -f docker-compose.test.yml up -d
@@ -211,15 +277,15 @@ jobs:
 
   # Phase 4: MSRV verification
   msrv:
-    name: MSRV Check (Rust 1.92.0)
+    name: MSRV Check (Rust 1.97)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust 1.92.0
+      - name: Install Rust 1.97
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.92.0"
+          toolchain: "1.97"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -264,11 +330,45 @@ jobs:
         with:
           key: coverage
 
+      # This job is where the disk actually ran out: `rustc-LLVM ERROR: IO
+      # failure on output stream: No space left on device` compiling
+      # gcs_emulator_tests, followed by the runner failing to write its own
+      # GITHUB_STEP_SUMMARY. Coverage is the hungriest job in the workflow —
+      # instrumented binaries plus full debuginfo across the whole graph — so it
+      # hits the wall first, but it is the same wall.
+      - name: Free disk space
+        run: |
+          echo "before:"; df -h / | tail -1
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/share/powershell /usr/share/swift \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          echo "after:"; df -h / | tail -1
+        shell: bash
+
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin --locked
 
+      # NOTE ON `|| true`: a tarpaulin failure is swallowed on purpose, so
+      # coverage never blocks a merge. That also means this step reports green
+      # when it produced nothing — the pattern this repo keeps getting bitten by
+      # elsewhere. It is left alone rather than silently changed, but the exit
+      # code is now echoed so the log says which happened instead of leaving the
+      # reader to infer it from a missing artifact.
+      #
+      # The job still went RED despite `|| true`, because ENOSPC broke the
+      # runner's own bookkeeping, not the command. Freeing disk above is the fix
+      # for that; this line is unchanged in behaviour.
       - name: Generate coverage report
-        run: cargo tarpaulin --workspace --all-features --out Xml --output-dir coverage/ --timeout 300 --skip-clean || true
+        run: |
+          set +e
+          cargo tarpaulin --workspace --all-features --out Xml \
+            --output-dir coverage/ --timeout 300 --skip-clean
+          rc=$?
+          echo "tarpaulin exit=$rc (non-blocking by design)"
+          df -h / | tail -1
+          exit 0
+        shell: bash
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@v5
@@ -278,3 +378,49 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
+
+  # OP-6: the QA suite has caught defects no cargo test ever did — the safety
+  # axis (phase 12) reproduces the whole 17-defect data-loss cluster against a
+  # pre-fix binary, and phase 05 exercises branching against a real server.
+  # Neither was ever run automatically.
+  #
+  # Scope is deliberately the two phases that need no cloud credentials and no
+  # MinIO: phase 12 runs the CLI against local sandboxes, phase 05 uses the
+  # filesystem backend. The cloud matrix stays a local/manual campaign — it
+  # needs five sets of real credentials and takes hours. A partial suite that
+  # runs on every PR is worth more than a complete one that runs twice a year.
+  #
+  # Windows because that is the harness's native platform and the platform
+  # whose path semantics the safety checks care about.
+  qa-suite:
+    name: QA Suite (safety + branching)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: qa-suite
+
+      # The harness runs the shipped binaries, not `cargo run`: $QA.MG defaults
+      # to target\release\mediagit.exe.
+      - name: Build release binaries
+        run: cargo build --release --workspace --bins
+
+      - name: Run QA phases 12 and 05
+        shell: pwsh
+        run: ./dev-tests/qa-suite/scripts/run_all.ps1 -Phases 12,05
+
+      - name: Upload QA logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-suite-logs
+          path: dev-tests/qa-suite/logs/
+          retention-days: 14

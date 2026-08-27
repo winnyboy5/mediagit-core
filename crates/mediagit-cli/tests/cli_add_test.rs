@@ -23,15 +23,27 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tempfile::TempDir;
 
-#[cfg(windows)]
-const TEST_FILES_DIR: &str = "D:\\own\\saas\\mediagit-core\\test-files";
-#[cfg(not(windows))]
-const TEST_FILES_DIR: &str = "/mnt/d/own/saas/mediagit-core/test-files";
-
+// Fixture root. Resolved from the workspace root at runtime by
+// `TestPaths::test_files_dir()` — this used to be two cfg-gated absolute
+// paths baked to one developer's machine (`D:\own\...` /
+// `/mnt/d/own/...`), so on every other machine, CI included, the fixture
+// lookups silently missed and every media assertion below skipped.
+fn test_files_dir() -> std::path::PathBuf {
+    mediagit_test_utils::TestPaths::announce_fixture_root(
+        mediagit_test_utils::TestPaths::test_files_dir(),
+        "test-files/",
+    )
+}
 /// Helper to create mediagit command
 #[allow(deprecated)]
 fn mediagit() -> Command {
-    Command::cargo_bin("mediagit").unwrap()
+    let mut cmd = Command::cargo_bin("mediagit").unwrap();
+    // `commit` refuses an unconfigured identity (UX-6) rather than authoring
+    // as `Unknown <unknown@localhost>`, so tests must declare one like a real
+    // user would.
+    cmd.env("MEDIAGIT_AUTHOR_NAME", "Test User")
+        .env("MEDIAGIT_AUTHOR_EMAIL", "test@example.com");
+    cmd
 }
 
 /// Initialize a repository in the given directory
@@ -46,7 +58,7 @@ fn init_repo(dir: &Path) {
 
 /// Copy a test file to the repository
 fn copy_test_file(test_file: &str, repo_dir: &Path, dest_name: &str) -> PathBuf {
-    let source = Path::new(TEST_FILES_DIR).join(test_file);
+    let source = test_files_dir().join(test_file);
     let dest = repo_dir.join(dest_name);
 
     if let Some(parent) = dest.parent() {

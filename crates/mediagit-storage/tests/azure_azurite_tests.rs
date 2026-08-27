@@ -29,17 +29,25 @@
 //!
 //! Tests use the default Azurite connection string:
 //! - Account: devstoreaccount1
-//! - Key: Eby8vdM09T1+hIvGdd4nJ3TrzLlTAj5KhKb8LQ+d9Cg5pBGG7XXqE6aBb+Ke3Y9T/mW8JW/lWz9FzWXhKW3dYg==
+//! - Key: Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==
 //! - Endpoint: http://localhost:10000
 
 #[cfg(test)]
 mod azure_azurite_tests {
-    use mediagit_storage::{azure::AzureBackend, StorageBackend};
+    use mediagit_storage::{StorageBackend, azure::AzureBackend};
 
-    /// Azurite default connection string
+    /// Azurite default connection string.
+    ///
+    /// The key below is Azurite's PUBLISHED development credential — identical
+    /// on every install, not a secret. It must match byte-for-byte: this file
+    /// previously carried a near-miss variant (same 8-char prefix, different
+    /// tail) which cannot authenticate against any Azurite instance, so every
+    /// test here failed with 403 AuthorizationFailure. They are #[ignore]d and
+    /// the campaign's Azure coverage runs against real Azure, so nothing
+    /// surfaced it.
     const AZURITE_CONNECTION_STRING: &str = "DefaultEndpointsProtocol=http;\
         AccountName=devstoreaccount1;\
-        AccountKey=Eby8vdM09T1+hIvGdd4nJ3TrzLlTAj5KhKb8LQ+d9Cg5pBGG7XXqE6aBb+Ke3Y9T/mW8JW/lWz9FzWXhKW3dYg==;\
+        AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;\
         BlobEndpoint=http://localhost:10000/devstoreaccount1;";
 
     /// Container name for tests
@@ -381,17 +389,50 @@ mod azure_azurite_tests {
         assert_eq!(backend1.get("clone/test2").await.unwrap(), b"from2");
     }
 
-    /// Test account key authentication method
+    /// Container auto-create must work against Azurite.
+    ///
+    /// Regression guard for the Content-Length disagreement: real Azure
+    /// REQUIRES the header on a zero-body PUT (411 without it) while Azurite
+    /// rejects the signature when it is present (403), so the backend sends
+    /// the spec-correct form first and falls back. Uses a fresh container name
+    /// each run so the create path is genuinely exercised, not skipped by the
+    /// existence check.
+    #[tokio::test]
+    #[ignore] // Requires Azurite
+    async fn test_azurite_container_auto_create() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let container = format!("autocreate{unique}");
+        let backend = AzureBackend::with_connection_string(&container, AZURITE_CONNECTION_STRING)
+            .await
+            .expect("backend construction must create the missing container");
+        backend
+            .put("probe", b"created")
+            .await
+            .expect("put into new container");
+        assert_eq!(backend.get("probe").await.unwrap(), b"created");
+        backend.delete("probe").await.ok();
+    }
+
+    /// Test account key authentication method.
+    ///
+    /// NOTE: `with_account_key` builds the PUBLIC endpoint
+    /// (https://<account>.blob.core.windows.net) and has no endpoint override,
+    /// so it can never reach Azurite — this test asserted against a cloud URL
+    /// for an account that does not exist, and failed for that reason under
+    /// the previous SDK too. Account-key auth *against the emulator* is what
+    /// every other test in this file already exercises: the Azurite
+    /// connection string carries `AccountKey=`. Kept, pointed at the emulator
+    /// endpoint, so it tests the thing its name claims.
     #[tokio::test]
     #[ignore] // Requires Azurite
     async fn test_azurite_account_key_auth() {
-        let backend = AzureBackend::with_account_key(
-            "devstoreaccount1",
-            TEST_CONTAINER,
-            "Eby8vdM09T1+hIvGdd4nJ3TrzLlTAj5KhKb8LQ+d9Cg5pBGG7XXqE6aBb+Ke3Y9T/mW8JW/lWz9FzWXhKW3dYg==",
-        )
-        .await
-        .expect("Account key authentication failed");
+        let backend =
+            AzureBackend::with_connection_string(TEST_CONTAINER, AZURITE_CONNECTION_STRING)
+                .await
+                .expect("Account key authentication failed");
 
         // Test basic operation
         backend.put("auth/test.txt", b"auth test").await.unwrap();

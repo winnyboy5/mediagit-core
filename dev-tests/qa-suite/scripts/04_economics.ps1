@@ -1,0 +1,232 @@
+# 04_economics.ps1 - storage economics: per-format v1..vN chain repos.
+# Generalized from dev-tests/standalone-deep-v11/scripts/measure_economics.ps1 (read-only reference; not modified).
+param()
+. (Join-Path $PSScriptRoot "lib\common.ps1")
+$Phase = "04_economics"
+
+# Pin the CDC seed for economics measurement: every `mediagit init` otherwise
+# draws a random seed, and v3+ dedup on shifted-content chains (wav fade/append/
+# trim) swings 2-4pp on boundary alignment alone (I11 RCA 2026-07-16: same
+# release binary spanned 94.6-99.5 across three seed draws). A regression gate
+# must be deterministic; real-world unpinned behavior is covered by every other
+# phase. Value is arbitrary but MUST stay fixed - changing it re-anchors every
+# threshold below.
+$env:MEDIAGIT_CDC_SEED = "20260716"
+
+$OUT = Join-Path $QA.Logs "economics.tsv"
+$HEADER = @("family", "version", "fileMB", "odbGrowthMB", "savedPct", "addSec", "commitSec")
+
+Write-QaLog $Phase "economics run starting, tier=$($QA.Tier)"
+
+$EC = Join-Path $QA.Work "economics"
+if (Test-Path $EC) { Remove-Item -Recurse -Force $EC }
+New-Item -ItemType Directory $EC -Force | Out-Null
+
+# ---- families: fixture chains (v1..vN of the SAME asset) ----
+$families = [ordered]@{
+  jpg         = @(1..5 | ForEach-Object { Join-Path $QA.Fixtures "chains\photo_v$_.jpg" })
+  png         = @(1..5 | ForEach-Object { Join-Path $QA.Fixtures "chains\render_v$_.png" })
+  svg         = @(1..5 | ForEach-Object { Join-Path $QA.Fixtures "chains\map_v$_.svg" })
+  wav         = @(1..5 | ForEach-Object { Join-Path $QA.Fixtures "chains\aria_v$_.wav" })
+  flac        = @(1..5 | ForEach-Object { Join-Path $QA.Fixtures "chains\aria_v$_.flac" })
+  glb         = @(1..3 | ForEach-Object { Join-Path $QA.Fixtures "chains\car_v$_.glb" })
+  safetensors = @(1..5 | ForEach-Object { Join-Path $QA.Fixtures "ml\model_v$_.safetensors" })
+  npz         = @(1..3 | ForEach-Object { Join-Path $QA.Fixtures "ml\checkpoint_v$_.npz" })
+  parquet     = @(1..3 | ForEach-Object { Join-Path $QA.Fixtures "ml\data_v$_.parquet" })
+  onnx        = @(1..2 | ForEach-Object { Join-Path $QA.Fixtures "ml\model_v$_.onnx" })
+}
+
+# vfx\ subdir: auto-discover <base>_vN.<ext> groups instead of hardcoding names,
+# since the fixture-generation agent owns exact filenames there.
+$vfxDir = Join-Path $QA.Fixtures "vfx"
+if (Test-Path $vfxDir) {
+  $vfxFiles = Get-ChildItem $vfxDir -File -EA SilentlyContinue
+  $groups = $vfxFiles | Where-Object { $_.BaseName -match '_v(\d+)$' } | Group-Object { $_.BaseName -replace '_v\d+$', '' }
+  foreach ($g in $groups) {
+    $ordered = $g.Group | Sort-Object { [int]([regex]::Match($_.BaseName, '_v(\d+)$').Groups[1].Value) }
+    $families["vfx-$($g.Name)"] = @($ordered | ForEach-Object { $_.FullName })
+  }
+}
+
+# ---- real-file pseudo-chains: distinct real assets of the same format treated as v1..vN ----
+$psdFiles = Get-ChildItem (Join-Path $QA.TestFiles "psd") -Filter "*.psd" -File -EA SilentlyContinue | Sort-Object Name
+if ($psdFiles) { $families["psd"] = @($psdFiles | ForEach-Object { $_.FullName }) }
+$aiFiles = Get-ChildItem $QA.TestFiles -Filter "*.ai" -File -EA SilentlyContinue | Sort-Object Name
+if ($aiFiles) { $families["ai"] = @($aiFiles | ForEach-Object { $_.FullName }) }
+$videoFiles = Get-ChildItem (Join-Path $QA.TestFiles "video-variants") -File -EA SilentlyContinue | Sort-Object Name
+if ($videoFiles) { $families["video-variants"] = @($videoFiles | ForEach-Object { $_.FullName }) }
+
+# ---- anchor gates: v11 measured floors minus 5pt tolerance, keyed on latest version's savedPct ----
+$anchors = @{ wav = 94.0; glb = 95.0; safetensors = 44.0; psd = 62.0; npz = 71.0; ai = 21.0 }  # safetensors rebased 48->44 on 2026-07-16: prior 48 was calibrated on lucky RANDOM-seed draws (48.9-50.9); under the pinned seed above the deterministic value is 45.5 (I11 RCA). wav pinned-seed value: 95.3.
+# psd/npz/ai added 2026-08-19. Until then 10 of the 13 families had NO savings
+# anchor: psd, npz and ai could each have collapsed to zero savings and only the
+# accounting-accuracy and fsck gates would have fired - neither of which measures
+# savings at all. Savings is the product's differentiator, so "compression died"
+# was the one regression this phase could not see.
+#
+# Same convention as the three above: measured floor minus a 5pt tolerance, keyed
+# on the LAST version's savedPct. Calibrated on two complete campaigns rather than
+# one, so the tolerance covers observed spread and not just a single draw:
+#   psd  v3 = 67.2 (20260818-gagate8) / 67.1 (20260819-gagate13) -> 62.0
+#   npz  v3 = 76.7 / 76.7                                        -> 71.0
+#   ai   v3 = 26.3 / 26.3                                        -> 21.0
+# npz and ai reproduce exactly; psd is the only one that moves at all (0.1pt on
+# v3, 0.8pt on v2) because it is real-file, not seeded synthetic.
+#
+# flac is deliberately still unanchored: its LAST version measures 0% savings in
+# both runs (savings live in v3/v4), so an anchor keyed on the last version would
+# have to be 0 - a gate that cannot fail. Anchoring it needs a per-version key,
+# which is a bigger change than this one.
+
+# Smallest ODB size, in MB, whose stats-vs-disk comparison may fail the gate.
+#
+# Keyed on the INPUT size (actual on-disk ODB), not on diffPct - same lesson as
+# 08_perf's $MIN_GATED_SIZE_MB: a floor keyed on the measurement is circular. Both
+# reportedMB and actual are independently rounded to 2 decimals ([math]::Round .. 2),
+# a +/-0.005MB resolution each; below 1MB that rounding alone can swing diffPct past
+# the 2% threshold (0.02 vs 0.03 MB -> 33%) even when nothing is actually wrong. At
+# 1MB the same rounding noise caps out at ~1%, safely under the 2% gate, while a real
+# accounting error still reads as a real percentage. Sub-floor records are still
+# logged - just not able to fail.
+#
+# What this floor COSTS, stated so nobody assumes it is free: on the 20260729-202252
+# corpus it ungates svg (0.03MB, the bug) and also jpg (0.63MB, which was fine). jpg's
+# own noise band is ~1.6%, close enough to the 2% threshold that gating it would mostly
+# be gating rounding. Every ungated family still prints its numbers each run, so the
+# cost stays visible instead of becoming silent coverage loss.
+$MIN_GATED_ODB_MB = 1.0
+$statsRecords = @()
+
+$gateFailCount = 0
+foreach ($fam in $families.Keys) {
+  $files = @($families[$fam] | Where-Object { Test-Path $_ })
+  $files = @(Select-TierFiles $files)
+  if ($files.Count -lt 2) {
+    Write-QaRow $OUT $HEADER @($fam, "SKIP", 0, 0, 0, 0, 0)
+    Write-QaLog $Phase "SKIP family $fam (fewer than 2 usable fixtures)"
+    continue
+  }
+
+  $rp = Join-Path $EC $fam
+  $init = Invoke-MG $null @("init", $rp) $Phase
+  if ($init.Exit -ne 0) { Write-QaLog $Phase "init failed for $fam : $($init.Out)"; continue }
+
+  $ext = [IO.Path]::GetExtension($files[0])
+  $prev = 0.0
+  $lastSaved = $null
+  $i = 0
+  foreach ($f in $files) {
+    $i++
+    Copy-Item $f (Join-Path $rp "asset$ext") -Force
+    # `add` is where chunking/hashing/compression actually happen, so its wall time is
+    # the number the addSec column and the report both claim to show. This used to
+    # discard the add result and record the COMMIT time under the addSec heading -
+    # a near-zero figure that made the expensive half of the pipeline look free.
+    $a = Invoke-MG $rp @("add", "asset$ext") $Phase
+    $c = Invoke-MG $rp @("commit", "-m", "v$i") $Phase
+    $odb = Get-DirMB (Join-Path $rp ".mediagit")
+    $fmb = [math]::Round((Get-Item $f).Length / 1MB, 2)
+    $growth = [math]::Round($odb - $prev, 2)
+    $saved = if ($fmb -gt 0) { [math]::Round((1 - $growth / $fmb) * 100, 1) } else { 0 }
+    Write-QaRow $OUT $HEADER @($fam, "v$i", $fmb, $growth, $saved, $a.Sec, $c.Sec)
+    $prev = $odb
+    $lastSaved = $saved
+  }
+
+  if ($anchors.ContainsKey($fam)) {
+    $pass = $lastSaved -ge $anchors[$fam]
+    Write-QaGate $Phase "anchor-$fam" $pass "savedPct=$lastSaved threshold=$($anchors[$fam])"
+    if (-not $pass) { $gateFailCount++ }
+  }
+
+  # repack + fsck invariant
+  Invoke-MG $rp @("gc", "--repack", "-y") $Phase | Out-Null
+  $fsck = Invoke-MG $rp @("fsck", "--full") $Phase
+  $fsckClean = ($fsck.Exit -eq 0) -and ($fsck.Out -notmatch "corrupt|missing|failed")
+  Write-QaGate $Phase "fsck-clean-$fam" $fsckClean "exit=$($fsck.Exit)"
+  if (-not $fsckClean) { $gateFailCount++ }
+
+  # stats --json totals vs measured ODB dir size, within 2%
+  $statsRes = Invoke-MG $rp @("stats", "--json") $Phase
+  $odbActualMB = Get-DirMB (Join-Path $rp ".mediagit")
+  try {
+    $statsJson = $statsRes.Out | ConvertFrom-Json
+    $reportedMB = $null
+    if ($statsJson.storage -and $statsJson.storage.PSObject.Properties.Name -contains "total_bytes") {
+      # `stats --json` shape: { storage: { total_bytes, loose_bytes, pack_bytes, ... }, ... } - confirmed via live probe.
+      $reportedMB = [math]::Round($statsJson.storage.total_bytes / 1MB, 2)
+    } else {
+      foreach ($k in @("storage_bytes", "total_bytes", "odb_bytes", "storageBytes")) {
+        if ($statsJson.PSObject.Properties.Name -contains $k) { $reportedMB = [math]::Round($statsJson.$k / 1MB, 2); break }
+      }
+    }
+  } catch {
+    $reportedMB = $null
+  }
+  if ($null -ne $reportedMB -and $odbActualMB -gt 0) {
+    $diffPct = [math]::Abs($reportedMB - $odbActualMB) / $odbActualMB * 100
+    $gatable = $odbActualMB -ge $MIN_GATED_ODB_MB
+    $detail = "reported=$reportedMB actual=$odbActualMB diffPct=$([math]::Round($diffPct,2))"
+    if ($gatable) {
+      # Per-family gate retained deliberately: the aggregate below can only say
+      # "failures=N", and a failure you cannot attribute to a family and a
+      # magnitude is not actionable. These numbers ARE the decision inputs.
+      $famPass = ($diffPct -le 2.0)
+      Write-QaGate $Phase "stats-vs-diskMB-$fam" $famPass $detail
+      $statsRecords += [pscustomobject]@{ fam = $fam; pass = $famPass }
+    } else {
+      # Too small to support a percentage claim -> report, but do not gate. See $MIN_GATED_ODB_MB.
+      Write-QaLog $Phase "stats-vs-diskMB-$fam ungated, below floor: $detail (min-odb-size=${MIN_GATED_ODB_MB}MB)"
+      $statsRecords += [pscustomobject]@{ fam = $fam; pass = $null }
+    }
+  } else {
+    Write-QaLog $Phase "stats-vs-diskMB-$fam skipped: could not locate a storage-bytes field in stats --json"
+  }
+}
+
+# Single aggregate gate across all families, mirroring 08_perf's baseline-regression
+# gate shape: gated=N/M is always printed so a floor set above every family reads as
+# a visible ratio, not silence. A gate that measured nothing must FAIL, not pass
+# vacuously - see $MIN_GATED_ODB_MB comment above and 08_perf's identical rule.
+$statsGated = @($statsRecords | Where-Object { $null -ne $_.pass })
+if ($statsGated.Count -eq 0) {
+  Write-QaGate $Phase "stats-vs-diskMB" $false `
+    "gated=0/$($statsRecords.Count) - the gate measured nothing (min-odb-size=${MIN_GATED_ODB_MB}MB)"
+  $gateFailCount++
+} else {
+  $statsFailed = @($statsGated | Where-Object { -not $_.pass })
+  $statsPassOverall = $statsFailed.Count -eq 0
+  Write-QaGate $Phase "stats-vs-diskMB" $statsPassOverall `
+    "gated=$($statsGated.Count)/$($statsRecords.Count) failures=$($statsFailed.Count) threshold=2% min-odb-size=${MIN_GATED_ODB_MB}MB"
+  if (-not $statsPassOverall) { $gateFailCount++ }
+}
+
+# ---- existing dedup regression gate (unchanged script, invoked as-is) ----
+$compareScript = Join-Path $QA.RepoRoot "dev-tests\compare_dedup.ps1"
+$baseline = Join-Path $QA.RepoRoot "dev-tests\dedup-baseline.json"
+$dedupExe = Join-Path $QA.RepoRoot "target\release\examples\dedup_report.exe"
+if ((Test-Path $compareScript) -and (Test-Path $baseline) -and (Test-Path $dedupExe)) {
+  $currentJson = Join-Path $QA.Logs "dedup-current.json"
+  # dedup_report.exe prints JSON to stdout and a PEAK_RSS_MB diagnostic line to stderr - drop stderr so it can't corrupt the JSON.
+  # dedup_report has no repo config (seed 0 = deterministic) and its baseline
+  # was locked under that regime - shield it from this phase's pinned seed.
+  $savedSeed = $env:MEDIAGIT_CDC_SEED
+  Remove-Item Env:MEDIAGIT_CDC_SEED -ErrorAction SilentlyContinue
+  $reportOut = & $dedupExe 2>$null
+  $env:MEDIAGIT_CDC_SEED = $savedSeed
+  $reportOut | Set-Content $currentJson
+  $global:LASTEXITCODE = 0
+  & powershell -NoProfile -File $compareScript -Baseline $baseline -Current $currentJson 2>&1 | Add-Content (Join-Path $QA.Logs "$Phase-cmds.log")
+  $dedupPass = ($LASTEXITCODE -eq 0)
+  Write-QaGate $Phase "compare-dedup" $dedupPass "exit=$LASTEXITCODE"
+  if (-not $dedupPass) { $gateFailCount++ }
+} else {
+  Write-QaLog $Phase "compare-dedup skipped: prebuilt dedup_report.exe not found at $dedupExe (build with: cargo build --release -p mediagit-versioning --example dedup_report)"
+}
+
+Write-QaLog $Phase "done: families=$($families.Count) gateFailures=$gateFailCount"
+# Teardown: reclaim this phase's own work/ scratch so a long campaign cannot run the
+# volume out of space. work/ ONLY - logs/ and fixtures-synthetic/ are never touched.
+Invoke-QaTeardown $Phase @("economics*")
+
+Exit-QaPhase $Phase
