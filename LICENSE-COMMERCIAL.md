@@ -29,20 +29,21 @@ your own work, you are covered. You owe nothing and need to ask no one.
 
 One thing is reserved:
 
-> Offering the Licensed Work to third parties **on a hosted or embedded basis in
-> order to compete with the Licensor's paid version(s)** of the Licensed Work.
+> Offering the Licensed Work, **or a service whose primary value derives from the
+> Licensed Work**, to third parties as a **hosted, managed, or
+> software-as-a-service offering**.
 
 In plain terms, you need a commercial licence to:
 
-- Run MediaGit **as a service for other people** — a hosted "MediaGit cloud",
-  a managed offering, or MediaGit rented out per-seat to customers who are not
-  your own organisation.
-- **Embed** MediaGit inside a product you sell where MediaGit's versioning,
-  dedup or delta engine is what the customer is paying for.
+- Run MediaGit **as a service for other people** — a hosted "MediaGit cloud", a
+  managed offering, or MediaGit operated on someone else's behalf where they are
+  not your own organisation.
+- Sell a product whose **primary value comes from MediaGit** — wrapping the
+  versioning, dedup or delta engine in a thin layer and selling access to it.
 
 The distinction is not "are you making money" — it is "are you selling MediaGit
-itself to third parties". Using it commercially for your own work is free. Reselling
-it as a service is not.
+itself, or access to it, to third parties". Using it commercially for your own
+work is free, at any scale. Operating it as a service for others is not.
 
 If you are unsure which side of the line you are on, ask. The answer is usually
 "you are fine", and it costs nothing to check.

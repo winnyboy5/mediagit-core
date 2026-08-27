@@ -916,8 +916,8 @@ MediaGit is **source available** under the
   cap and no company-size cap
 - ✅ Read, modify, fork and self-host freely
 - ✅ Each release converts to **AGPL-3.0-or-later four years after publication**
-- ⚠️ Offering MediaGit *to third parties* as a hosted or embedded service, in
-  competition with our paid versions, requires a
+- ⚠️ Offering MediaGit *to third parties* as a hosted, managed or
+  software-as-a-service offering requires a
   [commercial licence](LICENSE-COMMERCIAL.md)
 
 Not open source in the OSI sense — the competing-service restriction is a

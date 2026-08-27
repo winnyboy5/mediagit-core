@@ -103,8 +103,8 @@ MediaGit-Core is **source available** under the **Business Source License 1.1
   no company-size cap
 - ✅ Read, modify, fork and self-host freely
 - ✅ Each release converts to **AGPL-3.0-or-later four years after publication**
-- ⚠️ Offering MediaGit *to third parties* as a hosted or embedded service, in
-  competition with our paid versions, requires a commercial licence
+- ⚠️ Offering MediaGit *to third parties* as a hosted, managed or
+  software-as-a-service offering requires a commercial licence
 
 Not open source in the OSI sense — the competing-service restriction is a
 field-of-use limit, which the Open Source Definition does not permit.

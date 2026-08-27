@@ -88,9 +88,9 @@ License: BUSL-1.1
  Debian's definition.
  .
  Production use is permitted at any scale and by any organisation, provided
- that use does not include offering the Licensed Work to third parties on a
- hosted or embedded basis in order to compete with the Licensor's paid
- version(s) of the Licensed Work.
+ that use does not include offering the Licensed Work, or a service whose
+ primary value derives from it, to third parties as a hosted, managed, or
+ software-as-a-service offering.
  .
  Four years after a given version is published, that version becomes available
  under the Change Licence, the GNU Affero General Public License version 3 or

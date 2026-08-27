@@ -10,17 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed — relicensed from AGPL-3.0 to BSL 1.1 (2026-08-27)
 
 **MediaGit is now source available, not open source.** Offering it to third
-parties as a competing hosted or embedded service is reserved to the copyright
-holder. That is a field-of-use restriction, which the Open Source Definition does
+parties as a hosted, managed or software-as-a-service offering is reserved to
+the copyright holder. That is a field-of-use restriction, which the Open Source Definition does
 not permit, so the "open source" label no longer applies and every doc claiming
 it has been corrected.
 
 - **Licence: [BUSL-1.1](LICENSE)** (Business Source License 1.1).
 - **Free for production use at any scale**, by any organisation. No seat cap, no
   company-size cap. Read, modify, fork and self-host freely.
-- **Reserved:** offering MediaGit to third parties on a hosted or embedded basis
-  in order to compete with the Licensor's paid versions. See
-  [LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md).
+- **Reserved:** offering MediaGit, or a service whose primary value derives from
+  it, to third parties as a hosted, managed or software-as-a-service offering.
+  See [LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md).
 - **Change Licence: AGPL-3.0-or-later**, four years after each release is
   published. Deliberately AGPL rather than Apache/MPL: even after conversion,
   anyone hosting MediaGit must publish their entire modified stack, so no version
