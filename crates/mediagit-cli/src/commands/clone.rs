@@ -225,10 +225,38 @@ impl CloneCmd {
             );
         }
 
-        // Check if directory already exists
-        if target_dir.exists() {
-            anyhow::bail!("Destination path '{}' already exists", target_dir.display());
-        }
+        // C5: an interrupted clone leaves a directory behind. Adopt it and
+        // resume — but ONLY if this clone is what created it, which the
+        // in-progress marker is the proof of. Anything else still bails.
+        let resuming = match read_clone_marker(&target_dir) {
+            Some(marker) => {
+                if marker.url != self.url || marker.branch != branch {
+                    anyhow::bail!(
+                        "Destination path '{}' holds an interrupted clone of a DIFFERENT \
+                         source ({} @ {}).\n  Remove it, or re-run with the same URL and \
+                         branch to resume it.",
+                        target_dir.display(),
+                        marker.url,
+                        marker.branch
+                    );
+                }
+                if !self.quiet {
+                    println!(
+                        "{} Resuming interrupted clone in '{}' (already-downloaded objects \
+                         are skipped)",
+                        style("↻").cyan().bold(),
+                        target_dir.display()
+                    );
+                }
+                true
+            }
+            None => {
+                if target_dir.exists() {
+                    anyhow::bail!("Destination path '{}' already exists", target_dir.display());
+                }
+                false
+            }
+        };
 
         // Create progress tracker and stats (matching pull.rs pattern)
         let mut stats = OperationStats::for_operation("clone");
@@ -238,15 +266,31 @@ impl CloneCmd {
         let init_spinner = progress.spinner("Creating directory...");
         std::fs::create_dir_all(&target_dir).context("Failed to create target directory")?;
 
+        // C5: has anything worth keeping landed yet?
+        //
+        // Set just before bulk transfer starts — i.e. after the URL, the
+        // credentials and the repo's existence have all been validated by
+        // `get_refs`. A failure BEFORE this point is a setup failure with no
+        // downloaded data behind it, and wiping is still the right answer
+        // (a bad URL should not leave a stub directory the next attempt then
+        // refuses). A failure AFTER it may have gigabytes behind it.
+        let data_phase = std::sync::atomic::AtomicBool::new(false);
+
         // Steps 2-9 can all fail (network, refs, checkout) after target_dir
-        // has been created. Wrap them so any failure cleans up the partial
-        // clone directory before the error propagates (NOTE-RM-3). We always
-        // own target_dir here — the exists() check above already bailed if
-        // it was there before this clone, so it's safe to remove on failure.
+        // has been created. Wrap them so a failure with nothing behind it
+        // cleans up the partial clone directory before the error propagates
+        // (NOTE-RM-3). We always own target_dir here — either the exists()
+        // check above bailed, or the marker proves this command created it.
         let clone_result: Result<()> = async {
         // Step 2: Initialize repository
         init_spinner.set_message("Initializing repository...");
         let storage_path = target_dir.join(".mediagit");
+        // On resume the control directory is already built. Re-running Step 3
+        // in particular would mint a NEW repo_id and namespace into
+        // config.toml, orphaning every object already downloaded under the old
+        // one — so the whole of setup is skipped, not just the parts that
+        // would error.
+        if !resuming {
         std::fs::create_dir_all(&storage_path)?;
         std::fs::create_dir_all(storage_path.join("objects"))?;
         std::fs::create_dir_all(storage_path.join("refs").join("heads"))?;
@@ -279,6 +323,12 @@ url = "{}"
             self.url
         );
         std::fs::write(storage_path.join("config.toml"), config_content)?;
+
+        // C5: from here on, a leftover directory is a resumable clone rather
+        // than debris. Written after config.toml so an adopted directory is
+        // always one that got at least as far as being a valid repository.
+        write_clone_marker(&storage_path, &self.url, branch)?;
+        } // end `if !resuming`
 
         // Step 4: Initialize storage and fetch. `create_storage_backend`
         // performs the LAYOUT marker check/write itself (one of the two
@@ -473,6 +523,10 @@ url = "{}"
         let download_pb = progress.spinner("Receiving objects...");
         // Use streaming pull to avoid OOM with large files
         tracing::debug!(phase = "pull-streaming", "clone: starting bulk transfer");
+        // Past setup: `get_refs` above has already proved the URL, the
+        // credentials and the repo. Anything that fails from here has data
+        // behind it worth resuming from.
+        data_phase.store(true, std::sync::atomic::Ordering::SeqCst);
         let chunked_oids = client
             .pull_streaming(&odb, &remote_ref_name, vec![])
             .await?;
@@ -686,9 +740,35 @@ url = "{}"
         }
         .await;
 
-        if clone_result.is_err() {
-            let _ = std::fs::remove_dir_all(&target_dir);
-            println!("cleaned up partial clone at {}", target_dir.display());
+        // C5: split the wipe rule. Deleting on ANY error is what made clone
+        // unresumable by construction — an 11 GB clone dying at 90% deleted the
+        // very ODB the retry would have skipped work against.
+        match (
+            clone_result.is_ok(),
+            data_phase.load(std::sync::atomic::Ordering::SeqCst),
+        ) {
+            (true, _) => {
+                // Success: the directory is a finished repository, not a clone
+                // in progress. Clearing the marker is what stops a later clone
+                // into the same path from silently adopting it.
+                clear_clone_marker(&target_dir);
+            }
+            (false, false) => {
+                // Setup failure — bad URL, auth, no such repo. Nothing was
+                // downloaded, so leaving a stub the next attempt refuses would
+                // be strictly worse than cleaning up. Unchanged behaviour.
+                let _ = std::fs::remove_dir_all(&target_dir);
+                println!("cleaned up partial clone at {}", target_dir.display());
+            }
+            (false, true) => {
+                // Data landed. Keep it: the marker makes this directory
+                // adoptable, and re-running skips everything already in the
+                // ODB.
+                println!(
+                    "kept partial clone at {} — re-run the same `clone` command to resume",
+                    target_dir.display()
+                );
+            }
         }
         clone_result
     }
@@ -735,4 +815,121 @@ fn copy_dir_skip(src: &Path, dst: &Path, skip_relative: &Path) -> std::io::Resul
         }
     }
     Ok(())
+}
+
+/// What an interrupted clone left behind, read back from its marker file.
+#[derive(Debug, PartialEq, Eq)]
+struct CloneMarker {
+    url: String,
+    branch: String,
+}
+
+/// Name of the in-progress marker, inside the repo's `.mediagit` directory.
+///
+/// C5: this file is the ONLY thing that makes a leftover directory adoptable.
+/// Clone must never resume into a directory it did not create — a user's
+/// `~/projects/foo` that happens to share a name with the repo must still be
+/// refused — and only `clone` ever writes this name.
+const CLONE_MARKER: &str = "CLONE_IN_PROGRESS";
+
+fn clone_marker_path(target_dir: &Path) -> PathBuf {
+    target_dir.join(".mediagit").join(CLONE_MARKER)
+}
+
+fn write_clone_marker(storage_path: &Path, url: &str, branch: &str) -> Result<()> {
+    std::fs::write(
+        storage_path.join(CLONE_MARKER),
+        format!("url={url}\nbranch={branch}\n"),
+    )
+    .context("Failed to write clone in-progress marker")
+}
+
+/// `None` means "not a resumable clone" — no marker, or one we cannot parse.
+///
+/// An unreadable or malformed marker degrades to a clean refusal (the caller's
+/// "already exists" bail), never to adopting a directory on a guess. Same
+/// principle as the pack-verification fallbacks: missing data downgrades the
+/// path, it does not relax the check.
+fn read_clone_marker(target_dir: &Path) -> Option<CloneMarker> {
+    let text = std::fs::read_to_string(clone_marker_path(target_dir)).ok()?;
+    let mut url = None;
+    let mut branch = None;
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("url=") {
+            url = Some(v.to_string());
+        } else if let Some(v) = line.strip_prefix("branch=") {
+            branch = Some(v.to_string());
+        }
+    }
+    Some(CloneMarker {
+        url: url?,
+        branch: branch?,
+    })
+}
+
+fn clear_clone_marker(target_dir: &Path) {
+    let _ = std::fs::remove_file(clone_marker_path(target_dir));
+}
+
+#[cfg(test)]
+mod clone_marker_tests {
+    use super::*;
+
+    fn seed(dir: &Path, url: &str, branch: &str) {
+        let storage = dir.join(".mediagit");
+        std::fs::create_dir_all(&storage).unwrap();
+        write_clone_marker(&storage, url, branch).unwrap();
+    }
+
+    /// The round trip clone's resume decision is made on.
+    #[test]
+    fn marker_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed(tmp.path(), "http://host:3000/repo", "main");
+        assert_eq!(
+            read_clone_marker(tmp.path()),
+            Some(CloneMarker {
+                url: "http://host:3000/repo".to_string(),
+                branch: "main".to_string(),
+            })
+        );
+    }
+
+    /// A directory clone did not create must NOT be adoptable. This is the
+    /// invariant that keeps C5 from turning "clone into an existing path" from
+    /// a refusal into a silent merge.
+    #[test]
+    fn a_directory_without_a_marker_is_never_adopted() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".mediagit")).unwrap();
+        std::fs::write(tmp.path().join("my-notes.txt"), b"not a clone").unwrap();
+        assert_eq!(read_clone_marker(tmp.path()), None);
+    }
+
+    /// Success clears it, so a LATER clone into the same path gets the
+    /// "already exists" refusal rather than adopting a finished repository and
+    /// checking out over the user's working tree.
+    #[test]
+    fn clearing_the_marker_makes_the_directory_unadoptable_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed(tmp.path(), "http://host:3000/repo", "main");
+        assert!(read_clone_marker(tmp.path()).is_some());
+        clear_clone_marker(tmp.path());
+        assert_eq!(read_clone_marker(tmp.path()), None);
+    }
+
+    /// A truncated marker (killed mid-write) must fail closed to "not
+    /// resumable", not resume against a half-known source.
+    #[test]
+    fn a_malformed_marker_fails_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = tmp.path().join(".mediagit");
+        std::fs::create_dir_all(&storage).unwrap();
+        std::fs::write(storage.join(CLONE_MARKER), b"url=http://host:3000/re").unwrap();
+        assert_eq!(
+            read_clone_marker(tmp.path()),
+            None,
+            "a marker missing its branch must not be treated as resumable"
+        );
+    }
 }
