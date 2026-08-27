@@ -43,6 +43,29 @@ if (-not $env:GOOGLE_APPLICATION_CREDENTIALS) {
   if ($credPath -and (Test-Path $credPath)) { $env:GOOGLE_APPLICATION_CREDENTIALS = (Resolve-Path $credPath).Path }
 }
 
+# How 07_abuse's A7 drill cycles the S3 backend. Docker stays the default when
+# a container is actually there; this only fills the gap on a host where a
+# NATIVE process holds the endpoint, which is where A7 failed in ga32 with
+# "configuration, not capability".
+#
+# Detected rather than hardcoded: silo_native.ps1 reads the running process's
+# own command line, so this tracked file carries no local install path and the
+# pair is correct on whatever host the campaign runs on.
+if (-not $env:MG_QA_BACKEND_STOP_CMD -and -not $env:MG_QA_BACKEND_START_CMD) {
+  $siloScript = Join-Path $PSScriptRoot "silo_native.ps1"
+  $holder = $null
+  try {
+    $conn = Get-NetTCPConnection -LocalPort 9000 -State Listen -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+    if ($conn) { $holder = (Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue).ProcessName }
+  } catch { }
+  if ($holder -eq "silo" -and (Test-Path $siloScript)) {
+    $env:MG_QA_BACKEND_STOP_CMD  = "& '$siloScript' -Action stop"
+    $env:MG_QA_BACKEND_START_CMD = "& '$siloScript' -Action start"
+    Write-Host "campaign_env: native silo on :9000 - A7 backend-cycle commands wired to silo_native.ps1"
+  }
+}
+
 $set = @("AWS_ACCESS_KEY_ID","AWS_SECRET_ACCESS_KEY","AZURE_STORAGE_ACCOUNT","AZURE_STORAGE_KEY","GCS_PROJECT_ID","GOOGLE_APPLICATION_CREDENTIALS") |
   ForEach-Object { "{0}={1}" -f $_, $(if ([Environment]::GetEnvironmentVariable($_)) { "set" } else { "MISSING" }) }
 Write-Host ("campaign_env: " + ($set -join " "))

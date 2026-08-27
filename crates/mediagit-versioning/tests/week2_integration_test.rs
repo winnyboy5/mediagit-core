@@ -35,7 +35,7 @@ async fn test_week2_milestone_end_to_end() {
     let readme_content = b"# MediaGit\n\nA Git for Media Files";
     let readme_oid = odb.write(ObjectType::Blob, readme_content).await.unwrap();
 
-    let license_content = b"AGPL-3.0";
+    let license_content = b"BUSL-1.1";
     let license_oid = odb.write(ObjectType::Blob, license_content).await.unwrap();
 
     // Create tree (directory structure)

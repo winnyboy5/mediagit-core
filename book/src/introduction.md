@@ -40,7 +40,7 @@ layers, video/audio streams and 3D model metadata.
 - Branch-specific storage optimization
 
 ### Enterprise-Ready
-- AGPL-3.0 community license + commercial licensing
+- BUSL-1.1 source-available license + commercial licensing
 - Audit trails and security features
 - Self-hosted or cloud deployment options
 
@@ -65,7 +65,7 @@ MediaGit-Core is designed for teams and individuals working with large binary fi
 | Multi-Backend Support | 7 backends | Server-dependent | Proprietary |
 | Media-Aware Merging | ✅ Yes | ❌ No | ⚠️ Limited |
 | Offline Commits | ✅ Full DVCS | ✅ (Git handles) | ❌ Server required |
-| Open Source | ✅ AGPL-3.0 | ✅ MIT | ❌ No |
+| Source available | ✅ BUSL-1.1 | ✅ MIT (open source) | ❌ No |
 
 ## Quick Example
 
@@ -96,14 +96,23 @@ Ready to get started? Head to the [Installation](./installation/README.md) guide
 
 ## License
 
-MediaGit-Core is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
+MediaGit-Core is **source available** under the **Business Source License 1.1
+(BUSL-1.1)**.
 
-- ✅ Free to use, modify, and distribute
-- ✅ Source code must be made available
-- ✅ Network use requires source disclosure (AGPL provision)
-- ✅ Commercial use allowed with license compliance
+- ✅ **Free for production use at any scale**, by any organisation — no seat cap,
+  no company-size cap
+- ✅ Read, modify, fork and self-host freely
+- ✅ Each release converts to **AGPL-3.0-or-later four years after publication**
+- ⚠️ Offering MediaGit *to third parties* as a hosted or embedded service, in
+  competition with our paid versions, requires a commercial licence
 
-See the [LICENSE](https://github.com/winnyboy5/mediagit-core/blob/main/LICENSE) file for details.
+Not open source in the OSI sense — the competing-service restriction is a
+field-of-use limit, which the Open Source Definition does not permit.
+
+See [LICENSE](https://github.com/winnyboy5/mediagit-core/blob/main/LICENSE) for the
+governing terms and
+[LICENSE-COMMERCIAL.md](https://github.com/winnyboy5/mediagit-core/blob/main/LICENSE-COMMERCIAL.md)
+for what needs a commercial licence.
 
 ## Community and Support
 

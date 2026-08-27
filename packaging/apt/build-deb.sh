@@ -77,27 +77,29 @@ gzip -9 "${PKG_DIR}/usr/share/doc/mediagit/changelog.Debian"
 cat > "${PKG_DIR}/usr/share/doc/mediagit/copyright" << 'EOF'
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: mediagit
-Upstream-Contact: MediaGit Contributors <hello@mediagit.dev>
+Upstream-Contact: Aswin Krishnamoorthy <licensing@mediagit.dev>
 Source: https://github.com/winnyboy5/mediagit-core
 
 Files: *
-Copyright: 2025 MediaGit Contributors
-License: AGPL-3.0
- This program is free software: you can redistribute it and/or modify
- it under the terms of the GNU Affero General Public License as published
- by the Free Software Foundation, either version 3 of the License, or
- (at your option) any later version.
+Copyright: 2025-2026 Aswin Krishnamoorthy
+License: BUSL-1.1
+ Business Source License 1.1. This is a source-available licence, NOT an
+ OSI-approved open source licence, and this package is therefore non-free by
+ Debian's definition.
  .
- This program is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- GNU Affero General Public License for more details.
+ Production use is permitted at any scale and by any organisation, provided
+ that use does not include offering the Licensed Work to third parties on a
+ hosted or embedded basis in order to compete with the Licensor's paid
+ version(s) of the Licensed Work.
  .
- You should have received a copy of the GNU Affero General Public License
- along with this program. If not, see <https://www.gnu.org/licenses/>.
+ Four years after a given version is published, that version becomes available
+ under the Change Licence, the GNU Affero General Public License version 3 or
+ later.
  .
- On Debian systems, the complete text of the GNU Affero General Public
- License version 3 can be found in /usr/share/common-licenses/AGPL-3.
+ The full licence text is installed alongside this file as LICENSE, and is
+ available at https://github.com/winnyboy5/mediagit-core/blob/main/LICENSE
+ .
+ For commercial licensing, contact licensing@mediagit.dev
 EOF
 
 # Build package

@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — relicensed from AGPL-3.0 to BSL 1.1 (2026-08-27)
+
+**MediaGit is now source available, not open source.** Offering it to third
+parties as a competing hosted or embedded service is reserved to the copyright
+holder. That is a field-of-use restriction, which the Open Source Definition does
+not permit, so the "open source" label no longer applies and every doc claiming
+it has been corrected.
+
+- **Licence: [BUSL-1.1](LICENSE)** (Business Source License 1.1).
+- **Free for production use at any scale**, by any organisation. No seat cap, no
+  company-size cap. Read, modify, fork and self-host freely.
+- **Reserved:** offering MediaGit to third parties on a hosted or embedded basis
+  in order to compete with the Licensor's paid versions. See
+  [LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md).
+- **Change Licence: AGPL-3.0-or-later**, four years after each release is
+  published. Deliberately AGPL rather than Apache/MPL: even after conversion,
+  anyone hosting MediaGit must publish their entire modified stack, so no version
+  ever becomes a free closed-source SaaS.
+- **Copyright is now Aswin Krishnamoorthy**, replacing "MediaGit Contributors" —
+  a collective that does not legally exist and therefore could not grant a
+  commercial licence.
+
+**Not retroactive.** `v0.1.0` through `v0.2.8-beta.1` were published under
+AGPL-3.0-or-later and remain so, permanently, for anyone who obtained them.
+
+### Fixed — licensing defects found during the relicense
+
+- **`LICENSE` was a stub** — the AGPL preamble (61 lines) plus a link to gnu.org
+  rather than the licence text. AGPL-3.0 requires conveying the full text, so the
+  project was arguably out of compliance with its own licence.
+- **Headers contradicted the manifest** — the prose said "or any later version"
+  while `Cargo.toml` said bare `AGPL-3.0`, a deprecated SPDX identifier. The
+  header had also drifted into two variants across 309 and 4 files. All 313 now
+  carry an identical two-line SPDX header.
+- **The two header gates scanned different file sets** — CI took
+  `crates/**/*.rs`, the pre-commit hook took all staged `*.rs`, so a file outside
+  `crates/` could pass one and fail the other. Both now use `*.rs`.
+- **`deny.toml` allowed `AGPL-3.0` in the third-party allowlist** purely to stop
+  cargo-deny failing on our own crates, which made the list misstate what we
+  accept from dependencies. Replaced with `private.ignore`.
+
+### Added
+
+- **[`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md)** — 648 dependency
+  packages. Required regardless of our own licence: 17 MPL-2.0 crates
+  (`symphonia`, `mp4parse`) ship inside the binary, and ~470 Apache-2.0 crates
+  carry notice-preservation obligations.
+- **[`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md)** — plain-language summary of
+  what is free and what is reserved. Not a contract.
+- **`CLA.md`** and a pull-request template. Required before accepting outside
+  contributions: without an agreement, each contributor retains copyright in
+  their patch and the commercial licence becomes unsellable for that code.
+
+
 ### Changed — clone is faster, and no longer restarts from zero (2026-08-27)
 
 Six commits, each independently revertible. The target is **clone**, not push:

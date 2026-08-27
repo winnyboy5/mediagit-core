@@ -438,4 +438,4 @@ To extend the configuration system:
 
 ## License
 
-AGPL-3.0 - See LICENSE file for details
+BUSL-1.1 (Business Source License 1.1) - See the LICENSE file at the repository root for details

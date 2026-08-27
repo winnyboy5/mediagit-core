@@ -15,6 +15,37 @@ Thank you for your interest in contributing to MediaGit-Core! This document prov
 - [Documentation](#documentation)
 - [Release Process](#release-process)
 
+## Licensing and the CLA
+
+**Read this before you write code.** MediaGit is [source available under
+BUSL-1.1](LICENSE) and is also offered under a
+[commercial licence](LICENSE-COMMERCIAL.md).
+
+Offering the same code under two sets of terms is only possible while one party
+holds the rights to all of it. So **every outside pull request requires agreement
+to the [Contributor License Agreement](CLA.md)** before it can be merged. A bot
+will ask you on the pull request; it takes one comment.
+
+It does **not** take your copyright away — you keep it, and you may reuse your own
+contribution anywhere. What it grants is permission to distribute your
+contribution under both licences.
+
+If we merged a contribution without this, that code could never appear in a
+commercially licensed build, permanently, and there would be no way to undo it
+short of rewriting it from scratch.
+
+Every `.rs` file must begin with:
+
+```rust
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
+```
+
+Both CI and the pre-commit hook enforce this, over `git ls-files '*.rs'`.
+
+Questions about licensing: **licensing@mediagit.dev**. See also
+[NOTICE-PROVENANCE.md](NOTICE-PROVENANCE.md).
+
 ## Code of Conduct
 
 This project adheres to a Code of Conduct that all contributors are expected to follow. Please read [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) before contributing.

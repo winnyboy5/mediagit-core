@@ -110,7 +110,7 @@ Git hooks are managed by **[husky-rs](https://github.com/pplmx/husky-rs)** and i
 
 | Hook | What it enforces |
 |------|-----------------|
-| `pre-commit` | `cargo fmt --check`, `cargo clippy --workspace`, AGPL license headers, 5MB file size limit, conflict markers |
+| `pre-commit` | `cargo fmt --check`, `cargo clippy --workspace`, BUSL-1.1 license headers, 5MB file size limit, conflict markers |
 | `pre-push` | `cargo test --workspace` — all tests must pass |
 | `commit-msg` | [Conventional Commits](https://www.conventionalcommits.org/) format, max 72 chars |
 
@@ -144,12 +144,20 @@ cargo machete
 
 ### License Headers
 
-All `.rs` files must include an AGPL-3.0 header. Check with:
+All `.rs` files must begin with a two-line SPDX header:
+
+```rust
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
+```
+
+Check with the same glob CI uses — `*.rs`, not `crates/**/*.rs`, so a file added
+outside `crates/` cannot slip past:
 
 ```bash
 while IFS= read -r file; do
-  grep -q "GNU Affero General Public License" "$file" || echo "MISSING: $file"
-done < <(git ls-files 'crates/**/*.rs')
+  grep -q "SPDX-License-Identifier: BUSL-1.1" "$file" || echo "MISSING: $file"
+done < <(git ls-files '*.rs')
 ```
 
 ### Security Audit

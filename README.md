@@ -3,7 +3,7 @@
 > High-performance version control for large media files and binary assets
 
 [![CI](https://github.com/winnyboy5/mediagit-core/workflows/CI/badge.svg)](https://github.com/winnyboy5/mediagit-core/actions)
-[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+[![License: BUSL-1.1](https://img.shields.io/badge/License-BUSL--1.1-blue.svg)](LICENSE)
 [![Rust Version](https://img.shields.io/badge/rust-1.97+-orange.svg)](https://www.rust-lang.org)
 [![Features](https://img.shields.io/badge/features-100%25%20complete-success.svg)](FUTURE_TODOS.md)
 
@@ -481,7 +481,7 @@ Compression strategy is selected automatically per file type. Pre-compressed for
 | **Branching Cost** | ✅ Instant ref-based | ✅ (Git) | ⚠️ Copy-based | N/A | N/A |
 | **File Locking** | ✅ Server-enforced (`lock create/unlock/list`, push-time enforcement) | ✅ | ✅ | ❌ | Not documented |
 | **Max File Size** | No limit (u64) | 5 GB (GitHub.com) | No limit | No limit | No limit |
-| **Price** | **Free (AGPL-3.0)** | Free + server | Free ≤5; $39/user/mo | Free tier + Enterprise | Beta TBD |
+| **Price** | **Free (BUSL-1.1)** | Free + server | Free ≤5; $39/user/mo | Free tier + Enterprise | Beta TBD |
 
 **Storage comparison for 100 MB binary file × 2 versions:**
 
@@ -909,15 +909,22 @@ iwr -UseBasicParsing https://raw.githubusercontent.com/winnyboy5/mediagit-core/m
 
 ## License
 
-This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
+MediaGit is **source available** under the
+**[Business Source License 1.1](LICENSE)**.
 
-Key points:
-- ✅ Free to use, modify, and distribute
-- ✅ Source code must be made available
-- ✅ Network use requires source disclosure (AGPL provision)
-- ✅ Commercial use allowed with license compliance
+- ✅ **Free for production use at any scale**, by any organisation, with no seat
+  cap and no company-size cap
+- ✅ Read, modify, fork and self-host freely
+- ✅ Each release converts to **AGPL-3.0-or-later four years after publication**
+- ⚠️ Offering MediaGit *to third parties* as a hosted or embedded service, in
+  competition with our paid versions, requires a
+  [commercial licence](LICENSE-COMMERCIAL.md)
 
-See [LICENSE](LICENSE) for complete terms.
+Not open source in the OSI sense — the competing-service restriction is a
+field-of-use limit, which the Open Source Definition does not permit. See
+[LICENSE](LICENSE) for the governing terms, [LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md)
+for what needs a commercial licence, and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)
+for dependency attribution.
 
 ---
 

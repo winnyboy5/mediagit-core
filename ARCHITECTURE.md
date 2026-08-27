@@ -1173,7 +1173,7 @@ merge = "refs/heads/main"
 ## Build & Distribution
 
 - **MSRV**: Rust 1.97
-- **License**: AGPL-3.0
+- **License**: BUSL-1.1 (Business Source License 1.1)
 - **Release profile**: `opt-level = 3`, LTO, `codegen-units = 1`
 - **Distribution**: cargo-dist (v0.26.0) with GitHub CI
 - **Installers**: Shell, PowerShell, Homebrew, MSI

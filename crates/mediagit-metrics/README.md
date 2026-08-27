@@ -294,7 +294,7 @@ mediagit-metrics/
 
 ## License
 
-AGPL-3.0
+BUSL-1.1
 
 ## Contributors
 

@@ -2,7 +2,7 @@
 #
 # `cargo audit` already runs in CI, but it only answers "does a dependency have
 # a published advisory". It says nothing about the three failure modes that
-# actually bite a project shipping under AGPL-3.0 with seven cloud SDKs:
+# actually bite a project shipping under BUSL-1.1 with seven cloud SDKs:
 #
 #   licenses — a copyleft-incompatible or unlicensed crate arriving through a
 #              transitive bump, which is a legal problem discovered at release;

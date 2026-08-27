@@ -5,7 +5,7 @@ class Mediagit < Formula
   desc "Git-based version control system optimized for large media files"
   homepage "https://mediagit.dev"
   version "0.1.0"
-  license "AGPL-3.0"
+  license :cannot_represent # BUSL-1.1 (Business Source License 1.1)
 
   on_macos do
     if Hardware::CPU.intel?
