@@ -9,6 +9,19 @@ repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
 description = "Axum REST API server for MediaGit repositories"
+# Not published to crates.io: distribution is cargo-dist binaries, Docker
+# images and GitHub releases. This also makes deny.toml's
+# `allow-wildcard-paths` apply to our own path deps (cargo-deny exempts
+# them only for non-public crates). Flip to `true` and add `version = ...`
+# beside every internal `path = ...` if crates.io publishing is turned on.
+publish = false
+# cargo-dist ships these two binaries. Marked explicitly because dist's default
+# for a package is tied to whether it is publishable, and this crate just became
+# `publish = false` — without this the release pipeline could silently stop
+# building the binary. Being explicit costs one line and removes the coupling.
+[package.metadata.dist]
+dist = true
+
 
 [lib]
 name = "mediagit_server"

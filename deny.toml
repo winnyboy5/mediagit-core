@@ -48,6 +48,21 @@ confidence-threshold = 0.9
 # outright below.
 multiple-versions = "warn"
 wildcards = "deny"
+# ...but a path dependency on one of our OWN workspace crates is not what that
+# rule is for. `mediagit-config = { path = "../mediagit-config" }` carries no
+# version, so cargo-deny counts it as a wildcard — 24 of them across the
+# workspace, which is the entire reason the Dependency Policy job was red.
+#
+# The rule still does its real job: a wildcard on an EXTERNAL crate (`foo = "*"`)
+# is still denied, and that is the case that actually lets an unreviewed upgrade
+# in.
+#
+# The alternative — writing `version = "0.3.0-rc.4"` beside all 24 paths — buys
+# nothing today: crates.io publishing is disabled (`release.yml:347`). It would
+# also make every version bump a 24-line edit. If publishing is ever turned back
+# on, `cargo publish` will refuse a path dep with no version, and THAT is the
+# moment to add them.
+allow-wildcard-paths = true
 
 deny = [
     # rustls 0.21 arrived transitively alongside the intended 0.23 and brought

@@ -9,6 +9,12 @@ repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
 description = "Content-aware compression engine for media objects"
+# Not published to crates.io: distribution is cargo-dist binaries, Docker
+# images and GitHub releases. This also makes deny.toml's
+# `allow-wildcard-paths` apply to our own path deps (cargo-deny exempts
+# them only for non-public crates). Flip to `true` and add `version = ...`
+# beside every internal `path = ...` if crates.io publishing is turned on.
+publish = false
 
 [dependencies]
 tokio = { workspace = true, features = ["rt"] }
