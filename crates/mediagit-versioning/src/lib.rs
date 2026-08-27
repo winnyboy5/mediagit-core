@@ -98,7 +98,7 @@ mod tree;
 
 pub use bitmap::{ReachabilityBitmap, bitmap_enabled, bitmap_key};
 pub use branch::{BranchInfo, BranchManager, DetachedHead};
-pub use checkout::{CheckoutManager, CheckoutStats};
+pub use checkout::{CheckoutManager, CheckoutStats, FreshCheckoutPlan};
 pub use chunking::{
     ChunkId, ChunkManifest, ChunkRef, ChunkStore, ChunkStoreStats, ChunkStrategy, ChunkType,
     CodecHint, ContentChunk, ContentChunker,

@@ -689,6 +689,60 @@ impl<'a> CheckoutManager<'a> {
         self.checkout_tree(&commit.tree, Path::new("")).await
     }
 
+    /// Split a fresh checkout into what can be written now and what must wait
+    /// for its chunks to finish downloading (C4).
+    ///
+    /// Clone used to wait for the LAST byte of the LAST file before writing
+    /// anything, because [`Self::checkout_fresh`] is all-or-nothing. But small
+    /// blobs are already fully in the ODB the moment `pull_streaming` returns —
+    /// only chunked media is still in flight. Splitting on that lets the two
+    /// overlap.
+    ///
+    /// `deferred_oids` is the chunked-object set the caller got back from
+    /// `pull_streaming`. Anything else is `ready`.
+    ///
+    /// # Invariant (VC-5)
+    ///
+    /// Case-collision detection runs HERE, over the full path list, before any
+    /// write. [`Self::run_parallel_writes`] repeats it per batch, but a batch
+    /// can only see collisions *within itself* — a `ready` path colliding with
+    /// a `deferred` one would slip past both batches. Losing that guard would
+    /// be silent on a case-insensitive filesystem, so it is deliberately not
+    /// left to the batches.
+    pub async fn plan_fresh(
+        &self,
+        commit_oid: &Oid,
+        deferred_oids: &HashSet<Oid>,
+    ) -> Result<FreshCheckoutPlan> {
+        let commit = Commit::read(self.odb, commit_oid).await?;
+        let flat = self
+            .get_tree_files_with_oid(&commit.tree, Path::new(""))
+            .await?;
+        let flat = self.filter_sparse(flat);
+        let entries: Vec<(PathBuf, Oid, FileMode)> =
+            flat.into_iter().map(|(p, (o, m))| (p, o, m)).collect();
+
+        detect_case_collisions(&self.repo_root, entries.iter().map(|(p, _, _)| p))?;
+
+        let (deferred, ready) = entries
+            .into_iter()
+            .partition(|(_, oid, _)| deferred_oids.contains(oid));
+
+        Ok(FreshCheckoutPlan { ready, deferred })
+    }
+
+    /// Write one batch from a [`FreshCheckoutPlan`]. Same semantics as
+    /// [`Self::checkout_fresh`]'s writes: always-write, bounded parallelism,
+    /// abort-all on first error.
+    ///
+    /// Note the F1+F2 abort scope narrows from whole-tree to per-batch: a
+    /// failure while writing `deferred` leaves the already-written `ready`
+    /// files on disk. Clone's cleanup handles that today by deleting the
+    /// target directory.
+    pub async fn write_entries(&self, entries: Vec<(PathBuf, Oid, FileMode)>) -> Result<usize> {
+        self.run_parallel_writes(entries, false).await
+    }
+
     /// Differential checkout - only update changed files
     ///
     /// This is the fast path for branch switching when most files are unchanged.
@@ -904,6 +958,18 @@ impl<'a> CheckoutManager<'a> {
             Ok(files)
         })
     }
+}
+
+/// A fresh checkout split by [`CheckoutManager::plan_fresh`] into the entries
+/// that can be written immediately and the ones still waiting on chunk
+/// downloads (C4).
+#[derive(Debug, Default)]
+pub struct FreshCheckoutPlan {
+    /// Entries whose object is already fully in the ODB — small blobs written
+    /// by the metadata pack. Safe to write while chunks are still downloading.
+    pub ready: Vec<(PathBuf, Oid, FileMode)>,
+    /// Entries backed by a chunked object that is still being downloaded.
+    pub deferred: Vec<(PathBuf, Oid, FileMode)>,
 }
 
 /// Statistics from a differential checkout operation
@@ -2107,6 +2173,228 @@ mod tests {
         assert!(repo_root.join("good.bin").exists());
         assert!(!repo_root.join("x.bin::stage1").exists());
 
+        Ok(())
+    }
+}
+
+/// C4 (overlap parity): clone now writes small blobs to the working tree WHILE
+/// chunked media is still downloading, instead of waiting for the last byte of
+/// the last file. The split that makes that safe is
+/// [`CheckoutManager::plan_fresh`], and these pin the two properties it has to
+/// have: it loses nothing, and it still refuses a case-collision.
+///
+/// The parity assertion is the primary safety net named in the plan — the
+/// overlapped tree must be indistinguishable from the staged one, or the
+/// commit is wrong.
+#[cfg(test)]
+mod overlap_split_parity_tests {
+    use super::*;
+    use crate::{ObjectType, Signature, TreeEntry};
+    use anyhow::Result;
+    use mediagit_storage::LocalBackend;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    fn sig() -> Signature {
+        Signature::now("Test".to_string(), "test@example.com".to_string())
+    }
+
+    /// Nested tree: a subdirectory plus root files, so the recursive walk and
+    /// the path prefixes are exercised, not just a flat list.
+    async fn build_commit(odb: &ObjectDatabase) -> Result<(Oid, Vec<(String, String)>)> {
+        let mut expected: Vec<(String, String)> = Vec::new();
+
+        let mut sub = Tree::new();
+        for i in 0..4 {
+            let content = format!("nested-content-{i}");
+            let oid = odb.write(ObjectType::Blob, content.as_bytes()).await?;
+            sub.add_entry(TreeEntry::new(
+                format!("nested_{i}.bin"),
+                FileMode::Regular,
+                oid,
+            ));
+            expected.push((format!("assets/nested_{i}.bin"), content));
+        }
+        let sub_oid = sub.write(odb).await?;
+
+        let mut root = Tree::new();
+        root.add_entry(TreeEntry::new(
+            "assets".to_string(),
+            FileMode::Directory,
+            sub_oid,
+        ));
+        for i in 0..6 {
+            let content = format!("root-content-{i}");
+            let oid = odb.write(ObjectType::Blob, content.as_bytes()).await?;
+            root.add_entry(TreeEntry::new(
+                format!("root_{i}.txt"),
+                FileMode::Regular,
+                oid,
+            ));
+            expected.push((format!("root_{i}.txt"), content));
+        }
+        let root_oid = root.write(odb).await?;
+
+        let commit = Commit::new(root_oid, sig(), sig(), "overlap parity".to_string());
+        Ok((commit.write(odb).await?, expected))
+    }
+
+    fn read_tree_on_disk(root: &Path) -> Vec<(String, String)> {
+        fn walk(dir: &Path, base: &Path, out: &mut Vec<(String, String)>) {
+            for entry in fs::read_dir(dir).unwrap().flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    walk(&p, base, out);
+                } else {
+                    let rel = p
+                        .strip_prefix(base)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    out.push((rel, fs::read_to_string(&p).unwrap()));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out.sort();
+        out
+    }
+
+    /// The overlapped tree must be byte-identical to the staged one.
+    ///
+    /// `deferred_oids` here stands in for the chunked-object set clone gets
+    /// back from `pull_streaming`; the point is that WHICH oids are deferred
+    /// must not change the result, only when each file is written.
+    #[tokio::test]
+    async fn split_checkout_matches_whole_tree_checkout() -> Result<()> {
+        let storage_dir = TempDir::new()?;
+        let storage = Arc::new(LocalBackend::new(storage_dir.path()).await?);
+        let odb = ObjectDatabase::new(storage, 100);
+        let (commit_oid, expected) = build_commit(&odb).await?;
+
+        // Baseline: the path MEDIAGIT_CLONE_OVERLAP=0 still takes.
+        let staged = TempDir::new()?;
+        let staged_mgr = CheckoutManager::new(&odb, staged.path());
+        let staged_count = staged_mgr.checkout_fresh(&commit_oid).await?;
+
+        // Overlapped: defer a non-trivial subset spanning both the root and
+        // the subdirectory, then write in two batches like clone does.
+        let overlapped = TempDir::new()?;
+        let mgr = CheckoutManager::new(&odb, overlapped.path());
+        let tree_oid = Commit::read(&odb, &commit_oid).await?.tree;
+        let all = mgr
+            .get_tree_files_with_oid(&tree_oid, Path::new(""))
+            .await?;
+        let deferred_oids: HashSet<Oid> = all
+            .iter()
+            .filter(|(p, _)| {
+                let s = p.to_string_lossy().replace('\\', "/");
+                s.contains("nested_1") || s.contains("nested_3") || s.contains("root_0")
+            })
+            .map(|(_, (oid, _))| *oid)
+            .collect();
+        assert_eq!(deferred_oids.len(), 3, "test fixture must defer 3 objects");
+
+        let plan = mgr.plan_fresh(&commit_oid, &deferred_oids).await?;
+        assert_eq!(
+            plan.ready.len() + plan.deferred.len(),
+            expected.len(),
+            "the split must partition the tree, not sample it"
+        );
+        assert_eq!(plan.deferred.len(), 3);
+
+        // Ready first (clone writes these under the download), deferred after.
+        let wrote = mgr.write_entries(plan.ready).await? + mgr.write_entries(plan.deferred).await?;
+
+        assert_eq!(wrote, staged_count, "same number of files written");
+        let mut want = expected.clone();
+        want.sort();
+        assert_eq!(read_tree_on_disk(overlapped.path()), want);
+        assert_eq!(
+            read_tree_on_disk(overlapped.path()),
+            read_tree_on_disk(staged.path()),
+            "overlapped tree must be identical to the staged tree"
+        );
+        Ok(())
+    }
+
+    /// Deferring nothing (a repo with no chunked media) must still produce the
+    /// whole tree — the case where `deferred` is empty and Step 9 writes zero.
+    #[tokio::test]
+    async fn split_with_nothing_deferred_still_writes_everything() -> Result<()> {
+        let storage_dir = TempDir::new()?;
+        let storage = Arc::new(LocalBackend::new(storage_dir.path()).await?);
+        let odb = ObjectDatabase::new(storage, 100);
+        let (commit_oid, expected) = build_commit(&odb).await?;
+
+        let repo = TempDir::new()?;
+        let mgr = CheckoutManager::new(&odb, repo.path());
+        let plan = mgr.plan_fresh(&commit_oid, &HashSet::new()).await?;
+        assert!(plan.deferred.is_empty());
+
+        let wrote = mgr.write_entries(plan.ready).await? + mgr.write_entries(plan.deferred).await?;
+        assert_eq!(wrote, expected.len());
+        let mut want = expected;
+        want.sort();
+        assert_eq!(read_tree_on_disk(repo.path()), want);
+        Ok(())
+    }
+
+    /// VC-5 must still fire, and it must fire from `plan_fresh` — a collision
+    /// between a READY path and a DEFERRED one is invisible to the per-batch
+    /// check inside `run_parallel_writes`, because neither batch contains both
+    /// halves. This is the guard the C4 split could most easily have dropped
+    /// silently, so it is asserted across the split, not within one side.
+    #[tokio::test]
+    async fn case_collision_across_the_split_is_still_refused() -> Result<()> {
+        let storage_dir = TempDir::new()?;
+        let storage = Arc::new(LocalBackend::new(storage_dir.path()).await?);
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let a_oid = odb.write(ObjectType::Blob, b"lower").await?;
+        let b_oid = odb.write(ObjectType::Blob, b"UPPER").await?;
+
+        let mut root = Tree::new();
+        root.add_entry(TreeEntry::new(
+            "readme.md".to_string(),
+            FileMode::Regular,
+            a_oid,
+        ));
+        root.add_entry(TreeEntry::new(
+            "README.md".to_string(),
+            FileMode::Regular,
+            b_oid,
+        ));
+        let root_oid = root.write(&odb).await?;
+        let commit = Commit::new(root_oid, sig(), sig(), "collision".to_string());
+        let commit_oid = commit.write(&odb).await?;
+
+        let repo = TempDir::new()?;
+        let mgr = CheckoutManager::new(&odb, repo.path());
+
+        // Defer exactly one of the colliding pair, so the two land in
+        // different batches.
+        let deferred: HashSet<Oid> = [b_oid].into_iter().collect();
+        let err = mgr.plan_fresh(&commit_oid, &deferred).await;
+
+        // Only meaningful where the filesystem actually conflates the two;
+        // detect_case_collisions probes for that itself, so ask it directly
+        // rather than guessing from the platform.
+        let fs_is_case_insensitive = detect_case_collisions(
+            repo.path(),
+            [PathBuf::from("readme.md"), PathBuf::from("README.md")].iter(),
+        )
+        .is_err();
+
+        if fs_is_case_insensitive {
+            assert!(
+                err.is_err(),
+                "plan_fresh must refuse a case-collision that spans the split"
+            );
+        } else {
+            assert!(err.is_ok(), "case-sensitive fs: both paths are distinct");
+        }
         Ok(())
     }
 }

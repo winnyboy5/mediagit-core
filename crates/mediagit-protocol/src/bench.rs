@@ -262,16 +262,23 @@ pub fn emit_commit_summary(wall_start: std::time::Instant, files: u64) {
 /// Deliberately reports no throughput figure, for the same reason `op=commit`
 /// does not: these bytes were already counted by the clone that fetched them, so
 /// a second MB/s here would double-count.
-pub fn emit_checkout_summary(wall_start: std::time::Instant, files: u64) {
+/// `overlap` records whether the C4 download/checkout overlap was on. It is
+/// reported explicitly rather than left to `knobs=`, because the knob defaults
+/// ON and so is ABSENT from the environment in the interesting case — an A/B
+/// that has to read "on" from a missing variable is one transcription slip away
+/// from being backwards.
+pub fn emit_checkout_summary(wall_start: std::time::Instant, files: u64, overlap: bool) {
     if !enabled() {
         return;
     }
     let wall_s = wall_start.elapsed().as_secs_f64();
     let knobs = collect_knobs();
     eprintln!(
-        "[bench] bench_schema_version={schema} op=checkout files={files}          wall={wall:.2}s knobs={knobs}",
+        "[bench] bench_schema_version={schema} op=checkout files={files} \
+         overlap={overlap} wall={wall:.2}s knobs={knobs}",
         schema = BENCH_SCHEMA_VERSION,
         files = files,
+        overlap = if overlap { "on" } else { "off" },
         wall = wall_s,
         knobs = if knobs.is_empty() {
             "none".to_string()

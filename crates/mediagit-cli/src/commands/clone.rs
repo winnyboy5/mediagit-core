@@ -180,7 +180,11 @@ impl CloneCmd {
             let checkout_mgr = CheckoutManager::new(&odb, &target_dir);
             let checkout_start = std::time::Instant::now();
             let files_count = checkout_mgr.checkout_fresh(&oid).await?;
-            mediagit_protocol::bench::emit_checkout_summary(checkout_start, files_count as u64);
+            mediagit_protocol::bench::emit_checkout_summary(
+                checkout_start,
+                files_count as u64,
+                false,
+            );
             checkout_pb.finish_with_message(format!("Checked out {} files", files_count));
 
             if !self.quiet {
@@ -482,26 +486,62 @@ url = "{}"
             );
         }
 
+        let remote_oid = mediagit_versioning::Oid::from_hex(&remote_ref.oid)
+            .map_err(|e| anyhow::anyhow!("Invalid remote OID: {}", e))?;
+
+        // C4: overlap the working-tree writes we can already do with the chunk
+        // downloads we still have to wait for.
+        //
+        // `pull_streaming` has just written every non-chunked object to the
+        // ODB, so every small blob in the tree is ALREADY complete — only
+        // chunked media is still in flight. Checkout used to sit behind a hard
+        // barrier waiting for all of it anyway.
+        //
+        // `MEDIAGIT_CLONE_OVERLAP=0` restores the old serial path. That is both
+        // the revert switch and the parity oracle the clone-parity test diffs
+        // against, so it must stay reachable.
+        let checkout_mgr = CheckoutManager::new(&odb, &target_dir);
+        let overlap_enabled = std::env::var("MEDIAGIT_CLONE_OVERLAP").as_deref() != Ok("0");
+        let split = if overlap_enabled {
+            let deferred_oids: std::collections::HashSet<_> =
+                chunked_oids.iter().copied().collect();
+            Some(checkout_mgr.plan_fresh(&remote_oid, &deferred_oids).await?)
+        } else {
+            None
+        };
+        let (ready_entries, deferred_entries) = match split {
+            Some(plan) => (Some(plan.ready), Some(plan.deferred)),
+            None => (None, None),
+        };
+        let mut files_written = 0usize;
+
         // Step 7: Download chunked objects (large files)
         if !chunked_oids.is_empty() {
             // Total bytes seeded from manifests in Phase 1 via first on_progress call.
             let chunk_pb = progress.download_bar("Downloading large files", 0);
 
             let chunk_pb_ref = chunk_pb.clone();
-            let (chunks_downloaded, chunk_bytes) = client
-                .download_chunked_objects(
-                    &odb,
-                    &chunked_oids,
-                    move |bytes_done, bytes_total, msg| {
-                        if chunk_pb_ref.length() != Some(bytes_total) {
-                            chunk_pb_ref.set_length(bytes_total);
-                            chunk_pb_ref.reset_eta();
-                        }
-                        chunk_pb_ref.set_position(bytes_done);
-                        chunk_pb_ref.set_message(msg.to_string());
-                    },
-                )
-                .await?;
+            let download = client.download_chunked_objects(
+                &odb,
+                &chunked_oids,
+                move |bytes_done, bytes_total, msg| {
+                    if chunk_pb_ref.length() != Some(bytes_total) {
+                        chunk_pb_ref.set_length(bytes_total);
+                        chunk_pb_ref.reset_eta();
+                    }
+                    chunk_pb_ref.set_position(bytes_done);
+                    chunk_pb_ref.set_message(msg.to_string());
+                },
+            );
+
+            let (chunks_downloaded, chunk_bytes) = if let Some(ready) = ready_entries {
+                let (downloaded, wrote) =
+                    tokio::try_join!(download, checkout_mgr.write_entries(ready))?;
+                files_written += wrote;
+                downloaded
+            } else {
+                download.await?
+            };
 
             chunk_pb.finish_with_message(format!("Downloaded {} chunks", chunks_downloaded));
             stats.objects_received += chunks_downloaded as u64;
@@ -515,11 +555,13 @@ url = "{}"
                     chunked_oids.len()
                 );
             }
+        } else if let Some(ready) = ready_entries {
+            // Nothing to overlap with, but the split is still the cheaper
+            // path: these entries are written here and skipped at Step 9.
+            files_written += checkout_mgr.write_entries(ready).await?;
         }
 
         // Step 8: Update refs
-        let remote_oid = mediagit_versioning::Oid::from_hex(&remote_ref.oid)
-            .map_err(|e| anyhow::anyhow!("Invalid remote OID: {}", e))?;
         let ref_update = mediagit_versioning::Ref::new_direct(remote_ref_name.clone(), remote_oid);
         refdb.write(&ref_update).await?;
 
@@ -599,10 +641,19 @@ url = "{}"
         // Step 9: Checkout working directory
         // Use spinner: file count only known after checkout finishes
         let checkout_pb = progress.spinner("Checking out files...");
-        let checkout_mgr = CheckoutManager::new(&odb, &target_dir);
+        // Timed from HERE, not from before the download: this is the wait the
+        // user actually still has after the last byte lands. With overlap off
+        // it is the whole checkout, matching the C0 baseline; with it on it is
+        // the residual tail, which is the number that should collapse.
         let checkout_start = std::time::Instant::now();
-        let files_count = checkout_mgr.checkout_fresh(&remote_oid).await?;
-        mediagit_protocol::bench::emit_checkout_summary(checkout_start, files_count as u64);
+        // With overlap on, only the chunked entries are left — the rest were
+        // written above, under the download. With it off this is the original
+        // whole-tree checkout.
+        let files_count = match deferred_entries {
+            Some(deferred) => files_written + checkout_mgr.write_entries(deferred).await?,
+            None => checkout_mgr.checkout_fresh(&remote_oid).await?,
+        };
+        mediagit_protocol::bench::emit_checkout_summary(checkout_start, files_count as u64, overlap_enabled);
         checkout_pb.finish_with_message(format!("Checked out {} files", files_count));
         stats.files_updated = files_count as u64;
 
