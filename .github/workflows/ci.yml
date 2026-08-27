@@ -69,6 +69,30 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && !matrix.cross
         uses: rui314/setup-mold@v1
 
+      # The GitHub Ubuntu image ships ~25 GB of toolchains this project never
+      # touches (Android SDK/NDK, .NET, GHC, Swift, preloaded Docker images).
+      # That matters here because this workspace builds TWICE on the disk: the
+      # Build step passes `--target`, which puts artifacts in
+      # `target/<triple>/debug`, while the test step below has no `--target` and
+      # so builds the whole graph again into `target/debug`. Add aws-sdk +
+      # azure + gcs + criterion + proptest and the runner runs out of space.
+      #
+      # The Code Coverage job died exactly this way — `rustc-LLVM ERROR: IO
+      # failure on output stream: No space left on device` while compiling
+      # gcs_emulator_tests, then the runner could not even write its own step
+      # summary. Deleting what we never use is cheaper and less fragile than
+      # trying to shrink the build.
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        run: |
+          echo "before:"; df -h / | tail -1
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/share/powershell /usr/share/swift \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          echo "after:"; df -h / | tail -1
+        shell: bash
+
       - name: Install cross (for ARM cross-compilation)
         if: matrix.cross
         run: cargo install cross --git https://github.com/cross-rs/cross
@@ -87,10 +111,22 @@ jobs:
       # mediagit-versioning and are *only* wrong off Linux, so the one matrix
       # dimension that could have caught them was the one not exercising them.
       # Every platform now runs the same suite.
+      # `debug = "line-tables-only"` rather than the default full debuginfo:
+      # this graph's debug sections are the bulk of `target/`, and line tables
+      # are all a panic backtrace needs to still name file:line. Full DWARF here
+      # buys variable inspection nobody does on a CI runner, at several GB.
+      #
+      # Deliberately NOT set workspace-wide in the top-level `env:` — the
+      # coverage job needs whatever debuginfo tarpaulin asks for, and quietly
+      # degrading its input from another job's optimisation is how a coverage
+      # number silently becomes wrong.
       - name: Run tests
         if: ${{ !matrix.cross }}
         run: cargo test --workspace --verbose --all-features
         shell: bash
+        env:
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+          CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 
   lint:
@@ -294,11 +330,45 @@ jobs:
         with:
           key: coverage
 
+      # This job is where the disk actually ran out: `rustc-LLVM ERROR: IO
+      # failure on output stream: No space left on device` compiling
+      # gcs_emulator_tests, followed by the runner failing to write its own
+      # GITHUB_STEP_SUMMARY. Coverage is the hungriest job in the workflow —
+      # instrumented binaries plus full debuginfo across the whole graph — so it
+      # hits the wall first, but it is the same wall.
+      - name: Free disk space
+        run: |
+          echo "before:"; df -h / | tail -1
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/share/powershell /usr/share/swift \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          echo "after:"; df -h / | tail -1
+        shell: bash
+
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin --locked
 
+      # NOTE ON `|| true`: a tarpaulin failure is swallowed on purpose, so
+      # coverage never blocks a merge. That also means this step reports green
+      # when it produced nothing — the pattern this repo keeps getting bitten by
+      # elsewhere. It is left alone rather than silently changed, but the exit
+      # code is now echoed so the log says which happened instead of leaving the
+      # reader to infer it from a missing artifact.
+      #
+      # The job still went RED despite `|| true`, because ENOSPC broke the
+      # runner's own bookkeeping, not the command. Freeing disk above is the fix
+      # for that; this line is unchanged in behaviour.
       - name: Generate coverage report
-        run: cargo tarpaulin --workspace --all-features --out Xml --output-dir coverage/ --timeout 300 --skip-clean || true
+        run: |
+          set +e
+          cargo tarpaulin --workspace --all-features --out Xml \
+            --output-dir coverage/ --timeout 300 --skip-clean
+          rc=$?
+          echo "tarpaulin exit=$rc (non-blocking by design)"
+          df -h / | tail -1
+          exit 0
+        shell: bash
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@v5
