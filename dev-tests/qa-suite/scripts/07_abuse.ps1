@@ -1529,9 +1529,14 @@ function Drill-A17-EncryptionRecovery {
 # ---------------------------------------------------------------------------
 function Drill-A18-CloneResumeAfterKill {
   $drill = "A18-clone-resume-after-kill"
+  # BACKEND: local, deliberately. What is under test is a client-side
+  # directory/marker decision, identical on every backend -- so pinning these
+  # to minio would buy no coverage and would make both drills SKIP on any host
+  # without it. A SKIP reads as green; that is how A7 went missing for two
+  # weeks. Local keeps them runnable everywhere.
   $srv = $null
   try {
-    $srv = Start-QaServer -Backend "minio" -Phase "$Phase-A18"
+    $srv = Start-QaServer -Backend "local" -Phase "$Phase-A18"
     $repo = New-SandboxRepo "a18-cloneresume" $Phase
     # 600MB for the same reason A2 uses it: a small payload clones faster than
     # the sleep below, the kill lands after completion, and the drill quietly
@@ -1595,7 +1600,7 @@ function Drill-A19-CloneSetupFailureStillCleansUp {
   $drill = "A19-clone-setup-failure-cleans-up"
   $srv = $null
   try {
-    $srv = Start-QaServer -Backend "minio" -Phase "$Phase-A19"
+    $srv = Start-QaServer -Backend "local" -Phase "$Phase-A19"
     # A live server, a repository that does not exist on it: the failure lands
     # in ref discovery, BEFORE any bulk transfer, which is exactly the case the
     # split rule says to wipe.
