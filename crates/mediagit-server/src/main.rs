@@ -657,9 +657,17 @@ async fn main() -> Result<()> {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             ticks += 1;
+            // `routed` and `idle_s` turn an ABSENCE into a reading. In ga33 and
+            // ga36 a clone hung for 240-300s and the server logged nothing for
+            // it, so "the request never reached the router" had to be inferred
+            // from missing TraceLayer lines -- which is also what a logging
+            // failure looks like. A frozen `routed` alongside a climbing
+            // `idle_s` says it positively.
             tracing::debug!(
                 tick = ticks,
                 uptime_s = started.elapsed().as_secs(),
+                routed = mediagit_server::REQS_ROUTED.load(std::sync::atomic::Ordering::Relaxed),
+                idle_s = mediagit_server::secs_since_last_routed_request(),
                 "server runtime heartbeat"
             );
         }

@@ -190,6 +190,67 @@ pub fn create_router_sharing_rate_limit(
 /// added to one and not the other exists or vanishes depending on whether
 /// rate limiting happens to be on — and that duplication is exactly what let
 /// the HTTPS branch pick the wrong builder.
+/// Connections accepted by the listener, and requests that reached the router.
+///
+/// THE GAP THESE CLOSE. A clone hung for 240s+ in ga36 (and 300s in ga33) with
+/// the client reporting `Failed to send GET /info/refs: operation timed out`,
+/// while the server logged NOTHING for it -- not even `TraceLayer`'s
+/// "started processing request". The runtime was demonstrably healthy: the
+/// heartbeat ticked straight through. So the request died somewhere between the
+/// kernel accepting the TCP connection and the router seeing it, and NOTHING in
+/// that stretch was instrumented.
+///
+/// Two campaigns produced two reproductions and neither could name the
+/// component, because the only available evidence was an absence. These two
+/// counters turn that absence into a reading:
+///
+///   accepted > served and not moving -> the connection arrived but its request
+///                                       never reached the router (HTTP parse,
+///                                       TLS, or a stuck connection task)
+///   accepted not moving              -> the acceptor itself is stuck; the
+///                                       client's connection is sitting in the
+///                                       kernel backlog showing ESTABLISHED
+///
+/// Relaxed ordering throughout: these are diagnostic counters read by a
+/// once-per-10s log line, not a synchronisation mechanism.
+pub static REQS_ROUTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Millis since process start at which the last request reached the router.
+static LAST_ROUTED_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Process start, so `idle_s` is meaningful before the first request.
+static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+fn now_ms() -> u64 {
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+}
+
+/// Seconds since a request last reached the router (uptime if none ever has).
+///
+/// Read by the runtime heartbeat. A stall in which this climbs while
+/// `REQS_ROUTED` stands still is positive evidence that nothing is arriving --
+/// as opposed to arriving and failing to be logged, which is what an absence of
+/// log lines alone cannot distinguish.
+pub fn secs_since_last_routed_request() -> u64 {
+    (now_ms().saturating_sub(LAST_ROUTED_MS.load(std::sync::atomic::Ordering::Relaxed))) / 1000
+}
+
+/// Counts every request that reaches the router, as the OUTERMOST layer.
+///
+/// Deliberately outside `TraceLayer`: the whole point is to count requests that
+/// arrive even when the tracing layer never logs them.
+async fn count_routed_requests(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    REQS_ROUTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    LAST_ROUTED_MS.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+    next.run(request).await
+}
+
 fn build_router(state: Arc<AppState>, rate_limiter: Option<SharedRateLimiter>) -> Router {
     // Create Git protocol routes
     let mut git_router = Router::new()
@@ -318,6 +379,10 @@ fn build_router(state: Arc<AppState>, rate_limiter: Option<SharedRateLimiter>) -
     // to intercept requests before routing
     router = router.layer(middleware::from_fn(security::path_validation_middleware));
 
+    // Outside even path validation, so a request is counted the instant it
+    // reaches the router -- before anything can reject, block or fail to log it.
+    router = router.layer(middleware::from_fn(count_routed_requests));
+
     // Health check is merged AFTER all middleware so it bypasses auth + rate-limiting
     router = router.merge(
         Router::new()
@@ -385,4 +450,105 @@ pub fn create_rate_limited_router(
 
     let router = build_router(state, Some(Arc::clone(&governor_config)));
     (router, cleanup_task, governor_config)
+}
+
+/// The routed-request counter is diagnostic, so it has exactly one job: be
+/// accurate about whether a request reached the router. Both directions matter.
+///
+/// This exists because ga33 and ga36 each burned a campaign on a hang whose only
+/// evidence was an ABSENCE of log lines -- and an absence cannot distinguish
+/// "no request arrived" from "a request arrived and logging failed". A counter
+/// that silently stopped incrementing would recreate exactly that ambiguity
+/// while looking like an answer, so it is asserted in both directions here.
+#[cfg(test)]
+mod routed_counter_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request as HttpRequest, StatusCode};
+    use tower::ServiceExt;
+
+    fn routed() -> u64 {
+        REQS_ROUTED.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// One test, not two: `REQS_ROUTED` is a process-global counter by design
+    /// (it is a server-wide diagnostic), so two parallel tests asserting exact
+    /// deltas against it race each other. Splitting them produced exactly that
+    /// -- an off-by-one that was the harness, not the code.
+    ///
+    /// Covers, in order:
+    ///   1. a served request increments the counter
+    ///   2. a REJECTED request increments it too -- the counter answers "did
+    ///      anything reach us", not "did anything succeed". Were rejects
+    ///      uncounted, a server being flooded with bad paths would look
+    ///      identical to one receiving nothing at all.
+    ///   3. the idle clock resets when a request lands and never runs backwards
+    #[tokio::test]
+    async fn routed_counter_and_idle_clock_are_accurate_in_both_directions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = std::sync::Arc::new(AppState::new(tmp.path().to_path_buf()));
+
+        // NOT /healthz. Health routes are merged AFTER the middleware stack so
+        // they bypass auth and rate limiting -- and therefore this counter too.
+        // That is load-bearing rather than incidental: the QA harness polls
+        // /healthz continuously, so if health checks reset the idle clock the
+        // heartbeat would report a healthy 0 straight through a total stall.
+        let before = routed();
+        let app = build_router(std::sync::Arc::clone(&state), None);
+        let _ = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/some-repo/info/refs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let after_ok = routed();
+        assert_eq!(
+            after_ok,
+            before + 1,
+            "a request that reached the router must be counted"
+        );
+
+        // A repo name containing `..` is rejected by path_validation_middleware,
+        // which sits INSIDE the counter, so the reject must still be counted.
+        //
+        // The path must still MATCH a route. `/../etc/info/refs` does not, and
+        // an unmatched path is served by the router's fallback, which sits
+        // outside the layer stack and is therefore never counted -- an earlier
+        // draft of this test used it and failed for that reason, not because the
+        // counter was wrong.
+        let app2 = build_router(std::sync::Arc::clone(&state), None);
+        let resp2 = app2
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/bad..repo/info/refs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            resp2.status(),
+            StatusCode::OK,
+            "a traversal attempt must not be served"
+        );
+        assert_eq!(
+            routed(),
+            after_ok + 1,
+            "a REJECTED request still reached the router and must be counted"
+        );
+
+        // The idle clock must reset on arrival -- a frozen clock would be worse
+        // than none, reporting a healthy 0 through a total stall.
+        assert_eq!(
+            secs_since_last_routed_request(),
+            0,
+            "idle clock must reset when a request reaches the router"
+        );
+        let a = secs_since_last_routed_request();
+        let b = secs_since_last_routed_request();
+        assert!(b >= a, "idle clock must not run backwards");
+    }
 }
