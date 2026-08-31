@@ -666,6 +666,8 @@ async fn main() -> Result<()> {
             tracing::debug!(
                 tick = ticks,
                 uptime_s = started.elapsed().as_secs(),
+                accepted =
+                    mediagit_server::CONNS_ACCEPTED.load(std::sync::atomic::Ordering::Relaxed),
                 routed = mediagit_server::REQS_ROUTED.load(std::sync::atomic::Ordering::Relaxed),
                 idle_s = mediagit_server::secs_since_last_routed_request(),
                 "server runtime heartbeat"
@@ -746,7 +748,7 @@ async fn main() -> Result<()> {
                 // ConnectInfo must be supplied or SmartIpKeyExtractor (rate limiting)
                 // 500s with "Unable to extract key!" on every request.
                 axum::serve(
-                    http_listener,
+                    mediagit_server::counting_listener(http_listener),
                     app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
                 )
                 .with_graceful_shutdown(shutdown_signal())
@@ -809,7 +811,7 @@ async fn main() -> Result<()> {
         // ConnectInfo must be supplied or SmartIpKeyExtractor (rate limiting)
         // 500s with "Unable to extract key!" on every request.
         axum::serve(
-            listener,
+            mediagit_server::counting_listener(listener),
             app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
         .with_graceful_shutdown(shutdown_signal())

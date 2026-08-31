@@ -215,6 +215,26 @@ pub fn create_router_sharing_rate_limit(
 /// once-per-10s log line, not a synchronisation mechanism.
 pub static REQS_ROUTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Connections the listener has handed to axum. See `REQS_ROUTED` for why.
+pub static CONNS_ACCEPTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Wrap a listener so every accepted connection is counted.
+///
+/// `tap_io` runs the moment axum accepts, before hyper reads a single byte, so
+/// this counts connections that never produce a request -- which is precisely
+/// the case `REQS_ROUTED` alone cannot tell apart from "never accepted".
+pub fn counting_listener(
+    listener: tokio::net::TcpListener,
+) -> axum::serve::TapIo<
+    tokio::net::TcpListener,
+    impl FnMut(&mut tokio::net::TcpStream) + Send + 'static,
+> {
+    use axum::serve::ListenerExt;
+    listener.tap_io(|_| {
+        CONNS_ACCEPTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    })
+}
+
 /// Millis since process start at which the last request reached the router.
 static LAST_ROUTED_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -550,5 +570,36 @@ mod routed_counter_tests {
         let a = secs_since_last_routed_request();
         let b = secs_since_last_routed_request();
         assert!(b >= a, "idle clock must not run backwards");
+
+        // `accepted` vs `routed` is the whole point of having two counters, so
+        // the discriminating case is the one asserted: a connection that is
+        // accepted and then sends NOTHING. That is the shape of the hang --
+        // ESTABLISHED on the client, silent on the server -- and it must move
+        // `accepted` while leaving `routed` alone. A counter that only moved
+        // alongside `routed` would be decoration; it could never tell the two
+        // failure modes apart, which is the only reason it exists.
+        let accepted_before = CONNS_ACCEPTED.load(std::sync::atomic::Ordering::Relaxed);
+        let routed_before = routed();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut tapped = counting_listener(listener);
+        let acceptor = tokio::spawn(async move {
+            use axum::serve::Listener;
+            let _ = tapped.accept().await;
+        });
+        // Held open until the accept completes: dropping it early would let the
+        // connection be torn down before `tap_io` ever ran.
+        let _conn = tokio::net::TcpStream::connect(addr).await.unwrap();
+        acceptor.await.unwrap();
+        assert_eq!(
+            CONNS_ACCEPTED.load(std::sync::atomic::Ordering::Relaxed),
+            accepted_before + 1,
+            "an accepted connection must be counted before any byte is read"
+        );
+        assert_eq!(
+            routed(),
+            routed_before,
+            "a connection that sent no request must NOT be counted as routed"
+        );
     }
 }
