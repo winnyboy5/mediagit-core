@@ -503,6 +503,101 @@ pub(crate) fn rate_limit_max_wait_ms() -> u64 {
         .saturating_mul(1000)
 }
 
+/// Seconds a SHORT control-plane request gets to produce response headers
+/// before its connection is abandoned and the request retried on a fresh one.
+/// 0 disables the bound entirely, restoring the previous behaviour.
+fn short_request_deadline_secs() -> u64 {
+    std::env::var("MEDIAGIT_SHORT_REQUEST_DEADLINE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(30)
+}
+
+/// Send a short, bodyless control request under a deadline, retrying on a
+/// FRESH connection if no response headers arrive in time.
+///
+/// THE BUG THIS EXISTS FOR. A clone intermittently hangs on its very first
+/// request. Captured twice with the server's own counters (2026-08-31): the
+/// client's TCP connect completes, `Established` to the server, CPU flat; the
+/// server's `accepted` counter never moves while its heartbeat keeps ticking.
+/// The connection completes into the kernel's listen backlog and the acceptor
+/// never returns it. The client then waits on a connection that will never be
+/// served.
+///
+/// WHY RETRYING IS THE FIX AND NOT A PAPER-OVER. Abandoning the request drops
+/// the future, which drops hyper's connection, so the retry necessarily dials a
+/// NEW connection rather than reusing the abandoned one. If the acceptor is
+/// healthy and merely lost this connection, the retry succeeds and the hang is
+/// gone. If instead the acceptor is wedged process-wide, the retry fails too --
+/// but it fails in seconds with a named error rather than stalling silently,
+/// which is a strict improvement either way. Which of those two it is has not
+/// been established: 2 hangs in ~2500 clones, and neither reproduced on demand.
+///
+/// WHY NOT JUST LOWER `read_timeout`. That knob is global to the control plane
+/// and its 300s value is load-bearing: during a several-hundred-MB PUT the
+/// client reads nothing for minutes while the server ships blocks to cloud, so
+/// a short read timeout would kill healthy uploads -- the exact regression that
+/// value was chosen to avoid. This bound is applied only to requests that carry
+/// no body and return a tiny response, where a stall cannot be legitimate.
+///
+/// THE LAST ATTEMPT IS DELIBERATELY UNBOUNDED. A server that is genuinely slow
+/// -- a cold cloud backend taking longer than the deadline to list refs -- must
+/// not be newly broken by this. So the final attempt runs exactly as before,
+/// still covered by `read_timeout`. Anything that worked before still works;
+/// the only change is that a stall now gets two fast retries first.
+pub(crate) async fn send_short_control_request<F, Fut>(
+    what: &str,
+    make: F,
+) -> anyhow::Result<reqwest::Response>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = reqwest::Result<reqwest::Response>>,
+{
+    send_short_control_request_with_deadline(what, short_request_deadline_secs(), make).await
+}
+
+/// The body of [`send_short_control_request`], with the deadline passed in.
+///
+/// Split out purely so the tests can drive it with a 1s deadline instead of
+/// mutating `MEDIAGIT_SHORT_REQUEST_DEADLINE_SECS`. That env var is read
+/// per-call and process-global, so a test that set it would race every other
+/// test in the binary -- and a flaky gate for a bug this rare is worse than no
+/// gate at all.
+async fn send_short_control_request_with_deadline<F, Fut>(
+    what: &str,
+    secs: u64,
+    make: F,
+) -> anyhow::Result<reqwest::Response>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = reqwest::Result<reqwest::Response>>,
+{
+    if secs == 0 {
+        return Ok(send_with_rate_limit_retry(make).await?);
+    }
+    /// Bounded attempts before falling through to the unbounded one.
+    const BOUNDED_ATTEMPTS: u32 = 2;
+    for attempt in 1..=BOUNDED_ATTEMPTS {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(secs),
+            send_with_rate_limit_retry(&make),
+        )
+        .await
+        {
+            Ok(res) => return Ok(res?),
+            Err(_) => tracing::warn!(
+                request = what,
+                attempt,
+                bounded_attempts = BOUNDED_ATTEMPTS,
+                deadline_s = secs,
+                "no response headers within deadline; abandoning this connection \
+                 and retrying on a fresh one (see MEDIAGIT_SHORT_REQUEST_DEADLINE_SECS)"
+            ),
+        }
+    }
+    Ok(send_with_rate_limit_retry(&make).await?)
+}
+
 /// Send a control-plane request, waiting out HTTP 429 instead of failing.
 ///
 /// A large push issues one control-plane request per chunk on the
@@ -643,9 +738,10 @@ impl ProtocolClient {
         let url = format!("{}/info/refs", self.base_url);
         tracing::debug!("GET {}", url);
 
-        let response = send_with_rate_limit_retry(|| self.client.get(&url).send())
-            .await
-            .context("Failed to send GET /info/refs")?;
+        let response =
+            send_short_control_request("GET /info/refs", || self.client.get(&url).send())
+                .await
+                .context("Failed to send GET /info/refs")?;
 
         if !response.status().is_success() {
             anyhow::bail!("GET /info/refs failed with status: {}", response.status());
@@ -665,9 +761,10 @@ impl ProtocolClient {
         let url = format!("{}/info/refs", self.base_url);
         tracing::debug!("GET {}", url);
 
-        let response = send_with_rate_limit_retry(|| self.client.get(&url).send())
-            .await
-            .context("Failed to send GET /info/refs")?;
+        let response =
+            send_short_control_request("GET /info/refs", || self.client.get(&url).send())
+                .await
+                .context("Failed to send GET /info/refs")?;
 
         if response.status().as_u16() == 404 {
             return Ok(RefsResponse {
@@ -1600,5 +1697,136 @@ mod backoff_tests {
         for _ in 0..50 {
             assert!(rate_limit_backoff(30, None).as_millis() <= 16_000);
         }
+    }
+}
+
+/// Gates for the short-control-request deadline, the fix for the intermittent
+/// clone hang in which the server accepts a connection into the kernel backlog
+/// and never returns it from `accept()`.
+///
+/// Both directions are asserted, because this guard has two ways to be wrong
+/// and only one of them looks like a failure:
+///   1. it must RESCUE a stalled connection by retrying on a fresh one
+///   2. it must NOT break a server that is merely slow
+///
+/// A guard tested only in direction 1 would happily ship a client that gives up
+/// on every slow cloud backend, and the test suite would stay green.
+#[cfg(test)]
+mod short_request_deadline_tests {
+    use super::send_short_control_request_with_deadline;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const OK_BODY: &[u8] =
+        b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}";
+
+    /// Accept connections; stall the first `stall_first` of them forever, then
+    /// answer the rest after `delay`. Returns the bound address.
+    ///
+    /// The stalled sockets are deliberately LEAKED into the spawned task rather
+    /// than dropped: dropping would send FIN and the client would see a clean
+    /// connection close, which is a different failure from the one under test.
+    /// The real bug leaves the client waiting on a socket nobody answers.
+    async fn stalling_server(stall_first: usize, delay: std::time::Duration) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            let mut seen = 0usize;
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                seen += 1;
+                if seen <= stall_first {
+                    held.push(sock); // never answered, never closed
+                    continue;
+                }
+                tokio::spawn(async move {
+                    // Drain the request BEFORE answering. Closing a socket that
+                    // still has unread bytes in its receive buffer sends an RST
+                    // instead of a FIN, and the RST discards the response the
+                    // client was about to read -- surfacing as WSAECONNRESET
+                    // (10054) and looking exactly like a server bug. Read to the
+                    // end of the request headers first.
+                    let mut buf = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !buf.ends_with(b"\r\n\r\n") {
+                        match sock.read(&mut byte).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(_) => buf.push(byte[0]),
+                        }
+                    }
+                    tokio::time::sleep(delay).await;
+                    let _ = sock.write_all(OK_BODY).await;
+                    let _ = sock.flush().await;
+                    // Let the client consume the response before the socket is
+                    // dropped; a drop here would race the read on loopback.
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// Direction 1: a connection that is accepted and never answered must be
+    /// abandoned and retried on a fresh connection, and the request must
+    /// ultimately succeed. Without the fix this call never returns.
+    #[tokio::test]
+    async fn stalled_connection_is_abandoned_and_retried() {
+        let url = stalling_server(1, std::time::Duration::ZERO).await;
+        crate::ensure_crypto_provider();
+        let client = reqwest::Client::new();
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            send_short_control_request_with_deadline("GET /test", 1, || client.get(&url).send()),
+        )
+        .await
+        .expect("must not hang: the whole point of the deadline")
+        .expect("the retry on a fresh connection must succeed");
+        assert_eq!(resp.status(), 200);
+    }
+
+    /// Direction 2: a server that is merely SLOW must still be served, not
+    /// broken by the new bound. Every connection here answers, but only after
+    /// twice the deadline -- so both bounded attempts time out and the final
+    /// unbounded attempt has to carry it. If that fallback were removed this
+    /// test fails, which is exactly the regression it exists to catch.
+    #[tokio::test]
+    async fn slow_server_still_succeeds_via_the_unbounded_attempt() {
+        let url = stalling_server(0, std::time::Duration::from_secs(2)).await;
+        crate::ensure_crypto_provider();
+        let client = reqwest::Client::new();
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            send_short_control_request_with_deadline("GET /slow", 1, || client.get(&url).send()),
+        )
+        .await
+        .expect("a slow server must not be turned into a hang")
+        .expect("a slow server must still succeed");
+        assert_eq!(resp.status(), 200);
+    }
+
+    /// Proof that the two gates above are not vacuous.
+    ///
+    /// `secs = 0` disables the bound, which IS the pre-fix behaviour. Against
+    /// the identical stalling server the request must then never return. If
+    /// this ever passes, something else is rescuing the stall and the two tests
+    /// above stop being evidence that the deadline does anything -- the exact
+    /// way a guard ends up permanently green while protecting nothing.
+    #[tokio::test]
+    async fn without_the_deadline_the_same_stall_never_returns() {
+        let url = stalling_server(1, std::time::Duration::ZERO).await;
+        crate::ensure_crypto_provider();
+        let client = reqwest::Client::new();
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            send_short_control_request_with_deadline("GET /test", 0, || client.get(&url).send()),
+        )
+        .await;
+        assert!(
+            outcome.is_err(),
+            "with the bound disabled the stall must persist; it returned instead, \
+             so the deadline is not what makes the other tests pass"
+        );
     }
 }
