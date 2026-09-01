@@ -57,6 +57,68 @@ fn pack_put_backoff_ms(attempt: u32) -> u64 {
     ceiling / 2 + crate::client::jitter_upto(ceiling / 2)
 }
 
+/// Send one of this module's IDEMPOTENT pack control requests, retrying
+/// transport failures on the same budget the pack PUT uses.
+///
+/// WHY THIS EXISTS. `send_with_rate_limit_retry` is `make().await?` -- it waits
+/// out HTTP 429 and nothing else, so a transport error (a reset connection, a
+/// dropped socket) propagates on the FIRST occurrence with zero retries. Both
+/// `POST /packs/upload-urls` and `POST /packs/complete` sit on that path, and
+/// either failing makes `upload_and_register` return Err, which makes the whole
+/// pack phase return Err, which drops the entire push to the per-chunk path.
+///
+/// So the expensive fallback could be triggered by a single TCP blip on a tiny
+/// metadata call -- the pack bytes themselves might have transferred perfectly.
+/// Bounding the PUT was pointless while the two calls bracketing it had no
+/// transport retry at all.
+///
+/// ONLY FOR IDEMPOTENT REQUESTS, and only these. Minting presigned URLs has no
+/// side effect worth repeating, and re-registering a pack manifest is
+/// idempotent by design -- the QA fast-path gate documents that "a retried pack
+/// can register more than once, and that is not a failure". `POST /refs/update`
+/// is emphatically NOT in this class: it carries an `old_oid` compare-and-swap,
+/// and a transport error cannot distinguish "never arrived" from "applied,
+/// response lost", so retrying it would fail the CAS and report a spurious
+/// conflict. It keeps using `send_with_rate_limit_retry` directly.
+///
+/// Reuses `pack_put_should_give_up` / `pack_put_backoff_ms` deliberately: same
+/// tested rule, same knob, no second budget to reason about or document.
+async fn send_idempotent_pack_request<F, Fut>(
+    what: &str,
+    make: F,
+) -> reqwest::Result<reqwest::Response>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = reqwest::Result<reqwest::Response>>,
+{
+    const MAX_ATTEMPTS: u32 = 24;
+    let budget = std::time::Duration::from_secs(pack_put_retry_budget_secs());
+    let started = std::time::Instant::now();
+
+    let mut attempt = 0u32;
+    loop {
+        match crate::client::send_with_rate_limit_retry(&make).await {
+            Ok(resp) => return Ok(resp),
+            Err(e) => {
+                let wait = pack_put_backoff_ms(attempt);
+                if pack_put_should_give_up(attempt, started.elapsed(), wait, budget, MAX_ATTEMPTS) {
+                    return Err(e);
+                }
+                tracing::warn!(
+                    request = what,
+                    attempt = attempt + 1,
+                    wait_ms = wait,
+                    err = ?e,
+                    "pack control request transport failure; retrying (a fallback here \
+                     would drop the whole push to the per-chunk path)"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                attempt += 1;
+            }
+        }
+    }
+}
+
 /// Whether a pack PUT has run out of room to retry.
 ///
 /// Extracted as a free function because it IS the fix: the old bound was a bare
@@ -221,7 +283,7 @@ pub async fn upload_and_register(
         "pack_ids": [pack_oid_hex],
         "sizes": [byte_len],
     });
-    let presign_resp = crate::client::send_with_rate_limit_retry(|| {
+    let presign_resp = send_idempotent_pack_request("POST /packs/upload-urls", || {
         http_client.post(&presign_url).json(&presign_body).send()
     })
     .await
@@ -427,7 +489,10 @@ pub async fn upload_and_register(
     } else {
         // Proxy fallback: PUT to /packs/<oid> so complete_pack's head("packs/<oid>") succeeds
         let proxy_url = format!("{}/packs/{}", base_url, pack_oid_hex);
-        let resp = crate::client::send_with_rate_limit_retry(|| {
+        // Same class: the proxy PUT targets a content-addressed pack key, so
+        // re-sending is idempotent, and this IS the fallback -- letting one
+        // transport blip here fail it drops the push to per-chunk.
+        let resp = send_idempotent_pack_request("PUT /packs/<oid> (proxy)", || {
             http_client.put(&proxy_url).body(pack_data.clone()).send()
         })
         .await
@@ -462,7 +527,7 @@ pub async fn upload_and_register(
         "pack_oid": pack_oid_hex,
         "manifest": manifest,
     });
-    let complete_resp = crate::client::send_with_rate_limit_retry(|| {
+    let complete_resp = send_idempotent_pack_request("POST /packs/complete", || {
         http_client.post(&complete_url).json(&complete_body).send()
     })
     .await
@@ -483,6 +548,108 @@ pub async fn upload_and_register(
         "Pack registered with server"
     );
     Ok(presigned_direct)
+}
+
+#[cfg(test)]
+#[cfg(test)]
+mod pack_control_transport_retry_tests {
+    use super::send_idempotent_pack_request;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A server that DROPS the first `fail_first` connections without answering,
+    /// then serves 200s. Dropping mid-request is what a reset link looks like to
+    /// reqwest: a transport error, which `send_with_rate_limit_retry` propagates
+    /// on the first occurrence because it only ever waited out HTTP 429.
+    async fn flaky_server(fail_first: usize) -> (String, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let conns = Arc::new(AtomicUsize::new(0));
+        let seen = conns.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let n = seen.fetch_add(1, Ordering::SeqCst);
+                if n < fail_first {
+                    // Drop without reading or replying.
+                    drop(sock);
+                    continue;
+                }
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 2048];
+                    let _ = sock.read(&mut buf).await;
+                    let _ = sock
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                        .await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+
+        (format!("http://{addr}/packs/complete"), conns)
+    }
+
+    /// An end-to-end sanity check that the wrapper does not BREAK anything.
+    ///
+    /// HONEST LIMIT, stated so nobody mistakes this for justification: it passes
+    /// with `send_with_rate_limit_retry` too. reqwest/hyper already retries a
+    /// connection that closes without answering, so this shape never reached our
+    /// code either way. Checked both ways -- dropping at accept time, and
+    /// consuming the request first -- and neither discriminates.
+    ///
+    /// What the wrapper is actually for is the error class reqwest SURFACES
+    /// rather than absorbs: timeouts. 20260901-ga38 shows those reaching the
+    /// caller ("error sending request ... operation timed out"), and on the two
+    /// pack control calls such an error fails the pack, fails the pack phase,
+    /// and drops the whole push to the per-chunk path. Reproducing one costs a
+    /// 300s read timeout, which is not worth a unit test, so the retry decision
+    /// itself is covered by `pack_put_retry_tests` instead.
+    #[tokio::test]
+    async fn a_transport_failure_is_retried_instead_of_failing_the_pack() {
+        let (url, conns) = flaky_server(2).await;
+        crate::ensure_crypto_provider();
+        let client = reqwest::Client::new();
+
+        let resp = send_idempotent_pack_request("POST /packs/complete", || {
+            client.post(&url).json(&serde_json::json!({})).send()
+        })
+        .await
+        .expect("two dropped connections must be retried, not surfaced");
+
+        assert_eq!(resp.status(), 200);
+        assert!(
+            conns.load(Ordering::SeqCst) >= 3,
+            "expected the two failures plus a success, saw {}",
+            conns.load(Ordering::SeqCst)
+        );
+    }
+
+    /// The other half. A guard that simply retried everything would pass the
+    /// test above while quietly multiplying every healthy request; a healthy
+    /// call must cost exactly one connection.
+    #[tokio::test]
+    async fn a_healthy_request_is_not_retried() {
+        let (url, conns) = flaky_server(0).await;
+        crate::ensure_crypto_provider();
+        let client = reqwest::Client::new();
+
+        let resp = send_idempotent_pack_request("POST /packs/complete", || {
+            client.post(&url).json(&serde_json::json!({})).send()
+        })
+        .await
+        .expect("healthy request");
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            conns.load(Ordering::SeqCst),
+            1,
+            "a healthy request must not be retried"
+        );
+    }
 }
 
 #[cfg(test)]
