@@ -12,11 +12,19 @@ use std::path::PathBuf;
 /// WHY A TIME BUDGET AND NOT AN ATTEMPT COUNT. The previous bound was five
 /// attempts with an equal-jitter backoff whose ceiling doubled from 250ms, so
 /// the four waits summed to 1.9-3.75s. That is the total amount of link trouble
-/// a pack upload could survive: under four seconds. 20260901-ga38 measured the
-/// waits directly (`wait_ms` 130-227) and 20260901-ga39 lost 16 of 16 azure
-/// packs to it. A link that wobbles for ten seconds -- which is ordinary on
-/// Wi-Fi, and routine on a saturated uplink -- exhausted the budget every time
-/// and dropped the whole push off the cloud-pack fast path.
+/// a pack upload could survive: under four seconds. 20260901-ga38 measured both
+/// halves of that -- the waits directly (`wait_ms` 130-227) and the consequence:
+/// five `pack push FAILED after retries`, with the gcs arm registering 16 of 32
+/// packs and falling back to 97 per-chunk proxy PUTs. A link that wobbles for
+/// ten seconds -- ordinary on Wi-Fi, routine on a saturated uplink -- exhausts
+/// the budget and drops the push off the cloud-pack fast path.
+///
+/// NOT evidenced by ga39's azure arm, despite the superficially similar
+/// 32-vs-16: there all 16 packs registered, ChunkPuts was 0 and the push exited
+/// 0. That was the existing retry SUCCEEDING via a re-signed URL, and the gate
+/// misreporting it -- fixed separately in `Get-QaPackFastPathCounts`. Cited here
+/// because mistaking a working retry for a failing one is how a budget gets
+/// tuned against noise.
 ///
 /// An outage is measured in seconds-to-minutes, so the bound that matters is
 /// wall-clock, not a count. 120s rides out a typical reconnect while still
