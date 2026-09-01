@@ -306,7 +306,46 @@ pub async fn upload_and_register(
         .context("read pack temp file")?
         .into();
 
-    if let Some(Some(purl)) = presign_map.get(&pack_oid_hex) {
+    // 2a. Multipart first, for packs big enough to be worth it.
+    //
+    // WHY. The pack fast path was the ONLY large-object upload in the product
+    // still doing a single all-or-nothing PUT: the per-chunk path has used MPU
+    // above `MEDIAGIT_MPU_THRESHOLD_BYTES` for a long time. So the FAST path had
+    // coarser retry granularity than the fallback it exists to beat -- a pack
+    // failing at 63 of 64 MiB re-sent all 64 MiB, and with a wall-clock retry
+    // budget that is a lot of re-sent bytes on a thin link. Inverted, for a
+    // product whose whole job is heavy files.
+    //
+    // With MPU a transport failure costs one PART, not the pack. That is also
+    // what makes MEDIAGIT_PACK_PUT_RETRY_BUDGET_SECS unambiguously good rather
+    // than a bandwidth trade.
+    //
+    // Degrades on every axis instead of failing:
+    //   backend without presigned MPU (GCS/Azure/local) -> 501 -> single PUT
+    //   server without the /packs/mpu routes            -> 404 -> single PUT
+    //   any part failure                                -> abort, single PUT
+    // so this can only add a faster path, never remove the existing one.
+    let mpu_threshold = std::env::var("MEDIAGIT_MPU_THRESHOLD_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(16 * 1024 * 1024);
+    let uploaded_via_mpu = byte_len >= mpu_threshold
+        && crate::client::upload_object_mpu(
+            http_client,
+            direct_client,
+            base_url,
+            "packs",
+            &pack_oid_hex,
+            &pack_data,
+        )
+        .await;
+
+    if uploaded_via_mpu {
+        tracing::debug!(pack = %pack_oid_hex, bytes = byte_len, "Pack uploaded via MPU");
+        // Direct to the bucket, same as the presigned single PUT, so the
+        // bench/QA "did the fast path hold?" signal reads it as direct.
+        presigned_direct = true;
+    } else if let Some(Some(purl)) = presign_map.get(&pack_oid_hex) {
         let put_url = purl["url"].as_str().unwrap_or("").to_string();
         // Presigned direct-to-bucket PUT — not server-bound, so not routed
         // through send_with_rate_limit_retry: a 429 here comes from the BUCKET,

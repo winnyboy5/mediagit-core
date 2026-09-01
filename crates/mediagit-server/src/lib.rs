@@ -305,6 +305,16 @@ fn build_router(state: Arc<AppState>, rate_limiter: Option<SharedRateLimiter>) -
         .route("/{repo}/chunks/mpu/start", post(handlers::mpu_start))
         .route("/{repo}/chunks/mpu/complete", post(handlers::mpu_complete))
         .route("/{repo}/chunks/mpu/abort", post(handlers::mpu_abort))
+        // Pack MPU: same handlers, "packs/" prefix. Separate routes rather
+        // than a `kind` field so an old server 404s and the client falls
+        // back to single-PUT, instead of silently writing a pack under
+        // chunks/. See the note above the wrappers in handlers/transfer.rs.
+        .route("/{repo}/packs/mpu/start", post(handlers::pack_mpu_start))
+        .route(
+            "/{repo}/packs/mpu/complete",
+            post(handlers::pack_mpu_complete),
+        )
+        .route("/{repo}/packs/mpu/abort", post(handlers::pack_mpu_abort))
         .route(
             "/{repo}/chunks/{chunk_id}",
             get(handlers::download_chunk).put(handlers::upload_chunk),

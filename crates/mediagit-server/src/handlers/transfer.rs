@@ -712,7 +712,8 @@ pub struct MpuAbortRequest {
 /// Request: `{ chunk_id: hex, chunk_size: u64 }`
 /// Response: `{ upload_id, parts: [{ part_number, url }], part_size }` — or 501 when the backend
 /// does not support MPU (client should fall back to single-PUT presigned URL).
-pub async fn mpu_start(
+async fn mpu_start_for(
+    prefix: &str,
     Path(repo): Path<String>,
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
@@ -737,7 +738,7 @@ pub async fn mpu_start(
     }
     let storage = get_or_init_storage(&state, &repo_path).await?;
     let ttl = std::time::Duration::from_secs(state.presigned_url_ttl_secs);
-    let key = format!("chunks/{}", req.chunk_id);
+    let key = format!("{}/{}", prefix, req.chunk_id);
 
     match storage
         .create_presigned_mpu(&key, req.chunk_size, ttl)
@@ -792,7 +793,8 @@ pub async fn mpu_start(
 ///
 /// Request: `{ chunk_id: hex, upload_id, parts: [{ part_number, etag }] }`
 /// Response: 204 No Content on success.
-pub async fn mpu_complete(
+async fn mpu_complete_for(
+    prefix: &str,
     Path(repo): Path<String>,
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
@@ -816,7 +818,7 @@ pub async fn mpu_complete(
         return Err(StatusCode::NOT_FOUND);
     }
     let storage = get_or_init_storage(&state, &repo_path).await?;
-    let key = format!("chunks/{}", req.chunk_id);
+    let key = format!("{}/{}", prefix, req.chunk_id);
 
     let parts = req
         .parts
@@ -843,7 +845,8 @@ pub async fn mpu_complete(
 ///
 /// Request: `{ chunk_id: hex, upload_id }`
 /// Response: 204 No Content (idempotent).
-pub async fn mpu_abort(
+async fn mpu_abort_for(
+    prefix: &str,
     Path(repo): Path<String>,
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
@@ -867,12 +870,86 @@ pub async fn mpu_abort(
         return Err(StatusCode::NOT_FOUND);
     }
     let storage = get_or_init_storage(&state, &repo_path).await?;
-    let key = format!("chunks/{}", req.chunk_id);
+    let key = format!("{}/{}", prefix, req.chunk_id);
 
     let _ = storage.abort_presigned_mpu(&key, &req.upload_id).await;
 
     tracing::debug!(repo = %repo, chunk = %req.chunk_id, "MPU aborted");
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// MPU route pairs: identical logic, different object-store prefix.
+//
+// SEPARATE ROUTES, NOT A `kind` FIELD ON THE REQUEST. Adding a field would be
+// wire-compatible in the loose sense -- serde ignores unknown fields by default
+// -- and that is exactly the hazard: an OLD server receiving `kind: "pack"`
+// would silently ignore it and initiate the upload against `chunks/<pack_oid>`.
+// The pack bytes would land under the wrong prefix, and `complete_pack`'s
+// `head("packs/<oid>")` would then fail on an upload that "succeeded".
+//
+// A new route degrades honestly instead: an old server 404s, the client sees a
+// non-success status and falls back to the single-PUT path it already has.
+// ---------------------------------------------------------------------------
+
+/// POST /:repo/chunks/mpu/start
+pub async fn mpu_start(
+    path: Path<String>,
+    state: State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    body: Json<MpuStartRequest>,
+) -> Result<Json<MpuStartResponse>, StatusCode> {
+    mpu_start_for("chunks", path, state, auth_user, body).await
+}
+
+/// POST /:repo/packs/mpu/start — same, for a cloud pack object.
+pub async fn pack_mpu_start(
+    path: Path<String>,
+    state: State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    body: Json<MpuStartRequest>,
+) -> Result<Json<MpuStartResponse>, StatusCode> {
+    mpu_start_for("packs", path, state, auth_user, body).await
+}
+
+/// POST /:repo/chunks/mpu/complete
+pub async fn mpu_complete(
+    path: Path<String>,
+    state: State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    body: Json<MpuCompleteRequest>,
+) -> Result<impl IntoResponse, StatusCode> {
+    mpu_complete_for("chunks", path, state, auth_user, body).await
+}
+
+/// POST /:repo/packs/mpu/complete
+pub async fn pack_mpu_complete(
+    path: Path<String>,
+    state: State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    body: Json<MpuCompleteRequest>,
+) -> Result<impl IntoResponse, StatusCode> {
+    mpu_complete_for("packs", path, state, auth_user, body).await
+}
+
+/// POST /:repo/chunks/mpu/abort
+pub async fn mpu_abort(
+    path: Path<String>,
+    state: State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    body: Json<MpuAbortRequest>,
+) -> Result<impl IntoResponse, StatusCode> {
+    mpu_abort_for("chunks", path, state, auth_user, body).await
+}
+
+/// POST /:repo/packs/mpu/abort
+pub async fn pack_mpu_abort(
+    path: Path<String>,
+    state: State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+    body: Json<MpuAbortRequest>,
+) -> Result<impl IntoResponse, StatusCode> {
+    mpu_abort_for("packs", path, state, auth_user, body).await
 }
 
 #[derive(serde::Deserialize)]

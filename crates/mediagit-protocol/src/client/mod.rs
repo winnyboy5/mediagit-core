@@ -1135,6 +1135,37 @@ pub(crate) async fn upload_chunk_mpu(
     chunk_hex: &str,
     chunk_data: &[u8],
 ) -> bool {
+    upload_object_mpu(
+        api_client,
+        direct_client,
+        base_url,
+        "chunks",
+        chunk_hex,
+        chunk_data,
+    )
+    .await
+}
+
+/// Upload one object via server-orchestrated MPU under `family` (`chunks` or
+/// `packs`).
+///
+/// `family` selects the route set, NOT a request field: an old server simply
+/// 404s on `/packs/mpu/start` and this returns false, so the caller falls back
+/// to the single-PUT path it already had. A `kind` field would instead be
+/// silently ignored by an old server, which would initiate the upload against
+/// `chunks/<pack_oid>` -- the wrong prefix, and a `complete_pack` head() failure
+/// on an upload that reported success.
+///
+/// The wire field stays `chunk_id` for both so the server's request types and
+/// hex validation are shared; only the object-store prefix differs.
+pub(crate) async fn upload_object_mpu(
+    api_client: &reqwest::Client,
+    direct_client: &reqwest::Client,
+    base_url: &str,
+    family: &str,
+    chunk_hex: &str,
+    chunk_data: &[u8],
+) -> bool {
     #[derive(serde::Serialize)]
     struct StartReq<'a> {
         chunk_id: &'a str,
@@ -1174,7 +1205,7 @@ pub(crate) async fn upload_chunk_mpu(
     }
 
     // --- Start MPU ---
-    let start_url = format!("{}/chunks/mpu/start", base_url);
+    let start_url = format!("{}/{}/mpu/start", base_url, family);
     let resp = match send_with_rate_limit_retry(|| {
         api_client
             .post(&start_url)
@@ -1301,7 +1332,7 @@ pub(crate) async fn upload_chunk_mpu(
                             );
                             let _ = send_with_rate_limit_retry(|| {
                                 api_client
-                                    .post(format!("{}/chunks/mpu/abort", base_url))
+                                    .post(format!("{}/{}/mpu/abort", base_url, family))
                                     .json(&AbortReq {
                                         chunk_id: chunk_hex,
                                         upload_id: &upload_id,
@@ -1338,7 +1369,7 @@ pub(crate) async fn upload_chunk_mpu(
                 );
                 let _ = send_with_rate_limit_retry(|| {
                     api_client
-                        .post(format!("{}/chunks/mpu/abort", base_url))
+                        .post(format!("{}/{}/mpu/abort", base_url, family))
                         .json(&AbortReq {
                             chunk_id: chunk_hex,
                             upload_id: &upload_id,
@@ -1352,7 +1383,7 @@ pub(crate) async fn upload_chunk_mpu(
     }
 
     // --- Complete MPU ---
-    let complete_url = format!("{}/chunks/mpu/complete", base_url);
+    let complete_url = format!("{}/{}/mpu/complete", base_url, family);
     let complete_resp = match send_with_rate_limit_retry(|| {
         api_client
             .post(&complete_url)
