@@ -585,14 +585,51 @@ where
         .await
         {
             Ok(res) => return Ok(res?),
-            Err(_) => tracing::warn!(
-                request = what,
-                attempt,
-                bounded_attempts = BOUNDED_ATTEMPTS,
-                deadline_s = secs,
-                "no response headers within deadline; abandoning this connection \
-                 and retrying on a fresh one (see MEDIAGIT_SHORT_REQUEST_DEADLINE_SECS)"
-            ),
+            Err(_) => {
+                // Runtime state at the moment of the stall. 20260901-ga38 pinned
+                // every retry to a server-side accept with second precision: the
+                // server ACCEPTS each fresh connection and the request never
+                // reaches its router, while the client sits at flat CPU with all
+                // threads in Wait. Two very different faults produce that, and
+                // nothing on record can tell them apart:
+                //
+                //   queue backed up / tasks piling up -> the runtime is starved or
+                //       deadlocked, and the connection future is simply never
+                //       polled (something is blocking an async worker)
+                //   queue empty, task count normal    -> the runtime is healthy and
+                //       the stall is inside the connection itself
+                //
+                // Logged only when a request has ALREADY missed its deadline, so
+                // this costs nothing on a healthy run. WARN, not info: main.rs
+                // pins the CLI filter to `warn` unless --verbose or MEDIAGIT_LOG is
+                // set, and an info line here would be invisible in exactly the
+                // campaign runs that catch this (the same trap that made
+                // pack_builder's retry logging useless until it was raised).
+                //
+                // Only the metrics stable without `tokio_unstable` are read.
+                let (workers, alive, queued) = match tokio::runtime::Handle::try_current() {
+                    Ok(h) => {
+                        let m = h.metrics();
+                        (
+                            m.num_workers() as i64,
+                            m.num_alive_tasks() as i64,
+                            m.global_queue_depth() as i64,
+                        )
+                    }
+                    Err(_) => (-1, -1, -1),
+                };
+                tracing::warn!(
+                    request = what,
+                    attempt,
+                    bounded_attempts = BOUNDED_ATTEMPTS,
+                    deadline_s = secs,
+                    rt_workers = workers,
+                    rt_alive_tasks = alive,
+                    rt_global_queue_depth = queued,
+                    "no response headers within deadline; abandoning this connection \
+                     and retrying on a fresh one (see MEDIAGIT_SHORT_REQUEST_DEADLINE_SECS)"
+                )
+            }
         }
     }
     Ok(send_with_rate_limit_retry(&make).await?)
