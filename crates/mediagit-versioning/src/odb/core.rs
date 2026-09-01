@@ -332,6 +332,42 @@ impl ObjectDatabase {
     /// # Ok(())
     /// # }
     /// ```
+    /// `exists()` for the write-path dedup check, degrading to "absent" when the
+    /// backend cannot answer.
+    ///
+    /// WHY. This check is an OPTIMISATION - it skips re-uploading bytes that are
+    /// already there - not a correctness gate. Propagating its error made one
+    /// transient metadata hiccup fail an entire push: in 20260901-ga39 a single
+    /// GCS `get_object` returned `Cancelled` ("connection closed") after its 3
+    /// retry attempts, and `POST /objects/pack` answered 500 and killed a
+    /// multi-thousand-object push that was otherwise fine.
+    ///
+    /// Assuming ABSENT is the safe direction. Keys here are content-addressed
+    /// (`oid.to_hex()`), so the worst case is re-writing identical bytes to the
+    /// same key - idempotent, costing one redundant upload.
+    ///
+    /// This cannot mask a genuinely broken backend: the write that follows goes
+    /// to the same storage, so a real outage still fails loudly one line later.
+    /// What it stops is a *metadata* blip taking down a *data* transfer.
+    ///
+    /// NOT used by `delete_object`: there a failed `exists()` means we cannot
+    /// tell whether a delete is needed, and assuming absent would silently skip
+    /// it. That call keeps propagating its error.
+    async fn exists_for_dedup(&self, key: &str) -> bool {
+        match self.storage.exists(key).await {
+            Ok(present) => present,
+            Err(e) => {
+                tracing::warn!(
+                    key = %key,
+                    err = ?e,
+                    "dedup existence check failed; assuming the object is absent and \
+                     writing it. This costs one redundant upload, not the push."
+                );
+                false
+            }
+        }
+    }
+
     pub async fn write(&self, obj_type: ObjectType, data: &[u8]) -> anyhow::Result<Oid> {
         // Delegate to smart-compression path when available.
         // write_with_path with an empty filename falls back to magic-byte type detection,
@@ -354,8 +390,9 @@ impl ObjectDatabase {
         // Build storage key (LocalBackend will handle sharding)
         let key = oid.to_hex();
 
-        // Check if object already exists (deduplication)
-        let exists = self.storage.exists(&key).await?;
+        // Check if object already exists (deduplication).
+        // Degrades to "absent" on a transient backend error - see exists_for_dedup.
+        let exists = self.exists_for_dedup(&key).await;
 
         if exists {
             debug!(oid = %oid, "Object already exists (deduplicated)");
@@ -454,8 +491,9 @@ impl ObjectDatabase {
         // Build storage key
         let key = oid.to_hex();
 
-        // Check if object already exists (deduplication)
-        let exists = self.storage.exists(&key).await?;
+        // Check if object already exists (deduplication).
+        // Degrades to "absent" on a transient backend error - see exists_for_dedup.
+        let exists = self.exists_for_dedup(&key).await;
 
         if exists {
             debug!(oid = %oid, "Object already exists (deduplicated)");

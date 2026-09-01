@@ -2094,6 +2094,95 @@ mod tests {
         let oid = Oid::from_hex(base_oid_hex).unwrap();
         assert_eq!(oid.to_hex(), test_oid);
     }
+    /// Storage wrapper that COUNTS `put()` calls and can force `exists()` to
+    /// fail, so the write-path dedup guard can be observed in both directions.
+    #[derive(Debug)]
+    struct CountingBackend {
+        inner: Arc<dyn StorageBackend>,
+        puts: Arc<std::sync::atomic::AtomicUsize>,
+        exists_fails: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl StorageBackend for CountingBackend {
+        async fn get(&self, key: &str) -> anyhow::Result<Vec<u8>> {
+            self.inner.get(key).await
+        }
+        async fn put(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
+            self.puts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.put(key, data).await
+        }
+        async fn exists(&self, key: &str) -> anyhow::Result<bool> {
+            if self.exists_fails {
+                // The exact shape seen in 20260901-ga39: a transport-level
+                // cancellation from the metadata call, not a 404.
+                anyhow::bail!("simulated transport failure: connection closed");
+            }
+            self.inner.exists(key).await
+        }
+        async fn delete(&self, key: &str) -> anyhow::Result<()> {
+            self.inner.delete(key).await
+        }
+        async fn list_objects(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+            self.inner.list_objects(prefix).await
+        }
+        async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+            self.inner.head(key).await
+        }
+    }
+
+    async fn write_twice_counting_puts(exists_fails: bool) -> (usize, Oid) {
+        let puts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let backend: Arc<dyn StorageBackend> = Arc::new(CountingBackend {
+            inner: Arc::new(MockBackend::new()),
+            puts: puts.clone(),
+            exists_fails,
+        });
+        let odb = ObjectDatabase::new(backend, 100);
+
+        let data = b"dedup guard payload";
+        let first = odb
+            .write(ObjectType::Blob, data)
+            .await
+            .expect("first write");
+        let second = odb
+            .write(ObjectType::Blob, data)
+            .await
+            .expect("second write must succeed even when exists() cannot answer");
+        assert_eq!(first, second, "same content must yield the same oid");
+
+        (puts.load(std::sync::atomic::Ordering::SeqCst), first)
+    }
+
+    /// Half 1 - the guard FIRES. A backend that cannot answer `exists()` must
+    /// not fail the write: 20260901-ga39 had one GCS `Cancelled` on a metadata
+    /// call turn into a 500 that killed a whole push.
+    #[tokio::test]
+    async fn write_survives_an_exists_check_that_cannot_answer() {
+        let (puts, _oid) = write_twice_counting_puts(true).await;
+
+        // Degrades to "assume absent", so both writes store. That redundancy is
+        // the whole cost of the guard - and it is content-addressed, so the two
+        // puts carry identical bytes to the same key.
+        assert_eq!(
+            puts, 2,
+            "a failing exists() must degrade to assume-absent and still write"
+        );
+    }
+
+    /// Half 2 - the guard STAYS QUIET. Without this, a guard that simply
+    /// disabled deduplication would pass half 1 and silently double every
+    /// upload. This suite has shipped six guards that could not fail; this is
+    /// the half that catches that.
+    #[tokio::test]
+    async fn a_healthy_exists_check_still_deduplicates() {
+        let (puts, _) = write_twice_counting_puts(false).await;
+
+        assert_eq!(
+            puts, 1,
+            "a working exists() must still dedup the second identical write"
+        );
+    }
 }
 
 /// C3: the streaming verify-hash must be bit-identical to the one-shot hash it
