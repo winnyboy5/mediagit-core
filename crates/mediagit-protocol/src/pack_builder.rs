@@ -5,6 +5,76 @@ use anyhow::{Context, Result};
 use mediagit_versioning::{CloudPackResult, ObjectType, Oid, PackKind, StreamingPackWriter};
 use std::path::PathBuf;
 
+/// How long to keep retrying ONE pack PUT through transport and transient-status
+/// failures, in seconds. `MEDIAGIT_PACK_PUT_RETRY_BUDGET_SECS`; `0` restores the
+/// old attempt-count-only behaviour.
+///
+/// WHY A TIME BUDGET AND NOT AN ATTEMPT COUNT. The previous bound was five
+/// attempts with an equal-jitter backoff whose ceiling doubled from 250ms, so
+/// the four waits summed to 1.9-3.75s. That is the total amount of link trouble
+/// a pack upload could survive: under four seconds. 20260901-ga38 measured the
+/// waits directly (`wait_ms` 130-227) and 20260901-ga39 lost 16 of 16 azure
+/// packs to it. A link that wobbles for ten seconds -- which is ordinary on
+/// Wi-Fi, and routine on a saturated uplink -- exhausted the budget every time
+/// and dropped the whole push off the cloud-pack fast path.
+///
+/// An outage is measured in seconds-to-minutes, so the bound that matters is
+/// wall-clock, not a count. 120s rides out a typical reconnect while still
+/// failing in bounded time against a backend that is genuinely gone.
+///
+/// Retrying is safe to do at length here: the PUT targets a content-addressed
+/// key with the same pack bytes, so re-sending is idempotent. On a healthy link
+/// nothing changes at all -- the first attempt succeeds and none of this runs.
+fn pack_put_retry_budget_secs() -> u64 {
+    std::env::var("MEDIAGIT_PACK_PUT_RETRY_BUDGET_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(120)
+}
+
+/// Equal-jitter backoff for pack PUT retries, capped so the wait actually
+/// reaches a useful size.
+///
+/// Half fixed so the wait grows, half random so concurrent pack uploads do not
+/// retry in lockstep -- which matters here, since ga11's GCS failures arrived as
+/// a simultaneous burst.
+///
+/// The 30s ceiling only raises the old 16s one; it is NOT where the bug was.
+/// The old schedule never got near its own ceiling because it stopped at five
+/// attempts -- waits of 0.125-0.25, 0.25-0.5, 0.5-1 and 1-2s, so 1.9-3.75s in
+/// total. The budget in `pack_put_should_give_up` is the actual fix.
+fn pack_put_backoff_ms(attempt: u32) -> u64 {
+    const CEILING_MAX_MS: u64 = 30_000;
+    let ceiling = (250u64.saturating_mul(1u64 << attempt.min(10))).min(CEILING_MAX_MS);
+    ceiling / 2 + crate::client::jitter_upto(ceiling / 2)
+}
+
+/// Whether a pack PUT has run out of room to retry.
+///
+/// Extracted as a free function because it IS the fix: the old bound was a bare
+/// `attempt + 1 == 5`, which let a pack upload survive only 1.9-3.75s of link
+/// trouble regardless of how long the outage actually lasted. Keeping it inline
+/// would have left the one load-bearing rule untestable, and the backoff curve
+/// -- which barely changed -- as the only thing under test.
+///
+/// `budget` of zero restores the historical five-attempt behaviour exactly, so
+/// `MEDIAGIT_PACK_PUT_RETRY_BUDGET_SECS=0` is a true revert switch.
+fn pack_put_should_give_up(
+    attempt: u32,
+    elapsed: std::time::Duration,
+    wait_ms: u64,
+    budget: std::time::Duration,
+    max_attempts: u32,
+) -> bool {
+    if attempt + 1 >= max_attempts {
+        return true;
+    }
+    if budget.is_zero() {
+        return attempt + 1 >= 5;
+    }
+    elapsed + std::time::Duration::from_millis(wait_ms) > budget
+}
+
 fn bytes_to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
@@ -185,12 +255,27 @@ pub async fn upload_and_register(
         // a burst inside one second, the shape of throttling). Neither was
         // retried even once.
         //
-        // Reuses `error_class::classify_auto` and the same 5-attempt budget the
-        // per-chunk MPU path already uses (`client/mod.rs:1010`), so pack and
-        // part uploads behave alike. Permanent* still bails immediately —
-        // retrying a 403 five times re-sends the whole pack body and cannot
-        // succeed.
-        const MAX_PACK_PUT_ATTEMPTS: u32 = 5;
+        // Reuses `error_class::classify_auto`. Permanent* still bails
+        // immediately — re-sending a whole pack body against a 403 cannot
+        // succeed however long the budget is.
+        // Hard backstop only. The real bound is the wall-clock budget below --
+        // see `pack_put_retry_budget_secs` for why an attempt count alone was
+        // the wrong shape. This stays so a pathological zero-latency failure
+        // loop cannot spin unboundedly inside the budget.
+        const MAX_PACK_PUT_ATTEMPTS: u32 = 24;
+        let retry_budget = std::time::Duration::from_secs(pack_put_retry_budget_secs());
+        let put_started = std::time::Instant::now();
+        // `true` when there is no time left to sleep and try again, so both the
+        // transport and the transient-status arms give up on the same rule.
+        let out_of_budget = |attempt: u32, wait_ms: u64| -> bool {
+            pack_put_should_give_up(
+                attempt,
+                put_started.elapsed(),
+                wait_ms,
+                retry_budget,
+                MAX_PACK_PUT_ATTEMPTS,
+            )
+        };
         let mut last_status = String::new();
         let mut sent = false;
         for attempt in 0..MAX_PACK_PUT_ATTEMPTS {
@@ -227,19 +312,23 @@ pub async fn upload_and_register(
             //
             // Every send() error is retried, not a hand-picked subset: no
             // response arrived, so there is nothing to classify as permanent,
-            // and the 5-attempt bound already caps the cost of being wrong.
+            // and the retry BUDGET already caps the cost of being wrong.
             let resp = match req.send().await {
                 Ok(r) => r,
                 Err(e) => {
-                    if attempt + 1 == MAX_PACK_PUT_ATTEMPTS {
+                    let wait = pack_put_backoff_ms(attempt);
+                    if out_of_budget(attempt, wait) {
+                        let spent = put_started.elapsed().as_secs_f64();
                         return Err(anyhow::Error::new(e))
                             .context("presigned PUT of pack")
                             .with_context(|| {
-                                format!("after {MAX_PACK_PUT_ATTEMPTS} transport attempts")
+                                format!(
+                                    "after {} transport attempts over {spent:.1}s \
+                                     (MEDIAGIT_PACK_PUT_RETRY_BUDGET_SECS)",
+                                    attempt + 1
+                                )
                             });
                     }
-                    let ceiling = 250u64 * (1u64 << attempt.min(6));
-                    let wait = ceiling / 2 + crate::client::jitter_upto(ceiling / 2);
                     // WARN, and the level is load-bearing: this went
                     // debug -> info -> warn, and only the last one works.
                     //
@@ -298,9 +387,13 @@ pub async fn upload_and_register(
             use crate::error_class::{TransferOutcome, classify_auto};
             match classify_auto(status.as_u16(), &put_url, &ct, &hdr_code, body_ref) {
                 TransferOutcome::Transient | TransferOutcome::RefreshUrl => {
-                    if attempt + 1 == MAX_PACK_PUT_ATTEMPTS {
+                    let wait = pack_put_backoff_ms(attempt);
+                    if out_of_budget(attempt, wait) {
+                        let spent = put_started.elapsed().as_secs_f64();
                         anyhow::bail!(
-                            "presigned PUT returned {status} after {MAX_PACK_PUT_ATTEMPTS} attempts"
+                            "presigned PUT returned {status} after {} attempts over \
+                             {spent:.1}s (MEDIAGIT_PACK_PUT_RETRY_BUDGET_SECS)",
+                            attempt + 1
                         );
                     }
                     tracing::debug!(
@@ -309,13 +402,6 @@ pub async fn upload_and_register(
                         %status,
                         "pack PUT transient error; retrying"
                     );
-                    // Equal-jitter backoff, same shape as `rate_limit_backoff`:
-                    // half fixed so the wait actually grows, half random so
-                    // concurrent pack uploads do not retry in lockstep — which
-                    // matters here, since ga11's GCS failures arrived as a
-                    // simultaneous burst.
-                    let ceiling = 250u64 * (1u64 << attempt.min(6));
-                    let wait = ceiling / 2 + crate::client::jitter_upto(ceiling / 2);
                     tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
                 }
                 TransferOutcome::PermanentChunk
@@ -389,4 +475,78 @@ pub async fn upload_and_register(
         "Pack registered with server"
     );
     Ok(presigned_direct)
+}
+
+#[cfg(test)]
+mod pack_put_retry_tests {
+    use super::{pack_put_backoff_ms, pack_put_should_give_up};
+    use std::time::Duration;
+
+    const MAX: u32 = 24;
+    const BUDGET: Duration = Duration::from_secs(120);
+
+    /// THE REGRESSION, stated as a test. The old rule was `attempt + 1 == 5`,
+    /// so a fifth transport failure ended the pack upload no matter how little
+    /// time had passed -- 20260901-ga39 lost 16 of 16 azure packs that way.
+    /// Four seconds into a 120s budget there is plainly room to keep going.
+    ///
+    /// This assertion FAILS against the old bound, which is the point: the
+    /// backoff-curve tests below pass either way and prove nothing on their own.
+    #[test]
+    fn a_fifth_failure_early_in_the_budget_keeps_retrying() {
+        assert!(
+            !pack_put_should_give_up(4, Duration::from_secs(4), 2_000, BUDGET, MAX),
+            "five quick failures must not end a pack upload with 116s of budget left"
+        );
+    }
+
+    /// The other half: the budget must actually stop. A guard that only ever
+    /// said "keep going" would pass the test above and hang on a dead backend.
+    #[test]
+    fn an_exhausted_budget_gives_up() {
+        assert!(
+            pack_put_should_give_up(6, Duration::from_secs(119), 30_000, BUDGET, MAX),
+            "a wait that would overrun the budget must end the retry loop"
+        );
+    }
+
+    /// The attempt backstop still binds, so a zero-latency failure loop cannot
+    /// spin forever inside the budget.
+    #[test]
+    fn the_attempt_backstop_still_binds() {
+        assert!(
+            pack_put_should_give_up(MAX - 1, Duration::ZERO, 0, BUDGET, MAX),
+            "the hard attempt cap must hold even with budget remaining"
+        );
+    }
+
+    /// `MEDIAGIT_PACK_PUT_RETRY_BUDGET_SECS=0` is a true revert switch.
+    #[test]
+    fn a_zero_budget_restores_the_old_five_attempt_rule() {
+        assert!(!pack_put_should_give_up(
+            3,
+            Duration::ZERO,
+            0,
+            Duration::ZERO,
+            MAX
+        ));
+        assert!(pack_put_should_give_up(
+            4,
+            Duration::ZERO,
+            0,
+            Duration::ZERO,
+            MAX
+        ));
+    }
+
+    #[test]
+    fn backoff_grows_and_is_capped() {
+        assert!(pack_put_backoff_ms(0) < pack_put_backoff_ms(6));
+        for attempt in 0..40 {
+            assert!(
+                pack_put_backoff_ms(attempt) <= 30_000,
+                "attempt {attempt} exceeded the 30s ceiling"
+            );
+        }
+    }
 }
