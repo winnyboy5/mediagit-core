@@ -906,13 +906,62 @@ function Get-QaPackFastPathCounts([string]$LogPath) {
   $txt = Get-Content $LogPath -Raw -ErrorAction SilentlyContinue
   if (-not $txt) { return $null }
   $txt = $txt -replace "\x1b\[[0-9;]*m", ""
-  $offered = 0
-  foreach ($m in [regex]::Matches($txt, "Presigned pack upload URLs generated[^\r\n]*?count=(\d+)")) {
-    $offered += [int]$m.Groups[1].Value
+  # DISTINCT pack ids on both sides, not a sum of count=N against a line count.
+  #
+  # Summing counted URL MINTINGS, and a slow link re-signs. 20260901-ga39: azure
+  # logged 32 presign requests for 16 DISTINCT packs, 16 registrations, ZERO
+  # per-chunk proxy PUTs and push exit 0 - a healthy push the gate reported as
+  # "16 of 32 packs never registered; the push fell back to the per-chunk path".
+  # Both halves were false. aws showed the same shape at 32-vs-31. Fast backends
+  # re-sign nothing, which is why local and minio sat at 172==172 and this only
+  # ever surfaced on cloud.
+  #
+  # The note below already worried about exactly this ("the kind of coincidence
+  # that becomes a false gate the day the client batches") - it just guarded the
+  # wrong direction.
+  #
+  # Completed is de-duplicated too, and that is not cosmetic: the gate's rule is
+  # Completed >= Offered, so counting raw registration LINES against distinct
+  # offers lets one pack registering twice mask another that never registered at
+  # all (2 >= 2 passes while a pack is genuinely missing). Distinct-vs-distinct
+  # compares like with like.
+  $offeredIds = @{}
+  foreach ($m in [regex]::Matches($txt, "Presigned pack upload URLs generated[^\r\n]*?packs=([0-9a-f,]+)")) {
+    foreach ($id in $m.Groups[1].Value.Split(",")) {
+      if ($id) { $offeredIds[$id] = $true }
+    }
   }
+  $offered = $offeredIds.Count
+
+  # FALLBACK, and it is load-bearing. A server predating the `packs=` field logs
+  # no ids, leaving $offered at 0 - and `Offered -le 0` makes the gate SKIP with
+  # "fast path not offered". That would silently switch the gate OFF against an
+  # older binary, which is the gate-that-cannot-fail shape this suite keeps
+  # finding in itself. Falling back to the old sum keeps it gating, just as
+  # coarsely as it did before.
+  $usedIds = $offered -gt 0
+  if (-not $usedIds) {
+    foreach ($m in [regex]::Matches($txt, "Presigned pack upload URLs generated[^\r\n]*?count=(\d+)")) {
+      $offered += [int]$m.Groups[1].Value
+    }
+  }
+
+  $completedIds = @{}
+  foreach ($m in [regex]::Matches($txt, "Pack manifest registered[^\r\n]*?pack=([0-9a-f]+)")) {
+    $completedIds[$m.Groups[1].Value] = $true
+  }
+  # Symmetry: only de-duplicate Completed when Offered is also de-duplicated.
+  # Mixing distinct-completed with summed-offered on an old log would compare
+  # two different units and under-report Completed.
+  $completed = if ($usedIds -and $completedIds.Count -gt 0) {
+    $completedIds.Count
+  } else {
+    ([regex]::Matches($txt, "Pack manifest registered")).Count
+  }
+
   return [pscustomobject]@{
     Offered   = $offered
-    Completed = ([regex]::Matches($txt, "Pack manifest registered")).Count
+    Completed = $completed
     ChunkPuts = ([regex]::Matches($txt, "PUT chunk")).Count
   }
 }

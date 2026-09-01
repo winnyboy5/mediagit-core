@@ -117,9 +117,27 @@ pub async fn presign_pack_uploads(
     let urls: std::collections::HashMap<String, Option<PresignedPutJson>> =
         entries.into_iter().collect();
 
+    // The pack ids, not just how many. `count` alone cannot answer "how many
+    // DISTINCT packs were offered a URL", and that is the question the QA
+    // fast-path gate actually asks.
+    //
+    // 20260901-ga39 shows why: azure logged 32 presign requests, 16 "Pack
+    // manifest registered" lines, 16 distinct pack ids, zero per-chunk proxy
+    // PUTs, and push exit 0. Every pack simply had its URL minted twice (a
+    // re-sign after a slow-link attempt), so summing `count` reported 32
+    // offered against 16 completed and the gate declared "16 of 32 packs never
+    // registered; the push fell back to the per-chunk path" -- both halves
+    // false. The same shape produced aws's 32-vs-31 in the same run.
+    //
+    // Ids make the count de-duplicable by the reader. Volume is fine: these
+    // requests carry count=1 in practice, and the whole line is one INFO per
+    // presign request.
+    let mut pack_ids: Vec<&str> = urls.keys().map(String::as_str).collect();
+    pack_ids.sort_unstable();
     tracing::info!(
         repo = %repo,
         count = count,
+        packs = %pack_ids.join(","),
         "Presigned pack upload URLs generated"
     );
     Ok(Json(urls))
