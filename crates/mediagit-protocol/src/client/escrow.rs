@@ -40,9 +40,30 @@ impl ProtocolClient {
         let url = format!("{}/encryption-key", self.base_url);
         tracing::debug!("GET {}", url);
 
-        let response = crate::client::send_with_rate_limit_retry(|| self.client.get(&url).send())
-            .await
-            .context("Failed to send GET /encryption-key")?;
+        // Bounded like the other short control GETs: bodyless request, tiny
+        // response, so it matches send_short_control_request's own stated
+        // criterion, and it was the last opening-path GET still unbounded.
+        //
+        // HONEST SCOPE -- this does NOT fix the pre-bulk hang, and was briefly
+        // committed here with a comment claiming it did. In 20260901-ga38 the
+        // failing tag push logged op_id=1788256522010-0 completing BOTH
+        // encryption-key (404) and info/refs (200) at 09:55:22, and only then
+        // went silent. So this call succeeded in the one case on record; the
+        // block is after it. See [[project-client-prebulk-hang-2026-08-21]].
+        //
+        // Safe to retry where `POST /refs/update` is not: a GET cannot
+        // half-apply. refs/update carries an `old_oid` compare-and-swap, where a
+        // timeout cannot distinguish "never arrived" from "applied, response
+        // lost" -- retrying that would fail the CAS and report a spurious
+        // conflict, so it stays unbounded.
+        //
+        // Behaviour is otherwise unchanged: two bounded attempts, then a final
+        // UNBOUNDED one, so a genuinely slow server still succeeds.
+        let response = crate::client::send_short_control_request("GET /encryption-key", || {
+            self.client.get(&url).send()
+        })
+        .await
+        .context("Failed to send GET /encryption-key")?;
 
         // 404 covers both "no key yet" and "no such route"; the server cannot
         // distinguish an old client asking and neither can we. Either way the
