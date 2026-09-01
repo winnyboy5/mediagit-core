@@ -166,6 +166,11 @@ fn build_control_plane_client(creds: &Credentials, op_id: &str) -> reqwest::Clie
         // presigned PUT/GET uses separate direct_client (HTTP/1.1).
         .pool_max_idle_per_host(pool_max)
         .pool_idle_timeout(std::time::Duration::from_secs(90))
+        // Bounds the CONNECT only -- see connect_timeout_secs. A slow but
+        // progressing transfer is governed by read_timeout, not this.
+        .connect_timeout(std::time::Duration::from_secs(
+            connect_timeout_secs().max(1),
+        ))
         .tcp_keepalive(std::time::Duration::from_secs(30))
         .tcp_nodelay(true)
         .http2_adaptive_window(true)
@@ -311,6 +316,34 @@ pub(crate) fn http_pool_max() -> usize {
         .unwrap_or(64)
 }
 
+/// TCP+TLS connect timeout for both protocol clients.
+/// `MEDIAGIT_CONNECT_TIMEOUT_SECS`; `0` restores the OS default.
+///
+/// WHY. Neither client set one, so a connect to a black-holed peer fell back to
+/// the OS default -- on Windows roughly 21s of SYN retries, and unbounded in the
+/// worst case. That is not a hypothetical cost here: the MinIO SDK path already
+/// carries the measured version of this bug in `minio.rs`, where "a stalled TCP
+/// can cost ~30 s/attempt x default-3 retries = ~90 s/op, which on a
+/// multi-endpoint push compounded to the 10-15 min outages we saw". It was fixed
+/// there and never applied to the reqwest clients that carry the control plane
+/// and every presigned transfer.
+///
+/// This is what makes a retry BUDGET work. A wall-clock budget spends itself on
+/// however many attempts fit inside it, so an unbounded connect converts ~20 fast
+/// attempts into ~5 slow ones -- the budget looks generous and buys almost
+/// nothing. Bounding the connect is the difference between retrying and waiting.
+///
+/// 10s, not MinIO's 5s: this path includes cross-region TLS handshakes, and
+/// `minio.rs` already widened its own window for exactly that reason. Only the
+/// CONNECT is bounded -- a slow but progressing transfer is governed by
+/// `read_timeout`, so large uploads over a thin link are unaffected.
+fn connect_timeout_secs() -> u64 {
+    std::env::var("MEDIAGIT_CONNECT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10)
+}
+
 /// Build the data-plane `reqwest::ClientBuilder` shared by every presigned
 /// transfer: pack PUTs (`packs.rs`), per-chunk PUTs (`push.rs`, two passes) and
 /// presigned GETs (`pull.rs`).
@@ -337,6 +370,11 @@ pub fn data_plane_client_builder() -> reqwest::ClientBuilder {
     let mut builder = reqwest::Client::builder()
         .pool_idle_timeout(std::time::Duration::from_secs(60))
         .pool_max_idle_per_host(http_pool_max())
+        // Bounds the CONNECT only -- see connect_timeout_secs. Large presigned
+        // transfers are governed by read_timeout below, not this.
+        .connect_timeout(std::time::Duration::from_secs(
+            connect_timeout_secs().max(1),
+        ))
         .tcp_keepalive(std::time::Duration::from_secs(45))
         .tcp_nodelay(true)
         .http1_only();
