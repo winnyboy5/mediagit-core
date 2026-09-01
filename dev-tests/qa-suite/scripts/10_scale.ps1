@@ -50,8 +50,16 @@ $DEDUP_FLOOR_PCT = 35.0
 # without a pause: ~22 GB through the host I/O path in minutes. 0 disables.
 $S5_COOLDOWN_SEC = [int]($env:MG_QA_S5_COOLDOWN_SEC | ForEach-Object { if ($_) { $_ } else { 60 } })
 # Cloud backends are WAN-bound, so their throughput floor is an operator-set knob rather
-# than a fixed SLO. 0 (default) records the number without gating - set MG_QA_CLOUD_MBS_FLOOR
-# once a link's real capability has been measured.
+# than a fixed SLO. `0` records the number without gating.
+#
+# THE DEFAULT IS 1.0, NOT 0 -- config.ps1:37 is authoritative and this comment said the
+# opposite until 2026-09-02. The stale version invited exactly the wrong conclusion: ga39's
+# azure arm came in at 0.92 MB/s and was read as "a gate misconfigured against a WAN link"
+# rather than as the detector firing. Against the 2026-07-27 reference (azure 3.17 push,
+# aws 2.76 push) that run was 3.4x down, which is the order-of-magnitude shape 1.0 was
+# chosen to catch -- see config.ps1 for the reasoning and the measurements.
+#
+# Never lower it to make a failing run pass.
 $CLOUD_FLOOR_MBS = $QA.CloudMbsFloor
 
 # ---- observed-throughput regression floor (fast backends only) --------------

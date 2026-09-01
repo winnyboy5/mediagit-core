@@ -29,7 +29,6 @@ pub fn ensure_crypto_provider() {
     });
 }
 
-pub mod adaptive_config;
 pub mod bench;
 pub mod client;
 pub mod error_class;
