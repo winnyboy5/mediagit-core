@@ -166,9 +166,27 @@ async fn a_dropped_connection_on_a_pack_put_is_retried() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn transport_retries_are_bounded() {
-    // The reason I talked myself out of this fix originally: a retried pack
-    // re-sends the whole body, so an unbounded transport retry is worse than no
-    // retry. It must be bounded by the SAME budget the status path uses.
+    // The concern is unchanged and still right: a retried pack re-sends the
+    // whole body, so an UNBOUNDED transport retry is worse than no retry.
+    //
+    // What changed is the SHAPE of the bound, and this test did not follow.
+    // It asserted `n <= 5` — the attempt count from ee80699 — and 0de5b7e
+    // deliberately replaced that with a wall-clock budget, on the grounds that
+    // five quick attempts rode out only 1.9-3.75s of trouble no matter how long
+    // the outage actually was. The code moved; the assertion did not; the test
+    // has been failing since 2026-09-01 and nothing caught it, because the QA
+    // campaign runs drills and never `cargo test`.
+    //
+    // Asserting the count again — at 24 instead of 5 — would just re-encode an
+    // implementation detail and rot the same way. The contract worth pinning is
+    // the one the commit actually created: the retrying STOPS, and it stops on
+    // the budget.
+    //
+    // A short budget is set on purpose. At the 120s default this test ran for
+    // ~100-119s against its own 120s timeout, which is both slow and one
+    // scheduling hiccup away from a flake that looks like a hang.
+    unsafe { std::env::set_var("MEDIAGIT_PACK_PUT_RETRY_BUDGET_SECS", "10") };
+
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr").to_string();
     let puts = Arc::new(AtomicUsize::new(0));
@@ -182,6 +200,7 @@ async fn transport_retries_are_bounded() {
         .build()
         .unwrap();
 
+    let started = std::time::Instant::now();
     let out = tokio::time::timeout(
         std::time::Duration::from_secs(120),
         mediagit_protocol::pack_builder::upload_and_register(
@@ -194,6 +213,7 @@ async fn transport_retries_are_bounded() {
     )
     .await
     .expect("upload_and_register hung");
+    let elapsed = started.elapsed();
 
     server.abort();
 
@@ -201,10 +221,24 @@ async fn transport_retries_are_bounded() {
         out.is_err(),
         "a peer that never accepts must surface an error"
     );
+
+    // THE bound. `pack_put_should_give_up` refuses to start an attempt whose
+    // backoff would carry it past the budget, so the last attempt can overrun by
+    // roughly one backoff step; 4x the budget is loose enough to absorb that and
+    // a loaded CI box, and still fails an unbounded loop by a mile.
+    assert!(
+        elapsed < std::time::Duration::from_secs(40),
+        "retrying must stop on MEDIAGIT_PACK_PUT_RETRY_BUDGET_SECS (set to 10s here). \
+         It ran {elapsed:?}, so the wall-clock budget is not bounding this loop."
+    );
+
+    // Both halves: it must also actually HAVE retried, or a bound of zero would
+    // pass the assertion above while quietly removing the retry that ee80699 and
+    // 0de5b7e both exist to provide.
     let n = puts.load(Ordering::SeqCst);
     assert!(
-        n <= 5,
-        "transport retries must be BOUNDED by the same 5-attempt budget as the \
-         status path; a whole pack body is re-sent per attempt. got {n}"
+        n > 1,
+        "a transport failure must be RETRIED, not surfaced on the first attempt; \
+         got {n} attempt(s)"
     );
 }
