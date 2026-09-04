@@ -137,10 +137,10 @@ impl ProtocolClient {
         let temp_dir = tempfile::TempDir::new().context("create pack temp dir")?;
         let mut builder = PackBuilder::new(temp_dir.path());
 
-        // NO total .timeout() — this is the same mistake the control plane made
-        // and reverted, one layer over. A pack BODY is bounded, but the time to
-        // upload it is not: it is (pack size / share of the link), and packs
-        // upload concurrently, so each one's share shrinks as fan-out grows.
+        // The bound scales with the pack, because the cost does. A pack BODY is
+        // bounded, but the time to upload it is not: it is (pack size / share of
+        // the link), and packs upload concurrently, so each one's share shrinks
+        // as fan-out grows.
         //
         // Measured in 20260821-s5check. Azure moved 2048 MB in 2072s — ~1 MB/s
         // aggregate — and a 64 MB pack's wall time blew past the 300s ceiling
@@ -151,12 +151,25 @@ impl ProtocolClient {
         //   [azure] packsOffered=32 packsCompleted=2 perChunkProxyPUTs=724
         //   cause: "operation timed out" (x3 across azure+aws, x0 HTTP statuses)
         //
-        // A total ceiling cannot tell a slow transfer from a dead one. The read
-        // timeout in the shared builder can: it bounds the gap BETWEEN bytes, so
-        // a stalled pack still fails fast while a slow one is left alone.
-        let direct_client = super::data_plane_client_builder()
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        // DROPPING `.timeout()` DID NOT FIX THAT, and this comment used to claim
+        // it had. The shared builder's read_timeout took over as the ceiling: it
+        // bounds the gap between bytes RECEIVED, and an upload receives nothing
+        // until the body completes, so it never resets and lands on the same
+        // 300s wall. The same drill reproduced it a fortnight later — azure
+        // 6/32, and four packs dying at EXACTLY 300.0s within one second of each
+        // other, which is a start-time deadline and not four independent stalls.
+        // Raising ONLY that knob to 1800 took the same push from 6/32 in 918.66s
+        // to 32/32 in 368.27s.
+        //
+        // So the fix is the shape, not the number: a total ceiling derived from
+        // the bytes, i.e. "this pack must sustain MIN_UPLOAD_BYTES_PER_SEC". A
+        // dead socket still fails; a slow-but-moving pack is left alone. Passing
+        // the cap (not the actual pack size) keeps every pack on one client, and
+        // the cap is the largest body any of them can hold.
+        let direct_client =
+            super::data_plane_upload_client_builder(mediagit_versioning::pack_bytes_cap())
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new());
 
         let mut chunks_done: u32 = 0;
         let mut bytes_done: u64 = 0;

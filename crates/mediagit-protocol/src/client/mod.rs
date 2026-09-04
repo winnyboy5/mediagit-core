@@ -384,6 +384,13 @@ pub fn data_plane_client_builder() -> reqwest::ClientBuilder {
     // second is safe on a data plane that legitimately moves multi-hundred-MB
     // objects — a slow but progressing transfer resets it on every byte.
     //
+    // THAT SENTENCE IS TRUE OF DOWNLOADS AND FALSE OF UPLOADS, and the
+    // difference cost a whole class of pushes. See
+    // `data_plane_upload_client_builder` — on an upload the client is WRITING,
+    // the bucket correctly sends nothing until the body completes, so no read
+    // ever arrives to reset the timer and this becomes a hard total deadline on
+    // the upload itself. Upload sites must use that constructor, not this one.
+    //
     // What it catches is what `tcp_keepalive` cannot: keepalive proves a peer is
     // ALIVE, not that it is ANSWERING. A bucket that accepts the connection and
     // then goes quiet keeps keepalive satisfied indefinitely.
@@ -392,14 +399,92 @@ pub fn data_plane_client_builder() -> reqwest::ClientBuilder {
     // moving, and far below the phase deadlines that were previously the only
     // backstop. MEDIAGIT_DATA_READ_TIMEOUT_SECS tunes it; 0 restores the old
     // unbounded behaviour.
-    let read_timeout_secs = std::env::var("MEDIAGIT_DATA_READ_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(300);
+    let read_timeout_secs = data_plane_read_timeout_secs();
     if read_timeout_secs > 0 {
         builder = builder.read_timeout(std::time::Duration::from_secs(read_timeout_secs));
     }
     builder
+}
+
+/// Inter-byte read timeout for data-plane transfers, in seconds. 0 disables.
+pub fn data_plane_read_timeout_secs() -> u64 {
+    std::env::var("MEDIAGIT_DATA_READ_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(300)
+}
+
+/// Slowest upload rate still considered ALIVE, in bytes per second.
+///
+/// Only used to turn a body size into a deadline, so it wants to sit below the
+/// worst link the product is expected to work on, not near the typical one.
+/// 20260427-E0 measured a real Azure push at 0.24-0.37 MB/s AGGREGATE; split
+/// across the default 8 concurrent packs that is ~30 KiB/s per pack. 16 KiB/s
+/// keeps ~2x margin under that, and still bounds a genuinely dead socket.
+///
+/// THE COST, stated plainly: at a 64 MiB pack cap this yields a 4096s bound, so
+/// a genuinely silent peer on the UPLOAD path is now caught in ~68 minutes
+/// instead of 5. That is a real weakening of what the flat read timeout was
+/// added for, and it is the right trade only because the two failures are not
+/// comparable. Killing a healthy pack is not a delayed error, it is a WRONG one:
+/// it demotes the whole push to the per-chunk path and cost a measured 2.5x
+/// (918.66s -> 368.27s on the same 2 GB). A dead socket, meanwhile, is still
+/// bounded — by this ceiling, by the per-pack retry budget above it, and by the
+/// absolute phase deadline above that.
+///
+/// The structural way to get both back is a smaller pack: at a 16 MiB cap this
+/// bound falls to 1024s while the natural upload time falls to ~76s, which is
+/// what AWS already enjoys by splitting packs into ~8 MiB MPU parts. Left alone
+/// here deliberately — pack size changes what lands in the bucket, and this
+/// change should not.
+const MIN_UPLOAD_BYTES_PER_SEC: u64 = 16 * 1024;
+
+/// Data-plane client for UPLOADING a body of known, bounded size.
+///
+/// WHY THIS EXISTS. `read_timeout` bounds the gap between bytes RECEIVED. On a
+/// download that is a stall detector; on an upload there is nothing to receive
+/// until the body finishes, so the timer never resets and a flat value silently
+/// becomes a total deadline on the transfer.
+///
+/// Measured 2026-09-04, azure, 2 GB as 32 packs of 64 MiB at concurrency 8:
+///
+///   read_timeout=300   6/32 packs landed, push 918.66s
+///   read_timeout=1800  32/32 packs landed, push 368.27s
+///
+/// In the failing run four packs died at EXACTLY 300.0s, within one second of
+/// each other — the signature of a deadline measured from request start, not of
+/// four connections independently going quiet. In the passing run the first wave
+/// registered at 106..269s, i.e. the old bound left a 10% margin on work that
+/// takes `pack_size × concurrency / bandwidth`. That is why ga38/ga39/ga40 read
+/// 32, 16 and 0 packs landed and looked like flakiness: a constant bound against
+/// a variable cost is a cliff, and ordinary link variation walks either side of
+/// it.
+///
+/// So an upload gets a TOTAL ceiling derived from the bytes it must move —
+/// `push.rs` already reasons this way for chunks ("a bounded chunk body, so a
+/// TOTAL request ceiling is safe here"). The rule becomes "this upload must
+/// sustain at least MIN_UPLOAD_BYTES_PER_SEC", which a dead socket still fails
+/// and a slow-but-moving one does not.
+///
+/// `MEDIAGIT_DATA_READ_TIMEOUT_SECS=0` disables the bound here too, so the one
+/// documented escape hatch keeps working.
+pub fn data_plane_upload_client_builder(max_body_bytes: u64) -> reqwest::ClientBuilder {
+    let builder = data_plane_client_builder();
+    let base = data_plane_read_timeout_secs();
+    if base == 0 {
+        return builder;
+    }
+    // Never TIGHTER than the flat bound: this only ever buys a large body more
+    // room, so a small-body upload keeps exactly the behaviour it has today.
+    let need = max_body_bytes / MIN_UPLOAD_BYTES_PER_SEC;
+    let bound = std::time::Duration::from_secs(base.max(need));
+    // BOTH, and the read one is the whole point. `data_plane_client_builder`
+    // has already installed read_timeout(300); leaving it would fire at 300s no
+    // matter what total ceiling is set beside it, which is the exact bug this
+    // constructor exists to fix. Raising it to `bound` stops it pre-empting the
+    // real deadline, and `.timeout(bound)` is then the honest bound: a total
+    // ceiling on a body whose size we know.
+    builder.read_timeout(bound).timeout(bound)
 }
 
 /// Maximum 429 retries for a single control-plane request. Default 10,
