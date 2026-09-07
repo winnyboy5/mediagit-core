@@ -697,6 +697,22 @@ impl MinIOBackend {
     }
 
     /// Get the configured bucket name
+    /// Endpoint this backend actually talks to, for error messages.
+    ///
+    /// WHY THIS EXISTS. This driver is the shared S3-compatible implementation:
+    /// `handlers/mod.rs` builds it via `new_with_prefix` for MinIO AND via
+    /// `with_config` for AWS. Every error string here used to say "minio:"
+    /// regardless, so a real AWS failure was reported as
+    ///
+    ///   err=complete_multipart_upload minio: dispatch failure
+    ///
+    /// on the aws backend (20260907-ga42). That is not cosmetic: it points the
+    /// next investigation at the wrong backend, and it cost time in the ga42
+    /// post-mortem before the endpoint in the URL gave it away.
+    pub(crate) fn endpoint_label(&self) -> &str {
+        &self.config.endpoint
+    }
+
     pub fn bucket(&self) -> &str {
         &self.bucket
     }
@@ -1324,7 +1340,7 @@ impl StorageBackend for MinIOBackend {
         let req = builder
             .presigned(presigning)
             .await
-            .map_err(|e| anyhow!("presign_put minio: {e}"))?;
+            .map_err(|e| anyhow!("presign_put {}: {e}", self.endpoint_label()))?;
         Ok(Some(crate::PresignedPut {
             url: req.uri().to_string(),
             method: "PUT".to_string(),
@@ -1351,7 +1367,7 @@ impl StorageBackend for MinIOBackend {
             .key(&wire_key)
             .presigned(presigning)
             .await
-            .map_err(|e| anyhow!("presign_get minio: {e}"))?;
+            .map_err(|e| anyhow!("presign_get {}: {e}", self.endpoint_label()))?;
         Ok(Some(crate::PresignedDownload {
             url: req.uri().to_string(),
             headers: vec![],
@@ -1383,7 +1399,7 @@ impl StorageBackend for MinIOBackend {
                 .key(&wire_key)
                 .send()
                 .await
-                .map_err(|e| anyhow!("create_multipart_upload minio: {}", e))?;
+                .map_err(|e| anyhow!("create_multipart_upload {}: {}", self.endpoint_label(), e))?;
             resp.upload_id()
                 .ok_or_else(|| anyhow!("no upload_id from MinIO"))?
                 .to_string()
@@ -1403,7 +1419,14 @@ impl StorageBackend for MinIOBackend {
                 .part_number(part_number)
                 .presigned(presigning.clone())
                 .await
-                .map_err(|e| anyhow!("presign upload_part {} minio: {}", part_number, e))?;
+                .map_err(|e| {
+                    anyhow!(
+                        "presign upload_part {} {}: {}",
+                        part_number,
+                        self.endpoint_label(),
+                        e
+                    )
+                })?;
             parts.push(crate::PresignedMpuPart {
                 part_number,
                 url: req.uri().to_string(),
@@ -1449,7 +1472,7 @@ impl StorageBackend for MinIOBackend {
             )
             .send()
             .await
-            .map_err(|e| anyhow!("complete_multipart_upload minio: {}", e))?;
+            .map_err(|e| anyhow!("complete_multipart_upload {}: {}", self.endpoint_label(), e))?;
         Ok(())
     }
 
