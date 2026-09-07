@@ -59,17 +59,28 @@ $startedAt = Get-Date
 $env:MG_QA_TIER   = "SCALE"
 $env:MG_QA_RUN_ID = $RunId
 
+# Measure the link for the whole run, per backend. The WLAN check below only
+# sees full disconnects: ga41 and ga42 both reported "the link held" while
+# packets were dropping and, in ga42, s3.ap-south-1 was gone for four minutes.
+# Without this, a bad-network run and a bad-code run read identically in the
+# record. Started AFTER campaign_env so the Azure account name is resolved, and
+# it only records - it never trips or fails a phase.
+. .\lib\linkprobe.ps1
+$logDir = "..\logs\$RunId"
+New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+Start-QaLinkProbe -LogDir $logDir -Hosts (Get-QaLinkHosts)
+
 $sw = [Diagnostics.Stopwatch]::StartNew()
 # -Command, not -File: under -File every argument is a literal string, so a
 # comma-separated -Phases list arrives as ONE token and run_all rejects it.
 powershell -NoProfile -Command "& '.\run_all.ps1' -Phases @('00','01','02','03','04','05','06','07','08','10','11','12','13','09') -ContinueOnFail"
 $code = $LASTEXITCODE
 $sw.Stop()
+Stop-QaLinkProbe
 
 Write-Host ""
 Write-Host ("RUN_ALL_EXIT=$code  elapsed={0:hh\:mm\:ss}" -f $sw.Elapsed)
 
-$logDir = "..\logs\$RunId"
 $summary = Join-Path $logDir "run_all-summary.tsv"
 if (Test-Path $summary) {
     Write-Host "`n=== phases ==="
@@ -119,7 +130,15 @@ if ($drops) {
     Write-Host "Cloud-backend failures in this campaign are SUSPECT - treat the run as VOID"
     Write-Host "unless the failing phases are local/minio only."
     $drops | Select-Object TimeCreated | Format-Table -AutoSize | Out-String | Write-Host
-} else { Write-Host "none - the link held for the whole run." }
+} else { Write-Host "none - no full disconnect (this does NOT mean the link was good - see below)." }
+
+# What the 8003 check above cannot see: loss, latency and per-host outages that
+# never disconnect the adapter. Read this BEFORE bisecting a cloud failure --
+# a BAD arm here whose outage window covers the failing phase's timestamp means
+# the run is suspect for that arm, and a clean report is evidence the failure
+# was the product.
+Write-Host "`n=== link quality per backend during the run ==="
+Write-QaLinkSummary -LogDir $logDir
 
 [void][Win32.Power]::SetThreadExecutionState($ES_CONTINUOUS)
 Write-Host "`nGA_DONE exit=$code"
