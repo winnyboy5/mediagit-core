@@ -1468,34 +1468,104 @@ pub(crate) async fn upload_object_mpu(
     }
 
     // --- Complete MPU ---
+    //
+    // RETRIED, unlike everything above it, because by this point every part is
+    // ALREADY IN THE BUCKET. Only the commit is outstanding, and giving up here
+    // throws away the whole successful upload to re-send the entire body down
+    // the single-PUT path -- degrading to the LESS resilient route at the exact
+    // moment the link is misbehaving, which is backwards.
+    //
+    // 20260907-ga42, aws S5: `packs/mpu/complete` returned 500 twenty-three
+    // times out of twenty-nine while the server's own aws-sdk-s3 call failed
+    // with `dispatch failure` (a transport error, 33-40s latency) during a
+    // ~4-minute connectivity fault to s3.ap-south-1. Six of those completions
+    // DID succeed, so the fault was intermittent, not fatal. Each 500 sent a
+    // fully-uploaded 64 MiB pack back to single-PUT, and two of those then lost
+    // their own retry budget to connect timeouts -- packsOffered=32
+    // packsCompleted=30, the only failing gate in the run.
+    //
+    // A retry here is cheap in a way a body retry is not: the request carries
+    // only the part list, so it costs one small round trip rather than 64 MiB.
+    // That asymmetry is why this loop is bounded by attempts and not by the
+    // wall-clock budget the pack PUT uses.
+    //
+    // Only TRANSIENT statuses are retried. A 4xx means the part list or upload
+    // id is wrong, and re-sending an identical request cannot fix that.
+    const MPU_COMPLETE_MAX_ATTEMPTS: u32 = 5;
     let complete_url = format!("{}/{}/mpu/complete", base_url, family);
-    let complete_resp = match send_with_rate_limit_retry(|| {
-        api_client
-            .post(&complete_url)
-            .json(&CompleteReq {
-                chunk_id: chunk_hex,
-                upload_id: &upload_id,
-                parts: &completed_parts,
-            })
-            .send()
-    })
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::debug!(chunk = %chunk_hex, err = %e, "MPU complete request failed; falling back");
-            return false;
+    let mut complete_resp = None;
+    for attempt in 0..MPU_COMPLETE_MAX_ATTEMPTS {
+        if attempt > 0 {
+            // Same equal-jitter shape as the pack PUT backoff, capped low: the
+            // server is still reachable (it answered 500), so this is waiting
+            // out ITS upstream, not a dead peer.
+            let ceiling = (500u64 << (attempt - 1)).min(8_000);
+            let wait = ceiling / 2 + jitter_upto(ceiling / 2);
+            tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
         }
-    };
-
-    if !complete_resp.status().is_success() {
-        tracing::debug!(
-            chunk = %chunk_hex,
-            status = complete_resp.status().as_u16(),
-            "MPU complete non-2xx; falling back"
-        );
-        return false;
+        match send_with_rate_limit_retry(|| {
+            api_client
+                .post(&complete_url)
+                .json(&CompleteReq {
+                    chunk_id: chunk_hex,
+                    upload_id: &upload_id,
+                    parts: &completed_parts,
+                })
+                .send()
+        })
+        .await
+        {
+            Ok(r) => {
+                let status = r.status();
+                if status.is_success() {
+                    complete_resp = Some(r);
+                    break;
+                }
+                // 408/429/5xx are worth another go; anything else is our own
+                // request being wrong and will stay wrong.
+                let transient =
+                    status.as_u16() == 408 || status.as_u16() == 429 || status.is_server_error();
+                if !transient || attempt + 1 == MPU_COMPLETE_MAX_ATTEMPTS {
+                    tracing::debug!(
+                        chunk = %chunk_hex,
+                        status = status.as_u16(),
+                        attempts = attempt + 1,
+                        transient,
+                        "MPU complete gave up; falling back to single-PUT"
+                    );
+                    return false;
+                }
+                tracing::warn!(
+                    chunk = %chunk_hex,
+                    status = status.as_u16(),
+                    attempt = attempt + 1,
+                    "MPU complete transient; retrying (parts are already uploaded, \
+                     falling back would re-send the whole body)"
+                );
+            }
+            Err(e) => {
+                if attempt + 1 == MPU_COMPLETE_MAX_ATTEMPTS {
+                    tracing::debug!(
+                        chunk = %chunk_hex,
+                        err = %e,
+                        attempts = attempt + 1,
+                        "MPU complete request failed; falling back"
+                    );
+                    return false;
+                }
+                tracing::warn!(
+                    chunk = %chunk_hex,
+                    err = %e,
+                    attempt = attempt + 1,
+                    "MPU complete transport failure; retrying"
+                );
+            }
+        }
     }
+    let Some(complete_resp) = complete_resp else {
+        return false;
+    };
+    debug_assert!(complete_resp.status().is_success());
 
     tracing::debug!(chunk = %chunk_hex, parts = mpu.parts.len(), "MPU upload succeeded");
     true
@@ -2018,6 +2088,154 @@ mod short_request_deadline_tests {
             outcome.is_err(),
             "with the bound disabled the stall must persist; it returned instead, \
              so the deadline is not what makes the other tests pass"
+        );
+    }
+}
+
+/// `upload_object_mpu` must not throw away a fully-uploaded MPU because the
+/// final commit hit a transient.
+///
+/// By the time `mpu/complete` is called every part is ALREADY in the bucket.
+/// Returning false there sends the whole body back down the single-PUT path --
+/// the less resilient route, chosen at the exact moment the link is misbehaving.
+///
+/// 20260907-ga42, aws S5: `packs/mpu/complete` returned 500 twenty-three times
+/// of twenty-nine, while the server's own aws-sdk-s3 call failed with
+/// `dispatch failure` during a ~4-minute connectivity fault to s3.ap-south-1.
+/// SIX of those completions succeeded, so the fault was intermittent. Each 500
+/// demoted a finished 64 MiB pack to single-PUT, and two then lost their retry
+/// budget to connect timeouts: packsOffered=32 packsCompleted=30.
+#[cfg(test)]
+mod mpu_complete_retry_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Stub standing in for the control plane AND the bucket on one address.
+    ///
+    /// `complete_failures` completions are answered `fail_status` before the
+    /// first 204, so one knob covers "transient then success" and "permanent".
+    async fn serve(
+        listener: TcpListener,
+        addr: String,
+        complete_failures: usize,
+        fail_status: &'static str,
+        completes: Arc<AtomicUsize>,
+    ) {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let addr = addr.clone();
+            let completes = Arc::clone(&completes);
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 8192];
+                loop {
+                    let Ok(n) = sock.read(&mut tmp).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let head = String::from_utf8_lossy(&buf).to_string();
+                let first = head.lines().next().unwrap_or("").to_string();
+                let reply = |status: &str, body: String, extra: &str| {
+                    format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n{extra}content-length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+
+                let resp = if first.contains("/packs/mpu/start") {
+                    // One part, pointed back at this same stub.
+                    let body = format!(
+                        r#"{{"upload_id":"up-1","part_size":8388608,"parts":[{{"part_number":1,"url":"http://{addr}/bucket/part1"}}]}}"#
+                    );
+                    reply("200 OK", body, "")
+                } else if first.starts_with("PUT") && first.contains("/bucket/part1") {
+                    // A part upload must return an ETag or the client cannot
+                    // build the completion request at all.
+                    reply("200 OK", "{}".into(), "ETag: \"etag-1\"\r\n")
+                } else if first.contains("/packs/mpu/complete") {
+                    let n = completes.fetch_add(1, Ordering::SeqCst);
+                    if n < complete_failures {
+                        reply(fail_status, "{}".into(), "")
+                    } else {
+                        reply("204 No Content", String::new(), "")
+                    }
+                } else {
+                    reply("404 Not Found", "{}".into(), "")
+                };
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            });
+        }
+    }
+
+    async fn run(complete_failures: usize, fail_status: &'static str) -> (bool, usize) {
+        crate::ensure_crypto_provider();
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let completes = Arc::new(AtomicUsize::new(0));
+        let server = tokio::spawn(serve(
+            listener,
+            addr.clone(),
+            complete_failures,
+            fail_status,
+            Arc::clone(&completes),
+        ));
+
+        let api = reqwest::Client::builder().build().unwrap();
+        let direct = reqwest::Client::builder().build().unwrap();
+        let ok = super::upload_object_mpu(
+            &api,
+            &direct,
+            &format!("http://{addr}/repo"),
+            "packs",
+            &"aa".repeat(32),
+            &[7u8; 1024],
+        )
+        .await;
+        server.abort();
+        (ok, completes.load(Ordering::SeqCst))
+    }
+
+    /// THE ga42 CASE. Two transient 500s then success: the MPU must be COMMITTED,
+    /// not abandoned. This assertion fails against the previous code, which
+    /// returned false on the first non-2xx.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_transient_complete_is_retried_not_abandoned() {
+        let (ok, attempts) = run(2, "500 Internal Server Error").await;
+        assert!(
+            ok,
+            "two transient 500s on mpu/complete must be retried -- every part is \
+             already in the bucket, and falling back re-sends the whole body down \
+             the single-PUT path"
+        );
+        assert_eq!(
+            attempts, 3,
+            "expected 2 failed completions + 1 success; got {attempts}"
+        );
+    }
+
+    /// The other half. A 4xx means our own request is wrong -- the part list or
+    /// the upload id -- and re-sending an identical request cannot fix it. It
+    /// must NOT be retried, or a permanently broken commit burns five round
+    /// trips before falling back.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_permanent_complete_failure_is_not_retried() {
+        let (ok, attempts) = run(usize::MAX, "400 Bad Request").await;
+        assert!(!ok, "a permanent completion failure must fall back");
+        assert_eq!(
+            attempts, 1,
+            "a 4xx must not be retried; got {attempts} attempts"
         );
     }
 }
