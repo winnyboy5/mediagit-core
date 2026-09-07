@@ -517,6 +517,50 @@ function Drill-A7-BackendOutage {
     $env:MEDIAGIT_UPLOAD_CONCURRENCY      = "1"
     $env:MEDIAGIT_PACK_UPLOAD_CONCURRENCY = "1"
     $env:MEDIAGIT_PUSH_OBJECT_CONCURRENCY = "1"
+
+    # ARM THE KILL BEFORE THE PUSH STARTS.
+    #
+    # This drill has now been mis-timed three times -- 2000ms, then 500ms, then
+    # concurrency 1 -- and every attempt tuned the TRIGGER while leaving the
+    # STOP slow. That was the actual defect. `& powershell -NoProfile -Command
+    # $stopCmd` spawns a fresh PowerShell (~0.5s), which then runs
+    # Get-NetTCPConnection and Get-CimInstance (~0.5s more) BEFORE it reaches
+    # Stop-Process. So the outage lands 1-2s after the trigger fires, against a
+    # transfer window that is about one second on loopback. No sleep value can
+    # win that race; ga43 proved it again with an EMPTY server error log --
+    # the backend never saw a write while it was down, because every write had
+    # already finished.
+    #
+    # Everything expensive is therefore resolved HERE, while nothing is racing,
+    # so the trigger below is a single Stop-Process on an integer: microseconds.
+    #
+    # The cmdline is recorded to the same state file silo_native.ps1 uses, so
+    # the RESTART path is completely unchanged and still relaunches exactly what
+    # was running. That path owns the filename; it is duplicated here only
+    # because arming has to happen before the push rather than inside the stop.
+    $a7KillPid   = $null
+    $a7SiloState = Join-Path $env:TEMP "mg-qa-silo-cmdline.txt"
+    try {
+      $a7Port = ([Uri]$QA.MinioEndpoint).Port
+      $a7Conn = Get-NetTCPConnection -LocalPort $a7Port -State Listen -EA SilentlyContinue |
+                Select-Object -First 1
+      if ($a7Conn) {
+        $a7Proc = Get-Process -Id $a7Conn.OwningProcess -EA SilentlyContinue
+        # Only a native silo is safe to kill directly; anything else (a docker
+        # proxy, a tunnel) goes down the original command path, which knows how
+        # to cycle it properly.
+        if ($a7Proc -and $a7Proc.ProcessName -eq "silo") {
+          $a7Wmi = Get-CimInstance Win32_Process -Filter "ProcessId=$($a7Proc.Id)" -EA SilentlyContinue
+          if ($a7Wmi -and $a7Wmi.CommandLine) {
+            Set-Content -Path $a7SiloState -Value $a7Wmi.CommandLine -Encoding ascii
+            $a7KillPid = $a7Proc.Id
+          }
+        }
+      }
+    } catch { $a7KillPid = $null }
+    Write-QaLog $Phase ("A7: kill armed pid=" + $(if ($a7KillPid) { "$a7KillPid (instant)" } else { "none - falling back to the slow stop command" }))
+
+    $a7PushStart = Get-Date
     $p = Start-Process $QA.MG -ArgumentList @("-C", $repo, "push", "origin") -PassThru -NoNewWindow `
       -RedirectStandardOutput (Join-Path $QA.Logs "a7-push.out") -RedirectStandardError (Join-Path $QA.Logs "a7-push.err")
     # Cache the handle, exactly as A15 does and for the same reason: without it
@@ -553,7 +597,15 @@ function Drill-A7-BackendOutage {
     # (watch the server log for the first chunk PUT, then stop). That is a
     # bigger change than this run warrants; noted rather than silently skipped.
     Start-Sleep -Milliseconds 500
-    & $StopBackend
+    # Instant when armed. 500ms stays, and is now safe in both directions as the
+    # comment above always claimed: land mid-transfer and the rest of the upload
+    # fails, or land before the client has reached the backend and its first
+    # upload fails. Both are clean failures the drill can assert on. The only
+    # outcome that breaks it is landing LATE, which is precisely what arming
+    # removes.
+    if ($a7KillPid) { Stop-Process -Id $a7KillPid -Force -EA SilentlyContinue }
+    else            { & $StopBackend }
+    $a7KillAt = Get-Date
     $stoppedContainer = $true
 
     # Progress markers through the recovery sequence.
@@ -566,6 +618,7 @@ function Drill-A7-BackendOutage {
     # afterwards from a log that ends mid-drill.
     Write-QaLog $Phase "A7: push started, backend stopped; waiting for client exit"
     $exited = $p.WaitForExit(120000)
+    $a7PushEnd = Get-Date
     # Concurrency restored the moment the throttled push is done. The retry and
     # clone below assert recovery and must not inherit the throttle.
     $env:MEDIAGIT_UPLOAD_CONCURRENCY      = $a7SavedUpload
@@ -626,9 +679,17 @@ function Drill-A7-BackendOutage {
     # `killed=False`: a drill that tested nothing must SAY so.
     $why = ""
     if (-not $cleanFail -and $exited -and $exitRead -and $exitCode -eq 0) {
-      $why = " -- push SUCCEEDED despite the backend being stopped: the outage landed AFTER the upload finished, so nothing was interrupted and this drill tested nothing. Widen the transfer window (upload concurrency), do not tune the sleep."
+      $why = " -- push SUCCEEDED despite the backend being stopped: the outage landed AFTER the upload finished, so nothing was interrupted and this drill tested nothing. The kill is armed before the push and fires in microseconds, so if this still happens the transfer window is shorter than the 500ms trigger: lower the trigger or enlarge the fixture, and check kill-after-start below against push-ran."
     }
-    Rec $drill $pass "minio-restarted=$up push-exited=$exited push-exit=$exitCode exit-read=$exitRead panic=$panic clean-fail=$cleanFail local-fsck=$fsckLocal retry-push=$($retry.Exit) clone=$($cl.Exit) clone-hash-ok=$cloneHashOk clone-fsck=$fsckClone$why"
+    # Timing, always -- not only on failure. Three mis-timings in a row were all
+    # diagnosed after the fact from push stdout, because the drill never recorded
+    # WHEN the kill landed relative to the transfer. A PASS with kill-after-start
+    # ~= push-ran is a drill that only just made it and will flake on a faster
+    # host; that is invisible without these numbers.
+    $killMs = if ($a7KillAt   -and $a7PushStart) { [int]($a7KillAt   - $a7PushStart).TotalMilliseconds } else { -1 }
+    $pushMs = if ($a7PushEnd  -and $a7PushStart) { [int]($a7PushEnd  - $a7PushStart).TotalMilliseconds } else { -1 }
+    $timing = " kill-armed=$([bool]$a7KillPid) kill-after-start=${killMs}ms push-lasted=${pushMs}ms"
+    Rec $drill $pass "minio-restarted=$up push-exited=$exited push-exit=$exitCode exit-read=$exitRead panic=$panic clean-fail=$cleanFail local-fsck=$fsckLocal retry-push=$($retry.Exit) clone=$($cl.Exit) clone-hash-ok=$cloneHashOk clone-fsck=$fsckClone$timing$why"
   } catch {
     if ($stoppedContainer) { & docker start $container *> $null }
     if ("$_" -match "^SKIP:") { Rec $drill "SKIP" "$_" } else { Rec $drill $false "unexpected error: $_" }

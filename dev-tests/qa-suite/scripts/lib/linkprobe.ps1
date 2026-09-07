@@ -45,6 +45,14 @@ function Start-QaLinkProbe {
 
   $tsv = Join-Path $LogDir "link-samples.tsv"
   "ts`thost`tconnect_ms`tok" | Set-Content -Path $tsv -Encoding UTF8
+  # ABSOLUTE, and resolved in the PARENT. Start-Job does not inherit the
+  # caller's working directory, so the relative "..\logs\<run>\..." run_ga
+  # passes resolved to nothing inside the job: every Add-Content failed, the
+  # header (written here, in the parent) was the only line ever produced, and
+  # ga43 ran 16 minutes reporting zero samples. A probe that silently records
+  # nothing is exactly the gate-that-cannot-fail this file exists to avoid --
+  # and the first arming check missed it by passing an absolute path itself.
+  $tsv = (Resolve-Path $tsv).Path
 
   $script:QaLinkProbeJob = Start-Job -Name "qa-linkprobe" -ScriptBlock {
     param($tsv, $hosts, $intervalSec, $timeoutMs)
@@ -94,7 +102,14 @@ function Write-QaLinkSummary {
   if (-not (Test-Path $tsv)) { Write-Host "no link samples recorded."; return }
 
   $rows = @(Import-Csv $tsv -Delimiter "`t")
-  if ($rows.Count -eq 0) { Write-Host "link probe recorded no samples."; return }
+  if ($rows.Count -eq 0) {
+    # Loud on purpose. "No samples" must never be mistaken for "the link was
+    # fine" -- it means this run has NO link evidence either way, so a cloud
+    # failure in it cannot be attributed to the product or the network.
+    Write-Host "WARNING: the link probe recorded ZERO samples - it did not run."
+    Write-Host "This run has NO link evidence. Do not read a cloud failure here as a product bug."
+    return
+  }
 
   foreach ($g in ($rows | Group-Object host | Sort-Object Name)) {
     $n    = $g.Group.Count
