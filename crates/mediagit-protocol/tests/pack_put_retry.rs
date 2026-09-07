@@ -27,8 +27,20 @@ use tokio::net::TcpListener;
 
 /// Minimal server standing in for BOTH the mediagit-server control plane and
 /// the bucket, so one address serves upload-urls, the presigned PUT and
-/// complete. `put_failures` PUTs are answered 503 before the first 200.
-async fn serve(listener: TcpListener, addr: String, put_failures: usize, puts: Arc<AtomicUsize>) {
+/// complete. The first `put_failures` PUTs are answered `fail_status`; the rest
+/// get 200.
+///
+/// `fail_status` is a parameter and not a constant because the two tests below
+/// need OPPOSITE classifications, and for a long time only one of them got it.
+/// The permanent-error test reused the 503 path and therefore never sent a
+/// permanent status at all -- see the note on that test.
+async fn serve(
+    listener: TcpListener,
+    addr: String,
+    put_failures: usize,
+    fail_status: &'static str,
+    puts: Arc<AtomicUsize>,
+) {
     loop {
         let Ok((mut sock, _)) = listener.accept().await else {
             return;
@@ -72,8 +84,7 @@ async fn serve(listener: TcpListener, addr: String, put_failures: usize, puts: A
             } else if first.starts_with("PUT") && first.contains("/bucket/pack") {
                 let n = puts.fetch_add(1, Ordering::SeqCst);
                 if n < put_failures {
-                    // 503 is unambiguously Transient for every backend.
-                    reply("503 Service Unavailable", "{}".into())
+                    reply(fail_status, "{}".into())
                 } else {
                     reply("200 OK", "{}".into())
                 }
@@ -103,7 +114,14 @@ async fn a_transient_pack_put_is_retried_not_abandoned() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr").to_string();
     let puts = Arc::new(AtomicUsize::new(0));
-    let server = tokio::spawn(serve(listener, addr.clone(), 2, Arc::clone(&puts)));
+    // 503 is unambiguously Transient for every backend.
+    let server = tokio::spawn(serve(
+        listener,
+        addr.clone(),
+        2,
+        "503 Service Unavailable",
+        Arc::clone(&puts),
+    ));
 
     // std temp dir rather than adding a `tempfile` dev-dependency for two files.
     let tmp =
@@ -146,15 +164,43 @@ async fn a_transient_pack_put_is_retried_not_abandoned() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_permanent_pack_put_error_is_not_retried() {
-    // 403 is PermanentConfig for every backend. Retrying it 5 times wastes a
-    // whole pack body per attempt and cannot succeed. This proves the
-    // classifier is consulted rather than everything being retried blindly.
+    // A permanent status must bail on the FIRST attempt: re-sending a whole
+    // pack body against an error that cannot succeed is pure waste. This proves
+    // the classifier is consulted rather than everything being retried blindly.
+    //
+    // THIS TEST DID NOT DO THAT UNTIL 2026-09-05, and it is worth saying why,
+    // because it was wrong in three separate ways at once:
+    //
+    //   1. It served 503, not a permanent status. The stub had ONE failure path
+    //      and that path was the transient one, so the code correctly retried
+    //      and the "permanent" branch was never reached.
+    //   2. Its comment asserted "403 is PermanentConfig for every backend".
+    //      `classify_by_status` maps 403 to RefreshUrl -- a presigned URL that
+    //      expired is retryable BY DESIGN -- and only 400..=499 otherwise to
+    //      PermanentConfig. So even a real 403 would have been retried.
+    //   3. Its assertion was `n <= 5`, the pre-0de5b7e attempt bound. 0de5b7e
+    //      replaced that with a 120s wall-clock budget, which is longer than
+    //      this test's own 90s ceiling, so once the code started retrying past
+    //      90s the test failed as "hung" -- which is how it was finally noticed,
+    //      on 2026-09-05, four days later.
+    //
+    // The failure mode is the one this suite keeps rediscovering: a guard that
+    // cannot fire the way its name claims. It passed for years while asserting
+    // nothing about permanence, then broke for a reason unrelated to its
+    // subject. Now it sends a genuine PermanentConfig status and asserts the
+    // count is EXACTLY one.
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr").to_string();
     let puts = Arc::new(AtomicUsize::new(0));
-    // usize::MAX failures => always 403... but we want 403 specifically, so
-    // reuse the failure path with a large count and assert on attempts only.
-    let server = tokio::spawn(serve(listener, addr.clone(), usize::MAX, Arc::clone(&puts)));
+    // 400 is PermanentConfig: `classify_by_status` maps 400..=499 there, having
+    // already special-cased 403.
+    let server = tokio::spawn(serve(
+        listener,
+        addr.clone(),
+        usize::MAX,
+        "400 Bad Request",
+        Arc::clone(&puts),
+    ));
 
     let tmp =
         std::env::temp_dir().join(format!("mg-packretry-permanent-{}.tmp", std::process::id()));
@@ -183,8 +229,9 @@ async fn a_permanent_pack_put_error_is_not_retried() {
         "a bucket that never accepts must surface an error"
     );
     let n = puts.load(Ordering::SeqCst);
-    assert!(
-        n <= 5,
-        "retries must be BOUNDED; a pack body is re-sent on every attempt. got {n}"
+    assert_eq!(
+        n, 1,
+        "a PermanentConfig status must bail on the first attempt, not be retried; \
+         a whole pack body is re-sent per attempt and none of them can succeed. got {n}"
     );
 }
