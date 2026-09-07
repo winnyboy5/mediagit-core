@@ -129,6 +129,39 @@ where
 ///
 /// `budget` of zero restores the historical five-attempt behaviour exactly, so
 /// `MEDIAGIT_PACK_PUT_RETRY_BUDGET_SECS=0` is a true revert switch.
+///
+/// THE FIRST RETRY IS UNCONDITIONAL, and that is not a nicety. `elapsed` is
+/// measured from the start of attempt 0, so it already contains the whole
+/// duration of the upload that just failed. The budget therefore only permits a
+/// retry when `upload_duration + backoff <= budget`, and a 64 MiB cloud pack
+/// takes 150-450s to upload against a 120s default. The comparison can never be
+/// satisfied on the path this guards, which made the knob inert there: tuning
+/// MEDIAGIT_PACK_PUT_RETRY_BUDGET_SECS changed nothing, because the first check
+/// always lost.
+///
+/// 20260907-ga41, azure, S5, real evidence:
+///
+///   after 1 transport attempts over 158.5s (MEDIAGIT_PACK_PUT_RETRY_BUDGET_SECS)
+///     ... error sending request ... connection error
+///     ... An existing connection was forcibly closed by the remote host. (os error 10054)
+///
+/// An ordinary WAN reset after 158.5s of healthy transfer, zero retries, and
+/// `finish_pack_phase` then demoted the ENTIRE push to the per-chunk path over
+/// one pack (packsOffered=32 packsCompleted=31).
+///
+/// 0de5b7e's reasoning -- "five quick attempts survive only 1.9-3.75s of link
+/// trouble" -- is right for attempts that fail FAST (refused, instant reset) and
+/// silently assumed attempts are cheap. Two failure modes share one rule:
+///
+///   fast failure (~0s per attempt)  -> budget works, ~11-13 attempts
+///   slow failure (158s per attempt) -> budget unreachable, ALWAYS zero retries
+///
+/// So attempt 0 always gets one more go. Re-sending is idempotent (the PUT
+/// targets a content-addressed key with the same bytes), one retry is bounded at
+/// one extra body, and losing a pack costs the whole push its fast path -- a
+/// measured 2.5x. Everything after that first retry is governed by the existing
+/// budget exactly as before, which on a slow path stops immediately because
+/// `elapsed` is already past it.
 fn pack_put_should_give_up(
     attempt: u32,
     elapsed: std::time::Duration,
@@ -138,6 +171,11 @@ fn pack_put_should_give_up(
 ) -> bool {
     if attempt + 1 >= max_attempts {
         return true;
+    }
+    // Checked before the budget so a slow first attempt cannot skip it, and
+    // after max_attempts so a caller passing max_attempts=1 still means one.
+    if attempt == 0 {
+        return false;
     }
     if budget.is_zero() {
         return attempt + 1 >= 5;
@@ -721,6 +759,42 @@ mod pack_put_retry_tests {
         assert!(
             pack_put_should_give_up(6, Duration::from_secs(119), 30_000, BUDGET, MAX),
             "a wait that would overrun the budget must end the retry loop"
+        );
+    }
+
+    /// THE ga41 REGRESSION, stated as a test.
+    ///
+    /// `elapsed` starts at attempt 0, so when a SLOW attempt fails it already
+    /// contains that attempt's whole duration. A 64 MiB cloud pack takes
+    /// 150-450s to upload against a 120s budget, so `elapsed + wait > budget`
+    /// is true the very first time it is asked and the pack gets ZERO retries --
+    /// the budget knob is inert on the exact path it guards.
+    ///
+    /// 20260907-ga41 azure: "after 1 transport attempts over 158.5s", cause
+    /// `os error 10054` (connection forcibly closed) after 158.5s of healthy
+    /// transfer. One ordinary WAN reset, no retry, and the whole push demoted
+    /// to per-chunk over a single pack (32 offered, 31 completed).
+    ///
+    /// This assertion FAILS against the pre-fix rule, which is the point.
+    #[test]
+    fn a_slow_first_attempt_still_gets_one_retry() {
+        assert!(
+            !pack_put_should_give_up(0, Duration::from_secs(158), 2_000, BUDGET, MAX),
+            "a first attempt that spent 158s uploading before the peer reset it must \
+             still be retried; re-sending is idempotent and losing the pack costs the \
+             whole push its fast path"
+        );
+    }
+
+    /// The other half of that guard: the exemption is for the FIRST attempt
+    /// only. Without this, "always allow one more" could be widened into
+    /// "always allow more" and the budget would stop bounding anything.
+    #[test]
+    fn the_first_retry_exemption_does_not_extend_to_later_attempts() {
+        assert!(
+            pack_put_should_give_up(1, Duration::from_secs(317), 2_000, BUDGET, MAX),
+            "after the one guaranteed retry the budget must bind again -- two slow \
+             attempts is the bound, not an open-ended loop"
         );
     }
 
