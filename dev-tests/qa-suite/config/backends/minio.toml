@@ -7,4 +7,8 @@ region = "{{REGION}}"
 access_key_id = "{{ACCESS_KEY}}"
 secret_access_key = "{{SECRET_KEY}}"
 endpoint = "{{ENDPOINT}}"
-force_path_style = true
+# NOTE: `force_path_style` used to be set here and was never a TOML key -
+# S3Storage has no such field, so it was silently discarded. Path-style
+# addressing is switched on in code for any custom endpoint
+# (minio.rs:438 `.force_path_style(config.path_style)`), so MinIO already
+# gets it. Removed so `mediagit` stops warning about an unknown key.
