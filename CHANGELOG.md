@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.3.0-rc.5] - 2026-09-08
+
+Cleared for release by two consecutive clean QA campaigns — **241 gates each,
+0 failures, all 14 phases**, on identical binaries — plus a green workspace
+suite (2226 passed, 0 failed). Both campaigns ran through a degraded network
+and neither lost a gate; see the pack-upload section below.
+
 ### Changed — relicensed from AGPL-3.0 to BSL 1.1 (2026-08-27)
 
 **MediaGit is now source available, not open source.** Offering it to third
@@ -1565,7 +1572,8 @@ throughput improvements, pack negotiation fixes, and several cloud-backend bug f
 - Dependency security audits in CI
 - Encryption at rest with Argon2 key derivation
 
-[Unreleased]: https://github.com/winnyboy5/mediagit-core/compare/v0.3.0-rc.4...HEAD
+[Unreleased]: https://github.com/winnyboy5/mediagit-core/compare/v0.3.0-rc.5...HEAD
+[v0.3.0-rc.5]: https://github.com/winnyboy5/mediagit-core/compare/v0.3.0-rc.4...v0.3.0-rc.5
 [v0.3.0-rc.4]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.8-beta.1...v0.3.0-rc.4
 [v0.2.8-beta.1]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.7-beta.1...v0.2.8-beta.1
 [v0.2.6-beta.3]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.6-beta.2...v0.2.6-beta.3

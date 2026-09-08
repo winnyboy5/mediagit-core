@@ -1,6 +1,6 @@
 # MediaGit Architecture
 
-**Version**: 0.3.0-rc.4
+**Version**: 0.3.0-rc.5
 
 > **Media-first version control** built on Git semantics with intelligent compression,
 > content-defined chunking, delta encoding, and media-aware merging.

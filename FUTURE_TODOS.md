@@ -4,7 +4,7 @@ Consolidated and **priority-ordered** registry of planned features, code-level T
 known limitations for MediaGit. Items are sourced from documentation and source code;
 each entry cites the file it was verified against.
 
-> Last updated: 2026-08-26 (completed items removed) | v0.3.0-rc.4 | Completed work is recorded in CHANGELOG.md and git history
+> Last updated: 2026-08-26 (completed items removed) | v0.3.0-rc.5 | Completed work is recorded in CHANGELOG.md and git history
 
 **Priority levels:**
 - **P0** — Quick win or active blocker — ≤1 day effort, implement immediately

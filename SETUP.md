@@ -5,7 +5,7 @@ on Git internals, but a purpose-built VCS with chunk-level deduplication,
 BLAKE3-addressed objects, and pluggable storage backends (local filesystem,
 AWS S3, Azure Blob, GCS, MinIO). It ships two binaries: `mediagit` (the
 client) and `mediagit-server` (an optional HTTP(S) server for push/pull
-collaboration). Current release: **0.3.0-rc.4**.
+collaboration). Current release: **0.3.0-rc.5**.
 
 ## Which track am I?
 
@@ -40,11 +40,11 @@ both the `mediagit` client and the `mediagit-server` binary, plus a
 
 | Platform | Archive |
 |----------|---------|
-| Linux x86_64 | `mediagit-0.3.0-rc.4-x86_64-linux.tar.gz` |
-| Linux ARM64 | `mediagit-0.3.0-rc.4-aarch64-linux.tar.gz` |
-| macOS Intel | `mediagit-0.3.0-rc.4-x86_64-macos.tar.gz` |
-| macOS Apple Silicon | `mediagit-0.3.0-rc.4-aarch64-macos.tar.gz` |
-| Windows x86_64 | `mediagit-0.3.0-rc.4-x86_64-windows.zip` |
+| Linux x86_64 | `mediagit-0.3.0-rc.5-x86_64-linux.tar.gz` |
+| Linux ARM64 | `mediagit-0.3.0-rc.5-aarch64-linux.tar.gz` |
+| macOS Intel | `mediagit-0.3.0-rc.5-x86_64-macos.tar.gz` |
+| macOS Apple Silicon | `mediagit-0.3.0-rc.5-aarch64-macos.tar.gz` |
+| Windows x86_64 | `mediagit-0.3.0-rc.5-x86_64-windows.zip` |
 
 Download from [GitHub Releases](https://github.com/winnyboy5/mediagit-core/releases).
 
@@ -55,13 +55,13 @@ curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/instal
 
 **Linux x86_64 — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.4/mediagit-0.3.0-rc.4-x86_64-linux.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-linux.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **Windows x86_64 (PowerShell):**
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.4/mediagit-0.3.0-rc.4-x86_64-windows.zip" -OutFile mediagit.zip
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-windows.zip" -OutFile mediagit.zip
 Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 # Add to PATH:
 [Environment]::SetEnvironmentVariable("Path", "$env:Path;$env:LOCALAPPDATA\MediaGit\bin", "User")
@@ -86,13 +86,13 @@ the image). The `ENTRYPOINT` is `mediagit` (the CLI, default `CMD ["--help"]`)
 — to run the server instead, override the entrypoint:
 
 ```bash
-docker pull ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.4
-docker run --rm ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.4 mediagit --version
+docker pull ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.5
+docker run --rm ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.5 mediagit --version
 
 # Run the server (override entrypoint), mounting a host dir for repo data:
 docker run --rm -p 3000:3000 -v $(pwd)/repos:/data \
   --entrypoint mediagit-server \
-  ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.4 --data-dir /data
+  ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.5 --data-dir /data
 ```
 
 ### 2. Minimal server

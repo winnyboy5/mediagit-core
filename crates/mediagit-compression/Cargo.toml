@@ -26,7 +26,7 @@ thiserror.workspace = true
 tracing.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
-mediagit-security = { version = "0.3.0-rc.4", path = "../mediagit-security", default-features = false }
+mediagit-security = { version = "0.3.0-rc.5", path = "../mediagit-security", default-features = false }
 
 [dev-dependencies]
 criterion.workspace = true

@@ -1,7 +1,7 @@
 # MediaGit vs. Competitors — Technical Comparison
 
 **Date:** May 2026  
-**MediaGit Version:** 0.2.8-beta.1 (evidence basis below; current release is `0.3.0-rc.4`)  
+**MediaGit Version:** 0.2.8-beta.1 (evidence basis below; current release is `0.3.0-rc.5`)  
 **Evidence basis:** 459 automated deep-tests run 2026-05-25 across AWS S3 (ap-south-1), Azure Blob Storage (South India), and Google Cloud Storage; competitor data from public docs, GitHub issues, and vendor pricing pages as of May 2026.
 
 ---
