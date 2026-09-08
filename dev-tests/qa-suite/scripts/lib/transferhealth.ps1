@@ -41,6 +41,16 @@ $script:QA_TH_VERIFY_ABORT = 'stream error mid-entry'
 $script:QA_TH_SERVE_ABORT  = 'streaming error|dispatch failure'
 $script:QA_TH_THROUGHPUT   = 'mb_per_sec="([0-9.]+)"'
 
+# Did packs actually reach the verified state, or did verification give up?
+#
+# A pack that never verifies is not a correctness problem -- an unverified pack
+# can never have a URL minted for it, so clients take the proxy path and get
+# bytes that are hashed inline before being served. It is a SILENT PERFORMANCE
+# problem: every clone of that pack relays through the server forever, and the
+# campaign still reports pass=241. Nothing else in the suite can see it.
+$script:QA_TH_VERIFIED = 'pack verified clean'
+$script:QA_TH_GAVEUP   = 'exceeded its wall-clock budget|incomplete after retries'
+
 function Get-QaBackendFromLogName {
   param([string]$Name)
   # server-<backend>-<phase>-<n>.out.log
@@ -68,7 +78,7 @@ function Write-QaTransferHealth {
     $b = Get-QaBackendFromLogName $f.Name
     if (-not $byBackend.ContainsKey($b)) {
       $byBackend[$b] = [pscustomobject]@{
-        Logs = 0; VerifyAborts = 0; ServeAborts = 0
+        Logs = 0; VerifyAborts = 0; ServeAborts = 0; Verified = 0; GaveUp = 0
         Mbps = New-Object System.Collections.ArrayList
         AbortMinutes = @{}
       }
@@ -96,6 +106,9 @@ function Write-QaTransferHealth {
           else { $acc.AbortMinutes[$m] = 1 }
         }
       }
+
+      if ($line -match $script:QA_TH_VERIFIED) { $acc.Verified++ }
+      if ($line -match $script:QA_TH_GAVEUP)   { $acc.GaveUp++ }
 
       if ($line -match $script:QA_TH_THROUGHPUT) {
         [void]$acc.Mbps.Add([double]$Matches[1])
@@ -158,6 +171,9 @@ function Write-QaTransferHealth {
 
     Write-Host ("  {0,-8} logs={1,-3} aborts={2,-4} (serve={3} verify={4})  {5}  {6}" -f
       $b, $a.Logs, $total, $a.ServeAborts, $a.VerifyAborts, $tp, $verdict)
+    Write-Host ("           packs verified={0}  gave-up={1}{2}" -f
+      $a.Verified, $a.GaveUp,
+      $(if ($a.GaveUp -gt 0) { "  <- those packs stay on the PROXY path for every future clone" } else { "" }))
 
     # The correlation the ga47 forensics actually needed by hand: WHEN were the
     # aborts, so a failing drill's window can be checked against them. Densest

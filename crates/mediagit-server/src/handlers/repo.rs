@@ -1712,9 +1712,10 @@ pub(crate) async fn verify_pack_with_budget(
         let elapsed = verify_start.elapsed();
         let bytes: u64 = manifest.iter().map(|e| e.length as u64).sum();
         // A pack that verifies far slower than its peers is the difference
-        // between a clone taking minutes and taking an hour, because
-        // `ensure_pack_verified_for_presign` blocks URL minting on exactly this
-        // work. On 2026-08-20 one pack took 2628765 ms for 21 entries (~8 KB/s)
+        // between a clone downloading direct from the bucket and relaying every
+        // byte through this server, because a pack is only presignable once
+        // this work finishes. On 2026-08-20 one pack took 2628765 ms for 21
+        // entries (~8 KB/s)
         // while its 31 siblings averaged ~10 s, and the ONLY trace of it was a
         // single `elapsed_ms` on this line — no rate, no size, and nothing at
         // all until it finally finished 44 minutes later. Diagnosing it needed
@@ -1736,8 +1737,13 @@ pub(crate) async fn verify_pack_with_budget(
                 bytes,
                 elapsed_ms = elapsed.as_millis() as u64,
                 mb_per_sec = format!("{mbs:.3}"),
-                "pack verification was pathologically slow; a clone waiting on this pack \
-                 is blocked for the whole duration (see ensure_pack_verified_for_presign)"
+                // Was: "a clone waiting on this pack is blocked for the whole
+                // duration". That stopped being true in a816b3c — presign now
+                // answers immediately and the client proxies — and a log line
+                // that describes behaviour the code no longer has will misdirect
+                // the next person reading it at 2am.
+                "pack verification was pathologically slow; until it finishes, every clone \
+                 of this pack relays through the server instead of downloading direct"
             );
         }
         tracing::info!(
@@ -1840,14 +1846,34 @@ pub async fn resume_pack_verification(
         }
     };
 
-    tokio::spawn(verify_pack_in_background(
-        Arc::clone(state),
-        repo_path.to_path_buf(),
-        repo.to_string(),
-        pack_oid.to_string(),
-        storage,
-        manifest,
-    ));
+    // Route through the same in-flight cell every other caller uses
+    // (`complete_pack`, `ensure_pack_verified_for_presign`). This spawn used to
+    // call `verify_pack_in_background` directly, so a presign arriving while
+    // the startup sweep was still working could start a SECOND full
+    // read-and-hash pass of the same pack — every entry pulled over the WAN
+    // twice, which is the exact duplication this cell exists to prevent.
+    // The 1-permit semaphore serialised the two passes but did not stop either
+    // doing the work.
+    let state2 = Arc::clone(state);
+    let repo_path2 = repo_path.to_path_buf();
+    let repo2 = repo.to_string();
+    let pack_oid2 = pack_oid.to_string();
+    tokio::spawn(async move {
+        let key = (repo2.clone(), pack_oid2.clone());
+        let cell = get_or_create_pack_verify_cell(&state2, &key).await;
+        cell.get_or_init(|| {
+            verify_pack_in_background(
+                Arc::clone(&state2),
+                repo_path2,
+                repo2,
+                pack_oid2,
+                storage,
+                manifest,
+            )
+        })
+        .await;
+        state2.pack_verify_inflight.lock().await.remove(&key);
+    });
 }
 
 /// POST /{repo}/packs/complete — Register a finished cloud pack and its chunk manifest.

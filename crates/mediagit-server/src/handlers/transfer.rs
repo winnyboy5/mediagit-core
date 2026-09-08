@@ -1017,10 +1017,34 @@ async fn ensure_pack_verified_for_presign(
         })
         .await;
 
-    // Free the slot now that it's resolved — the fast path above already
-    // covers every future caller once `unverified_packs` reflects that, so
-    // this is just bounding memory, not a correctness step.
-    state.pack_verify_inflight.lock().await.remove(&key);
+    if clean {
+        // Verified: the fast path above now covers every future caller, because
+        // `unverified_packs` no longer holds this pack. Dropping the cell is
+        // pure memory bounding.
+        state.pack_verify_inflight.lock().await.remove(&key);
+    } else {
+        // NOT verified — and here the old unconditional remove was a bug.
+        //
+        // On `false` (budget exhausted, or entries still unreadable after three
+        // attempts) the pack STAYS in `unverified_packs`, so the fast path does
+        // not cover the next caller. Removing the cell immediately meant the
+        // very next presign request started a whole fresh read-and-hash pass of
+        // the same pack. A clone sends one presign request per batch — ga47's
+        // aws clone sent 25 — so a pack that keeps failing to verify on a sick
+        // link gets re-read once per request, on the link that is already the
+        // reason it is failing.
+        //
+        // Hold the resolved `false` briefly so that burst coalesces onto one
+        // answer, then drop it so the pack is not pinned unverified forever.
+        // No env knob: there is no evidence anyone needs to tune this, and this
+        // path has already produced three "fixed timer" cliffs.
+        const RETRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
+        let state2 = Arc::clone(state);
+        tokio::spawn(async move {
+            tokio::time::sleep(RETRY_COOLDOWN).await;
+            state2.pack_verify_inflight.lock().await.remove(&key);
+        });
+    }
 
     clean
 }
@@ -1737,6 +1761,134 @@ mod presign_pack_downloads_verification_tests {
         assert!(
             !ok,
             "a pack with a corrupted entry must never be reported mintable, got true"
+        );
+    }
+
+    /// G1. The unconditional `remove` that used to sit at the end of
+    /// `ensure_pack_verified_for_presign` was a bug on the FAILURE path.
+    ///
+    /// When verification resolves `false` the pack stays in `unverified_packs`,
+    /// so the function's fast path does not cover the next caller. Dropping the
+    /// cell immediately meant the very next presign request started a whole
+    /// fresh read-and-hash pass. A clone sends one presign request per batch —
+    /// ga47's aws clone sent 25 — so a pack failing to verify on a sick link
+    /// was re-read once per request, over the link that was already the reason
+    /// it was failing.
+    ///
+    /// Retaining the resolved `false` briefly makes that burst coalesce.
+    #[tokio::test]
+    async fn a_failed_verification_is_retained_so_the_next_request_coalesces() {
+        let repo = "retain-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+
+        // No manifest on disk -> `read_pack_manifest` returns None and the
+        // function resolves `false` without doing any I/O. The fast, boring
+        // route to the failure path this test is about.
+        let pack_oid = "1".repeat(64);
+        mark_unverified(&state, &repo, &pack_oid).await;
+
+        let ok =
+            ensure_pack_verified_for_presign(&state, &repo_path, &repo, &storage, &pack_oid).await;
+        assert!(
+            !ok,
+            "a pack whose manifest cannot be read must not be mintable"
+        );
+
+        let key = (repo.clone(), pack_oid.clone());
+        assert!(
+            state.pack_verify_inflight.lock().await.contains_key(&key),
+            "after resolving false the cell must be RETAINED, so the next presign              request coalesces onto it instead of starting another full pack read"
+        );
+    }
+
+    /// The other half — and the half that stops "always retain" from being a
+    /// passing implementation.
+    ///
+    /// Retention has to be CONDITIONAL. If a successful verification also kept
+    /// its cell, the cached `true`/`false` would outlive the state it describes
+    /// and the map would grow without bound. On success the fast path already
+    /// covers every future caller, because the pack has left
+    /// `unverified_packs`, so the cell must go immediately.
+    #[tokio::test]
+    async fn a_successful_verification_drops_its_cell_immediately() {
+        let repo = "drop-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let fixture = build_valid_pack();
+        let pack_oid = "2".repeat(64);
+        write_pack_and_manifest(&storage, &repo_path, &pack_oid, &fixture).await;
+        mark_unverified(&state, &repo, &pack_oid).await;
+
+        let ok =
+            ensure_pack_verified_for_presign(&state, &repo_path, &repo, &storage, &pack_oid).await;
+        assert!(ok, "a well-formed pack must verify clean");
+
+        let key = (repo.clone(), pack_oid.clone());
+        assert!(
+            !state.pack_verify_inflight.lock().await.contains_key(&key),
+            "a verified pack must release its cell at once; retaining it unconditionally              would grow the map without bound and cache a verdict past its usefulness"
+        );
+    }
+
+    /// P1. `resume_pack_verification` used to spawn `verify_pack_in_background`
+    /// directly, bypassing the in-flight cell that every other call site uses.
+    /// A presign arriving while the startup sweep was still working could
+    /// therefore start a SECOND full read-and-hash pass of the same pack —
+    /// every entry pulled over the WAN twice. The 1-permit semaphore serialised
+    /// the two passes but did not stop either doing the work.
+    ///
+    /// Whichever of the two registers the cell first, the other must join it.
+    #[tokio::test]
+    async fn startup_sweep_and_presign_verify_the_same_pack_exactly_once() {
+        let repo = "sweep-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let base_storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let verify_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let storage: Arc<dyn StorageBackend> = Arc::new(CountingBackend {
+            inner: base_storage,
+            verify_reads: Arc::clone(&verify_reads),
+        });
+        let fixture = build_valid_pack();
+        let entries_per_verify = fixture.manifest.len();
+        let pack_oid = "3".repeat(64);
+        write_pack_and_manifest(&storage, &repo_path, &pack_oid, &fixture).await;
+        install_backend(&state, &repo_path, Arc::clone(&storage)).await;
+        mark_unverified(&state, &repo, &pack_oid).await;
+
+        // The startup sweep, then a presign racing it — the ga-time shape.
+        crate::handlers::repo::resume_pack_verification(&state, &repo_path, &repo, &pack_oid).await;
+        let _ =
+            ensure_pack_verified_for_presign(&state, &repo_path, &repo, &storage, &pack_oid).await;
+
+        // Let the sweep's spawned task settle, whichever way the race went.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let still_unverified = {
+                let unverified = state.unverified_packs.read().await;
+                unverified.get(&repo).is_some_and(|s| s.contains(&pack_oid))
+            };
+            if !still_unverified {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "verification never resolved"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let reads = verify_reads.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            reads, entries_per_verify,
+            "the pack was read {reads} times for {entries_per_verify} entries — the sweep              and the presign each ran their own full pass instead of sharing one"
         );
     }
 
