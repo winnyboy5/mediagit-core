@@ -51,7 +51,9 @@ if (Test-Path $QA.MGServer) {
 }
 
 # ---------------------------------------------------------------
-# MinIO
+# S3 backend on the QA endpoint (native Silo on this host; MinIO elsewhere).
+# The `minio` token is the backend IDENTIFIER used throughout the suite -
+# gate names, log filenames and $backend comparisons - so it stays put.
 # ---------------------------------------------------------------
 if ($QA.Backends -contains "minio") {
   try {

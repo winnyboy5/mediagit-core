@@ -118,7 +118,9 @@ function Test-QaBackendIsLocal([string]$Endpoint) {
   } catch { return $null }
 }
 
-# Poll a MinIO endpoint's health-live probe until it responds or times out.
+# Poll the S3 backend's health-live probe until it responds or times out.
+# `/minio/health/live` is MinIO's path, which native Silo also serves - it is a
+# compatibility endpoint, not a statement about which server is running.
 function Wait-QaMinioUp([string]$Endpoint, [int]$TimeoutSec = 30) {
   $sw = [Diagnostics.Stopwatch]::StartNew()
   while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
@@ -403,11 +405,22 @@ function Drill-A6-SpacesAndUnicodePaths {
 }
 
 # ---------------------------------------------------------------------------
-# A7: kill MinIO mid-push (docker stop mediagit-minio); the push must fail
-# cleanly (nonzero exit, no panic), a restarted MinIO must let a retried push
-# succeed, and a fresh clone must be hash-exact and fsck-clean.
-# Capability-gated: SKIPs cleanly when the "mediagit-minio" container isn't
-# reachable (docker not installed/running, or a differently-named container).
+# A7: kill the S3 backend mid-push; the push must fail cleanly (nonzero exit,
+# no panic), a restarted backend must let a retried push succeed, and a fresh
+# clone must be hash-exact and fsck-clean.
+#
+# The backend here is whatever serves the QA S3 endpoint. On this host that is a
+# NATIVE Silo process, cycled through silo_native.ps1 via
+# MG_QA_BACKEND_STOP_CMD/_START_CMD; `docker stop mediagit-minio` is the
+# fallback when a container is actually present. The drill does not care which -
+# it stops a real backend during a real upload either way.
+#
+# NOT skip-gated on the container any more. It used to SKIP when
+# "mediagit-minio" was unreachable, which is how it silently stopped testing
+# anything the day the backend moved off Docker: a SKIP reads as green. It now
+# FAILS when something local is serving the endpoint but no stop/start command
+# was configured, because that is misconfiguration rather than a missing
+# capability.
 # ---------------------------------------------------------------------------
 function Drill-A7-BackendOutage {
   $drill = "A7-backend-outage"
