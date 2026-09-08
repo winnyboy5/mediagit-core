@@ -186,12 +186,29 @@ Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile
 
 ### Slow Performance on Network Drives
 
-```toml
-# Disable real-time scanning for MediaGit operations
-[performance]
-disable_indexing = true
-bypass_cache_manager = true
+Real-time antivirus scanning and the Windows search indexer are the usual
+cause: every chunk MediaGit writes is a new file, so an object store is exactly
+the shape that makes both work hardest.
+
+**This is not something MediaGit config can switch off** — earlier revisions of
+this page showed `[performance] disable_indexing` / `bypass_cache_manager`,
+which are not settings and never were. Because unknown keys are silently
+discarded, that block looked like it applied and did nothing at all.
+
+Set the exclusions in Windows instead, for both the repository and its object
+store (elevated PowerShell):
+
+```powershell
+Add-MpPreference -ExclusionPath "C:\path\to\my-media-project"
+Add-MpPreference -ExclusionProcess "mediagit.exe"
 ```
+
+Then exclude the same folder from the search indexer via
+**Settings → Privacy & security → Searching Windows → Exclude folders**.
+
+If the working tree itself lives on a network share, prefer keeping the repo on
+a local disk and pointing the remote at the network location — MediaGit's object
+store does many small writes, which is the worst case for SMB round trips.
 
 ### Chocolatey Not Found
 

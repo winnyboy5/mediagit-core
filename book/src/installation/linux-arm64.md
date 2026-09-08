@@ -32,14 +32,15 @@ mediagit --version
 ### Raspberry Pi 4/5 Optimization
 
 ```toml
-# ~/.mediagit/config.toml
+# .mediagit/config.toml
 [performance]
-worker_threads = 4  # Raspberry Pi 4/5 has 4 cores
-chunk_size = "4MB"  # Optimize for limited RAM
+max_concurrency = 4          # Raspberry Pi 4/5 has 4 cores
+upload_concurrency = 4
+download_concurrency = 4
 
 [compression]
 algorithm = "zstd"
-level = "fast"  # Less CPU intensive
+level = 1                    # lowest CPU cost; level is an integer, not a name
 ```
 
 ## ARM Server Installation
@@ -78,9 +79,10 @@ Optimized for AWS Graviton processors:
 # Install
 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 
-# Configure for Graviton
-mediagit config set performance.worker_threads $(nproc)
-mediagit config set compression.algorithm zstd
+# Configure for Graviton. `config set` accepts only author.name, author.email,
+# performance.upload_concurrency and performance.download_concurrency —
+# everything else is edited in .mediagit/config.toml directly.
+mediagit config set performance.upload_concurrency $(nproc)
 ```
 
 ### Oracle Cloud Ampere
@@ -118,31 +120,46 @@ mediagit --version
 ### Memory-Constrained Devices (1-2GB RAM)
 
 ```toml
-# ~/.mediagit/config.toml
+# .mediagit/config.toml
 [performance]
-worker_threads = 2
-chunk_size = "2MB"
-cache_size = "256MB"
+max_concurrency = 2          # keep peak memory down on a 1-2GB board
+upload_concurrency = 4
+download_concurrency = 4
+buffer_size = 65536          # bytes
+
+[performance.cache]
+enabled = true
+max_size = 268435456         # bytes — 256 MiB
 
 [compression]
-level = "fast"
-parallel = false
+algorithm = "zstd"
+level = 1                    # 1 is the cheapest zstd level; 22 is the slowest
 ```
 
 ### High-Performance ARM Servers (Graviton 3, Ampere Altra)
 
 ```toml
-# ~/.mediagit/config.toml
+# .mediagit/config.toml
 [performance]
-worker_threads = 64  # Full core utilization
-chunk_size = "16MB"
-cache_size = "4GB"
+max_concurrency = 64
+upload_concurrency = 32
+download_concurrency = 24
+pack_workers = 8
+buffer_size = 1048576        # bytes — 1 MiB
+
+[performance.cache]
+enabled = true
+max_size = 4294967296        # bytes — 4 GiB
 
 [compression]
+algorithm = "zstd"
 level = 3
-parallel = true
-threads = 8
 ```
+
+Sizes are raw **bytes**, and `level` is an **integer** (zstd 1-22, brotli 0-11).
+Unrecognised keys in `config.toml` are silently discarded, so a value written in
+the wrong shape — `"256MB"`, or `level = "fast"` — is indistinguishable from
+never having written it at all.
 
 ## System Requirements
 
@@ -179,15 +196,20 @@ uname -m  # Should output: aarch64
 ### Out of Memory on Raspberry Pi
 
 ```toml
-# Reduce memory usage
+# Reduce memory usage — .mediagit/config.toml
 [performance]
-worker_threads = 1
-chunk_size = "1MB"
-cache_size = "128MB"
+max_concurrency = 1
+upload_concurrency = 2
+download_concurrency = 2
+buffer_size = 32768          # bytes — 32 KiB
+
+[performance.cache]
+enabled = true
+max_size = 134217728         # bytes — 128 MiB
 
 [compression]
-level = "fast"
-parallel = false
+algorithm = "zstd"
+level = 1
 ```
 
 ### Slow Performance

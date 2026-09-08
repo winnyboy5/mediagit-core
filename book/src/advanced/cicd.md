@@ -117,19 +117,16 @@ jobs:
 
 ## Environment Variables
 
-All CI systems can configure MediaGit through environment variables without modifying `config.toml`:
+Storage credentials are NOT among these — MediaGit reads no `AWS_*` or
+`AZURE_STORAGE_*` variables; write them into `config.toml` as shown above.
+These are the variables CI systems actually use to configure MediaGit
+without modifying `config.toml`:
 
 | Variable | Purpose |
 |----------|---------|
 | `MEDIAGIT_REPO` | Override repository path (used by `-C` flag) |
 | `MEDIAGIT_AUTHOR_NAME` | Commit author name |
 | `MEDIAGIT_AUTHOR_EMAIL` | Commit author email |
-| `AWS_ACCESS_KEY_ID` | S3 access key |
-| `AWS_SECRET_ACCESS_KEY` | S3 secret key |
-| `AWS_REGION` | S3 region |
-| `AWS_ENDPOINT_URL` | Custom S3 endpoint (MinIO, etc.) |
-| `AZURE_STORAGE_CONNECTION_STRING` | Azure Blob connection string |
-| `GCS_EMULATOR_HOST` | GCS emulator URL (for testing) |
 
 See [Environment Variables Reference](../reference/environment.md) for the full list.
 
@@ -161,15 +158,22 @@ For running integration tests locally or in CI without cloud credentials, use th
 # Start emulators (MinIO, Azurite, fake-gcs-server)
 docker compose -f docker-compose.test.yml up -d
 
-# Configure MediaGit to use MinIO
-export AWS_ACCESS_KEY_ID=minioadmin
-export AWS_SECRET_ACCESS_KEY=minioadmin
-export AWS_ENDPOINT_URL=http://localhost:9000
-export AWS_REGION=us-east-1
-
 # Run your pipeline
 mediagit init test-repo
 cd test-repo
+
+# Configure MediaGit to use MinIO — credentials live in config.toml, not
+# environment variables; `endpoint` is what makes this MinIO instead of AWS.
+cat >> .mediagit/config.toml << 'EOF'
+[storage]
+backend = "s3"
+bucket = "test-bucket"
+region = "us-east-1"
+access_key_id = "minioadmin"
+secret_access_key = "minioadmin"
+endpoint = "http://localhost:9000"
+EOF
+
 mediagit add assets/
 mediagit commit -m "Test commit"
 mediagit push origin main
@@ -224,8 +228,11 @@ MediaGit is designed for CI performance:
 Ensure `/usr/local/bin` is in your PATH, or specify the full path to the binary.
 
 ### Authentication failures with S3
-- Verify `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` secrets are set
-- Check that the IAM role/user has `s3:GetObject`, `s3:PutObject`, `s3:ListBucket` permissions
+- Verify `access_key_id` and `secret_access_key` are written into the
+  generated `config.toml` — MediaGit has no IAM-role or instance-profile
+  fallback, so an empty key/secret fails with "access key cannot be empty"
+- Check that the underlying AWS key has `s3:GetObject`, `s3:PutObject`,
+  `s3:ListBucket` permissions
 
 ### Slow uploads in CI
 - Use parallel add: `mediagit add --jobs $(nproc) assets/`

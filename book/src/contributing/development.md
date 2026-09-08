@@ -78,25 +78,28 @@ cargo test --workspace -- --nocapture
 
 ### Integration Tests (requires Docker)
 
-Integration tests are marked `#[ignore]` and need real storage emulators:
+Integration tests are marked `#[ignore]` and need real storage emulators. The
+emulator-backed tests set up their own credentials against the emulators'
+well-known defaults (`minio_docker_tests.rs`, `azure_azurite_tests.rs`,
+`gcs_emulator_tests.rs`) — no exports needed for those:
 
 ```bash
 # Start emulators
 docker compose -f docker-compose.test.yml up -d
 
 # Run integration tests
-export AWS_ACCESS_KEY_ID=minioadmin
-export AWS_SECRET_ACCESS_KEY=minioadmin
-export AWS_ENDPOINT_URL=http://localhost:9000
-export AWS_REGION=us-east-1
-export AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://localhost:10000/devstoreaccount1;"
-export GCS_EMULATOR_HOST=http://localhost:4443
-
 cargo test --ignored -p mediagit-storage -p mediagit-server --verbose
 
 # Cleanup
 docker compose -f docker-compose.test.yml down -v
 ```
+
+A separate handful of `#[ignore]` tests instead exercise real cloud accounts
+and skip themselves unless their own env vars are set (see each test's doc
+comment): `AZURE_STORAGE_ACCOUNT` / `AZURE_STORAGE_KEY` /
+`MG_QA_AZURE_CONTAINER` for the real-Azure diagnostic in `reqsign_diag.rs`,
+and `MEDIAGIT_GCS_BUCKET` / `MEDIAGIT_GCS_PROJECT` (or `GOOGLE_CLOUD_PROJECT`)
+plus ADC for the real-GCS round-trip tests in `gcs_integration_tests.rs`.
 
 ### MSRV Check
 

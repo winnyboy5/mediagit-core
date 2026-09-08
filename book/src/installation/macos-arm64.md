@@ -89,18 +89,25 @@ MediaGit-Core leverages Apple Silicon features:
 ### Performance Configuration
 
 ```toml
-# ~/.mediagit/config.toml
+# .mediagit/config.toml
 [performance]
-worker_threads = 8  # M1: 8, M2/M3: 8-12, M4: 10-16
-chunk_size = "16MB"
-cache_size = "2GB"  # Leverage unified memory
+max_concurrency = 8          # M1: 8, M2/M3: 8-12, M4: 10-16
+upload_concurrency = 32
+download_concurrency = 24
+buffer_size = 1048576        # bytes — 1 MiB
+
+[performance.cache]
+enabled = true
+max_size = 2147483648        # bytes — 2 GiB, leveraging unified memory
 
 [compression]
 algorithm = "zstd"
 level = 3
-parallel = true
-threads = 4  # Use performance cores
 ```
+
+Cache and buffer sizes are raw **bytes**, and `level` is an **integer** (zstd
+1-22, brotli 0-11). Unrecognised keys are silently discarded, so `"2GB"` or
+`level = "fast"` would be dropped without any error.
 
 ## System Requirements
 

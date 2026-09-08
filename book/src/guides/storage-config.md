@@ -115,11 +115,12 @@ Default Credentials, which honours `GOOGLE_APPLICATION_CREDENTIALS`:
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
 ```
 
-For local testing with the GCS emulator:
-
-```bash
-export GCS_EMULATOR_HOST=http://localhost:4443
-```
+There is no supported environment variable for pointing MediaGit at a local GCS
+emulator. `GCS_EMULATOR_HOST` was documented here previously and is read by
+nothing — the name does not appear anywhere in the codebase. The emulator tests
+in `crates/mediagit-storage/tests/gcs_emulator_tests.rs` set
+`STORAGE_EMULATOR_HOST` themselves, for the Google SDK's benefit, and it is not
+a user-facing knob.
 
 ---
 

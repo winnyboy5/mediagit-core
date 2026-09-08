@@ -223,5 +223,128 @@ if ($null -eq $knobBaselineCount) {
 }
 foreach ($k in $undocumented) { Write-QaLog $Phase "FINDING: knob in code but not env-knobs.md: $k" }
 
-Write-QaLog $Phase "=== 13_docs done: invented=$totalInvented undocumented=$totalUndocumented undocumented_knobs=$($undocumented.Count) ==="
+# ---- invented config keys ------------------------------------------------
+#
+# The knob check above runs code -> doc: it finds knobs the docs forgot. Nothing
+# has ever run doc -> code for CONFIG KEYS, and that is the direction the damage
+# comes from. A knob missing from a doc is an omission a reader survives; a key
+# documented that does not exist is a reader configuring something that silently
+# does nothing.
+#
+# Five instances were live in the docs on 2026-09-08, all the same shape:
+#   [storage] encryption / encryption_algorithm - never fields on S3Storage
+#   [security] encryption_at_rest               - deleted from the struct
+#   force_path_style                            - set in code, never a TOML key
+#     (still present in dev-tests\qa-suite\config\backends\minio.toml, inert)
+#   flat account_name/account_key under [storage] - the rejected pre-v3 shape
+#
+# What makes this class invisible without a gate: `mediagit-config` does NOT set
+# `deny_unknown_fields`. A config carrying `encryption = true` AND
+# `totally_made_up_key = 42` loads completely clean - verified against the
+# shipping binary. So nothing at runtime, and no reader, can tell an invented
+# key from a real one. Only a diff against the schema can.
+#
+# Scope: TOML fences in tracked docs, under any table belonging to MediaGit's
+# own config, compared against the field names serde actually accepts. Nested
+# inline tables (Azure's tagged `auth = { ... }`) are not descended into - the
+# outer key is what gets checked.
+#
+# The table list is READ FROM the Config struct rather than hardcoded, so a new
+# config section cannot quietly fall outside the gate. It also stops the gate
+# reading Cargo.toml/docker examples that share a doc: a `[dependencies]` block
+# is not MediaGit config and its keys are not inventions.
+#
+# First cut only scanned [storage] and [security] and a seeded fault under
+# [performance.timeouts] sailed straight through - a gate that passes because it
+# never looked. Widened after that, then re-proven.
+# BOTH config surfaces, or the gate cries wolf. `schema.rs` is the CLIENT
+# config (.mediagit/config.toml); the SERVER has its own
+# (mediagit-server.toml, config.rs) carrying enable_auth/jwt_secret/etc. A doc
+# showing a server `[security]` block is not inventing anything, so both files
+# are unioned. Checked on the first run: without config.rs this reported five
+# false positives from a single server-config example.
+$SCHEMA_FILES = @(
+  (Join-Path $QA.RepoRoot "crates\mediagit-config\src\schema.rs"),
+  (Join-Path $QA.RepoRoot "crates\mediagit-server\src\config.rs")
+)
+$schemaFields = @{}
+foreach ($sf in $SCHEMA_FILES) {
+  if (-not (Test-Path $sf)) { continue }
+  $txt = [IO.File]::ReadAllText($sf)
+  # `pub name: Type,` - every serde-visible field on every struct in the file.
+  # Union rather than per-struct: a key valid under [storage] for one backend is
+  # not an invention, and this gate hunts names that exist NOWHERE.
+  foreach ($m in ([regex]'(?m)^\s*pub\s+([a-z_][a-z0-9_]*)\s*:').Matches($txt)) {
+    $schemaFields[$m.Groups[1].Value] = $true
+  }
+  # Enum tags serde also accepts as a key (e.g. Azure's `auth = { type = ... }`).
+  foreach ($m in ([regex]'#\[serde\(tag\s*=\s*"([a-z_]+)"').Matches($txt)) {
+    $schemaFields[$m.Groups[1].Value] = $true
+  }
+}
+
+# Top-level table names, taken from the `Config` struct itself.
+$configTables = @{}
+$cfgSchemaTxt = if (Test-Path $SCHEMA_FILES[0]) { [IO.File]::ReadAllText($SCHEMA_FILES[0]) } else { "" }
+if ($cfgSchemaTxt -match '(?s)pub struct Config\s*\{(.*?)\n\}') {
+  # Capture the TYPE too: a free-form map accepts ANY key by design, so its
+  # table must be skipped or the gate flags legitimate user settings. `[custom]`
+  # is `HashMap<String, serde_json::Value>` and its three example keys were the
+  # gate's only false positives on the first widened run.
+  foreach ($m in ([regex]'(?m)^\s*pub\s+([a-z_][a-z0-9_]*)\s*:\s*([^,\r\n]+)').Matches($Matches[1])) {
+    if ($m.Groups[2].Value -match 'HashMap|BTreeMap|Value') { continue }
+    $configTables[$m.Groups[1].Value] = $true
+  }
+}
+
+$CFGKEY_TSV = Join-Path $QA.Logs "docs_config_keys.tsv"
+"doc`tkey" | Set-Content -Path $CFGKEY_TSV -Encoding UTF8
+$inventedKeys = @()
+if ($schemaFields.Count -eq 0 -or $configTables.Count -eq 0) {
+  # Anti-vacuity, same discipline as "compared 0 pages": with no fields or no
+  # table list this gate inspects nothing and would pass on any input, so it
+  # must say so rather than report all-clear.
+  Write-QaGate $Phase "docs-no-invented-config-keys" $false `
+    "schema_fields=$($schemaFields.Count) config_tables=$($configTables.Count) - the gate proved nothing"
+} else {
+  # TRACKED docs only. A plain recursive scan picked up `.serena\memories\` and
+  # other agent scratch, which is not documentation anyone ships and not this
+  # gate's business. `git ls-files` is the same definition of "the docs" the
+  # rest of this suite uses.
+  Push-Location $QA.RepoRoot
+  $tracked = @(& git ls-files "*.md" 2>$null)
+  Pop-Location
+  $docs = $tracked |
+          ForEach-Object { Get-Item (Join-Path $QA.RepoRoot $_) -EA SilentlyContinue } |
+          Where-Object { $_ }
+  foreach ($d in $docs) {
+    $text = [IO.File]::ReadAllText($d.FullName)
+    foreach ($fence in ([regex]'(?s)```toml(.*?)```').Matches($text)) {
+      $inTarget = $false
+      foreach ($line in ($fence.Groups[1].Value -split "`r?`n")) {
+        $t = $line.Trim()
+        if ($t -match '^\[') {
+          # `[storage]`, `[performance.timeouts]`, `[[remotes]]` -> first segment.
+          $tbl = ($t -replace '^\[+' -replace '\]+$' -split '\.')[0]
+          $inTarget = $configTables.ContainsKey($tbl)
+          continue
+        }
+        if (-not $inTarget -or $t -eq "" -or $t.StartsWith("#")) { continue }
+        if ($t -match '^([a-z_][a-z0-9_]*)\s*=') {
+          $k = $Matches[1]
+          if (-not $schemaFields.ContainsKey($k)) {
+            $rel = $d.FullName.Substring($QA.RepoRoot.Length).TrimStart('\')
+            $inventedKeys += "$rel : $k"
+            Add-Content -Path $CFGKEY_TSV -Value "$rel`t$k" -Encoding UTF8
+          }
+        }
+      }
+    }
+  }
+  $ck = "scanned=$($docs.Count) tables=$($configTables.Count) schema_fields=$($schemaFields.Count) invented=$($inventedKeys.Count)"
+  Write-QaGate $Phase "docs-no-invented-config-keys" ($inventedKeys.Count -eq 0) $ck
+  foreach ($i in $inventedKeys) { Write-QaLog $Phase "FINDING: config key documented but not in schema.rs: $i" }
+}
+
+Write-QaLog $Phase "=== 13_docs done: invented=$totalInvented undocumented=$totalUndocumented undocumented_knobs=$($undocumented.Count) invented_keys=$($inventedKeys.Count) ==="
 Exit-QaPhase $Phase $false

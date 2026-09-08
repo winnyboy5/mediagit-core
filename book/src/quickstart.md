@@ -355,8 +355,9 @@ source ~/.zshrc
 Increase timeout in configuration:
 
 ```toml
-[storage]
-timeout_seconds = 300  # 5 minutes
+[performance.timeouts]
+request = 300   # 5 minutes
+write = 120
 ```
 
 For more troubleshooting, see the [Troubleshooting Guide](./guides/troubleshooting.md).
