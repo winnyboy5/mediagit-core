@@ -2,14 +2,19 @@
 
 MediaGit-Core is optimized for Apple Silicon (M1, M2, M3, M4) processors with native ARM64 binaries.
 
-## Quick Install (Homebrew - Recommended)
+## Quick Install (Recommended)
 
 ```bash
-brew tap mediagit/tap
-brew install mediagit-core
+curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 ```
 
-Homebrew automatically installs the ARM64 version on Apple Silicon Macs.
+The script detects Apple Silicon and fetches the native ARM64 build.
+
+## Homebrew
+
+> **Not published.** There is no `mediagit/tap` and no Homebrew formula in any
+> published feed — `packaging/homebrew/mediagit.rb` in the repo is a build
+> recipe, not a hosted tap. `brew install mediagit-core` will fail.
 
 ## Alternative Installation Methods
 
@@ -168,11 +173,10 @@ If you accidentally installed the Intel version:
 # Check if running under Rosetta
 sysctl sysctl.proc_translated
 
-# If output is 1, you're using Intel binary
-# Uninstall and reinstall ARM64 version
-brew uninstall mediagit-core
-brew cleanup
-arch -arm64 brew install mediagit-core
+# If output is 1, you have the Intel binary. Remove it and re-run the
+# install script, which selects the native ARM64 build.
+rm -f /usr/local/bin/mediagit /usr/local/bin/mediagit-server
+curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 ```
 
 ### "mediagit" cannot be opened
@@ -199,11 +203,11 @@ source ~/.zshrc
 ### Permission Issues
 
 ```bash
-# Fix Homebrew permissions
-sudo chown -R $(whoami) /opt/homebrew
+# The install script writes to /usr/local/bin; make sure it is writable.
+sudo chown -R $(whoami) /usr/local/bin
 
-# Retry installation
-brew install mediagit-core
+# Retry
+curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 ```
 
 ## Performance Benchmarks
@@ -234,15 +238,7 @@ curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-r
 
 ## Uninstalling
 
-### Via Homebrew
-
-```bash
-brew uninstall mediagit-core
-brew untap mediagit/tap
-rm -rf ~/.mediagit
-```
-
-### Manual Uninstall
+### Uninstall
 
 ```bash
 sudo rm /usr/local/bin/mediagit

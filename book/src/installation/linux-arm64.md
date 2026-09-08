@@ -47,15 +47,8 @@ level = 1                    # lowest CPU cost; level is an integer, not a name
 
 ### Ubuntu Server ARM64
 
-```bash
-# Add MediaGit repository
-curl -fsSL https://apt.mediagit.dev/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/mediagit-archive-keyring.gpg
-echo "deb [arch=arm64 signed-by=/usr/share/keyrings/mediagit-archive-keyring.gpg] https://apt.mediagit.dev stable main" | sudo tee /etc/apt/sources.list.d/mediagit.list
-
-# Install
-sudo apt update
-sudo apt install mediagit-core
-```
+> **Not published.** There is no APT repository at `apt.mediagit.dev`. On ARM64,
+> use the install script or the `aarch64-linux` tarball shown above.
 
 ### Amazon Linux 2 (Graviton)
 
@@ -88,9 +81,9 @@ mediagit config set performance.upload_concurrency $(nproc)
 ### Oracle Cloud Ampere
 
 ```bash
-# Install on Oracle Cloud ARM instances
-sudo dnf config-manager --add-repo https://rpm.mediagit.dev/mediagit.repo
-sudo dnf install mediagit-core
+# Install on Oracle Cloud ARM instances. There is no rpm.mediagit.dev
+# repository, so use the install script.
+curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 ```
 
 ### Azure ARM VMs

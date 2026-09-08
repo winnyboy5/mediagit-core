@@ -346,5 +346,13 @@ if ($schemaFields.Count -eq 0 -or $configTables.Count -eq 0) {
   foreach ($i in $inventedKeys) { Write-QaLog $Phase "FINDING: config key documented but not in schema.rs: $i" }
 }
 
+# ---- release assets ------------------------------------------------------
+#
+# Everything above asks "does this name exist in the code?". A download URL is
+# a promise about what the RELEASE WORKFLOW publishes, so nothing here has ever
+# looked at one. See lib\docs_release_assets.ps1 for why that matters.
+. (Join-Path $PSScriptRoot "lib\docs_release_assets.ps1")
+Test-QaDocsReleaseAssets $Phase $QA.RepoRoot (Join-Path $QA.Logs "docs_release_assets.tsv")
+
 Write-QaLog $Phase "=== 13_docs done: invented=$totalInvented undocumented=$totalUndocumented undocumented_knobs=$($undocumented.Count) invented_keys=$($inventedKeys.Count) ==="
 Exit-QaPhase $Phase $false

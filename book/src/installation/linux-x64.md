@@ -27,79 +27,39 @@ The archive contains both `mediagit` and `mediagit-server` binaries.
 
 #### Using APT Repository
 
-```bash
-# Add MediaGit repository
-curl -fsSL https://apt.mediagit.dev/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/mediagit-archive-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/mediagit-archive-keyring.gpg] https://apt.mediagit.dev stable main" | sudo tee /etc/apt/sources.list.d/mediagit.list
+> **Not published.** There is no APT repository at `apt.mediagit.dev`, and no
+> step in `.github/workflows` that would populate one. Use the install script
+> or the tarball below.
 
-# Update and install
-sudo apt update
-sudo apt install mediagit-core
-```
+#### Using a .deb Package
 
-#### Using .deb Package
-
-```bash
-# Download latest release
-wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit_0.3.0-rc.5_amd64.deb
-
-# Install
-sudo dpkg -i mediagit_0.3.0-rc.5_amd64.deb
-
-# Fix dependencies if needed
-sudo apt-get install -f
-```
+> **Not published.** There is no `.deb` in the releases. The release workflow
+> builds five artifacts and none of them is a distro package — see
+> [Manual Installation](#manual-installation) below for the tarball, which is
+> the supported route on Debian and Ubuntu.
 
 ### Fedora / RHEL / CentOS
 
 #### Using DNF/YUM
 
-```bash
-# Add MediaGit repository
-sudo dnf config-manager --add-repo https://rpm.mediagit.dev/mediagit.repo
+> **Not published.** There is no YUM/DNF repository at `rpm.mediagit.dev`. Use
+> the install script or the tarball below.
 
-# Install
-sudo dnf install mediagit-core
+#### Using an .rpm Package
 
-# For older systems using yum
-sudo yum install mediagit-core
-```
-
-#### Using .rpm Package
-
-```bash
-# Download latest release
-wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-1.x86_64.rpm
-
-# Install
-sudo rpm -i mediagit-0.3.0-rc.5-1.x86_64.rpm
-```
+> **Not published.** There is no `.rpm` in the releases, and no repository at
+> `rpm.mediagit.dev`. Use the tarball in
+> [Manual Installation](#manual-installation) instead.
 
 ### Arch Linux
 
-```bash
-# Install from AUR
-yay -S mediagit-core
-
-# Or using paru
-paru -S mediagit-core
-
-# Manual AUR installation
-git clone https://aur.archlinux.org/mediagit-core.git
-cd mediagit-core
-makepkg -si
-```
+> **Not published.** There is no AUR package — `aur.archlinux.org/mediagit-core`
+> does not exist, so `yay -S`, `paru -S` and a manual `makepkg` all fail.
 
 ### openSUSE
 
-```bash
-# Add repository
-sudo zypper addrepo https://download.opensuse.org/repositories/home:mediagit/openSUSE_Tumbleweed/home:mediagit.repo
-
-# Install
-sudo zypper refresh
-sudo zypper install mediagit-core
-```
+> **Not published.** There is no openSUSE build-service repository. Use the
+> install script or the tarball below.
 
 ## Manual Binary Installation
 

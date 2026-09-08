@@ -2,20 +2,24 @@
 
 MediaGit-Core provides native Windows binaries for x64 systems (Windows 10/11).
 
-## Quick Install (Chocolatey - Recommended)
+## Quick Install (Recommended)
+
+Download and extract the release ZIP:
 
 ```powershell
-# Open PowerShell as Administrator
-choco install mediagit-core
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-windows.zip" -OutFile mediagit.zip
+Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 ```
+
+Then add `%LOCALAPPDATA%\MediaGit\bin` to your `PATH`.
+
+## Chocolatey and winget
+
+> **Not published.** MediaGit is not on Chocolatey or winget — there is no
+> publishing step for either in `.github/workflows`. `choco install
+> mediagit-core` and `winget install MediaGit.MediaGitCore` will both fail.
 
 ## Alternative Installation Methods
-
-### Windows Package Manager (winget)
-
-```powershell
-winget install MediaGit.MediaGitCore
-```
 
 ### Direct Download
 
@@ -288,7 +292,7 @@ winget upgrade MediaGit.MediaGitCore
 ### Via Chocolatey
 
 ```powershell
-choco uninstall mediagit-core
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\MediaGit"
 ```
 
 ### Via Windows Settings

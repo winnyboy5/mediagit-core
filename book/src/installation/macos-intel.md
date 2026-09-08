@@ -5,8 +5,8 @@ MediaGit-Core provides native binaries optimized for Intel-based Macs.
 ## Quick Install (Homebrew - Recommended)
 
 ```bash
-brew tap mediagit/tap
-brew install mediagit-core
+# Not published: there is no mediagit/tap. Use the install script instead:
+curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 ```
 
 ## Alternative Installation Methods
@@ -143,7 +143,7 @@ echo 'export PATH="/usr/local/bin:$PATH"' >> ~/.zshrc
 sudo chown -R $(whoami) /usr/local/bin /usr/local/lib /usr/local/share
 
 # Retry installation
-brew install mediagit-core
+curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 ```
 
 ## Updating
@@ -167,7 +167,7 @@ curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-r
 ### Via Homebrew
 
 ```bash
-brew uninstall mediagit-core
+rm -f /usr/local/bin/mediagit /usr/local/bin/mediagit-server
 brew untap mediagit/tap
 ```
 
