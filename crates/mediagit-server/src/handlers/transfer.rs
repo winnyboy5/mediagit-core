@@ -1062,6 +1062,39 @@ pub async fn presign_pack_downloads(
         .filter(|n: &usize| *n > 0)
         .unwrap_or(64);
 
+    // THIS HANDLER NEVER WAITS FOR VERIFICATION.
+    //
+    // D3 requires that no URL is minted for a pack whose contents have not been
+    // verified, because a presigned URL takes the server out of the data path
+    // permanently — there is no revocation. That requirement is kept exactly.
+    // What changed is that an unverified pack is answered `None` IMMEDIATELY
+    // instead of the request blocking until verification finishes.
+    //
+    // Why it must not block: verification re-reads the whole pack out of the
+    // bucket, so its cost is payload / bandwidth, while the client's patience
+    // is a fixed MEDIAGIT_CONTROL_READ_TIMEOUT_SECS (300). Every pack of a
+    // freshly pushed repo is unverified, and packs verify one at a time — the
+    // semaphore is deliberately 1 permit (more measured 4.5x slower) and its
+    // own comment notes the queue for it is unbounded. In 20260908-ga46 the
+    // server logged `on_request` for this endpoint and never logged a response;
+    // the client gave up 300.005s later and the clone failed. The same drill
+    // passed at 453s and 506s in ga44/ga45 on a link ~33% faster. A fixed timer
+    // against bandwidth-dependent work is a cliff, not a guard — the same shape
+    // as the pack-upload read timeout fixed in 53f7a00 and the A7 kill trigger.
+    //
+    // Why `None` is safe rather than merely convenient: it is this endpoint's
+    // existing "no URL, fetch it through the proxy" contract, and the proxy path
+    // ALREADY verifies every chunk it serves out of an unverified pack, inline,
+    // before serving it (`handlers/chunks.rs`, `verify_chunk_content` guarded by
+    // `is_unverified`). So the bytes the client actually receives are checked
+    // either way. Declining to mint moves the check onto the read the client was
+    // going to perform regardless, instead of paying for a second full read of
+    // the payload first.
+    //
+    // Verification is still kicked off here, just not awaited, so a pack becomes
+    // mintable shortly after the first clone touches it and later clones get the
+    // fast direct-to-bucket path. `get_or_create_pack_verify_cell` dedupes, so
+    // concurrent requests and a racing push completion still verify exactly once.
     let entries: Vec<(String, Option<PresignedGetJson>)> =
         futures::stream::iter(req.pack_ids.into_iter().map(|pack_id| {
             let storage = Arc::clone(&storage);
@@ -1069,21 +1102,44 @@ pub async fn presign_pack_downloads(
             let repo_path = repo_path.clone();
             let state = Arc::clone(&state);
             async move {
-                // D3: an unverified pack must be verified in full — and,
-                // if corrupted, quarantined — before a URL for it is minted.
-                if !ensure_pack_verified_for_presign(
-                    &state,
-                    &repo_path,
-                    &repo,
-                    &storage,
-                    &pack_id,
-                )
-                .await
-                {
-                    tracing::error!(
+                // D3: never mint for a pack that is not already verified.
+                //
+                // Read-only check, no waiting. This is the same predicate
+                // `ensure_pack_verified_for_presign` uses for its fast path.
+                let already_verified = {
+                    let unverified = state.unverified_packs.read().await;
+                    !unverified.get(&repo).is_some_and(|s| s.contains(&pack_id))
+                };
+
+                if !already_verified {
+                    // Start verification if nothing is on it yet, but do NOT
+                    // await it — that wait is what failed ga46. The client is
+                    // told `None` and fetches this pack through the proxy, which
+                    // verifies every chunk inline before serving it, so nothing
+                    // unverified reaches it either way.
+                    //
+                    // Detached rather than inline: the request must not own work
+                    // whose duration is set by the bucket. The verify cell
+                    // dedupes, so a burst of 32 pack_ids and a racing push
+                    // completion still produce one verification per pack.
+                    tokio::spawn({
+                        let state = Arc::clone(&state);
+                        let repo = repo.clone();
+                        let repo_path = repo_path.clone();
+                        let storage = Arc::clone(&storage);
+                        let pack_id = pack_id.clone();
+                        async move {
+                            let _ = ensure_pack_verified_for_presign(
+                                &state, &repo_path, &repo, &storage, &pack_id,
+                            )
+                            .await;
+                        }
+                    });
+                    tracing::debug!(
                         repo = %repo,
                         pack = %pack_id,
-                        "presign_pack_downloads: refusing to mint — pack failed content verification"
+                        "presign_pack_downloads: pack not yet verified; returning no URL so the \
+                         client proxies it, and verifying in the background"
                     );
                     return (pack_id, None);
                 }
@@ -1869,6 +1925,204 @@ mod presign_pack_downloads_verification_tests {
             resp.0.get(&pack_oid).map(Option::is_none).unwrap_or(true),
             "handler minted a presigned URL for a corrupted unverified pack — the \
                 verification gate is not wired into presign_pack_downloads"
+        );
+    }
+    /// A backend whose verification reads stall, so the request-wide deadline
+    /// is what decides the outcome rather than the work finishing.
+    #[derive(Debug)]
+    struct StallingBackend {
+        inner: Arc<dyn StorageBackend>,
+        delay: std::time::Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl StorageBackend for StallingBackend {
+        async fn get(&self, key: &str) -> anyhow::Result<Vec<u8>> {
+            self.inner.get(key).await
+        }
+        async fn presign_get(
+            &self,
+            key: &str,
+            ttl: std::time::Duration,
+        ) -> anyhow::Result<Option<mediagit_storage::PresignedDownload>> {
+            Ok(Some(mediagit_storage::PresignedDownload {
+                url: format!("https://test.invalid/{key}"),
+                headers: Vec::new(),
+                expires_in_secs: ttl.as_secs(),
+            }))
+        }
+        async fn put(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
+            self.inner.put(key, data).await
+        }
+        async fn exists(&self, key: &str) -> anyhow::Result<bool> {
+            self.inner.exists(key).await
+        }
+        async fn delete(&self, key: &str) -> anyhow::Result<()> {
+            self.inner.delete(key).await
+        }
+        async fn list_objects(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+            self.inner.list_objects(prefix).await
+        }
+        async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+            self.inner.head(key).await
+        }
+        /// The one method verification calls per manifest entry. Stalling here
+        /// is what a slow bucket looks like from this handler's point of view.
+        async fn get_streaming_range(
+            &self,
+            key: &str,
+            range: std::ops::Range<u64>,
+        ) -> anyhow::Result<
+            std::pin::Pin<
+                Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+            >,
+        > {
+            tokio::time::sleep(self.delay).await;
+            self.inner.get_streaming_range(key, range).await
+        }
+    }
+
+    async fn install_backend(
+        state: &Arc<AppState>,
+        repo_path: &std::path::Path,
+        backend: Arc<dyn StorageBackend>,
+    ) {
+        let mut backends = state.storage_backends.write().await;
+        let canon = repo_path
+            .canonicalize()
+            .unwrap_or_else(|_| repo_path.to_path_buf());
+        backends.insert(canon, Arc::clone(&backend));
+        backends.insert(repo_path.to_path_buf(), backend);
+    }
+
+    /// ga46 (azure S5): the server logged `on_request` for this endpoint and
+    /// never logged a response. The client gave up 300.005s later on its
+    /// control-plane read timeout and the clone failed with
+    /// `parity=False exit=1`, because inline D3 verification re-reads the whole
+    /// pack out of the bucket while the client waits on a fixed 300s timer.
+    ///
+    /// The handler must ANSWER, whatever verification is doing. Stalling the
+    /// backend for 30s must not stall the response.
+    #[tokio::test]
+    async fn handler_never_waits_for_verification() {
+        let repo = "deadline-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let inner = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let fixture = build_valid_pack();
+        let pack_oid = "e".repeat(64);
+        write_pack_and_manifest(&inner, &repo_path, &pack_oid, &fixture).await;
+        mark_unverified(&state, &repo, &pack_oid).await;
+
+        install_backend(
+            &state,
+            &repo_path,
+            Arc::new(StallingBackend {
+                inner: Arc::clone(&inner),
+                delay: std::time::Duration::from_secs(30),
+            }),
+        )
+        .await;
+
+        let started = std::time::Instant::now();
+        let resp = presign_pack_downloads(
+            Path(repo.clone()),
+            State(Arc::clone(&state)),
+            None,
+            Json(PresignPackDownloadRequest {
+                pack_ids: vec![pack_oid.clone()],
+            }),
+        )
+        .await
+        .expect("handler must answer, not hang");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "handler took {elapsed:?} against a backend stalling 30s; it must not wait              on verification at all (ga46 waited past the client's 300s)"
+        );
+        assert!(
+            resp.0.get(&pack_oid).map(Option::is_none).unwrap_or(true),
+            "handler minted a URL for an unverified pack — a presigned URL takes the              server out of the data path permanently and cannot be revoked"
+        );
+    }
+
+    /// The other half, and the one that stops "never mint anything" from being
+    /// a passing implementation: declining must be TEMPORARY. The handler kicks
+    /// verification off in the background, so once it lands a later request
+    /// mints and clones go back to the fast direct-to-bucket path.
+    ///
+    /// Without this, returning `None` unconditionally would satisfy the test
+    /// above while pushing every clone onto the proxy path forever.
+    #[tokio::test]
+    async fn declining_is_temporary_and_a_later_request_mints() {
+        let repo = "heals-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let inner = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let fixture = build_valid_pack();
+        let pack_oid = "f".repeat(64);
+        write_pack_and_manifest(&inner, &repo_path, &pack_oid, &fixture).await;
+        mark_unverified(&state, &repo, &pack_oid).await;
+
+        install_backend(
+            &state,
+            &repo_path,
+            Arc::new(CountingBackend {
+                inner: Arc::clone(&inner),
+                verify_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }),
+        )
+        .await;
+
+        let first = presign_pack_downloads(
+            Path(repo.clone()),
+            State(Arc::clone(&state)),
+            None,
+            Json(PresignPackDownloadRequest {
+                pack_ids: vec![pack_oid.clone()],
+            }),
+        )
+        .await
+        .expect("handler must succeed");
+        assert!(
+            first.0.get(&pack_oid).map(Option::is_none).unwrap_or(true),
+            "first request must decline: the pack is not verified yet"
+        );
+
+        // Wait for the spawned verification to resolve, rather than sleeping a
+        // fixed amount and hoping.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let still_unverified = {
+                let unverified = state.unverified_packs.read().await;
+                unverified.get(&repo).is_some_and(|s| s.contains(&pack_oid))
+            };
+            if !still_unverified {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background verification never resolved; declining would be permanent                  and every clone would proxy forever"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        let second = presign_pack_downloads(
+            Path(repo.clone()),
+            State(Arc::clone(&state)),
+            None,
+            Json(PresignPackDownloadRequest {
+                pack_ids: vec![pack_oid.clone()],
+            }),
+        )
+        .await
+        .expect("handler must succeed");
+        assert!(
+            second.0.get(&pack_oid).and_then(|e| e.as_ref()).is_some(),
+            "once verified, the pack must mint — otherwise every clone stays on the              proxy path and the direct-to-bucket fast path is dead"
         );
     }
 }
