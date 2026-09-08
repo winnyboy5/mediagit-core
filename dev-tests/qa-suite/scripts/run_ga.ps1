@@ -66,6 +66,7 @@ $env:MG_QA_RUN_ID = $RunId
 # record. Started AFTER campaign_env so the Azure account name is resolved, and
 # it only records - it never trips or fails a phase.
 . .\lib\linkprobe.ps1
+. .\lib\transferhealth.ps1
 $logDir = "..\logs\$RunId"
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 Start-QaLinkProbe -LogDir $logDir -Hosts (Get-QaLinkHosts)
@@ -139,6 +140,15 @@ if ($drops) {
 # was the product.
 Write-Host "`n=== link quality per backend during the run ==="
 Write-QaLinkSummary -LogDir $logDir
+
+# What the connect probe above cannot see, and ga47 proved it: it scored the aws
+# clone window 0 failures / 321 samples while 44 sustained reads died mid-body
+# and the clone failed. A handshake proves the path can be OPENED, not that a
+# 60MB body can be PULLED through it. This reads the run's own server logs for
+# reads that opened and then aborted, so "the link was clean" can never again be
+# asserted about a window in which transfers were dying.
+Write-Host "`n=== transfer health per backend (sustained reads, not handshakes) ==="
+Write-QaTransferHealth -LogDir $logDir
 
 [void][Win32.Power]::SetThreadExecutionState($ES_CONTINUOUS)
 Write-Host "`nGA_DONE exit=$code"
