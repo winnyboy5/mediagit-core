@@ -138,6 +138,81 @@ against a local backend, and are recorded in `BENCHMARKS.md`. The **cloud**
 throughput table in that file has NOT been re-measured and is flagged as
 pre-cycle; cloud MB/s is WAN-bound and is not expected to move.
 
+### Fixed — large pack uploads to cloud backends (2026-09-05 → 2026-09-07)
+
+Three defects on the cloud pack path, found in this order because **each one
+hid the next**. They are layers, not regressions. Symptom throughout: a push
+offering 32 packs completed only some of them, three consecutive campaigns
+recorded 32, 16 and 0 packs landed, and it read as flakiness. It was never
+flaky.
+
+- **A pack upload is now bounded by the bytes it must move, not by a flat read
+  timeout.** `read_timeout` bounds the gap between bytes *received*. On a
+  download that is a stall detector; on an upload the client is writing and the
+  bucket correctly sends nothing until the body completes, so nothing ever
+  resets it and the flat 300 s became a hard deadline on the transfer itself. A
+  64 MiB pack at concurrency 8 costs about 233 s on a 2.2 MB/s link — a 10%
+  margin against a cost that moves with the link, which is a cliff, not a guard.
+
+  Proven by A/B on real backends, 2 GB as 32 packs, one knob and nothing else:
+
+  | `MEDIAGIT_DATA_READ_TIMEOUT_SECS` | azure | gcs |
+  |---|---|---|
+  | 300 | 6/32, 918.66 s | 5/32, 1276.34 s |
+  | 1800 | 32/32, 368.27 s | 32/32, 366.40 s |
+
+  The 300 s run was on a 2 ms link with zero jitter, so "the network was bad"
+  does not explain it; four packs died at *exactly* 300.0 s within one second of
+  each other, which is a deadline measured from request start, not four
+  independent stalls. **AWS was immune throughout, and that is what hid it** —
+  presigned MPU exists only in `s3.rs`/`minio.rs`, so AWS sends ~8 MiB parts
+  that finish far inside 300 s, while azure and gcs get a `501` on
+  `/packs/mpu/start` (the designed capability signal) and push 64 MiB in one
+  request.
+
+- **The pack retry budget could never permit even one retry.** `elapsed` is
+  measured from the start of attempt 0, so when a slow attempt fails it already
+  contains the duration of the upload that just failed. The budget then asks
+  `elapsed + backoff > budget` — for a 64 MiB cloud pack that is
+  `158.5s + 2s > 120s`, true the first time it is ever asked. The knob was inert
+  on the exact path it guards. One ordinary WAN reset after 158.5 s of healthy
+  transfer therefore took zero retries and demoted an entire push to the
+  per-chunk path over a single pack.
+
+- **A failed multipart commit no longer re-sends the whole body.** By the time
+  `mpu/complete` is called every part is already in the bucket and only the
+  commit is outstanding. Giving up there threw the successful upload away and
+  re-sent the entire 64 MiB down the single-PUT path — degrading to the *less*
+  resilient route at exactly the moment the link is misbehaving. The retry is
+  bounded by attempt count rather than the wall-clock budget the pack PUT uses,
+  because the request carries only the part list: one small round trip, not
+  64 MiB.
+
+- **S3 errors now name the endpoint they actually talked to.** `minio.rs` is the
+  shared S3-compatible driver and is built for both MinIO and AWS, but all five
+  error strings hardcoded `minio:`, so a genuine AWS failure was reported as
+  `err=complete_multipart_upload minio: dispatch failure`. That is not cosmetic —
+  it pointed an investigation at the wrong backend for an hour.
+
+**Verified under real fault conditions, not only on a clean link.** In the first
+of the two clearance campaigns the multipart commit failed **8 times** against
+`s3.ap-south-1` — and every pack still landed (`packsOffered=170
+packsCompleted=170`, and `32/32` on the scale drill). The same failure before
+these fixes produced `packsCompleted=30` and was the only failing gate in that
+run. The endpoint label is confirmed in the same logs, reading
+`complete_multipart_upload https://s3.ap-south-1.amazonaws.com:`.
+
+**Validation:** two consecutive clean campaigns, **241 gates each, 0 failures**,
+all 14 phases, on identical binaries. Both ran through a degraded link — all
+three cloud arms dropping simultaneously for multi-minute stretches inside the
+11 GB scale phase, with no Wi-Fi disconnect and no power event to explain it —
+and no gate failed in either. A degraded link can only manufacture false
+*failures*, never a false pass, so these results are not discounted for it.
+
+**Not fixed, deliberately:** the per-chunk fallback path still exists and is
+still coarser than the pack path it backs up. Nothing here changes wire or
+persisted formats.
+
 
 ## [v0.3.0-rc.4] - 2026-08-26
 
