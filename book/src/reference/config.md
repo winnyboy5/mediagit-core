@@ -28,7 +28,8 @@ backend = "s3"
 bucket = "my-media-bucket"
 region = "us-east-1"
 prefix = "repos/my-project"
-encryption = true
+access_key_id = "..."
+secret_access_key = "..."
 
 [compression]
 enabled = true
@@ -97,8 +98,14 @@ documented for schema completeness only.
 | `tls_cert_path` / `tls_key_path` | string | — | Certificate/key files for TLS |
 | `api_key` | string | — | Static API key (legacy single-key mode) |
 | `cors_origins` | array | `[]` | Allowed CORS origins |
-| `encryption_at_rest` | bool | `false` | Encrypt objects at rest (`encryption_key_path` for the key file) |
 | `rate_limiting` | table | — | Rate-limit configuration for auth and data routes |
+
+> `encryption_at_rest` / `encryption_key_path` used to be documented here.
+> They were removed from `SecurityConfig` entirely — nothing ever read them,
+> even the "key path must exist" check never ran — and the real at-rest
+> encryption switch is `[encryption]` in `mediagit-server`'s own config. If
+> your `config.toml` still has them, they parse without complaint and do
+> nothing; remove them.
 
 ---
 
@@ -144,9 +151,8 @@ backend = "s3"
 bucket = "my-bucket"
 region = "us-east-1"
 prefix = ""
-encryption = false
-encryption_algorithm = "AES256"
-# access_key_id and secret_access_key from env vars or IAM role
+access_key_id = "..."
+secret_access_key = "..."
 ```
 
 | Key | Type | Default | Description |
@@ -154,12 +160,15 @@ encryption_algorithm = "AES256"
 | `backend` | string | — | Must be `"s3"` |
 | `bucket` | string | — | **Required.** S3 bucket name |
 | `region` | string | — | **Required.** AWS region |
-| `access_key_id` | string | env | AWS access key (prefer env var) |
-| `secret_access_key` | string | env | AWS secret key (prefer env var) |
-| `endpoint` | string | — | Custom endpoint for S3-compatible services |
+| `access_key_id` | string | — | **Required for real AWS/MinIO/S3-compatible.** No env var or IAM-role fallback; defaults to empty if unset. |
+| `secret_access_key` | string | — | **Required for real AWS/MinIO/S3-compatible.** Same caveat as `access_key_id`. |
+| `endpoint` | string | — | Custom endpoint for S3-compatible services (e.g. MinIO) |
 | `prefix` | string | `""` | Object key prefix |
-| `encryption` | bool | `false` | Enable server-side encryption |
-| `encryption_algorithm` | string | `"AES256"` | SSE algorithm: `AES256` or `aws:kms` |
+
+> **Warning**: `encryption` and `encryption_algorithm` are not real keys —
+> `S3Storage` has no such fields. A config carrying them parses without
+> complaint and the values are silently ignored. If you copied them from an
+> older doc, remove them; they do not enable server-side encryption.
 
 ### Azure Blob Storage
 

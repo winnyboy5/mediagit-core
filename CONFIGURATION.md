@@ -551,7 +551,7 @@ CLI flags are applied after the config file is loaded, so they win over whatever
 
 ## Precedence rule
 
-Where both an environment variable and a TOML key configure the same thing, **the environment variable wins**, e.g. `MEDIAGIT_JWT_SECRET` overrides `jwt_secret` (server logs a warning if both are set and different). Client credential resolution has its own five-tier precedence — see [`[remotes.<name>]`](#remotesname--remote-repositories) above: `MEDIAGIT_TOKEN`/`MEDIAGIT_API_KEY` > OS keychain > `remotes.<name>.token`/`.api_key` in config.toml.
+Where both an environment variable and a TOML key configure the same thing, **the environment variable wins**, e.g. `MEDIAGIT_JWT_SECRET` overrides `jwt_secret` (server logs a warning if both are set and different). Client credential resolution has its own precedence — see [`[remotes.<name>]`](#remotesname--remote-repositories) above: `MEDIAGIT_TOKEN`/`MEDIAGIT_API_KEY` > `remotes.<name>.token`/`.api_key` in config.toml > OS keychain. The **keychain is checked last** because it is a write-through cache, not a source of truth (`mediagit-cli/src/repo.rs:173-218`, `resolve_credentials_tiered`); `MEDIAGIT_NO_KEYRING` skips that tier entirely. This matches the flowchart in Part 1 — an earlier revision of this sentence had the keychain ahead of config.toml, which was backwards.
 
 ## Operational environment variables
 

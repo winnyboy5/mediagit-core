@@ -21,41 +21,40 @@ These override the `[author]` section of `.mediagit/config.toml`. Priority (high
 | `MEDIAGIT_AUTHOR_NAME` | Commit author name (e.g., `"Alice Smith"`) |
 | `MEDIAGIT_AUTHOR_EMAIL` | Commit author email (e.g., `"alice@example.com"`) |
 
-## AWS / S3 / S3-Compatible Storage
+## Storage credentials
 
-Standard AWS SDK environment variables. Used when `storage.backend = "s3"`.
+**Storage credentials come from `.mediagit/config.toml`, not from the
+environment — with one exception (GCS).** This section previously listed the
+standard `AWS_*` and `AZURE_STORAGE_*` variables as if MediaGit read them. It
+does not, and exporting them has no effect: a push will still fail with
+"access key cannot be empty" while the shell looks correctly configured.
+
+| Backend | Where credentials come from |
+|---------|------------------------------|
+| `s3` — including real AWS, MinIO, and other S3-compatible services | **Config file only.** `access_key_id` / `secret_access_key` under `[storage.s3]`. No environment override, and no IAM-role or instance-profile path. |
+| `azure` | **Config file only.** A tagged `[storage.azure.auth]` table — `type` of `account_key`, `connection_string`, `sas`, or `emulator`. |
+| `gcs` | `credentials_path` in `[storage.gcs]` if set; **otherwise Application Default Credentials**, which do honour `GOOGLE_APPLICATION_CREDENTIALS` and a `gcloud auth application-default login` session. |
+
+Why: both the CLI and the server build every S3-family backend through
+`MinIOBackend`, and the AWS path fills its key and secret straight from the
+config file (`mediagit-server/src/handlers/mod.rs:610-638`,
+`mediagit-cli/src/repo.rs:655-668`). The AWS SDK credential chain does exist in
+`mediagit-storage/src/s3.rs`, but `S3Backend` is only ever constructed by the
+Backblaze/Spaces wrapper, so nothing a user reaches goes through it.
+
+Only GCS resolves credentials outside the config file
+(`mediagit-cli/src/repo.rs:745-749`).
+
+See [Configuration](./config.md) for the full `[storage]` schema.
 
 | Variable | Description |
 |----------|-------------|
-| `AWS_ACCESS_KEY_ID` | AWS access key ID |
-| `AWS_SECRET_ACCESS_KEY` | AWS secret access key |
-| `AWS_SESSION_TOKEN` | AWS session token (for temporary credentials) |
-| `AWS_REGION` | AWS region (e.g., `us-east-1`) |
-| `AWS_ENDPOINT_URL` | Custom S3 endpoint URL (for MinIO, DigitalOcean Spaces, Backblaze B2, etc.) |
-| `AWS_PROFILE` | AWS named profile from `~/.aws/credentials` |
-
-## Azure Blob Storage
-
-Used when `storage.backend = "azure"`.
-
-| Variable | Description |
-|----------|-------------|
-| `AZURE_STORAGE_CONNECTION_STRING` | Full connection string (alternative to account_name + account_key) |
-| `AZURE_STORAGE_ACCOUNT` | Storage account name |
-| `AZURE_STORAGE_KEY` | Storage account key |
-
-## Google Cloud Storage
-
-Used when `storage.backend = "gcs"`.
-
-| Variable | Description |
-|----------|-------------|
-| `GOOGLE_APPLICATION_CREDENTIALS` | Path to service account JSON key file |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to a service-account JSON key. Honoured via ADC when `[storage.gcs].credentials_path` is unset. |
 | `GCS_EMULATOR_HOST` | GCS emulator URL for testing (e.g., `http://localhost:4443`) |
 
 ## Performance Tuning
 
-MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurrency, chunking, cloud-pack bundling, and storage-backend behavior. The table below is a summary grouped by area; **[`env-knobs.md`](https://github.com/mediagit/mediagit/blob/main/env-knobs.md) in the repository root is the canonical, exhaustive reference** with per-knob stability status and the release each knob was introduced in.
+MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurrency, chunking, cloud-pack bundling, and storage-backend behavior. The table below is a summary grouped by area; **[`env-knobs.md`](https://github.com/winnyboy5/mediagit-core/blob/main/env-knobs.md) in the repository root is the canonical, exhaustive reference** with per-knob stability status and the release each knob was introduced in.
 
 ### Push / Pull / Fetch Concurrency
 

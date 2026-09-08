@@ -391,7 +391,6 @@ Releases are managed by maintainers. The process is:
 
 ## Getting Help
 
-- **Discord**: Join our [Discord server](https://discord.gg/mediagit)
 - **GitHub Discussions**: Ask questions in [Discussions](https://github.com/winnyboy5/mediagit-core/discussions)
 - **Issue Tracker**: Report bugs in [Issues](https://github.com/winnyboy5/mediagit-core/issues)
 

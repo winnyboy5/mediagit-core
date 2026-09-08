@@ -190,22 +190,45 @@ mediagit merge feature/new-assets
 
 MediaGit supports multiple storage backends. By default, it uses local filesystem storage.
 
+**Storage is configured by editing `.mediagit/config.toml` directly.** There is
+no `mediagit config set` command for storage keys — `config set` accepts only
+`author.name`, `author.email`, `performance.upload_concurrency` and
+`performance.download_concurrency`, and any other key is rejected.
+
 ### Configure AWS S3 Backend
 
-```bash
-# Edit .mediagit/config.toml
-mediagit config set storage.backend s3
-mediagit config set storage.s3.bucket my-media-bucket
-mediagit config set storage.s3.region us-west-2
+Open `.mediagit/config.toml` in your editor and replace the `[storage]` section:
+
+```toml
+[storage]
+backend = "s3"
+bucket = "my-media-bucket"
+region = "us-west-2"
+access_key_id = "AKIA..."
+secret_access_key = "..."
 ```
+
+Backend fields sit **directly under `[storage]`** alongside `backend` — there is
+no nested `[storage.s3]` table. Credentials must be in this file: MediaGit does
+not read `AWS_ACCESS_KEY_ID` and has no IAM-role or instance-profile path.
 
 ### Configure Azure Blob Storage
 
-```bash
-mediagit config set storage.backend azure
-mediagit config set storage.azure.account my-storage-account
-mediagit config set storage.azure.container media-container
+The credential goes in a tagged `auth` table, so exactly one credential is
+expressible:
+
+```toml
+[storage]
+backend = "azure"
+container = "media-container"
+auth = { type = "account_key", account_name = "my-storage-account", account_key = "..." }
 ```
+
+Other `type` values are `connection_string` (with `value`), `sas` (with
+`account_name` and `token`), and `emulator` for local Azurite. Writing
+`account_name`/`account_key` flat under `[storage]` is the pre-v3 layout;
+MediaGit detects it and reports a migration error rather than silently ignoring
+it.
 
 See [Storage Backend Configuration](./guides/storage-config.md) for detailed setup instructions.
 
@@ -295,9 +318,8 @@ mediagit stats
 ## Getting Help
 
 - 📖 [Documentation](https://winnyboy5.github.io/mediagit-core)
-- 💬 [Discord Community](https://discord.gg/mediagit)
 - 🐛 [Issue Tracker](https://github.com/winnyboy5/mediagit-core/issues)
-- 📧 Email: support@mediagit.dev
+- 💬 [Discussions](https://github.com/winnyboy5/mediagit-core/discussions)
 
 ## Common Issues
 

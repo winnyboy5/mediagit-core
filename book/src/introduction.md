@@ -63,7 +63,7 @@ MediaGit-Core is designed for teams and individuals working with large binary fi
 | Storage Savings (avg) | Up to 81% (compression + dedup + delta) | ~0% (no dedup/delta) | ~10-20% (RCS deltas) |
 | Deduplication | ✅ Content-addressable | ❌ None | ✅ Server-side |
 | Multi-Backend Support | 7 backends | Server-dependent | Proprietary |
-| Media-Aware Merging | ✅ Yes | ❌ No | ⚠️ Limited |
+| Media-Aware Merging | ⚠️ Conflict *detection* only — see above; no auto-merge yet | ❌ No | ⚠️ Limited |
 | Offline Commits | ✅ Full DVCS | ✅ (Git handles) | ❌ Server required |
 | Source available | ✅ BUSL-1.1 | ✅ MIT (open source) | ❌ No |
 

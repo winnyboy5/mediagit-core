@@ -96,31 +96,49 @@ mediagit fsck --full
 
 ## Cloud Backend Setup (Optional)
 
-If you plan to use cloud storage backends (S3, Azure, GCS, etc.), you'll need:
+If you plan to use cloud storage backends (S3, Azure, GCS), credentials come
+from `.mediagit/config.toml`, not from the environment or a CLI-managed
+credential store — with one exception (GCS). See
+[Configuration Reference](../reference/config.md) for the full schema.
 
-### AWS S3
-```bash
-# Install AWS CLI
-# Configure credentials
-aws configure
+### AWS S3 (and S3-compatible / MinIO)
 
-# MediaGit will use AWS credentials automatically
+`aws configure` has no effect on MediaGit. Put the key and secret directly in
+`config.toml`:
+
+```toml
+[storage]
+backend = "s3"
+bucket = "my-bucket"
+region = "us-east-1"
+access_key_id = "..."
+secret_access_key = "..."
 ```
 
 ### Azure Blob Storage
-```bash
-# Install Azure CLI
-az login
 
-# MediaGit will use Azure credentials automatically
+`az login` has no effect on MediaGit. Put the credential in `config.toml` as
+a tagged `auth` table under `[storage]`, e.g. `account_key`:
+
+```toml
+[storage]
+backend = "azure"
+container = "my-container"
+auth = { type = "account_key", account_name = "...", account_key = "..." }
 ```
 
 ### Google Cloud Storage
+
+GCS is the one backend that genuinely picks up ambient credentials: if
+`credentials_path` is unset, MediaGit falls back to Application Default
+Credentials, which honours `GOOGLE_APPLICATION_CREDENTIALS` and
+`gcloud auth application-default login`.
+
 ```bash
 # Install gcloud CLI
-gcloud auth login
+gcloud auth application-default login
 
-# MediaGit will use gcloud credentials automatically
+# MediaGit will use ADC automatically
 ```
 
 ## Next Steps
