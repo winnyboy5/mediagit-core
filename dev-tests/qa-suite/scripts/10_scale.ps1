@@ -255,11 +255,42 @@ function Drill-S1-ForBackend([string]$backend) {
 
     # Exit codes are ASSERTED, not merely collected: a clone can exit nonzero and still
     # leave a directory behind, so Test-Path alone reports success for a failed clone.
-    $exitOk = 0; $panics = 0
+    $exitOk = 0; $panics = 0; $idx = 0
     foreach ($res in $results) {
+      $idx++
       $code = (($res -split "`n")[0]).Trim()
       if ($code -eq "0") { $exitOk++ }
       if ($res -match "panicked|RUST_BACKTRACE") { $panics++ }
+
+      # PERSIST the failing clone's own words.
+      #
+      # These clones run under Start-Job, not Invoke-MG, so they never reach the
+      # <Phase>-cmds.log that every other command in this suite writes to. The
+      # job block above deliberately captures stdout+stderr and says in its own
+      # comment that "a clone that fails needs its error text to be
+      # diagnosable" -- and then the text was matched for the word "panicked"
+      # and dropped on the floor.
+      #
+      # ga47 is what that cost: azure came back exit0=0 present=4 converged=0
+      # with a completely clean server log (no 5xx, no aborts, no warnings), so
+      # the failure was entirely client-side and the only record of it had been
+      # discarded. It could not be root-caused from the run, and a rerun passed
+      # 4/4, so the evidence is gone for good.
+      #
+      # Failures only: a passing clone has nothing to diagnose and 16 local
+      # clone transcripts per run would bury the ones that matter.
+      if ($code -ne "0") {
+        $body = ($res -split "---OUT---", 2)[-1]
+        @(
+          "### CLONE FAILED backend=$backend clone=$idx/$N exit=$code",
+          "### url=$($srv.Url)",
+          $body,
+          ""
+        ) -join "`n" | Add-Content (Join-Path $QA.Logs "$Phase-S1-$backend-clone-failures.log") -Encoding UTF8
+      }
+    }
+    if ($exitOk -lt $N) {
+      Write-QaLog "$drill-$backend" "clone failures captured -> logs\$Phase-S1-$backend-clone-failures.log"
     }
 
     $converged = 0; $fsckClean = 0; $present = 0
