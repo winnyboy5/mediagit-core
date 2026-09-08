@@ -36,6 +36,27 @@ Transfer is **presigned** wherever the backend can sign:
 - **Upload**: the server mints presigned PUT URLs and the client PUTs packs directly to the backend (presigned multipart upload for large packs on S3/MinIO; proxy-upload fallback when the backend can't sign).
 - **Download/clone**: the server mints presigned GET URLs and the client issues Range-GETs direct from the backend (proxy-GET fallback on 404/null).
 
+The message flow between client, server, and backend:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as mediagit-server
+    participant B as Cloud Backend<br/>(S3/MinIO/Azure/GCS)
+
+    Note over C,B: Push
+    C->>S: POST /push (ref updates + OID list)
+    S-->>C: presigned PUT URLs (per chunk)
+    C->>B: PUT chunks directly (parallel)
+    C->>S: POST /push/complete
+
+    Note over C,B: Pull / Clone
+    C->>S: POST /pull (want OIDs)
+    S-->>C: pack index + presigned GET URLs
+    C->>B: GET pack / Range-GET chunks (parallel)
+    C->>C: reconstruct + write ODB
+```
+
 ### How the fallback is decided
 
 The client never has to know which backends can sign. It always asks, and the

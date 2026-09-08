@@ -189,11 +189,14 @@ present, or neither) it fails with the exact `auth` block to write.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `backend` | string | — | Must be `"azure"` |
-| `account_name` | string | — | **Required.** Storage account name |
 | `container` | string | — | **Required.** Blob container name |
-| `account_key` | string | env | Storage account key (prefer env var) |
-| `connection_string` | string | env | Full connection string (alternative to account_name/key) |
+| `auth` | tagged table | — | **Required.** The credential — see the variants above. |
 | `prefix` | string | `""` | Blob path prefix |
+
+> **Note:** `account_name`, `account_key` and `connection_string` are **not**
+> top-level keys. They live *inside* the `auth` table. Writing them directly
+> under `[storage]` is the pre-v3 layout and is rejected with a migration error.
+> There is no environment-variable fallback for any of them.
 
 ### Google Cloud Storage
 
@@ -203,7 +206,8 @@ backend = "gcs"
 bucket = "my-gcs-bucket"
 project_id = "my-gcp-project"
 prefix = ""
-# credentials_path from GOOGLE_APPLICATION_CREDENTIALS env var
+# credentials_path is optional; omit it to use Application Default Credentials,
+# which honour GOOGLE_APPLICATION_CREDENTIALS or a gcloud login session.
 ```
 
 | Key | Type | Default | Description |
@@ -211,7 +215,7 @@ prefix = ""
 | `backend` | string | — | Must be `"gcs"` |
 | `bucket` | string | — | **Required.** GCS bucket name |
 | `project_id` | string | — | **Required.** GCP project ID |
-| `credentials_path` | string | env | Path to service account JSON key |
+| `credentials_path` | string | unset | Path to a service-account JSON key. **Optional** — when unset, Application Default Credentials are used, which honour `GOOGLE_APPLICATION_CREDENTIALS` or a `gcloud auth application-default login` session. GCS is the only backend with a credential path outside this file. |
 | `prefix` | string | `""` | Object prefix |
 
 ---

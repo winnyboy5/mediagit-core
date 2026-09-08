@@ -38,15 +38,13 @@ MediaGit can be used in **two different modes** depending on your needs:
 #### Mode 1: Standalone (Local-Only)
 **Perfect for**: Single developer, local versioning, experimenting
 
-```
-┌─────────────────────────────────┐
-│   Your Computer                 │
-│                                 │
-│  mediagit CLI                   │
-│       ↓                         │
-│  .mediagit/        (metadata)   │
-│  mediagit-data/    (objects)    │
-└─────────────────────────────────┘
+```mermaid
+flowchart TD
+    CLI["mediagit CLI"]
+    META[".mediagit/<br/>refs, HEAD, index, config"]
+    OBJ["mediagit-data/<br/>chunks, manifests, packs"]
+    CLI --> META
+    CLI --> OBJ
 ```
 
 **What you need**: `mediagit` binary only — no server, no network.
@@ -57,16 +55,22 @@ local-only commands.
 #### Mode 2: Client-Server (Collaborative)
 **Perfect for**: Teams, remote backups, collaboration
 
+```mermaid
+flowchart LR
+    CLI["mediagit CLI"]
+    SRV["mediagit-server<br/>refs, auth, presigning"]
+    BUCKET[("Object store<br/>S3 · Azure · GCS · MinIO")]
+
+    CLI -->|"control plane:<br/>refs, negotiation,<br/>ask for presigned URLs"| SRV
+    SRV -.->|"repo metadata"| BUCKET
+    CLI ==>|"data plane: chunk and pack<br/>bytes go DIRECT via presigned URL"| BUCKET
+    CLI -->|"proxy fallback when the backend<br/>cannot presign, or a URL 404s"| SRV
 ```
-┌──────────────────┐         ┌──────────────────┐
-│  Your Computer   │         │   Server         │
-│                  │         │                  │
-│  mediagit CLI    │ ←────→  │ mediagit-server  │
-│       ↓          │  push/  │       ↓          │
-│  .mediagit/      │  pull   │  repos/          │
-└──────────────────┘         │  S3/Azure/etc    │
-                             └──────────────────┘
-```
+
+The heavy arrow is the point: **media bytes do not flow through the server.**
+The client asks the server for a presigned URL and then transfers straight to
+the bucket, so the server stays a small control plane rather than a bandwidth
+bottleneck. It only proxies the data when a backend cannot sign a URL.
 
 **What you need**: `mediagit` (client) + a running `mediagit-server` + network.
 

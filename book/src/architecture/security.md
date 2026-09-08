@@ -95,11 +95,20 @@ multi-repo server.
   With no key configured the bytes written are byte-for-byte identical to a build
   without the feature, which is asserted by test.
 - **At-rest (cloud)**: **also not wired.** `[storage] encryption` and
-  `[storage] encryption_algorithm` are parsed and *validated* (`validation.rs:130`
-  rejects anything but `AES256` / `aws:kms*`), which makes them look live — but no
-  storage backend reads either field. Grep for `ServerSideEncryption` / `sse_algorithm`
-  returns nothing: no `PutObject` call sets an SSE header on any backend. Setting these
-  keys has no effect.
+  `[storage] encryption_algorithm` are not fields at all — `S3Storage`
+  (`schema.rs:396-418`) has only `bucket`, `region`, `access_key_id`,
+  `secret_access_key`, `endpoint` and `prefix`. Nothing validates them, because
+  nothing recognises them. The config layer does not set `deny_unknown_fields`,
+  so they are silently discarded exactly like any typo — a config carrying
+  `encryption = true` loads without a murmur, and so does one carrying
+  `totally_made_up_key = 42` (verified against the shipping binary). Grep for
+  `ServerSideEncryption` / `sse_algorithm` returns nothing: no `PutObject` call
+  sets an SSE header on any backend.
+
+  > Because unknown keys are dropped in silence, a misspelled key anywhere in
+  > `config.toml` is indistinguishable from one you never wrote. Check spelling
+  > against [Configuration](../reference/config.md) rather than trusting a
+  > clean startup.
   These docs previously described this as "a *different, real* thing" from the above.
   It is different; it is not real. The 2026-07-29 correction fixed the client-side claim
   and introduced this one in its place. Verified 2026-08-05.

@@ -6,22 +6,29 @@ The Object Database (ODB) is the core storage engine for MediaGit, managing cont
 
 ```mermaid
 graph TB
-    API[ODB API] --> Cache[In-Memory Cache]
-    Cache --> Compression[Compression Layer]
-    Compression --> Backend[Storage Backend]
+    API["ODB API"] --> Hash["BLAKE3 hash<br/>(content address)"]
+    Hash --> Chunk["Chunker<br/>FastCDC · media-aware · fixed"]
+    Chunk --> Delta{"Similar chunk<br/>already stored?"}
+    Delta -->|yes| Enc["Delta-encode against it<br/>(bounded chain depth)"]
+    Delta -->|no| Comp
+    Enc --> Comp["Compress per type<br/>Store · Brotli · Zstd"]
+    Comp --> Cache["In-memory chunk cache"]
+    Cache --> Backend["StorageBackend trait"]
 
-    API --> |Write| Hash[BLAKE3 Hasher]
-    Hash --> Cache
-
-    Backend --> Local[Local FS]
-    Backend --> S3[Amazon S3]
-    Backend --> Azure[Azure Blob]
-    Backend --> Cloud[Other Cloud Providers]
+    Backend --> Local["Local filesystem"]
+    Backend --> S3["S3 / MinIO<br/>and S3-compatible"]
+    Backend --> Azure["Azure Blob"]
+    Backend --> GCS["Google Cloud Storage"]
+    Backend --> B2["Backblaze B2 /<br/>DigitalOcean Spaces"]
 
     style API fill:#e1f5ff
     style Cache fill:#fff4e1
-    style Compression fill:#e8f5e9
+    style Comp fill:#e8f5e9
 ```
+
+Reads run the same path in reverse: resolve the chunk (loose object first, then
+inside a pack), reverse any delta chain, decompress, and verify the BLAKE3
+address matches what was asked for.
 
 ## Core Operations
 

@@ -213,7 +213,6 @@ tls_key_path = "/path/to/key.pem"
 api_key = "your-secret-key"      # or use MEDIAGIT_API_KEY
 auth_enabled = false
 cors_origins = ["http://localhost:3000"]
-encryption_at_rest = false
 
 [security.rate_limiting]
 enabled = false

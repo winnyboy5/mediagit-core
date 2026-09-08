@@ -85,7 +85,9 @@ sequenceDiagram
     User->>CLI: mediagit add large-file.psd
     CLI->>ODB: Store object
     ODB->>ODB: Calculate BLAKE3 hash
-    ODB->>Compression: Compress with zstd
+    ODB->>ODB: Chunk (FastCDC / media-aware)
+    ODB->>Compression: Compress each chunk
+    Note over Compression: Codec is chosen per file type:<br/>Store for already-compressed media,<br/>Brotli for text and documents,<br/>Zstd for everything else
     Compression->>Storage: Write to backend
     Storage-->>User: ✓ Object stored
 
@@ -148,9 +150,10 @@ sequenceDiagram
   configured, output is byte-for-byte identical to a build without the feature.
   Encrypting an *existing* repository is not supported. See [Security](security.md).
 - At-rest, cloud SSE: **not wired either.** `[storage] encryption` /
-  `encryption_algorithm` are parsed and validated but read by no storage backend — no
-  request sets an SSE header. Setting them has no effect. (Bucket-level encryption
-  configured outside MediaGit still applies; it just isn't these keys.)
+  `encryption_algorithm` are not fields on `S3Storage` at all, and unknown keys are
+  silently discarded rather than rejected — so setting them looks fine and does
+  nothing. No request sets an SSE header. (Bucket-level encryption configured
+  outside MediaGit still applies; it just isn't these keys.)
 - In-transit: TLS 1.3 by default when the server's TLS listener is enabled; `tls_min_version = "1.2"` in `mediagit-server.toml` is an escape hatch for TLS 1.2-only clients/proxies. mTLS is not wired.
 
 ## Scalability

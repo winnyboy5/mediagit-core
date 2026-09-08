@@ -50,7 +50,11 @@ See [Configuration](./config.md) for the full `[storage]` schema.
 | Variable | Description |
 |----------|-------------|
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to a service-account JSON key. Honoured via ADC when `[storage.gcs].credentials_path` is unset. |
-| `GCS_EMULATOR_HOST` | GCS emulator URL for testing (e.g., `http://localhost:4443`) |
+
+`GCS_EMULATOR_HOST` was previously listed here and is **not read by anything** —
+no such name appears in the codebase. The GCS emulator tests use
+`STORAGE_EMULATOR_HOST`, which they set themselves, and it is not a supported
+user-facing knob.
 
 ## Performance Tuning
 

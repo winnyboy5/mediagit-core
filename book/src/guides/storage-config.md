@@ -30,34 +30,27 @@ backend = "s3"
 bucket = "my-media-bucket"
 region = "us-east-1"
 prefix = "repos/my-project"
-encryption = false
+access_key_id = "AKIAIOSFODNN7EXAMPLE"
+secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 ```
 
-Credentials via environment variables (recommended over config file):
-
-```bash
-export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
-export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
-export AWS_REGION=us-east-1
-```
-
-For temporary credentials (IAM role or STS):
-
-```bash
-export AWS_SESSION_TOKEN=...
-```
-
-For named profiles from `~/.aws/credentials`:
-
-```bash
-export AWS_PROFILE=my-profile
-```
+> **Credentials must live in this file.** MediaGit does not read
+> `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` or `AWS_SESSION_TOKEN`, and has
+> no IAM-role or instance-profile path — the S3 family is built through
+> `MinIOBackend`, whose key and secret come straight from `[storage]`
+> (`mediagit-server/src/handlers/mod.rs:610-638`). Exporting those variables
+> leaves the shell looking configured while the push fails with "access key
+> cannot be empty". Protect the file instead: keep it out of version control
+> and restrict its permissions.
+>
+> GCS is the one exception — see [GCS](#google-cloud-storage) below.
 
 ---
 
 ## MinIO (S3-Compatible)
 
-MinIO uses the same S3 configuration with a custom endpoint:
+MinIO uses the same S3 backend with a custom `endpoint` — that's the only
+thing that distinguishes it from real AWS:
 
 ```toml
 [storage]
@@ -65,13 +58,9 @@ backend = "s3"
 bucket = "my-media-bucket"
 region = "us-east-1"
 prefix = ""
-```
-
-```bash
-export AWS_ACCESS_KEY_ID=minioadmin
-export AWS_SECRET_ACCESS_KEY=minioadmin
-export AWS_ENDPOINT_URL=http://localhost:9000
-export AWS_REGION=us-east-1
+access_key_id = "minioadmin"
+secret_access_key = "minioadmin"
+endpoint = "http://localhost:9000"
 ```
 
 Create the bucket first:
@@ -97,19 +86,13 @@ Credentials live in a tagged `auth` block -- exactly one credential, chosen by
 `type`: `account_key`, `connection_string { value }`, `sas { account_name,
 token }`, or `emulator` (local Azurite). The pre-`config_version` 3 flat form
 (`account_name`/`account_key` directly under `[storage]`) is migrated
-automatically the first time a repo is opened.
+automatically the first time a repo is opened. There is no environment-variable
+path for any of these — `AZURE_STORAGE_CONNECTION_STRING`,
+`AZURE_STORAGE_ACCOUNT` and `AZURE_STORAGE_KEY` are not read. Use
+`connection_string` instead of `account_key` if that's what you have:
 
-The `account_key` may instead be supplied out of band via the environment:
-
-```bash
-export AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=https;AccountName=mystorageaccount;AccountKey=base64key==;EndpointSuffix=core.windows.net"
-```
-
-Or account name + key:
-
-```bash
-export AZURE_STORAGE_ACCOUNT=mystorageaccount
-export AZURE_STORAGE_KEY=base64key==
+```toml
+auth = { type = "connection_string", value = "DefaultEndpointsProtocol=https;AccountName=mystorageaccount;AccountKey=base64key==;EndpointSuffix=core.windows.net" }
 ```
 
 ---
@@ -123,6 +106,10 @@ bucket = "my-gcs-bucket"
 project_id = "my-gcp-project"
 prefix = ""
 ```
+
+GCS is the **only** backend with a genuine environment-variable path: leave
+`credentials_path` unset in the config and MediaGit falls back to Application
+Default Credentials, which honours `GOOGLE_APPLICATION_CREDENTIALS`:
 
 ```bash
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
