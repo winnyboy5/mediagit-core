@@ -28,11 +28,38 @@
 
 # Readiness budget for a freshly started mediagit-server.
 #
-# MUST stay above the server's OWN startup probe, which is a 30s tokio timeout
-# around backend validation (crates\mediagit-server\src\main.rs: "startup probe
-# timed out after 30s validating N repo(s)"). Waiting less than 30s here turns a
-# merely SLOW backend into "server never became healthy" -- a false product
-# failure the harness cannot tell apart from a real one.
+# MUST stay above the server's OWN startup probe timeout
+# (`startup_probe_timeout_secs`, crates\mediagit-server\src\main.rs). Waiting
+# less than that turns a merely SLOW backend into "server never became
+# healthy" -- a false product failure the harness cannot tell apart from a real
+# one.
+#
+# 60 -> 120 (2026-09-09). THE INVARIANT ABOVE WAS SILENTLY VIOLATED. This
+# comment said "a 30s tokio timeout" and 60 cleared it comfortably -- but the
+# server's probe was later raised 30s -> 90s (main.rs DEFAULT_SECS, with its own
+# long note on why 30 was too short), and nothing updated this side. The rule
+# stayed written down while the number it depended on moved underneath it, and
+# 60 < 90 went unnoticed for as long as no probe took over a minute.
+#
+# ga51 is the first campaign where one did: 07_abuse/A2-kill-mid-push failed
+# with `server never became healthy:` and NOTHING after the colon. That empty
+# string is the tell. The harness gave up at 60s and killed the server, so the
+# probe's own 90s message -- which names the repo and the backend it was stuck
+# on -- was never printed, and $errText below had nothing to report. Silo was
+# demonstrably alive: A3 passed against it 3 seconds later. A2 had passed in all
+# seven preceding campaigns (ga44-ga50).
+#
+# So the failure was real (something DID stall for >60s) but the harness
+# destroyed the only evidence that could name it. That is the
+# gate-that-cannot-fail shape inverted -- a gate that fails without being able
+# to say why, which is just as useless.
+#
+# 120 = the server's 90s probe + 30s margin for process start and the first
+# /health round trip. Deliberately NOT derived from
+# MEDIAGIT_STARTUP_PROBE_TIMEOUT_SECS: this must stay above the server's
+# DEFAULT, and reading the env var would silently track a value a caller
+# lowered, reintroducing the same drift. If the server's default moves again,
+# this number moves with it -- by hand, on purpose.
 #
 # Both call sites previously used `for ($i = 0; $i -lt 40; $i++)` with a 500ms
 # sleep and called it 20s. Two defects in that:
@@ -45,7 +72,7 @@
 #      total). The budget silently varied 5x with the failure mode.
 # A wall-clock deadline fixes both and makes the timeout mean what it says.
 $script:QA_SERVER_HEALTH_TIMEOUT_SEC =
-  [int]$(if ($env:MG_QA_SERVER_HEALTH_TIMEOUT_SEC) { $env:MG_QA_SERVER_HEALTH_TIMEOUT_SEC } else { 60 })
+  [int]$(if ($env:MG_QA_SERVER_HEALTH_TIMEOUT_SEC) { $env:MG_QA_SERVER_HEALTH_TIMEOUT_SEC } else { 120 })
 
 # Poll <BaseUrl>/health until 200, the process exits, or the deadline passes.
 # Returns $true only on a real 200. Single implementation on purpose: this loop
@@ -294,7 +321,19 @@ repos_dir = "$reposDirFwd"$authLines$rlLines$encLines
   $healthy = Wait-QaServerHealthy -Proc $proc -BaseUrl $url
 
   if (-not $healthy) {
+    # Read BOTH logs. The server's own tracing -- including the startup probe's
+    # timeout message, the one line that names which repo and backend it hung on
+    # -- goes to STDOUT, so an error built from $errLog alone is empty in exactly
+    # the case that needs explaining. ga51's A2 reported
+    # `never became healthy:` with nothing after the colon while its .out.log
+    # held the whole story, ending mid-probe at "Using MinIO/S3-compatible
+    # backend". Tail rather than the whole file: the interesting lines are the
+    # last ones, and a healthy server's stdout can run to megabytes.
     $errText = if (Test-Path $errLog) { (Get-Content $errLog -Raw -ErrorAction SilentlyContinue) } else { "" }
+    $outTail = if (Test-Path $outLog) {
+      (Get-Content $outLog -Tail 15 -ErrorAction SilentlyContinue) -join "`n"
+    } else { "" }
+    if ($outTail) { $errText = "$errText`n--- server stdout (last 15 lines) ---`n$outTail" }
     if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
     # NOT a SKIP: the backend was selected and its credentials resolved, so a server
     # that will not come up is a live defect (or dead infrastructure) and must fail
