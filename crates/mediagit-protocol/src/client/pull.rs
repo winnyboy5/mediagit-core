@@ -10,6 +10,68 @@ use super::*;
 /// moment-in-time condition, not a substitute for backend resilience.
 const CHUNK_GET_MAX_RETRIES: u32 = 3;
 
+/// How many times to retry a chunk GET whose *request never completed* — the
+/// connection was refused, reset, or reused after the peer had closed it.
+///
+/// Separate from `CHUNK_GET_MAX_RETRIES`, and much larger, because the two
+/// describe opposite situations. A 503 means the server already exhausted its
+/// own storage retries, so asking again mostly delays an error the caller needs
+/// to see — 3 is right there. A transport failure means nothing was ever
+/// established: the server may be perfectly healthy, and the condition is
+/// usually brief and local.
+///
+/// Measured, campaign 20260908-ga47: the aws S5 clone died to 65 of these
+/// against `127.0.0.1` — the loopback hop to a server that was *idle* at the
+/// time (`idle_s=41` in the heartbeat at the moment of the final failure), so
+/// this was never backend weather. 36 chunks failed once, 17 a second time, and
+/// 12 exhausted the budget of 3. Recovery was plainly happening — 19 chunks
+/// came back after one retry and 5 more after two — but with the
+/// `500ms << attempt` floor a budget of 3 is under 7 seconds of patience, and
+/// the condition persisted for minutes. We did not fail because the retry was
+/// wrong; we failed because we stopped asking. The first chunk to exhaust kills
+/// the whole clone (`buffer_unordered` + `result?` is fail-fast).
+///
+/// 8 with the capped floor below is ~40s per chunk, against the 3600s
+/// `MEDIAGIT_PULL_DEADLINE_SECS` that still bounds the download as a whole.
+const CHUNK_GET_SEND_MAX_RETRIES: u32 = 8;
+
+/// Upper bound on the exponential floor, so a larger budget cannot turn into an
+/// unbounded wait. A no-op for the 5xx arm, whose budget of 3 tops out at
+/// 2000ms and never reaches this.
+const CHUNK_GET_BACKOFF_FLOOR_CAP_MS: u64 = 8_000;
+
+fn chunk_get_send_max_retries() -> u32 {
+    std::env::var("MEDIAGIT_CHUNK_GET_SEND_RETRIES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(CHUNK_GET_SEND_MAX_RETRIES)
+}
+
+/// The whole `source()` chain of an error, innermost cause last.
+///
+/// `reqwest`'s `Display` is only ever the outermost layer — "error sending
+/// request for url (…)" — and the layer that actually names the failure
+/// (connection refused, connection reset, "os error 10055") sits underneath it.
+/// ga47 lost a 2 GB clone to 65 of those and its logs could not say which of
+/// them it was, because every site formatted the error with `{}` and dropped
+/// the chain. Diagnosing that class needs the cause kept, not a bigger budget.
+///
+/// This is what rclone's `Cause()` is for. rclone also carries a hand-written
+/// list of stdlib error *strings* (`fs/fserrors/error.go`, whose own comment
+/// calls it "incredibly ugly") because Go loses error types across wrapping.
+/// Rust does not: `source()` walks the real chain, so the list is not worth
+/// porting — only the idea behind it.
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut s = e.to_string();
+    let mut src = e.source();
+    while let Some(cause) = src {
+        s.push_str(" <- ");
+        s.push_str(&cause.to_string());
+        src = cause.source();
+    }
+    s
+}
+
 /// Is this chunk-GET outcome worth retrying?
 ///
 /// 5xx and 429 are weather; 404/403/409 are verdicts. Retrying a verdict just
@@ -47,8 +109,10 @@ fn chunk_get_error(chunk_id: &Oid, status: reqwest::StatusCode) -> anyhow::Error
 /// handful of times costs seconds; not retrying costs the whole transfer and
 /// every byte already downloaded.
 ///
-/// Transport errors are retried alongside 5xx/429 — a dropped connection
-/// mid-clone is the same class of weather on a WAN-bound product.
+/// Transport errors are retried too — a dropped connection mid-clone is the
+/// same class of weather on a WAN-bound product — but on their own, larger
+/// budget: see `CHUNK_GET_SEND_MAX_RETRIES` for the ga47 measurement that says
+/// why sharing the 503 budget of 3 is what cost that campaign a clone.
 /// `MEDIAGIT_PULL_DEADLINE_SECS` still bounds the whole download, so this
 /// cannot stall a clone forever.
 async fn get_chunk_with_retry(
@@ -72,10 +136,17 @@ async fn get_chunk_with_retry(
         // to wait it out, and giving up after 3 fails a clone that only needed
         // patience. Measured: with the push path fixed, a clone against a 2 rps
         // server still failed here alone.
+        //
+        // A transport failure is a third kind again, and ga47 proved it must not
+        // share the 503 budget either: 12 chunks exhausted 3 attempts against an
+        // IDLE server over loopback. See CHUNK_GET_SEND_MAX_RETRIES.
         let rate_limited =
             matches!(&outcome, Ok(r) if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS);
+        let send_failed = outcome.is_err();
         let budget = if rate_limited {
             super::rate_limit_max_retries()
+        } else if send_failed {
+            chunk_get_send_max_retries()
         } else {
             CHUNK_GET_MAX_RETRIES
         };
@@ -102,25 +173,39 @@ async fn get_chunk_with_retry(
                 )
                 .as_millis() as u64
             } else {
-                let floor_ms = 500u64 << attempt;
+                let floor_ms = (500u64 << attempt.min(20)).min(CHUNK_GET_BACKOFF_FLOOR_CAP_MS);
                 floor_ms + super::rate_limit_backoff(attempt, None).as_millis() as u64
             };
             attempt += 1;
             tracing::warn!(
                 chunk = %hex,
                 attempt,
+                budget,
                 backoff_ms,
                 outcome = %match &outcome {
                     Ok(r) => r.status().to_string(),
-                    Err(e) => e.to_string(),
+                    Err(e) => error_chain(e),
                 },
                 "chunk GET failed transiently; retrying"
             );
             tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
             continue;
         }
-        return outcome
-            .map_err(|e| anyhow::anyhow!("Failed to download chunk {}: {}", chunk_id, e));
+        return outcome.map_err(|e| {
+            // `error_chain`, not `{}`. This is the message the user and the
+            // campaign log actually see, and in ga47 it was the only record of
+            // the failure -- reading "error sending request for url (...)" and
+            // nothing more is what made that clone undiagnosable.
+            // "retries", not "attempts": `attempt` counts retries, so the
+            // request count is one higher. ga47's forensics turned on reading
+            // these numbers precisely, so the noun has to be exact.
+            anyhow::anyhow!(
+                "Failed to download chunk {} after {} retries: {}",
+                chunk_id,
+                attempt,
+                error_chain(&e)
+            )
+        });
     }
 }
 
@@ -1439,6 +1524,155 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(10), server)
             .await
             .expect("server task timed out -- client made fewer requests than expected")
+            .expect("server task panicked");
+    }
+
+    /// The ga47 signature, reproduced exactly. `reqwest` shows only the
+    /// outermost layer, and the only layer that names the actual fault is the
+    /// innermost one.
+    #[test]
+    fn error_chain_keeps_the_innermost_cause() {
+        #[derive(Debug)]
+        struct E(&'static str, Option<Box<E>>);
+        impl std::fmt::Display for E {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.0)
+            }
+        }
+        impl std::error::Error for E {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                self.1
+                    .as_deref()
+                    .map(|e| e as &(dyn std::error::Error + 'static))
+            }
+        }
+
+        let e = E(
+            "error sending request for url (http://127.0.0.1:58579/chunks/070ae806)",
+            Some(Box::new(E(
+                "client error (SendRequest)",
+                Some(Box::new(E(
+                    "connection closed before message completed",
+                    None,
+                ))),
+            ))),
+        );
+
+        let s = super::error_chain(&e);
+        assert!(
+            s.starts_with("error sending request for url"),
+            "the outermost layer must still lead: {s}"
+        );
+        assert!(
+            s.contains("connection closed before message completed"),
+            "the innermost cause is the whole point of this function: {s}"
+        );
+    }
+
+    /// Accepts `total_requests` connections; the first `drop_count` are read and
+    /// then CLOSED with no reply at all. That is what a reset connection, or a
+    /// socket the peer had already closed, looks like to `reqwest`: `send()`
+    /// returns `Err` and no status ever exists.
+    ///
+    /// Deliberately a separate helper from `serve_flaky_chunk`, which answers
+    /// 503. A 503 is a *response*; this is the absence of one. They now draw on
+    /// different retry budgets, so a helper that conflated them could not tell
+    /// the two apart -- which is the exact confusion that produced the bug.
+    async fn serve_dropping_chunk(
+        listener: TcpListener,
+        drop_count: usize,
+        total_requests: usize,
+        body: Vec<u8>,
+        served: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        for i in 0..total_requests {
+            let (mut sock, _) = listener.accept().await.expect("accept");
+            served.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let n = sock.read(&mut chunk).await.expect("read");
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            if i < drop_count {
+                drop(sock);
+                continue;
+            }
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.write_all(&body).await;
+            let _ = sock.flush().await;
+        }
+    }
+
+    /// A transport failure draws on its OWN budget, and that budget outlasts the
+    /// 503 one.
+    ///
+    /// FOUR consecutive connection drops, then a real body. Four is the
+    /// load-bearing number: it is one more than `CHUNK_GET_MAX_RETRIES` (3), so
+    /// under the old code -- where `send()` errors and 503s shared those 3 --
+    /// this GET failed outright. That is exactly how the aws arm of campaign
+    /// 20260908-ga47 lost a 2 GB clone: 65 `send()` failures against
+    /// `127.0.0.1`, 12 of them exhausting a budget of 3, while the server sat
+    /// idle. Not one was a body read, and not one was a status.
+    ///
+    /// The counts here are HARDCODED rather than derived from either constant,
+    /// for the reason spelled out on the sibling test: an expectation derived
+    /// from the constant moves with the defect instead of catching it. If the
+    /// send budget is ever folded back into the status budget, this must go red.
+    ///
+    /// It spends ~10s in real backoff (floors of 500+1000+2000+4000ms, plus
+    /// jitter). That wait is not incidental -- it IS the fix, since the bug was
+    /// a budget too short to outlast a condition that persisted for minutes --
+    /// so it is deliberately not mocked away.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn transport_failures_outlast_the_status_budget() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let body: Vec<u8> = (0u16..4096).map(|b| (b % 251) as u8).collect();
+        let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server = tokio::spawn(serve_dropping_chunk(
+            listener,
+            4,
+            5,
+            body.clone(),
+            std::sync::Arc::clone(&served),
+        ));
+
+        crate::ensure_crypto_provider();
+        let client = reqwest::Client::builder().build().expect("client");
+        let oid = mediagit_versioning::Oid::from_bytes([9u8; 32]);
+        let url = format!("http://{addr}/chunks/{}", oid.to_hex());
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            get_chunk_with_retry(&client, &url, &oid),
+        )
+        .await
+        .expect("retry loop did not return within its own backoff schedule")
+        .expect("4 dropped connections must not exhaust the transport budget");
+
+        assert!(response.status().is_success());
+        let got = response.bytes().await.expect("body").to_vec();
+        assert_eq!(got, body, "recovered body must be byte-identical");
+        assert_eq!(
+            served.load(std::sync::atomic::Ordering::SeqCst),
+            5,
+            "recovery must have taken exactly the 4 dropped attempts plus 1 success"
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), server)
+            .await
+            .expect("server task timed out")
             .expect("server task panicked");
     }
 }
