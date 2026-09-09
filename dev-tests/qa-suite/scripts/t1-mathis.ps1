@@ -244,11 +244,47 @@ $p = if ($sentDelta -gt 0) { [math]::Max(0.0, $retransDelta / [double]$sentDelta
 [void]$summary.AppendLine("segments retransmitted (delta): $retransDelta")
 [void]$summary.AppendLine("p (retransmit ratio):          $([math]::Round($p * 100, 4))%")
 
+# Resolution guard. p is a ratio of machine-wide counters, so it can only
+# resolve loss down to ~1/sentDelta. A 200MB transfer is ~137k segments and
+# resolves ~0.0007%, which is plenty -- but a small -SizeMB (or a transfer that
+# died early) can report "p = 0" purely because it never sent enough segments
+# for one retransmit to be likely. Saying "no loss" from too few samples is the
+# gate-that-cannot-fail shape: an answer that cannot come out any other way.
+$MIN_SEGMENTS_FOR_P = 20000
+if ($sentDelta -lt $MIN_SEGMENTS_FOR_P) {
+  [void]$summary.AppendLine("")
+  [void]$summary.AppendLine("VERDICT: inconclusive -- only $sentDelta segments sent (need >= $MIN_SEGMENTS_FOR_P).")
+  [void]$summary.AppendLine("Too few to resolve a loss rate: p would be an artefact of sample size, not a")
+  [void]$summary.AppendLine("measurement. Re-run with a larger -SizeMB, or check the transfer completed.")
+  Write-Host ""
+  Write-Host $summary.ToString()
+  Set-Content -Path (Join-Path $OutDir "summary.txt") -Value $summary.ToString() -Encoding UTF8
+  exit 0
+}
+
+# THE BIAS IN THIS MEASUREMENT, AND WHICH WAY IT POINTS.
+#
+# RTT is sampled BEFORE the transfer, on an idle path. Mathis wants the RTT of
+# the LOADED path, which on any bufferbloated link is higher -- sometimes much
+# higher. A too-small RTT makes the computed bound too LARGE, which makes the
+# observed/bound ratio too SMALL, which biases this script toward printing
+# "H-A: link-limited".
+#
+# That is the dangerous direction: H-A closes the whole transport category
+# (QUIC, relay, the accelerator shape) permanently. So an H-A verdict here is
+# the one to distrust, and the summary says so where it is printed rather than
+# only in this comment. H-B, by contrast, is reported against the bias and is
+# the sturdier of the two answers.
 if ($p -le 0) {
   [void]$summary.AppendLine("")
   [void]$summary.AppendLine("p ~= 0 -> Mathis bound is undefined (no measurable loss to plug in).")
-  [void]$summary.AppendLine("VERDICT: H-A: link-limited -- no loss observed, so TCP/loss is not the bottleneck.")
-  [void]$summary.AppendLine("Close the transport question; spend effort on dedup instead.")
+  [void]$summary.AppendLine("VERDICT: H-A: link-limited -- no loss observed over $sentDelta segments.")
+  [void]$summary.AppendLine("Spend effort on dedup rather than transport.")
+  [void]$summary.AppendLine("")
+  [void]$summary.AppendLine("BEFORE ACTING ON THIS: zero retransmits across a real transfer is a strong")
+  [void]$summary.AppendLine("result, but it is also what a transfer that never left the local network")
+  [void]$summary.AppendLine("looks like. Confirm the RTT above is a WAN number (tens of ms, not ~0) --")
+  [void]$summary.AppendLine("if it is ~0 you measured loopback or a LAN cache, and this verdict is void.")
 } else {
   $rttSec = $rttMedianMs / 1000.0
   $boundBps  = $MSS_BYTES / ($rttSec * [math]::Sqrt($p))
@@ -265,6 +301,13 @@ if ($p -le 0) {
   } elseif ($ratio -lt 0.5) {
     [void]$summary.AppendLine("VERDICT: H-A: link-limited -- observed throughput is far BELOW the Mathis bound.")
     [void]$summary.AppendLine("TCP has headroom it isn't using; loss/RTT are not the bottleneck. Spend effort on dedup.")
+    [void]$summary.AppendLine("")
+    [void]$summary.AppendLine("TREAT THIS AS THE WEAKER VERDICT. RTT above was sampled on an IDLE path; the")
+    [void]$summary.AppendLine("loaded RTT is higher on any bufferbloated link, which inflates the bound and")
+    [void]$summary.AppendLine("drags this ratio down -- i.e. the measurement is biased TOWARD H-A, and H-A is")
+    [void]$summary.AppendLine("the verdict that closes the transport category for good. Before acting on it,")
+    [void]$summary.AppendLine("re-measure RTT DURING a transfer; if loaded RTT is well above the $rttMedianMs ms")
+    [void]$summary.AppendLine("used here, recompute before believing this.")
   } else {
     [void]$summary.AppendLine("VERDICT: inconclusive -- observed throughput exceeds the Mathis bound, which the bound")
     [void]$summary.AppendLine("shouldn't allow. Likely a bad RTT or p sample (see the machine-wide netstat caveat above).")
