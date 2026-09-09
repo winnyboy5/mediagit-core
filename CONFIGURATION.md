@@ -498,14 +498,28 @@ quarantined, no URL minted) so the remaining packs are not held hostage.
 |---|---|---|
 | `download_chunk` | verifies the requested slice inline (bytes already in hand) | serves directly |
 | `batch_get_pack_chunks` | same inline slice check | serves directly |
-| `presign_pack_downloads` | verifies the **whole** pack before minting | **mints immediately, zero added cost** |
+| `presign_pack_downloads` | **declines to mint** — returns no URL immediately, and starts verification in the background | **mints immediately, zero added cost** |
 
-`presign_pack_downloads` verifies the whole pack because once a URL is minted the
-server is permanently out of that request path — there is no revocation, only
-expiry (`presigned_url_ttl_seconds`, default 12 h). A pack is unverified only for the
-short window between push and the background worker finishing, so in steady state
-every pull mints immediately and **media keeps travelling client↔bucket directly in
-both directions**.
+`presign_pack_downloads` will not mint for an unverified pack because once a URL
+is minted the server is permanently out of that request path — there is no
+revocation, only expiry (`presigned_url_ttl_seconds`, default 12 h).
+
+**It declines rather than waits** (changed 2026-09-08). It previously verified
+the whole pack inline and then minted; that wait is bandwidth-dependent work
+sitting under a fixed client timeout (`MEDIAGIT_CONTROL_READ_TIMEOUT_SECS`,
+300 s), and every pack of a freshly pushed repo is unverified while packs verify
+one at a time. A clone died on exactly that cliff — the server logged the request
+and never a response, and the client gave up 300.005 s later. Returning "no URL"
+is this endpoint's existing contract for "fetch it through the proxy", and the
+proxy verifies every chunk inline before serving it, so **nothing unverified
+reaches the client either way**; the check simply moves onto the read the client
+was going to do anyway, instead of paying for a second full read of the payload
+first. Verification is still started, just not awaited, so the pack becomes
+mintable shortly after the first clone touches it.
+
+A pack is unverified only for the short window between push and the background
+worker finishing, so in steady state every pull mints immediately and **media
+keeps travelling client↔bucket directly in both directions**.
 
 **Crash safety.** The `.pending` marker is written *before* the manifest and is the
 source of truth: marker present ⇒ unverified. A crash mid-verification leaves the

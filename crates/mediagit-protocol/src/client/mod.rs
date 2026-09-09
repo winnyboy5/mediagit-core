@@ -691,9 +691,22 @@ fn short_request_attempts() -> u32 {
 /// request. Captured twice with the server's own counters (2026-08-31): the
 /// client's TCP connect completes, `Established` to the server, CPU flat; the
 /// server's `accepted` counter never moves while its heartbeat keeps ticking.
-/// The connection completes into the kernel's listen backlog and the acceptor
-/// never returns it. The client then waits on a connection that will never be
-/// served.
+/// For THAT signature the reading was that the connection completes into the
+/// kernel's listen backlog and the acceptor never returns it.
+///
+/// THERE IS A SECOND SIGNATURE, AND THE BACKLOG READING DOES NOT COVER IT.
+/// 20260909-ga49 hit the same symptom from this call site with `accepted`
+/// CLIMBING 4→9 while `routed` stayed frozen at 13 and `idle_s` ran to 699. The
+/// acceptor was demonstrably working; the connection was accepted and handed to
+/// axum, and no request ever reached the router. Client-side runtime metrics
+/// were healthy at the same moment (`rt_workers=1, rt_alive_tasks=2,
+/// rt_global_queue_depth=0`) with the deadline timers firing exactly on
+/// schedule, so this was not executor starvation either.
+///
+/// So: two distinct signatures, `accepted` frozen vs `accepted` moving. Whether
+/// they are one fault presenting differently is UNKNOWN. Do not quote the
+/// backlog explanation as the cause of a stall without first checking which of
+/// the two the server's counters actually show — that is what they are for.
 ///
 /// WHY RETRYING IS THE FIX AND NOT A PAPER-OVER. Abandoning the request drops
 /// the future, which drops hyper's connection, so the retry necessarily dials a
