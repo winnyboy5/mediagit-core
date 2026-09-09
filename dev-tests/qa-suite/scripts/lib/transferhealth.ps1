@@ -4,14 +4,35 @@
 #
 # linkprobe.ps1 samples a TCP handshake to :443. In ga47 it scored the aws clone
 # window 0 failures out of 321 samples, median connect 78ms -- "clean" -- while
-# 44 sustained reads died mid-body and the clone failed with exit=1. A handshake
-# says the path can be OPENED. It says nothing about whether a 60MB body can be
-# PULLED through it, which is the only thing a clone actually needs.
+# 44 sustained reads died mid-body in the same window. A handshake says the path
+# can be OPENED. It says nothing about whether a 60MB body can be PULLED through
+# it, which is the only thing a clone actually needs. Counting mid-body aborts is
+# a genuine signal the connect probe cannot see, and that is why this file stays.
 #
-# That is the gate-that-cannot-fail shape (feedback_gates_that_cannot_fail),
-# sitting in the very layer that was added to answer "product or link?". The
-# connect probe answered "link is fine" about a window in which the link was the
-# thing that broke.
+# CORRECTION, 2026-09-09 -- THIS HEADER PREVIOUSLY CLAIMED THOSE 44 ABORTS KILLED
+# THE ga47 CLONE. THEY DID NOT. Read back from the run's own logs:
+#
+#   server-aws-10_scale-S5-10.out.log : all 44 are mediagit_storage::minio WARN
+#     "Operation failed (attempt N/5), retrying". Distribution 38x attempt 1,
+#     6x attempt 2. Zero reached 5. Zero "Failed after N retries". Zero ERROR
+#     lines in the whole file. Every one of them RECOVERED -- with_retry did
+#     its job.
+#
+#   10_scale-cmds.log:4351 : what actually killed the clone --
+#     "Failed to download chunk 070ae806...: error sending request for url
+#      (http://127.0.0.1:58579/...)". 65 of those, all against LOOPBACK, all at
+#     send() before any body existed; 36 failed once, 17 twice, 12 exhausted
+#     CHUNK_GET_MAX_RETRIES=3. The server was idle at the time (idle_s=41 in the
+#     heartbeat at the moment of the final failure), so this was never the link
+#     and never the backend.
+#
+# So this file did to itself precisely what it was written to prevent: it took a
+# correlation -- aborts and a failure in the same window -- and wrote it down as
+# a cause, inside the instrument built to stop "product or link?" from being
+# guessed. That is the gate-that-cannot-fail shape one level up
+# (feedback_gates_that_cannot_fail): the instrument was sound, the CONCLUSION
+# drawn from it was never checked against the terminal error. Count the aborts
+# here; do not let the count name a cause on its own.
 #
 # WHY IT READS LOGS INSTEAD OF GENERATING TRAFFIC.
 #
