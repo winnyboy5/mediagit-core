@@ -7,10 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.3.0-rc.5] - 2026-09-09
+
 Cleared for release by two clean QA campaigns — **243 gates each, 0 failures,
-all 14 phases, across all five backends** — on byte-identical binaries. One
-campaign between them failed on a harness defect, not product code; it is
-described under *Known issues* below rather than omitted.
+all 14 phases, across all five backends** — on byte-identical binaries, plus a
+green workspace suite (**2,238 passed, 0 failed**).
+
+A third campaign, run between the two, failed and is described under *Known
+issues* rather than omitted: its one failure was a harness defect (the suite
+waited 60 s for a server whose own startup probe is allowed 90 s), not product
+code. An earlier pair of campaigns cleared an earlier subset of this same
+release at 241 gates each; the transfer fixes below landed after that pair and
+were validated by the 243-gate pair. Both pairs ran through a degraded network
+and neither lost a gate; see the pack-upload section below.
 
 ### Fixed — a clone died because a retry budget was sized for the wrong failure
 
@@ -53,26 +62,6 @@ names the fault (connection refused, reset, `os error 10055`) lives in the
 error's `source()` chain and was discarded at every site. One failing clone was
 undiagnosable for an entire session because of it. Errors and retry warnings on
 the chunk-GET path now walk and print the full chain.
-
-### Known issues
-
-- **Intermittent stalls on loopback, cause unidentified.** Three occurrences
-  were observed on one machine in one day: a client `send()` against an idle
-  server, a request that a server accepted but never routed, and a server
-  startup probe stalling against a live storage backend. The fixes above make
-  such a stall **survivable and diagnosable — they do not explain it.** Neither
-  was exercised in the two clean campaigns, so both are proven not to regress
-  anything rather than proven to work. Finding the mechanism is the first item
-  of the next release.
-- **`A8-disk-full` has never executed** in any campaign. It needs an elevated
-  shell to attach a size-capped volume; every other check runs unelevated.
-
-## [v0.3.0-rc.5] - 2026-09-08
-
-Cleared for release by two consecutive clean QA campaigns — **241 gates each,
-0 failures, all 14 phases**, on identical binaries — plus a green workspace
-suite (2226 passed, 0 failed). Both campaigns ran through a degraded network
-and neither lost a gate; see the pack-upload section below.
 
 ### Changed — relicensed from AGPL-3.0 to BSL 1.1 (2026-08-27)
 
@@ -280,6 +269,19 @@ and no gate failed in either. A degraded link can only manufacture false
 still coarser than the pack path it backs up. Nothing here changes wire or
 persisted formats.
 
+
+### Known issues
+
+- **Intermittent stalls on loopback, cause unidentified.** Three occurrences
+  were observed on one machine in one day: a client `send()` against an idle
+  server, a request that a server accepted but never routed, and a server
+  startup probe stalling against a live storage backend. The fixes above make
+  such a stall **survivable and diagnosable — they do not explain it.** Neither
+  was exercised in the two clean campaigns, so both are proven not to regress
+  anything rather than proven to work. Finding the mechanism is the first item
+  of the next release.
+- **`A8-disk-full` has never executed** in any campaign. It needs an elevated
+  shell to attach a size-capped volume; every other check runs unelevated.
 
 ## [v0.3.0-rc.4] - 2026-08-26
 
