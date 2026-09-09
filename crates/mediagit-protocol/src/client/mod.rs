@@ -636,6 +636,54 @@ fn short_request_deadline_secs() -> u64 {
         .unwrap_or(30)
 }
 
+/// How many bounded, fresh-connection attempts before the unbounded fallback.
+///
+/// WHY 6 AND NOT 2. Two was the original value, and campaign 20260909-ga49
+/// measured it as too few — the first hard evidence of this bound being wrong
+/// rather than merely untested. `07_auth/A11-auth-grants` failed with a push
+/// that ran 720.1s and then reported
+/// `Failed to send GET /info/refs: … operation timed out`. Reconstructed from
+/// both sides:
+///
+///   client  two 30s deadlines missed on `/encryption-key`, then two more on
+///           `/info/refs`, each logging rt_workers=1, rt_alive_tasks=2,
+///           rt_global_queue_depth=0 — timers firing exactly on schedule, so
+///           the runtime was healthy, not starved.
+///   server  `accepted` climbing 4→9 while `routed` stayed frozen at 13 and
+///           `idle_s` ran to 699. Connections were accepted and handed to
+///           axum; not one produced a request the router ever saw.
+///
+/// The arithmetic closes it: 30 + 30 + 300 (the `read_timeout` finally killing
+/// the unbounded attempt) = 360s per request, twice = 720s. Exactly the
+/// measured push.
+///
+/// So the stall outlived BOTH bounded attempts, and the unbounded fallback then
+/// inherited a third stalled connection and rode it all the way to the read
+/// timeout. The fallback is a safety net for a genuinely slow server; it is the
+/// worst possible thing to spend on a stalled one. More fresh-connection
+/// attempts before reaching it is the fix, and `/encryption-key` recovering on
+/// a later attempt in the same push is direct evidence that a fresh connection
+/// does eventually get served.
+///
+/// Worst case grows from 360s to 480s for a request that fails anyway; in
+/// exchange a stall gets six chances across three minutes instead of two across
+/// one. `MEDIAGIT_SHORT_REQUEST_ATTEMPTS` tunes it; 0 is clamped to 1, since
+/// zero bounded attempts would silently restore the unbounded-only behaviour
+/// this whole function exists to prevent.
+///
+/// NOTE THIS IS MITIGATION, NOT A CURE. Why a connection accepted by axum never
+/// yields a request to the router is still unknown — and ga49 REFUTES the
+/// explanation recorded below and in `send_short_control_request`, which had it
+/// completing into the kernel backlog with the acceptor never returning it. Here
+/// `accepted` moved. The acceptor was fine.
+fn short_request_attempts() -> u32 {
+    std::env::var("MEDIAGIT_SHORT_REQUEST_ATTEMPTS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(6)
+        .max(1)
+}
+
 /// Send a short, bodyless control request under a deadline, retrying on a
 /// FRESH connection if no response headers arrive in time.
 ///
@@ -698,9 +746,8 @@ where
     if secs == 0 {
         return Ok(send_with_rate_limit_retry(make).await?);
     }
-    /// Bounded attempts before falling through to the unbounded one.
-    const BOUNDED_ATTEMPTS: u32 = 2;
-    for attempt in 1..=BOUNDED_ATTEMPTS {
+    let bounded_attempts = short_request_attempts();
+    for attempt in 1..=bounded_attempts {
         match tokio::time::timeout(
             std::time::Duration::from_secs(secs),
             send_with_rate_limit_retry(&make),
@@ -744,7 +791,7 @@ where
                 tracing::warn!(
                     request = what,
                     attempt,
-                    bounded_attempts = BOUNDED_ATTEMPTS,
+                    bounded_attempts,
                     deadline_s = secs,
                     rt_workers = workers,
                     rt_alive_tasks = alive,
@@ -2044,6 +2091,37 @@ mod short_request_deadline_tests {
         .await
         .expect("must not hang: the whole point of the deadline")
         .expect("the retry on a fresh connection must succeed");
+        assert_eq!(resp.status(), 200);
+    }
+
+    /// The ga49 shape: a stall that outlives MORE THAN TWO connections.
+    ///
+    /// Three connections are accepted and never answered. Under the old
+    /// `BOUNDED_ATTEMPTS = 2` both bounded attempts are consumed by stalls and
+    /// the UNBOUNDED fallback then inherits the third stalled connection — and
+    /// waits on it forever, which in production meant riding the 300s
+    /// `read_timeout` to a failed push (`07_auth/A11-auth-grants`, 720.1s).
+    ///
+    /// The count is hardcoded at 3, deliberately not derived from
+    /// `short_request_attempts()`: an expectation that tracks the constant
+    /// cannot fail when the constant is wrong, which is the whole defect here.
+    /// Red-verified 2026-09-09 — with `MEDIAGIT_SHORT_REQUEST_ATTEMPTS=2` this
+    /// test hangs until its own timeout and fails; at the default 6 it passes.
+    #[tokio::test]
+    async fn stall_outlasting_two_attempts_still_recovers() {
+        let url = stalling_server(3, std::time::Duration::ZERO).await;
+        crate::ensure_crypto_provider();
+        let client = reqwest::Client::new();
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            send_short_control_request_with_deadline("GET /test", 1, || client.get(&url).send()),
+        )
+        .await
+        .expect(
+            "a stall longer than two connections must not reach the unbounded \
+             attempt -- that is the ga49 hang",
+        )
+        .expect("a later fresh-connection attempt must succeed");
         assert_eq!(resp.status(), 200);
     }
 
