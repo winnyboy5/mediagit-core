@@ -12,11 +12,11 @@
 **Version**: v0.3.0-rc.5
 **Status**: 🚧 **RELEASE CANDIDATE**
 **Features**: 100% complete (all P0–P3 items from the rc.3 feature-completeness sprint implemented — a closed batch, distinct from the forward-looking backlog in [FUTURE_TODOS.md](FUTURE_TODOS.md), which reuses the same P0–P3 labels as effort/impact tiers for planned work)
-**Last Validated**: August 6, 2026 — SCALE QA campaign (`reports/20260806-scale-full`), 0 failures across MinIO, AWS S3, Azure Blob, GCS and local
-**Not yet in a campaign**: at-rest encryption (DC-7), added in rc.3. Covered by the workspace suite including an end-to-end encrypted push and read-back over a real server, but no cloud-backend campaign has run against it yet.
+**Last Validated**: September 9, 2026 — two clean SCALE QA campaigns (`20260909-ga50`, `20260909-ga52`), **243 gates each, 0 failures, all 14 phases**, on byte-identical binaries, across MinIO, AWS S3, Azure Blob, GCS and local
+**At-rest encryption (DC-7)**: now campaign-covered. Every campaign runs 15 encryption gates — push, clone and byte-for-byte roundtrip against MinIO, AWS S3, Azure Blob and GCS, each asserting every object is actually sealed, plus three key-mismatch drills. (This line previously said encryption had never been in a campaign; that stopped being true and the README did not follow.)
 **🚨 WARNING 🚨**: This project is under active development. Be aware that large breaking changes may happen before 1.0 is reached.
 
-✅ **614/614 deep-tests passing** across MinIO, AWS S3 (ap-south-1), Azure Blob (South India), Google Cloud Storage
+✅ **614/614 deep-tests passing** across MinIO, AWS S3 (ap-south-1), Azure Blob (South India), Google Cloud Storage *(deep-test sweep, June 2026; the current per-campaign gate count is 243 — see Last Validated above)*
 ✅ **32 CLI commands validated end-to-end** — 0 crashes, 0 data corruption across all 4 cloud backends
 ✅ **27+ file types tested** (58 GB dataset) across video, audio, 3D, image, design, ML
 ✅ **26.3–26.5% storage savings** measured on cloud backends (compression + dedup + delta, validated June 2026)
@@ -836,6 +836,32 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] `/health` route alias alongside `/healthz`
 
 
+### v0.3.0-rc.5 — August–September 2026
+*Relicensed to BSL 1.1, clone streaming, and transfer hardening under WAN failure*
+
+- [x] **Relicensed AGPL-3.0 → BUSL-1.1** — source available, not open source; free for
+      production use at any scale, with hosted/managed third-party offerings reserved.
+      Change Licence AGPL-3.0-or-later after four years. Not retroactive: v0.1.0–v0.2.8-beta.1
+      remain AGPL permanently
+- [x] Clone streams the working tree while chunked media is still downloading
+      (`MEDIAGIT_CLONE_OVERLAP`) — −75.6% peak memory and ~4× faster locally
+- [x] Clone resume after interruption — a killed clone restarts from its marker
+      instead of from zero
+- [x] Large pack uploads to cloud backends hardened: a pack PUT gets a time budget
+      rather than a fixed attempt count, and the TCP connect is bounded on both clients
+- [x] Presign no longer blocks on pack verification — an unverified pack declines the
+      URL and is fetched through the proxy, which verifies every chunk inline
+      (removes a 300 s client-timeout cliff on first clone of a fresh repo)
+- [x] A pack is never re-read over the WAN while it is already being verified
+- [x] Transport failures on a chunk GET get their own retry budget, separate from the
+      one sized for a 503 (`MEDIAGIT_CHUNK_GET_SEND_RETRIES`)
+- [x] A stalled control request gets more fresh-connection attempts before the
+      unbounded fallback (`MEDIAGIT_SHORT_REQUEST_ATTEMPTS`)
+- [x] Client transport errors keep their full `source()` chain, so a failure names the
+      layer that actually broke instead of "error sending request for url"
+- [x] Validated by two clean SCALE campaigns, 243 gates each, 0 failures, on
+      byte-identical binaries
+
 ### v0.3.0-rc.4 — July 2026
 *Object-store layout v2, client auth, and reachability tooling, GA hardening: server-enforced locking, durable auth, format freeze*
 
@@ -959,7 +985,7 @@ Special thanks to:
 
 - **Lines of Code**: 85,000+ (Rust, 218 source files across 14 crates)
 - **Features**: 100% complete (all P0–P3 items from the rc.3 feature-completeness sprint — see disambiguation note above)
-- **Test Coverage**: 1,765+ unit/integration tests (validated 2026-07-16); **614/614 deep-tests** across MinIO, AWS S3, Azure Blob, GCS (validated 2026-06-02)
+- **Test Coverage**: **2,238 unit/integration tests, 0 failures** (measured 2026-09-09); 243 QA-campaign gates per run across all five backends (2026-09-09); **614/614 deep-tests** across MinIO, AWS S3, Azure Blob, GCS (validated 2026-06-02)
 - **Staging Throughput**: 25–240 MB/s for small files; 2.8–5.2 MB/s for chunked large files (WAV/PSD/GLB)
 - **Network Throughput**: 134–267 MB/s push (local server, pack negotiation); WAN-bound on cloud backends
 - **Storage Savings**: **26.3–26.5%** validated on 4 cloud backends (June 2026); ~30% average across mixed media projects
@@ -970,6 +996,6 @@ Special thanks to:
 
 ---
 
-**Made with 🦀 and ❤️ by the MediaGit Contributors**
+**Made with 🦀 and ❤️ by Aswin Krishnamoorthy**
 
-**Status**: Release Candidate | **Version**: v0.3.0-rc.5 | **Updated**: July 16, 2026 | **Cloud-Validated**: QA campaign `20260716-172951` ✅
+**Status**: Release Candidate | **Version**: v0.3.0-rc.5 | **Updated**: September 9, 2026 | **Cloud-Validated**: QA campaigns `20260909-ga50` + `20260909-ga52`, 243 gates each, 0 failures ✅
