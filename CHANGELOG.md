@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Cleared for release by two clean QA campaigns — **243 gates each, 0 failures,
+all 14 phases, across all five backends** — on byte-identical binaries. One
+campaign between them failed on a harness defect, not product code; it is
+described under *Known issues* below rather than omitted.
+
+### Fixed — a clone died because a retry budget was sized for the wrong failure
+
+A clone against AWS failed after 65 client-side `send()` failures, every one of
+them over **loopback to a server that was idle at the time**. Twelve exhausted
+the retry budget, and the first to exhaust aborted the whole transfer.
+
+The budget was three, and deliberately so — but that three was chosen for a
+**503**, which means the server has already exhausted its own storage retries,
+so asking again mostly delays a real error. A transport failure is the opposite
+situation: nothing was ever established, the peer may be perfectly healthy, and
+the condition is usually brief. Both were drawing on the same three attempts,
+which with the backoff floor is under seven seconds of patience against a
+condition that lasted minutes. Recovery was plainly available — 19 chunks
+returned after one retry and 5 more after two. The transfer did not fail because
+retrying was wrong; it failed because it stopped asking.
+
+Transport failures now have their own, larger budget
+(`MEDIAGIT_CHUNK_GET_SEND_RETRIES`, default 8) with the backoff floor capped so
+a bigger budget cannot become an unbounded wait.
+
+### Fixed — a stalled control request gave up too early, and then waited forever
+
+A push hung for 720 seconds and reported `operation timed out`. A short
+control-plane request gets two bounded attempts on fresh connections and then
+one deliberately unbounded attempt, so that a genuinely *slow* server is never
+broken by the bound. The stall outlived both bounded attempts, and the unbounded
+fallback then inherited a third stalled connection and waited on it until the
+read timeout — a safety net for a slow server, spent on a stalled one.
+
+Bounded attempts raised from 2 to 6 (`MEDIAGIT_SHORT_REQUEST_ATTEMPTS`), giving
+a stall roughly three minutes of fresh-connection chances instead of one. The
+unbounded fallback is unchanged, so slow backends still succeed.
+
+### Fixed — errors that threw away the one line naming the cause
+
+Client transport errors were formatted with their outermost layer only — the
+`error sending request for url (…)` that says nothing. The layer that actually
+names the fault (connection refused, reset, `os error 10055`) lives in the
+error's `source()` chain and was discarded at every site. One failing clone was
+undiagnosable for an entire session because of it. Errors and retry warnings on
+the chunk-GET path now walk and print the full chain.
+
+### Known issues
+
+- **Intermittent stalls on loopback, cause unidentified.** Three occurrences
+  were observed on one machine in one day: a client `send()` against an idle
+  server, a request that a server accepted but never routed, and a server
+  startup probe stalling against a live storage backend. The fixes above make
+  such a stall **survivable and diagnosable — they do not explain it.** Neither
+  was exercised in the two clean campaigns, so both are proven not to regress
+  anything rather than proven to work. Finding the mechanism is the first item
+  of the next release.
+- **`A8-disk-full` has never executed** in any campaign. It needs an elevated
+  shell to attach a size-capped volume; every other check runs unelevated.
+
 ## [v0.3.0-rc.5] - 2026-09-08
 
 Cleared for release by two consecutive clean QA campaigns — **241 gates each,
